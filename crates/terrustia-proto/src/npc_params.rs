@@ -3563,3 +3563,58 @@ pub const SCREAM_NEEDLES: TreeAttack = TreeAttack {
     warmup: 60.0,
     ..NO_SPREAD
 };
+
+// --- The moon events' flying bosses ----------------------------------------------------------------
+
+pub const PUMPKING: u16 = 327;
+pub const PUMPKING_BLADE: u16 = 328;
+pub const ICE_QUEEN: u16 = 345;
+pub const SANTA_NK1: u16 = 346;
+
+/// Pumpking cycles a mood every five seconds: nought throws spheres, one charges, two sets its
+/// blades scything.
+pub const PUMPKING_MOOD_TICKS: f32 = 300.0;
+pub const PUMPKING_MOODS: u32 = 3;
+/// Its hover, two hundred pixels above you, and how fast it closes when it means to.
+pub const PUMPKING_ABOVE: f32 = 200.0;
+pub const PUMPKING_HOVER: f32 = 6.0;
+pub const PUMPKING_HOVER_SMOOTH: f32 = 14.0;
+pub const PUMPKING_CHARGE: f32 = 16.0;
+pub const PUMPKING_CHARGE_SMOOTH: f32 = 49.0;
+pub const PUMPKING_CHARGE_TICKS: f32 = 600.0;
+/// It closes faster the further off you are while it is in its charging mood.
+pub const PUMPKING_RUSH_STEPS: [(f32, f32); 3] = [(900.0, 12.0), (600.0, 10.0), (300.0, 8.0)];
+/// The spheres it throws while hovering.
+pub const PUMPKING_SPHERE: u16 = 326;
+pub const PUMPKING_SPHERE_SPAN: u16 = 3;
+pub const PUMPKING_SPHERE_DAMAGE: i32 = 40;
+pub const PUMPKING_SPHERE_SPEED: f32 = 5.0;
+pub const PUMPKING_SPHERE_EVERY: f32 = 30.0;
+/// Its two scythe blades, which orbit it.
+pub const PUMPKING_BLADES: usize = 2;
+pub const PUMPKING_LEASH: f32 = 2000.0;
+
+/// The Ice Queen sweeps back and forth rather than hovering, turning at eight hundred pixels.
+pub const QUEEN_SWEEP: f32 = 800.0;
+pub const QUEEN_ABOVE_MIN: f32 = 150.0;
+pub const QUEEN_ABOVE_MAX: f32 = 200.0;
+pub const QUEEN_CLIMB: f32 = 0.2;
+pub const QUEEN_CLIMB_CAP: f32 = 8.0;
+/// It accelerates and tops out faster the more it is hurt, at every quarter.
+pub const QUEEN_PACE: [(f32, f32, f32); 4] = [
+    (1.0, 0.45, 7.0),
+    (0.75, 0.55, 8.0),
+    (0.5, 0.7, 10.0),
+    (0.25, 0.8, 11.0),
+];
+
+/// Santa-NK1 walks and shoots, faster at every quarter of its health.
+pub const SANTA_WALK: [(f32, f32); 4] = [(1.0, 2.0), (0.75, 3.0), (0.5, 4.0), (0.25, 5.0)];
+pub const SANTA_WAIT: f32 = 300.0;
+/// Its gun fires faster as it is worn down: every sixteen ticks down to every eight.
+pub const SANTA_FIRE_RATE: [(f32, f32); 4] = [(1.0, 16.0), (0.75, 14.0), (0.5, 11.0), (0.25, 8.0)];
+pub const SANTA_BULLET: u16 = 180;
+pub const SANTA_BULLET_DAMAGE: i32 = 36;
+pub const SANTA_BULLET_SPEED: f32 = 15.0;
+pub const SANTA_MUZZLE: f32 = 50.0;
+pub const SANTA_LEASH: f32 = 2000.0;
