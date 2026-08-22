@@ -3,6 +3,7 @@ pub mod items;
 pub mod liquid;
 pub mod objects;
 pub mod progress;
+pub mod wiring;
 pub mod wld;
 pub mod wld_save;
 #[allow(clippy::module_inception)]

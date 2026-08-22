@@ -3783,6 +3783,32 @@ impl GameServer {
         if !self.world.in_bounds(x, y) {
             return Ok(());
         }
+
+        // The circuit is run here rather than only relayed. An actuator changes what the world
+        // *is* — whether a block is solid — so a server that leaves it to the clients has a world
+        // where players walk through walls the server thinks are there.
+        let fired = {
+            let world = &mut self.world;
+            crate::world::wiring::hit_switch(world, x, y)
+        };
+        if fired.truncated {
+            warn!(slot, x, y, reached = fired.reached, "circuit cut short");
+        }
+        for (cx, cy) in fired.changed {
+            let tile = self.world.tile(cx, cy);
+            let square = TileSquare {
+                x: cx as i16,
+                y: cy as i16,
+                width: 1,
+                height: 1,
+                change_type: 0,
+                tiles: vec![tile],
+            };
+            if let Ok(frame) = square.encode() {
+                self.broadcast(frame, None);
+            }
+        }
+
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
         Ok(())
     }
