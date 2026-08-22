@@ -4594,3 +4594,6 @@ pub const EMPRESS_RAINBOW_SPEED: f32 = 8.0;
 /// The lance walls: how many lances to a wall, and how far apart.
 pub const EMPRESS_WALL_LANCES: f32 = 13.0;
 pub const EMPRESS_WALL_SPACING: f32 = 150.0;
+
+/// Debuffs an enemy can land on you by standing near you rather than by hitting you.
+pub const BUFF_WITHERED_ARMOR: u16 = 195;

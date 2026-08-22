@@ -2134,6 +2134,7 @@ impl GameServer {
         let mut raisings: Vec<(f32, f32)> = Vec::new();
         let mut screams = 0usize;
         let mut rituals: Vec<(f32, f32)> = Vec::new();
+        let mut auras: Vec<((f32, f32), f32)> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -2448,6 +2449,11 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.screamed) {
                     screams += 1;
                 }
+                // A wither beast standing in its aura weakens whoever is standing in it too.
+                if let Some(reach) = ai_out.aura.take() {
+                    let here = npc.center();
+                    auras.push((here, reach));
+                }
                 // A boss that vanished and wants to come back somewhere else. It is applied here
                 // rather than in the routine because the routine cannot see the world's edges.
                 if let Some(at) = ai_out.teleport_to.take() {
@@ -2502,6 +2508,31 @@ impl GameServer {
                 let at = (corpse.0, (ground - 1) as f32 * crate::game::npc::TILE);
                 if let Some(index) = self.npcs.spawn(npc_type, at) {
                     self.broadcast_npc(index);
+                }
+            }
+        }
+
+        // The aura is refreshed every tick it is out, so a short buff is enough: leaving it is
+        // what makes it stop, rather than waiting for a timer.
+        for (at, reach) in auras {
+            let caught: Vec<u8> = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing() && p.life > 0)
+                .filter(|p| {
+                    let (x, y) = (p.position.0 + 10.0, p.position.1 + 21.0);
+                    (x - at.0).hypot(y - at.1) < reach
+                })
+                .map(|p| p.slot)
+                .collect();
+            for slot in caught {
+                if let Ok(frame) = terrustia_proto::packets::add_player_buff(
+                    slot,
+                    terrustia_proto::npc_params::BUFF_WITHERED_ARMOR,
+                    3,
+                ) {
+                    self.broadcast(frame, None);
                 }
             }
         }

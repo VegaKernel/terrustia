@@ -865,3 +865,14 @@ mod tile_manipulation_tests {
         );
     }
 }
+
+/// Packet `55`: put a buff on a player.
+///
+/// The name in the protocol is `AddPlayerBuffPvP`, and clients only accept it from another player
+/// in a PvP fight — but a server sending it is authoritative, which is how a wither beast's aura
+/// or an enemy's touch lands a debuff on you at all.
+pub fn add_player_buff(player: u8, buff: u16, ticks: i32) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::ADD_PLAYER_BUFF_PV_P);
+    w.u8(player).u16(buff).i32(ticks);
+    w.finish()
+}
