@@ -193,6 +193,27 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     }
 }
 
+/// What a blood moon adds to the surface at night.
+///
+/// It does not replace the night's pool — a blood moon night still has zombies — it widens it, and
+/// the widening is what makes one worth fighting through rather than sleeping past. The Clown only
+/// comes in hardmode, which is why he is not simply on the list.
+pub fn blood_moon_pool(depth: Depth, hard_mode: bool) -> &'static [u16] {
+    const EARLY: [u16; 2] = [
+        489, // BloodZombie
+        490, // Drippler
+    ];
+    const LATE: [u16; 3] = [
+        489, // BloodZombie
+        490, // Drippler
+        109, // Clown
+    ];
+    if depth != Depth::Surface {
+        return &[];
+    }
+    if hard_mode { &LATE } else { &EARLY }
+}
+
 /// Classify a spawn point by how far down it is.
 pub fn depth_at(world: &World, y: i32) -> Depth {
     if y >= world.height() - UNDERWORLD_DEPTH {
@@ -558,14 +579,23 @@ pub fn try_spawn(
                     } else {
                         &[]
                     };
-                    if ordinary.is_empty() && extra.is_empty() {
+                    // ...and a blood moon widens the night on top of both.
+                    let bloody = if world.blood_moon && !world.day_time {
+                        blood_moon_pool(depth, events.hard_mode)
+                    } else {
+                        &[]
+                    };
+                    let total = ordinary.len() + extra.len() + bloody.len();
+                    if total == 0 {
                         continue;
                     }
-                    let at = rng.random_range(0..ordinary.len() + extra.len());
+                    let at = rng.random_range(0..total);
                     if at < ordinary.len() {
                         ordinary[at]
-                    } else {
+                    } else if at < ordinary.len() + extra.len() {
                         extra[at - ordinary.len()]
+                    } else {
+                        bloody[at - ordinary.len() - extra.len()]
                     }
                 }
             };
@@ -672,6 +702,25 @@ mod tests {
             hallow.iter().all(|t| !forest.contains(t)),
             "the hallow is sharing the forest's hardmode life"
         );
+    }
+
+    /// A blood moon widens the night rather than replacing it, and only on the surface.
+    #[test]
+    fn a_blood_moon_widens_the_night() {
+        use terrustia_proto::npc_data::npc_stats;
+        let early = blood_moon_pool(Depth::Surface, false);
+        let late = blood_moon_pool(Depth::Surface, true);
+        assert!(!early.is_empty());
+        assert!(late.len() > early.len(), "hardmode adds the Clown");
+        assert!(late.contains(&109), "the Clown");
+        assert!(!early.contains(&109), "but not before hardmode");
+        for npc_type in late {
+            assert!(npc_stats(*npc_type).is_some(), "{npc_type} is not a type");
+        }
+        // Underground is untouched: a blood moon is a thing that happens to the sky.
+        for depth in [Depth::Underground, Depth::Cavern, Depth::Underworld] {
+            assert!(blood_moon_pool(depth, true).is_empty(), "{depth:?}");
+        }
     }
 
     /// The two evils get different creatures, not the same list twice.
