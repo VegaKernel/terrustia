@@ -745,6 +745,7 @@ impl GameServer {
                 self.on_paint(slot, frame.id, &payload)
             }
             id::LOCK_AND_UNLOCK => self.on_lock(slot, &payload),
+            id::CHEST_UPDATES => self.on_chest_update(slot, &payload),
             id::HIT_SWITCH => self.on_hit_switch(slot, &payload),
             id::BUG_CATCHING => self.on_bug_caught(slot, &payload),
             id::BUG_RELEASING => self.on_bug_released(slot, &payload),
@@ -3507,6 +3508,57 @@ impl GameServer {
             self.world.set_tile(x, y, tile);
         }
         self.broadcast(packets::verbatim(id, payload)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 34: a chest or dresser was placed or broken.
+    ///
+    /// This is where a chest stops existing. Without it the tile goes but the chest stays
+    /// registered — a ghost that still answers when somebody clicks the empty space it used to
+    /// occupy, and that goes into the save with no tile to belong to.
+    fn on_chest_update(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        /// A dresser is a chest by another name, three tiles wide instead of two.
+        const DRESSER_BLOCK: u16 = 88;
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let action = r.u8()?;
+        let (x, y) = (r.i16()?, r.i16()?);
+        let _style = r.i16()?;
+        if !self.world.in_bounds(i32::from(x), i32::from(y)) {
+            return Ok(());
+        }
+
+        // Odd actions break; even ones place. Placement arrives as a tile square from the client,
+        // which the ordinary handler already applies, so only the registration is done here.
+        let breaking = action % 2 == 1;
+        let block = match action {
+            0 | 1 => CHEST_BLOCK,
+            2 | 3 => DRESSER_BLOCK,
+            4 | 5 => terrustia_proto::locks::CHEST_2,
+            _ => return Ok(()),
+        };
+        if breaking {
+            // The client reports whichever corner was clicked; the chest is anchored at the
+            // top-left, so walk back to it before looking the chest up.
+            let tile = self.world.tile(i32::from(x), i32::from(y));
+            let wide = if block == DRESSER_BLOCK { 54 } else { 36 };
+            let anchor = (
+                x - (tile.frame_x % wide) / 18,
+                y - i16::from(tile.frame_y % 36 != 0),
+            );
+            if let Some((id, chest)) = self.world.chest_at(anchor.0, anchor.1) {
+                // A chest with anything in it is not breakable, the same rule the game uses.
+                if chest.items.iter().any(|item| item.stack > 0) {
+                    debug!(slot, x, y, "refusing to break a chest with things in it");
+                    return Ok(());
+                }
+                self.world.remove_chest(id);
+                debug!(slot, x = anchor.0, y = anchor.1, id, "chest removed");
+            }
+        }
+        self.broadcast(packets::verbatim(id::CHEST_UPDATES, payload)?, Some(slot));
         Ok(())
     }
 

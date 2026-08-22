@@ -494,6 +494,33 @@ impl Client {
         }
     }
 
+    /// Read events until one matches, or a shorter deadline than the client's own expires.
+    ///
+    /// For asserting that something does *not* arrive, where waiting the full timeout would only
+    /// make the test slow.
+    pub async fn try_wait_for<F>(
+        &mut self,
+        _what: &str,
+        mut matches: F,
+        within: std::time::Duration,
+    ) -> Option<Event>
+    where
+        F: FnMut(&Event) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(left, self.next_event()).await {
+                Ok(Ok(event)) if matches(&event) => return Some(event),
+                Ok(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+    }
+
     /// Turn a frame into an event, folding tile data into the world view on the way.
     fn interpret(&mut self, frame: Frame) -> Result<Event> {
         match frame.id {

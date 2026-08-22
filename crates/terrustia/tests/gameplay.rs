@@ -1652,3 +1652,113 @@ fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(payload);
     out
 }
+
+/// Breaking a chest removes it, rather than leaving a ghost behind.
+#[tokio::test]
+async fn breaking_a_chest_removes_it() {
+    let addr = start_with(Config::default(), |world| {
+        for dx in 0..2 {
+            for dy in 0..2 {
+                world.set_tile(
+                    402 + dx,
+                    330 + dy,
+                    Tile::framed(21, dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+        world.add_chest(Chest {
+            x: 402,
+            y: 330,
+            name: String::new(),
+            items: vec![ItemStack::default(); 40],
+        });
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    // Opening it proves it is there to begin with.
+    let mut open = Vec::new();
+    open.extend_from_slice(&402i16.to_le_bytes());
+    open.extend_from_slice(&330i16.to_le_bytes());
+    bob.send(&frame(id::REQUEST_CHEST_OPEN, &open))
+        .await
+        .unwrap();
+    bob.wait_for(
+        "the chest opening",
+        |e| matches!(e, Event::Other(f) if f.id == id::SYNC_PLAYER_CHEST),
+    )
+    .await
+    .unwrap();
+
+    // Now break it.
+    let mut kill = vec![1u8]; // break a chest
+    kill.extend_from_slice(&402i16.to_le_bytes());
+    kill.extend_from_slice(&330i16.to_le_bytes());
+    kill.extend_from_slice(&0i16.to_le_bytes());
+    bob.send(&frame(id::CHEST_UPDATES, &kill)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A fresh player asking for the same spot gets nothing.
+    let mut fresh = join(addr, "fresh").await;
+    fresh
+        .send(&frame(id::REQUEST_CHEST_OPEN, &open))
+        .await
+        .unwrap();
+    let answered = fresh
+        .try_wait_for(
+            "a chest that should be gone",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_PLAYER_CHEST),
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(answered.is_none(), "the broken chest still answers");
+}
+
+/// A chest with things in it will not break.
+#[tokio::test]
+async fn a_full_chest_will_not_break() {
+    let addr = start_with(Config::default(), |world| {
+        for dx in 0..2 {
+            for dy in 0..2 {
+                world.set_tile(
+                    402 + dx,
+                    330 + dy,
+                    Tile::framed(21, dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+        let mut items = vec![ItemStack::default(); 40];
+        items[0] = ItemStack::new(1, 1, 0);
+        world.add_chest(Chest {
+            x: 402,
+            y: 330,
+            name: String::new(),
+            items,
+        });
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut kill = vec![1u8];
+    kill.extend_from_slice(&402i16.to_le_bytes());
+    kill.extend_from_slice(&330i16.to_le_bytes());
+    kill.extend_from_slice(&0i16.to_le_bytes());
+    bob.send(&frame(id::CHEST_UPDATES, &kill)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut fresh = join(addr, "fresh").await;
+    let mut open = Vec::new();
+    open.extend_from_slice(&402i16.to_le_bytes());
+    open.extend_from_slice(&330i16.to_le_bytes());
+    fresh
+        .send(&frame(id::REQUEST_CHEST_OPEN, &open))
+        .await
+        .unwrap();
+    fresh
+        .wait_for(
+            "the chest, still there",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_PLAYER_CHEST),
+        )
+        .await
+        .expect("a chest with things in it should survive");
+}
