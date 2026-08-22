@@ -919,6 +919,45 @@ fn build_house(world: &mut World, x0: i32, y0: i32) -> (i32, i32) {
     (x0 + 5, y0 + 3)
 }
 
+/// A finished house gets a Guide, without anybody asking for one.
+///
+/// This is the whole of town NPCs arriving: the server scans for a free house near a player every
+/// few seconds and moves somebody into it. A server that never does it has a world where nobody
+/// ever turns up, however much is built.
+#[tokio::test]
+async fn a_house_gets_a_guide() {
+    let inside = std::cell::Cell::new((0, 0));
+    let addr = start_with(Config::default(), |world| {
+        inside.set(build_house(world, 300, 300));
+    })
+    .await;
+    let mut client = join(addr, "builder").await;
+    let (hx, hy) = inside.get();
+    client
+        .move_to(hx as f32 * 16.0, hy as f32 * 16.0)
+        .await
+        .unwrap();
+
+    // The scan runs every few seconds, so this waits rather than expecting it at once.
+    client.set_timeout(Duration::from_secs(20));
+    let guide = client
+        .wait_for(
+            "the Guide moving in",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 22),
+        )
+        .await
+        .expect("a Guide should have moved into a finished house");
+    let Event::NpcSynced(guide) = guide else {
+        unreachable!("matched on it")
+    };
+    // He arrives in the house rather than wherever the scan started from.
+    assert!(
+        (guide.position.0 / 16.0 - hx as f32).abs() < 20.0,
+        "the Guide moved in somewhere else: {:?}",
+        guide.position
+    );
+}
+
 #[tokio::test]
 async fn the_house_command_explains_why_a_room_is_rejected() {
     let addr = start_with(Config::default(), |world| {
@@ -1994,4 +2033,65 @@ async fn a_cramped_arena_is_refused() {
         )
         .await;
     assert!(started.is_none(), "the event began in a cramped arena");
+}
+
+/// An enemy standing on you kills you, and everybody is told.
+///
+/// Death is the server's call, not the client's: a client that decides for itself when it has died
+/// is a client that decides for itself when it has not.
+#[tokio::test]
+async fn an_enemy_can_kill_a_player_and_everyone_hears() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+    alice.set_timeout(Duration::from_secs(20));
+    bob.set_timeout(Duration::from_secs(20));
+
+    bob.move_to(420.0 * 16.0, 300.0 * 16.0).await.unwrap();
+    bob.set_life(5, 400).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Something that hurts on contact. Where it lands is the server's choice, so bob goes to it
+    // rather than hoping it comes to him.
+    let zombie = spawn_npc(&mut bob, "Zombie").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut died = false;
+    let mut on = zombie.position;
+    while tokio::time::Instant::now() < deadline && !died {
+        // Stand on it, following it if it wanders.
+        bob.move_to(on.0, on.1).await.ok();
+        match bob
+            .try_wait_for(
+                "bob dying",
+                |e| {
+                    matches!(e, Event::PlayerDied(_))
+                        || matches!(e, Event::NpcSynced(n) if n.index == zombie.index)
+                },
+                Duration::from_millis(300),
+            )
+            .await
+        {
+            Some(Event::PlayerDied(death)) => {
+                assert_eq!(death.player, bob.slot(), "bob's death, not somebody else's");
+                died = true;
+            }
+            Some(Event::NpcSynced(n)) => on = n.position,
+            _ => {}
+        }
+    }
+    assert!(
+        died,
+        "an enemy standing on a player with five life should kill them"
+    );
+
+    // And alice, who was nowhere near it, is told.
+    alice
+        .try_wait_for(
+            "the death reaching alice",
+            |e| matches!(e, Event::PlayerDied(_)),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("a death should reach every player, not only the one who died");
 }
