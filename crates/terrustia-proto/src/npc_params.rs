@@ -791,6 +791,11 @@ pub struct WormMotion {
 /// Speed and turn rate for a worm.
 pub fn worm_motion(npc_type: u16, expert: bool) -> WormMotion {
     match npc_type {
+        // The Destroyer, which is the fastest burrower in the game and turns no better for it.
+        DESTROYER_HEAD | DESTROYER_BODY | DESTROYER_TAIL => WormMotion {
+            speed: DESTROYER_SPEED,
+            turn: DESTROYER_TURN,
+        },
         95 => WormMotion {
             speed: 5.5,
             turn: 0.045,
@@ -876,7 +881,7 @@ pub fn worm_always_digs(npc_type: u16) -> bool {
 pub fn worm_is_head(npc_type: u16) -> bool {
     matches!(
         npc_type,
-        7 | 10 | 13 | 39 | 95 | 98 | 117 | 375 | 454 | 510 | 513 | 621
+        7 | 10 | 13 | 39 | 95 | 98 | 117 | 134 | 375 | 454 | 510 | 513 | 621
     )
 }
 
@@ -2883,3 +2888,297 @@ pub const MOTHRON_SWEEP_PAST: f32 = 260.0;
 /// Where it will lay: within this many tiles of you, on a floor, and not in lava.
 pub const MOTHRON_LAY_RANGE_X: i32 = 30;
 pub const MOTHRON_LAY_RANGE_Y: i32 = 20;
+
+// --- The Twins ------------------------------------------------------------------------------------
+
+/// One eye's numbers. The two share a skeleton and differ in every constant in it.
+#[derive(Debug, Clone, Copy)]
+pub struct Twin {
+    /// Where it holds station in its first form, relative to the player.
+    pub station: (f32, f32),
+    pub speed: f32,
+    pub accel: f32,
+    pub speed_expert: f32,
+    pub accel_expert: f32,
+    /// How long it holds station before running its dashes.
+    pub hover_ticks: f32,
+    /// The dash: how fast, how long each one lasts, and how many before it settles again.
+    pub dash_speed: f32,
+    pub dash_speed_expert: f32,
+    pub dash_ticks: f32,
+    pub dash_brake_at: f32,
+    pub dashes: f32,
+    /// Its ranged attack in the first form.
+    pub shot: u16,
+    pub shot_damage: i32,
+    pub shot_speed: f32,
+    pub shot_speed_expert: f32,
+    pub shot_charge: f32,
+    /// Whether it only shoots from above and close, as Retinazer does.
+    pub shoots_only_from_above: bool,
+    /// The second form: where it holds, how fast, and what it throws.
+    pub second_station: (f32, f32),
+    pub second_speed: f32,
+    pub second_accel: f32,
+    pub second_speed_expert: f32,
+    pub second_accel_expert: f32,
+    pub second_hover_ticks: f32,
+    pub second_shot: u16,
+    pub second_shot_damage: i32,
+    pub second_shot_speed: f32,
+    pub second_shot_speed_expert: f32,
+    pub second_shot_charge: f32,
+    /// The strafing sub-state of the second form.
+    pub strafe_offset: f32,
+    pub strafe_speed: f32,
+    pub strafe_accel: f32,
+    pub strafe_speed_expert: f32,
+    pub strafe_accel_expert: f32,
+}
+
+pub const RETINAZER: u16 = 125;
+pub const SPAZMATISM: u16 = 126;
+
+pub const RETINAZER_TWIN: Twin = Twin {
+    station: (300.0, -300.0),
+    speed: 7.0,
+    accel: 0.1,
+    speed_expert: 8.25,
+    accel_expert: 0.115,
+    hover_ticks: 600.0,
+    dash_speed: 14.0,
+    dash_speed_expert: 17.0,
+    dash_ticks: 70.0,
+    dash_brake_at: 25.0,
+    dashes: 4.0,
+    shot: 83,
+    shot_damage: 20,
+    shot_speed: 9.0,
+    shot_speed_expert: 10.5,
+    shot_charge: 60.0,
+    shoots_only_from_above: true,
+    second_station: (0.0, -300.0),
+    second_speed: 8.0,
+    second_accel: 0.15,
+    second_speed_expert: 9.5,
+    second_accel_expert: 0.175,
+    second_hover_ticks: 300.0,
+    second_shot: 100,
+    second_shot_damage: 25,
+    second_shot_speed: 8.5,
+    second_shot_speed_expert: 10.0,
+    second_shot_charge: 180.0,
+    strafe_offset: 340.0,
+    strafe_speed: 8.0,
+    strafe_accel: 0.2,
+    strafe_speed_expert: 9.5,
+    strafe_accel_expert: 0.25,
+};
+
+pub const SPAZMATISM_TWIN: Twin = Twin {
+    station: (400.0, 0.0),
+    speed: 12.0,
+    accel: 0.4,
+    speed_expert: 12.0,
+    accel_expert: 0.4,
+    hover_ticks: 600.0,
+    dash_speed: 14.0,
+    dash_speed_expert: 17.0,
+    dash_ticks: 70.0,
+    dash_brake_at: 25.0,
+    dashes: 4.0,
+    shot: 96,
+    shot_damage: 25,
+    shot_speed: 12.0,
+    shot_speed_expert: 13.0,
+    shot_charge: 60.0,
+    shoots_only_from_above: false,
+    second_station: (0.0, -300.0),
+    second_speed: 8.0,
+    second_accel: 0.15,
+    second_speed_expert: 9.5,
+    second_accel_expert: 0.175,
+    second_hover_ticks: 300.0,
+    second_shot: 101,
+    second_shot_damage: 30,
+    second_shot_speed: 8.5,
+    second_shot_speed_expert: 10.0,
+    second_shot_charge: 180.0,
+    strafe_offset: 340.0,
+    strafe_speed: 8.0,
+    strafe_accel: 0.2,
+    strafe_speed_expert: 9.5,
+    strafe_accel_expert: 0.25,
+};
+
+/// Below this fraction of its health an eye transforms.
+pub const TWIN_TRANSFORM_AT: f32 = 0.4;
+/// The transformation: two spins of a hundred ticks, up and then down.
+pub const TWIN_SPIN_TICKS: f32 = 100.0;
+pub const TWIN_SPIN_RATE: f32 = 0.005;
+pub const TWIN_SPIN_CAP: f32 = 0.5;
+/// The second form hits half again as hard and soaks ten more.
+pub const TWIN_SECOND_DAMAGE: f32 = 1.5;
+pub const TWIN_SECOND_DEFENSE: i32 = 10;
+/// Its first-form shot only comes when it is above you and within this far.
+pub const TWIN_SHOT_RANGE: f32 = 400.0;
+/// Shots are spawned fifteen ticks ahead of the eye, and scattered by this much.
+pub const TWIN_SHOT_LEAD: f32 = 15.0;
+pub const TWIN_SHOT_SPREAD: i32 = 40;
+pub const TWIN_SHOT_SPREAD_SCALE: f32 = 0.08;
+/// Daylight sends both of them home.
+pub const TWIN_FLEE_CLIMB: f32 = -0.04;
+
+// --- The Destroyer ------------------------------------------------------------------------------
+
+/// Its head, body and tail.
+pub const DESTROYER_HEAD: u16 = 134;
+pub const DESTROYER_BODY: u16 = 135;
+pub const DESTROYER_TAIL: u16 = 136;
+/// How many body segments it is built from.
+pub const DESTROYER_SEGMENTS: usize = 79;
+
+/// It burrows faster than anything else in the game, and turns no more sharply for it.
+pub const DESTROYER_SPEED: f32 = 16.0;
+pub const DESTROYER_TURN: f32 = 0.1;
+pub const DESTROYER_TURN_HARD: f32 = 0.15;
+/// Fleeing at daybreak it dives at twice that.
+pub const DESTROYER_FLEE_SPEED: f32 = 32.0;
+
+/// Every body segment carries a probe that fires on a long random fuse.
+///
+/// The fuse advances by nought to three a tick and fires somewhere between fourteen hundred and
+/// twenty-six thousand, so across eighty segments the swarm of lasers is steady while any one
+/// segment fires rarely.
+pub const DESTROYER_FUSE_STEP: u32 = 4;
+pub const DESTROYER_FUSE: (u32, u32) = (1400, 26000);
+pub const DESTROYER_LASER: u16 = 100;
+pub const DESTROYER_LASER_DAMAGE: i32 = 22;
+pub const DESTROYER_LASER_SPEED: f32 = 8.0;
+/// The aim is scattered twice: once in pixels before it is normalised, once in speed after.
+pub const DESTROYER_AIM_SPREAD: i32 = 20;
+pub const DESTROYER_SPEED_SPREAD: f32 = 0.05;
+pub const DESTROYER_LASER_LEAD: f32 = 5.0;
+pub const DESTROYER_LASER_LIFE: u16 = 300;
+
+// --- Skeletron Prime ------------------------------------------------------------------------------
+
+pub const PRIME_HEAD: u16 = 127;
+pub const PRIME_SAW: u16 = 128;
+pub const PRIME_VICE: u16 = 129;
+pub const PRIME_CANNON: u16 = 130;
+pub const PRIME_LASER: u16 = 131;
+
+/// The head hovers for ten seconds, then spins for six and two thirds, and repeats.
+pub const PRIME_HOVER_TICKS: f32 = 600.0;
+pub const PRIME_SPIN_TICKS: f32 = 400.0;
+/// While spinning it hits twice as hard and takes half as much.
+pub const PRIME_SPIN_DAMAGE: i32 = 2;
+pub const PRIME_SPIN_DEFENSE: i32 = 2;
+/// It holds between two and five hundred pixels above you, gently.
+pub const PRIME_ABOVE_MIN: f32 = 200.0;
+pub const PRIME_ABOVE_MAX: f32 = 500.0;
+pub const PRIME_LIFT: f32 = 0.1;
+pub const PRIME_LIFT_CAP: f32 = 2.0;
+pub const PRIME_DRIFT: f32 = 0.1;
+pub const PRIME_DRIFT_CAP: f32 = 8.0;
+pub const PRIME_LIFT_EXPERT: f32 = 0.03;
+pub const PRIME_LIFT_CAP_EXPERT: f32 = 4.0;
+pub const PRIME_DRIFT_EXPERT: f32 = 0.07;
+pub const PRIME_DRIFT_CAP_EXPERT: f32 = 9.5;
+/// It keeps a hundred pixels of sideways slack, so it does not jitter directly overhead.
+pub const PRIME_SLACK: f32 = 100.0;
+/// The spin: it comes at you at a fixed speed, faster in expert and faster still at range.
+pub const PRIME_SPIN_SPEED: f32 = 2.0;
+pub const PRIME_SPIN_SPEED_EXPERT: f32 = 6.0;
+pub const PRIME_SPIN_RANGE_STEP: f32 = 50.0;
+pub const PRIME_SPIN_RANGE_FROM: f32 = 150.0;
+pub const PRIME_SPIN_RANGE_GAIN: f32 = 1.1;
+/// Daylight enrages it: unkillable, and it runs you down.
+pub const PRIME_ENRAGED_SPEED: f32 = 10.0;
+pub const PRIME_ENRAGED_GAIN: f32 = 100.0;
+pub const PRIME_ENRAGED_MIN: f32 = 8.0;
+pub const PRIME_ENRAGED_MAX: f32 = 32.0;
+/// Losing you entirely sends it down and away.
+pub const PRIME_LEAVE_SINK: f32 = 0.1;
+pub const PRIME_LEAVE_CAP: f32 = 13.0;
+pub const PRIME_LOSE_RANGE: f32 = 6000.0;
+
+/// One limb's numbers.
+#[derive(Debug, Clone, Copy)]
+pub struct PrimeLimb {
+    /// Which side of the head it hangs on: -1 left, 1 right. Read from `ai[0]`.
+    pub station: (f32, f32),
+    /// How fast it chases while the head is spinning.
+    pub chase_speed: f32,
+    pub chase_accel: f32,
+    /// Its cycle: how long it holds station, and how long it attacks for.
+    pub hold_ticks: f32,
+    pub attack_ticks: f32,
+    /// What it throws, if anything.
+    pub shot: Option<u16>,
+    pub shot_damage: i32,
+    pub shot_speed: f32,
+    pub shot_charge: f32,
+    pub shot_spread: f32,
+    pub shot_lead: f32,
+    /// Whether the shot is fired *away* from the aim, as the cannon's arc is.
+    pub shot_reversed: bool,
+}
+
+/// Where every limb hangs, before its side is applied.
+pub const PRIME_LIMB_STATION: (f32, f32) = (200.0, 230.0);
+/// A limb further than this from its station gives up and flies back; it resumes inside this.
+pub const PRIME_LIMB_LOST: f32 = 800.0;
+pub const PRIME_LIMB_FOUND: f32 = 400.0;
+/// How fast it flies back.
+pub const PRIME_LIMB_RETURN_X: f32 = 0.5;
+pub const PRIME_LIMB_RETURN_X_CAP: f32 = 12.0;
+pub const PRIME_LIMB_RETURN_Y: f32 = 0.1;
+pub const PRIME_LIMB_RETURN_Y_CAP: f32 = 8.0;
+
+pub fn prime_limb(npc_type: u16) -> PrimeLimb {
+    let base = PrimeLimb {
+        station: PRIME_LIMB_STATION,
+        chase_speed: 7.0,
+        chase_accel: 0.05,
+        hold_ticks: 300.0,
+        attack_ticks: 600.0,
+        shot: None,
+        shot_damage: 0,
+        shot_speed: 0.0,
+        shot_charge: 0.0,
+        shot_spread: 0.0,
+        shot_lead: 0.0,
+        shot_reversed: false,
+    };
+    match npc_type {
+        // The cannon lobs its bomb *backwards* along the aim, which is what gives it its arc.
+        PRIME_CANNON => PrimeLimb {
+            attack_ticks: 1100.0,
+            shot: Some(102),
+            shot_damage: 0,
+            shot_speed: 12.0,
+            shot_charge: 140.0,
+            shot_spread: 0.01,
+            shot_lead: 4.0,
+            shot_reversed: true,
+            ..base
+        },
+        PRIME_LASER => PrimeLimb {
+            attack_ticks: 800.0,
+            shot: Some(100),
+            shot_damage: 25,
+            shot_speed: 8.0,
+            shot_charge: 200.0,
+            shot_spread: 0.05,
+            shot_lead: 8.0,
+            ..base
+        },
+        // The saw and the vice have no shot at all: they are the melee arms.
+        _ => base,
+    }
+}
+
+/// Shots are scattered by up to forty steps of the limb's spread.
+pub const PRIME_SHOT_SPREAD_STEPS: i32 = 40;

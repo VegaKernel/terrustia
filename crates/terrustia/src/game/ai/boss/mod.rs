@@ -6,8 +6,11 @@
 
 pub mod brain;
 pub mod deerclops;
+pub mod destroyer;
 pub mod eye;
 pub mod king_slime;
+pub mod prime;
 pub mod queen_bee;
 pub mod skeletron;
+pub mod twins;
 pub mod wall;

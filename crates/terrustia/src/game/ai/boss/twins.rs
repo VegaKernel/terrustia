@@ -1,0 +1,529 @@
+//! The Twins: styles 30 and 31.
+//!
+//! Both eyes run the same skeleton and differ in every number inside it, which is why the
+//! per-eye figures live in a table rather than in branches here.
+//!
+//! The skeleton is: hold a station off to one side of you for ten seconds, shooting on a charge
+//! that fills faster the more hurt the eye is, then run four dashes straight through you, then
+//! settle and start again. Below forty per cent health the eye stops fighting entirely for a little
+//! over three seconds — spinning up, then down, reflecting everything — and comes out of it as its
+//! second form: half again the damage, ten more armour, and a heavier attack.
+//!
+//! What separates the two is where they want to be. Retinazer holds three hundred pixels *above*
+//! and to the side and will only fire from up there, so it is fought by denying it height.
+//! Spazmatism holds level with you at four hundred pixels and fires regardless, so it is fought by
+//! moving.
+//!
+//! Daylight ends the fight: both climb away.
+
+use rand::{Rng, rngs::SmallRng};
+use terrustia_proto::npc_params::{
+    RETINAZER, RETINAZER_TWIN, SPAZMATISM_TWIN, TWIN_FLEE_CLIMB, TWIN_SECOND_DAMAGE,
+    TWIN_SECOND_DEFENSE, TWIN_SHOT_LEAD, TWIN_SHOT_RANGE, TWIN_SHOT_SPREAD, TWIN_SHOT_SPREAD_SCALE,
+    TWIN_SPIN_CAP, TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
+};
+
+use crate::game::ai::{Shot, World, can_see};
+use crate::game::npc::{Npc, TileView};
+
+/// Which form an eye is in, from `ai[0]`.
+mod form {
+    pub const FIRST: f32 = 0.0;
+    pub const SPINNING_UP: f32 = 1.0;
+    pub const SPINNING_DOWN: f32 = 2.0;
+    pub const SECOND: f32 = 3.0;
+}
+
+/// What an eye did this tick.
+#[derive(Debug, Default)]
+pub struct TwinOutcome {
+    pub shots: Vec<Shot>,
+    /// Set while it is transforming, when everything bounces off.
+    pub reflecting: bool,
+    /// Set when daylight has sent it home.
+    pub fleeing: bool,
+}
+
+fn table(npc_type: u16) -> Twin {
+    if npc_type == RETINAZER {
+        RETINAZER_TWIN
+    } else {
+        SPAZMATISM_TWIN
+    }
+}
+
+/// Styles 30 and 31.
+pub fn twin(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng) -> TwinOutcome {
+    let mut out = TwinOutcome::default();
+    npc.dirty = true;
+    let t = table(npc.npc_type);
+    let expert = world.conditions.expert;
+
+    let Some(target) = world.target.filter(|p| p.alive) else {
+        // Nobody to fight: it climbs out.
+        npc.velocity.1 += TWIN_FLEE_CLIMB;
+        out.fleeing = true;
+        return out;
+    };
+    // Daylight is the timer on the whole fight.
+    if world.conditions.day {
+        npc.velocity.1 += TWIN_FLEE_CLIMB;
+        out.fleeing = true;
+        return out;
+    }
+
+    let (cx, cy) = npc.center();
+    let to_player = (target.center.0 - cx, target.center.1 - cy);
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+
+    match npc.ai[0] {
+        f if f == form::FIRST => {
+            first_form(npc, world, &t, target.center, expert, rng, &mut out);
+            // Hurt enough, it stops fighting and changes.
+            if health < TWIN_TRANSFORM_AT {
+                npc.ai = [form::SPINNING_UP, 0.0, 0.0, 0.0];
+            }
+        }
+
+        f if f == form::SPINNING_UP || f == form::SPINNING_DOWN => {
+            // The transformation. It hangs still, spins up and then down, and nothing touches it.
+            out.reflecting = true;
+            if npc.ai[0] == form::SPINNING_UP {
+                npc.ai[2] = (npc.ai[2] + TWIN_SPIN_RATE).min(TWIN_SPIN_CAP);
+            } else {
+                npc.ai[2] = (npc.ai[2] - TWIN_SPIN_RATE).max(0.0);
+            }
+            npc.rotation += npc.ai[2];
+            npc.ai[1] += 1.0;
+            if npc.ai[1] >= TWIN_SPIN_TICKS {
+                npc.ai[0] += 1.0;
+                npc.ai[1] = 0.0;
+                if npc.ai[0] == form::SECOND {
+                    npc.ai[2] = 0.0;
+                }
+            }
+            coast(npc);
+        }
+
+        _ => {
+            npc.damage_bonus = TWIN_SECOND_DAMAGE;
+            npc.defense = npc.stats.defense + TWIN_SECOND_DEFENSE;
+            second_form(npc, world, &t, target.center, expert, &mut out);
+        }
+    }
+
+    // It always looks where the player is, whatever it is doing.
+    if npc.ai[0] != form::SPINNING_UP && npc.ai[0] != form::SPINNING_DOWN {
+        npc.rotation = to_player.1.atan2(to_player.0) - std::f32::consts::FRAC_PI_2;
+    }
+    out
+}
+
+/// The first form: hold station and shoot, then four dashes.
+fn first_form(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    t: &Twin,
+    player: (f32, f32),
+    expert: bool,
+    rng: &mut SmallRng,
+    out: &mut TwinOutcome,
+) {
+    let (cx, cy) = npc.center();
+    match npc.ai[1] {
+        0.0 => {
+            // Holding station off to whichever side of you it is already on.
+            let side = if cx < player.0 { -1.0 } else { 1.0 };
+            let station = (
+                player.0 + side * t.station.0 - cx,
+                player.1 + t.station.1 - cy,
+            );
+            let (speed, accel) = if expert {
+                (t.speed_expert, t.accel_expert)
+            } else {
+                (t.speed, t.accel)
+            };
+            steer(&mut npc.velocity, station, speed, accel);
+
+            npc.ai[2] += 1.0;
+            if npc.ai[2] >= t.hover_ticks {
+                npc.ai = [form::FIRST, 1.0, 0.0, 0.0];
+                return;
+            }
+
+            // The charge. Retinazer only fires from above and close; Spazmatism always fires.
+            let reach = (player.0 - cx).hypot(player.1 - cy);
+            let allowed = !t.shoots_only_from_above
+                || (npc.position.1 + npc.height() < player.1 && reach < TWIN_SHOT_RANGE);
+            if !allowed {
+                return;
+            }
+            npc.ai[3] += 1.0;
+            // In expert the charge fills faster the more hurt it is, which is what makes the
+            // second half of the fight busier than the first.
+            if expert {
+                let health = npc.life as f32 / npc.life_max.max(1) as f32;
+                for step in [0.9, 0.8, 0.7, 0.6] {
+                    if health < step {
+                        npc.ai[3] += 0.3;
+                    }
+                }
+            }
+            if npc.ai[3] >= t.shot_charge {
+                npc.ai[3] = 0.0;
+                let speed = if expert {
+                    t.shot_speed_expert
+                } else {
+                    t.shot_speed
+                };
+                out.shots
+                    .push(aimed_shot(npc, player, t.shot, t.shot_damage, speed, rng));
+            }
+        }
+
+        1.0 => {
+            // Committing to a dash: aimed once, at speed, and not corrected afterwards.
+            let speed = if expert {
+                t.dash_speed_expert
+            } else {
+                t.dash_speed
+            };
+            let aim = (player.0 - cx, player.1 - cy);
+            npc.velocity = unit(aim, speed);
+            npc.ai[1] = 2.0;
+        }
+
+        _ => {
+            // Running the dash out, then braking.
+            npc.ai[2] += 1.0;
+            if npc.ai[2] >= t.dash_brake_at {
+                npc.velocity.0 *= 0.96;
+                npc.velocity.1 *= 0.96;
+                if npc.velocity.0.abs() < 0.1 {
+                    npc.velocity.0 = 0.0;
+                }
+                if npc.velocity.1.abs() < 0.1 {
+                    npc.velocity.1 = 0.0;
+                }
+            }
+            if npc.ai[2] >= t.dash_ticks {
+                npc.ai[3] += 1.0;
+                npc.ai[2] = 0.0;
+                if npc.ai[3] >= t.dashes {
+                    npc.ai[1] = 0.0;
+                    npc.ai[3] = 0.0;
+                } else {
+                    npc.ai[1] = 1.0;
+                }
+            }
+        }
+    }
+    let _ = world;
+}
+
+/// The second form: hover and throw the heavy shot, then strafe.
+fn second_form(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    t: &Twin,
+    player: (f32, f32),
+    expert: bool,
+    out: &mut TwinOutcome,
+) {
+    let (cx, cy) = npc.center();
+    if npc.ai[1] == 0.0 {
+        let station = (
+            player.0 + t.second_station.0 - cx,
+            player.1 + t.second_station.1 - cy,
+        );
+        let (speed, accel) = if expert {
+            (t.second_speed_expert, t.second_accel_expert)
+        } else {
+            (t.second_speed, t.second_accel)
+        };
+        steer(&mut npc.velocity, station, speed, accel);
+
+        npc.ai[2] += 1.0;
+        if npc.ai[2] >= t.second_hover_ticks {
+            npc.ai = [form::SECOND, 1.0, 0.0, 0.0];
+            return;
+        }
+    } else {
+        // Strafing past you at a fixed offset, on whichever side it is already on.
+        let side = if cx < player.0 { -1.0 } else { 1.0 };
+        let station = (player.0 + side * t.strafe_offset - cx, player.1 - cy);
+        let (speed, accel) = if expert {
+            (t.strafe_speed_expert, t.strafe_accel_expert)
+        } else {
+            (t.strafe_speed, t.strafe_accel)
+        };
+        steer(&mut npc.velocity, station, speed, accel);
+    }
+
+    // The heavy shot. Its charge fills faster the more hurt the eye is, in every difficulty.
+    npc.local_ai[1] += 1.0;
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+    for (step, extra) in [(0.75, 1.0), (0.5, 1.0), (0.25, 1.0), (0.1, 2.0)] {
+        if health < step {
+            npc.local_ai[1] += extra;
+        }
+    }
+    let target = world.target.filter(|p| p.alive);
+    if npc.local_ai[1] > t.second_shot_charge
+        && let Some(target) = target
+        && can_see(world.tiles, npc, target)
+    {
+        npc.local_ai[1] = 0.0;
+        let speed = if expert {
+            t.second_shot_speed_expert
+        } else {
+            t.second_shot_speed
+        };
+        // The heavy shot is not scattered, unlike the first form's.
+        let aim = unit((player.0 - cx, player.1 - cy), speed);
+        out.shots.push(Shot {
+            projectile: t.second_shot,
+            damage: t.second_shot_damage,
+            position: (cx + aim.0 * TWIN_SHOT_LEAD, cy + aim.1 * TWIN_SHOT_LEAD),
+            velocity: aim,
+            time_left: 600,
+        });
+    }
+}
+
+/// A scattered shot, spawned fifteen ticks ahead of the eye so it does not appear inside it.
+fn aimed_shot(
+    npc: &Npc,
+    player: (f32, f32),
+    projectile: u16,
+    damage: i32,
+    speed: f32,
+    rng: &mut SmallRng,
+) -> Shot {
+    let (cx, cy) = npc.center();
+    let mut aim = unit((player.0 - cx, player.1 - cy), speed);
+    aim.0 += rng.random_range(-TWIN_SHOT_SPREAD..=TWIN_SHOT_SPREAD) as f32 * TWIN_SHOT_SPREAD_SCALE;
+    aim.1 += rng.random_range(-TWIN_SHOT_SPREAD..=TWIN_SHOT_SPREAD) as f32 * TWIN_SHOT_SPREAD_SCALE;
+    Shot {
+        projectile,
+        damage,
+        position: (cx + aim.0 * TWIN_SHOT_LEAD, cy + aim.1 * TWIN_SHOT_LEAD),
+        velocity: aim,
+        time_left: 600,
+    }
+}
+
+/// Accelerate toward a wanted offset, doubling the push while still going the wrong way.
+fn steer(velocity: &mut (f32, f32), offset: (f32, f32), speed: f32, accel: f32) {
+    let wanted = unit(offset, speed);
+    for (v, w) in [(&mut velocity.0, wanted.0), (&mut velocity.1, wanted.1)] {
+        if *v < w {
+            *v += accel;
+            if *v < 0.0 && w > 0.0 {
+                *v += accel;
+            }
+        } else if *v > w {
+            *v -= accel;
+            if *v > 0.0 && w < 0.0 {
+                *v -= accel;
+            }
+        }
+    }
+}
+
+fn coast(npc: &mut Npc) {
+    npc.velocity.0 *= 0.98;
+    npc.velocity.1 *= 0.98;
+    if npc.velocity.0.abs() < 0.1 {
+        npc.velocity.0 = 0.0;
+    }
+    if npc.velocity.1.abs() < 0.1 {
+        npc.velocity.1 = 0.0;
+    }
+}
+
+fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
+    let length = v.0.hypot(v.1);
+    if length <= 0.0 || !length.is_finite() {
+        (0.0, 0.0)
+    } else {
+        (v.0 / length * speed, v.1 / length * speed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::ai::Conditions;
+    use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::npc_params::SPAZMATISM;
+    use terrustia_proto::tile::Tile;
+
+    struct Sky(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Sky {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn night(tiles: &Sky, target: Option<(f32, f32)>) -> World<'_, Sky> {
+        let mut w = crate::game::ai::calm(
+            tiles,
+            target.map(|center| Target {
+                slot: 0,
+                center,
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        );
+        w.conditions = Conditions {
+            day: false,
+            ..Conditions::default()
+        };
+        w
+    }
+
+    fn eye(npc_type: u16, x: f32, y: f32) -> Npc {
+        Npc::new(npc_type, (x, y), 1).expect("a twin")
+    }
+
+    /// Daylight ends the fight for both of them.
+    #[test]
+    fn daylight_sends_them_home() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(30);
+        for ty in [RETINAZER, SPAZMATISM] {
+            let mut e = eye(ty, 0.0, 0.0);
+            let mut w = night(&tiles, Some((300.0, 300.0)));
+            w.conditions.day = true;
+            let out = twin(&mut e, &w, &mut rng);
+            assert!(out.fleeing, "it should be leaving");
+            assert!(e.velocity.1 < 0.0, "and going up");
+        }
+    }
+
+    /// Retinazer holds above you; Spazmatism holds level. That difference is the whole matchup.
+    #[test]
+    fn the_two_eyes_want_different_places() {
+        let tiles = Sky(HashMap::new());
+        let player = (0.0, 0.0);
+        let settle = |ty: u16| {
+            let mut rng = SmallRng::seed_from_u64(1);
+            let mut e = eye(ty, 0.0, 0.0);
+            let w = night(&tiles, Some(player));
+            for _ in 0..400 {
+                twin(&mut e, &w, &mut rng);
+                e.position.0 += e.velocity.0;
+                e.position.1 += e.velocity.1;
+            }
+            e.center()
+        };
+        let (_, retinazer_y) = settle(RETINAZER);
+        let (spaz_x, spaz_y) = settle(SPAZMATISM);
+        assert!(
+            retinazer_y < player.1 - 100.0,
+            "Retinazer should be well above you, at {retinazer_y}"
+        );
+        assert!(
+            spaz_y.abs() < retinazer_y.abs(),
+            "Spazmatism should be closer to level, at {spaz_y}"
+        );
+        assert!(spaz_x.abs() > 200.0, "and off to one side, at {spaz_x}");
+    }
+
+    /// The first form shoots on a charge, and then runs its dashes.
+    #[test]
+    fn the_first_form_shoots_and_then_dashes() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(2);
+        let mut e = eye(SPAZMATISM, 0.0, 0.0);
+        let w = night(&tiles, Some((300.0, 0.0)));
+
+        let mut shots = 0;
+        let mut dashed = false;
+        for _ in 0..1200 {
+            let out = twin(&mut e, &w, &mut rng);
+            shots += out.shots.len();
+            if e.ai[1] == 2.0 {
+                dashed = true;
+            }
+        }
+        assert!(shots > 5, "it should have been firing, got {shots}");
+        assert!(dashed, "and then dashed");
+    }
+
+    /// Retinazer will not fire from below you, which is what makes height the answer to it.
+    #[test]
+    fn retinazer_only_fires_from_above() {
+        let tiles = Sky(HashMap::new());
+        let shots_from = |player_y: f32| {
+            let mut rng = SmallRng::seed_from_u64(3);
+            let mut e = eye(RETINAZER, 0.0, 0.0);
+            // Hold it still so only the firing rule is under test.
+            let w = night(&tiles, Some((200.0, player_y)));
+            (0..600)
+                .map(|_| {
+                    let out = twin(&mut e, &w, &mut rng);
+                    // Keep it where it started.
+                    e.position = (0.0, 0.0);
+                    out.shots.len()
+                })
+                .sum::<usize>()
+        };
+        assert!(shots_from(400.0) > 0, "from above it should fire");
+        assert_eq!(shots_from(-400.0), 0, "from below it should not");
+    }
+
+    /// Below forty per cent it stops fighting, spins, and comes out changed.
+    #[test]
+    fn a_hurt_eye_transforms() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(4);
+        let mut e = eye(RETINAZER, 0.0, 0.0);
+        let w = night(&tiles, Some((300.0, 300.0)));
+
+        e.life = (e.life_max as f32 * 0.3) as i32;
+        twin(&mut e, &w, &mut rng);
+        assert_eq!(e.ai[0], form::SPINNING_UP, "it should be changing");
+
+        let mut reflected = 0;
+        for _ in 0..(TWIN_SPIN_TICKS as i32 * 2 + 4) {
+            if twin(&mut e, &w, &mut rng).reflecting {
+                reflected += 1;
+            }
+        }
+        assert!(reflected > 100, "it reflects throughout the change");
+        assert_eq!(e.ai[0], form::SECOND, "and comes out as the second form");
+        assert_eq!(e.damage_bonus, TWIN_SECOND_DAMAGE, "hitting harder");
+        assert_eq!(
+            e.defense,
+            e.stats.defense + TWIN_SECOND_DEFENSE,
+            "and tougher"
+        );
+    }
+
+    /// A hurt second form fires faster than a fresh one.
+    #[test]
+    fn the_second_form_speeds_up_as_it_dies() {
+        let tiles = Sky(HashMap::new());
+        let w = night(&tiles, Some((0.0, 400.0)));
+        let shots_at = |health: f32| {
+            let mut rng = SmallRng::seed_from_u64(5);
+            let mut e = eye(RETINAZER, 0.0, 0.0);
+            e.ai[0] = form::SECOND;
+            e.life = (e.life_max as f32 * health) as i32;
+            (0..1200)
+                .map(|_| twin(&mut e, &w, &mut rng).shots.len())
+                .sum::<usize>()
+        };
+        let fresh = shots_at(0.39);
+        let dying = shots_at(0.05);
+        assert!(
+            dying > fresh,
+            "a dying eye should fire more: {dying} vs {fresh}"
+        );
+    }
+}
