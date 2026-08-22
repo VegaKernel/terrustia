@@ -32,6 +32,8 @@ pub struct World {
     /// A blood moon changes behaviour, not just lighting: fighters that would open a door break it
     /// down instead, and the night spawn pool widens.
     pub blood_moon: bool,
+    /// A solar eclipse: a daytime event, and the only time Mothron and its brood appear.
+    pub eclipse: bool,
     pub moon_phase: u8,
     pub crimson: bool,
     /// What the world has already been through.
@@ -86,6 +88,7 @@ impl World {
             time: 13_500,
             day_time: true,
             blood_moon: false,
+            eclipse: false,
             moon_phase: 0,
             crimson: false,
             progress: Progress::default(),
@@ -309,6 +312,7 @@ impl World {
             time: self.time,
             day_time: self.day_time,
             blood_moon: self.blood_moon,
+            eclipse: self.eclipse,
             moon_phase: self.moon_phase,
             max_tiles_x: self.width as i16,
             max_tiles_y: self.height as i16,

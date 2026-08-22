@@ -647,6 +647,7 @@ impl GameServer {
             id::HELLO => self.on_hello(slot, &payload),
             id::SYNC_PLAYER => self.on_sync_player(slot, &payload),
             id::SYNC_EQUIPMENT => self.on_equipment(slot, &payload),
+            id::SPAWN_BOSS_USE_LICENSE_START_EVENT => self.on_summon(slot, &payload),
             id::REQUEST_WORLD_DATA => self.on_request_world_data(slot),
             id::SPAWN_TILE_DATA => self.on_spawn_tile_data(slot, &payload),
             id::PLAYER_SPAWN => self.on_player_spawn(slot, &payload),
@@ -1138,6 +1139,132 @@ impl GameServer {
             player.zone = Some(Bytes::copy_from_slice(payload));
         }
         self.relay_player_packet(slot, id::SYNC_PLAYER_ZONE, payload)
+    }
+
+    /// Tell everyone the world itself has changed — an eclipse begun, a blood moon risen.
+    fn broadcast_world_data(&mut self) {
+        if let Ok(frame) = self.world.world_data().encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// A player used a summoning item.
+    ///
+    /// This is the only way a boss enters the world, so it is also the only place a client gets to
+    /// name an NPC type. What it may name is the game's own list and nothing else: without that
+    /// check a crafted packet could ask for anything in the roster, in any number.
+    ///
+    /// Negative types are events rather than bosses — a pumpkin moon, an eclipse, an invasion.
+    fn on_summon(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        // The player the client claims; ignored in favour of the connection it arrived on.
+        let _claimed = r.i16()?;
+        let what = r.i16()?;
+
+        if what >= 0 {
+            let npc_type = what as u16;
+            if !terrustia_proto::npc_params::summonable(npc_type) {
+                debug!(
+                    slot,
+                    npc_type, "refusing to summon something that is not summonable"
+                );
+                return Ok(());
+            }
+            // One at a time. A second Eye of Cthulhu is not a thing the game allows.
+            if self.npcs.iter().any(|(_, n)| n.npc_type == npc_type) {
+                return Ok(());
+            }
+            self.summon_on_player(slot, npc_type);
+            return Ok(());
+        }
+
+        match what {
+            // A pumpkin or frost moon, which only rise at night.
+            -4 | -5 => {
+                if !self.world.day_time {
+                    let name = if what == -4 { "pumpkin" } else { "frost" };
+                    self.announce(&format!("The {name} moon is rising..."));
+                    info!(slot, event = name, "moon summoned");
+                }
+            }
+            // A solar eclipse, which only happens by day.
+            -6 => {
+                if self.world.day_time && !self.world.eclipse {
+                    self.world.eclipse = true;
+                    self.announce("A solar eclipse is happening!");
+                    self.broadcast_world_data();
+                }
+            }
+            -7 => self.start_invasion(Invasion::Martian),
+            // A blood moon, which only rises at night and not twice in one night.
+            -10 => {
+                if !self.world.day_time && !self.world.blood_moon {
+                    self.world.blood_moon = true;
+                    self.announce("The blood moon is rising...");
+                    self.broadcast_world_data();
+                }
+            }
+            // The rest of the negative range is the invasions, numbered from -1.
+            other => {
+                if let Some(kind) = Invasion::from_id(i32::from(-other)) {
+                    self.start_invasion(kind);
+                } else {
+                    debug!(slot, what = other, "ignoring an unrecognised summon");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Put a boss somewhere near a player: on the ground, out of arm's reach, or overhead when
+    /// there is no ground to be found.
+    fn summon_on_player(&mut self, slot: u8, npc_type: u16) {
+        use terrustia_proto::npc_params::{
+            SUMMON_ABOVE, SUMMON_ATTEMPTS, SUMMON_RANGE_X, SUMMON_RANGE_Y, SUMMON_SAFE_X,
+            SUMMON_SAFE_Y,
+        };
+        // Copied out, because the search below needs the generator and the player at once.
+        let Some(at_player) = self.player(slot).map(|p| p.position) else {
+            return;
+        };
+        let (px, py) = (
+            (at_player.0 / crate::game::npc::TILE) as i32,
+            (at_player.1 / crate::game::npc::TILE) as i32,
+        );
+
+        let mut at = None;
+        for _ in 0..SUMMON_ATTEMPTS {
+            let x = px + rand::Rng::random_range(&mut self.rng, -SUMMON_RANGE_X..=SUMMON_RANGE_X);
+            let y = py + rand::Rng::random_range(&mut self.rng, -SUMMON_RANGE_Y..=SUMMON_RANGE_Y);
+            // Not right on top of the player.
+            if (x - px).abs() < SUMMON_SAFE_X && (y - py).abs() < SUMMON_SAFE_Y {
+                continue;
+            }
+            if self.world.tile(x, y).is_active() {
+                continue;
+            }
+            let Some(ground) = crate::game::spawn::find_ground(&self.world, x, y) else {
+                continue;
+            };
+            at = Some((
+                x as f32 * crate::game::npc::TILE,
+                (ground - 1) as f32 * crate::game::npc::TILE,
+            ));
+            break;
+        }
+        // Nowhere to stand — a Moon Lord, or a player in mid-air. Overhead it is.
+        let at = at.unwrap_or((at_player.0, at_player.1 - SUMMON_ABOVE));
+
+        if let Some(index) = self.npcs.spawn(npc_type, at) {
+            let name = self
+                .npcs
+                .get(index)
+                .map(|n| n.stats.name)
+                .unwrap_or("Something");
+            self.announce(&format!("{name} has awoken!"));
+            self.broadcast_npc(index);
+            info!(slot, npc_type, name, "boss summoned");
+        }
     }
 
     /// One slot of a player's inventory.

@@ -385,6 +385,15 @@ impl Client {
     }
 
     /// Throw an item into the world, asking the server for a slot.
+    /// Use a summoning item: a boss by type, or an event by one of the negative codes.
+    pub async fn summon(&mut self, what: i16) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::SPAWN_BOSS_USE_LICENSE_START_EVENT);
+        w.i16(i16::from(self.slot()));
+        w.i16(what);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Tell the server what is in one of this player's inventory slots.
     pub async fn set_equipment(&mut self, slot: u16, item: ItemStack) -> Result<()> {
         let frame = terrustia_proto::inventory::SyncEquipment {

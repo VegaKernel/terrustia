@@ -1281,3 +1281,75 @@ async fn private_storage_is_not_relayed() {
         .await;
     assert!(leaked.is_err(), "a piggy bank should not be broadcast");
 }
+
+/// Using a summoning item is the only way a boss enters the world, so it had better work.
+#[tokio::test]
+async fn a_player_can_summon_a_boss() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    // King Slime.
+    alice.summon(50).await.unwrap();
+    alice.set_timeout(Duration::from_secs(3));
+    let arrived = alice
+        .wait_for(
+            "king slime",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 50),
+        )
+        .await;
+    assert!(arrived.is_ok(), "the boss should have been summoned");
+}
+
+/// One at a time. A second Eye of Cthulhu is not something the game allows.
+#[tokio::test]
+async fn a_boss_cannot_be_summoned_twice() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    alice.summon(4).await.unwrap();
+    // Short, because a quiet moment is the loop's exit condition rather than an error.
+    alice.set_timeout(Duration::from_millis(30));
+    // A living boss is re-synced every tick it moves, so "did another packet arrive" is the wrong
+    // question. What matters is how many *different* NPC slots ever carry an Eye.
+    let mut slots = std::collections::HashSet::new();
+    for _ in 0..300 {
+        match alice.next_event().await {
+            Ok(Event::NpcSynced(n)) if n.net_id == 4 => {
+                slots.insert(n.index);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(slots.len(), 1, "the first summon should have worked");
+
+    alice.summon(4).await.unwrap();
+    for _ in 0..300 {
+        match alice.next_event().await {
+            Ok(Event::NpcSynced(n)) if n.net_id == 4 => {
+                slots.insert(n.index);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(slots.len(), 1, "two Eyes of Cthulhu at once: {slots:?}");
+}
+
+/// A crafted packet cannot conjure something that is not a summonable boss.
+#[tokio::test]
+async fn only_the_games_own_list_can_be_summoned() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    // A Moon Lord is not on the list, however politely you ask.
+    alice.summon(398).await.unwrap();
+    alice.set_timeout(Duration::from_secs(2));
+    let arrived = alice
+        .wait_for(
+            "a moon lord",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 398),
+        )
+        .await;
+    assert!(arrived.is_err(), "that is not a summonable boss");
+}

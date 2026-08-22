@@ -3314,3 +3314,44 @@ pub const TENTACLE_CAP: f32 = 8.0;
 /// It picks a new offset within its orbit every two to eight seconds.
 pub const TENTACLE_DRIFT: (u32, u32) = (120, 480);
 pub const TENTACLE_SPREAD: i32 = 100;
+
+// --- Summoning ------------------------------------------------------------------------------------
+
+/// The bosses a player may summon by using an item.
+///
+/// From `NPCID.Sets.MPAllowedEnemies`. Anything not on this list cannot be summoned however the
+/// packet is crafted, which is what stops a client asking for an army of Moon Lords.
+pub const SUMMONABLE: [u16; 17] = [
+    4,   // Eye of Cthulhu
+    13,  // Eater of Worlds
+    50,  // King Slime
+    125, // Retinazer
+    126, // Spazmatism
+    127, // Skeletron Prime
+    128, // Prime Saw
+    129, // Prime Vice
+    130, // Prime Cannon
+    131, // Prime Laser
+    134, // The Destroyer
+    222, // Queen Bee
+    245, // Golem
+    266, // Brain of Cthulhu
+    370, // Duke Fishron
+    657, // Queen Slime
+    668, // Deerclops
+];
+
+/// Whether a type may be summoned by a player.
+pub fn summonable(npc_type: u16) -> bool {
+    SUMMONABLE.contains(&npc_type)
+}
+
+/// How far above the player a boss with no ground to stand on appears.
+pub const SUMMON_ABOVE: f32 = 150.0;
+/// How far around a player the summoner looks for ground, and how many tries it makes.
+pub const SUMMON_RANGE_X: i32 = 60;
+pub const SUMMON_RANGE_Y: i32 = 40;
+pub const SUMMON_ATTEMPTS: usize = 500;
+/// It will not put one inside this box around the player.
+pub const SUMMON_SAFE_X: i32 = 20;
+pub const SUMMON_SAFE_Y: i32 = 12;
