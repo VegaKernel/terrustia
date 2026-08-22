@@ -76,7 +76,7 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
     } else {
         face(npc, target);
         match npc.ai[0] {
-            s if s == 0.0 => {
+            0.0 => {
                 // Waiting. The wait shortens as it is worn down.
                 npc.ai[1] += 1.0;
                 if health < 0.5 {
