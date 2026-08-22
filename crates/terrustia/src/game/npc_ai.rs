@@ -39,6 +39,8 @@ pub struct Surroundings<'a> {
     pub hazards: &'a [Hazard],
     /// Centres of whatever the crowded styles keep away from; see [`avoidance`].
     pub avoid: &'a [(f32, f32)],
+    /// Whether a nebula headcrab is already latched onto the target.
+    pub target_taken: bool,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -201,6 +203,7 @@ pub fn update_with(
             } else {
                 &[]
             },
+            target_taken: around.target_taken,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,
@@ -285,7 +288,7 @@ pub enum Avoids {
 /// NPC table, so it is only built when something present actually reads it.
 pub fn avoidance(style: i32) -> Option<Avoids> {
     match style {
-        122 => Some(Avoids::OwnKind),
+        85 | 90 | 122 => Some(Avoids::OwnKind),
         64 => Some(Avoids::AnythingAlive),
         _ => None,
     }

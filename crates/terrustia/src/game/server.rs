@@ -1827,6 +1827,13 @@ impl GameServer {
                     list
                 }
             };
+            // Which NPCs are currently riding a player, and whose head each is on.
+            let latched: Vec<(u16, u8)> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.stats.ai_style == 85 && n.ai[0] == 5.0)
+                .map(|(_, n)| (n.npc_type, n.target as u8))
+                .collect();
             // A handful of routines wait on how many of some other type are still alive: the
             // Brain's armour, the Wall's leeches, a pal's escort. One pass counts them all, and
             // only for the types anything actually asks about.
@@ -1920,6 +1927,13 @@ impl GameServer {
                         conditions,
                         hazards: &hazards,
                         avoid: &avoid,
+                        // A headcrab already on this player's head is the only thing that stops
+                        // another trying, so it is worked out once per NPC that asks.
+                        target_taken: npc.stats.ai_style == 85
+                            && latched.iter().any(|(ty, slot)| {
+                                *ty == npc.npc_type
+                                    && Some(*slot) == targets.first().map(|t| t.slot)
+                            }),
                         census: &census,
                         parent,
                         parent_state,

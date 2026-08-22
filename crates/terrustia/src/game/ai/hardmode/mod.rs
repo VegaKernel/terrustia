@@ -14,6 +14,7 @@ pub mod drifters;
 pub mod fixtures;
 pub mod hopper;
 pub mod hoverers;
+pub mod hunter;
 pub mod invasion;
 pub mod leaper;
 pub mod rider;

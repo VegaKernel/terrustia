@@ -88,6 +88,7 @@ fn main() -> ExitCode {
                     conditions,
                     hazards: &[],
                     avoid: &[],
+                    target_taken: false,
                     census: &[],
                     parent: None,
                     parent_state: 0.0,

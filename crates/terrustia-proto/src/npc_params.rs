@@ -2567,3 +2567,62 @@ pub const CANNON_SHOT_DAMAGE: i32 = 30;
 pub const CANNON_SHOT_SPEED: f32 = 14.0;
 pub const CANNON_SHOT_RISE: f32 = -5.0;
 pub const CANNON_RELOAD: f32 = 240.0;
+
+// --- Pathfinders and pouncers -------------------------------------------------------------------
+
+/// Style 85: how fast each of the three closes when it has a clear line.
+pub const SPHERE_CHASE: f32 = 5.5;
+pub const CELL_CHASE: f32 = 8.0;
+/// The chase speeds up with distance, a pixel per tick for every hundred pixels away.
+pub const CHASE_DISTANCE_GAIN: f32 = 100.0;
+pub const CHASE_SMOOTH: f32 = 50.0;
+/// Beyond this it gives up on terrain entirely and flies through it.
+pub const PATH_GIVE_UP: f32 = 800.0;
+pub const PATH_PHASE_SPEED: f32 = 3.0;
+pub const CELL_PHASE_SPEED: f32 = 6.0;
+pub const PATH_PHASE_SMOOTH: f32 = 3.0;
+/// ...and comes back through once it is this close again.
+pub const PATH_RESURFACE: f32 = 600.0;
+/// Rounding a corner: it aims at a waypoint level with or above the player.
+pub const PATH_CORNER_SPEED: f32 = 2.0;
+pub const CELL_CORNER_SPEED: f32 = 3.0;
+pub const PATH_CORNER_SMOOTH: f32 = 3.0;
+/// The waypoint has to be at least this far off to be worth going to.
+pub const PATH_WAYPOINT_MIN: f32 = 8.0;
+/// Lost: it drifts, bouncing, and looks for a corner every five ticks.
+pub const PATH_DRIFT_SPEED: f32 = 2.0;
+pub const CELL_DRIFT_SPEED: f32 = 3.0;
+pub const PATH_DRIFT_SMOOTH: f32 = 20.0;
+pub const PATH_DRIFT_BOUNCE: f32 = -0.8;
+pub const PATH_LOOK_EVERY: f32 = 5.0;
+pub const PATH_LOST_TICKS: f32 = 180.0;
+/// The nebula headcrab, which latches onto your head instead of hitting you.
+pub const HEADCRAB: u16 = 421;
+pub const HEADCRAB_LATCH: f32 = 40.0;
+/// The stardust cell, which pushes its own kind apart rather than stacking.
+pub const STARDUST_CELL_BIG: u16 = 405;
+pub const PATH_SHOVE: f32 = 0.05;
+
+/// Style 90: a Mothron spawn's three speeds, and how long it holds each.
+pub const SPAWN_CIRCLE_TICKS: f32 = 90.0;
+pub const SPAWN_CHASE: f32 = 5.5;
+pub const SPAWN_CHASE_GAIN: f32 = 100.0;
+pub const SPAWN_CHASE_SMOOTH: f32 = 40.0;
+pub const SPAWN_CIRCLE_RANGE: f32 = 200.0;
+pub const SPAWN_FAR: f32 = 800.0;
+/// Out of sight it phases through terrain, gaining speed the longer it takes.
+pub const SPAWN_PHASE_GAIN: f32 = 150.0;
+pub const SPAWN_PHASE_SMOOTH: f32 = 35.0;
+pub const SPAWN_PHASE_ACCEL: f32 = 1.0 / 60.0;
+pub const SPAWN_REACQUIRE: f32 = 300.0;
+pub const SPAWN_LOSE: f32 = 1000.0;
+/// The pounce: it lines up for ten ticks and then commits.
+pub const SPAWN_AIM_TICKS: f32 = 10.0;
+pub const SPAWN_POUNCE: f32 = 9.0;
+pub const SPAWN_POUNCE_SMOOTH: f32 = 8.0;
+pub const SPAWN_POUNCE_TICKS: f32 = 45.0;
+pub const SPAWN_POUNCE_GAIN: f32 = 1.01;
+/// Without an eclipse to be out in, it climbs away and leaves.
+pub const SPAWN_LEAVE_CLIMB: f32 = -0.2;
+pub const SPAWN_LEAVE_CAP: f32 = -8.0;
+pub const SPAWN_DESPAWN_RANGE: f32 = 3000.0;

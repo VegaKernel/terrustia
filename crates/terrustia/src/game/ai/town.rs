@@ -533,6 +533,7 @@ mod tests {
             parent_health: 1.0,
             crowding: (0.0, 0.0),
             avoid: &[],
+            target_taken: false,
         }
     }
 

@@ -324,6 +324,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         parent_health: 1.0,
         crowding: (0.0, 0.0),
         avoid: &[],
+        target_taken: false,
     }
 }
 
@@ -345,8 +346,8 @@ pub fn parity(style: i32) -> Option<Parity> {
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
         | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 74 | 75 | 72 | 73
-        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124
-        | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
+        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 85 | 90 | 93 | 102 | 103
+        | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -379,6 +380,11 @@ pub struct World<'a, T: TileView> {
     pub parent_state: f32,
     /// ...and what fraction of its health it has left.
     pub parent_health: f32,
+    /// Whether something of this NPC's own type is already riding the target.
+    ///
+    /// Only the nebula headcrab asks, and only so that a swarm of them deals with you one at a
+    /// time rather than all latching at once.
+    pub target_taken: bool,
     /// What this one keeps its distance from: the rest of its own kind for a pirate ghost,
     /// anything alive at all for a shimmerfly. Empty unless the style asks for it, because
     /// building it is a scan of the whole table.
@@ -556,6 +562,14 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         23 => hardmode::hoverers::flying_weapon(npc, world),
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
+        85 => {
+            // Another of its kind already on the player's head is what stops this one trying.
+            let taken = world.target_taken;
+            hardmode::hunter::pathfinder(npc, world, taken);
+        }
+        90 => {
+            hardmode::hunter::mothron_spawn(npc, world);
+        }
         75 => {
             let out = hardmode::rider::rider(npc, world, world.parent, rng);
             effects.shots.extend(out.shots);
@@ -785,6 +799,7 @@ mod tests {
                 parent_health: 1.0,
                 crowding: (0.0, 0.0),
                 avoid: &[],
+                target_taken: false,
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);
