@@ -385,6 +385,19 @@ impl Client {
     }
 
     /// Throw an item into the world, asking the server for a slot.
+    /// Teleport this player, the way a magic mirror does.
+    pub async fn teleport(&mut self, x: f32, y: f32) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
+        // No flags: a player, to a given place, with no extra.
+        w.u8(0);
+        w.i16(i16::from(self.slot()));
+        w.f32(x);
+        w.f32(y);
+        w.u8(0);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Place a multi-tile object — a chest, a door, a workbench — with its cursor tile at
     /// `(x, y)`.
     pub async fn place_object(&mut self, x: i16, y: i16, block: u16, style: i16) -> Result<()> {

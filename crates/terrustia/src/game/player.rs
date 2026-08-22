@@ -55,6 +55,8 @@ pub struct Player {
     pub appearance: Option<Bytes>,
     /// The most recent packet 13 payload, so a joining player sees everyone in their real pose.
     pub last_controls: Option<Bytes>,
+    /// Which town NPC this player has open, if any. A shop needs to know.
+    pub talking_to: Option<u8>,
     /// What this player is carrying, by slot.
     ///
     /// Sparse: a client sends a slot only when it holds something or when it has just been
@@ -106,6 +108,7 @@ impl Player {
             team: 0,
             appearance: None,
             last_controls: None,
+            talking_to: None,
             inventory: std::collections::HashMap::new(),
             greeted: false,
             password_ok: false,

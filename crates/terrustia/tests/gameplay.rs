@@ -1433,3 +1433,23 @@ async fn an_object_will_not_be_placed_over_something() {
         "half a workbench should not have been placed"
     );
 }
+
+/// A teleport the server does not apply leaves every enemy in the world attacking where the
+/// player used to be, so it has to move the server's idea of them as well as telling everyone.
+#[tokio::test]
+async fn a_teleport_moves_the_player_for_everyone() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    alice.teleport(1234.0, 567.0).await.unwrap();
+
+    bob.set_timeout(Duration::from_secs(3));
+    let seen = bob
+        .wait_for(
+            "alice's teleport",
+            |e| matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+        )
+        .await;
+    assert!(seen.is_ok(), "bob should have been told");
+}

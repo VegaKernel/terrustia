@@ -684,6 +684,10 @@ impl GameServer {
             | id::SYNC_TILE_PICKING
             | id::SYNC_LOADOUT => self.relay_player_packet(slot, frame.id, &payload),
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
+            id::TELEPORT_ENTITY => self.on_teleport(slot, &payload),
+            // Which town NPC a player is talking to. The owner byte is first, so the ordinary
+            // relay handles it, and remembering it is what a shop will need.
+            id::SYNC_TALK_N_P_C => self.on_talk_npc(slot, &payload),
             id::REQUEST_SECTION => self.on_request_section(slot, &payload),
             id::AREA_TILE_CHANGE => self.on_tile_square(slot, &payload),
             id::SYNC_ITEM | id::SPAWN_INSTANCED_ITEM => self.on_sync_item(slot, &payload),
@@ -1158,6 +1162,71 @@ impl GameServer {
             player.zone = Some(Bytes::copy_from_slice(payload));
         }
         self.relay_player_packet(slot, id::SYNC_PLAYER_ZONE, payload)
+    }
+
+    /// A player teleported: a magic mirror, a teleporter, a recall potion.
+    ///
+    /// The server has to move its own idea of the player as well as relaying, because every
+    /// routine that hunts a target reads that position. A teleport the server does not apply
+    /// leaves every enemy in the world attacking where the player used to be.
+    fn on_teleport(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        let flags = r.u8()?;
+        let _claimed = r.i16()?;
+        let x = r.f32()?;
+        let y = r.f32()?;
+        let style = r.u8()?;
+
+        // Bits 0 and 1 together say what is being teleported; only zero — a player — is ours.
+        let what = (flags & 1) + ((flags & 2) >> 1) * 2;
+        if what != 0 {
+            return Ok(());
+        }
+        // Bit 2 means "where they already are", which is how a client asks for the effect without
+        // moving anything.
+        let stay = flags & 4 != 0;
+        let extra = if flags & 8 != 0 { r.i32()? } else { 0 };
+
+        let at = if stay {
+            match self.player(slot) {
+                Some(player) => player.position,
+                None => return Ok(()),
+            }
+        } else {
+            (x, y)
+        };
+        if !at.0.is_finite() || !at.1.is_finite() {
+            return Ok(());
+        }
+        if let Some(player) = self.player_mut(slot) {
+            player.position = at;
+            player.velocity = (0.0, 0.0);
+        }
+
+        let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
+        w.u8(flags);
+        w.i16(i16::from(slot));
+        w.f32(at.0);
+        w.f32(at.1);
+        w.u8(style);
+        if flags & 8 != 0 {
+            w.i32(extra);
+        }
+        let frame = w.finish()?;
+        self.broadcast(frame, Some(slot));
+        debug!(slot, x = at.0, y = at.1, "player teleported");
+        Ok(())
+    }
+
+    /// A player started or stopped talking to a town NPC.
+    fn on_talk_npc(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        let _claimed = r.u8()?;
+        let npc = r.i16()?;
+        if let Some(player) = self.player_mut(slot) {
+            player.talking_to = if npc >= 0 { Some(npc as u8) } else { None };
+        }
+        self.relay_player_packet(slot, id::SYNC_TALK_N_P_C, payload)
     }
 
     /// A player placed a multi-tile object: a chest, a door, a bed, a workbench.
