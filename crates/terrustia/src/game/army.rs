@@ -14,6 +14,7 @@
 use rand::{Rng, rngs::SmallRng};
 
 use terrustia_proto::npc_params as ids;
+use terrustia_proto::npc_params::{RAISE_CHECK_RANGE, RAISE_MINIMUM, RAISE_MOST, RAISE_RANGE};
 
 /// Which tier is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -134,6 +135,11 @@ pub struct ArmyState {
     pub stand: (i32, i32),
     /// Whether the champion of the current tier has been beaten this run.
     pub champion_down: bool,
+    /// Where goblins have died, for a Dark Mage to raise.
+    ///
+    /// Only the plain goblins leave anything worth raising — a javelinist or a drakin is gone for
+    /// good — and a raising consumes the spots it uses, so the same corpse never comes back twice.
+    pub corpses: Vec<(f32, f32)>,
 }
 
 impl ArmyState {
@@ -184,6 +190,42 @@ impl ArmyState {
         // event ever gives you.
         self.hold = 1800;
         Some(finished)
+    }
+
+    /// Note where a goblin fell, if it was the kind that leaves anything behind.
+    pub fn note_corpse(&mut self, npc_type: u16, bottom: (f32, f32)) {
+        if self.ongoing()
+            && matches!(
+                npc_type,
+                ids::DD2_GOBLIN_T1 | ids::DD2_GOBLIN_T2 | ids::DD2_GOBLIN_T3
+            )
+        {
+            self.corpses.push(bottom);
+        }
+    }
+
+    /// Whether there are enough corpses near a point to be worth a summoning.
+    pub fn can_raise_at(&self, spot: (f32, f32)) -> bool {
+        self.corpses
+            .iter()
+            .filter(|c| (c.0 - spot.0).hypot(c.1 - spot.1) <= RAISE_CHECK_RANGE)
+            .count()
+            >= RAISE_MINIMUM
+    }
+
+    /// Take the corpses near a point, up to the most a single summoning will raise.
+    pub fn take_raisable(&mut self, spot: (f32, f32)) -> Vec<(f32, f32)> {
+        let mut taken = Vec::new();
+        self.corpses.retain(|c| {
+            if (c.0 - spot.0).hypot(c.1 - spot.1) <= RAISE_RANGE {
+                taken.push(*c);
+                false
+            } else {
+                true
+            }
+        });
+        taken.truncate(RAISE_MOST);
+        taken
     }
 
     /// Whether the event has been won: the last wave of the tier is behind you.
@@ -907,6 +949,48 @@ mod tests {
             right.0 < 122,
             "the walk should have stopped at the hole, not reached {right:?}"
         );
+    }
+
+    /// A Dark Mage will not raise until there are three corpses to raise, and a raising uses
+    /// them up rather than leaving them to be raised again.
+    #[test]
+    fn corpses_are_spent_when_they_are_raised() {
+        let mut army = ArmyState::default();
+        army.start(Tier::One, (0, 0));
+        let spot = (1000.0, 1000.0);
+        assert!(!army.can_raise_at(spot), "an empty field raises nothing");
+
+        for i in 0..3 {
+            army.note_corpse(ids::DD2_GOBLIN_T1, (1000.0 + i as f32 * 20.0, 1000.0));
+        }
+        assert!(army.can_raise_at(spot), "three is enough");
+
+        let raised = army.take_raisable(spot);
+        assert_eq!(raised.len(), 3);
+        assert!(!army.can_raise_at(spot), "and they do not come back twice");
+    }
+
+    /// Only the plain goblins leave anything behind.
+    #[test]
+    fn a_javelinist_leaves_nothing_to_raise() {
+        let mut army = ArmyState::default();
+        army.start(Tier::One, (0, 0));
+        for _ in 0..10 {
+            army.note_corpse(ids::DD2_JAVELINST_T1, (1000.0, 1000.0));
+            army.note_corpse(ids::DD2_WYVERN_T1, (1000.0, 1000.0));
+        }
+        assert!(!army.can_raise_at((1000.0, 1000.0)));
+    }
+
+    /// A summoning raises at most eight at once, however many are lying about.
+    #[test]
+    fn a_summoning_raises_at_most_eight() {
+        let mut army = ArmyState::default();
+        army.start(Tier::One, (0, 0));
+        for i in 0..30 {
+            army.note_corpse(ids::DD2_GOBLIN_T1, (1000.0 + i as f32 * 10.0, 1000.0));
+        }
+        assert_eq!(army.take_raisable((1000.0, 1000.0)).len(), RAISE_MOST);
     }
 
     /// The gap between waves actually holds the gates shut.

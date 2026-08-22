@@ -51,6 +51,8 @@ pub struct Surroundings<'a> {
     pub army: super::ai::ArmyView,
     /// The best thing a fairy could lead someone to, when one is asking.
     pub treasure: Option<(i32, i32)>,
+    /// What a Dark Mage can see around it.
+    pub mage: super::ai::army::mage::MageView,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -136,6 +138,8 @@ pub struct AiOutput {
     pub army_ended: Option<bool>,
     /// Set when the crystal wants its gates told to shut.
     pub close_gates: bool,
+    /// Set on the tick a Dark Mage finishes a summoning.
+    pub raising: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -229,6 +233,7 @@ pub fn update_with(
             sockets_open: around.sockets_open,
             army: around.army,
             treasure: around.treasure,
+            mage: around.mage,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,
@@ -254,6 +259,7 @@ pub fn update_with(
         out.release = effects.release;
         out.army_ended = effects.army_ended;
         out.close_gates = effects.close_gates;
+        out.raising = effects.raising;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;

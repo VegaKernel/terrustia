@@ -4109,3 +4109,35 @@ pub const SAUCER_LAST_STAND: f32 = 3600.0;
 /// The last phase alternates on this rhythm: hover, then strafe.
 pub const SAUCER_BEAT: f32 = 120.0;
 pub const SAUCER_HALF_BEAT: f32 = 60.0;
+
+/// The Dark Mage: a caster that raises the goblins you have already killed.
+///
+/// Its three spells cycle in order and each has its own wind-up. The bolt is the only one aimed at
+/// you; the other two are why leaving its escort dead near it is a mistake.
+pub const DARK_MAGE_BOLT: u16 = 675;
+pub const DARK_MAGE_BOLT_DAMAGE: i32 = 40;
+pub const DARK_MAGE_BOLT_SPEED: f32 = 14.0;
+/// The healing sigil it plants on the ground, and the portal its skeletons come out of.
+pub const DARK_MAGE_HEAL: u16 = 674;
+pub const DARK_MAGE_PORTAL: u16 = 673;
+/// The skeletons it raises, per tier.
+pub const DD2_SKELETON_BY_TIER: [u16; 3] = [DD2_SKELETON_T1, DD2_SKELETON_T1, DD2_SKELETON_T3];
+/// How long each of the three spells takes, and the cooldown after each.
+pub const DARK_MAGE_CASTS: [f32; 3] = [97.0, 127.0, 183.0];
+pub const DARK_MAGE_COOLDOWN: f32 = 120.0;
+pub const DARK_MAGE_SHORT_COOLDOWN: f32 = 20.0;
+/// Where in each cast the spell actually goes off.
+pub const DARK_MAGE_BOLT_AT: f32 = 32.0;
+pub const DARK_MAGE_HEAL_AT: [f32; 3] = [40.0, 48.0, 56.0];
+pub const DARK_MAGE_RAISE_AT: f32 = 64.0;
+/// How far it will look for hurt allies worth healing, and how far it throws its bolt.
+pub const DARK_MAGE_HEAL_RANGE: (f32, f32) = (600.0, 200.0);
+pub const DARK_MAGE_BOLT_RANGE: f32 = 1000.0;
+/// How far away a dead goblin can be and still be worth raising.
+pub const RAISE_CHECK_RANGE: f32 = 800.0;
+pub const RAISE_RANGE: f32 = 850.0;
+/// How many corpses it takes before raising is worth casting, and how many come back at once.
+pub const RAISE_MINIMUM: usize = 3;
+pub const RAISE_MOST: usize = 8;
+/// Where it puts the healing sigil, relative to itself.
+pub const DARK_MAGE_HEAL_OUT: f32 = 240.0;

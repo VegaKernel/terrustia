@@ -152,6 +152,7 @@ mod tests {
             sockets_open: 0,
             army: crate::game::ai::ArmyView::default(),
             treasure: None,
+            mage: Default::default(),
         }
     }
 

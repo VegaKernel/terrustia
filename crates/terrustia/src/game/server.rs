@@ -2075,6 +2075,11 @@ impl TileView for WorldTiles<'_> {
     }
 }
 
+/// How far a Dark Mage looks for something worth healing, and for a corpse worth raising.
+const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE;
+const RAISE_CHECK_RANGE: f32 = terrustia_proto::npc_params::RAISE_CHECK_RANGE;
+const RAISE_MINIMUM: usize = terrustia_proto::npc_params::RAISE_MINIMUM;
+
 /// Coin item ids, smallest first.
 const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
 
@@ -2126,6 +2131,10 @@ impl GameServer {
         let mut releases: Vec<((f32, f32), bool)> = Vec::new();
         let mut ended: Option<bool> = None;
         let mut close_gates = false;
+        let mut raisings: Vec<(f32, f32)> = Vec::new();
+        // Taken out of the event's own state for the tick so a mage can read it while the table
+        // is borrowed, and put back once everything has moved.
+        let mut raisable: Vec<(f32, f32)>;
         let mut escaped_probe = false;
         let mut carrying = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
@@ -2214,6 +2223,18 @@ impl GameServer {
                 .map(|(_, n)| (n.npc_type, n.target as u8))
                 .collect();
             let world_size = (self.world.width(), self.world.height());
+            // Where the hurt are, and where goblins have fallen: a Dark Mage reads both, and
+            // building either inside the loop would mean scanning the table once per mage.
+            let hurt: Vec<(f32, f32)> = if self.npcs.iter().any(|(_, n)| n.stats.ai_style == 109) {
+                self.npcs
+                    .iter()
+                    .filter(|(_, n)| n.life != n.life_max)
+                    .map(|(_, n)| n.center())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            raisable = std::mem::take(&mut self.army.corpses);
             // The event as its own fixtures see it. The arena is surveyed once, when the crystal
             // first asks for its gates, and kept: re-walking it every tick would let a player
             // change where the gates are by building mid-fight.
@@ -2355,6 +2376,29 @@ impl GameServer {
                         } else {
                             None
                         },
+                        // A Dark Mage picks its spell from what is around it: how many of its
+                        // side are hurt, and whether there are goblins on the ground to raise.
+                        mage: if npc.stats.ai_style == 109 {
+                            let here = npc.center();
+                            crate::game::ai::army::mage::MageView {
+                                wounded: hurt
+                                    .iter()
+                                    .filter(|(x, y)| {
+                                        (x - here.0).abs() <= HEAL_REACH.0
+                                            && (y - here.1).abs() <= HEAL_REACH.1
+                                    })
+                                    .count(),
+                                can_raise: raisable
+                                    .iter()
+                                    .filter(|c| {
+                                        (c.0 - here.0).hypot(c.1 - here.1) <= RAISE_CHECK_RANGE
+                                    })
+                                    .count()
+                                    >= RAISE_MINIMUM,
+                            }
+                        } else {
+                            Default::default()
+                        },
                         sockets_open,
                         parent,
                         parent_state,
@@ -2394,6 +2438,9 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.close_gates) {
                     close_gates = true;
                 }
+                if std::mem::take(&mut ai_out.raising) {
+                    raisings.push(npc.center());
+                }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -2418,6 +2465,26 @@ impl GameServer {
             {
                 npc.life = (npc.life + amount).min(npc.life_max);
                 npc.dirty = true;
+            }
+        }
+
+        self.army.corpses = std::mem::take(&mut raisable);
+
+        // Skeletons a mage called up out of the ground where goblins fell.
+        for spot in raisings {
+            let tier = self.army.tier.map_or(0, |t| t as usize);
+            let npc_type =
+                terrustia_proto::npc_params::DD2_SKELETON_BY_TIER[tier.saturating_sub(1).min(2)];
+            for corpse in self.army.take_raisable(spot) {
+                let column = (corpse.0 / crate::game::npc::TILE) as i32;
+                let from = (corpse.1 / crate::game::npc::TILE) as i32;
+                let Some(ground) = spawn::find_ground(&self.world, column, from) else {
+                    continue;
+                };
+                let at = (corpse.0, (ground - 1) as f32 * crate::game::npc::TILE);
+                if let Some(index) = self.npcs.spawn(npc_type, at) {
+                    self.broadcast_npc(index);
+                }
             }
         }
 
@@ -2995,6 +3062,7 @@ impl GameServer {
             self.drop_coins(value, center);
             self.drop_loot(npc_type, center);
             self.note_invasion_kill(npc_type);
+            self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
             self.note_army_kill(npc_type);
             debug!(slot, npc_type, "npc killed");
         } else {
@@ -3345,6 +3413,9 @@ impl GameServer {
     }
 
     /// Count a kill against the Old One's Army, and advance its waves.
+    ///
+    /// A goblin also leaves its body where it fell, which is the whole reason a Dark Mage is
+    /// dangerous: it turns your own progress back into enemies.
     fn note_army_kill(&mut self, npc_type: u16) {
         if !self.army.ongoing() {
             return;

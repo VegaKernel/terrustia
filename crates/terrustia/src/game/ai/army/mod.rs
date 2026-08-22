@@ -8,3 +8,4 @@
 pub mod bug;
 pub mod crystal;
 pub mod flyer;
+pub mod mage;

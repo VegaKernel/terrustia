@@ -88,6 +88,7 @@ fn main() -> ExitCode {
                     sockets_open: 0,
                     army: Default::default(),
                     treasure: None,
+                    mage: Default::default(),
                     conditions,
                     hazards: &[],
                     avoid: &[],
