@@ -524,6 +524,10 @@ pub struct Effects {
     pub screamed: bool,
     /// How far a draining aura reaches, while one is out.
     pub aura: Option<f32>,
+    /// Where this NPC wants to be put, once it has finished going.
+    pub teleport_to: Option<(f32, f32)>,
+    /// Set on the tick the Cultists' tablet finishes breaking, which is what raises their master.
+    pub ritual_complete: bool,
 }
 
 /// Drive an NPC whose style is [`Parity::Ported`].
@@ -936,6 +940,156 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired =
                 creeper::update(npc, brain, target, charging) == creeper::Outcome::BrainGone;
         }
+        58 => {
+            let out = boss::moon::pumpking(npc, world, rng);
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        59 => {
+            let out = boss::moon::pumpking_blade(npc, world.parent);
+            effects.expired = out.spent;
+        }
+        60 => {
+            let out = boss::moon::ice_queen(npc, world);
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        61 => {
+            let out = boss::moon::santa(npc, world, rng);
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        76 => {
+            let out = hardmode::saucer::core(npc, world);
+            effects.spawn.extend(out.spawn);
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
+        }
+        77 => {
+            // A socket that has been broken open is still on the field, so counting the parts is
+            // not enough to know how far along the fight is.
+            let parts = world.count(terrustia_proto::npc_params::MOON_LORD_HAND)
+                + world.count(terrustia_proto::npc_params::MOON_LORD_HEAD);
+            let open = (3usize.saturating_sub(parts) + world.sockets_open).min(3);
+            let out = boss::moon_lord::core(npc, world, parts, open);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        78 | 79 => {
+            let out = boss::moon_lord::eye_socket(npc, world, world.parent, rng);
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        81 => {
+            boss::moon_lord::free_eye(npc, world);
+        }
+        82 => {
+            let out = boss::moon_lord::leech(npc, world.parent);
+            effects.expired = out.spent;
+            effects.healed = out.healed;
+        }
+        83 => {
+            let out = if npc.npc_type == terrustia_proto::npc_params::CULTIST_TABLET {
+                boss::tablet::tablet(
+                    npc,
+                    world,
+                    world.count(terrustia_proto::npc_params::CULTIST_DEVOTE)
+                        + world.count(terrustia_proto::npc_params::CULTIST_ARCHER),
+                )
+            } else {
+                boss::tablet::devote(npc, world.parent)
+            };
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+            effects.ritual_complete = out.ritual_complete;
+        }
+        84 => {
+            let out = boss::cultist::cultist(
+                npc,
+                world,
+                world.parent,
+                world.count(terrustia_proto::npc_params::CULTIST_CLONE),
+                rng,
+            );
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+            effects.teleport_to = out.move_to;
+        }
+        105 => {
+            let out = army::crystal::crystal(npc, world.army.arena);
+            effects.gates = out.gates;
+            effects.army_ended = out.ended;
+            effects.close_gates = out.close_gates;
+            effects.expired = out.spent;
+        }
+        106 => {
+            let out = army::crystal::portal(
+                npc,
+                world.army.rate.max(1),
+                world.army.on_hold,
+                world.army.crystal_alive,
+            );
+            effects.release = out.release;
+            effects.expired = out.spent;
+        }
+        107 => {
+            let out = army::walker::improved_walker(npc, world, rng);
+            effects.shots.extend(out.shots);
+            effects.detonated = out.burst;
+            effects.expired = out.spent;
+            effects.aura = out.aura;
+        }
+        108 => {
+            let out = army::flyer::diving(npc, world, rng);
+            effects.detonated = out.burst;
+            effects.expired = out.spent;
+        }
+        109 => {
+            let out = army::mage::dark_mage(npc, world, world.mage);
+            effects.shots.extend(out.shots);
+            effects.raising = out.raising;
+        }
+        110 => {
+            let out = army::betsy::betsy(
+                npc,
+                world,
+                world.count(terrustia_proto::npc_params::BETSY_WYVERN),
+                rng,
+            );
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+            effects.screamed = out.screamed;
+        }
+        111 => {
+            effects
+                .shots
+                .extend(army::bug::lightning_bug(npc, world, rng));
+        }
+        112 => {
+            let out = fairy::fairy(npc, world, world.treasure, rng);
+            effects.expired = out.spent;
+        }
+        120 => {
+            let out = boss::empress::empress(
+                npc,
+                world,
+                world.conditions.day,
+                world.conditions.expert,
+                rng,
+            );
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
+        }
+        121 => {
+            let out = boss::queen_slime::queen_slime(npc, world, rng);
+            effects.teleport_to = out.teleport_to;
+        }
         style => unreachable!("style {style} claims parity but has no routine here"),
     }
     effects
@@ -964,6 +1118,10 @@ mod tests {
     /// old approximation, which is exactly the failure the parity table exists to prevent. Running
     /// every ported type through [`run`] makes the claim and the wiring the same edit: the final
     /// arm of that match is `unreachable!`, so a style marked ported without a routine panics here.
+    ///
+    /// It walks the *whole* roster rather than the pre-hardmode list. It used to walk only the
+    /// latter, and style 58 sat claimed-but-unwired behind that gap until a Pumpking crashed a
+    /// profiling run: nothing before hardmode uses it, so nothing tested it.
     #[test]
     fn every_ported_style_actually_runs_its_routine() {
         let mut tiles = Flat::default();
@@ -974,8 +1132,15 @@ mod tests {
         }
         let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
         let mut seen = Vec::new();
-        for npc_type in PRE_HARDMODE {
-            let stats = npc_stats(npc_type).expect("stats");
+        // Every unwired style at once rather than the first one: `run`'s last arm panics, so the
+        // probe below catches that and collects the style instead of stopping the whole test.
+        let mut unwired = std::collections::BTreeSet::new();
+        let loud = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
+            let Some(stats) = npc_stats(npc_type) else {
+                continue;
+            };
             if parity(stats.ai_style) != Some(Parity::Ported) {
                 continue;
             }
@@ -1007,6 +1172,18 @@ mod tests {
                 treasure: None,
                 mage: Default::default(),
             };
+            unwired.extend(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut probe = npc.clone();
+                    let mut probe_rng = rand::rngs::SmallRng::seed_from_u64(1);
+                    run(&mut probe, &world, &mut probe_rng);
+                }))
+                .err()
+                .map(|_| stats.ai_style),
+            );
+            if unwired.contains(&stats.ai_style) {
+                continue;
+            }
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);
             seen.push(stats.ai_style);
@@ -1014,6 +1191,11 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert!(!seen.is_empty());
+        std::panic::set_hook(loud);
+        assert!(
+            unwired.is_empty(),
+            "styles claiming parity with no routine wired up: {unwired:?}"
+        );
     }
 
     #[test]
@@ -1067,7 +1249,10 @@ mod tests {
                     .push(stats.name);
             }
         }
-        assert!(orphans.is_empty(), "styles with no ported routine: {orphans:?}");
+        assert!(
+            orphans.is_empty(),
+            "styles with no ported routine: {orphans:?}"
+        );
     }
 
     /// How much of the *whole* game is ported, not just what appears before hardmode.

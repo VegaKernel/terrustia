@@ -144,6 +144,10 @@ pub struct AiOutput {
     pub screamed: bool,
     /// How far a draining aura reaches, while one is out.
     pub aura: Option<f32>,
+    /// Where the NPC just updated wants to be put, once it has finished going.
+    pub teleport_to: Option<(f32, f32)>,
+    /// Set on the tick the Cultists' tablet finishes breaking.
+    pub ritual_complete: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -266,6 +270,8 @@ pub fn update_with(
         out.raising = effects.raising;
         out.screamed = effects.screamed;
         out.aura = effects.aura;
+        out.teleport_to = effects.teleport_to;
+        out.ritual_complete = effects.ritual_complete;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;

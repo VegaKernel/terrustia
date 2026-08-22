@@ -2133,6 +2133,7 @@ impl GameServer {
         let mut close_gates = false;
         let mut raisings: Vec<(f32, f32)> = Vec::new();
         let mut screams = 0usize;
+        let mut rituals: Vec<(f32, f32)> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -2447,6 +2448,17 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.screamed) {
                     screams += 1;
                 }
+                // A boss that vanished and wants to come back somewhere else. It is applied here
+                // rather than in the routine because the routine cannot see the world's edges.
+                if let Some(at) = ai_out.teleport_to.take() {
+                    npc.position = (at.0 - npc.width() / 2.0, at.1 - npc.height());
+                    npc.velocity = (0.0, 0.0);
+                    npc.dirty = true;
+                }
+                // The tablet finished breaking: the Cultist rises where it stood.
+                if std::mem::take(&mut ai_out.ritual_complete) {
+                    rituals.push(npc.center());
+                }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -2491,6 +2503,20 @@ impl GameServer {
                 if let Some(index) = self.npcs.spawn(npc_type, at) {
                     self.broadcast_npc(index);
                 }
+            }
+        }
+
+        for at in rituals {
+            if self
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == terrustia_proto::npc_params::CULTIST)
+            {
+                continue;
+            }
+            if let Some(index) = self.npcs.spawn(terrustia_proto::npc_params::CULTIST, at) {
+                self.announce("The Lunatic Cultist has awoken!");
+                self.broadcast_npc(index);
             }
         }
 
