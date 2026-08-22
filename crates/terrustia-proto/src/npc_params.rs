@@ -3650,3 +3650,69 @@ pub const QUEEN_SLIME_LEASH_TILES: f32 = 500.0;
 /// Flying: it holds above you and dives.
 pub const QUEEN_SLIME_HOVER: f32 = 250.0;
 pub const QUEEN_SLIME_DIVE_RANGE: f32 = 250.0;
+
+// --- The Lunatic Cultist ---------------------------------------------------------------------------
+
+pub const CULTIST: u16 = 439;
+pub const CULTIST_CLONE: u16 = 440;
+pub const CULTIST_DRAGON: u16 = 522;
+pub const CULTIST_ANCIENT_LIGHT: u16 = 523;
+
+/// It arrives over seven seconds before it will fight.
+pub const CULTIST_ARRIVAL: f32 = 420.0;
+/// Between attacks it pauses for two thirds of a second.
+pub const CULTIST_PAUSE: f32 = 40.0;
+/// Below half health it sheds a third of its armour.
+pub const CULTIST_HALF_DEFENSE: f32 = 0.65;
+
+/// The attack script, indexed by how many attacks it has made.
+///
+/// Nought is "move", which is why it spends so much of the fight drifting into a new position:
+/// every other entry in the second half of the script is a reposition. The sequence is fixed, so
+/// the fight is memorisable, and that is the point of it.
+pub const CULTIST_SCRIPT: [u8; 13] = [0, 1, 0, 5, 0, 3, 0, 5, 0, 2, 0, 3, 4];
+
+/// The ice mist: a slow, heavy shot.
+pub const CULTIST_ICE: u16 = 599;
+pub const CULTIST_ICE_DAMAGE: i32 = 45;
+pub const CULTIST_ICE_EVERY: f32 = 80.0;
+pub const CULTIST_ICE_EVERY_EXPERT: f32 = 40.0;
+/// The fireballs: a burst of three, or four in expert.
+pub const CULTIST_FIRE: u16 = 598;
+pub const CULTIST_FIRE_DAMAGE: i32 = 30;
+pub const CULTIST_FIRE_EVERY: f32 = 18.0;
+pub const CULTIST_FIRE_EVERY_EXPERT: f32 = 12.0;
+pub const CULTIST_FIRE_COUNT: i32 = 3;
+pub const CULTIST_FIRE_COUNT_EXPERT: i32 = 4;
+/// The lightning: rarer and harder.
+pub const CULTIST_LIGHTNING: u16 = 600;
+pub const CULTIST_LIGHTNING_DAMAGE: i32 = 35;
+pub const CULTIST_LIGHTNING_EVERY: f32 = 120.0;
+pub const CULTIST_LIGHTNING_EVERY_EXPERT: f32 = 90.0;
+/// How it repositions: a two-hundred-by-three-hundred ellipse above you, shared out between it and
+/// its clones so they fan rather than stack.
+pub const CULTIST_ORBIT: (f32, f32) = (300.0, 200.0);
+pub const CULTIST_ORBIT_SPREAD: f32 = 0.4;
+pub const CULTIST_MOVE_STEP: f32 = 50.0;
+/// The ritual: it makes clones and only the real one flinches.
+pub const CULTIST_CLONES: usize = 4;
+pub const CULTIST_RITUAL_TICKS: f32 = 420.0;
+pub const CULTIST_RITUAL_WINDOW: (f32, f32) = (120.0, 420.0);
+/// Guessing wrong costs you: ten of its clones' lights survive, or three in expert.
+pub const CULTIST_WRONG_GUESS: i32 = 10;
+pub const CULTIST_WRONG_GUESS_EXPERT: i32 = 3;
+
+/// The tablet the cultists gather at, and the devotes that kneel around it.
+pub const CULTIST_TABLET: u16 = 437;
+pub const CULTIST_DEVOTE: u16 = 438;
+pub const CULTIST_ARCHER: u16 = 379;
+/// Four gather: two archers and two devotes.
+pub const TABLET_CULTISTS: usize = 4;
+/// Once they are all dead the tablet shatters over five seconds and the Cultist rises.
+pub const TABLET_SHATTER_TICKS: f32 = 300.0;
+pub const TABLET_SHARD_FROM: f32 = 120.0;
+pub const TABLET_SHARD_EVERY: f32 = 10.0;
+pub const TABLET_SHARD: u16 = 526;
+/// A devote paces, turning to face the tablet, and gives up after five seconds of nothing.
+pub const DEVOTE_DRAG: f32 = 0.93;
+pub const DEVOTE_PATIENCE: f32 = 300.0;

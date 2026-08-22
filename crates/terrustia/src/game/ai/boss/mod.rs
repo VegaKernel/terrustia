@@ -5,6 +5,7 @@
 //! than a style table.
 
 pub mod brain;
+pub mod cultist;
 pub mod deerclops;
 pub mod destroyer;
 pub mod eye;
@@ -17,6 +18,7 @@ pub mod prime;
 pub mod queen_bee;
 pub mod queen_slime;
 pub mod skeletron;
+pub mod tablet;
 pub mod tree;
 pub mod twins;
 pub mod wall;
