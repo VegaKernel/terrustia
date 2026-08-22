@@ -24,6 +24,14 @@ use terrustia_proto::tile::{Liquid, Tile};
 /// tick to take several frames.
 pub const BUDGET: usize = 8_000;
 
+/// The most tiles that may be waiting at once.
+///
+/// The queue takes duplicates because checking is dearer than visiting twice, so a determined
+/// flood can push far more in than comes out. Dropping the excess is right rather than merely
+/// cheap: a tile that is genuinely still moving will be woken again by its neighbour on the next
+/// tick, and one that is not was going to do nothing anyway.
+pub const QUEUE_CAP: usize = 200_000;
+
 /// How full a tile has to be before it counts as a full block of liquid.
 const FULL: u8 = 255;
 /// Lava moves at a fifth of water's pace, and honey slower still.
@@ -77,7 +85,9 @@ impl Liquids {
     pub fn wake(&mut self, x: i32, y: i32) {
         // The queue can hold a tile more than once; the cost of checking is higher than the cost
         // of visiting one twice, and a visit with nothing to do is nearly free.
-        self.queue.push_back((x, y));
+        if self.queue.len() < QUEUE_CAP {
+            self.queue.push_back((x, y));
+        }
     }
 
     pub fn pending(&self) -> usize {
@@ -581,6 +591,16 @@ mod tests {
         let water = spread_after(Liquid::Water, 30);
         let lava = spread_after(Liquid::Lava, 30);
         assert!(lava < water, "lava {lava} should trail water {water}");
+    }
+
+    /// The queue is bounded however hard it is pushed.
+    #[test]
+    fn the_queue_cannot_grow_without_end() {
+        let mut liquids = Liquids::default();
+        for i in 0..(QUEUE_CAP * 2) {
+            liquids.wake(i as i32 % 400, i as i32 % 400);
+        }
+        assert_eq!(liquids.pending(), QUEUE_CAP);
     }
 
     /// Still water is free: nothing to do means nothing queued.

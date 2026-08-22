@@ -118,6 +118,9 @@ impl Tier {
     }
 }
 
+/// How many fallen goblins the field remembers at once.
+const CORPSES_REMEMBERED: usize = 300;
+
 /// Whether killing this counts toward the wave at all.
 pub fn belongs(npc_type: u16) -> bool {
     (551..=565).contains(&npc_type) || (568..=578).contains(&npc_type)
@@ -193,6 +196,10 @@ impl ArmyState {
     }
 
     /// Note where a goblin fell, if it was the kind that leaves anything behind.
+    ///
+    /// The oldest is forgotten once there are more than a wave's worth: a mage only ever raises
+    /// eight at a time and only ones close by, so an unbounded list would be a slow leak across a
+    /// long event and would never be read.
     pub fn note_corpse(&mut self, npc_type: u16, bottom: (f32, f32)) {
         if self.ongoing()
             && matches!(
@@ -200,6 +207,9 @@ impl ArmyState {
                 ids::DD2_GOBLIN_T1 | ids::DD2_GOBLIN_T2 | ids::DD2_GOBLIN_T3
             )
         {
+            if self.corpses.len() >= CORPSES_REMEMBERED {
+                self.corpses.remove(0);
+            }
             self.corpses.push(bottom);
         }
     }
@@ -980,6 +990,22 @@ mod tests {
             army.note_corpse(ids::DD2_WYVERN_T1, (1000.0, 1000.0));
         }
         assert!(!army.can_raise_at((1000.0, 1000.0)));
+    }
+
+    /// The field forgets the oldest corpses rather than remembering every one forever.
+    #[test]
+    fn the_field_only_remembers_so_many() {
+        let mut army = ArmyState::default();
+        army.start(Tier::One, (0, 0));
+        for i in 0..(CORPSES_REMEMBERED * 3) {
+            army.note_corpse(ids::DD2_GOBLIN_T1, (i as f32, 0.0));
+        }
+        assert_eq!(army.corpses.len(), CORPSES_REMEMBERED);
+        // What it kept is the newest, which is what a mage standing in the fight would want.
+        assert!(
+            army.corpses[0].0 > CORPSES_REMEMBERED as f32,
+            "it forgot the wrong end"
+        );
     }
 
     /// A summoning raises at most eight at once, however many are lying about.

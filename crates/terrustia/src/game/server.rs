@@ -3582,6 +3582,26 @@ impl GameServer {
             .map(|p| p.position)
             .collect();
 
+        // An entity whose tile has gone is gone with it. Without this it is a ghost: it keeps its
+        // spot reserved so nothing can be placed there again, and it goes on being ticked forever.
+        let mut orphaned = Vec::new();
+        for (at, entity) in self.tile_entities.iter().enumerate() {
+            let Some(wanted) = entity.kind.tile() else {
+                continue;
+            };
+            let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
+            if !tile.is_active() || tile.block != wanted {
+                orphaned.push((at, entity.npc));
+            }
+        }
+        for (at, npc) in orphaned.iter().rev() {
+            if let Some(index) = npc {
+                self.npcs.remove(*index);
+                self.broadcast_npc_death(*index);
+            }
+            self.tile_entities.remove(*at);
+        }
+
         let mut raise = Vec::new();
         let mut lower = Vec::new();
         for (at, entity) in self.tile_entities.iter().enumerate() {

@@ -1828,3 +1828,54 @@ async fn a_tile_entity_needs_its_tile() {
     let fresh = join(addr, "fresh").await;
     assert!(fresh.world().tile(402, 20).is_some(), "the server survived");
 }
+
+/// Mining a dummy's tile takes the dummy with it, rather than leaving it standing.
+#[tokio::test]
+async fn a_dummy_goes_when_its_tile_does() {
+    let addr = start_with(Config::default(), |world| {
+        let (x, y) = (world.spawn_x as i32, world.spawn_y as i32 + 1);
+        world.set_tile(x, y, Tile::framed(378, 0, 0));
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+    let (x, y) = (bob.world().spawn.0, bob.world().spawn.1 + 1);
+    bob.move_to(f32::from(x) * 16.0, f32::from(y) * 16.0)
+        .await
+        .unwrap();
+
+    let mut place = Vec::new();
+    place.extend_from_slice(&x.to_le_bytes());
+    place.extend_from_slice(&y.to_le_bytes());
+    place.push(0);
+    bob.send(&frame(id::TILE_ENTITY_PLACEMENT, &place))
+        .await
+        .unwrap();
+    let raised = bob
+        .wait_for(
+            "the dummy",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 488),
+        )
+        .await
+        .expect("a dummy");
+    let Event::NpcSynced(dummy) = raised else {
+        unreachable!("matched on it")
+    };
+
+    // Mine the tile out from under it.
+    let square = TileSquare {
+        x,
+        y,
+        width: 1,
+        height: 1,
+        change_type: 0,
+        tiles: vec![Tile::AIR],
+    };
+    bob.send(&square.encode().unwrap()).await.unwrap();
+
+    bob.wait_for(
+        "the dummy going",
+        |e| matches!(e, Event::NpcSynced(n) if n.index == dummy.index && n.life == 0),
+    )
+    .await
+    .expect("the dummy should have gone with its tile");
+}
