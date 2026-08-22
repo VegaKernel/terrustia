@@ -4742,6 +4742,8 @@ impl GameServer {
             moon: self.moon.moon.map(|m| (m, self.moon.wave)),
             eclipse: self.world.eclipse,
             downed_plantera: progress.downed_plantera,
+            hard_mode: progress.hard_mode,
+            downed_mech_any: progress.downed_mech_any,
             downed_all_mechs: progress.downed_mech1
                 && progress.downed_mech2
                 && progress.downed_mech3,

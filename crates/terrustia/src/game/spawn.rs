@@ -48,6 +48,149 @@ pub enum Biome {
     Desert,
     Ocean,
     Dungeon,
+    /// Only exists after the wall falls, which is why nothing recognised it before hardmode did.
+    Hallow,
+}
+
+/// What hardmode adds where, on top of whatever the place had before.
+///
+/// Every entry was read out of `NPC.Spawner` with its real condition rather than from memory: the
+/// zone it needs, the depth, and whether it wants day or night. A pool that named the wrong biome
+/// would be worse than an empty one, because it would look right.
+///
+/// These *add* to the ordinary pool rather than replacing it — a hardmode forest still has
+/// zombies — except in the hallow, which has no pre-hardmode life of its own.
+pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
+    use Biome::*;
+    use Depth::*;
+
+    match (depth, biome) {
+        // The two evils, which are the same shape with different names.
+        (Surface, Corruption) => &[
+            81,  // CorruptSlime
+            121, // Slimer
+            94,  // Corruptor
+        ],
+        (Underground | Cavern, Corruption) => &[
+            81,  // CorruptSlime
+            83,  // CursedHammer
+            94,  // Corruptor
+            98,  // SeekerHead — a world feeder
+            170, // PigronCorruption
+            473, // BigMimicCorruption
+        ],
+        (Surface, Crimson) => &[
+            183, // Crimslime
+            241, // BloodFeeder
+            242, // BloodJelly
+        ],
+        (Underground | Cavern, Crimson) => &[
+            174, // Herpling
+            179, // CrimsonAxe
+            180, // PigronCrimson
+            182, // FloatyGross
+            183, // Crimslime
+            268, // IchorSticker
+            474, // BigMimicCrimson
+        ],
+        // The hallow, which has nothing but hardmode life.
+        (Surface, Hallow) => {
+            if day {
+                &[
+                    75,  // Pixie
+                    122, // Gastropod
+                ]
+            } else {
+                &[
+                    75,  // Pixie
+                    122, // Gastropod
+                    137, // IlluminantBat
+                    138, // IlluminantSlime
+                ]
+            }
+        }
+        (Underground | Cavern, Hallow) => &[
+            75,  // Pixie
+            84,  // EnchantedSword
+            120, // ChaosElemental
+            137, // IlluminantBat
+            138, // IlluminantSlime
+            171, // PigronHallow
+            475, // BigMimicHallow
+        ],
+        // The snow, which gets a great deal.
+        (Surface, Snow) => &[
+            197, // ArmoredViking
+            243, // IceGolem
+            250, // AngryNimbus
+        ],
+        (Underground | Cavern, Snow) => &[
+            95,  // DiggerHead
+            150, // IceBat
+            154, // IceTortoise
+            184, // SpikedIceSlime
+            197, // ArmoredViking
+            206, // IcyMerman
+            629, // IceMimic
+        ],
+        // The jungle.
+        (Surface, Jungle) => {
+            if day {
+                &[
+                    177, // Derpling
+                    153, // GiantTortoise
+                ]
+            } else {
+                &[
+                    152, // GiantFlyingFox
+                    153, // GiantTortoise
+                ]
+            }
+        }
+        (Underground | Cavern, Jungle) => &[
+            157, // Arapaima
+            176, // MossHornet
+            205, // Moth
+            236, // JungleCreeper
+            476, // BigMimicJungle
+        ],
+        // The desert, whose hardmode life is the underground half of it.
+        (Underground | Cavern, Desert) => &[
+            78,  // Mummy
+            79,  // DarkMummy
+            80,  // LightMummy
+            510, // DuneSplicerHead
+        ],
+        // The underworld, which only opens up once a mechanical boss is down; the caller holds
+        // that gate because it is progression rather than place.
+        (Underworld, _) => &[
+            151, // Lavabat
+            156, // RedDevil
+        ],
+        // An ordinary forest surface at night.
+        (Surface, _) => {
+            if day {
+                &[]
+            } else {
+                &[
+                    82,  // Wraith
+                    93,  // GiantBat
+                    133, // WanderingEye
+                    140, // PossessedArmor
+                ]
+            }
+        }
+        // ...and everything under it.
+        (Underground | Cavern, _) => &[
+            77,  // ArmoredSkeleton
+            85,  // Mimic
+            93,  // GiantBat
+            110, // SkeletonArcher
+            141, // ToxicSludge
+            163, // BlackRecluse
+            172, // RuneWizard
+        ],
+    }
 }
 
 /// Classify a spawn point by how far down it is.
@@ -70,8 +213,8 @@ pub fn biome_at(world: &World, x: i32, y: i32) -> Biome {
         return Biome::Ocean;
     }
 
-    let (mut corrupt, mut crimson, mut jungle, mut snow, mut desert, mut dungeon) =
-        (0, 0, 0, 0, 0, 0);
+    let (mut corrupt, mut crimson, mut jungle, mut snow, mut desert, mut dungeon, mut hallow) =
+        (0, 0, 0, 0, 0, 0, 0);
     let radius = 20;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -92,6 +235,8 @@ pub fn biome_at(world: &World, x: i32, y: i32) -> Biome {
                 53 | 396 | 397 => desert += 1,
                 // Dungeon bricks in all three colours.
                 41 | 43 | 44 | 481 | 482 | 483 => dungeon += 1,
+                // Pearlstone, hallowed grass, pearlsand, hallowed ice, hallowed sandstone.
+                109 | 116 | 117 | 164 | 402 | 403 => hallow += 1,
                 _ => {}
             }
         }
@@ -109,6 +254,7 @@ pub fn biome_at(world: &World, x: i32, y: i32) -> Biome {
         (jungle, Biome::Jungle),
         (snow, Biome::Snow),
         (desert, Biome::Desert),
+        (hallow, Biome::Hallow),
     ];
     candidates
         .iter()
@@ -129,6 +275,10 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     use Depth::*;
 
     match (depth, biome) {
+        // The hallow does not exist before the wall falls, so nothing pre-hardmode lives there of
+        // its own. It borrows the forest's pool so a hallowed forest is not silently empty of the
+        // ordinary things; what is *only* there in hardmode is in `hardmode_pool`.
+        (depth, Hallow) => pool(depth, Forest, day),
         (Underworld, _) => &[
             24, // FireImp
             59, // LavaSlime
@@ -301,6 +451,10 @@ pub struct EventSpawns<'a> {
     pub downed_all_mechs: bool,
     /// Whether the field already holds as many event bosses as it will take.
     pub boss_cap: bool,
+    /// Whether the wall has fallen, which is what opens the hardmode half of every pool.
+    pub hard_mode: bool,
+    /// ...and whether a mechanical boss is down, which is what opens the underworld's.
+    pub downed_mech_any: bool,
     /// How many of a type are alive, for the tables that cap their heavies.
     pub census: &'a dyn Fn(u16) -> usize,
 }
@@ -393,11 +547,26 @@ pub fn try_spawn(
                 Some(npc_type) => npc_type,
                 None => {
                     let biome = biome_at(world, x, y);
-                    let choices = pool(depth, biome, world.day_time);
-                    if choices.is_empty() {
+                    let ordinary = pool(depth, biome, world.day_time);
+                    // Hardmode adds to what a place had rather than replacing it, so a hardmode
+                    // forest still has zombies in it. The underworld's additions wait for a
+                    // mechanical boss, which is progression rather than place and so is held here.
+                    let extra = if events.hard_mode
+                        && (depth != Depth::Underworld || events.downed_mech_any)
+                    {
+                        hardmode_pool(depth, biome, world.day_time)
+                    } else {
+                        &[]
+                    };
+                    if ordinary.is_empty() && extra.is_empty() {
                         continue;
                     }
-                    choices[rng.random_range(0..choices.len())]
+                    let at = rng.random_range(0..ordinary.len() + extra.len());
+                    if at < ordinary.len() {
+                        ordinary[at]
+                    } else {
+                        extra[at - ordinary.len()]
+                    }
                 }
             };
 
@@ -421,6 +590,8 @@ mod tests {
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
+            hard_mode: false,
+            downed_mech_any: false,
             census: &|_| 0,
         }
     }
@@ -440,6 +611,81 @@ mod tests {
         assert_eq!(depth_at(&world, 250), Depth::Underground);
         assert_eq!(depth_at(&world, 350), Depth::Cavern);
         assert_eq!(depth_at(&world, 599 - 1), Depth::Underworld);
+    }
+
+    /// Every hardmode pool names real, hostile types, and each biome's are its own.
+    #[test]
+    fn the_hardmode_pools_are_real_and_placed_right() {
+        use terrustia_proto::npc_data::npc_stats;
+        let mut anywhere = std::collections::HashSet::new();
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for biome in [
+                Biome::Forest,
+                Biome::Corruption,
+                Biome::Crimson,
+                Biome::Jungle,
+                Biome::Snow,
+                Biome::Desert,
+                Biome::Ocean,
+                Biome::Dungeon,
+                Biome::Hallow,
+            ] {
+                for day in [true, false] {
+                    for npc_type in hardmode_pool(depth, biome, day) {
+                        let stats = npc_stats(*npc_type)
+                            .unwrap_or_else(|| panic!("{npc_type} in {biome:?} is not a type"));
+                        assert!(
+                            !stats.friendly && !stats.town_npc,
+                            "{} is friendly and should not be spawned at anyone",
+                            stats.name
+                        );
+                        anywhere.insert(*npc_type);
+                    }
+                }
+            }
+        }
+        assert!(
+            anywhere.len() > 40,
+            "only {} hardmode types",
+            anywhere.len()
+        );
+    }
+
+    /// The hallow is empty before hardmode and full after it.
+    #[test]
+    fn the_hallow_only_lives_in_hardmode() {
+        // Before: it borrows the forest's ordinary life rather than being barren.
+        assert_eq!(
+            pool(Depth::Surface, Biome::Hallow, true),
+            pool(Depth::Surface, Biome::Forest, true),
+        );
+        // After: it has its own, and nothing it has is the forest's.
+        let hallow = hardmode_pool(Depth::Surface, Biome::Hallow, true);
+        assert!(!hallow.is_empty());
+        let forest = hardmode_pool(Depth::Surface, Biome::Forest, true);
+        assert!(
+            hallow.iter().all(|t| !forest.contains(t)),
+            "the hallow is sharing the forest's hardmode life"
+        );
+    }
+
+    /// The two evils get different creatures, not the same list twice.
+    #[test]
+    fn the_evils_are_not_the_same_list() {
+        for depth in [Depth::Surface, Depth::Cavern] {
+            let corrupt = hardmode_pool(depth, Biome::Corruption, false);
+            let crimson = hardmode_pool(depth, Biome::Crimson, false);
+            assert!(!corrupt.is_empty() && !crimson.is_empty());
+            assert!(
+                corrupt.iter().all(|t| !crimson.contains(t)),
+                "the two evils share {depth:?} spawns"
+            );
+        }
     }
 
     #[test]
