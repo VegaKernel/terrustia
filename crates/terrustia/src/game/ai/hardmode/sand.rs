@@ -19,12 +19,11 @@ use terrustia_proto::{
         ELEMENTAL_CAST_TICKS, ELEMENTAL_CLIMB_ACCEL, ELEMENTAL_CLIMB_SPEED, ELEMENTAL_DRAG,
         ELEMENTAL_FALL_CAP, ELEMENTAL_GRAVITY, ELEMENTAL_MISS_REST, ELEMENTAL_RISE,
         ELEMENTAL_RISE_CAP, ELEMENTAL_SPEED, ELEMENTAL_STUBBORN_AT, ELEMENTAL_WOUNDED_ACCEL,
-        ELEMENTAL_WOUNDED_SPEED, SANDNADO, SANDNADOES, SANDNADO_APART, SANDNADO_LEAD,
-        SANDNADO_SPREAD, SHARK_BEACHED_SPEED, SHARK_BOB, SHARK_BOB_ACCEL, SHARK_FALL_CAP,
-        SHARK_GRAVITY, SHARK_HOME_ACCEL, SHARK_HOME_X, SHARK_HOME_Y, SHARK_LUNGE_ARC,
-        SHARK_LUNGE_COOLDOWN, SHARK_LUNGE_RANGE, SHARK_LUNGE_READY, SHARK_LUNGE_SPEED,
-        SHARK_MIN_RANGE, SHARK_SWIM_ACCEL, SHARK_SWIM_SPEED, STUCK_TOLERANCE,
-        STUCK_TURN_REST, STUCK_TURN_TICKS,
+        ELEMENTAL_WOUNDED_SPEED, SANDNADO, SANDNADO_APART, SANDNADO_LEAD, SANDNADO_SPREAD,
+        SANDNADOES, SHARK_BEACHED_SPEED, SHARK_BOB, SHARK_BOB_ACCEL, SHARK_FALL_CAP, SHARK_GRAVITY,
+        SHARK_HOME_ACCEL, SHARK_HOME_X, SHARK_HOME_Y, SHARK_LUNGE_ARC, SHARK_LUNGE_COOLDOWN,
+        SHARK_LUNGE_RANGE, SHARK_LUNGE_READY, SHARK_LUNGE_SPEED, SHARK_MIN_RANGE, SHARK_SWIM_ACCEL,
+        SHARK_SWIM_SPEED, STUCK_TOLERANCE, STUCK_TURN_REST, STUCK_TURN_TICKS,
     },
     tile_sets::sandy,
     tile_solid::solid,
@@ -82,10 +81,10 @@ pub fn sand_shark(npc: &mut Npc, world: &World<'_, impl TileView>) {
         if let Some(target) = world.target {
             face(npc, target);
         }
-        npc.velocity.0 =
-            (npc.velocity.0 + f32::from(npc.direction) * SHARK_HOME_ACCEL).clamp(-SHARK_HOME_X, SHARK_HOME_X);
-        npc.velocity.1 =
-            (npc.velocity.1 + f32::from(npc.direction_y) * SHARK_HOME_ACCEL).clamp(-SHARK_HOME_Y, SHARK_HOME_Y);
+        npc.velocity.0 = (npc.velocity.0 + f32::from(npc.direction) * SHARK_HOME_ACCEL)
+            .clamp(-SHARK_HOME_X, SHARK_HOME_X);
+        npc.velocity.1 = (npc.velocity.1 + f32::from(npc.direction_y) * SHARK_HOME_ACCEL)
+            .clamp(-SHARK_HOME_Y, SHARK_HOME_Y);
 
         // What is directly in front of its nose, one body-length ahead.
         let speed = npc.velocity.0.hypot(npc.velocity.1);
@@ -99,7 +98,12 @@ pub fn sand_shark(npc: &mut Npc, world: &World<'_, impl TileView>) {
             (cx, cy)
         };
         let still_buried = in_sand(world.tiles, ahead)
-            || (world.wet && world.tiles.tile((ahead.0 / TILE) as i32, (ahead.1 / TILE) as i32).liquid > 0);
+            || (world.wet
+                && world
+                    .tiles
+                    .tile((ahead.0 / TILE) as i32, (ahead.1 / TILE) as i32)
+                    .liquid
+                    > 0);
 
         // About to break the surface, going the way it is facing, with you in range and the
         // cooldown clear: that is the lunge.
@@ -114,10 +118,7 @@ pub fn sand_shark(npc: &mut Npc, world: &World<'_, impl TileView>) {
         {
             npc.ai[2] = SHARK_LUNGE_COOLDOWN;
             // It aims above you, so it arcs over rather than into you.
-            let (ax, ay) = (
-                target.center.0 - cx,
-                target.center.1 + SHARK_LUNGE_ARC - cy,
-            );
+            let (ax, ay) = (target.center.0 - cx, target.center.1 + SHARK_LUNGE_ARC - cy);
             let length = ax.hypot(ay).max(f32::MIN_POSITIVE);
             npc.velocity = (
                 ax / length * SHARK_LUNGE_SPEED,
@@ -258,7 +259,11 @@ pub fn sand_elemental(
         // Recovering from a turn: it will not re-target, but it still faces the right way.
         npc.local_ai[2] += 1.0;
         if let Some(target) = world.target {
-            npc.direction = if target.center.0 > npc.center().0 { 1 } else { -1 };
+            npc.direction = if target.center.0 > npc.center().0 {
+                1
+            } else {
+                -1
+            };
         }
     }
 
@@ -269,7 +274,8 @@ pub fn sand_elemental(
     }
 
     // Terrain sense: it looks ahead-and-down for something to clear, and below itself for a floor.
-    let ahead_x = ((npc.position.0 + npc.width() / 2.0) / TILE) as i32 + i32::from(npc.direction) * 2;
+    let ahead_x =
+        ((npc.position.0 + npc.width() / 2.0) / TILE) as i32 + i32::from(npc.direction) * 2;
     let feet_y = ((npc.position.1 + npc.height()) / TILE) as i32;
     let blocked = |x: i32, y: i32| {
         let tile = world.tiles.tile(x, y);
@@ -378,17 +384,12 @@ fn raise_sandnadoes(
             continue;
         }
         // Fall from twenty tiles up until something solid stops us.
-        let mut y = tile_y - 20;
-        let mut landed = None;
-        for _ in 0..51 {
+        let Some(floor) = (tile_y - 20..).take(51).find(|&y| {
             let tile = world.tiles.tile(x, y);
-            if tile.is_active() && solid(tile.block) {
-                landed = Some(y);
-                break;
-            }
-            y += 1;
-        }
-        let Some(floor) = landed else { continue };
+            tile.is_active() && solid(tile.block)
+        }) else {
+            continue;
+        };
         chosen.push(x);
         shots.push(Shot {
             projectile: SANDNADO,
@@ -444,12 +445,7 @@ mod tests {
     const SAND_ELEMENTAL: u16 = 541;
 
     fn shark(tile_x: i32, tile_y: i32) -> Npc {
-        Npc::new(
-            SAND_SHARK,
-            (tile_x as f32 * TILE, tile_y as f32 * TILE),
-            1,
-        )
-        .expect("sand shark")
+        Npc::new(SAND_SHARK, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1).expect("sand shark")
     }
 
     /// In sand it swims; out of it, it falls. That difference is the entire enemy.

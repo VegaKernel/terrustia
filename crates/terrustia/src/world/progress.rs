@@ -75,8 +75,10 @@ mod tests {
     /// and a world edited elsewhere can disagree with the three individual ones.
     #[test]
     fn any_mech_is_read_not_computed() {
-        let mut p = Progress::default();
-        p.downed_mech1 = true;
+        let mut p = Progress {
+            downed_mech1: true,
+            ..Progress::default()
+        };
         assert!(!p.past_mechs(), "the file's own flag is what counts");
         p.downed_mech_any = true;
         assert!(p.past_mechs());

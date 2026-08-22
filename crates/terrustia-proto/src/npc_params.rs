@@ -2156,13 +2156,8 @@ pub const CRAWLER_SPIT: u16 = 472;
 pub const CRAWLER_SPIT_DAMAGE: i32 = 18;
 pub const CRAWLER_SPIT_SPEED: f32 = 8.0;
 /// The wall forms and the ground forms they turn into once they have room.
-pub const CRAWLER_FORMS: [(u16, u16); 5] = [
-    (165, 164),
-    (237, 236),
-    (238, 163),
-    (240, 239),
-    (531, 530),
-];
+pub const CRAWLER_FORMS: [(u16, u16); 5] =
+    [(165, 164), (237, 236), (238, 163), (240, 239), (531, 530)];
 
 /// Style 41: a leaper's charge-up, which counts *faster* the closer you are.
 pub const LEAPER_CHARGE: f32 = 5.0;

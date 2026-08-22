@@ -247,7 +247,6 @@ pub struct Shot {
     pub time_left: u16,
 }
 
-
 /// The types worth counting each tick, because some routine's behaviour turns on how many are up.
 pub const CENSUS_TYPES: [u16; 4] = [
     terrustia_proto::npc_params::CREEPER,
@@ -280,7 +279,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         conditions: Conditions::default(),
         was_hurt: false,
         target_velocity: (0.0, 0.0),
-            census: &[],
+        census: &[],
         parent: None,
         parent_state: 0.0,
         parent_health: 1.0,
@@ -306,8 +305,9 @@ pub fn parity(style: i32) -> Option<Parity> {
         // Ported from the decompiled source.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
-        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 40 | 41 | 70 | 72 | 73 | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 122 | 124 | 127
-        | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
+        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 70 | 72 | 73 | 80 | 89 | 91 | 92 | 95
+        | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119
+        | 123 | 125 | 126 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -438,7 +438,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         4 => effects.spawn.extend(boss::eye::update(npc, world)),
         11 => effects.spawn.extend(boss::skeletron::head(npc, world)),
         27 => {
-            let advance = boss::wall::wall(npc, world, world.count(terrustia_proto::npc_params::WALL_LEECH), rng);
+            let advance = boss::wall::wall(
+                npc,
+                world,
+                world.count(terrustia_proto::npc_params::WALL_LEECH),
+                rng,
+            );
             effects.spawn.extend(advance.spawn);
             effects.shots.extend(advance.shots);
             effects.expired = advance.gone;
@@ -507,6 +512,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         126 => mimic::update(npc, world, rng),
         23 => hardmode::hoverers::flying_weapon(npc, world),
+        39 => hardmode::roller::roller(npc, world, rng),
+        102 => effects.shots.extend(hardmode::sand::sand_elemental(npc, world, rng).shots),
+        103 => hardmode::sand::sand_shark(npc, world),
         40 => {
             let out = hardmode::crawler::crawler(npc, world, rng);
             effects.shots.extend(out.shots);
@@ -537,9 +545,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         72 => {
             // A pinned part is drawn on its parent, so it needs the parent's centre rather than
             // its corner.
-            let at = world.parent.map(|(position, (w, h))| {
-                (position.0 + w / 2.0, position.1 + h / 2.0)
-            });
+            let at = world
+                .parent
+                .map(|(position, (w, h))| (position.0 + w / 2.0, position.1 + h / 2.0));
             effects.expired = hardmode::fixtures::pinned(npc, at).spent;
         }
         73 => {
@@ -711,7 +719,7 @@ mod tests {
                 conditions: Conditions::default(),
                 was_hurt: false,
                 target_velocity: (0.0, 0.0),
-            census: &[],
+                census: &[],
                 parent: None,
                 parent_state: 0.0,
                 parent_health: 1.0,

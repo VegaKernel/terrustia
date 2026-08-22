@@ -12,13 +12,13 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::{
     npc_params::{
-        PROBE_ALERT_TICKS, PROBE_CLIMB, PROBE_CLIMB_CAP, PROBE_COMFORTABLE, PROBE_CRUISE,
-        PROBE_ESCAPE_CLIMB, PROBE_ESCAPE_CLIMB_CAP, PROBE_ESCAPE_DRIFT, PROBE_ESCAPE_DRIFT_CAP,
-        PROBE_ESCAPE_TICKS, PROBE_SCAN, PROBE_SIGHT, PROBE_SINK_CAP, PROBE_TOO_LOW,
-        DUTCHMAN_ACCEL, DUTCHMAN_DROP_CHANCE, DUTCHMAN_DROP_RISE, DUTCHMAN_DROPS, DUTCHMAN_GROUND_SCAN,
-        DUTCHMAN_HOVER, DUTCHMAN_HOVER_EASE, DUTCHMAN_HOVER_RATE, DUTCHMAN_HOVER_SLACK, DUTCHMAN_SPEED,
-        DUTCHMAN_STANDOFF, DUTCHMAN_GUN, DUTCHMAN_CANNON, DUTCHMAN_CANNON_OFFSET,
-        DUTCHMAN_CANNON_SPACING,
+        DUTCHMAN_ACCEL, DUTCHMAN_CANNON, DUTCHMAN_CANNON_OFFSET, DUTCHMAN_CANNON_SPACING,
+        DUTCHMAN_DROP_CHANCE, DUTCHMAN_DROP_RISE, DUTCHMAN_DROPS, DUTCHMAN_GROUND_SCAN,
+        DUTCHMAN_GUN, DUTCHMAN_HOVER, DUTCHMAN_HOVER_EASE, DUTCHMAN_HOVER_RATE,
+        DUTCHMAN_HOVER_SLACK, DUTCHMAN_SPEED, DUTCHMAN_STANDOFF, PROBE_ALERT_TICKS, PROBE_CLIMB,
+        PROBE_CLIMB_CAP, PROBE_COMFORTABLE, PROBE_CRUISE, PROBE_ESCAPE_CLIMB,
+        PROBE_ESCAPE_CLIMB_CAP, PROBE_ESCAPE_DRIFT, PROBE_ESCAPE_DRIFT_CAP, PROBE_ESCAPE_TICKS,
+        PROBE_SCAN, PROBE_SIGHT, PROBE_SINK_CAP, PROBE_TOO_LOW,
     },
     tile_solid::{solid, solid_top},
 };
@@ -58,7 +58,7 @@ pub fn probe(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome {
     npc.dirty = true;
 
     match npc.ai[0] {
-        x if x == 0.0 => {
+        0.0 => {
             if npc.direction == 0
                 && let Some(target) = world.target
             {
@@ -95,7 +95,7 @@ pub fn probe(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome {
             }
         }
         // Seen you. It hangs still while it makes up its mind, then picks a direction away.
-        x if x == 1.0 => {
+        1.0 => {
             npc.ai[1] += 1.0;
             npc.velocity.0 *= 0.95;
             npc.velocity.1 *= 0.95;
@@ -285,7 +285,8 @@ mod tests {
         }
         // Between the two bands it steers for, with a little overshoot either way.
         assert!(
-            (PROBE_TOO_LOW as f32 * TILE - 64.0..=PROBE_SCAN as f32 * TILE + 64.0).contains(&highest),
+            (PROBE_TOO_LOW as f32 * TILE - 64.0..=PROBE_SCAN as f32 * TILE + 64.0)
+                .contains(&highest),
             "dropped to {highest} above the floor"
         );
         assert!(highest > 0.0, "it flew into the ground");
@@ -348,7 +349,10 @@ mod tests {
         // Guns still up: it flies.
         assert!(!dutchman(&mut s, &w, &mut rng, 4).spent);
         // Guns gone: it does not.
-        assert!(dutchman(&mut s, &w, &mut rng, 0).spent, "no guns, no saucer");
+        assert!(
+            dutchman(&mut s, &w, &mut rng, 0).spent,
+            "no guns, no saucer"
+        );
     }
 
     /// The Dutchman keeps its distance rather than flying into you.
@@ -363,7 +367,10 @@ mod tests {
         let near = world(&tiles, Some((cx + 50.0, cy)));
         let before = s.velocity.0;
         dutchman(&mut s, &near, &mut rng, 4);
-        assert_eq!(s.velocity.0, before, "already on top of you, no need to push");
+        assert_eq!(
+            s.velocity.0, before,
+            "already on top of you, no need to push"
+        );
 
         let far = world(&tiles, Some((cx + 900.0, cy)));
         dutchman(&mut s, &far, &mut rng, 4);

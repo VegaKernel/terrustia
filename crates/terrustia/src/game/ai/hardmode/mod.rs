@@ -11,9 +11,9 @@
 pub mod crawler;
 pub mod drifters;
 pub mod fixtures;
-pub mod invasion;
 pub mod hopper;
 pub mod hoverers;
+pub mod invasion;
 pub mod leaper;
 pub mod roller;
 pub mod sand;

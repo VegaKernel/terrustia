@@ -270,11 +270,10 @@ impl Npc {
 ///
 /// Platforms are skipped here: they are in the solid set but only stop something landing on them
 /// from above, which [`move_vertical`] handles separately.
-fn blocked(tiles: &impl TileView, left: f32, top: f32, width: f32, height: f32) -> bool {
-    blocked_for(tiles, 0, left, top, width, height)
-}
-
-/// As [`blocked`], but for an NPC that may pass through some tiles.
+/// Whether a box overlaps anything solid, for an NPC that may pass through some tiles.
+///
+/// `npc_type` decides what counts as solid: almost every NPC is stopped by everything, but a sand
+/// shark swims through sand, so the type has to be part of the question.
 fn blocked_for(
     tiles: &impl TileView,
     npc_type: u16,

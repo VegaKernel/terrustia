@@ -31,18 +31,33 @@ fn main() -> ExitCode {
     let p = world.progress;
     println!(
         "progress    hardmode={} altars={} orbs={} eye={} evil_boss={} skeletron={} queen_bee={}",
-        p.hard_mode, p.altar_count, p.shadow_orb_count, p.downed_boss1, p.downed_boss2,
-        p.downed_boss3, p.downed_queen_bee
+        p.hard_mode,
+        p.altar_count,
+        p.shadow_orb_count,
+        p.downed_boss1,
+        p.downed_boss2,
+        p.downed_boss3,
+        p.downed_queen_bee
     );
     println!(
         "            mechs={}/{}/{} any={} plantera={} golem={} king_slime={}",
-        p.downed_mech1, p.downed_mech2, p.downed_mech3, p.downed_mech_any, p.downed_plantera,
-        p.downed_golem, p.downed_king_slime
+        p.downed_mech1,
+        p.downed_mech2,
+        p.downed_mech3,
+        p.downed_mech_any,
+        p.downed_plantera,
+        p.downed_golem,
+        p.downed_king_slime
     );
     println!(
         "            saved goblin={} wizard={} mechanic={} | goblins={} clown={} frost={} pirates={}",
-        p.saved_goblin, p.saved_wizard, p.saved_mechanic, p.downed_goblins, p.downed_clown,
-        p.downed_frost, p.downed_pirates
+        p.saved_goblin,
+        p.saved_wizard,
+        p.saved_mechanic,
+        p.downed_goblins,
+        p.downed_clown,
+        p.downed_frost,
+        p.downed_pirates
     );
     println!("rock layer  {}", world.rock_layer);
     println!("world id    {}", world.id);

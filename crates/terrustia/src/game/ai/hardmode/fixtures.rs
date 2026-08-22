@@ -221,7 +221,7 @@ pub fn pal(npc: &mut Npc, world: &World<'_, impl TileView>, escorts_alive: usize
 
     match npc.ai[0] {
         // Waiting for the escort. While one is alive the pal will not time out.
-        x if x == 0.0 => {
+        0.0 => {
             if escorts_alive == 0 {
                 npc.ai[0] = 1.0;
             } else {
@@ -229,7 +229,7 @@ pub fn pal(npc: &mut Npc, world: &World<'_, impl TileView>, escorts_alive: usize
             }
         }
         // Escort gone: waiting for the player to come and collect.
-        x if x == 1.0 => {
+        1.0 => {
             if let Some(target) = world.target.filter(|t| t.alive) {
                 let (cx, cy) = npc.center();
                 if (target.center.0 - cx).hypot(target.center.1 - cy) < PAL_APPROACH {
@@ -350,7 +350,10 @@ mod tests {
         };
         assert!(spent, "it should have faded away");
         assert_eq!(ticks, 255 / GHOST_FADE, "the fade takes alpha to full");
-        assert!(g.velocity.0.abs() < 0.1, "and it should have coasted to a stop");
+        assert!(
+            g.velocity.0.abs() < 0.1,
+            "and it should have coasted to a stop"
+        );
     }
 
     /// A caster fires on a fixed cycle, and being hit pushes the next shot further away.

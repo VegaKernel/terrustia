@@ -8,8 +8,7 @@
 //! until it comes down.
 
 use terrustia_proto::npc_params::{
-    HOP_DRAG, HOP_FIRST_REST, HOP_HIGH, HOP_LEAN, HOP_LEAN_CAP, HOP_LONG, HOP_REST,
-    HOP_WAKE_MARGIN,
+    HOP_DRAG, HOP_FIRST_REST, HOP_HIGH, HOP_LEAN, HOP_LEAN_CAP, HOP_LONG, HOP_REST, HOP_WAKE_MARGIN,
 };
 
 use crate::game::ai::{World, face};
@@ -22,9 +21,7 @@ use crate::game::npc::{Npc, TileView};
 pub fn hopper(npc: &mut Npc, world: &World<'_, impl TileView>, sleeps_through_targeting: bool) {
     npc.dirty = true;
     let look = |npc: &mut Npc| {
-        if !sleeps_through_targeting
-            && let Some(target) = world.target
-        {
+        if !sleeps_through_targeting && let Some(target) = world.target {
             face(npc, target);
         }
     };
@@ -199,7 +196,10 @@ mod tests {
             was_grounded = s.velocity.1 == 0.0;
             crate::game::npc::step_physics(&mut s, &tiles);
         }
-        assert!(launches.len() >= 4, "expected several hops, got {launches:?}");
+        assert!(
+            launches.len() >= 4,
+            "expected several hops, got {launches:?}"
+        );
         assert!(
             launches.iter().any(|v| v.1 == HOP_LONG.1),
             "no long hop in {launches:?}"

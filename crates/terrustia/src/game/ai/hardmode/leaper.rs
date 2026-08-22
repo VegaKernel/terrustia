@@ -283,11 +283,11 @@ mod tests {
         }
         assert!(launches.len() >= 4, "expected several hops: {launches:?}");
         assert!(
-            launches.iter().any(|v| *v == LEAPER_HOP.1),
+            launches.contains(&LEAPER_HOP.1),
             "no short hop in {launches:?}"
         );
         assert!(
-            launches.iter().any(|v| *v == LEAPER_LEAP.1),
+            launches.contains(&LEAPER_LEAP.1),
             "no long leap in {launches:?}"
         );
     }
@@ -314,10 +314,7 @@ mod tests {
         };
         let close = hops_in(6.0 * TILE);
         let far = hops_in(300.0 * TILE);
-        assert!(
-            close > far,
-            "close should mean more hops: {close} vs {far}"
-        );
+        assert!(close > far, "close should mean more hops: {close} vs {far}");
     }
 
     /// Landing where it started means something is blocking it, so it turns round and waits.
@@ -357,7 +354,11 @@ mod tests {
             }
         }
         assert!(went_off, "the fuse should have run out");
-        assert_eq!(bomb.width(), TEETH_BLAST_SIZE, "and it swells before it does");
+        assert_eq!(
+            bomb.width(),
+            TEETH_BLAST_SIZE,
+            "and it swells before it does"
+        );
     }
 
     /// Standing next to one lights it too, without any water involved.
