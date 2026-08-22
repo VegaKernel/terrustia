@@ -576,7 +576,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let out = boss::prime::prime_head(npc, world);
             effects.expired = out.leaving && npc.time_left <= 0;
         }
-        33 | 34 | 35 | 36 => {
+        33..=36 => {
             let out = boss::prime::prime_arm(npc, world, world.parent, rng);
             effects.shots.extend(out.shots);
             effects.expired = out.spent;
