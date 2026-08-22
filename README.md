@@ -191,6 +191,9 @@ Results at the time of writing, against Terraria 1.4.5.7:
   **15 of 15 sections byte-identical and zero differing tiles** out of 450,000.
 - The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol
   and confirms every one arrives and syncs: 691 of 691, exercising 126 distinct AI styles.
+- The `fuzz` example throws **fifty thousand malformed packets** at a running server — half noise,
+  half structurally plausible traffic naming tiles at the extremes of an `i16` — and checks it is
+  still answering afterwards, with the world uncorrupted and nothing in the log.
 
 ## Licence
 
