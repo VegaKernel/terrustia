@@ -504,5 +504,84 @@ such chain, and a demon eye's black lens sits behind its rarer drop the same way
 chains into independent rolls would make several drops far more common than they are, so the chain
 structure has to survive into whatever you generate.
 
-The rest of the database — conditions, boss bags, "one from these options", expert-mode variants —
-needs the condition system behind it and cannot be transcribed on its own.
+Conditional loot is a second layer over that, and three parts of it carry the game's structure
+rather than its flavour. A boss in expert drops a **treasure bag** as well as its ordinary loot,
+and the bag is where the expert-only accessory lives. Every boss drops a **trophy** one time in ten
+— the Twins are the one boss whose halves have different trophies but share a bag. And the hardmode
+**crafting materials** are gated three ways at once: on hardmode, on the biome underfoot, and on
+depth, so a Soul of Night needs the corruption *and* the rock layer and neither alone will do.
+
+## The world flags of packet `7`
+
+Eleven bytes, sixty-two named flags, and a server that sends zeroes leaves every client believing
+it has joined a brand-new world however far along the save is. The order is the order
+`NetMessage.SendData` writes them, which is not the order the world file stores them in.
+
+The layout worth recording, because getting one bit wrong quietly closes a shop:
+
+```
+byte 0  shadowOrbSmashed, downedBoss1, downedBoss2, downedBoss3,
+        hardMode, downedClown, ServerSideCharacter, downedPlantBoss
+byte 1  mech1, mech2, mech3, mechAny, cloudBGActive, crimson, pumpkinMoon, snowMoon
+byte 2  —, fastForwardToDawn, slimeRain, downedSlimeKing,
+        downedQueenBee, downedFishron, downedMartians, downedAncientCultist
+byte 3  downedMoonlord, halloweenKing, halloweenTree, xmasIceQueen,
+        xmasSantank, xmasTree, downedGolem, partyIsUp
+byte 4  pirates, frostLegion, goblins, sandstorm, dd2Ongoing, dd2T1, dd2T2, dd2T3
+byte 5  combatBook, lanternNight, towerSolar, towerVortex,
+        towerNebula, towerStardust, halloweenToday, xmasToday
+byte 6  boughtCat, boughtDog, boughtBunny, freeCake,
+        drunkWorld, empressOfLight, queenSlime, getGoodWorld
+byte 7  tenthAnniversary, dontStarve, deerclops, notTheBees,
+        remixWorld, slimeBlueSpawn, combatBookTwo, —
+```
+
+Bit 6 of byte 0 is `ServerSideCharacter`, not a downed flag — the game skips it in the sequence,
+which is easy to misread as an unused bit and shift everything after it.
+
+**Shops need nothing else.** `Chest.SetupShop` runs on the client, reads `Main.LocalPlayer`, and
+gates on exactly twenty-two of these flags plus `bloodMoon` and `eclipse`. A server that sends the
+flag block correctly has implemented shops; one that does not cannot fix them by sending anything
+else.
+
+## Tile entities
+
+Furniture that remembers something is kept beside the world rather than in it, and the kinds are
+numbered by *registration order* in `TileEntitiesManager.RegisterAll`, not by tile id:
+
+```
+0 TrainingDummy   1 ItemFrame    2 LogicSensor   3 DisplayDoll
+4 WeaponsRack     5 HatRack      6 FoodPlatter   7 TeleportationPylon
+8 DeadCellsJar    9 KiteAnchor  10 CritterAnchor
+```
+
+Packet `87` places one: `i16 x, i16 y, u8 kind`. The two anchors ride other tiles and have no home
+tile of their own; every other kind must be standing on its own tile or the placement is a lie.
+
+The training dummy is the only one with behaviour: it is a tile entity that puts NPC 488 in front
+of itself when a player comes within a hundred tiles and takes it away again when they leave. The
+NPC carries the tile position in `ai[0..1]`, which is the whole of how it notices its tile has been
+mined out from under it.
+
+## Locked chests
+
+A locked chest is the same tile shifted along its frame strip, so unlocking is arithmetic rather
+than a tile swap: subtract 36 from `frameX` for a dungeon or golden chest, 180 for a biome chest,
+and 36 for the temple chest (tile 467). All four tiles of the two-by-two carry the frame and all
+four must move together.
+
+The biome chests and the temple are gated on Plantera. That gate is the server's to hold: they are
+the whole reward for beating her.
+
+## Liquids
+
+`Liquid.Update` falls first and levels sideways afterwards, and the levelling averages across seven
+tiles where it can, five where it cannot, three where it cannot manage that, and two as a last
+resort. Averaging wide is what makes a pool find its level in a few ticks rather than creeping one
+tile at a time.
+
+Two details are worth diverging from deliberately on a server. The game rounds each tile's share
+independently, which **creates liquid** every time a pool settles; dividing exactly and handing out
+the remainder costs nothing visible and means a world cannot flood itself. And a span already level
+to within one unit has to be left alone, or the indivisible remainder is handed back and forth
+between neighbours forever and a still pool costs as much as a flowing one.

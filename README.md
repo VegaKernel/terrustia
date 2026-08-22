@@ -60,9 +60,10 @@ Implemented:
 
 Not implemented:
 
-- **Player inventories.** The server does not inspect what a player is carrying, so it cannot stop
-  a client from claiming to hold something. Every server-side consequence of an item — a drop, a
-  purchase, a key — is handled; the carrying is not.
+- **Authoritative inventories.** Every player's inventory is kept and relayed, so a joining player
+  sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
+  key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
+  handled; verifying the claim is not.
 - **Wiring.** Wires, actuators and switches are placed and relayed, so a circuit fires the same way
   on every client, but the server does not run one itself.
 - **Player weapons.** Projectiles an NPC throws are flown by the server; a player's own are
