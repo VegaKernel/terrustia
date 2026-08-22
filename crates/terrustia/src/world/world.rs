@@ -673,6 +673,73 @@ mod flag_tests {
         );
     }
 
+    /// Every flag a town NPC's shop gates on reaches the client.
+    ///
+    /// Shops are not a server concern: a vanilla client builds one locally from these flags the
+    /// moment you talk to somebody, and the server sends nothing about it. That makes this the
+    /// whole of shop support, and it is easy to break silently — a missing flag does not fail, it
+    /// just quietly closes a shop that should be open.
+    ///
+    /// The list is the twenty-two conditions `Chest.SetupShop` actually reads.
+    #[test]
+    fn every_shop_gate_reaches_the_client() {
+        let mut world = crate::world::worldgen::generate(400, 300, "shops", 5);
+        world.crimson = true;
+        world.blood_moon = true;
+        world.eclipse = true;
+        let p = &mut world.progress;
+        p.hard_mode = true;
+        p.downed_boss1 = true;
+        p.downed_boss2 = true;
+        p.downed_boss3 = true;
+        p.downed_king_slime = true;
+        p.downed_clown = true;
+        p.downed_frost = true;
+        p.downed_pirates = true;
+        p.downed_golem = true;
+        p.downed_martians = true;
+        p.downed_plantera = true;
+        p.downed_mech1 = true;
+        p.downed_mech2 = true;
+        p.downed_mech3 = true;
+        p.downed_mech_any = true;
+        p.downed_ancient_cultist = true;
+        p.downed_moon_lord = true;
+        p.downed_queen_slime = true;
+        p.downed_tower_solar = true;
+
+        let data = world.world_data();
+        assert!(data.blood_moon, "blood moon");
+        assert!(data.eclipse, "eclipse");
+        for flag in [
+            F::HardMode,
+            F::DownedBoss1,
+            F::DownedBoss2,
+            F::DownedBoss3,
+            F::DownedKingSlime,
+            F::DownedClown,
+            F::DownedFrostLegion,
+            F::DownedPirates,
+            F::DownedGolem,
+            F::DownedMartians,
+            F::DownedPlantera,
+            F::DownedMech1,
+            F::DownedMech2,
+            F::DownedMech3,
+            F::DownedMechAny,
+            F::DownedAncientCultist,
+            F::DownedMoonLord,
+            F::DownedQueenSlime,
+            F::DownedTowerSolar,
+            F::Crimson,
+        ] {
+            assert!(
+                bit(&data, flag),
+                "{flag:?} would close a shop that should be open"
+            );
+        }
+    }
+
     /// The rain the client is told about is the rain that is actually falling.
     #[test]
     fn a_dry_world_reports_no_rain() {
