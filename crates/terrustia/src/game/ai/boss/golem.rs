@@ -1,0 +1,720 @@
+//! The Golem: styles 45–48.
+//!
+//! Four pieces that fight as one, and the order you take them apart in changes the fight rather
+//! than merely shortening it:
+//!
+//! * The **body** (45) hops. Its charge fills faster for every part already destroyed and every
+//!   health threshold crossed, so a Golem you have disarmed is a Golem that comes at you twice as
+//!   often. It cannot be hurt at all while its head is attached.
+//! * The **head** (46) rides on the body and spits fireballs on a fixed cycle.
+//! * The **fists** (47) hold stations either side, wind up, and punch — but only at a player on
+//!   their own side, so the left fist cannot reach you if you stay to the right.
+//! * Once the body dies the head comes **free** (48) and hovers three hundred pixels above you.
+//!
+//! And fighting it anywhere but the temple doubles every rate in it. That is not a difficulty
+//! setting; it is the game refusing to be dragged out of the fight it designed.
+
+use terrustia_proto::npc_params::{
+    GOLEM_AIR_ACCEL, GOLEM_AIR_SPEED, GOLEM_FIREBALL, GOLEM_FIREBALL_DAMAGE, GOLEM_FIREBALL_SPEED,
+    GOLEM_FIST_LEFT, GOLEM_FIST_OFFSET, GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN,
+    GOLEM_FIST_RETURN_BODY_HURT, GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF,
+    GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP, GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL,
+    GOLEM_FREE_SPEED, GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET, GOLEM_HEAD_TETHER_SPEED,
+    GOLEM_HOP_ACROSS, GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT, GOLEM_HOP_BONUS_PART,
+    GOLEM_HOP_BONUS_THIRD, GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP,
+    GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT, GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF,
+    GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_SPEED, GOLEM_PUNCH_TICKS, GOLEM_SLAM,
+};
+
+use super::skeletron::Parent;
+use crate::game::ai::{PLAYER_WIDTH, Shot, World, face};
+use crate::game::npc::{Npc, TileView};
+use crate::game::npc_ai::Spawn;
+
+/// Which of its parts are still standing, and where it is being fought.
+#[derive(Debug, Clone, Copy)]
+pub struct GolemState {
+    pub head: bool,
+    pub left_fist: bool,
+    pub right_fist: bool,
+    /// Whether the player is in the temple or jungle, and underground. Outside it, everything the
+    /// Golem does happens twice as fast.
+    pub at_home: bool,
+}
+
+impl GolemState {
+    /// The multiplier every rate in the fight is scaled by.
+    fn pace(&self) -> f32 {
+        // The game's own balance factor is one in single player; the part that matters here is
+        // whether the fight has been dragged out of the temple.
+        let base = 1.0;
+        if self.at_home {
+            base
+        } else {
+            base * GOLEM_OUTSIDE_PENALTY
+        }
+    }
+}
+
+/// What a piece of the Golem did this tick.
+#[derive(Debug, Default)]
+pub struct GolemOutcome {
+    pub shots: Vec<Shot>,
+    pub spawn: Vec<Spawn>,
+    /// Set when this piece has outlived whatever it hangs off.
+    pub spent: bool,
+}
+
+/// Style 45: the body.
+pub fn body(npc: &mut Npc, world: &World<'_, impl TileView>, state: GolemState) -> GolemOutcome {
+    let mut out = GolemOutcome::default();
+    npc.dirty = true;
+
+    // On its first tick it assembles itself.
+    if npc.local_ai[0] == 0.0 {
+        npc.local_ai[0] = 1.0;
+        let (cx, cy) = npc.center();
+        for (npc_type, offset) in [
+            (GOLEM_FIST_LEFT, (-GOLEM_FIST_OFFSET.0, GOLEM_FIST_OFFSET.1)),
+            (
+                terrustia_proto::npc_params::GOLEM_FIST_RIGHT,
+                (GOLEM_FIST_OFFSET.0 - 6.0, GOLEM_FIST_OFFSET.1),
+            ),
+            (terrustia_proto::npc_params::GOLEM_HEAD, GOLEM_HEAD_OFFSET),
+        ] {
+            out.spawn.push(Spawn {
+                npc_type,
+                position: (cx + offset.0, cy + offset.1),
+                velocity: (0.0, 0.0),
+                parent: Some(Spawn::OWN_PARENT),
+            });
+        }
+    }
+
+    // While its head is on, the body itself cannot be hurt at all.
+    npc.invulnerable = state.head;
+    npc.alpha = (npc.alpha - 10).max(0);
+
+    let Some(target) = world.target.filter(|t| t.alive) else {
+        npc.no_tile_collide = true;
+        return out;
+    };
+
+    // A jump turns tile collision off so the Golem can leave the platform it is standing on. This
+    // is what turns it back on: either it has fallen far enough to be coming down on the player,
+    // or it has a clear line to them and is not buried. Without this it would sink through the
+    // floor and never land again.
+    if npc.no_tile_collide {
+        let below_the_player = npc.velocity.1 > 0.0
+            && npc.position.1 + npc.height()
+                > target.center.1 - crate::game::ai::PLAYER_HEIGHT as f32 / 2.0;
+        let in_the_open =
+            crate::game::ai::can_see(world.tiles, npc, target) && !boxed(world.tiles, npc);
+        if below_the_player || in_the_open {
+            npc.no_tile_collide = false;
+        }
+    }
+
+    let (cx, cy) = npc.center();
+    // Too far to keep fighting.
+    if (cx - target.center.0).abs() + (cy - target.center.1).abs() > GOLEM_LEASH {
+        out.spent = true;
+        return out;
+    }
+    let pace = state.pace();
+
+    if npc.ai[0] == 0.0 {
+        // On the ground, winding up.
+        if npc.velocity.1 != 0.0 {
+            return out;
+        }
+        npc.velocity.0 *= 0.8;
+        let mut rate = 1.0;
+        if npc.ai[1] > 0.0 {
+            // Every part already gone makes the next hop come sooner.
+            for present in [state.head, state.left_fist, state.right_fist] {
+                if !present {
+                    rate += GOLEM_HOP_BONUS_PART;
+                }
+            }
+            if npc.life < npc.life_max {
+                rate += GOLEM_HOP_BONUS_HURT;
+            }
+            if npc.life < npc.life_max / 2 {
+                rate += GOLEM_HOP_BONUS_HALF;
+            }
+            if npc.life < npc.life_max / 3 {
+                rate += GOLEM_HOP_BONUS_THIRD;
+            }
+            rate *= pace;
+        }
+        npc.ai[1] += rate;
+        if npc.ai[1] >= GOLEM_HOP_READY {
+            // A short pause with its feet planted before it goes, which is the tell.
+            npc.ai[1] = GOLEM_HOP_PAUSE;
+        } else if npc.ai[1] >= -1.0 && npc.ai[1] < 0.0 {
+            npc.no_tile_collide = true;
+            face(npc, target);
+            npc.velocity.0 = GOLEM_HOP_ACROSS * f32::from(npc.direction);
+            npc.velocity.1 = if npc.life < npc.life_max {
+                // A hurt Golem jumps higher, up to a limit.
+                (GOLEM_HOP_UP * (pace + 9.0) / 10.0).max(GOLEM_HOP_UP_CAP)
+            } else {
+                GOLEM_HOP_UP
+            };
+            npc.ai[0] = 1.0;
+            npc.ai[1] = 0.0;
+        }
+        return out;
+    }
+
+    // In the air.
+    if npc.velocity.1 == 0.0 {
+        npc.ai[0] = 0.0;
+        return out;
+    }
+    face(npc, target);
+    let over_the_player = npc.position.0 < target.center.0 - PLAYER_WIDTH as f32 / 2.0
+        && npc.position.0 + npc.width() > target.center.0 + PLAYER_WIDTH as f32 / 2.0;
+    if over_the_player {
+        // Directly above: it stops steering and comes down on you.
+        npc.velocity.0 *= 0.9;
+        if npc.position.1 + npc.height() < target.center.1 {
+            npc.velocity.1 += GOLEM_SLAM * (pace + 1.0) / 2.0;
+        }
+    } else {
+        npc.velocity.0 += GOLEM_AIR_ACCEL * f32::from(npc.direction);
+        let mut cap = GOLEM_AIR_SPEED;
+        if npc.life < npc.life_max {
+            cap += 1.0;
+        }
+        if npc.life < npc.life_max / 2 {
+            cap += 1.0;
+        }
+        if npc.life < npc.life_max / 4 {
+            cap += 1.0;
+        }
+        cap *= (pace + 1.0) / 2.0;
+        npc.velocity.0 = npc.velocity.0.clamp(-cap, cap);
+    }
+    out
+}
+
+/// Style 46: the head, while it is still attached.
+pub fn head(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    body: Option<Parent>,
+    state: GolemState,
+) -> GolemOutcome {
+    let mut out = GolemOutcome::default();
+    npc.dirty = true;
+    npc.no_tile_collide = true;
+    npc.alpha = (npc.alpha - 10).max(0);
+
+    let Some(body) = body else {
+        out.spent = true;
+        return out;
+    };
+    // It is towed by the body rather than following it: the velocity is the whole gap, capped.
+    let (bx, by) = body.center();
+    let (cx, cy) = npc.center();
+    let station = (
+        bx + GOLEM_HEAD_OFFSET.0 * npc.scale - cx,
+        by + GOLEM_HEAD_OFFSET.1 * npc.scale - cy,
+    );
+    let gap = station.0.hypot(station.1);
+    if gap < GOLEM_HEAD_TETHER_SPEED {
+        npc.rotation = 0.0;
+        npc.velocity = station;
+    } else {
+        let scale = GOLEM_HEAD_TETHER_SPEED / gap;
+        npc.velocity = (station.0 * scale, station.1 * scale);
+        npc.rotation = npc.velocity.0 * 0.1;
+    }
+
+    let Some(target) = world.target.filter(|t| t.alive) else {
+        return out;
+    };
+    // The charge runs faster at the ends of its cycle, which is what gives the fireballs their
+    // uneven rhythm rather than a metronome.
+    let pace = state.pace();
+    npc.ai[1] += if npc.ai[1] < 20.0 || npc.ai[1] > GOLEM_HEAD_CHARGE - 20.0 {
+        1.0 + 2.0 * (pace - 1.0) / 3.0
+    } else {
+        1.0 * (pace - 1.0).max(0.0) / 2.0 + 1.0
+    };
+    if npc.ai[1] >= GOLEM_HEAD_CHARGE {
+        npc.ai[1] = 0.0;
+        let from = (cx, cy + 10.0 * npc.scale);
+        let aim = unit(
+            (target.center.0 - from.0, target.center.1 - from.1),
+            GOLEM_FIREBALL_SPEED,
+        );
+        out.shots.push(Shot {
+            projectile: GOLEM_FIREBALL,
+            damage: GOLEM_FIREBALL_DAMAGE,
+            position: from,
+            velocity: aim,
+            time_left: 600,
+        });
+    }
+    out
+}
+
+/// Style 47: a fist.
+pub fn fist(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    body: Option<Parent>,
+    state: GolemState,
+) -> GolemOutcome {
+    let mut out = GolemOutcome::default();
+    npc.dirty = true;
+    npc.alpha = (npc.alpha - 10).max(0);
+
+    let Some(body) = body else {
+        out.spent = true;
+        return out;
+    };
+    let pace = state.pace();
+    let left = npc.npc_type == GOLEM_FIST_LEFT;
+    let (bx, by) = body.center();
+    // The station moves with the body's velocity as well as its position, so a fist keeps up with
+    // a hopping Golem rather than trailing it.
+    let station = (
+        bx + body.velocity.0
+            + if left {
+                -GOLEM_FIST_OFFSET.0
+            } else {
+                GOLEM_FIST_OFFSET.0 - 6.0
+            } * npc.scale,
+        by + body.velocity.1 - 9.0 * npc.scale,
+    );
+    let (cx, cy) = npc.center();
+    let to_station = (station.0 - cx, station.1 - cy);
+    let gap = to_station.0.hypot(to_station.1);
+
+    match npc.ai[0] {
+        0.0 => {
+            // Holding station, and winding up while it is there.
+            npc.no_tile_collide = true;
+            let mut speed = GOLEM_FIST_RETURN;
+            if npc.life < npc.life_max / 2 {
+                speed += GOLEM_FIST_RETURN_HALF;
+            }
+            if npc.life < npc.life_max / 4 {
+                speed += GOLEM_FIST_RETURN_QUARTER;
+            }
+            if body.health < 1.0 {
+                speed += GOLEM_FIST_RETURN_BODY_HURT;
+            }
+            speed = (speed * (pace + 3.0) / 4.0).min(GOLEM_FIST_RETURN_CAP);
+
+            if gap < 12.0 + speed {
+                // Home. Wind up.
+                npc.rotation = 0.0;
+                npc.velocity = to_station;
+                let mut rate = pace;
+                if npc.life < npc.life_max / 2 {
+                    rate += pace;
+                }
+                if npc.life < npc.life_max / 4 {
+                    rate += pace;
+                }
+                if body.health < 1.0 {
+                    // A hurt body makes its fists punch ten times as often.
+                    rate += 10.0 * pace;
+                }
+                npc.ai[1] += rate;
+                if npc.ai[1] >= GOLEM_FIST_READY {
+                    npc.ai[1] = 0.0;
+                    // A fist only punches at somebody on its own side.
+                    if let Some(target) = world.target.filter(|t| t.alive) {
+                        let reachable = if left {
+                            cx + GOLEM_FIST_REACH > target.center.0
+                        } else {
+                            cx - GOLEM_FIST_REACH < target.center.0
+                        };
+                        if reachable {
+                            npc.ai[0] = 1.0;
+                        }
+                    }
+                }
+            } else {
+                let scale = speed / gap;
+                npc.velocity = (to_station.0 * scale, to_station.1 * scale);
+                npc.rotation = if left {
+                    npc.velocity.1.atan2(npc.velocity.0)
+                } else {
+                    (-npc.velocity.1).atan2(-npc.velocity.0)
+                };
+            }
+        }
+
+        1.0 => {
+            // Cocked. It is pinned to the station for half a second and then launches.
+            npc.ai[1] += 1.0;
+            npc.position = (
+                station.0 - npc.width() / 2.0,
+                station.1 - npc.height() / 2.0,
+            );
+            npc.rotation = 0.0;
+            npc.velocity = (0.0, 0.0);
+            if npc.ai[1] >= GOLEM_FIST_WINDUP {
+                npc.no_tile_collide = true;
+                npc.ai[0] = 2.0;
+                npc.ai[1] = 0.0;
+                let mut speed = GOLEM_PUNCH_SPEED;
+                if npc.life < npc.life_max / 2 {
+                    speed += GOLEM_PUNCH_HALF;
+                }
+                if npc.life < npc.life_max / 4 {
+                    speed += GOLEM_PUNCH_QUARTER;
+                }
+                if body.health < 1.0 {
+                    speed += GOLEM_PUNCH_BODY_HURT;
+                }
+                speed = (speed * (pace + 3.0) / 4.0).min(GOLEM_PUNCH_CAP);
+                if let Some(target) = world.target {
+                    npc.velocity = unit((target.center.0 - cx, target.center.1 - cy), speed);
+                }
+                npc.rotation = if left {
+                    (-npc.velocity.1).atan2(-npc.velocity.0)
+                } else {
+                    npc.velocity.1.atan2(npc.velocity.0)
+                };
+            }
+        }
+
+        _ => {
+            // Punching. It travels the line it committed to and then goes home.
+            npc.no_tile_collide = true;
+            npc.ai[1] += 1.0;
+            if npc.ai[1] >= GOLEM_PUNCH_TICKS {
+                npc.ai[0] = 0.0;
+                npc.ai[1] = 0.0;
+            }
+        }
+    }
+    out
+}
+
+/// Style 48: the head once the body is gone.
+pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcome {
+    let mut out = GolemOutcome::default();
+    npc.dirty = true;
+
+    let Some(target) = world.target.filter(|t| t.alive) else {
+        return out;
+    };
+    // It comes through terrain when it cannot see you, and becomes solid again once it can.
+    let seen = crate::game::ai::can_see(world.tiles, npc, target);
+    if !seen {
+        npc.no_tile_collide = true;
+    } else if npc.no_tile_collide && !boxed(world.tiles, npc) {
+        npc.no_tile_collide = false;
+    }
+
+    let (cx, cy) = npc.center();
+    let wanted = unit(
+        (
+            target.center.0 - cx,
+            target.center.1 - GOLEM_FREE_ABOVE - cy,
+        ),
+        GOLEM_FREE_SPEED,
+    );
+    for (v, w) in [
+        (&mut npc.velocity.0, wanted.0),
+        (&mut npc.velocity.1, wanted.1),
+    ] {
+        if *v < w {
+            *v += GOLEM_FREE_ACCEL;
+            if *v < 0.0 && w > 0.0 {
+                *v += GOLEM_FREE_ACCEL;
+            }
+        } else if *v > w {
+            *v -= GOLEM_FREE_ACCEL;
+            if *v > 0.0 && w < 0.0 {
+                *v -= GOLEM_FREE_ACCEL;
+            }
+        }
+    }
+
+    // It keeps spitting fireballs, on the same cycle it used while attached.
+    npc.ai[1] += 1.0;
+    if npc.ai[1] >= GOLEM_HEAD_CHARGE {
+        npc.ai[1] = 0.0;
+        out.shots.push(Shot {
+            projectile: GOLEM_FIREBALL,
+            damage: GOLEM_FIREBALL_DAMAGE,
+            position: (cx, cy + 10.0),
+            velocity: unit(
+                (target.center.0 - cx, target.center.1 - cy),
+                GOLEM_FIREBALL_SPEED,
+            ),
+            time_left: 600,
+        });
+    }
+    out
+}
+
+fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
+    let length = v.0.hypot(v.1);
+    if length <= 0.0 || !length.is_finite() {
+        (0.0, 0.0)
+    } else {
+        (v.0 / length * speed, v.1 / length * speed)
+    }
+}
+
+fn boxed(tiles: &impl TileView, npc: &Npc) -> bool {
+    let tile = crate::game::npc::TILE;
+    let x0 = (npc.position.0 / tile).floor() as i32;
+    let x1 = ((npc.position.0 + npc.width() - 1.0) / tile).floor() as i32;
+    let y0 = (npc.position.1 / tile).floor() as i32;
+    let y1 = ((npc.position.1 + npc.height() - 1.0) / tile).floor() as i32;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let t = tiles.tile(x, y);
+            if t.is_active() && terrustia_proto::tile_solid::solid(t.block) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::npc::TILE;
+    use crate::game::npc_ai::Target;
+    use std::collections::HashMap;
+    use terrustia_proto::npc_params::{GOLEM_BODY, GOLEM_FIST_RIGHT, GOLEM_HEAD, GOLEM_HEAD_FREE};
+    use terrustia_proto::tile::Tile;
+
+    struct Temple(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Temple {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn floor(at: i32) -> Temple {
+        let mut tiles = HashMap::new();
+        for x in -300..300 {
+            for y in at..at + 4 {
+                tiles.insert((x, y), Tile::block(1));
+            }
+        }
+        Temple(tiles)
+    }
+
+    fn world<'a>(tiles: &'a Temple, target: Option<(f32, f32)>) -> World<'a, Temple> {
+        crate::game::ai::calm(
+            tiles,
+            target.map(|center| Target {
+                slot: 0,
+                center,
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        )
+    }
+
+    fn whole() -> GolemState {
+        GolemState {
+            head: true,
+            left_fist: true,
+            right_fist: true,
+            at_home: true,
+        }
+    }
+
+    fn body_at(position: (f32, f32)) -> Parent {
+        Parent {
+            position,
+            size: (100.0, 100.0),
+            rotation: 0.0,
+            scale: 1.0,
+            velocity: (0.0, 0.0),
+            direction: 1,
+            sprite_direction: 1,
+            time_left: 3600,
+            state: 0.0,
+            health: 1.0,
+        }
+    }
+
+    fn piece(npc_type: u16, tile_x: i32, tile_y: i32) -> Npc {
+        Npc::new(npc_type, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1)
+            .expect("a piece of the Golem")
+    }
+
+    /// It builds itself out of its parts on the first tick.
+    #[test]
+    fn the_golem_assembles_itself() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut g = piece(GOLEM_BODY, 0, 25);
+        let out = body(&mut g, &w, whole());
+        let types: Vec<u16> = out.spawn.iter().map(|s| s.npc_type).collect();
+        assert!(types.contains(&GOLEM_HEAD), "a head: {types:?}");
+        assert!(types.contains(&GOLEM_FIST_LEFT), "a left fist: {types:?}");
+        assert!(types.contains(&GOLEM_FIST_RIGHT), "a right fist: {types:?}");
+        // And only once.
+        assert!(body(&mut g, &w, whole()).spawn.is_empty());
+    }
+
+    /// While its head is on, the body cannot be hurt.
+    #[test]
+    fn the_body_is_untouchable_until_the_head_is_off() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut g = piece(GOLEM_BODY, 0, 25);
+        body(&mut g, &w, whole());
+        assert!(g.invulnerable, "the head is protecting it");
+
+        let headless = GolemState {
+            head: false,
+            ..whole()
+        };
+        body(&mut g, &w, headless);
+        assert!(!g.invulnerable, "head off, body open");
+    }
+
+    /// Every part destroyed makes it hop sooner. That is the whole shape of the fight.
+    #[test]
+    fn a_dismantled_golem_hops_more_often() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((200.0, 29.0 * TILE)));
+        let hops = |state: GolemState| {
+            let mut g = piece(GOLEM_BODY, 0, 25);
+            g.local_ai[0] = 1.0;
+            // Start it charging rather than at rest.
+            g.ai[1] = 1.0;
+            let mut count = 0;
+            let mut grounded = true;
+            for _ in 0..3000 {
+                body(&mut g, &w, state);
+                if grounded && g.velocity.1 < 0.0 {
+                    count += 1;
+                }
+                grounded = g.velocity.1 == 0.0;
+                crate::game::npc::step_physics(&mut g, &tiles);
+            }
+            count
+        };
+        let intact = hops(whole());
+        let stripped = hops(GolemState {
+            head: false,
+            left_fist: false,
+            right_fist: false,
+            at_home: true,
+        });
+        assert!(
+            stripped > intact,
+            "a stripped Golem should hop more: {stripped} vs {intact}"
+        );
+    }
+
+    /// Fighting it outside the temple doubles its pace.
+    #[test]
+    fn dragging_it_out_of_the_temple_makes_it_worse() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((200.0, 29.0 * TILE)));
+        let hops = |at_home: bool| {
+            let mut g = piece(GOLEM_BODY, 0, 25);
+            g.local_ai[0] = 1.0;
+            g.ai[1] = 1.0;
+            let state = GolemState { at_home, ..whole() };
+            let mut count = 0;
+            let mut grounded = true;
+            for _ in 0..3000 {
+                body(&mut g, &w, state);
+                if grounded && g.velocity.1 < 0.0 {
+                    count += 1;
+                }
+                grounded = g.velocity.1 == 0.0;
+                crate::game::npc::step_physics(&mut g, &tiles);
+            }
+            count
+        };
+        assert!(
+            hops(false) > hops(true),
+            "outside the temple it should be faster: {} vs {}",
+            hops(false),
+            hops(true)
+        );
+    }
+
+    /// A part with no body does not survive.
+    #[test]
+    fn the_parts_die_with_the_body() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut h = piece(GOLEM_HEAD, 0, 25);
+        assert!(head(&mut h, &w, None, whole()).spent);
+        let mut f = piece(GOLEM_FIST_LEFT, 0, 25);
+        assert!(fist(&mut f, &w, None, whole()).spent);
+    }
+
+    /// The head spits fireballs on its cycle.
+    #[test]
+    fn the_head_spits_fireballs() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut h = piece(GOLEM_HEAD, 0, 25);
+        let mut shots = Vec::new();
+        for _ in 0..1200 {
+            shots.extend(head(&mut h, &w, Some(body_at((0.0, 400.0))), whole()).shots);
+        }
+        assert!(!shots.is_empty(), "it should have thrown something");
+        assert!(shots.iter().all(|s| s.projectile == GOLEM_FIREBALL));
+    }
+
+    /// A fist only punches at somebody on its own side.
+    #[test]
+    fn a_fist_will_not_reach_across_the_body() {
+        let tiles = floor(30);
+        let punched = |player_x: f32| {
+            let w = world(&tiles, Some((player_x, 400.0)));
+            let mut f = piece(GOLEM_FIST_LEFT, 0, 25);
+            let parent = body_at((100.0, 400.0));
+            for _ in 0..600 {
+                fist(&mut f, &w, Some(parent), whole());
+                // It has to actually travel to its station before it starts winding up.
+                f.position.0 += f.velocity.0;
+                f.position.1 += f.velocity.1;
+                if f.ai[0] != 0.0 {
+                    return true;
+                }
+            }
+            false
+        };
+        // The left fist sits to the left of the body; a player further left is on its side.
+        assert!(punched(-2000.0), "it should punch to its own side");
+        assert!(!punched(6000.0), "and not across the body");
+    }
+
+    /// The free head hovers above you rather than resting on the ground.
+    #[test]
+    fn the_free_head_hovers_overhead() {
+        let tiles = floor(30);
+        let player = (0.0, 29.0 * TILE);
+        let w = world(&tiles, Some(player));
+        let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        for _ in 0..2000 {
+            free_head(&mut h, &w);
+            h.position.0 += h.velocity.0;
+            h.position.1 += h.velocity.1;
+        }
+        let above = player.1 - h.center().1;
+        assert!(
+            (GOLEM_FREE_ABOVE - above).abs() < 120.0,
+            "it should be settling three hundred pixels up, got {above}"
+        );
+    }
+}

@@ -3182,3 +3182,65 @@ pub fn prime_limb(npc_type: u16) -> PrimeLimb {
 
 /// Shots are scattered by up to forty steps of the limb's spread.
 pub const PRIME_SHOT_SPREAD_STEPS: i32 = 40;
+
+// --- The Golem ------------------------------------------------------------------------------------
+
+pub const GOLEM_BODY: u16 = 245;
+pub const GOLEM_HEAD: u16 = 246;
+pub const GOLEM_FIST_LEFT: u16 = 247;
+pub const GOLEM_FIST_RIGHT: u16 = 248;
+pub const GOLEM_HEAD_FREE: u16 = 249;
+
+/// Where each part hangs off the body, before scale.
+pub const GOLEM_HEAD_OFFSET: (f32, f32) = (-3.0, -57.0);
+pub const GOLEM_FIST_OFFSET: (f32, f32) = (84.0, -9.0);
+
+/// Fighting the Golem outside its temple doubles everything it does. It is meant to be fought
+/// where it lives.
+pub const GOLEM_OUTSIDE_PENALTY: f32 = 2.0;
+
+/// The body's hop: a charge that fills faster for every part already destroyed and every health
+/// threshold crossed.
+pub const GOLEM_HOP_READY: f32 = 300.0;
+pub const GOLEM_HOP_PAUSE: f32 = -20.0;
+pub const GOLEM_HOP_BONUS_PART: f32 = 2.0;
+pub const GOLEM_HOP_BONUS_HURT: f32 = 1.0;
+pub const GOLEM_HOP_BONUS_HALF: f32 = 4.0;
+pub const GOLEM_HOP_BONUS_THIRD: f32 = 8.0;
+pub const GOLEM_HOP_ACROSS: f32 = 4.0;
+pub const GOLEM_HOP_UP: f32 = -12.1;
+pub const GOLEM_HOP_UP_CAP: f32 = -19.1;
+/// In the air it steers, and slams down when it is directly over you.
+pub const GOLEM_AIR_ACCEL: f32 = 0.2;
+pub const GOLEM_SLAM: f32 = 0.2;
+pub const GOLEM_AIR_SPEED: f32 = 3.0;
+/// Past this it gives up entirely.
+pub const GOLEM_LEASH: f32 = 3000.0;
+
+/// The head, while attached: it hovers on the body and spits fireballs.
+pub const GOLEM_HEAD_TETHER_SPEED: f32 = 100.0;
+pub const GOLEM_HEAD_CHARGE: f32 = 300.0;
+pub const GOLEM_FIREBALL: u16 = 258;
+pub const GOLEM_FIREBALL_DAMAGE: i32 = 18;
+pub const GOLEM_FIREBALL_SPEED: f32 = 8.0;
+
+/// A fist: it holds its station, winds up, and punches.
+pub const GOLEM_FIST_RETURN: f32 = 14.0;
+pub const GOLEM_FIST_RETURN_HALF: f32 = 3.0;
+pub const GOLEM_FIST_RETURN_QUARTER: f32 = 3.0;
+pub const GOLEM_FIST_RETURN_BODY_HURT: f32 = 8.0;
+pub const GOLEM_FIST_RETURN_CAP: f32 = 32.0;
+pub const GOLEM_FIST_READY: f32 = 60.0;
+pub const GOLEM_FIST_WINDUP: f32 = 30.0;
+pub const GOLEM_FIST_REACH: f32 = 100.0;
+pub const GOLEM_PUNCH_SPEED: f32 = 12.0;
+pub const GOLEM_PUNCH_HALF: f32 = 4.0;
+pub const GOLEM_PUNCH_QUARTER: f32 = 4.0;
+pub const GOLEM_PUNCH_BODY_HURT: f32 = 10.0;
+pub const GOLEM_PUNCH_CAP: f32 = 48.0;
+pub const GOLEM_PUNCH_TICKS: f32 = 60.0;
+
+/// The free head, once the body is dead: it hovers three hundred pixels above you.
+pub const GOLEM_FREE_ABOVE: f32 = 300.0;
+pub const GOLEM_FREE_SPEED: f32 = 7.0;
+pub const GOLEM_FREE_ACCEL: f32 = 0.05;

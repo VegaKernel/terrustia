@@ -276,8 +276,26 @@ pub struct Shot {
     pub time_left: u16,
 }
 
+/// What the Golem can see of its own assembly.
+///
+/// Which of its parts are still standing changes how often the body hops, and where it is being
+/// fought changes every rate in the fight, so both are worked out from the census rather than
+/// guessed at.
+fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
+    boss::golem::GolemState {
+        head: world.count(terrustia_proto::npc_params::GOLEM_HEAD) > 0,
+        left_fist: world.count(terrustia_proto::npc_params::GOLEM_FIST_LEFT) > 0,
+        right_fist: world.count(terrustia_proto::npc_params::GOLEM_FIST_RIGHT) > 0,
+        // The temple is jungle, and the fight is meant to happen underground.
+        at_home: world.conditions.jungle
+            && world
+                .target
+                .is_some_and(|t| t.center.1 > world.conditions.surface_y),
+    }
+}
+
 /// The types worth counting each tick, because some routine's behaviour turns on how many are up.
-pub const CENSUS_TYPES: [u16; 7] = [
+pub const CENSUS_TYPES: [u16; 10] = [
     terrustia_proto::npc_params::CREEPER,
     terrustia_proto::npc_params::WALL_LEECH,
     terrustia_proto::npc_params::PAL_ESCORT,
@@ -285,6 +303,9 @@ pub const CENSUS_TYPES: [u16; 7] = [
     terrustia_proto::npc_params::NAUTILUS_HELPER,
     terrustia_proto::npc_params::MOTHRON_EGG,
     terrustia_proto::npc_params::MOTHRON_SPAWN_TYPE,
+    terrustia_proto::npc_params::GOLEM_HEAD,
+    terrustia_proto::npc_params::GOLEM_FIST_LEFT,
+    terrustia_proto::npc_params::GOLEM_FIST_RIGHT,
 ];
 
 impl<T: TileView> World<'_, T> {
@@ -349,10 +370,10 @@ pub fn parity(style: i32) -> Option<Parity> {
         // a missing number is visible.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36
-        | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 49 | 50 | 54 | 55 | 56 | 62 | 63 | 64 | 65
-        | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75 | 80 | 85 | 86 | 87 | 88 | 89 | 90 | 91 | 92
-        | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113 | 114 | 115 | 116
-        | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
+        | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 54 | 55 | 56
+        | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75 | 80 | 85 | 86 | 87 | 88
+        | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113
+        | 114 | 115 | 116 | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -572,6 +593,23 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
         86 => hardmode::swooper::swooper(npc, world),
+        45 => {
+            let out = boss::golem::body(npc, world, golem_state(world));
+            effects.spawn.extend(out.spawn);
+            effects.expired = out.spent;
+        }
+        46 => {
+            let out = boss::golem::head(npc, world, world.parent, golem_state(world));
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
+        }
+        47 => {
+            let out = boss::golem::fist(npc, world, world.parent, golem_state(world));
+            effects.expired = out.spent;
+        }
+        48 => effects
+            .shots
+            .extend(boss::golem::free_head(npc, world).shots),
         32 => {
             let out = boss::prime::prime_head(npc, world);
             effects.expired = out.leaving && npc.time_left <= 0;
