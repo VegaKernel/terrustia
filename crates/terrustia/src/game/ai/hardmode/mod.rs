@@ -8,6 +8,7 @@
 //! Split from `super` only by when they appear in a playthrough; the same rule holds throughout —
 //! per-type variation lives in tables, and the modules here contain algorithms.
 
+pub mod big_mimic;
 pub mod charger;
 pub mod crawler;
 pub mod drifters;

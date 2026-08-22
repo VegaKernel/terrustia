@@ -2759,3 +2759,45 @@ pub const NAUTILUS_HELPERS_MAX: usize = 3;
 /// Where its mouth is, and how far off the body's own rotation it points.
 pub const NAUTILUS_MOUTH_ANGLE: f32 = 0.471_238_94;
 pub const NAUTILUS_MOUTH_REACH: f32 = 50.0;
+
+// --- Big mimics: the chest that fights back ------------------------------------------------------
+
+/// How long it sits there rattling before it stands up.
+pub const MIMIC_WAKE_TICKS: f32 = 36.0;
+/// A player this close wakes one even if nothing has touched it.
+pub const MIMIC_WAKE_RANGE: f32 = 80.0;
+/// The hop: it waits between fifteen and forty-five ticks depending on how hurt it is, and jumps
+/// harder and further the more it has taken.
+pub const MIMIC_HOP_REST_MIN: f32 = 15.0;
+pub const MIMIC_HOP_REST_HEALTHY: f32 = 30.0;
+pub const MIMIC_HOP_ACROSS_MIN: f32 = 3.0;
+pub const MIMIC_HOP_ACROSS_HURT: f32 = 4.0;
+pub const MIMIC_HOP_UP: f32 = 4.0;
+/// It jumps higher when it cannot see you, to get over whatever is in the way.
+pub const MIMIC_HOP_BLIND_BONUS: f32 = 2.0;
+/// Every third hop is a big one: twice the height and half the distance.
+pub const MIMIC_BIG_HOP_EVERY: f32 = 3.0;
+/// After this long hopping it picks one of its three specials.
+pub const MIMIC_HOP_PATIENCE: f32 = 210.0;
+/// Curling up: it takes nothing at all for three seconds, and in expert it bats shots back.
+pub const MIMIC_CURL_TICKS: f32 = 180.0;
+/// The dive: it climbs to this far above you before dropping.
+pub const MIMIC_DIVE_HEIGHT: f32 = 350.0;
+pub const MIMIC_DIVE_CLIMB: f32 = 12.0;
+pub const MIMIC_DIVE_LINEUP: f32 = 40.0;
+pub const MIMIC_DIVE_AIM_TICKS: f32 = 6.0;
+pub const MIMIC_DIVE_AIM_SPEED: f32 = 8.0;
+pub const MIMIC_DIVE_GRAVITY: f32 = 0.2;
+pub const MIMIC_DIVE_CAP: f32 = 16.0;
+pub const MIMIC_DIVE_LAND_TICKS: f32 = 10.0;
+/// The charge: three long low bounds at twelve pixels a tick.
+pub const MIMIC_CHARGE_BOUNDS: f32 = 3.0;
+pub const MIMIC_CHARGE_REST: f32 = 5.0;
+pub const MIMIC_CHARGE_ACROSS: f32 = 12.0;
+pub const MIMIC_CHARGE_UP: f32 = 4.0;
+pub const MIMIC_CHARGE_AIR_SPEED: f32 = 8.0;
+/// Coming back through terrain to reach you.
+pub const MIMIC_RETURN_SPEED: f32 = 10.0;
+pub const MIMIC_RETURN_RANGE: f32 = 200.0;
+/// Beyond this it stops fighting and comes back to you through the walls.
+pub const MIMIC_LOSE_RANGE: f32 = 600.0;
