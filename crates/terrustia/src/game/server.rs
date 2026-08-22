@@ -207,6 +207,8 @@ pub struct GameServer {
     weather: crate::game::weather::Weather,
     /// Liquid waiting to settle. Empty unless something has disturbed it.
     liquids: crate::world::liquid::Liquids,
+    /// Which of each pair of hardmode ores this world settled on.
+    ore_tiers: crate::world::hardmode::OreTiers,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -257,6 +259,7 @@ impl GameServer {
             lunar: crate::game::lunar::LunarState::default(),
             weather,
             liquids: crate::world::liquid::Liquids::default(),
+            ore_tiers: crate::world::hardmode::OreTiers::default(),
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -1634,6 +1637,11 @@ impl GameServer {
         }
         if let Some(block) = broke {
             self.spawn_tile_drop(block, x, y);
+            // A demon altar is the only way hardmode ore gets into a world, and it always costs
+            // something to break.
+            if block == DEMON_ALTAR {
+                self.smash_altar(x, y, slot);
+            }
         }
 
         // Relay regardless: even an edit the server does not model must reach other clients, or
@@ -2128,6 +2136,9 @@ impl TileView for WorldTiles<'_> {
         self.0.tile(x, y)
     }
 }
+
+/// The demon altar, which is a crafting station before hardmode and an ore mine after it.
+const DEMON_ALTAR: u16 = 26;
 
 /// How far a Dark Mage looks for something worth healing, and for a corpse worth raising.
 const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE;
@@ -3710,6 +3721,59 @@ impl GameServer {
     fn note_moon_kill(&mut self, npc_type: u16) {
         if let Some(wave) = self.moon.note_kill(npc_type, self.world.game_mode) {
             self.announce(&format!("Wave {wave}!"));
+        }
+    }
+
+    /// Break an altar: seed a tier, spray the ore, and put a wraith on whoever did it.
+    fn smash_altar(&mut self, x: i32, y: i32, slot: u8) {
+        use crate::world::hardmode;
+
+        let mut tiers = self.ore_tiers;
+        let Some(smashed) = hardmode::smash(
+            self.world.progress.altar_count,
+            self.world.progress.hard_mode,
+            &mut tiers,
+            hardmode::WorldShape {
+                width: self.world.width(),
+                height: self.world.height(),
+                surface: i32::from(self.world.surface),
+                rock_layer: i32::from(self.world.rock_layer),
+            },
+            &mut self.rng,
+        ) else {
+            return;
+        };
+        self.ore_tiers = tiers;
+        self.world.progress.altar_count += 1;
+
+        let mut dug = Vec::new();
+        for (vx, vy, strength, steps) in smashed.veins {
+            let changed = {
+                let world = &mut self.world;
+                hardmode::run_vein(world, (vx, vy), strength, steps, smashed.ore, &mut self.rng)
+            };
+            dug.extend(changed);
+        }
+        // The ore lands all over the world, so the changed tiles go out as whole sections rather
+        // than as thousands of squares. Clients re-request what they are near.
+        for (dx, dy) in &dug {
+            self.liquids.wake(*dx, *dy);
+        }
+
+        self.announce(smashed.announcement);
+        info!(
+            x,
+            y,
+            ore = smashed.ore,
+            veins = dug.len(),
+            altars = self.world.progress.altar_count,
+            "altar smashed"
+        );
+        if smashed.decided_a_tier {
+            self.broadcast_world_data();
+        }
+        for _ in 0..smashed.wraiths {
+            self.summon_on_player(slot, hardmode::WRAITH);
         }
     }
 

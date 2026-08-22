@@ -116,3 +116,14 @@ mod sand_tests {
         }
     }
 }
+
+/// Whether a block is a moss.
+///
+/// Moss is stone that has grown something, and everything that treats stone as stone — an ore vein
+/// digging through it, a spread of one biome into another — treats moss the same way.
+pub fn is_moss(block: u16) -> bool {
+    matches!(
+        block,
+        179 | 180 | 181 | 182 | 183 | 381 | 534 | 536 | 539 | 625 | 627
+    )
+}

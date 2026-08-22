@@ -1,3 +1,4 @@
+pub mod hardmode;
 pub mod items;
 pub mod liquid;
 pub mod objects;
