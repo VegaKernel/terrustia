@@ -87,6 +87,7 @@ fn main() -> ExitCode {
                 Surroundings {
                     sockets_open: 0,
                     army: Default::default(),
+                    treasure: None,
                     conditions,
                     hazards: &[],
                     avoid: &[],

@@ -20,6 +20,7 @@ pub mod critter;
 pub mod dragonfly;
 pub mod eater;
 pub mod eye;
+pub mod fairy;
 pub mod fighter;
 pub mod fish;
 pub mod frost;
@@ -371,6 +372,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         kin_moving: false,
         sockets_open: 0,
         army: ArmyView::default(),
+        treasure: None,
     }
 }
 
@@ -396,8 +398,8 @@ pub fn parity(style: i32) -> Option<Parity> {
         | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70
         | 71 | 72 | 73 | 74 | 75 | 77 | 78 | 79 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88
         | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 105
-        | 106 | 108 | 111 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 121 | 122 | 123 | 124
-        | 125 | 126 | 127 => Parity::Ported,
+        | 106 | 108 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 121 | 122 | 123
+        | 124 | 125 | 126 | 127 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -436,6 +438,8 @@ pub struct World<'a, T: TileView> {
     pub sockets_open: usize,
     /// What the Old One's Army looks like right now, for the crystal and its gates.
     pub army: ArmyView,
+    /// The best thing a fairy could lead someone to from here, when one is asking.
+    pub treasure: Option<(i32, i32)>,
     /// Whether another of this NPC's own type is still travelling, which is how Plantera's hooks
     /// take turns rather than all letting go at once.
     pub kin_moving: bool,
@@ -988,6 +992,7 @@ mod tests {
                 kin_moving: false,
                 sockets_open: 0,
                 army: ArmyView::default(),
+                treasure: None,
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);

@@ -49,6 +49,8 @@ pub struct Surroundings<'a> {
     pub sockets_open: usize,
     /// What the Old One's Army looks like right now.
     pub army: super::ai::ArmyView,
+    /// The best thing a fairy could lead someone to, when one is asking.
+    pub treasure: Option<(i32, i32)>,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -226,6 +228,7 @@ pub fn update_with(
             kin_moving: around.kin_moving,
             sockets_open: around.sockets_open,
             army: around.army,
+            treasure: around.treasure,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,

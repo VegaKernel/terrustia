@@ -3960,3 +3960,119 @@ pub const LIGHTNING_BUG_BOLT_DAMAGE: i32 = 50;
 pub const LIGHTNING_BUG_BOLT_SPEED: f32 = 10.0;
 /// How long a spawned army enemy spends fading in out of its gate.
 pub const ARMY_FADE_IN: f32 = 60.0;
+
+/// What a fairy will lead you to, and how badly it wants to.
+///
+/// This is the ore finder's own priority list: higher wins, and a tie is broken by distance. The
+/// fairy is not looking for treasure in general — it is looking for the *best* thing in a hundred
+/// and fifty tiles by this ranking, which is why one will fly past a copper vein to reach a chest.
+pub fn ore_finder_priority(block: u16) -> i16 {
+    match block {
+        28 => 100,
+        404 | 407 => 150,
+        7 => 200,
+        166 => 210,
+        6 => 220,
+        167 => 230,
+        9 => 240,
+        168 => 250,
+        8 => 260,
+        169 => 270,
+        22 => 300,
+        204 => 310,
+        37 => 400,
+        21 | 441 | 467 | 468 => 500,
+        12 | 639 | 665 => 550,
+        107 => 600,
+        221 => 610,
+        108 => 620,
+        222 => 630,
+        111 => 640,
+        223 => 650,
+        129 => 675,
+        211 => 700,
+        227 => 750,
+        656 | 701 => 760,
+        751 | 752 => 770,
+        236 | 702 => 810,
+        _ => 0,
+    }
+}
+
+/// Whether a fairy will lead anyone to this block at all.
+///
+/// A much shorter list than the priorities: the ore finder ranks everything, but a fairy only
+/// bothers with the good stuff — chests, life crystals, the hardmode ores and the rarer plants.
+pub fn fairy_lures_to(block: u16) -> bool {
+    matches!(
+        block,
+        8 | 12
+            | 21
+            | 107
+            | 108
+            | 111
+            | 169
+            | 211
+            | 221
+            | 222
+            | 223
+            | 227
+            | 236
+            | 467
+            | 639
+            | 665
+            | 702
+    )
+}
+
+/// Whether this block counts for the ore finder in the state it is in.
+///
+/// Two blocks are only sometimes worth pointing at: an enchanted sword shrine's sword is a
+/// particular frame of tile 227, and a plantera bulb is a particular frame of 129.
+pub fn valid_for_ore_finder(block: u16, frame_x: i16) -> bool {
+    match block {
+        227 => (272..=374).contains(&frame_x),
+        129 => frame_x >= 324,
+        _ => true,
+    }
+}
+
+/// Which blocks are ore, for the fairy's "is this a real vein or one stray block" check.
+pub fn is_ore(block: u16) -> bool {
+    matches!(
+        block,
+        6 | 7
+            | 8
+            | 9
+            | 22
+            | 37
+            | 58
+            | 107
+            | 108
+            | 111
+            | 166
+            | 167
+            | 168
+            | 169
+            | 204
+            | 211
+            | 221
+            | 222
+            | 223
+    )
+}
+
+/// How far a fairy will look for something worth showing you, in tiles.
+pub const FAIRY_SEARCH_X: i32 = 75;
+pub const FAIRY_SEARCH_Y: i32 = 50;
+/// How many blocks of the same ore must be within three tiles before a vein counts as a vein.
+pub const FAIRY_VEIN: usize = 40;
+/// How close you have to get before a fairy notices you.
+pub const FAIRY_NOTICE: f32 = 250.0;
+/// How far ahead of you it will get while leading.
+pub const FAIRY_LEAD: f32 = 300.0;
+/// How long it celebrates before setting off, and how long it dances at the end before it goes.
+pub const FAIRY_CELEBRATE: f32 = 210.0;
+pub const FAIRY_ARRIVAL: f32 = 200.0;
+/// How long a fairy will stay with you at all: five minutes, and then it leaves.
+pub const FAIRY_PATIENCE: f32 = 18000.0;

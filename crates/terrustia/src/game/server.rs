@@ -2213,6 +2213,7 @@ impl GameServer {
                 .filter(|(_, n)| n.stats.ai_style == 85 && n.ai[0] == 5.0)
                 .map(|(_, n)| (n.npc_type, n.target as u8))
                 .collect();
+            let world_size = (self.world.width(), self.world.height());
             // The event as its own fixtures see it. The arena is surveyed once, when the crystal
             // first asks for its gates, and kept: re-walking it every tick would let a player
             // change where the gates are by building mid-fight.
@@ -2342,6 +2343,18 @@ impl GameServer {
                             }),
                         census: &census,
                         army,
+                        // A fairy hunting for something to show you is the one routine that
+                        // wants a survey of the world rather than a look at its neighbours, so
+                        // it is done here and only for the two states that ask.
+                        treasure: if npc.stats.ai_style == 112 && matches!(npc.ai[2], 2.0 | 6.0) {
+                            crate::game::ai::fairy::treasure(
+                                &tiles,
+                                npc.center(),
+                                (world_size.0, world_size.1),
+                            )
+                        } else {
+                            None
+                        },
                         sockets_open,
                         parent,
                         parent_state,
