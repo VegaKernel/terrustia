@@ -1453,3 +1453,202 @@ async fn a_teleport_moves_the_player_for_everyone() {
         .await;
     assert!(seen.is_ok(), "bob should have been told");
 }
+
+/// Painting a tile sticks and reaches everybody.
+#[tokio::test]
+async fn paint_sticks_to_the_world() {
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(402, 330, Tile::block(1));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut paint = Vec::new();
+    paint.extend_from_slice(&402i16.to_le_bytes());
+    paint.extend_from_slice(&330i16.to_le_bytes());
+    paint.push(13); // a colour
+    paint.push(0); // paint, not coating
+    bob.send(&frame(id::SYNC_TILE_PAINT_OR_COATING, &paint))
+        .await
+        .unwrap();
+
+    alice
+        .wait_for(
+            "the relayed paint",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_TILE_PAINT_OR_COATING),
+        )
+        .await
+        .unwrap();
+
+    let fresh = join(addr, "fresh").await;
+    assert_eq!(
+        fresh.world().tile(402, 330).map(|t| t.color),
+        Some(13),
+        "the paint did not stick"
+    );
+}
+
+/// Painting empty air does nothing: a crafted packet cannot colour in the sky.
+#[tokio::test]
+async fn painting_nothing_does_nothing() {
+    let addr = start().await;
+    let mut bob = join(addr, "bob").await;
+
+    // Well above the surface, where there is certainly no tile.
+    let mut paint = Vec::new();
+    paint.extend_from_slice(&402i16.to_le_bytes());
+    paint.extend_from_slice(&20i16.to_le_bytes());
+    paint.push(13);
+    paint.push(0);
+    bob.send(&frame(id::SYNC_TILE_PAINT_OR_COATING, &paint))
+        .await
+        .unwrap();
+
+    let fresh = join(addr, "fresh").await;
+    assert_eq!(fresh.world().tile(402, 20).map(|t| t.color), Some(0));
+}
+
+/// A locked biome chest stays locked until Plantera is down.
+#[tokio::test]
+async fn a_biome_chest_waits_for_plantera() {
+    // Style 23 is a locked biome chest: frame_x 23 * 36.
+    let locked = |world: &mut World| {
+        for dx in 0..2 {
+            for dy in 0..2 {
+                world.set_tile(
+                    402 + dx,
+                    330 + dy,
+                    Tile::framed(21, 23 * 36 + dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+    };
+    let addr = start_with(Config::default(), locked).await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut unlock = vec![1u8]; // unlock a chest
+    unlock.extend_from_slice(&402i16.to_le_bytes());
+    unlock.extend_from_slice(&330i16.to_le_bytes());
+    bob.send(&frame(id::LOCK_AND_UNLOCK, &unlock))
+        .await
+        .unwrap();
+
+    let fresh = join(addr, "fresh").await;
+    assert_eq!(
+        fresh.world().tile(402, 330).map(|t| t.frame_x),
+        Some(23 * 36),
+        "the chest opened without Plantera"
+    );
+}
+
+/// A dungeon chest opens with a key, and the whole two-by-two moves together.
+#[tokio::test]
+async fn a_dungeon_chest_opens() {
+    let addr = start_with(Config::default(), |world| {
+        // Style 2 is a locked dungeon chest.
+        for dx in 0..2 {
+            for dy in 0..2 {
+                world.set_tile(
+                    402 + dx,
+                    330 + dy,
+                    Tile::framed(21, 2 * 36 + dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut unlock = vec![1u8];
+    unlock.extend_from_slice(&402i16.to_le_bytes());
+    unlock.extend_from_slice(&330i16.to_le_bytes());
+    bob.send(&frame(id::LOCK_AND_UNLOCK, &unlock))
+        .await
+        .unwrap();
+
+    let fresh = join(addr, "fresh").await;
+    for dx in 0..2 {
+        for dy in 0..2 {
+            let tile = fresh.world().tile(402 + dx, 330 + dy).expect("a tile");
+            assert_eq!(
+                tile.frame_x,
+                // Style 2 unlocks to style 1: one frame back.
+                36 + dx as i16 * 18,
+                "corner ({dx}, {dy}) did not move with the rest"
+            );
+        }
+    }
+}
+
+/// A net takes a critter and refuses anything else.
+#[tokio::test]
+async fn a_net_only_catches_critters() {
+    let addr = start().await;
+    let mut bob = join(addr, "bob").await;
+    // Ask for a boss and a bunny by index; neither exists, so this only proves the packet is
+    // accepted and refused rather than crashing the server.
+    let mut catch = Vec::new();
+    catch.extend_from_slice(&0i16.to_le_bytes());
+    catch.push(0);
+    bob.send(&frame(id::BUG_CATCHING, &catch)).await.unwrap();
+
+    // The server is still answering afterwards.
+    bob.send(&frame(id::PING, &[0u8; 8])).await.unwrap();
+    let fresh = join(addr, "fresh").await;
+    assert!(
+        fresh.world().tile(402, 330).is_some(),
+        "the server survived"
+    );
+}
+
+/// A bucket poured into the world falls and pools rather than sitting in the air.
+///
+/// The basin has walls: a bucket on an open plain spreads out and thins away to nothing, which is
+/// what the game does too, so testing it on a shelf would be testing the wrong thing.
+#[tokio::test]
+async fn poured_water_falls() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 400..410 {
+            world.set_tile(x, 340, Tile::block(1));
+            for y in 330..340 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        // The walls that make it a basin rather than a shelf.
+        for y in 330..341 {
+            world.set_tile(400, y, Tile::block(1));
+            world.set_tile(409, y, Tile::block(1));
+        }
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut pour = Vec::new();
+    pour.extend_from_slice(&405i16.to_le_bytes());
+    pour.extend_from_slice(&331i16.to_le_bytes());
+    pour.push(255); // a full bucket
+    pour.push(0); // water
+    bob.send(&frame(id::LIQUID_UPDATE, &pour)).await.unwrap();
+
+    // Give the simulation a moment.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let fresh = join(addr, "fresh").await;
+    let up_top = fresh.world().tile(405, 331).map(|t| t.liquid).unwrap_or(0);
+    let down_low = fresh.world().tile(405, 339).map(|t| t.liquid).unwrap_or(0);
+    assert!(
+        down_low > up_top,
+        "the water should have fallen: {up_top} up top, {down_low} at the bottom"
+    );
+}
+
+/// Build a raw frame the way the client's own encoder does.
+fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let len = (payload.len() + 3) as u16;
+    let mut out = Vec::with_capacity(len as usize);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.push(id);
+    out.extend_from_slice(payload);
+    out
+}

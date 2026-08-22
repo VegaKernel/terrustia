@@ -741,6 +741,37 @@ impl GameServer {
             | id::SYNC_TILE_PICKING
             | id::SYNC_LOADOUT => self.relay_player_packet(slot, frame.id, &payload),
             id::CRYSTAL_INVASION_START => self.on_crystal_placed(slot, &payload),
+            id::SYNC_TILE_PAINT_OR_COATING | id::SYNC_WALL_PAINT_OR_COATING => {
+                self.on_paint(slot, frame.id, &payload)
+            }
+            id::LOCK_AND_UNLOCK => self.on_lock(slot, &payload),
+            id::HIT_SWITCH => self.on_hit_switch(slot, &payload),
+            id::BUG_CATCHING => self.on_bug_caught(slot, &payload),
+            id::BUG_RELEASING => self.on_bug_released(slot, &payload),
+            id::LIQUID_UPDATE => self.on_liquid(slot, &payload),
+            // Social chatter and cosmetic effects: nothing to keep, but everyone else has to see
+            // it or the world looks different from each side.
+            id::SYNC_EMOTE_BUBBLE
+            | id::EMOJI
+            | id::TOGGLE_PARTY
+            | id::PING
+            | id::SPECIAL_F_X
+            | id::ITEM_USE_SOUND
+            | id::MINION_REST_TARGET_UPDATE
+            | id::SYNC_PROJECTILE_TRACKERS
+            | id::UPDATE_PLAYER_LUCK_FACTORS
+            | id::SYNC_REVENGE_MARKER
+            | id::REMOVE_REVENGE_MARKER
+            | id::LAND_GOLF_BALL_IN_CUP
+            | id::COMBAT_TEXT_INT
+            | id::COMBAT_TEXT_STRING => {
+                if self.player(slot).is_some_and(Player::is_playing)
+                    && let Ok(relayed) = packets::verbatim(frame.id, &payload)
+                {
+                    self.broadcast(relayed, Some(slot));
+                }
+                Ok(())
+            }
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
             id::TELEPORT_ENTITY => self.on_teleport(slot, &payload),
             // Which town NPC a player is talking to. The owner byte is first, so the ordinary
@@ -3435,6 +3466,210 @@ impl GameServer {
             }
         }
         None
+    }
+
+    /// Packets 63 and 64: a player painted a tile or a wall.
+    ///
+    /// The paint is kept rather than only relayed, because it goes into the save and into every
+    /// section a client asks for afterwards. A tile that is not there cannot be painted, which is
+    /// what stops a crafted packet colouring in the empty sky.
+    fn on_paint(&mut self, slot: u8, id: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let colour = r.u8()?;
+        // The last byte separates paint from coating; a coating is not a colour and is only
+        // relayed, because nothing on the server reads it.
+        let coating = r.u8().unwrap_or(0) != 0;
+
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+        if !coating {
+            let mut tile = self.world.tile(x, y);
+            let painting_a_wall = id == id::SYNC_WALL_PAINT_OR_COATING;
+            let real = if painting_a_wall {
+                tile.wall != 0
+            } else {
+                tile.is_active()
+            };
+            if !real {
+                debug!(slot, x, y, "painting nothing");
+                return Ok(());
+            }
+            if painting_a_wall {
+                tile.wall_color = colour;
+            } else {
+                tile.color = colour;
+            }
+            self.world.set_tile(x, y, tile);
+        }
+        self.broadcast(packets::verbatim(id, payload)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 52: a key turned in a chest or a door.
+    ///
+    /// Two of the chests are gated on Plantera, and that gate is the server's to hold: the biome
+    /// chests and the temple are the whole reward for beating her.
+    fn on_lock(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::locks::{self, LockAction};
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let action = LockAction::from_id(r.u8()?);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let Some(action) = action else {
+            return Ok(());
+        };
+        if !self.world.in_bounds(x, y) || !self.world.in_bounds(x + 1, y + 1) {
+            return Ok(());
+        }
+
+        let anchor = self.world.tile(x, y);
+        let moved = match action {
+            LockAction::UnlockDoor => {
+                // A door has no frame arithmetic to do here — the client reframes it and pushes a
+                // tile square. Relaying is what keeps the other clients in step.
+                anchor.is_active() && anchor.block == locks::DOOR_CLOSED
+            }
+            LockAction::UnlockChest | LockAction::LockChest => {
+                let style = i32::from(anchor.frame_x) / 36;
+                let shift = if action == LockAction::UnlockChest {
+                    locks::unlock_shift(anchor.block, style)
+                } else {
+                    locks::lock_shift(anchor.block, style)
+                };
+                let Some((shift, needs_plantera)) = shift else {
+                    debug!(slot, x, y, block = anchor.block, style, "not a lock");
+                    return Ok(());
+                };
+                if needs_plantera && !self.world.progress.downed_plantera {
+                    debug!(slot, x, y, "that lock waits for Plantera");
+                    return Ok(());
+                }
+                // A chest is two tiles by two, and all four carry the frame.
+                let toward = if action == LockAction::UnlockChest {
+                    -shift
+                } else {
+                    shift
+                };
+                for dx in 0..2 {
+                    for dy in 0..2 {
+                        let mut tile = self.world.tile(x + dx, y + dy);
+                        if tile.block != anchor.block {
+                            continue;
+                        }
+                        tile.frame_x += toward;
+                        self.world.set_tile(x + dx, y + dy, tile);
+                    }
+                }
+                true
+            }
+        };
+        if !moved {
+            return Ok(());
+        }
+        self.broadcast(packets::verbatim(id::LOCK_AND_UNLOCK, payload)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 59: a switch, lever or pressure plate was hit.
+    ///
+    /// The wiring itself is not simulated — what a circuit does when it fires is a system of its
+    /// own — but the hit is relayed so every client runs the same circuit, which is what makes a
+    /// door open on everybody's screen rather than only the one who stepped on the plate.
+    fn on_hit_switch(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+        self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 70: a critter was caught in a net, and is now an item.
+    fn on_bug_caught(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let index = r.i16()?;
+        let Ok(index) = u8::try_from(index) else {
+            return Ok(());
+        };
+        // Only a critter can be netted. Refusing anything else is what stops a crafted packet
+        // deleting a boss.
+        let catchable = self
+            .npcs
+            .get(index)
+            .is_some_and(|n| n.stats.friendly && !n.stats.town_npc && !n.stats.boss);
+        if !catchable {
+            debug!(slot, index, "refusing to net that");
+            return Ok(());
+        }
+        self.npcs.remove(index);
+        self.broadcast_npc_death(index);
+        Ok(())
+    }
+
+    /// Packet 71: a critter was let out of a jar.
+    fn on_bug_released(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (r.i32()?, r.i32()?);
+        let npc_type = r.i16()?;
+        let Ok(npc_type) = u16::try_from(npc_type) else {
+            return Ok(());
+        };
+        // The same rule in reverse: a jar holds critters, so only a critter comes out of one.
+        let is_a_critter = terrustia_proto::npc_data::npc_stats(npc_type)
+            .is_some_and(|s| s.friendly && !s.town_npc && !s.boss);
+        if !is_a_critter {
+            debug!(slot, npc_type, "refusing to release that");
+            return Ok(());
+        }
+        if let Some(index) = self.npcs.spawn(npc_type, (x as f32, y as f32)) {
+            self.broadcast_npc(index);
+        }
+        Ok(())
+    }
+
+    /// Packet 48: a bucket poured, or a client telling us liquid moved.
+    ///
+    /// The amount is taken and the tile woken; the settling itself is the server's, so a client
+    /// cannot make water flow uphill by saying it did.
+    fn on_liquid(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let amount = r.u8()?;
+        let kind = r.u8()?;
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+        let mut tile = self.world.tile(x, y);
+        tile.liquid = amount;
+        tile.liquid_kind = match kind {
+            1 => terrustia_proto::tile::Liquid::Lava,
+            2 => terrustia_proto::tile::Liquid::Honey,
+            3 => terrustia_proto::tile::Liquid::Shimmer,
+            _ => terrustia_proto::tile::Liquid::Water,
+        };
+        self.world.set_tile(x, y, tile);
+        self.liquids.disturb(x, y);
+        Ok(())
     }
 
     /// Packet 113: a player put an Eternia Crystal on its stand.

@@ -269,6 +269,17 @@ impl PlayerControls {
 /// sender rather than to whatever slot the client claimed.
 ///
 /// Clients are not trusted to report their own slot; every relayed packet goes through this.
+/// Rebuild a packet exactly as it arrived.
+///
+/// For the packets a server passes along untouched: it has already decided the message is
+/// acceptable, and re-encoding rather than forwarding the raw bytes means the length prefix is
+/// always right even if the payload came from somewhere odd.
+pub fn verbatim(message_id: u8, payload: &[u8]) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(message_id);
+    w.bytes(payload);
+    w.finish()
+}
+
 pub fn rewrite_owner(message_id: u8, payload: &[u8], owner: u8) -> Result<Vec<u8>> {
     if payload.is_empty() {
         return Err(ProtoError::Eof {

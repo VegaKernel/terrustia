@@ -15,6 +15,7 @@ pub mod id;
 pub mod inventory;
 pub mod item;
 pub mod items;
+pub mod locks;
 pub mod net_module;
 pub mod net_text;
 pub mod npc;
