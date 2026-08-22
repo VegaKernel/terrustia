@@ -37,8 +37,8 @@ pub struct Surroundings<'a> {
     pub conditions: super::ai::Conditions,
     /// Anything nearby that a timid critter would rather not be next to.
     pub hazards: &'a [Hazard],
-    /// Centres of the NPCs sharing this one's type, for the styles that space themselves out.
-    pub kin: &'a [(f32, f32)],
+    /// Centres of whatever the crowded styles keep away from; see [`avoidance`].
+    pub avoid: &'a [(f32, f32)],
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -110,6 +110,12 @@ pub struct AiOutput {
     /// entity survives, its type does not. Written per NPC, so the caller reads it straight after
     /// the call that set it.
     pub transform: Option<u16>,
+    /// How long the thing an NPC turned into should sit still, if it asked for a rest.
+    pub rest_for: i32,
+    /// Set when the NPC just updated went off rather than merely dying.
+    pub detonated: bool,
+    /// Set when what it just did calls in an invasion.
+    pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
     pub town_doors: Vec<super::ai::town::DoorAction>,
     /// Projectiles a routine decided to throw.
@@ -189,9 +195,9 @@ pub fn update_with(
             } else {
                 (0.0, 0.0)
             },
-            // Same story as crowding: only the styles that jostle their own kind pay for it.
-            kin: if reads_kin(npc.stats.ai_style) {
-                around.kin
+            // Same story as crowding: only the styles that jostle for space pay for it.
+            avoid: if avoidance(npc.stats.ai_style).is_some() {
+                around.avoid
             } else {
                 &[]
             },
@@ -213,6 +219,9 @@ pub fn update_with(
             npc.time_left = 0;
         }
         out.transform = effects.transform;
+        out.rest_for = effects.rest_for;
+        out.detonated = effects.detonated;
+        out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;
 
@@ -261,9 +270,25 @@ fn reads_crowding(style: i32) -> bool {
     matches!(style, 26 | 65)
 }
 
-/// Which styles push away from others of their own type.
-pub fn reads_kin(style: i32) -> bool {
-    matches!(style, 122)
+/// What a style keeps its distance from, if anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Avoids {
+    /// Others of the same type — a pack of pirate ghosts fans out instead of stacking.
+    OwnKind,
+    /// Anything alive: a shimmerfly bolts from enemies and players alike.
+    AnythingAlive,
+}
+
+/// Which styles jostle for space, and what they jostle with.
+///
+/// Returning `None` is what keeps this off the hot path: the list behind it is a scan of the whole
+/// NPC table, so it is only built when something present actually reads it.
+pub fn avoidance(style: i32) -> Option<Avoids> {
+    match style {
+        122 => Some(Avoids::OwnKind),
+        64 => Some(Avoids::AnythingAlive),
+        _ => None,
+    }
 }
 
 /// The average direction away from every hazard close enough to matter.

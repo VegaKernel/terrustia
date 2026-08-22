@@ -2318,3 +2318,63 @@ pub fn phases_through(npc_type: u16, block: u16) -> bool {
     // and its hardened form.
     crate::tile_sets::sandy(block) || matches!(block, 404 | 407)
 }
+
+// --- Fireflies and their kin --------------------------------------------------------------------
+
+/// Style 64: how long a firefly holds a heading before choosing another.
+pub const FIREFLY_HOLD: (u32, u32) = (60, 180);
+/// Each one is a slightly different size, fixed when it hatches.
+pub const FIREFLY_SCALE: (u32, u32) = (75, 111);
+/// Headings are eased in over eighty ticks, which is what makes the drift look weightless.
+pub const FIREFLY_SMOOTH: f32 = 80.0;
+/// Far from anybody it drifts *toward* them, faster the further off it is.
+pub const FIREFLY_SEEK_AT: f32 = 700.0;
+pub const FIREFLY_SEEK_SPEED: (u32, u32) = (50, 151);
+pub const FIREFLY_SEEK_FAR: f32 = 850.0;
+pub const FIREFLY_SEEK_FAR_SPEED: (u32, u32) = (100, 151);
+pub const FIREFLY_SEEK_FARTHER: f32 = 1000.0;
+pub const FIREFLY_SEEK_FARTHER_SPEED: (u32, u32) = (150, 201);
+/// Once it has arrived it wanders instead, and never goes back to seeking.
+pub const FIREFLY_WANDER_SPEED: (u32, u32) = (5, 151);
+/// It will not fly into the ground, nor away from it: four tiles below is too close and thirty
+/// tiles of nothing below is too high.
+pub const FIREFLY_FLOOR_LOOK: i32 = 4;
+pub const FIREFLY_SKY_LOOK: i32 = 30;
+/// The glow, which only happens at night or underground.
+pub const FIREFLY_DARK_BELOW: f32 = 10.0;
+pub const FIREFLY_GLOW_GAP: (u32, u32) = (30, 180);
+pub const FIREFLY_GLOW_FOR: (u32, u32) = (10, 30);
+/// The shimmerfly, which keeps clear of the world edges and of anything alive.
+pub const SHIMMERFLY: u16 = 677;
+pub const SHIMMERFLY_MARGIN: i32 = 40;
+pub const SHIMMERFLY_EDGE_PUSH: f32 = 0.5;
+pub const SHIMMERFLY_EDGE_CAP: f32 = 3.0;
+pub const SHIMMERFLY_CHECK_EVERY: f32 = 15.0;
+pub const SHIMMERFLY_SHY_OF_NPCS: f32 = 100.0;
+pub const SHIMMERFLY_SHY_OF_PLAYERS: f32 = 150.0;
+pub const SHIMMERFLY_BOLT: f32 = 2.0;
+pub const SHIMMERFLY_BOLT_CAP: f32 = 8.0;
+
+// --- Waterfowl ----------------------------------------------------------------------------------
+
+/// Style 68: how fast a duck paddles, and how far above the waterline it floats.
+pub const DUCK_PADDLE: f32 = 2.0;
+pub const DUCK_FLOAT_ABOVE: f32 = 6.0;
+pub const DUCK_SURFACE_CLIMB: f32 = 0.1;
+pub const DUCK_SURFACE_CLIMB_CAP: f32 = -8.0;
+/// A player this close to its box, or any injury, puts it up.
+pub const DUCK_STARTLE: f32 = 100.0;
+pub const DUCK_TAKEOFF: f32 = -6.0;
+/// It flies for five seconds and then looks for somewhere to come down.
+pub const DUCK_FLIGHT_TICKS: f32 = 300.0;
+pub const DUCK_FLY_SPEED: f32 = 3.0;
+pub const DUCK_FLY_ACCEL: f32 = 0.1;
+pub const DUCK_CLIMB: f32 = 0.1;
+pub const DUCK_CLIMB_CAP: f32 = -4.0;
+pub const DUCK_SINK_CAP: f32 = 3.0;
+/// It looks fifteen tiles down for somewhere to be, and panics if the ground is within five.
+pub const DUCK_LOOK_DOWN: i32 = 15;
+pub const DUCK_TOO_CLOSE: i32 = 5;
+/// Landing on dry ground turns a flying duck back into a walking one.
+pub const DUCK_LANDS_AS: [u16; 4] = [363, 365, 603, 609];
+pub const DUCK_LANDED_REST: (u32, u32) = (200, 400);

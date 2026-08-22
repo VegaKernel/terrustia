@@ -262,7 +262,7 @@ pub const GROUND_SCAN: i32 = 30;
 /// The game does this rather than requiring a random point to land exactly on the surface: at any
 /// column there is usually one standable row in a 90-tile band, so picking blind would almost
 /// never find it.
-fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
+pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     (from_y..from_y + GROUND_SCAN).find(|&y| {
         let tile = world.tile(x, y);
         tile.is_active() && solid(tile.block)
@@ -554,5 +554,42 @@ mod tests {
                 "spawned past the cap"
             );
         }
+    }
+}
+
+/// Whether an NPC type counts against an invasion's remaining size.
+///
+/// Only the invasion's own members count. A goblin army is not shortened by killing the bats that
+/// happened to be in the way, and the game keeps these rosters as flat lists for exactly that
+/// reason.
+pub fn belongs_to(kind: crate::game::event::Invasion, npc_type: u16) -> bool {
+    use crate::game::event::Invasion;
+    match kind {
+        Invasion::Goblin => matches!(npc_type, 26 | 27 | 28 | 29 | 111 | 471),
+        Invasion::FrostLegion => matches!(npc_type, 143..=145),
+        Invasion::Pirate => matches!(npc_type, 212 | 213 | 214 | 215 | 216 | 252 | 491),
+        Invasion::Martian => matches!(
+            npc_type,
+            381 | 382 | 383 | 385 | 386 | 388 | 389 | 390 | 395 | 520
+        ),
+    }
+}
+
+#[cfg(test)]
+mod invasion_tests {
+    use super::belongs_to;
+    use crate::game::event::Invasion;
+
+    /// Only an invasion's own members shorten it.
+    #[test]
+    fn bystanders_do_not_count_against_an_invasion() {
+        assert!(belongs_to(Invasion::Goblin, 28), "a goblin peon does");
+        assert!(!belongs_to(Invasion::Goblin, 1), "a blue slime does not");
+        assert!(
+            !belongs_to(Invasion::Goblin, 143),
+            "nor does a member of a different invasion"
+        );
+        assert!(belongs_to(Invasion::Pirate, 491), "the Dutchman counts");
+        assert!(belongs_to(Invasion::Martian, 395), "so does the saucer");
     }
 }

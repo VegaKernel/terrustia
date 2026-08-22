@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod clock;
+pub mod event;
 pub mod housing;
 pub mod npc;
 pub mod npc_ai;

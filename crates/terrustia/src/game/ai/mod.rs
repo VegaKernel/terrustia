@@ -56,7 +56,7 @@ pub const PLAYER_HEIGHT: i32 = 42;
 ///
 /// The game reaches into `Main` for these from inside the AI; passing them in keeps the routines
 /// testable and keeps `Main`-shaped global state out of the port.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct Conditions {
     pub blood_moon: bool,
     pub day: bool,
@@ -86,6 +86,35 @@ pub struct Conditions {
     pub expert: bool,
     /// Whether hardmode has begun. Some routines behave differently before the wall falls.
     pub hardmode: bool,
+    /// The world's size in tiles, for the handful of routines that steer away from its edges.
+    pub world_size: (i32, i32),
+}
+
+impl Default for Conditions {
+    /// A calm night in a large world: every flag false, as a derived `Default` would give, except
+    /// the world size.
+    ///
+    /// The size is the one field that must not be zero. A routine that steers away from the edges
+    /// of the world would decide it was against one, so "no world at all" is not a usable default
+    /// the way "no wind" and "no blood moon" are.
+    fn default() -> Self {
+        Self {
+            blood_moon: false,
+            day: false,
+            eclipse: false,
+            raining: false,
+            windy: false,
+            crimson: false,
+            jungle: false,
+            snow: false,
+            wind: 0.0,
+            desert: false,
+            surface_y: 0.0,
+            expert: false,
+            hardmode: false,
+            world_size: (4200, 1200),
+        }
+    }
 }
 
 /// The top-left corner of a target's hitbox, which is what the collision routines want.
@@ -257,6 +286,16 @@ pub const CENSUS_TYPES: [u16; 4] = [
 
 impl<T: TileView> World<'_, T> {
     /// How many of `npc_type` are alive right now. Types nobody asked about read as none.
+    /// The world's width in tiles.
+    pub fn world_width(&self) -> i32 {
+        self.conditions.world_size.0
+    }
+
+    /// The world's height in tiles.
+    pub fn world_height(&self) -> i32 {
+        self.conditions.world_size.1
+    }
+
     pub fn count(&self, npc_type: u16) -> usize {
         self.census
             .iter()
@@ -284,7 +323,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         parent_state: 0.0,
         parent_health: 1.0,
         crowding: (0.0, 0.0),
-        kin: &[],
+        avoid: &[],
     }
 }
 
@@ -305,9 +344,9 @@ pub fn parity(style: i32) -> Option<Parity> {
         // Ported from the decompiled source.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
-        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 70 | 72 | 73 | 80 | 89 | 91 | 92 | 95
-        | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119
-        | 123 | 125 | 126 => Parity::Ported,
+        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 72 | 73 | 80 | 89
+        | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124 | 127
+        | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -340,9 +379,10 @@ pub struct World<'a, T: TileView> {
     pub parent_state: f32,
     /// ...and what fraction of its health it has left.
     pub parent_health: f32,
-    /// Where the other NPCs of the same type are, for the ones that keep their distance from
-    /// their own kind. Empty unless the style asks.
-    pub kin: &'a [(f32, f32)],
+    /// What this one keeps its distance from: the rest of its own kind for a pirate ghost,
+    /// anything alive at all for a shimmerfly. Empty unless the style asks for it, because
+    /// building it is a scan of the whole table.
+    pub avoid: &'a [(f32, f32)],
     /// A unit push away from whatever nearby the NPC would rather not be next to.
     ///
     /// The routines that read this cannot see other NPCs, so the caller averages the directions
@@ -371,6 +411,8 @@ pub struct Effects {
     pub called_invasion: bool,
     /// Set when it went off rather than merely dying, which hurts whatever is next to it.
     pub detonated: bool,
+    /// How long the thing it just turned into should sit still before doing anything.
+    pub rest_for: i32,
     /// Where this NPC wants whatever it is carrying to hang.
     pub carry: Option<(f32, f32)>,
 }
@@ -513,7 +555,17 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         126 => mimic::update(npc, world, rng),
         23 => hardmode::hoverers::flying_weapon(npc, world),
         39 => hardmode::roller::roller(npc, world, rng),
-        102 => effects.shots.extend(hardmode::sand::sand_elemental(npc, world, rng).shots),
+        64 => critter::firefly(npc, world, rng),
+        68 => {
+            let landing = bird::waterfowl(npc, world, rng);
+            if let Some(walker) = landing.becomes {
+                effects.transform = Some(walker);
+                effects.rest_for = landing.rests_for;
+            }
+        }
+        102 => effects
+            .shots
+            .extend(hardmode::sand::sand_elemental(npc, world, rng).shots),
         103 => hardmode::sand::sand_shark(npc, world),
         40 => {
             let out = hardmode::crawler::crawler(npc, world, rng);
@@ -724,7 +776,7 @@ mod tests {
                 parent_state: 0.0,
                 parent_health: 1.0,
                 crowding: (0.0, 0.0),
-                kin: &[],
+                avoid: &[],
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);

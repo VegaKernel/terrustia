@@ -780,3 +780,344 @@ mod tests {
         }
     }
 }
+
+/// Style 64 — fireflies, lightning bugs, lavaflies and the shimmerfly.
+///
+/// A firefly holds a heading for one to three seconds and then picks another, easing onto it over
+/// eighty ticks so the drift never looks steered. Two rules keep it in the world without it ever
+/// appearing to notice: it will not fly into ground four tiles below, and it will not climb away
+/// from ground thirty tiles below — between those it wanders freely.
+///
+/// The one thing it does deliberately is come *to* you: from more than seven hundred pixels away
+/// it heads your way, faster the further off it is, until it arrives once. After that it wanders
+/// for the rest of its life and never seeks again, which is why fireflies gather where you are and
+/// then mill about.
+///
+/// `world.avoid` carries whatever the shimmerfly should keep away from; for every other type it
+/// is empty and the crowd check costs nothing.
+pub fn firefly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) {
+    use terrustia_proto::npc_params::{
+        FIREFLY_DARK_BELOW, FIREFLY_FLOOR_LOOK, FIREFLY_GLOW_FOR, FIREFLY_GLOW_GAP, FIREFLY_HOLD,
+        FIREFLY_SCALE, FIREFLY_SEEK_AT, FIREFLY_SEEK_FAR, FIREFLY_SEEK_FAR_SPEED,
+        FIREFLY_SEEK_FARTHER, FIREFLY_SEEK_FARTHER_SPEED, FIREFLY_SEEK_SPEED, FIREFLY_SKY_LOOK,
+        FIREFLY_SMOOTH, FIREFLY_WANDER_SPEED, SHIMMERFLY, SHIMMERFLY_BOLT, SHIMMERFLY_BOLT_CAP,
+        SHIMMERFLY_CHECK_EVERY, SHIMMERFLY_EDGE_CAP, SHIMMERFLY_EDGE_PUSH, SHIMMERFLY_MARGIN,
+    };
+
+    npc.dirty = true;
+    // `ai[0]` and `ai[1]` are the heading it is easing toward, not its velocity.
+    let (mut want_x, mut want_y) = (npc.ai[0], npc.ai[1]);
+
+    npc.local_ai[0] -= 1.0;
+    if npc.ai[3] == 0.0 {
+        npc.ai[3] = rng.random_range(FIREFLY_SCALE.0..FIREFLY_SCALE.1) as f32 * 0.01;
+    }
+    if npc.local_ai[0] <= 0.0 {
+        npc.local_ai[0] = rng.random_range(FIREFLY_HOLD.0..FIREFLY_HOLD.1) as f32;
+        let (cx, cy) = npc.center();
+        let across = world.target.map_or(0.0, |t| (cx - t.center.0).abs());
+        // `local_ai[3]` remembers that it has arrived once. It never seeks again after that.
+        if across > FIREFLY_SEEK_AT && npc.local_ai[3] == 0.0 {
+            let speed = if across > FIREFLY_SEEK_FARTHER {
+                rng.random_range(FIREFLY_SEEK_FARTHER_SPEED.0..FIREFLY_SEEK_FARTHER_SPEED.1)
+            } else if across > FIREFLY_SEEK_FAR {
+                rng.random_range(FIREFLY_SEEK_FAR_SPEED.0..FIREFLY_SEEK_FAR_SPEED.1)
+            } else {
+                rng.random_range(FIREFLY_SEEK_SPEED.0..FIREFLY_SEEK_SPEED.1)
+            } as f32
+                * 0.01;
+            let step_x = i32::from(npc.direction) * rng.random_range(100..251);
+            let mut step_y = rng.random_range(-50..51);
+            // Below the player it aims well above, so it comes up to meet you rather than
+            // crawling along the floor.
+            if world.target.is_some_and(|t| cy > t.center.1 - 100.0) {
+                step_y -= rng.random_range(100..251);
+            }
+            let length = ((step_x * step_x + step_y * step_y) as f32)
+                .sqrt()
+                .max(f32::MIN_POSITIVE);
+            want_x = step_x as f32 * speed / length;
+            want_y = step_y as f32 * speed / length;
+        } else {
+            npc.local_ai[3] = 1.0;
+            let speed =
+                rng.random_range(FIREFLY_WANDER_SPEED.0..FIREFLY_WANDER_SPEED.1) as f32 * 0.01;
+            let step_x = rng.random_range(-100..101);
+            let step_y = rng.random_range(-100..101);
+            let length = ((step_x * step_x + step_y * step_y) as f32)
+                .sqrt()
+                .max(f32::MIN_POSITIVE);
+            want_x = step_x as f32 * speed / length;
+            want_y = step_y as f32 * speed / length;
+        }
+    }
+    npc.scale = npc.ai[3];
+
+    if npc.npc_type == SHIMMERFLY {
+        // A shimmerfly turns back from the edges of the world rather than drifting out of it.
+        let (cx, cy) = npc.center();
+        let (tile_x, tile_y) = ((cx / TILE) as i32, (cy / TILE) as i32);
+        let mut settled = true;
+        if tile_x < SHIMMERFLY_MARGIN {
+            want_x = (want_x + SHIMMERFLY_EDGE_PUSH).min(SHIMMERFLY_EDGE_CAP);
+            settled = false;
+        } else if tile_x > world.world_width() - SHIMMERFLY_MARGIN {
+            want_x = (want_x - SHIMMERFLY_EDGE_PUSH).max(-SHIMMERFLY_EDGE_CAP);
+            settled = false;
+        }
+        if tile_y < SHIMMERFLY_MARGIN {
+            want_y = (want_y + SHIMMERFLY_EDGE_PUSH).min(SHIMMERFLY_EDGE_CAP);
+            settled = false;
+        } else if tile_y > world.world_height() - SHIMMERFLY_MARGIN {
+            want_y = (want_y - SHIMMERFLY_EDGE_PUSH).max(-SHIMMERFLY_EDGE_CAP);
+            settled = false;
+        }
+
+        if npc.local_ai[1] > 0.0 {
+            npc.local_ai[1] -= 1.0;
+        } else if settled {
+            npc.local_ai[1] = SHIMMERFLY_CHECK_EVERY;
+            // Anything alive nearby sends it off in the opposite direction, hard.
+            let mut away = (0.0f32, 0.0f32);
+            let mut crowd = 0.0f32;
+            for (kx, ky) in world.avoid {
+                let (dx, dy) = (cx - kx, cy - ky);
+                let gap = dx.hypot(dy);
+                if gap > 0.0 {
+                    crowd += 1.0;
+                    away.0 += dx / gap;
+                    away.1 += dy / gap;
+                }
+            }
+            if crowd > 0.0 {
+                away.0 = away.0 / crowd * SHIMMERFLY_BOLT;
+                away.1 = away.1 / crowd * SHIMMERFLY_BOLT;
+                npc.velocity.0 += away.0;
+                npc.velocity.1 += away.1;
+                let speed = npc.velocity.0.hypot(npc.velocity.1);
+                if speed > SHIMMERFLY_BOLT_CAP {
+                    npc.velocity.0 = npc.velocity.0 / speed * SHIMMERFLY_BOLT_CAP;
+                    npc.velocity.1 = npc.velocity.1 / speed * SHIMMERFLY_BOLT_CAP;
+                }
+                // And it reconsiders where it was going almost at once.
+                npc.local_ai[0] = 10.0;
+            }
+        }
+    } else if npc.local_ai[2] > 0.0 {
+        // Glowing.
+        npc.local_ai[2] -= 1.0;
+    } else if npc.local_ai[1] > 0.0 {
+        npc.local_ai[1] -= 1.0;
+    } else {
+        npc.local_ai[1] = rng.random_range(FIREFLY_GLOW_GAP.0..FIREFLY_GLOW_GAP.1) as f32;
+        // There is no point glowing in daylight on the surface.
+        let underground =
+            npc.position.1 / TILE > world.conditions.surface_y / TILE + FIREFLY_DARK_BELOW;
+        if !world.conditions.day || underground {
+            npc.local_ai[2] = rng.random_range(FIREFLY_GLOW_FOR.0..FIREFLY_GLOW_FOR.1) as f32;
+        }
+    }
+
+    npc.velocity.0 = (npc.velocity.0 * (FIREFLY_SMOOTH - 1.0) + want_x) / FIREFLY_SMOOTH;
+    npc.velocity.1 = (npc.velocity.1 * (FIREFLY_SMOOTH - 1.0) + want_y) / FIREFLY_SMOOTH;
+
+    let (cx, cy) = npc.center();
+    let (tile_x, tile_y) = ((cx / TILE) as i32, (cy / TILE) as i32);
+    let blocked = |y: i32| {
+        let tile = world.tiles.tile(tile_x, y);
+        (tile.is_active() && solid(tile.block)) || tile.liquid > 0
+    };
+    if npc.velocity.1 > 0.0 {
+        // Descending onto something: turn the heading around and slow the drop.
+        for y in tile_y..tile_y + FIREFLY_FLOOR_LOOK {
+            if blocked(y) {
+                want_y *= -1.0;
+                npc.velocity.1 *= 0.9;
+            }
+        }
+    }
+    if npc.velocity.1 < 0.0 {
+        // Climbing with nothing at all beneath: it has drifted off the world and turns back.
+        let ground_below = (tile_y..tile_y + FIREFLY_SKY_LOOK).any(|y| {
+            let tile = world.tiles.tile(tile_x, y);
+            tile.is_active() && solid(tile.block)
+        });
+        if !ground_below {
+            want_y *= -1.0;
+            npc.velocity.1 *= 0.9;
+        }
+    }
+    if npc.collide_x {
+        // Keep the heading's magnitude, take the sign from the way it is now going.
+        want_x = if npc.velocity.0 < 0.0 {
+            want_x.abs()
+        } else {
+            -want_x.abs()
+        };
+        npc.velocity.0 *= -0.2;
+    }
+    if npc.npc_type == SHIMMERFLY {
+        npc.rotation = npc.velocity.0 * 0.3;
+    }
+    if npc.velocity.0 < 0.0 {
+        npc.direction = -1;
+    }
+    if npc.velocity.0 > 0.0 {
+        npc.direction = 1;
+    }
+    npc.ai[0] = want_x;
+    npc.ai[1] = want_y;
+}
+
+#[cfg(test)]
+mod firefly_tests {
+    use super::*;
+    use crate::game::npc::TileView;
+    use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::tile::Tile;
+
+    struct Meadow(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Meadow {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn meadow(floor: i32) -> Meadow {
+        let mut tiles = HashMap::new();
+        for x in -600..600 {
+            for y in floor..floor + 4 {
+                tiles.insert((x, y), Tile::block(1));
+            }
+        }
+        Meadow(tiles)
+    }
+
+    fn world<'a>(tiles: &'a Meadow, target: Option<(f32, f32)>) -> World<'a, Meadow> {
+        crate::game::ai::calm(
+            tiles,
+            target.map(|center| Target {
+                slot: 0,
+                center,
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        )
+    }
+
+    const FIREFLY: u16 = 355;
+    const SHIMMERFLY_TYPE: u16 = 677;
+
+    fn bug(npc_type: u16, tile_x: i32, tile_y: i32) -> Npc {
+        Npc::new(npc_type, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1)
+            .expect("a style 64 type")
+    }
+
+    /// A firefly a long way off comes to you once, and then stops seeking for good.
+    #[test]
+    fn a_distant_firefly_comes_to_you_once() {
+        let tiles = meadow(60);
+        let mut rng = SmallRng::seed_from_u64(64);
+        let mut f = bug(FIREFLY, 0, 50);
+        f.direction = 1;
+        // Well past the seven-hundred-pixel threshold.
+        let w = world(&tiles, Some((80.0 * TILE, 50.0 * TILE)));
+
+        let start = f.position.0;
+        for _ in 0..1200 {
+            firefly(&mut f, &w, &mut rng);
+            crate::game::npc::step_physics(&mut f, &tiles);
+        }
+        assert!(
+            f.position.0 > start,
+            "it should have drifted toward the player, moved {}",
+            f.position.0 - start
+        );
+        assert_eq!(f.local_ai[3], 1.0, "and stopped seeking once it arrived");
+    }
+
+    /// It will not fly into the ground, however long it drifts.
+    #[test]
+    fn a_firefly_stays_off_the_floor() {
+        let tiles = meadow(60);
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut f = bug(FIREFLY, 0, 55);
+        // Already arrived, so it is wandering rather than steering anywhere.
+        f.local_ai[3] = 1.0;
+        let w = world(&tiles, Some((0.0, 55.0 * TILE)));
+
+        let mut lowest = f.position.1;
+        for _ in 0..3000 {
+            firefly(&mut f, &w, &mut rng);
+            crate::game::npc::step_physics(&mut f, &tiles);
+            lowest = lowest.max(f.position.1);
+        }
+        assert!(
+            lowest < 60.0 * TILE,
+            "it should have stayed above the floor, got down to {lowest}"
+        );
+    }
+
+    /// Each one is a slightly different size, chosen once and then kept.
+    #[test]
+    fn every_firefly_is_its_own_size() {
+        let tiles = meadow(60);
+        let mut rng = SmallRng::seed_from_u64(5);
+        let w = world(&tiles, None);
+        let mut sizes = Vec::new();
+        for _ in 0..20 {
+            let mut f = bug(FIREFLY, 0, 50);
+            firefly(&mut f, &w, &mut rng);
+            let first = f.scale;
+            for _ in 0..50 {
+                firefly(&mut f, &w, &mut rng);
+            }
+            assert_eq!(f.scale, first, "its size should not drift");
+            sizes.push(first);
+        }
+        assert!(
+            sizes.iter().any(|s| *s != sizes[0]),
+            "they should not all be identical: {sizes:?}"
+        );
+        assert!(
+            sizes.iter().all(|s| (0.75..=1.10).contains(s)),
+            "and all in range: {sizes:?}"
+        );
+    }
+
+    /// A shimmerfly bolts from anything alive rather than drifting past it.
+    ///
+    /// Well inside the world, because near an edge it is busy turning away from that instead and
+    /// never looks around for company.
+    #[test]
+    fn a_shimmerfly_bolts_from_company() {
+        let tiles = meadow(320);
+        let w = world(&tiles, None);
+        let run = |company: &[(f32, f32)]| {
+            // A fresh generator each time: two bugs sharing one stream diverge for reasons that
+            // have nothing to do with the thing under test.
+            let mut rng = SmallRng::seed_from_u64(677);
+            let mut fly = bug(SHIMMERFLY_TYPE, 200, 300);
+            let mut w = World { ..w };
+            w.avoid = company;
+            let mut jump: f32 = 0.0;
+            for _ in 0..20 {
+                let before = fly.velocity;
+                firefly(&mut fly, &w, &mut rng);
+                jump = jump.max(fly.velocity.0 - before.0);
+            }
+            jump
+        };
+
+        let (cx, cy) = bug(SHIMMERFLY_TYPE, 200, 300).center();
+        let quiet = run(&[]);
+        let crowded = run(&[(cx - 40.0, cy)]);
+        assert!(
+            crowded > quiet + 1.0,
+            "company on the left should shove it right, hard: {crowded} vs {quiet}"
+        );
+    }
+}

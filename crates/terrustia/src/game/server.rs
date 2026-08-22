@@ -44,7 +44,9 @@ use crate::{
     config::Config,
     game::player::{ConnState, Player},
     game::{
-        clock, housing,
+        clock,
+        event::{Invasion, InvasionState},
+        housing,
         npc::{NpcStore, TileView},
         npc_ai::{self, Target},
         spawn,
@@ -137,6 +139,9 @@ const GUIDE: u16 = 22;
 /// Ticks between housing scans. The room check is a flood fill, so it is not run every tick.
 const HOUSING_SCAN_INTERVAL: u64 = 60 * 5;
 
+/// One invader every this many ticks. An invasion arrives steadily rather than all at once.
+const INVASION_SPAWN_EVERY: u64 = 45;
+
 /// Ticks between NPC position broadcasts. Clients interpolate between them.
 const NPC_SYNC_INTERVAL: u64 = 6;
 
@@ -182,6 +187,8 @@ pub struct GameServer {
     /// How many shots have been fired since the server started, for `/npcs`.
     shots_thrown: u64,
     /// The longest tick seen in the current reporting window.
+    /// The invasion under way, if any.
+    invasion: Option<InvasionState>,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -214,6 +221,7 @@ impl GameServer {
             rng: SmallRng::seed_from_u64(0x7e77_a51a),
             projectiles: crate::game::projectile::ProjectileStore::new(),
             shots_thrown: 0,
+            invasion: None,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -1760,6 +1768,8 @@ impl GameServer {
 
         let mut expired = Vec::new();
         let mut transformed = Vec::new();
+        let mut blasts = Vec::new();
+        let mut escaped_probe = false;
         let mut carrying = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
         {
@@ -1781,23 +1791,40 @@ impl GameServer {
             } else {
                 Vec::new()
             };
-            // Only one style shoulders its own kind aside, so the list is built only when one of
-            // them is present, and only of that type.
-            let kin: Vec<(f32, f32)> = {
-                let flocking: Vec<u16> = self
+            // Two styles jostle for space, and they want different lists: a pirate ghost keeps
+            // away from other pirate ghosts, a shimmerfly from anything alive at all. Both lists
+            // are a scan of the table, so neither is built unless something present reads it.
+            let avoid: Vec<(f32, f32)> = {
+                use npc_ai::Avoids;
+                let wanted: Vec<(u16, Avoids)> = self
                     .npcs
                     .iter()
-                    .filter(|(_, n)| npc_ai::reads_kin(n.stats.ai_style))
-                    .map(|(_, n)| n.npc_type)
+                    .filter_map(|(_, n)| {
+                        npc_ai::avoidance(n.stats.ai_style).map(|a| (n.npc_type, a))
+                    })
                     .collect();
-                if flocking.is_empty() {
+                if wanted.is_empty() {
                     Vec::new()
                 } else {
-                    self.npcs
+                    let own_kind: Vec<u16> = wanted
                         .iter()
-                        .filter(|(_, n)| flocking.contains(&n.npc_type))
+                        .filter(|(_, a)| *a == Avoids::OwnKind)
+                        .map(|(ty, _)| *ty)
+                        .collect();
+                    let anything = wanted.iter().any(|(_, a)| *a == Avoids::AnythingAlive);
+                    let mut list: Vec<(f32, f32)> = self
+                        .npcs
+                        .iter()
+                        .filter(|(_, n)| {
+                            own_kind.contains(&n.npc_type)
+                                || (anything && !n.stats.friendly && n.stats.damage > 0)
+                        })
                         .map(|(_, n)| n.center())
-                        .collect()
+                        .collect();
+                    if anything {
+                        list.extend(targets.iter().map(|t| t.center));
+                    }
+                    list
                 }
             };
             // A handful of routines wait on how many of some other type are still alive: the
@@ -1863,6 +1890,7 @@ impl GameServer {
                 // routines that branch only ask whether it is above classic.
                 expert: self.world.game_mode >= 1,
                 hardmode: self.world.progress.hard_mode,
+                world_size: (self.world.width(), self.world.height()),
             };
             for (index, npc) in self.npcs.iter_mut() {
                 // Segments are positioned by their leader, not by a routine of their own.
@@ -1885,7 +1913,7 @@ impl GameServer {
                     npc_ai::Surroundings {
                         conditions,
                         hazards: &hazards,
-                        kin: &kin,
+                        avoid: &avoid,
                         census: &census,
                         parent,
                         parent_state,
@@ -1900,7 +1928,15 @@ impl GameServer {
                     }
                 }
                 if let Some(into) = ai_out.transform.take() {
-                    transformed.push((index, into));
+                    transformed.push((index, into, std::mem::take(&mut ai_out.rest_for)));
+                }
+                // A bomb that went off does its damage through its own hitbox, which the routine
+                // has already swollen; what is left is to make sure it is gone afterwards.
+                if std::mem::take(&mut ai_out.detonated) {
+                    blasts.push(index);
+                }
+                if std::mem::take(&mut ai_out.called_invasion) {
+                    escaped_probe = true;
                 }
                 if let (Some(at), Some(rider)) = (ai_out.carry.take(), npc.passenger) {
                     carrying.push((rider, at, npc.velocity));
@@ -1978,11 +2014,26 @@ impl GameServer {
         // A lost girl who has stopped pretending, or a truffle worm that has gone to ground.
         // The slot is kept so clients see one NPC change rather than one vanish and another
         // appear somewhere in the table.
-        for (index, into) in transformed {
+        for (index, into, rest_for) in transformed {
             if let Some(npc) = self.npcs.get_mut(index) {
                 npc.become_type(into);
+                if rest_for > 0 {
+                    npc.ai[1] = rest_for as f32;
+                }
             }
             self.broadcast_npc(index);
+        }
+
+        // Anything that detonated has already hurt whatever was inside it, through the enlarged
+        // hitbox contact damage reads. It only remains to take it off the table.
+        for index in blasts {
+            self.npcs.remove(index);
+            self.broadcast_npc_death(index);
+        }
+
+        // A probe that got away with what it saw brings the Martians down on the world.
+        if escaped_probe {
+            self.start_invasion(Invasion::Martian);
         }
 
         for index in expired {
@@ -2445,7 +2496,8 @@ impl GameServer {
             return Ok(());
         }
 
-        let amount = damage_taken(i32::from(hit.damage), npc.stats.defense, hit.crit);
+        // Live armour, not the type's: a rolling tortoise really is twice as hard to hurt.
+        let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
         let killed = npc.take_damage(amount, hit.knockback, hit.direction);
         let (npc_type, value, center) = (npc.npc_type, npc.stats.value, npc.center());
 
@@ -2456,6 +2508,7 @@ impl GameServer {
             self.broadcast_npc_death(hit.index);
             self.drop_coins(value, center);
             self.drop_loot(npc_type, center);
+            self.note_invasion_kill(npc_type);
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
@@ -2618,6 +2671,105 @@ impl GameServer {
         None
     }
 
+    /// Send in the next invader, if it is time and there is room.
+    ///
+    /// Invaders arrive at the invasion's column rather than around a player, which is what makes
+    /// one feel like something marching toward you instead of something appearing on top of you.
+    fn spawn_invaders(&mut self, state: InvasionState) {
+        let active = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && p.life > 0)
+            .count();
+        if active == 0 {
+            return;
+        }
+        // An invasion presses harder than ordinary spawning, and the cap scales with the party.
+        let cap = spawn::MAX_SPAWNS * 2.0 * (1.0 + 0.3 * active as f32);
+        if self.npcs.used_slots() >= cap {
+            return;
+        }
+        if !self.ticks.is_multiple_of(INVASION_SPAWN_EVERY) {
+            return;
+        }
+
+        let present: Vec<u16> = self.npcs.iter().map(|(_, n)| n.npc_type).collect();
+        let Some(npc_type) =
+            state.next_invader(self.world.progress.hard_mode, &present, &mut self.rng)
+        else {
+            return;
+        };
+
+        // They come in at the column the invasion owns, standing on whatever ground is there.
+        let column = state.from_x.clamp(10, self.world.width() - 10);
+        let Some(ground) = spawn::find_ground(&self.world, column, i32::from(self.world.spawn_y))
+        else {
+            return;
+        };
+        let at = (
+            column as f32 * crate::game::npc::TILE,
+            (ground - 1) as f32 * crate::game::npc::TILE,
+        );
+        if let Some(index) = self.npcs.spawn(npc_type, at) {
+            self.broadcast_npc(index);
+        }
+    }
+
+    /// Begin an invasion, unless one is already under way or nobody qualifies to be invaded.
+    fn start_invasion(&mut self, kind: Invasion) {
+        if self.invasion.is_some() {
+            return;
+        }
+        // A player qualifies at two hundred maximum life; a world of fresh characters cannot be
+        // invaded at all.
+        let qualifying = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && p.life_max >= 200)
+            .count();
+        let Some(state) = InvasionState::begin(
+            kind,
+            qualifying,
+            i32::from(self.world.spawn_x),
+            self.world.width(),
+            &mut self.rng,
+        ) else {
+            return;
+        };
+        let announcement = if kind == Invasion::Martian {
+            kind.arrival().to_string()
+        } else {
+            format!("{} {}!", kind.arrival(), state.side())
+        };
+        self.announce(&announcement);
+        info!(
+            invasion = ?kind,
+            size = state.started_with,
+            from_x = state.from_x,
+            "invasion started"
+        );
+        self.invasion = Some(state);
+    }
+
+    /// Count a kill against whatever invasion is running, and end it when the last one falls.
+    fn note_invasion_kill(&mut self, npc_type: u16) {
+        let Some(state) = self.invasion.as_mut() else {
+            return;
+        };
+        if !crate::game::spawn::belongs_to(state.kind, npc_type) {
+            return;
+        }
+        state.remaining -= 1;
+        if state.beaten() {
+            let kind = state.kind;
+            self.invasion = None;
+            self.announce(kind.defeat());
+            info!(invasion = ?kind, "invasion defeated");
+        }
+    }
+
     /// Try to spawn new NPCs around the players.
     fn tick_spawning(&mut self) {
         if self.ticks.is_multiple_of(300) {
@@ -2634,6 +2786,13 @@ impl GameServer {
                 "spawn tick"
             );
         }
+        // While an invasion is running its members replace the ordinary pool, and they walk in
+        // from the column it is coming from rather than appearing around each player.
+        if let Some(state) = self.invasion {
+            self.spawn_invaders(state);
+            return;
+        }
+
         let spawned = spawn::try_spawn(
             &self.world,
             &self.npcs,

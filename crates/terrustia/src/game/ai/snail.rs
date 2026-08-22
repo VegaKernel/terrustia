@@ -145,7 +145,7 @@ mod tests {
             parent_state: 0.0,
             parent_health: 1.0,
             crowding: (0.0, 0.0),
-            kin: &[],
+            avoid: &[],
         }
     }
 
