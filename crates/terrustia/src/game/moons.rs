@@ -456,7 +456,8 @@ impl MoonState {
         self.moon.is_some()
     }
 
-    /// Raise one. Whichever went up last is the one you are fighting.
+    /// Raise one, replacing whatever was up. Whichever went up last is the one you are fighting,
+    /// and it starts again at wave one however far the other had got.
     pub fn start(&mut self, moon: Moon) {
         self.moon = Some(moon);
         self.wave = 1;
@@ -645,6 +646,23 @@ mod tests {
                 "{ty} is not a type this build has"
             );
         }
+    }
+
+    /// Raising one moon replaces the other and starts the count again.
+    #[test]
+    fn one_moon_replaces_the_other() {
+        let mut moon = MoonState::default();
+        moon.start(Moon::Pumpkin);
+        for _ in 0..24 {
+            moon.note_kill(305, 0);
+        }
+        assert_eq!(moon.moon, Some(Moon::Pumpkin));
+        assert!(moon.points > 0.0);
+
+        moon.start(Moon::Frost);
+        assert_eq!(moon.moon, Some(Moon::Frost), "the newer one wins");
+        assert_eq!(moon.wave, 1, "and starts again");
+        assert_eq!(moon.points, 0.0);
     }
 
     /// A moon advances on points, and only on the points its own roster is worth.

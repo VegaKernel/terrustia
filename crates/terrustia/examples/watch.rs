@@ -58,6 +58,22 @@ async fn main() -> ExitCode {
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
     for command in commands {
+        // `summon:-4` sends the boss/event packet rather than chat, which is the only way to ask
+        // for an event: there is no chat command for one, because the game has no such command.
+        if let Some(what) = command.strip_prefix("summon:")
+            && let Ok(what) = what.parse::<i16>()
+        {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&0i16.to_le_bytes());
+            payload.extend_from_slice(&what.to_le_bytes());
+            let mut frame = Vec::new();
+            frame.extend_from_slice(&((payload.len() + 3) as u16).to_le_bytes());
+            frame.push(terrustia_proto::id::SPAWN_BOSS_USE_LICENSE_START_EVENT);
+            frame.extend_from_slice(&payload);
+            println!("  summoning {what}");
+            let _ = client.send(&frame).await;
+            continue;
+        }
         println!("  sending {command}");
         let _ = client.say(&command).await;
     }

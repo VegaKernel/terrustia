@@ -4154,14 +4154,20 @@ impl GameServer {
         }
     }
 
-    /// Raise a moon, if it is night and one is not already up.
+    /// Raise a moon, if it is night.
     ///
-    /// The two are exclusive and both cancel a blood moon: whichever went up last is the one you
-    /// are fighting.
+    /// The two are exclusive and both cancel a blood moon, but raising one does not *fail* when
+    /// the other is up — it replaces it, and the new moon starts again at wave one. Refusing
+    /// instead would leave somebody who summoned a frost moon fighting a pumpkin one.
     fn start_moon(&mut self, moon: crate::game::moons::Moon, slot: u8) {
         use crate::game::moons::Moon;
-        if self.world.day_time || self.moon.running() {
+        if self.world.day_time {
             return;
+        }
+        if let Some(was) = self.moon.moon
+            && was != moon
+        {
+            info!(?was, now = ?moon, "one moon replaces the other");
         }
         self.world.blood_moon = false;
         self.moon.start(moon);
