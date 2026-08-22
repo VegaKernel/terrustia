@@ -483,7 +483,7 @@ fn read_world_header(
     let moon_phase = num(r.i32(), r)?;
     let _blood_moon = num(r.bool(), r)?;
     let _eclipse = num(r.bool(), r)?;
-    let _dungeon_x = num(r.i32(), r)?;
+    let dungeon_x = num(r.i32(), r)?;
     let _dungeon_y = num(r.i32(), r)?;
     let crimson = num(r.bool(), r)?;
 
@@ -569,6 +569,7 @@ fn read_world_header(
 
     offsets.late = late;
     let mut world = World::empty(width, height, name);
+    world.dungeon_x = Some(dungeon_x);
     world.raining = world_weather.raining;
     world.rain_time = world_weather.rain_time;
     world.max_rain = world_weather.max_rain;

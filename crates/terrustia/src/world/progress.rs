@@ -72,6 +72,9 @@ pub struct Progress {
     pub saved_tax_collector: bool,
     pub saved_golfer: bool,
     pub saved_bartender: bool,
+    pub downed_deerclops: bool,
+    pub downed_empress_of_light: bool,
+    pub downed_queen_slime: bool,
 }
 
 impl Progress {

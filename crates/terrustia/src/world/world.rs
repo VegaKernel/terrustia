@@ -42,6 +42,8 @@ pub struct World {
     pub raining: bool,
     pub rain_time: i32,
     pub max_rain: f32,
+    /// Where the dungeon is, when the world file said. Hardmode's stripes steer around it.
+    pub dungeon_x: Option<i32>,
     /// Which moon is up, if either. Kept on the world because the client is told about it.
     pub pumpkin_moon: bool,
     pub snow_moon: bool,
@@ -104,6 +106,7 @@ impl World {
             blood_moon: false,
             eclipse: false,
             moon_phase: 0,
+            dungeon_x: None,
             pumpkin_moon: false,
             snow_moon: false,
             raining: false,
@@ -365,6 +368,9 @@ impl World {
             (F::DownedTowerVortex, p.downed_tower_vortex),
             (F::DownedTowerNebula, p.downed_tower_nebula),
             (F::DownedTowerStardust, p.downed_tower_stardust),
+            (F::DownedDeerclops, p.downed_deerclops),
+            (F::DownedEmpressOfLight, p.downed_empress_of_light),
+            (F::DownedQueenSlime, p.downed_queen_slime),
             (F::PumpkinMoon, self.pumpkin_moon),
             (F::SnowMoon, self.snow_moon),
         ] {

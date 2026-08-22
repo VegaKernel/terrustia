@@ -402,6 +402,7 @@ impl GameServer {
             self.save_world("autosave");
         }
         self.tick_liquids();
+        self.tick_spread();
         self.tick_weather();
         self.tick_lunar();
         lap(&mut cost, Phase::World);
@@ -2137,6 +2138,11 @@ impl TileView for WorldTiles<'_> {
     }
 }
 
+/// How often the biomes are given a chance to creep, and how far from a player they may.
+const SPREAD_EVERY: u64 = 10;
+const SPREAD_TRIES: usize = 3;
+const SPREAD_RANGE: i32 = 120;
+
 /// The demon altar, which is a crafting station before hardmode and an ore mine after it.
 const DEMON_ALTAR: u16 = 26;
 
@@ -3215,21 +3221,7 @@ impl GameServer {
             self.note_army_kill(npc_type);
             self.note_moon_kill(npc_type);
             self.lunar.note_kill(npc_type);
-            match npc_type {
-                // The Cultist's death is what tears the sky open.
-                terrustia_proto::npc_params::CULTIST => {
-                    self.world.progress.downed_ancient_cultist = true;
-                    self.trigger_lunar_apocalypse();
-                }
-                // ...and the Moon Lord's is what closes it for good.
-                crate::game::lunar::MOON_LORD => {
-                    self.lunar.stop();
-                    self.world.progress.downed_moon_lord = true;
-                    self.world.progress.lunar_apocalypse_up = false;
-                    self.announce("The Moon Lord has been defeated!");
-                }
-                _ => {}
-            }
+            self.note_boss_kill(npc_type);
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
@@ -3721,6 +3713,187 @@ impl GameServer {
     fn note_moon_kill(&mut self, npc_type: u16) {
         if let Some(wave) = self.moon.note_kill(npc_type, self.world.game_mode) {
             self.announce(&format!("Wave {wave}!"));
+        }
+    }
+
+    /// Record a boss's death against the world's history.
+    ///
+    /// Nothing in the game reads a boss's death directly — everything reads the flag it sets. A
+    /// shop that opens, a spawn pool that widens, an event that becomes possible: all of it hangs
+    /// off this, which is why a server that kills bosses without recording them has a world that
+    /// never progresses.
+    fn note_boss_kill(&mut self, npc_type: u16) {
+        use terrustia_proto::npc_params as ids;
+        let p = &mut self.world.progress;
+        let mut announce: Option<&'static str> = None;
+        match npc_type {
+            // Pre-hardmode.
+            4 => p.downed_boss1 = true,
+            13 | 266 => p.downed_boss2 = true,
+            35 | 36 => p.downed_boss3 = true,
+            50 => p.downed_king_slime = true,
+            222 => p.downed_queen_bee = true,
+            668 => p.downed_deerclops = true,
+            // The wall: the one death that changes the world itself.
+            113 => {
+                if !p.hard_mode {
+                    self.start_hardmode();
+                }
+                return;
+            }
+            // The mechanical three. Any one of them is what unlocks the next tier.
+            134 => {
+                p.downed_mech1 = true;
+                p.downed_mech_any = true;
+            }
+            125 | 126 => {
+                // The Twins only count once both eyes are gone.
+                if self
+                    .npcs
+                    .iter()
+                    .any(|(_, n)| matches!(n.npc_type, 125 | 126))
+                {
+                    return;
+                }
+                p.downed_mech2 = true;
+                p.downed_mech_any = true;
+            }
+            127 => {
+                p.downed_mech3 = true;
+                p.downed_mech_any = true;
+            }
+            262 => p.downed_plantera = true,
+            245 => p.downed_golem = true,
+            370 => p.downed_fishron = true,
+            657 => {
+                p.downed_queen_slime = true;
+                announce = Some("Queen Slime has been defeated!");
+            }
+            636 => {
+                p.downed_empress_of_light = true;
+                announce = Some("The Empress of Light has been defeated!");
+            }
+            // The lunar chain.
+            ids::CULTIST => {
+                p.downed_ancient_cultist = true;
+                self.trigger_lunar_apocalypse();
+                return;
+            }
+            crate::game::lunar::MOON_LORD => {
+                self.lunar.stop();
+                let p = &mut self.world.progress;
+                p.downed_moon_lord = true;
+                p.lunar_apocalypse_up = false;
+                self.announce("The Moon Lord has been defeated!");
+                self.broadcast_world_data();
+                return;
+            }
+            _ => return,
+        }
+        if let Some(text) = announce {
+            self.announce(text);
+        }
+        // The flags reach clients in packet 7 and nowhere else, so every change has to be told.
+        self.broadcast_world_data();
+    }
+
+    /// The wall has fallen: cut the two stripes through the world and turn hardmode on.
+    ///
+    /// This is the largest single thing that ever happens to a world, and it happens once. The
+    /// stripes are cut immediately rather than in the background — a world of a few million tiles
+    /// takes a fraction of a second, and doing it inline means no client can see a half-converted
+    /// world.
+    fn start_hardmode(&mut self) {
+        use crate::world::hardmode;
+        use terrustia_proto::convert::Biome;
+
+        if self.world.progress.hard_mode {
+            return;
+        }
+        self.world.progress.hard_mode = true;
+        let evil = if self.world.crimson {
+            Biome::Crimson
+        } else {
+            Biome::Corruption
+        };
+        // The dungeon's side decides which way the stripes lean, so neither lands on it.
+        let dungeon_x = self.world.dungeon_x.unwrap_or(self.world.width() / 4);
+        let stripes = hardmode::hardmode_stripes(self.world.width(), dungeon_x, &mut self.rng);
+        let began = std::time::Instant::now();
+        let mut converted = 0usize;
+        for ((x, drift), into) in stripes.into_iter().zip([Biome::Hallow, evil]) {
+            let changed = {
+                let world = &mut self.world;
+                hardmode::run_stripe(world, x, drift, into, &mut self.rng)
+            };
+            converted += changed.len();
+        }
+        self.announce("The ancient spirits of light and dark have been released!");
+        info!(
+            converted,
+            took_ms = began.elapsed().as_millis(),
+            "hardmode began"
+        );
+        // Every client's view of the world is now wrong: drop the caches so they re-request.
+        self.section_cache.clear();
+        self.broadcast_world_data();
+    }
+
+    /// One tick of the biomes creeping.
+    ///
+    /// A handful of tiles are picked at random near the players each tick rather than the whole
+    /// world being scanned. That is how the game does it too, and it is why an infection creeps
+    /// where somebody is standing and sits still where nobody is.
+    fn tick_spread(&mut self) {
+        use crate::world::hardmode;
+        if !self.world.progress.hard_mode || !self.ticks.is_multiple_of(SPREAD_EVERY) {
+            return;
+        }
+        let here: Vec<(i32, i32)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| {
+                (
+                    (p.position.0 / crate::game::npc::TILE) as i32,
+                    (p.position.1 / crate::game::npc::TILE) as i32,
+                )
+            })
+            .collect();
+        if here.is_empty() {
+            return;
+        }
+        let downed_plantera = self.world.progress.downed_plantera;
+        let mut changed = Vec::new();
+        for (px, py) in here {
+            for _ in 0..SPREAD_TRIES {
+                let x = px + rand::Rng::random_range(&mut self.rng, -SPREAD_RANGE..=SPREAD_RANGE);
+                let y = py + rand::Rng::random_range(&mut self.rng, -SPREAD_RANGE..=SPREAD_RANGE);
+                if x < 10 || y < 10 || x >= self.world.width() - 10 || y >= self.world.height() - 10
+                {
+                    continue;
+                }
+                let taken = {
+                    let world = &mut self.world;
+                    hardmode::spread(world, x, y, downed_plantera, &mut self.rng)
+                };
+                changed.extend(taken);
+            }
+        }
+        for (x, y) in changed {
+            let tile = self.world.tile(x, y);
+            let square = TileSquare {
+                x: x as i16,
+                y: y as i16,
+                width: 1,
+                height: 1,
+                change_type: 0,
+                tiles: vec![tile],
+            };
+            if let Ok(frame) = square.encode() {
+                self.broadcast(frame, None);
+            }
         }
     }
 

@@ -485,3 +485,353 @@ mod tests {
         assert!(run_vein(&mut world, (250, 250), 10.0, 10, COBALT, &mut rng).is_empty());
     }
 }
+
+// --- The wall falling, and the biomes creeping afterwards ----------------------------------------
+
+use terrustia_proto::convert::{self, Biome};
+
+/// Which biomes spread on their own, and which block starts a spread.
+///
+/// The list is deliberately short: only the *core* blocks of an evil push outward. A corrupt
+/// thorn spreads, a shadow orb does not, and that is why an infection creeps from its stone rather
+/// than from anything that happens to be standing in it.
+pub fn spreads(block: u16) -> Option<Biome> {
+    match block {
+        23 | 24 | 25 | 32 | 112 | 163 | 398 | 400 | 636 | 661 => Some(Biome::Corruption),
+        109 | 110 | 113 | 115 | 116 | 117 | 164 | 402 | 403 | 492 => Some(Biome::Hallow),
+        199 | 200 | 201 | 203 | 205 | 234 | 352 | 399 | 401 | 662 => Some(Biome::Crimson),
+        _ => None,
+    }
+}
+
+/// Whether a block is one a spread can take.
+///
+/// Grass, stone, moss, sand and sandstone, and nothing else. Everything a player built is safe.
+fn takeable(block: u16) -> bool {
+    matches!(block, 1 | 2 | 53 | 60 | 69 | 396 | 397 | 477)
+        || terrustia_proto::tile_sets::is_moss(block)
+}
+
+/// Sunflowers hold an infection off, which is the whole point of planting them.
+const SUNFLOWER: u16 = 27;
+/// How far out a spread looks for one.
+const SUNFLOWER_REACH: i32 = 2;
+/// How far a spread reaches from the tile that started it.
+const SPREAD_REACH: i32 = 3;
+
+/// One attempt at spreading from a tile.
+///
+/// Returns where it took hold and what it became, or `None` if nothing did. It keeps trying from
+/// the same tile while it keeps succeeding — half the time on each success — so an infection
+/// advances in bursts rather than one tile at a time.
+pub fn spread(
+    world: &mut impl OreWorld,
+    x: i32,
+    y: i32,
+    downed_plantera: bool,
+    rng: &mut SmallRng,
+) -> Vec<(i32, i32)> {
+    let mut taken = Vec::new();
+    let here = world.tile(x, y);
+    if !here.is_active() {
+        return taken;
+    }
+    let Some(biome) = spreads(here.block) else {
+        return taken;
+    };
+    // Plantera's death halves the rate for good, which is what makes killing her the thing that
+    // stops a world being eaten.
+    if downed_plantera && rng.random_range(0..2) != 0 {
+        return taken;
+    }
+
+    let mut again = true;
+    while again {
+        again = false;
+        let (tx, ty) = (
+            x + rng.random_range(-SPREAD_REACH..=SPREAD_REACH),
+            y + rng.random_range(-SPREAD_REACH..=SPREAD_REACH),
+        );
+        if tx < 10 || ty < 10 || tx >= world.width() - 10 || ty >= world.height() - 10 {
+            continue;
+        }
+        let target = world.tile(tx, ty);
+        if !target.is_active() || !takeable(target.block) {
+            continue;
+        }
+        // A sunflower nearby holds it off entirely.
+        if (tx - SUNFLOWER_REACH..=tx + SUNFLOWER_REACH).any(|sx| {
+            (ty - SUNFLOWER_REACH..=ty + SUNFLOWER_REACH).any(|sy| {
+                let tile = world.tile(sx, sy);
+                tile.is_active() && tile.block == SUNFLOWER
+            })
+        }) {
+            continue;
+        }
+        let Some(made) = convert::block(target.block, biome) else {
+            continue;
+        };
+        let mut converted = target;
+        converted.block = made;
+        world.set_tile(tx, ty, converted);
+        taken.push((tx, ty));
+        // Half the time it tries again from the same tile, which is what makes a spread arrive in
+        // bursts rather than trickling.
+        again = rng.random_range(0..2) == 0;
+    }
+    taken
+}
+
+/// Where the two hardmode stripes go when the Wall of Flesh falls.
+///
+/// Two diagonal Vs are driven down from the surface at a third and two-thirds across, one hallowed
+/// and one of whatever evil the world has. Which side gets which is a coin flip, and the pair is
+/// pushed away from the dungeon so neither swallows it.
+pub fn hardmode_stripes(world_width: i32, dungeon_x: i32, rng: &mut SmallRng) -> [(i32, i32); 2] {
+    let far = f64::from(rng.random_range(300..400)) * 0.001;
+    let near = f64::from(rng.random_range(200..300)) * 0.001;
+    let mut good = (f64::from(world_width) * far) as i32;
+    let mut evil = (f64::from(world_width) * (1.0 - far)) as i32;
+    let mut lean = 1;
+    if rng.random_range(0..2) == 0 {
+        std::mem::swap(&mut good, &mut evil);
+        lean = -1;
+    }
+    // Whichever stripe is on the dungeon's side is pulled in toward the middle, so the dungeon is
+    // never inside one.
+    if dungeon_x < world_width / 2 {
+        if evil < good {
+            evil = (f64::from(world_width) * near) as i32;
+        } else {
+            good = (f64::from(world_width) * near) as i32;
+        }
+    } else if evil > good {
+        evil = (f64::from(world_width) * (1.0 - near)) as i32;
+    } else {
+        good = (f64::from(world_width) * (1.0 - near)) as i32;
+    }
+    [(good, 3 * lean), (evil, 3 * -lean)]
+}
+
+/// Drive one stripe down through the world, converting as it goes.
+///
+/// Returns the tiles it changed.
+pub fn run_stripe(
+    world: &mut impl OreWorld,
+    x: i32,
+    drift_x: i32,
+    into: Biome,
+    rng: &mut SmallRng,
+) -> Vec<(i32, i32)> {
+    let mut changed = Vec::new();
+    let width = f64::from(rng.random_range(200..250)) * f64::from(world.width()) / 4200.0;
+    let mut here = (f64::from(x), 0.0);
+    let mut drift = (f64::from(drift_x), 5.0);
+
+    while here.1 < f64::from(world.height() - 5) {
+        let x0 = ((here.0 - width * 0.5) as i32).max(0);
+        let x1 = ((here.0 + width * 0.5) as i32).min(world.width());
+        let y0 = ((here.1 - width * 0.5) as i32).max(0);
+        let y1 = ((here.1 + width * 0.5) as i32).min(world.height() - 5);
+
+        for tx in x0..x1 {
+            for ty in y0..y1 {
+                // Ragged edges, so a stripe is a torn band rather than a drawn one.
+                let reach = width * 0.5 * (1.0 + f64::from(rng.random_range(-10..=10)) * 0.015);
+                if (f64::from(tx) - here.0).abs() + (f64::from(ty) - here.1).abs() >= reach {
+                    continue;
+                }
+                let tile = world.tile(tx, ty);
+                let mut made = tile;
+                let mut moved = false;
+                if tile.is_active()
+                    && let Some(block) = convert::block(tile.block, into)
+                {
+                    made.block = block;
+                    moved = true;
+                }
+                if let Some(wall) = convert::wall(tile.wall, into) {
+                    made.wall = wall;
+                    moved = true;
+                }
+                if moved {
+                    world.set_tile(tx, ty, made);
+                    changed.push((tx, ty));
+                }
+            }
+        }
+        here = (here.0 + drift.0, here.1 + drift.1);
+        drift.0 = (drift.0 + f64::from(rng.random_range(-10..=10)) * 0.05).clamp(-4.0, 4.0);
+    }
+    changed
+}
+
+#[cfg(test)]
+mod spread_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::tile::Tile;
+
+    struct Ground(HashMap<(i32, i32), Tile>);
+
+    impl OreWorld for Ground {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+        fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
+            self.0.insert((x, y), tile);
+        }
+        fn width(&self) -> i32 {
+            500
+        }
+        fn height(&self) -> i32 {
+            500
+        }
+    }
+
+    fn field() -> Ground {
+        let mut tiles = HashMap::new();
+        for x in 0..500 {
+            for y in 0..500 {
+                tiles.insert((x, y), Tile::block(1));
+            }
+        }
+        Ground(tiles)
+    }
+
+    /// An infection takes the stone around it and turns it to its own.
+    #[test]
+    fn an_infection_spreads() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(25));
+        let mut rng = SmallRng::seed_from_u64(1);
+        let mut taken = Vec::new();
+        for _ in 0..200 {
+            taken.extend(spread(&mut world, 250, 250, false, &mut rng));
+        }
+        assert!(!taken.is_empty(), "it should have spread");
+        for (x, y) in taken {
+            assert_eq!(world.tile(x, y).block, 25, "and made ebonstone of it");
+        }
+    }
+
+    /// A sunflower holds it off.
+    #[test]
+    fn a_sunflower_holds_it_back() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(25));
+        // Sunflowers over every tile the spread could reach.
+        for x in 245..256 {
+            for y in 245..256 {
+                world.set_tile(x, y, Tile::framed(SUNFLOWER, 0, 0));
+            }
+        }
+        world.set_tile(250, 250, Tile::block(25));
+        let mut rng = SmallRng::seed_from_u64(2);
+        let mut taken = Vec::new();
+        for _ in 0..500 {
+            taken.extend(spread(&mut world, 250, 250, false, &mut rng));
+        }
+        assert!(taken.is_empty(), "it got through: {taken:?}");
+    }
+
+    /// It only takes terrain. A chest in its path survives.
+    #[test]
+    fn an_infection_leaves_furniture_alone() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(25));
+        for x in 247..254 {
+            for y in 247..254 {
+                if (x, y) != (250, 250) {
+                    world.set_tile(x, y, Tile::framed(21, 0, 0));
+                }
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(3);
+        for _ in 0..500 {
+            spread(&mut world, 250, 250, false, &mut rng);
+        }
+        for x in 247..254 {
+            for y in 247..254 {
+                if (x, y) != (250, 250) {
+                    assert_eq!(world.tile(x, y).block, 21, "the chest at {x},{y} was eaten");
+                }
+            }
+        }
+    }
+
+    /// Killing Plantera halves it.
+    ///
+    /// The measure is how many attempts it takes to eat everything within reach, not how much it
+    /// eats: a spread saturates its neighbourhood either way, and only the pace differs.
+    #[test]
+    fn plantera_slows_the_spread() {
+        let attempts_to_saturate = |downed: bool| {
+            let mut world = field();
+            world.set_tile(250, 250, Tile::block(25));
+            let mut rng = SmallRng::seed_from_u64(4);
+            let mut idle = 0;
+            let mut attempts = 0;
+            // Saturated once it has failed to take anything a hundred times running.
+            while idle < 100 && attempts < 100_000 {
+                attempts += 1;
+                if spread(&mut world, 250, 250, downed, &mut rng).is_empty() {
+                    idle += 1;
+                } else {
+                    idle = 0;
+                }
+            }
+            attempts
+        };
+        let quick = attempts_to_saturate(false);
+        let slow = attempts_to_saturate(true);
+        assert!(
+            slow > quick,
+            "with Plantera down it took {slow} attempts, not more than {quick}"
+        );
+    }
+
+    /// Ordinary stone does not spread anything.
+    #[test]
+    fn clean_ground_spreads_nothing() {
+        let mut world = field();
+        let mut rng = SmallRng::seed_from_u64(5);
+        for _ in 0..500 {
+            assert!(spread(&mut world, 250, 250, false, &mut rng).is_empty());
+        }
+    }
+
+    /// The two hardmode stripes go on opposite sides, and neither lands on the dungeon.
+    #[test]
+    fn the_stripes_avoid_the_dungeon() {
+        for seed in 0..30u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            for dungeon in [400, 4000] {
+                let [(good, _), (evil, _)] = hardmode_stripes(4200, dungeon, &mut rng);
+                assert!((good - evil).abs() > 400, "too close: {good} and {evil}");
+                assert!(
+                    (good - dungeon).abs() > 300 || (evil - dungeon).abs() > 300,
+                    "both stripes landed on the dungeon at {dungeon}"
+                );
+                for x in [good, evil] {
+                    assert!((0..4200).contains(&x), "stripe at {x} is off the world");
+                }
+            }
+        }
+    }
+
+    /// A stripe converts a band from the top of the world to the bottom.
+    #[test]
+    fn a_stripe_reaches_the_bottom() {
+        let mut world = field();
+        let mut rng = SmallRng::seed_from_u64(6);
+        let changed = run_stripe(&mut world, 250, 3, Biome::Hallow, &mut rng);
+        assert!(!changed.is_empty(), "it should have converted something");
+        let deepest = changed.iter().map(|(_, y)| *y).max().unwrap();
+        assert!(deepest > 400, "it should reach the depths: {deepest}");
+        for (x, y) in &changed {
+            assert_eq!(world.tile(*x, *y).block, 117, "pearlstone");
+        }
+    }
+}

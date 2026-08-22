@@ -6,6 +6,7 @@
 //! Copyright (C) 2026 Brooklyn Halmstad.
 //! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
 
+pub mod convert;
 pub mod error;
 pub mod housing;
 pub mod hurt;
