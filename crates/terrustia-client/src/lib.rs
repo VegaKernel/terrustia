@@ -57,6 +57,8 @@ pub enum Event {
     ItemSynced(SyncItem),
     /// An item was reserved for a player, who may now pick it up.
     ItemReserved(ItemOwner),
+    /// A player is carrying something in a slot.
+    EquipmentSynced(terrustia_proto::inventory::SyncEquipment),
     /// An item is gone.
     ItemDespawned(i16),
     /// Something is in flight.
@@ -383,6 +385,19 @@ impl Client {
     }
 
     /// Throw an item into the world, asking the server for a slot.
+    /// Tell the server what is in one of this player's inventory slots.
+    pub async fn set_equipment(&mut self, slot: u16, item: ItemStack) -> Result<()> {
+        let frame = terrustia_proto::inventory::SyncEquipment {
+            player: self.slot(),
+            slot,
+            item,
+            favorited: false,
+            blocked: false,
+        }
+        .encode()?;
+        self.send(&frame).await
+    }
+
     pub async fn drop_item(&mut self, item: ItemStack, position: (f32, f32)) -> Result<()> {
         let sync = SyncItem::dropped(NEW_ITEM_INDEX, position, item);
         self.send(&sync.encode()?).await
@@ -519,6 +534,9 @@ impl Client {
             )),
             id::PLAYER_DEATH_V2 => Ok(Event::PlayerDied(
                 terrustia_proto::hurt::PlayerDeath::decode(&frame.payload)?,
+            )),
+            id::SYNC_EQUIPMENT => Ok(Event::EquipmentSynced(
+                terrustia_proto::inventory::SyncEquipment::decode(&frame.payload)?,
             )),
             id::ITEM_OWNER => Ok(Event::ItemReserved(ItemOwner::decode(&frame.payload)?)),
             id::SYNC_ITEM_DESPAWN => Ok(Event::ItemDespawned(decode_item_despawn(&frame.payload)?)),

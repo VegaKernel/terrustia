@@ -10,6 +10,7 @@ pub mod error;
 pub mod housing;
 pub mod hurt;
 pub mod id;
+pub mod inventory;
 pub mod item;
 pub mod items;
 pub mod net_module;

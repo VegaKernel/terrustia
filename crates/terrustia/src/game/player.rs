@@ -55,6 +55,13 @@ pub struct Player {
     pub appearance: Option<Bytes>,
     /// The most recent packet 13 payload, so a joining player sees everyone in their real pose.
     pub last_controls: Option<Bytes>,
+    /// What this player is carrying, by slot.
+    ///
+    /// Sparse: a client sends a slot only when it holds something or when it has just been
+    /// emptied, and the great majority of a player's three hundred and ninety-five slots are empty
+    /// for their whole session. Storing the whole array per player would be most of a megabyte of
+    /// nothing across a full server.
+    pub inventory: std::collections::HashMap<u16, terrustia_proto::inventory::SyncEquipment>,
     /// Whether a valid `Hello` has been seen.
     ///
     /// The password exchange happens while the connection is still in `Greeting`, so without this
@@ -99,6 +106,7 @@ impl Player {
             team: 0,
             appearance: None,
             last_controls: None,
+            inventory: std::collections::HashMap::new(),
             greeted: false,
             password_ok: false,
             pvp: false,

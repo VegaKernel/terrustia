@@ -1199,3 +1199,85 @@ async fn a_zombie_works_at_a_door_and_opens_it() {
         track.last()
     );
 }
+
+/// A player who joins a running server has to be told what everyone is already wearing. The
+/// equipment packets went out before they arrived and are never repeated, so without the catch-up
+/// they would see a room full of naked people.
+#[tokio::test]
+async fn a_joining_player_is_told_what_everyone_is_wearing() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    // A copper shortsword in her first inventory slot.
+    let sword = ItemStack {
+        id: 3507,
+        stack: 1,
+        prefix: 0,
+    };
+    alice.set_equipment(0, sword).await.unwrap();
+    // Give the server a moment to record it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut bob = join(addr, "bob").await;
+    bob.set_timeout(Duration::from_secs(3));
+    let seen = bob
+        .wait_for(
+            "alice's sword",
+            |e| matches!(e, Event::EquipmentSynced(s) if s.item.id == 3507 && s.slot == 0),
+        )
+        .await;
+    assert!(
+        seen.is_ok(),
+        "bob should have been told what alice is carrying"
+    );
+}
+
+/// A live change reaches everyone already connected.
+#[tokio::test]
+async fn an_equipment_change_reaches_the_other_players() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    let pickaxe = ItemStack {
+        id: 3509,
+        stack: 1,
+        prefix: 0,
+    };
+    alice.set_equipment(1, pickaxe).await.unwrap();
+
+    bob.set_timeout(Duration::from_secs(3));
+    let seen = bob
+        .wait_for(
+            "alice's pickaxe",
+            |e| matches!(e, Event::EquipmentSynced(s) if s.item.id == 3509 && s.slot == 1),
+        )
+        .await;
+    assert!(seen.is_ok(), "bob should have seen the change");
+}
+
+/// A player's safe is nobody else's business, however the client labels the packet.
+#[tokio::test]
+async fn private_storage_is_not_relayed() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    // The first piggy bank slot: inventory, cursor, armour, dyes and the two miscellaneous runs.
+    let piggy_bank = 58 + 1 + 20 + 10 + 5 + 5;
+    let hoard = ItemStack {
+        id: 73,
+        stack: 999,
+        prefix: 0,
+    };
+    alice.set_equipment(piggy_bank, hoard).await.unwrap();
+
+    bob.set_timeout(Duration::from_secs(2));
+    let leaked = bob
+        .wait_for(
+            "alice's savings",
+            |e| matches!(e, Event::EquipmentSynced(s) if s.slot == piggy_bank),
+        )
+        .await;
+    assert!(leaked.is_err(), "a piggy bank should not be broadcast");
+}

@@ -646,6 +646,7 @@ impl GameServer {
         let result = match frame.id {
             id::HELLO => self.on_hello(slot, &payload),
             id::SYNC_PLAYER => self.on_sync_player(slot, &payload),
+            id::SYNC_EQUIPMENT => self.on_equipment(slot, &payload),
             id::REQUEST_WORLD_DATA => self.on_request_world_data(slot),
             id::SPAWN_TILE_DATA => self.on_spawn_tile_data(slot, &payload),
             id::PLAYER_SPAWN => self.on_player_spawn(slot, &payload),
@@ -954,6 +955,11 @@ impl GameServer {
 
         if !was_playing {
             self.introduce(slot)?;
+            // What everyone already here is wearing. This waits until they are actually playing
+            // rather than going out with the world: a client is still working through its
+            // handshake when the tiles arrive, and anything sent then is read by the handshake
+            // rather than by the game.
+            self.send_existing_equipment(slot);
         }
         Ok(())
     }
@@ -1132,6 +1138,53 @@ impl GameServer {
             player.zone = Some(Bytes::copy_from_slice(payload));
         }
         self.relay_player_packet(slot, id::SYNC_PLAYER_ZONE, payload)
+    }
+
+    /// One slot of a player's inventory.
+    ///
+    /// The slot is remembered whatever it is — the server is the authority on what a player is
+    /// carrying — but only the public ones are passed on. A player's safe is their own business.
+    ///
+    /// The owner byte the client sends is not trusted: it is overwritten with the slot the packet
+    /// actually arrived on, which is what stops one client rewriting another's inventory.
+    fn on_equipment(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut equipment = terrustia_proto::inventory::SyncEquipment::decode(payload)?;
+        equipment.player = slot;
+        if equipment.slot >= terrustia_proto::inventory::SLOT_COUNT {
+            debug!(
+                slot,
+                requested = equipment.slot,
+                "ignoring an out-of-range inventory slot"
+            );
+            return Ok(());
+        }
+        if let Some(player) = self.player_mut(slot) {
+            player.inventory.insert(equipment.slot, equipment);
+        }
+        if terrustia_proto::inventory::relayed(equipment.slot) {
+            self.broadcast(equipment.encode()?, Some(slot));
+        }
+        Ok(())
+    }
+
+    /// Tell one player what everybody else is carrying.
+    ///
+    /// Without this a player who joins a running server sees everyone else naked: the equipment
+    /// packets went out before they arrived and are never repeated.
+    fn send_existing_equipment(&mut self, to: u8) {
+        let frames: Vec<Bytes> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.slot != to && p.is_playing())
+            .flat_map(|p| p.inventory.values())
+            .filter(|e| terrustia_proto::inventory::relayed(e.slot))
+            .filter_map(|e| e.encode().ok())
+            .map(Bytes::from)
+            .collect();
+        for frame in frames {
+            self.send_bytes(to, frame);
+        }
     }
 
     fn on_uuid(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
