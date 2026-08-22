@@ -2936,6 +2936,7 @@ impl GameServer {
             if let Some((index, npc)) = hit {
                 let damage = npc.stats.damage;
                 let direction = if npc.center().0 < box_at.0 { -1 } else { 1 };
+                let npc_type = npc.npc_type;
                 self.hurt_player(
                     slot,
                     damage,
@@ -2943,6 +2944,9 @@ impl GameServer {
                     terrustia_proto::hurt::DeathReason::from_npc(i16::from(index)),
                     IMMUNE_TICKS,
                 );
+                // Over half the roster leaves something behind as well as the damage, and for
+                // several of them that is the actual difficulty of the biome they live in.
+                self.apply_touch_debuffs(slot as u8, npc_type);
                 continue;
             }
 
@@ -3233,7 +3237,56 @@ impl GameServer {
     ///
     /// Each chain is rolled in order and stops at the first success, which is what keeps a
     /// skeleton's four weapons rare rather than giving it four separate chances at one.
+    ///
+    /// On top of that come the drops that depend on the world rather than the thing that died: a
+    /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
+    /// has fallen.
     fn drop_loot(&mut self, npc_type: u16, center: (f32, f32)) {
+        let (tx, ty) = (
+            (center.0 / crate::game::npc::TILE) as i32,
+            (center.1 / crate::game::npc::TILE) as i32,
+        );
+        let ground = self.world.tile(tx, ty).block;
+        let p = &self.world.progress;
+        let at = terrustia_proto::conditional_drops::Conditions {
+            expert: self.world.game_mode >= 1,
+            hard_mode: p.hard_mode,
+            downed_plantera: p.downed_plantera,
+            in_hallow: matches!(
+                terrustia_proto::convert::biome_of(ground),
+                Some(terrustia_proto::convert::Biome::Hallow)
+            ),
+            in_corruption: matches!(
+                terrustia_proto::convert::biome_of(ground),
+                Some(terrustia_proto::convert::Biome::Corruption)
+            ),
+            in_crimson: matches!(
+                terrustia_proto::convert::biome_of(ground),
+                Some(terrustia_proto::convert::Biome::Crimson)
+            ),
+            underground: ty > i32::from(self.world.rock_layer),
+        };
+        for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
+            if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+                continue;
+            }
+            let stack = if rule.max > rule.min {
+                rand::Rng::random_range(&mut self.rng, rule.min..=rule.max)
+            } else {
+                rule.min
+            };
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
+            {
+                self.broadcast_item(index);
+            }
+        }
+        self.drop_flat_loot(npc_type, center);
+    }
+
+    /// The unconditional table.
+    fn drop_flat_loot(&mut self, npc_type: u16, center: (f32, f32)) {
         for chain in terrustia_proto::npc_drops::drops(npc_type) {
             for rule in *chain {
                 if !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
@@ -3713,6 +3766,27 @@ impl GameServer {
     fn note_moon_kill(&mut self, npc_type: u16) {
         if let Some(wave) = self.moon.note_kill(npc_type, self.world.game_mode) {
             self.announce(&format!("Wave {wave}!"));
+        }
+    }
+
+    /// Land whatever an enemy leaves behind on the player it just touched.
+    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16) {
+        let expert = self.world.game_mode >= 1;
+        for rule in terrustia_proto::touch_debuffs::on_touch(npc_type) {
+            if rule.expert_only && !expert {
+                continue;
+            }
+            if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+                continue;
+            }
+            let ticks = if rule.ticks.1 > rule.ticks.0 {
+                rand::Rng::random_range(&mut self.rng, rule.ticks.0..=rule.ticks.1)
+            } else {
+                rule.ticks.0
+            };
+            if let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, rule.buff, ticks) {
+                self.broadcast(frame, None);
+            }
         }
     }
 

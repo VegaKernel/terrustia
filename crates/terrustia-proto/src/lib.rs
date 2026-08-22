@@ -6,6 +6,7 @@
 //! Copyright (C) 2026 Brooklyn Halmstad.
 //! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
 
+pub mod conditional_drops;
 pub mod convert;
 pub mod error;
 pub mod housing;
@@ -33,6 +34,7 @@ pub mod tile_drops;
 pub mod tile_object;
 pub mod tile_sets;
 pub mod tile_solid;
+pub mod touch_debuffs;
 pub mod writer;
 
 pub use error::{ProtoError, Result};
