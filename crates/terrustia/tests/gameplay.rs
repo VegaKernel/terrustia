@@ -1879,3 +1879,119 @@ async fn a_dummy_goes_when_its_tile_does() {
     .await
     .expect("the dummy should have gone with its tile");
 }
+
+/// Lay a flat arena with a crystal stand in the middle of it.
+///
+/// The Old One's Army refuses to begin unless the ground is sixty tiles clear on both sides, which
+/// is the game's own way of making building an arena part of preparing for the event.
+fn arena_with_a_stand(world: &mut World, at: (i32, i32)) {
+    for x in at.0 - 120..=at.0 + 120 {
+        for y in at.1 + 1..at.1 + 6 {
+            world.set_tile(x, y, Tile::block(1));
+        }
+        for y in at.1 - 20..=at.1 {
+            world.set_tile(x, y, Tile::AIR);
+        }
+    }
+    // The stand itself: a 3x2 object, so every tile carries its frame.
+    for dx in 0..3 {
+        for dy in 0..2 {
+            world.set_tile(
+                at.0 + dx,
+                at.1 - 1 + dy,
+                Tile::framed(466, dx as i16 * 18, dy as i16 * 18),
+            );
+        }
+    }
+}
+
+/// Putting a crystal on its stand raises the event, its gates and its first wave.
+#[tokio::test]
+async fn the_old_ones_army_begins_at_a_crystal_stand() {
+    let at = (400, 330);
+    let addr = start_with(Config::default(), |world| arena_with_a_stand(world, at)).await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut place = Vec::new();
+    place.extend_from_slice(&(at.0 as i16).to_le_bytes());
+    place.extend_from_slice(&((at.1 - 1) as i16).to_le_bytes());
+    bob.send(&frame(id::CRYSTAL_INVASION_START, &place))
+        .await
+        .unwrap();
+
+    // The crystal itself, and then the two gates it raises at the arena's ends.
+    bob.wait_for(
+        "the crystal",
+        |e| matches!(e, Event::NpcSynced(n) if n.net_id == 548),
+    )
+    .await
+    .expect("a crystal should have appeared");
+
+    let mut gates = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while gates < 2 && tokio::time::Instant::now() < deadline {
+        if let Some(Event::NpcSynced(n)) = bob
+            .try_wait_for(
+                "a gate",
+                |e| matches!(e, Event::NpcSynced(n) if n.net_id == 549),
+                Duration::from_secs(6),
+            )
+            .await
+        {
+            let _ = n;
+            gates += 1;
+        } else {
+            break;
+        }
+    }
+    assert_eq!(gates, 2, "both lane portals should have gone up");
+}
+
+/// An arena too small for the event is refused, rather than starting one nobody can win.
+#[tokio::test]
+async fn a_cramped_arena_is_refused() {
+    let at = (400, 330);
+    let addr = start_with(Config::default(), |world| {
+        // Only twenty tiles of floor each way: nowhere near the sixty the event asks for.
+        for x in at.0 - 20..=at.0 + 20 {
+            for y in at.1 + 1..at.1 + 6 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+            for y in at.1 - 20..=at.1 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        for dx in 0..3 {
+            for dy in 0..2 {
+                world.set_tile(
+                    at.0 + dx,
+                    at.1 - 1 + dy,
+                    Tile::framed(466, dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+        // Walls at both ends, so the arena walker stops well short.
+        for y in at.1 - 20..at.1 + 6 {
+            world.set_tile(at.0 - 21, y, Tile::block(1));
+            world.set_tile(at.0 + 21, y, Tile::block(1));
+        }
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    let mut place = Vec::new();
+    place.extend_from_slice(&(at.0 as i16).to_le_bytes());
+    place.extend_from_slice(&((at.1 - 1) as i16).to_le_bytes());
+    bob.send(&frame(id::CRYSTAL_INVASION_START, &place))
+        .await
+        .unwrap();
+
+    let started = bob
+        .try_wait_for(
+            "a crystal that should not appear",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 548),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(started.is_none(), "the event began in a cramped arena");
+}
