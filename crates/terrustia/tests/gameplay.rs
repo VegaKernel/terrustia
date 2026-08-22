@@ -1762,3 +1762,69 @@ async fn a_full_chest_will_not_break() {
         .await
         .expect("a chest with things in it should survive");
 }
+
+/// A training dummy appears when somebody is near its tile, and goes when they leave.
+#[tokio::test]
+async fn a_training_dummy_comes_and_goes() {
+    // The dummy's tile, planted where a joining player will be standing.
+    let addr = start_with(Config::default(), |world| {
+        let (x, y) = (world.spawn_x as i32, world.spawn_y as i32 + 1);
+        world.set_tile(x, y, Tile::framed(378, 0, 0));
+    })
+    .await;
+    let mut bob = join(addr, "bob").await;
+
+    let (x, y) = (bob.world().spawn.0, bob.world().spawn.1 + 1);
+    // A dummy only comes out for somebody standing near it, so bob has to actually be there: a
+    // client that has never moved is at the origin as far as the server is concerned.
+    bob.move_to(f32::from(x) * 16.0, f32::from(y) * 16.0)
+        .await
+        .unwrap();
+
+    let mut place = Vec::new();
+    place.extend_from_slice(&x.to_le_bytes());
+    place.extend_from_slice(&y.to_le_bytes());
+    place.push(0); // a training dummy
+    bob.send(&frame(id::TILE_ENTITY_PLACEMENT, &place))
+        .await
+        .unwrap();
+
+    // The dummy is put out because bob is standing right there.
+    let raised = bob
+        .wait_for(
+            "the dummy appearing",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 488),
+        )
+        .await
+        .expect("a dummy should have been raised");
+    let Event::NpcSynced(dummy) = raised else {
+        unreachable!("matched on it");
+    };
+    // It carries where it was planted, which is how its routine knows the tile is still there.
+    assert_eq!(
+        (dummy.ai[0] as i16, dummy.ai[1] as i16),
+        (x, y),
+        "the dummy does not know where it was planted"
+    );
+}
+
+/// A tile entity cannot be hung in mid-air.
+#[tokio::test]
+async fn a_tile_entity_needs_its_tile() {
+    let addr = start().await;
+    let mut bob = join(addr, "bob").await;
+
+    // An item frame where there is certainly nothing.
+    let mut place = Vec::new();
+    place.extend_from_slice(&402i16.to_le_bytes());
+    place.extend_from_slice(&20i16.to_le_bytes());
+    place.push(1); // an item frame
+    bob.send(&frame(id::TILE_ENTITY_PLACEMENT, &place))
+        .await
+        .unwrap();
+
+    // Nothing happens, and the server is still answering.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let fresh = join(addr, "fresh").await;
+    assert!(fresh.world().tile(402, 20).is_some(), "the server survived");
+}

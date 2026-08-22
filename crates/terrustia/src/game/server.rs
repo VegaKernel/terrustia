@@ -205,6 +205,9 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// The furniture that remembers something: dummies, frames, racks, pylons.
+    tile_entities: Vec<terrustia_proto::tile_entity::TileEntity>,
+    next_tile_entity: i32,
     /// Liquid waiting to settle. Empty unless something has disturbed it.
     liquids: crate::world::liquid::Liquids,
     /// Which of each pair of hardmode ores this world settled on.
@@ -258,6 +261,8 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            tile_entities: Vec::new(),
+            next_tile_entity: 0,
             liquids: crate::world::liquid::Liquids::default(),
             ore_tiers: crate::world::hardmode::OreTiers::default(),
             worst_tick: TickCost::default(),
@@ -401,6 +406,7 @@ impl GameServer {
         {
             self.save_world("autosave");
         }
+        self.tick_tile_entities();
         self.tick_liquids();
         self.tick_spread();
         self.tick_weather();
@@ -746,6 +752,7 @@ impl GameServer {
             }
             id::LOCK_AND_UNLOCK => self.on_lock(slot, &payload),
             id::CHEST_UPDATES => self.on_chest_update(slot, &payload),
+            id::TILE_ENTITY_PLACEMENT => self.on_tile_entity_placed(slot, &payload),
             id::HIT_SWITCH => self.on_hit_switch(slot, &payload),
             id::BUG_CATCHING => self.on_bug_caught(slot, &payload),
             id::BUG_RELEASING => self.on_bug_released(slot, &payload),
@@ -3509,6 +3516,120 @@ impl GameServer {
         }
         self.broadcast(packets::verbatim(id, payload)?, Some(slot));
         Ok(())
+    }
+
+    /// Packet 87: a client placed a tile entity.
+    ///
+    /// The tile has to be there and be the right one, and there has to be nothing there already.
+    /// Both checks are the server's: without them a crafted packet hangs an item frame in the sky
+    /// or stacks a hundred dummies on one tile.
+    fn on_tile_entity_placed(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::tile_entity::{EntityKind, TileEntity};
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (r.i16()?, r.i16()?);
+        let Some(kind) = EntityKind::from_id(r.u8()?) else {
+            return Ok(());
+        };
+        if !self.world.in_bounds(i32::from(x), i32::from(y)) {
+            return Ok(());
+        }
+        if self.tile_entities.iter().any(|e| e.x == x && e.y == y) {
+            return Ok(());
+        }
+        // The tile it claims to stand on has to actually be there.
+        if let Some(wanted) = kind.tile() {
+            let tile = self.world.tile(i32::from(x), i32::from(y));
+            if !tile.is_active() || tile.block != wanted {
+                debug!(slot, x, y, ?kind, "nothing there to place that on");
+                return Ok(());
+            }
+        }
+
+        let id = self.next_tile_entity;
+        self.next_tile_entity += 1;
+        self.tile_entities.push(TileEntity {
+            id,
+            kind,
+            x,
+            y,
+            npc: None,
+        });
+        debug!(slot, x, y, ?kind, id, "tile entity placed");
+        Ok(())
+    }
+
+    /// One tick of the tile entities.
+    ///
+    /// Only the training dummy does anything: it puts an NPC out when somebody comes near and
+    /// takes it away when they leave, which is the only way that NPC ever exists. The rest are
+    /// storage and are only there to be remembered.
+    fn tick_tile_entities(&mut self) {
+        use terrustia_proto::tile_entity::EntityKind;
+        /// How far a dummy will notice you from.
+        const DUMMY_REACH: f32 = 1600.0;
+        const DUMMY_NPC: u16 = 488;
+
+        if self.tile_entities.is_empty() {
+            return;
+        }
+        let watchers: Vec<(f32, f32)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| p.position)
+            .collect();
+
+        let mut raise = Vec::new();
+        let mut lower = Vec::new();
+        for (at, entity) in self.tile_entities.iter().enumerate() {
+            if entity.kind != EntityKind::TrainingDummy {
+                continue;
+            }
+            let here = (
+                f32::from(entity.x) * crate::game::npc::TILE,
+                f32::from(entity.y) * crate::game::npc::TILE,
+            );
+            let watched = watchers
+                .iter()
+                .any(|p| (p.0 - here.0).abs() < DUMMY_REACH && (p.1 - here.1).abs() < DUMMY_REACH);
+            // A dummy whose own tile has gone takes its NPC with it.
+            let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
+            let planted = tile.is_active() && Some(tile.block) == entity.kind.tile();
+            match entity.npc {
+                Some(index) if !watched || !planted => lower.push((at, index)),
+                None if watched && planted => raise.push((at, here)),
+                _ => {}
+            }
+        }
+
+        for (at, index) in lower {
+            self.npcs.remove(index);
+            self.broadcast_npc_death(index);
+            if let Some(entity) = self.tile_entities.get_mut(at) {
+                entity.npc = None;
+            }
+        }
+        for (at, here) in raise {
+            // It stands on its own tile, and carries where it was planted in its ai so its routine
+            // can tell whether it is still there.
+            let Some(index) = self.npcs.spawn(DUMMY_NPC, (here.0 + 16.0, here.1 + 48.0)) else {
+                continue;
+            };
+            if let Some(entity) = self.tile_entities.get(at)
+                && let Some(dummy) = self.npcs.get_mut(index)
+            {
+                dummy.ai[0] = f32::from(entity.x);
+                dummy.ai[1] = f32::from(entity.y);
+            }
+            if let Some(entity) = self.tile_entities.get_mut(at) {
+                entity.npc = Some(index);
+            }
+            self.broadcast_npc(index);
+        }
     }
 
     /// Packet 34: a chest or dresser was placed or broken.
