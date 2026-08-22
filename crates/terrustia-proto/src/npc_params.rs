@@ -2836,3 +2836,50 @@ pub const TOWER_COLLAPSE_TICKS: f32 = 180.0;
 pub const TOWER_COLLAPSE_FADE_AT: f32 = 120.0;
 pub const TOWER_COLLAPSE_DRIFT: f32 = 0.25;
 pub const TOWER_COLLAPSE_EASE: f32 = 0.02;
+
+// --- Mothron ------------------------------------------------------------------------------------
+
+/// It will not lay more than this many eggs and spawn at once.
+pub const MOTHRON_BROOD: usize = 7;
+/// The egg it lays, and the spawn that hatches from it.
+pub const MOTHRON_EGG: u16 = 470;
+pub const MOTHRON_SPAWN_TYPE: u16 = 471;
+/// Hovering: it holds two hundred pixels above you and picks an attack every three seconds.
+pub const MOTHRON_ABOVE: f32 = 200.0;
+pub const MOTHRON_HOVER_SPEED: f32 = 6.0;
+pub const MOTHRON_HOVER_SMOOTH: f32 = 30.0;
+pub const MOTHRON_HOVER_HOLD: f32 = 80.0;
+pub const MOTHRON_DECIDE_TICKS: f32 = 180.0;
+/// Being hit hurries the decision along, by ten to thirty ticks.
+pub const MOTHRON_HIT_HURRY: (u32, u32) = (10, 30);
+/// It gives up on terrain past this and comes straight through it.
+pub const MOTHRON_FAR: f32 = 800.0;
+pub const MOTHRON_LOSE: f32 = 1000.0;
+pub const MOTHRON_REACQUIRE: f32 = 300.0;
+pub const MOTHRON_CROSS_SPEED: f32 = 7.0;
+pub const MOTHRON_CROSS_GAIN: f32 = 100.0;
+pub const MOTHRON_CROSS_SMOOTH: f32 = 25.0;
+/// The chase: it accelerates for as long as it holds you in sight, and hits at half strength.
+pub const MOTHRON_CHASE_DAMAGE: f32 = 0.5;
+pub const MOTHRON_CHASE_BASE: f32 = 4.0;
+pub const MOTHRON_CHASE_ACCEL: f32 = 1.0 / 45.0;
+pub const MOTHRON_CHASE_ACCEL_EXPERT: f32 = 1.0 / 60.0;
+pub const MOTHRON_CHASE_GAIN: f32 = 120.0;
+pub const MOTHRON_CHASE_SMOOTH: f32 = 20.0;
+pub const MOTHRON_CHASE_TICKS: f32 = 240.0;
+/// The sweep: it draws off to one side, lines up, and comes across at speed, hitting harder.
+pub const MOTHRON_SWEEP_OFFSET: f32 = 400.0;
+pub const MOTHRON_SWEEP_DRAW_SPEED: f32 = 8.0;
+pub const MOTHRON_SWEEP_DRAW_ACCEL: f32 = 1.0 / 30.0;
+pub const MOTHRON_SWEEP_DRAW_SMOOTH: f32 = 4.0;
+pub const MOTHRON_SWEEP_READY_X: f32 = 350.0;
+pub const MOTHRON_SWEEP_READY_Y: f32 = 20.0;
+pub const MOTHRON_SWEEP_AIM_SPEED: f32 = 16.0;
+pub const MOTHRON_SWEEP_AIM_SMOOTH: f32 = 8.0;
+pub const MOTHRON_SWEEP_AIM_TICKS: f32 = 10.0;
+pub const MOTHRON_SWEEP_DAMAGE: f32 = 1.3;
+pub const MOTHRON_SWEEP_ACCEL: f32 = 1.0 / 30.0;
+pub const MOTHRON_SWEEP_PAST: f32 = 260.0;
+/// Where it will lay: within this many tiles of you, on a floor, and not in lava.
+pub const MOTHRON_LAY_RANGE_X: i32 = 30;
+pub const MOTHRON_LAY_RANGE_Y: i32 = 20;

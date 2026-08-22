@@ -18,6 +18,7 @@ pub mod hoverers;
 pub mod hunter;
 pub mod invasion;
 pub mod leaper;
+pub mod mothron;
 pub mod nautilus;
 pub mod pillar;
 pub mod rider;

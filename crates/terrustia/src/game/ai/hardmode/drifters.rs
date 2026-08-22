@@ -39,6 +39,8 @@ pub struct Outcome {
     pub spent: bool,
     /// Set when it finished by going off, which hurts whatever is standing next to it.
     pub detonated: bool,
+    /// Anything it put into the world.
+    pub spawn: Vec<crate::game::npc_ai::Spawn>,
     /// Set when it should count as killed rather than merely removed — a pillar that finishes
     /// collapsing has been beaten, and the world needs to know.
     pub died: bool,
