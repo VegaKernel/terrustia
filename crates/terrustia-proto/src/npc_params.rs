@@ -4076,3 +4076,36 @@ pub const FAIRY_CELEBRATE: f32 = 210.0;
 pub const FAIRY_ARRIVAL: f32 = 200.0;
 /// How long a fairy will stay with you at all: five minutes, and then it leaves.
 pub const FAIRY_PATIENCE: f32 = 18000.0;
+
+/// The Martian saucer's parts. The core is the thing that flies; everything else rides it.
+pub const MARTIAN_SAUCER_BODY: u16 = 392;
+pub const MARTIAN_SAUCER_TURRET: u16 = 393;
+pub const MARTIAN_SAUCER_CANNON: u16 = 394;
+/// Its deathray, fired once at the start of each strafe of the last phase.
+pub const SAUCER_DEATHRAY: u16 = 447;
+pub const SAUCER_DEATHRAY_DAMAGE: i32 = 80;
+/// How far the parts sit from the core when it puts itself together.
+pub const SAUCER_PART_OUT: f32 = 150.0;
+/// Beyond this it gives up on you.
+pub const SAUCER_GIVE_UP: f32 = 5600.0;
+/// The attack cycle, and the boundaries of its six phases within it.
+pub const SAUCER_CYCLE: f32 = 600.0;
+pub const SAUCER_PHASES: [(f32, u8); 6] = [
+    (580.0, 0),
+    (440.0, 5),
+    (420.0, 4),
+    (280.0, 3),
+    (260.0, 2),
+    (20.0, 1),
+];
+/// Where it wants to sit relative to you in each of the approach phases.
+pub const SAUCER_WIDE: f32 = 600.0;
+pub const SAUCER_CLOSE: f32 = 300.0;
+pub const SAUCER_HIGH: f32 = 250.0;
+pub const SAUCER_LOW: f32 = 170.0;
+/// How long the death spin runs, and how long the last phase lasts.
+pub const SAUCER_SPIN: f32 = 150.0;
+pub const SAUCER_LAST_STAND: f32 = 3600.0;
+/// The last phase alternates on this rhythm: hover, then strafe.
+pub const SAUCER_BEAT: f32 = 120.0;
+pub const SAUCER_HALF_BEAT: f32 = 60.0;
