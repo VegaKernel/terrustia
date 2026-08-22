@@ -15,6 +15,7 @@ pub mod moon;
 pub mod plantera;
 pub mod prime;
 pub mod queen_bee;
+pub mod queen_slime;
 pub mod skeletron;
 pub mod tree;
 pub mod twins;

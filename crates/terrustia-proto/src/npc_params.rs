@@ -3618,3 +3618,35 @@ pub const SANTA_BULLET_DAMAGE: i32 = 36;
 pub const SANTA_BULLET_SPEED: f32 = 15.0;
 pub const SANTA_MUZZLE: f32 = 50.0;
 pub const SANTA_LEASH: f32 = 2000.0;
+
+// --- Queen Slime ----------------------------------------------------------------------------------
+
+pub const QUEEN_SLIME: u16 = 657;
+/// Below half health it stops hopping and takes to the air.
+pub const QUEEN_SLIME_FLIES_AT: f32 = 0.5;
+/// It waits this long between attacks: a second on the ground, two in the air.
+pub const QUEEN_SLIME_WAIT: f32 = 60.0;
+pub const QUEEN_SLIME_WAIT_FLYING: f32 = 120.0;
+/// The three-hop set: two low, then one high that ends it.
+pub const QUEEN_SLIME_HOPS: [(f32, f32, f32); 3] = [
+    // rise, drift, rest afterwards
+    (-8.0, 4.0, -40.0),
+    (-6.0, 4.5, -40.0),
+    (-13.0, 3.5, 0.0),
+];
+/// The hop charge fills faster at two thirds and a third of its health.
+pub const QUEEN_SLIME_CHARGE: f32 = 4.0;
+pub const QUEEN_SLIME_CHARGE_STEPS: [f32; 2] = [0.66, 0.33];
+/// Losing sight of it, or being far above it, builds a teleport.
+pub const QUEEN_SLIME_CHEESE_RATE: f32 = 1.5;
+pub const QUEEN_SLIME_CHEESE_AT: f32 = 300.0;
+pub const QUEEN_SLIME_CHEESE_MAX: f32 = 360.0;
+pub const QUEEN_SLIME_REACH: f32 = 320.0;
+/// The teleport: it fades out over a second and back in over half of one.
+pub const QUEEN_SLIME_FADE_OUT: f32 = 60.0;
+pub const QUEEN_SLIME_FADE_IN: f32 = 30.0;
+/// Past five hundred tiles it gives up entirely.
+pub const QUEEN_SLIME_LEASH_TILES: f32 = 500.0;
+/// Flying: it holds above you and dives.
+pub const QUEEN_SLIME_HOVER: f32 = 250.0;
+pub const QUEEN_SLIME_DIVE_RANGE: f32 = 250.0;
