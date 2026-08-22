@@ -39,6 +39,9 @@ pub struct Outcome {
     pub spent: bool,
     /// Set when it finished by going off, which hurts whatever is standing next to it.
     pub detonated: bool,
+    /// Set when it should count as killed rather than merely removed — a pillar that finishes
+    /// collapsing has been beaten, and the world needs to know.
+    pub died: bool,
 }
 
 /// Ease toward a wanted velocity on both axes, doubling the push while still going the wrong way.

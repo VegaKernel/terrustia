@@ -348,7 +348,7 @@ pub fn parity(style: i32) -> Option<Parity> {
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 38 | 39 | 40 | 41 | 42 | 43 | 44
         | 49 | 50 | 54 | 55 | 56 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75
-        | 80 | 85 | 86 | 87 | 89 | 90 | 91 | 92 | 93 | 95 | 96 | 97 | 99 | 100 | 101 | 102
+        | 80 | 85 | 86 | 87 | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102
         | 103 | 104 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126
         | 127 => Parity::Ported,
         _ => return None,
@@ -435,6 +435,8 @@ pub struct Effects {
 /// construction, and a test walks the whole roster to prove it.
 pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> Effects {
     let mut effects = Effects::default();
+    // Read before the routine runs, because a pillar's routine borrows `npc` mutably.
+    let npc_shield = npc.shield;
     let target = world.target;
     match npc.stats.ai_style {
         0 => inert::update(npc, target),
@@ -568,6 +570,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
         86 => hardmode::swooper::swooper(npc, world),
+        94 => {
+            let out = hardmode::pillar::pillar(npc, world, npc_shield);
+            effects.expired = out.spent;
+            effects.died = out.died;
+        }
         87 => {
             let out = hardmode::big_mimic::big_mimic(npc, world, rng);
             effects.reflecting = out.reflecting;

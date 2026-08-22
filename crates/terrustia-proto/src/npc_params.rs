@@ -2801,3 +2801,38 @@ pub const MIMIC_RETURN_SPEED: f32 = 10.0;
 pub const MIMIC_RETURN_RANGE: f32 = 200.0;
 /// Beyond this it stops fighting and comes back to you through the walls.
 pub const MIMIC_LOSE_RANGE: f32 = 600.0;
+
+// --- Lunar pillars --------------------------------------------------------------------------------
+
+/// The four towers, in the order the game numbers their fragments.
+pub const TOWER_SOLAR: u16 = 517;
+pub const TOWER_VORTEX: u16 = 422;
+pub const TOWER_NEBULA: u16 = 507;
+pub const TOWER_STARDUST: u16 = 493;
+
+/// How many of a tower's minions must die before its shield drops.
+///
+/// Halved once the Moon Lord has been beaten, which is the game's way of making a second lunar
+/// event shorter than the first.
+pub const TOWER_SHIELD: i32 = 100;
+
+/// A tower bobs on this cycle, half a pixel either way.
+pub const TOWER_BOB_TICKS: f32 = 300.0;
+pub const TOWER_BOB: f32 = 0.5;
+/// It holds itself between ten and thirty tiles above whatever is beneath it.
+pub const TOWER_TOO_LOW: i32 = 10;
+pub const TOWER_COMFORTABLE: i32 = 20;
+pub const TOWER_TOO_HIGH: i32 = 30;
+pub const TOWER_LIFT: f32 = 1.5;
+/// It stays this many tiles clear of the world's edges.
+pub const TOWER_MARGIN: i32 = 60;
+pub const TOWER_MARGIN_NUDGE: f32 = 80.0;
+/// Left alone for a second it starts healing, two hundred a time.
+pub const TOWER_ABANDONED_RANGE: f32 = 2000.0;
+pub const TOWER_ABANDONED_TICKS: f32 = 60.0;
+pub const TOWER_REGEN: i32 = 200;
+/// Its collapse: three seconds, fading out over the last one.
+pub const TOWER_COLLAPSE_TICKS: f32 = 180.0;
+pub const TOWER_COLLAPSE_FADE_AT: f32 = 120.0;
+pub const TOWER_COLLAPSE_DRIFT: f32 = 0.25;
+pub const TOWER_COLLAPSE_EASE: f32 = 0.02;

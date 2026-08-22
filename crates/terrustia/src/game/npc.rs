@@ -55,6 +55,11 @@ pub struct Npc {
     /// together silently breaks the routine.
     pub local_ai: [f32; 4],
     pub stats: NpcStats,
+    /// A lunar pillar's shield: how many of its minions are still unaccounted for.
+    ///
+    /// Nothing else uses it. It lives on the NPC rather than in a global because a world can hold
+    /// four pillars at once and each one's shield falls separately.
+    pub shield: i32,
     /// A size that is not the type's, for the routines that grow or shrink mid-life.
     ///
     /// `None` means "whatever the type says", which is the case for all but a handful.
@@ -156,6 +161,7 @@ impl Npc {
             ai: [0.0; 4],
             local_ai: [0.0; 4],
             stats,
+            shield: 0,
             size: None,
             defense: stats.defense,
             damage_bonus: 1.0,
