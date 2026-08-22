@@ -2718,3 +2718,44 @@ pub const BRAIN_FLOATER_EVERY: f32 = 60.0;
 pub const BRAIN_FLOATER_SPEED: (f32, f32) = (4.0, 2.5);
 /// A teleport hurries its floaters along by half a second each.
 pub const BRAIN_FLOATER_HURRY: f32 = 30.0;
+
+// --- The Dreadnautilus, which only exists during a blood moon -----------------------------------
+
+/// How it drifts to its station, and where that station is relative to you.
+pub const NAUTILUS_SPEED: f32 = 7.5;
+pub const NAUTILUS_ACCEL: f32 = 0.15;
+pub const NAUTILUS_STANDOFF: f32 = 300.0;
+pub const NAUTILUS_ABOVE: f32 = 200.0;
+pub const NAUTILUS_ARRIVED: f32 = 50.0;
+/// It holds station this long before choosing an attack.
+pub const NAUTILUS_HOLD: f32 = 60.0;
+/// Rising out of the ground when it arrives.
+pub const NAUTILUS_EMERGE_TICKS: f32 = 50.0;
+pub const NAUTILUS_EMERGE_AT: f32 = 5.0;
+pub const NAUTILUS_EMERGE_RISE: f32 = -2.5;
+pub const NAUTILUS_FADE_IN: i32 = 10;
+/// The charge: it winds up, reflecting shots, then rams backwards along its own mouth line.
+pub const NAUTILUS_CHARGE_WINDUP: f32 = 90.0;
+pub const NAUTILUS_CHARGE_TICKS: f32 = 180.0;
+pub const NAUTILUS_CHARGE_SPEED: f32 = -16.0;
+pub const NAUTILUS_CHARGE_HOMING: f32 = 1.5;
+pub const NAUTILUS_CHARGE_MIN: f32 = 150.0;
+/// The spray: three bursts of five to ten bolts, each shoving it backwards.
+pub const NAUTILUS_SPRAY_WINDUP: f32 = 90.0;
+pub const NAUTILUS_SPRAY_TICKS: f32 = 90.0;
+pub const NAUTILUS_SPRAY_BURSTS: i32 = 3;
+pub const NAUTILUS_SPRAY_RECOIL: f32 = -8.0;
+pub const NAUTILUS_SPRAY_SHOT: u16 = 814;
+pub const NAUTILUS_SPRAY_DAMAGE: i32 = 30;
+pub const NAUTILUS_SPRAY_SPEED: f32 = 10.0;
+pub const NAUTILUS_SPRAY_SPREAD: f32 = 6.0;
+pub const NAUTILUS_SPRAY_COUNT: (u32, u32) = (5, 11);
+/// The summon: it holds still and calls three helpers out of the blood moon.
+pub const NAUTILUS_SUMMON_TICKS: f32 = 180.0;
+pub const NAUTILUS_SUMMON_AT: [f32; 3] = [10.0, 20.0, 30.0];
+pub const NAUTILUS_HELPER_PORTAL: u16 = 813;
+pub const NAUTILUS_HELPER: u16 = 619;
+pub const NAUTILUS_HELPERS_MAX: usize = 3;
+/// Where its mouth is, and how far off the body's own rotation it points.
+pub const NAUTILUS_MOUTH_ANGLE: f32 = 0.471_238_94;
+pub const NAUTILUS_MOUTH_REACH: f32 = 50.0;

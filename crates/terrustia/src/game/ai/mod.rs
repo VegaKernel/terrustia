@@ -277,11 +277,12 @@ pub struct Shot {
 }
 
 /// The types worth counting each tick, because some routine's behaviour turns on how many are up.
-pub const CENSUS_TYPES: [u16; 4] = [
+pub const CENSUS_TYPES: [u16; 5] = [
     terrustia_proto::npc_params::CREEPER,
     terrustia_proto::npc_params::WALL_LEECH,
     terrustia_proto::npc_params::PAL_ESCORT,
     terrustia_proto::npc_params::DUTCHMAN_GUN,
+    terrustia_proto::npc_params::NAUTILUS_HELPER,
 ];
 
 impl<T: TileView> World<'_, T> {
@@ -342,12 +343,13 @@ pub enum Parity {
 /// Anything absent has no implementation at all.
 pub fn parity(style: i32) -> Option<Parity> {
     let level = match style {
-        // Ported from the decompiled source.
+        // Ported from the decompiled source. Kept in order, so adding one is a one-line change and
+        // a missing number is visible.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
-        | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
-        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 74 | 75 | 72 | 73
-        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 85 | 86 | 90 | 93 | 97
-        | 102 | 103 | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => {
+        | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 38 | 39 | 40 | 41 | 42 | 43 | 44
+        | 49 | 50 | 54 | 55 | 56 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75
+        | 80 | 85 | 86 | 89 | 90 | 91 | 92 | 93 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103
+        | 104 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126 | 127 => {
             Parity::Ported
         }
         _ => return None,
@@ -419,6 +421,8 @@ pub struct Effects {
     pub called_invasion: bool,
     /// Set when it went off rather than merely dying, which hurts whatever is next to it.
     pub detonated: bool,
+    /// Set while it is in a phase that bounces projectiles off rather than taking them.
+    pub reflecting: bool,
     /// How long the thing it just turned into should sit still before doing anything.
     pub rest_for: i32,
     /// Where this NPC wants whatever it is carrying to hang.
@@ -565,6 +569,22 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
         86 => hardmode::swooper::swooper(npc, world),
+        117 => {
+            let helpers = world.count(terrustia_proto::npc_params::NAUTILUS_HELPER);
+            let out = hardmode::nautilus::dreadnautilus(npc, world, helpers, rng);
+            effects.shots.extend(out.base.shots);
+            effects.reflecting = out.reflecting;
+            // Each helper arrives through a portal rather than simply appearing.
+            for at in out.summons {
+                effects.shots.push(Shot {
+                    projectile: terrustia_proto::npc_params::NAUTILUS_HELPER_PORTAL,
+                    damage: 0,
+                    position: at,
+                    velocity: (0.0, 0.0),
+                    time_left: 300,
+                });
+            }
+        }
         97 => {
             let out = hardmode::teleporter::nebula_brain(npc, world, rng);
             effects.shots.extend(out.base.shots);
