@@ -1,0 +1,2831 @@
+//! The single-writer game task.
+//!
+//! One task owns the world and the player table, so there are no locks on the hot path and packet
+//! ordering is deterministic. Connections talk to it over an `mpsc` of [`ServerEvent`]; it talks
+//! back through each player's outbound queue.
+
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+use bytes::Bytes;
+use rand::{SeedableRng, rngs::SmallRng};
+use std::path::Path;
+use terrustia_proto::{
+    ItemStack, NetworkText, Tile, TileFlags, id,
+    items::{ItemOwner, SyncItem, decode_item_despawn},
+    net_module::{self, IncomingChat},
+    npc::{DamageNpc, SyncNpc, damage_ack, damage_taken},
+    npc_data::npc_stats,
+    objects::{
+        self, DoorToggle, RequestChestOpen, RequestSign, SignText, SyncChestItem, SyncPlayerChest,
+    },
+    packets::{
+        self, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn, SpawnTileData,
+        TileAction, TileManipulation,
+    },
+    reader::PacketReader,
+    section::encode_section_packet,
+    square::TileSquare,
+    tile_drops::tile_drop,
+    tile_sets::frame_important,
+};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{MissedTickBehavior, interval},
+};
+
+use tracing::{debug, error, info, warn};
+
+use crate::{
+    config::Config,
+    game::player::{ConnState, Player},
+    game::{
+        clock, housing,
+        npc::{NpcStore, TileView},
+        npc_ai::{self, Target},
+        spawn,
+    },
+    net::Frame,
+    world::{
+        Sign, World,
+        items::{self, ItemStore},
+        wld_save,
+        world::{DAY_LENGTH, NIGHT_LENGTH},
+    },
+};
+
+/// Signs hold a page of text at most; anything longer is a client that is not playing fair.
+const MAX_SIGN_TEXT: usize = 1000;
+
+/// How far a player can be from an item and still have it reserved for them, in pixels.
+///
+/// Generous on purpose: the reservation only grants the right to pick the item up, and a client
+/// needs to hold it before its own grab animation begins.
+const ITEM_GRAB_RANGE: f32 = 400.0;
+
+/// Vanilla runs at 60 ticks per second and the clock packets assume it.
+const TICK: Duration = Duration::from_nanos(16_666_667);
+
+/// How often the world clock is pushed to clients.
+const TIME_SYNC_TICKS: u64 = 60;
+
+/// How often the worst tick in the window is reported, when it is worth reporting.
+const TICK_REPORT_EVERY: u64 = 600;
+
+/// The parts of a tick, in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    World,
+    Sections,
+    Items,
+    Npcs,
+    Projectiles,
+    Damage,
+    Spawning,
+    Housing,
+    Sync,
+}
+
+impl Phase {
+    const NAMES: [&'static str; 9] = [
+        "world",
+        "sections",
+        "items",
+        "npcs",
+        "projectiles",
+        "damage",
+        "spawning",
+        "housing",
+        "sync",
+    ];
+}
+
+/// Where one tick's time went.
+///
+/// `cpu` is what the tick cost; `wall` is how long it took to happen. They differ by however long
+/// the OS gave this core to something else, which on a machine that is also running the game can
+/// be tens of milliseconds. Keeping them apart is what stops a busy laptop from being reported as
+/// a slow server.
+#[derive(Debug, Default, Clone, Copy)]
+struct TickCost {
+    cpu: Duration,
+    wall: Duration,
+    phases: [Duration; Phase::NAMES.len()],
+}
+
+impl TickCost {
+    /// The phase that took the longest, which is the one worth naming in a warning.
+    fn worst_phase(&self) -> (&'static str, Duration) {
+        self.phases
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, d)| **d)
+            .map_or(("none", Duration::ZERO), |(i, d)| (Phase::NAMES[i], *d))
+    }
+}
+
+/// Spawn slots a boss fight may fill with summoned minions.
+const MAX_MINION_SLOTS: f32 = 40.0;
+
+/// The Guide, who arrives as soon as there is a house.
+const GUIDE: u16 = 22;
+
+/// Ticks between housing scans. The room check is a flood fill, so it is not run every tick.
+const HOUSING_SCAN_INTERVAL: u64 = 60 * 5;
+
+/// Ticks between NPC position broadcasts. Clients interpolate between them.
+const NPC_SYNC_INTERVAL: u64 = 6;
+
+/// Chat colour for server notices.
+const SERVER_CHAT_COLOUR: [u8; 3] = [255, 240, 20];
+
+/// Things the connection tasks tell the game task about.
+pub enum ServerEvent {
+    Join {
+        addr: SocketAddr,
+        out: mpsc::Sender<Bytes>,
+        /// Receives the assigned slot, or `None` when the server is full.
+        slot: oneshot::Sender<Option<u8>>,
+    },
+    Packet {
+        slot: u8,
+        frame: Frame,
+    },
+    Leave {
+        slot: u8,
+    },
+}
+
+pub struct GameServer {
+    config: Config,
+    world: World,
+    players: Vec<Option<Player>>,
+    ticks: u64,
+    items: ItemStore,
+    npcs: NpcStore,
+    /// Encoded sections, keyed by section coordinates.
+    ///
+    /// A section is several kilobytes of deflate that costs about 0.13 ms to build, and the same
+    /// one goes to every player who joins or walks past. Caching turns that into a memcpy; the
+    /// whole cache for a full-size world is well under a megabyte.
+    section_cache: HashMap<(i32, i32), Bytes>,
+    rng: SmallRng,
+    save_path: Option<PathBuf>,
+    /// Ticks between autosaves, or `None` when saving is unavailable or disabled.
+    autosave_ticks: Option<u64>,
+    /// Everything currently in flight.
+    projectiles: crate::game::projectile::ProjectileStore,
+    /// How many shots have been fired since the server started, for `/npcs`.
+    shots_thrown: u64,
+    /// The longest tick seen in the current reporting window.
+    worst_tick: TickCost,
+    /// The longest a tick has been held off the processor this window.
+    worst_stall: Duration,
+}
+
+impl GameServer {
+    pub fn new(config: Config, mut world: World) -> Self {
+        // From here on, tile edits invalidate cached sections.
+        world.start_tracking_changes();
+        let slots = config.max_players;
+        let save_path = config.save_target().map(Path::to_path_buf);
+        // Saving needs a world that came from a file; a generated one has no header to preserve.
+        let can_save = save_path.is_some() && world.preserved.is_some();
+        let autosave_ticks = match (can_save, config.autosave_secs) {
+            (true, secs) if secs > 0 => Some(secs * 60),
+            _ => None,
+        };
+        if save_path.is_some() && !can_save {
+            warn!("saving is unavailable: this world was generated rather than loaded from a file");
+        }
+
+        Self {
+            config,
+            world,
+            players: (0..slots).map(|_| None).collect(),
+            ticks: 0,
+            items: ItemStore::new(),
+            npcs: NpcStore::new(),
+            section_cache: HashMap::new(),
+            rng: SmallRng::seed_from_u64(0x7e77_a51a),
+            projectiles: crate::game::projectile::ProjectileStore::new(),
+            shots_thrown: 0,
+            worst_tick: TickCost::default(),
+            worst_stall: Duration::ZERO,
+            save_path,
+            autosave_ticks,
+        }
+    }
+
+    /// Write the world to disk, announcing the outcome in chat.
+    ///
+    /// Serialisation runs on the game task because it needs exclusive access to the world; it takes
+    /// a fraction of a second even for a full-size world, which is why it is not worth the cost of
+    /// snapshotting eighty megabytes of tiles to move it off-thread.
+    fn save_world(&mut self, reason: &str) {
+        let Some(path) = self.save_path.clone() else {
+            return;
+        };
+        let started = Instant::now();
+        match wld_save::save(&self.world, &path) {
+            Ok(()) => {
+                let ms = started.elapsed().as_millis();
+                info!(path = %path.display(), reason, elapsed_ms = ms as u64, "world saved");
+                self.announce(&format!("World saved ({ms} ms)."));
+            }
+            Err(e) => {
+                error!(path = %path.display(), error = %e, "world save failed");
+                self.announce("World save FAILED; see the server log.");
+            }
+        }
+    }
+
+    pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) {
+        let mut ticker = interval(TICK);
+        // Catching up on missed ticks would fast-forward the world clock after any stall.
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Some(event) => self.handle_event(event),
+                    None => break,
+                },
+                _ = ticker.tick() => {
+                    let cost = self.tick();
+                    self.note_tick_cost(cost);
+                }
+            }
+        }
+
+        // The channel closing is the shutdown signal, so this is the last chance to persist.
+        self.save_world("shutdown");
+        info!("game loop stopped");
+    }
+
+    /// Keep an eye on how much of the sixteen-millisecond budget a tick is actually using.
+    ///
+    /// A server that is quietly overrunning its budget looks identical to one that is not, right
+    /// up until the world starts running slow. Reporting the worst tick in each ten-second window,
+    /// and only when it is over half the budget, makes that visible without a line a second.
+    ///
+    /// Two different problems can push a tick over its budget and they need different answers, so
+    /// they get different messages: work that costs too much processor is this server's bug, and a
+    /// tick that took a long time without using the processor is the machine being busy elsewhere.
+    /// The breakdown comes with the first one, because "a tick took 26 ms" is a mystery and "the
+    /// spawn scan took 26 ms" is a bug report.
+    fn note_tick_cost(&mut self, cost: TickCost) {
+        if cost.cpu > self.worst_tick.cpu {
+            self.worst_tick = cost;
+        }
+        self.worst_stall = self.worst_stall.max(cost.wall.saturating_sub(cost.cpu));
+        if !self.ticks.is_multiple_of(TICK_REPORT_EVERY) {
+            return;
+        }
+        let worst = std::mem::take(&mut self.worst_tick);
+        let stall = std::mem::take(&mut self.worst_stall);
+        debug!(
+            cpu_us = worst.cpu.as_micros() as u64,
+            wall_us = worst.wall.as_micros() as u64,
+            stall_us = stall.as_micros() as u64,
+            phase = worst.worst_phase().0,
+            npcs = self.npcs.len(),
+            "tick window"
+        );
+        if worst.cpu * 2 > TICK {
+            let (phase, phase_cost) = worst.worst_phase();
+            warn!(
+                worst_us = worst.cpu.as_micros() as u64,
+                budget_us = TICK.as_micros() as u64,
+                phase,
+                phase_us = phase_cost.as_micros() as u64,
+                npcs = self.npcs.len(),
+                projectiles = self.projectiles.len(),
+                "ticks are using a lot of their budget"
+            );
+        } else if stall > TICK {
+            // Not a warning: nothing here is wrong, the machine is just busy. Worth saying,
+            // because a player will feel it either way.
+            info!(
+                stall_us = stall.as_micros() as u64,
+                cpu_us = worst.cpu.as_micros() as u64,
+                "the game loop was held off the processor; the machine is busy elsewhere"
+            );
+        }
+    }
+
+    fn tick(&mut self) -> TickCost {
+        let mut cost = TickCost::default();
+        let began = Instant::now();
+        let cpu_began = clock::Cpu::now();
+        let mut clock = Instant::now();
+        let mut lap = |cost: &mut TickCost, phase: Phase| {
+            let now = Instant::now();
+            cost.phases[phase as usize] += now - clock;
+            clock = now;
+        };
+
+        self.ticks += 1;
+        self.world.tick_time();
+
+        if let Some(every) = self.autosave_ticks
+            && self.ticks.is_multiple_of(every)
+        {
+            self.save_world("autosave");
+        }
+        lap(&mut cost, Phase::World);
+
+        self.flush_dirty_sections();
+        lap(&mut cost, Phase::Sections);
+        self.tick_items();
+        lap(&mut cost, Phase::Items);
+        self.tick_npcs();
+        lap(&mut cost, Phase::Npcs);
+        self.tick_projectiles();
+        lap(&mut cost, Phase::Projectiles);
+        self.tick_contact_damage();
+        lap(&mut cost, Phase::Damage);
+        self.tick_spawning();
+        lap(&mut cost, Phase::Spawning);
+        self.tick_town_npcs();
+        lap(&mut cost, Phase::Housing);
+
+        if self.ticks.is_multiple_of(TIME_SYNC_TICKS)
+            && self.players.iter().flatten().any(Player::is_playing)
+        {
+            let time = packets::TimeSet {
+                day_time: self.world.day_time,
+                time: self.world.time,
+                sun_mod_y: 0,
+                moon_mod_y: 0,
+            };
+            if let Ok(frame) = time.encode() {
+                self.broadcast(frame, None);
+            }
+        }
+        lap(&mut cost, Phase::Sync);
+
+        cost.cpu = clock::Cpu::now().since(cpu_began);
+        cost.wall = began.elapsed();
+        cost
+    }
+
+    /// Age items, settle falling ones, and hand nearby ones to a player who can pick them up.
+    fn tick_items(&mut self) {
+        for index in self.items.tick() {
+            if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+                self.broadcast(frame, None);
+            }
+        }
+
+        // Falling items need their landing broadcast, but nothing in between: a client draws the
+        // arc itself once it knows where the item started.
+        let mut landed = Vec::new();
+        let world = &self.world;
+        for (index, item) in self
+            .items
+            .iter()
+            .filter(|(_, i)| !i.resting)
+            .map(|(i, item)| (i, *item))
+            .collect::<Vec<_>>()
+        {
+            let mut item = item;
+            items::fall(&mut item, |x, y| world.tile(x, y).is_active());
+            let settled = item.resting;
+            if let Some(slot) = self.items.get_mut(index) {
+                *slot = item;
+            }
+            if settled {
+                landed.push(index);
+            }
+        }
+        for index in landed {
+            self.broadcast_item(index);
+        }
+
+        // Offer unreserved items to the nearest player in range.
+        let positions: Vec<(u8, (f32, f32))> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| (p.slot, p.position))
+            .collect();
+        if positions.is_empty() {
+            return;
+        }
+
+        let offers: Vec<(i16, u8, (f32, f32))> = self
+            .items
+            .iter()
+            .filter(|(_, item)| !item.is_reserved())
+            .filter_map(|(index, item)| {
+                positions
+                    .iter()
+                    .map(|(slot, pos)| {
+                        let (dx, dy) = (pos.0 - item.position.0, pos.1 - item.position.1);
+                        (*slot, dx * dx + dy * dy)
+                    })
+                    .filter(|(_, d2)| *d2 <= ITEM_GRAB_RANGE * ITEM_GRAB_RANGE)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(slot, _)| (index, slot, item.position))
+            })
+            .collect();
+
+        for (index, owner, position) in offers {
+            if let Some(item) = self.items.get_mut(index) {
+                item.owner = owner;
+                item.reservation = items::RESERVATION_TICKS;
+            }
+            if let Ok(frame) = ItemOwner::reserve(index, owner, position).encode() {
+                self.broadcast(frame, None);
+            }
+        }
+    }
+
+    /// Tell everyone the current state of one item.
+    fn broadcast_item(&mut self, index: i16) {
+        let Some(item) = self.items.get(index).copied() else {
+            return;
+        };
+        let mut sync = SyncItem::dropped(index, item.position, item.item);
+        sync.velocity = item.velocity;
+        if let Ok(frame) = sync.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Drop whatever a broken tile yields, if it is a block with a simple drop.
+    fn spawn_tile_drop(&mut self, tile: u16, x: i32, y: i32) {
+        let Some(item_id) = tile_drop(tile) else {
+            // Framed objects choose their drop from a style, which is not modelled; dropping the
+            // wrong item would be worse than dropping none.
+            debug!(tile, "no simple drop for this tile type");
+            return;
+        };
+        let position = (x as f32 * 16.0, y as f32 * 16.0);
+        let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), position) else {
+            debug!("item slots are full; the drop was discarded");
+            return;
+        };
+        self.broadcast_item(index);
+    }
+
+    /// Packet 21: a client dropping something, or updating an item it holds the reservation on.
+    fn on_sync_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let sync = SyncItem::decode(payload)?;
+
+        if sync.is_new() {
+            let Some(index) = self.items.spawn(sync.item, sync.position) else {
+                return Ok(());
+            };
+            if let Some(item) = self.items.get_mut(index) {
+                item.velocity = sync.velocity;
+                // A player throwing an item keeps first claim on it.
+                item.owner = slot;
+                item.reservation = items::RESERVATION_TICKS;
+            }
+            self.broadcast_item(index);
+            return Ok(());
+        }
+
+        // Otherwise only the reserving player may move it.
+        match self.items.get_mut(sync.index) {
+            Some(item) if item.owner == slot => {
+                item.item = sync.item;
+                item.position = sync.position;
+                item.velocity = sync.velocity;
+                item.resting = false;
+            }
+            _ => {
+                debug!(
+                    slot,
+                    index = sync.index,
+                    "ignoring item update from a non-owner"
+                );
+                return Ok(());
+            }
+        }
+
+        self.broadcast(sync.encode()?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 151: a client reporting that it picked an item up.
+    fn on_item_despawn(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let index = decode_item_despawn(payload)?;
+        match self.items.get(index) {
+            Some(item) if item.owner == slot => {}
+            _ => {
+                debug!(
+                    slot,
+                    index, "ignoring pickup of an item reserved for someone else"
+                );
+                return Ok(());
+            }
+        }
+        self.items.remove(index);
+        self.broadcast(terrustia_proto::items::item_despawn(index)?, Some(slot));
+        Ok(())
+    }
+
+    fn handle_event(&mut self, event: ServerEvent) {
+        match event {
+            ServerEvent::Join { addr, out, slot } => {
+                let assigned = self.allocate_slot(addr, out);
+                let _ = slot.send(assigned);
+            }
+            ServerEvent::Packet { slot, frame } => self.handle_packet(slot, frame),
+            ServerEvent::Leave { slot } => self.remove_player(slot),
+        }
+    }
+
+    // ---------------------------------------------------------------- players
+
+    fn allocate_slot(&mut self, addr: SocketAddr, out: mpsc::Sender<Bytes>) -> Option<u8> {
+        let slot = self.players.iter().position(Option::is_none)?;
+        let slot = u8::try_from(slot).ok()?;
+        self.players[slot as usize] = Some(Player::new(slot, addr, out));
+        debug!(%addr, slot, "connection accepted into a slot");
+        Some(slot)
+    }
+
+    fn player(&self, slot: u8) -> Option<&Player> {
+        self.players.get(slot as usize)?.as_ref()
+    }
+
+    fn player_mut(&mut self, slot: u8) -> Option<&mut Player> {
+        self.players.get_mut(slot as usize)?.as_mut()
+    }
+
+    fn remove_player(&mut self, slot: u8) {
+        let Some(player) = self.players.get_mut(slot as usize).and_then(Option::take) else {
+            return;
+        };
+        info!(slot, name = %player.name, "player disconnected");
+
+        if player.state == ConnState::Playing {
+            if let Ok(frame) = packets::player_active(slot, false) {
+                self.broadcast(frame, Some(slot));
+            }
+            self.announce(&format!("{} has left.", player.name));
+        }
+    }
+
+    /// Queue a frame for one player, dropping the connection if its queue has backed up.
+    fn send(&mut self, slot: u8, frame: Vec<u8>) {
+        self.send_bytes(slot, Bytes::from(frame));
+    }
+
+    fn send_bytes(&mut self, slot: u8, frame: Bytes) {
+        let Some(out) = self.player(slot).map(|p| p.out.clone()) else {
+            return;
+        };
+        // A client that cannot keep up would otherwise grow the queue without bound. Dropping it is
+        // the same call vanilla makes, and the read task notices the closed channel.
+        if out.try_send(frame).is_err() {
+            warn!(slot, "outbound queue full or closed; dropping connection");
+            self.remove_player(slot);
+        }
+    }
+
+    /// Send to every player who is in the world, optionally skipping one.
+    fn broadcast(&mut self, frame: Vec<u8>, except: Option<u8>) {
+        let bytes = Bytes::from(frame);
+        // Collect first: sending can remove a player, which would invalidate an in-flight iterator.
+        let targets: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && Some(p.slot) != except)
+            .map(|p| p.slot)
+            .collect();
+        for slot in targets {
+            self.send_bytes(slot, bytes.clone());
+        }
+    }
+
+    fn announce(&mut self, text: &str) {
+        info!("{text}");
+        if let Ok(frame) = net_module::chat_broadcast(
+            net_module::SERVER_AUTHOR,
+            &NetworkText::literal(text),
+            SERVER_CHAT_COLOUR,
+        ) {
+            self.broadcast(frame, None);
+        }
+    }
+
+    fn kick(&mut self, slot: u8, reason: &str) {
+        debug!(slot, reason, "kicking");
+        if let Ok(frame) = packets::kick(&NetworkText::literal(reason)) {
+            self.send(slot, frame);
+        }
+        self.remove_player(slot);
+    }
+
+    // ---------------------------------------------------------------- packets
+
+    fn handle_packet(&mut self, slot: u8, frame: Frame) {
+        let payload = frame.payload;
+        let result = match frame.id {
+            id::HELLO => self.on_hello(slot, &payload),
+            id::SYNC_PLAYER => self.on_sync_player(slot, &payload),
+            id::REQUEST_WORLD_DATA => self.on_request_world_data(slot),
+            id::SPAWN_TILE_DATA => self.on_spawn_tile_data(slot, &payload),
+            id::PLAYER_SPAWN => self.on_player_spawn(slot, &payload),
+            id::PLAYER_CONTROLS => self.on_player_controls(slot, &payload),
+            id::PLAYER_LIFE_MANA => self.on_health(slot, &payload),
+            id::PLAYER_MANA => self.on_mana(slot, &payload),
+            id::CLIENT_UUID => self.on_uuid(slot, &payload),
+            id::SEND_PASSWORD => self.on_password(slot, &payload),
+            id::TEAM_CHANGE | id::TEAM_CHANGE_FROM_U_I => self.on_team(slot, &payload),
+            id::TOGGLE_P_V_P => self.on_pvp(slot, &payload),
+            id::PLAYER_BUFFS => self.on_buffs(slot, &payload),
+            id::SYNC_PLAYER_ZONE => self.on_zone(slot, &payload),
+            // Damage and death are not simulated; relaying keeps every client's view of another
+            // player's health and death messages consistent with the client that took the hit.
+            id::PLAYER_HURT_V2 | id::PLAYER_DEATH_V2 | id::DEAD_PLAYER => {
+                self.relay_player_packet(slot, frame.id, &payload)
+            }
+            id::REQUEST_SECTION => self.on_request_section(slot, &payload),
+            id::AREA_TILE_CHANGE => self.on_tile_square(slot, &payload),
+            id::SYNC_ITEM | id::SPAWN_INSTANCED_ITEM => self.on_sync_item(slot, &payload),
+            id::SYNC_ITEM_DESPAWN => self.on_item_despawn(slot, &payload),
+            id::DAMAGE_N_P_C => self.on_damage_npc(slot, &payload),
+            id::TOGGLE_DOOR_STATE => self.on_door(slot, &payload),
+            id::REQUEST_CHEST_OPEN => self.on_chest_open(slot, &payload),
+            id::SYNC_CHEST_ITEM => self.on_chest_item(slot, &payload),
+            id::SYNC_PLAYER_CHEST => self.on_player_chest(slot, &payload),
+            id::OPEN_SIGN_REQUEST => self.on_sign_request(slot, &payload),
+            id::OPEN_SIGN_RESPONSE => self.on_sign_write(slot, &payload),
+            id::TILE_MANIPULATION => self.on_tile_manipulation(slot, &payload),
+            id::NET_MODULES => self.on_net_module(slot, &payload),
+            id::SYNC_PROJECTILE => self.on_client_projectile(slot, &payload),
+            id::KILL_PROJECTILE => self.on_client_projectile_kill(slot, &payload),
+            other => {
+                debug!(slot, id = other, name = id::name(other), "ignoring packet");
+                Ok(())
+            }
+        };
+
+        if let Err(e) = result {
+            debug!(slot, id = frame.id, name = id::name(frame.id), error = %e, "malformed packet");
+        }
+    }
+
+    fn on_hello(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if self.player(slot).map(|p| p.state) != Some(ConnState::Greeting) {
+            return Ok(()); // a second hello is not a way to restart the handshake
+        }
+
+        let hello = Hello::decode(payload)?;
+        if !hello.is_supported() {
+            info!(slot, version = %hello.version, "rejecting unsupported client");
+            self.kick(
+                slot,
+                &format!(
+                    "This server runs Terraria {} (protocol {}).",
+                    "1.4.5.7",
+                    id::CUR_RELEASE
+                ),
+            );
+            return Ok(());
+        }
+
+        if let Some(player) = self.player_mut(slot) {
+            player.greeted = true;
+        }
+
+        // With a password set, the slot is withheld until the client proves it knows it.
+        if !self.config.password.is_empty() {
+            self.send(slot, packets::empty(id::REQUEST_PASSWORD)?);
+            return Ok(());
+        }
+
+        self.accept_player(slot)
+    }
+
+    /// Assign the slot and let the client proceed.
+    fn accept_player(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        if let Some(player) = self.player_mut(slot) {
+            player.password_ok = true;
+            player.advance_to(ConnState::SlotAssigned);
+        }
+        // The trailing bool is new in 1.4.5; see docs/protocol-notes.md.
+        let frame = packets::player_info(slot, false)?;
+        self.send(slot, frame);
+        Ok(())
+    }
+
+    /// Packet 38: the client's answer to a password prompt.
+    fn on_password(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        // Only a connection that has already passed the version check may offer a password.
+        let ready = self
+            .player(slot)
+            .is_some_and(|p| p.greeted && p.state == ConnState::Greeting);
+        if self.config.password.is_empty() || !ready {
+            return Ok(());
+        }
+        let offered = PacketReader::new(payload).string()?;
+        if constant_time_eq(offered.as_bytes(), self.config.password.as_bytes()) {
+            self.accept_player(slot)
+        } else {
+            info!(slot, "wrong password");
+            self.kick(slot, "Incorrect password.");
+            Ok(())
+        }
+    }
+
+    /// Relay a packet that describes the sender, stamping our slot over whatever they claimed.
+    fn relay_player_packet(
+        &mut self,
+        slot: u8,
+        message: u8,
+        payload: &[u8],
+    ) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let frame = packets::rewrite_owner(message, payload, slot)?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
+    }
+
+    fn on_sync_player(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        // The name sits after slot, skin variant, voice variant, voice pitch and hair.
+        let mut r = PacketReader::new(payload);
+        r.bytes(1 + 1 + 1)?;
+        r.f32()?;
+        r.u8()?;
+        let name = r.string()?;
+
+        if let Some(player) = self.player_mut(slot) {
+            if !name.trim().is_empty() {
+                player.name = name.trim().to_string();
+            }
+            player.appearance = Some(Bytes::copy_from_slice(payload));
+            player.advance_to(ConnState::Identified);
+        }
+
+        // Relay live appearance changes; a first-time sync reaches others at spawn instead.
+        if self.player(slot).is_some_and(Player::is_playing) {
+            let frame = packets::rewrite_owner(id::SYNC_PLAYER, payload, slot)?;
+            self.broadcast(frame, Some(slot));
+        }
+        Ok(())
+    }
+
+    fn on_request_world_data(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        let frame = self.world.world_data().encode()?;
+        self.send(slot, frame);
+        if let Some(player) = self.player_mut(slot) {
+            player.advance_to(ConnState::WorldSent);
+        }
+        Ok(())
+    }
+
+    fn on_spawn_tile_data(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let request = SpawnTileData::decode(payload)?;
+
+        // Vanilla re-sends world data here before the tiles; mirroring it keeps the client's
+        // loading sequence identical to the one it was written against.
+        let world_data = self.world.world_data().encode()?;
+        self.send(slot, world_data);
+
+        let sections = self.sections_for(request);
+        let status = packets::status_text(
+            sections.len() as i32,
+            &NetworkText::literal("Receiving tile data"),
+            0,
+        )?;
+        self.send(slot, status);
+
+        for (sx, sy) in sections {
+            self.send_section(slot, sx, sy)?;
+        }
+
+        // Vanilla sends the live entities after the tiles and before StartPlaying; without this a
+        // joining player sees an empty world where everyone else sees dropped loot.
+        let existing: Vec<(i16, (f32, f32), ItemStack)> = self
+            .items
+            .iter()
+            .map(|(index, item)| (index, item.position, item.item))
+            .collect();
+        for (index, position, stack) in existing {
+            self.send(slot, SyncItem::dropped(index, position, stack).encode()?);
+        }
+
+        self.send_npcs(slot)?;
+
+        if let Some(player) = self.player_mut(slot) {
+            player.advance_to(ConnState::TilesSent);
+        }
+        self.send(slot, packets::empty(id::INITIAL_SPAWN)?);
+        Ok(())
+    }
+
+    /// Stream one section, unless this client already has it.
+    fn send_section(&mut self, slot: u8, sx: i32, sy: i32) -> terrustia_proto::Result<()> {
+        if sx < 0 || sy < 0 || sx >= self.world.sections_x() || sy >= self.world.sections_y() {
+            return Ok(());
+        }
+        // `insert` returns false when the client already has this section.
+        let is_new = match self.player_mut(slot) {
+            Some(player) => player.sent_sections.insert((sx, sy)),
+            None => false,
+        };
+        if !is_new {
+            return Ok(());
+        }
+
+        let bounds = self.world.section_bounds(sx, sy);
+        if bounds.width == 0 || bounds.height == 0 {
+            return Ok(());
+        }
+        self.flush_dirty_sections();
+        let frame = match self.section_cache.get(&(sx, sy)) {
+            Some(cached) => cached.clone(),
+            None => {
+                let extras = self.world.extras_for(bounds);
+                let encoded = Bytes::from(encode_section_packet(bounds, &extras, |x, y| {
+                    self.world.tile(x, y)
+                })?);
+                self.section_cache.insert((sx, sy), encoded.clone());
+                encoded
+            }
+        };
+        self.send_bytes(slot, frame);
+        Ok(())
+    }
+
+    /// Packet 159: the client asking for one section as it moves.
+    ///
+    /// New in 1.4.5 — previously the server pushed sections from the player's position. Without
+    /// this a player can walk out of the area streamed at spawn and see nothing but sky.
+    fn on_request_section(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if self
+            .player(slot)
+            .is_none_or(|p| p.state < ConnState::TilesSent)
+        {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let sx = i32::from(r.u16()?);
+        let sy = i32::from(r.u16()?);
+        self.send_section(slot, sx, sy)
+    }
+
+    /// The sections vanilla streams on a tile request: a block around spawn, plus one around the
+    /// requested position when it is a real location.
+    fn sections_for(&self, request: SpawnTileData) -> Vec<(i32, i32)> {
+        let mut wanted = HashSet::new();
+        let (max_x, max_y) = (self.world.sections_x(), self.world.sections_y());
+
+        let mut add_block = |cx: i32, cy: i32, w: i32, h: i32| {
+            for sx in (cx - 2)..(cx - 2 + w) {
+                for sy in (cy - 1)..(cy - 1 + h) {
+                    if sx >= 0 && sy >= 0 && sx < max_x && sy < max_y {
+                        wanted.insert((sx, sy));
+                    }
+                }
+            }
+        };
+
+        let (spawn_sx, spawn_sy) = self
+            .world
+            .section_of(i32::from(self.world.spawn_x), i32::from(self.world.spawn_y));
+        add_block(spawn_sx, spawn_sy, 5, 3);
+
+        let valid = request.x >= 10
+            && request.y >= 10
+            && request.x < self.world.width() - 10
+            && request.y < self.world.height() - 10;
+        if valid {
+            let (sx, sy) = self.world.section_of(request.x, request.y);
+            add_block(sx, sy, 6, 4);
+        }
+
+        let mut sections: Vec<(i32, i32)> = wanted.into_iter().collect();
+        // Deterministic order keeps logs and tests reproducible.
+        sections.sort_unstable();
+        sections
+    }
+
+    fn on_player_spawn(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let spawn = PlayerSpawn::decode(payload)?;
+        let was_playing = self.player(slot).is_some_and(Player::is_playing);
+
+        if let Some(player) = self.player_mut(slot) {
+            if player.state < ConnState::TilesSent {
+                return Ok(()); // spawning before the world arrived is not a valid sequence
+            }
+            player.team = spawn.team;
+            // A respawn puts you back on your feet. Without this the server keeps thinking you
+            // are dead, and every routine that checks whether anyone is alive ignores you for the
+            // rest of the session.
+            if player.life <= 0 {
+                player.life = player.life_max.max(1);
+                player.immune_ticks = 0;
+            }
+            player.advance_to(ConnState::Playing);
+        } else {
+            return Ok(());
+        }
+
+        // Always relay the spawn so respawns after death are visible.
+        let relay = packets::rewrite_owner(id::PLAYER_SPAWN, payload, slot)?;
+        self.broadcast(relay, Some(slot));
+
+        if !was_playing {
+            self.introduce(slot)?;
+        }
+        Ok(())
+    }
+
+    /// Exchange presence between a newly spawned player and everyone already in the world.
+    fn introduce(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        let others: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && p.slot != slot)
+            .map(|p| p.slot)
+            .collect();
+
+        // Tell the newcomer about everyone else.
+        for other in &other_slots(&others) {
+            for frame in self.presence_frames(*other)? {
+                self.send(slot, frame);
+            }
+        }
+
+        // Tell everyone else about the newcomer.
+        for frame in self.presence_frames(slot)? {
+            self.broadcast(frame, Some(slot));
+        }
+
+        self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
+
+        let name = self
+            .player(slot)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        self.announce(&format!("{name} has joined."));
+
+        let motd = self.config.motd.clone();
+        if !motd.is_empty()
+            && let Ok(frame) = net_module::chat_broadcast(
+                net_module::SERVER_AUTHOR,
+                &NetworkText::literal(&motd),
+                SERVER_CHAT_COLOUR,
+            )
+        {
+            self.send(slot, frame);
+        }
+        Ok(())
+    }
+
+    /// Everything another client needs in order to draw a player.
+    fn presence_frames(&self, slot: u8) -> terrustia_proto::Result<Vec<Vec<u8>>> {
+        let Some(player) = self.player(slot) else {
+            return Ok(Vec::new());
+        };
+
+        let mut frames = vec![packets::player_active(slot, true)?];
+        if let Some(appearance) = &player.appearance {
+            frames.push(packets::rewrite_owner(id::SYNC_PLAYER, appearance, slot)?);
+        }
+        frames.push(
+            PlayerHealth {
+                player: slot,
+                life: player.life,
+                life_max: player.life_max,
+            }
+            .encode()?,
+        );
+        frames.push(
+            PlayerMana {
+                player: slot,
+                mana: player.mana,
+                mana_max: player.mana_max,
+            }
+            .encode()?,
+        );
+        if let Some(buffs) = &player.buffs {
+            frames.push(packets::rewrite_owner(id::PLAYER_BUFFS, buffs, slot)?);
+        }
+        if let Some(zone) = &player.zone {
+            frames.push(packets::rewrite_owner(id::SYNC_PLAYER_ZONE, zone, slot)?);
+        }
+        if player.team != 0 {
+            let mut w = terrustia_proto::PacketWriter::new(id::TEAM_CHANGE);
+            w.u8(slot).u8(player.team);
+            frames.push(w.finish()?);
+        }
+        if player.pvp {
+            let mut w = terrustia_proto::PacketWriter::new(id::TOGGLE_P_V_P);
+            w.u8(slot).bool(true);
+            frames.push(w.finish()?);
+        }
+        if let Some(controls) = &player.last_controls {
+            frames.push(packets::rewrite_owner(id::PLAYER_CONTROLS, controls, slot)?);
+        }
+        Ok(frames)
+    }
+
+    fn on_player_controls(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let controls = PlayerControls::decode(payload)?;
+
+        if let Some(player) = self.player_mut(slot) {
+            // Velocity is what actually changed since the last update, not what the client
+            // claims: the routines that lead a running player want the real thing.
+            player.velocity = (
+                controls.position.0 - player.position.0,
+                controls.position.1 - player.position.1,
+            );
+            player.position = controls.position;
+            player.last_controls = Some(Bytes::copy_from_slice(payload));
+            if !player.is_playing() {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+
+        // Relayed verbatim: the payload has optional trailing blocks the server does not model.
+        let frame = packets::rewrite_owner(id::PLAYER_CONTROLS, payload, slot)?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
+    }
+
+    fn on_health(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let health = PlayerHealth::decode(payload)?;
+        if let Some(player) = self.player_mut(slot) {
+            player.life = health.life;
+            player.life_max = health.life_max;
+        }
+        if self.player(slot).is_some_and(Player::is_playing) {
+            let frame = packets::rewrite_owner(id::PLAYER_LIFE_MANA, payload, slot)?;
+            self.broadcast(frame, Some(slot));
+        }
+        Ok(())
+    }
+
+    fn on_mana(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mana = PlayerMana::decode(payload)?;
+        if let Some(player) = self.player_mut(slot) {
+            player.mana = mana.mana;
+            player.mana_max = mana.mana_max;
+        }
+        if self.player(slot).is_some_and(Player::is_playing) {
+            let frame = packets::rewrite_owner(id::PLAYER_MANA, payload, slot)?;
+            self.broadcast(frame, Some(slot));
+        }
+        Ok(())
+    }
+
+    fn on_team(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        r.u8()?;
+        let team = r.u8()?;
+        if let Some(player) = self.player_mut(slot) {
+            player.team = team;
+        }
+        self.relay_player_packet(slot, id::TEAM_CHANGE, payload)
+    }
+
+    fn on_pvp(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        r.u8()?;
+        let hostile = r.bool()?;
+        if let Some(player) = self.player_mut(slot) {
+            player.pvp = hostile;
+        }
+        self.relay_player_packet(slot, id::TOGGLE_P_V_P, payload)
+    }
+
+    fn on_buffs(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if let Some(player) = self.player_mut(slot) {
+            player.buffs = Some(Bytes::copy_from_slice(payload));
+        }
+        self.relay_player_packet(slot, id::PLAYER_BUFFS, payload)
+    }
+
+    fn on_zone(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if let Some(player) = self.player_mut(slot) {
+            player.zone = Some(Bytes::copy_from_slice(payload));
+        }
+        self.relay_player_packet(slot, id::SYNC_PLAYER_ZONE, payload)
+    }
+
+    fn on_uuid(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let uuid = PacketReader::new(payload).string()?;
+        if let Some(player) = self.player_mut(slot) {
+            player.uuid = Some(uuid);
+        }
+        Ok(())
+    }
+
+    fn on_tile_manipulation(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+
+        let edit = TileManipulation::decode(payload)?;
+        let (x, y) = (i32::from(edit.x), i32::from(edit.y));
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+
+        let mut tile = self.world.tile(x, y);
+        let mut changed = true;
+        let mut broke = None;
+
+        match edit.kind() {
+            TileAction::KillTile | TileAction::KillTileNoItem => {
+                // A pickaxe swing that only damages a block also arrives here; only a real break
+                // clears the tile.
+                if edit.destroyed() {
+                    if tile.is_active() && matches!(edit.kind(), TileAction::KillTile) {
+                        broke = Some(tile.block);
+                    }
+                    tile.flags.set(TileFlags::ACTIVE, false);
+                    tile.block = 0;
+                    tile.frame_x = -1;
+                    tile.frame_y = -1;
+                    tile.slope = 0;
+                    tile.flags.set(TileFlags::HALF_BRICK, false);
+                } else {
+                    changed = false;
+                }
+            }
+            TileAction::PlaceTile => {
+                let block = edit.arg.max(0) as u16;
+                if frame_important(block) {
+                    // Multi-tile objects need placement and framing rules the slice does not
+                    // implement. The edit is still relayed so clients agree with each other.
+                    debug!(slot, block, "not modelling framed tile placement");
+                    changed = false;
+                } else {
+                    tile.block = block;
+                    tile.frame_x = -1;
+                    tile.frame_y = -1;
+                    tile.flags.set(TileFlags::ACTIVE, true);
+                    tile.flags.set(TileFlags::HALF_BRICK, false);
+                    tile.slope = 0;
+                }
+            }
+            TileAction::KillWall => {
+                if edit.destroyed() {
+                    tile.wall = 0;
+                    tile.wall_color = 0;
+                } else {
+                    changed = false;
+                }
+            }
+            TileAction::PlaceWall => tile.wall = edit.arg.max(0) as u16,
+            TileAction::PoundTile => {
+                // Hammering cycles a block through half-brick and the slopes; the client does the
+                // same walk, so mirroring just the half-brick step keeps the common case right.
+                tile.slope = 0;
+                let half = tile.flags.has(TileFlags::HALF_BRICK);
+                tile.flags.set(TileFlags::HALF_BRICK, !half);
+            }
+            TileAction::SlopeTile => {
+                tile.slope = edit.arg.clamp(0, 4) as u8;
+                tile.flags.set(TileFlags::HALF_BRICK, false);
+            }
+            TileAction::PlaceWire => tile.flags.set(TileFlags::WIRE_RED, true),
+            TileAction::KillWire => tile.flags.set(TileFlags::WIRE_RED, false),
+            TileAction::PlaceWire2 => tile.flags.set(TileFlags::WIRE_BLUE, true),
+            TileAction::KillWire2 => tile.flags.set(TileFlags::WIRE_BLUE, false),
+            TileAction::PlaceWire3 => tile.flags.set(TileFlags::WIRE_GREEN, true),
+            TileAction::KillWire3 => tile.flags.set(TileFlags::WIRE_GREEN, false),
+            TileAction::PlaceWire4 => tile.flags.set(TileFlags::WIRE_YELLOW, true),
+            TileAction::KillWire4 => tile.flags.set(TileFlags::WIRE_YELLOW, false),
+            TileAction::PlaceActuator => tile.flags.set(TileFlags::ACTUATOR, true),
+            TileAction::KillActuator => tile.flags.set(TileFlags::ACTUATOR, false),
+            TileAction::Other(action) => {
+                debug!(slot, action, "unmodelled tile action; relaying only");
+                changed = false;
+            }
+        }
+
+        if changed {
+            self.world.set_tile(x, y, tile);
+        }
+        if let Some(block) = broke {
+            self.spawn_tile_drop(block, x, y);
+        }
+
+        // Relay regardless: even an edit the server does not model must reach other clients, or
+        // their view of the world silently diverges from the sender's.
+        self.broadcast(edit.encode()?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 20: a rectangle of tiles pushed as one unit.
+    ///
+    /// Clients send this for anything spanning more than a single tile — furniture, trees, a door
+    /// swinging open. Applying it is what keeps the server's world in step with multi-tile
+    /// operations without reimplementing the game's placement and framing rules.
+    fn on_tile_square(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+
+        let square = TileSquare::decode(payload)?;
+        let (x0, y0) = (i32::from(square.x), i32::from(square.y));
+
+        // A square is at most 255 on a side, so a hostile one cannot cost much; still refuse any
+        // that reaches outside the world rather than clamping it into somewhere unintended.
+        if !self.world.in_bounds(x0, y0)
+            || !self.world.in_bounds(
+                x0 + i32::from(square.width) - 1,
+                y0 + i32::from(square.height) - 1,
+            )
+        {
+            debug!(
+                slot,
+                x = square.x,
+                y = square.y,
+                "tile square out of bounds"
+            );
+            return Ok(());
+        }
+
+        for dx in 0..usize::from(square.width) {
+            for dy in 0..usize::from(square.height) {
+                if let Some(tile) = square.tile(dx, dy) {
+                    self.world.set_tile(x0 + dx as i32, y0 + dy as i32, tile);
+                }
+            }
+        }
+
+        self.broadcast(square.encode()?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 19: a door opening or closing.
+    ///
+    /// The tile change itself is not modelled — a door swings between a 1x3 closed tile and a 2x3
+    /// open one with recomputed frames, which is placement logic this server does not implement.
+    /// Relaying keeps every client in agreement with the one that acted; the server's own copy of
+    /// those tiles stays as it was until a client pushes a tile square over them.
+    fn on_door(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let door = DoorToggle::decode(payload)?;
+        if !self.world.in_bounds(i32::from(door.x), i32::from(door.y)) {
+            return Ok(());
+        }
+        self.broadcast(door.encode()?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 31: a client asking to open a chest.
+    fn on_chest_open(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let request = RequestChestOpen::decode(payload)?;
+
+        let Some((id, chest)) = self.world.chest_at(request.x, request.y) else {
+            return Ok(());
+        };
+        // Vanilla refuses a chest someone else is already inside, so two players cannot both edit
+        // the same slots and clobber each other.
+        if self
+            .players
+            .iter()
+            .flatten()
+            .any(|p| p.slot != slot && p.open_chest == id)
+        {
+            debug!(slot, chest = id, "chest is already open elsewhere");
+            return Ok(());
+        }
+
+        let name = chest.name.clone();
+        let (x, y, slots) = (chest.x, chest.y, chest.items.len());
+        let items: Vec<_> = chest.items.clone();
+
+        self.send(slot, objects::sync_chest_size(id, slots as i16)?);
+        for (index, item) in items.iter().enumerate() {
+            let frame = SyncChestItem {
+                chest: id,
+                slot: index as u8,
+                item: *item,
+            }
+            .encode()?;
+            self.send(slot, frame);
+        }
+        self.send(
+            slot,
+            SyncPlayerChest {
+                chest: id,
+                x,
+                y,
+                name: Some(name).filter(|n| !n.is_empty()),
+            }
+            .encode()?,
+        );
+
+        if let Some(player) = self.player_mut(slot) {
+            player.open_chest = id;
+        }
+        Ok(())
+    }
+
+    /// Packet 32: a client changing one chest slot.
+    fn on_chest_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let sync = SyncChestItem::decode(payload)?;
+
+        // Only the player who has the chest open may change it.
+        if self.player(slot).map(|p| p.open_chest) != Some(sync.chest) {
+            debug!(
+                slot,
+                chest = sync.chest,
+                "rejecting edit to a chest that is not open"
+            );
+            return Ok(());
+        }
+
+        let Some(chest) = self.world.chest_mut(sync.chest) else {
+            return Ok(());
+        };
+        let Some(cell) = chest.items.get_mut(usize::from(sync.slot)) else {
+            return Ok(());
+        };
+        *cell = sync.item;
+
+        self.broadcast(sync.encode()?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 33: a client reporting which chest it has open, including closing one.
+    fn on_player_chest(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let sync = SyncPlayerChest::decode(payload)?;
+        if let Some(player) = self.player_mut(slot) {
+            player.open_chest = sync.chest;
+        }
+        Ok(())
+    }
+
+    /// Packet 46: a client asking to read a sign.
+    fn on_sign_request(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let request = RequestSign::decode(payload)?;
+        let Some((id, sign)) = self.world.sign_at(request.x, request.y) else {
+            return Ok(());
+        };
+        let frame = SignText {
+            sign: id,
+            x: sign.x,
+            y: sign.y,
+            text: sign.text.clone(),
+            player: slot,
+            editing: 0,
+        }
+        .encode()?;
+        self.send(slot, frame);
+        Ok(())
+    }
+
+    /// Packet 47: a client writing a sign.
+    fn on_sign_write(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut update = SignText::decode(payload)?;
+        if update.text.len() > MAX_SIGN_TEXT {
+            debug!(slot, len = update.text.len(), "sign text too long");
+            return Ok(());
+        }
+
+        let id = match self.world.sign_at(update.x, update.y) {
+            Some((id, _)) => {
+                if let Some(sign) = self.world.sign_mut(id) {
+                    sign.text = update.text.clone();
+                }
+                id
+            }
+            None => {
+                let sign = Sign {
+                    x: update.x,
+                    y: update.y,
+                    text: update.text.clone(),
+                };
+                match self.world.add_sign(sign) {
+                    Some(id) => id,
+                    None => return Ok(()),
+                }
+            }
+        };
+
+        update.sign = id;
+        update.player = slot;
+        update.editing = 0;
+        self.broadcast(update.encode()?, Some(slot));
+        Ok(())
+    }
+
+    fn on_net_module(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let Some(chat) = IncomingChat::decode(payload)? else {
+            return Ok(());
+        };
+        if !self.player(slot).is_some_and(Player::is_playing) || !chat.is_say() {
+            return Ok(());
+        }
+        if net_module::validate_chat(&chat.text, self.config.max_chat_len).is_err() {
+            debug!(
+                slot,
+                len = chat.text.len(),
+                "dropping out-of-range chat line"
+            );
+            return Ok(());
+        }
+
+        if let Some(command) = chat.text.strip_prefix('/') {
+            return self.run_command(slot, command);
+        }
+
+        let name = self
+            .player(slot)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        info!("<{name}> {}", chat.text);
+
+        let frame = net_module::chat_broadcast(
+            slot,
+            &NetworkText::literal(format!("<{name}> {}", chat.text)),
+            [255, 255, 255],
+        )?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Send a line of server text to one player.
+    fn tell(&mut self, slot: u8, text: &str) {
+        if let Ok(frame) = net_module::chat_broadcast(
+            net_module::SERVER_AUTHOR,
+            &NetworkText::literal(text),
+            SERVER_CHAT_COLOUR,
+        ) {
+            self.send(slot, frame);
+        }
+    }
+
+    /// Handle a chat line beginning with `/`.
+    ///
+    /// There is no permission model: this is aimed at a server among friends, and every command
+    /// here is either read-only or something any player could achieve anyway.
+    fn run_command(&mut self, slot: u8, command: &str) -> terrustia_proto::Result<()> {
+        let mut parts = command.split_whitespace();
+        let name = parts.next().unwrap_or("").to_ascii_lowercase();
+        let argument = parts.next().unwrap_or("").to_ascii_lowercase();
+
+        match name.as_str() {
+            "help" => {
+                for line in [
+                    "/help            this list",
+                    "/players         who is online",
+                    "/time <day|noon|night|midnight>",
+                    "/save            write the world to disk",
+                    "/where           your position and section",
+                    "/spawn <npc>     spawn an NPC beside you",
+                    "/npcs            what is alive right now",
+                    "/butcher         remove every hostile NPC",
+                    "/house           is the room you are standing in a valid house?",
+                ] {
+                    self.tell(slot, line);
+                }
+            }
+            "players" => {
+                let names: Vec<String> = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.is_playing())
+                    .map(|p| p.name.clone())
+                    .collect();
+                let line = format!(
+                    "{} of {} online: {}",
+                    names.len(),
+                    self.config.max_players,
+                    if names.is_empty() {
+                        "nobody".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                );
+                self.tell(slot, &line);
+            }
+            "time" => {
+                let set = match argument.as_str() {
+                    "day" => Some((true, 0)),
+                    "noon" => Some((true, DAY_LENGTH / 2)),
+                    "night" => Some((false, 0)),
+                    "midnight" => Some((false, NIGHT_LENGTH / 2)),
+                    _ => None,
+                };
+                match set {
+                    Some((day_time, time)) => {
+                        self.world.day_time = day_time;
+                        self.world.time = time;
+                        let frame = packets::TimeSet {
+                            day_time,
+                            time,
+                            sun_mod_y: 0,
+                            moon_mod_y: 0,
+                        }
+                        .encode()?;
+                        self.broadcast(frame, None);
+                        self.announce(&format!("Time set to {argument}."));
+                    }
+                    None => self.tell(slot, "usage: /time <day|noon|night|midnight>"),
+                }
+            }
+            "save" => {
+                if self.save_path.is_none() || self.world.preserved.is_none() {
+                    self.tell(
+                        slot,
+                        "This world cannot be saved: it was generated, not loaded from a file.",
+                    );
+                } else {
+                    self.save_world("command");
+                }
+            }
+            "spawn" => {
+                // Accepts an id or an NPCID name, so `/spawn Zombie` and `/spawn 3` both work.
+                let Some(npc_type) = resolve_npc(&argument) else {
+                    self.tell(slot, "usage: /spawn <npc id or name>, e.g. /spawn Zombie");
+                    return Ok(());
+                };
+                let Some(position) = self.player(slot).map(|p| p.position) else {
+                    return Ok(());
+                };
+                // Drop it a little to the side so it does not appear inside the player.
+                let at = (position.0 + 64.0, position.1 - 32.0);
+                // Worm heads come with a body: spawning a bare head would be a floating face.
+                let spawned = match npc_type {
+                    // EaterofWorldsHead, DevourerHead, GiantWormHead, BoneSerpentHead.
+                    13 => self.npcs.spawn_worm(13, 14, 15, 20, at),
+                    7 => self.npcs.spawn_worm(7, 8, 9, 8, at),
+                    10 => self.npcs.spawn_worm(10, 11, 12, 6, at),
+                    39 => self.npcs.spawn_worm(39, 40, 41, 12, at),
+                    _ => self.npcs.spawn(npc_type, at),
+                };
+                match spawned {
+                    Some(index) => {
+                        let name = npc_stats(npc_type).map(|s| s.name).unwrap_or("?");
+                        self.broadcast_npc(index);
+                        self.tell(slot, &format!("spawned {name} ({npc_type}) as npc {index}"));
+                    }
+                    None => self.tell(slot, "no free NPC slots"),
+                }
+            }
+            "npcs" => {
+                let total = self.npcs.len();
+                let mut summary: Vec<String> = Vec::new();
+                let mut counts: std::collections::BTreeMap<&str, usize> =
+                    std::collections::BTreeMap::new();
+                for (_, npc) in self.npcs.iter() {
+                    *counts.entry(npc.stats.name).or_default() += 1;
+                }
+                for (name, n) in counts.iter().take(8) {
+                    summary.push(format!("{name} x{n}"));
+                }
+                let line = format!(
+                    "{total} NPCs ({:.1} spawn slots): {}",
+                    self.npcs.used_slots(),
+                    if summary.is_empty() {
+                        "none".to_string()
+                    } else {
+                        summary.join(", ")
+                    }
+                );
+                self.tell(slot, &line);
+                if self.shots_thrown > 0 {
+                    self.tell(
+                        slot,
+                        &format!(
+                            "{} in flight, {} thrown since the server started",
+                            self.projectiles.len(),
+                            self.shots_thrown
+                        ),
+                    );
+                }
+            }
+            "butcher" => {
+                // Clear every hostile NPC, leaving town residents alone.
+                let doomed: Vec<u8> = self
+                    .npcs
+                    .iter()
+                    .filter(|(_, npc)| !npc.stats.town_npc)
+                    .map(|(index, _)| index)
+                    .collect();
+                let killed = doomed.len();
+                for index in doomed {
+                    self.npcs.remove(index);
+                    self.broadcast_npc_death(index);
+                }
+                self.announce(&format!("Butchered {killed} NPCs."));
+            }
+            "house" => {
+                // Report on the room the player is standing in, with the reason if it is no good.
+                let Some(position) = self.player(slot).map(|p| p.position) else {
+                    return Ok(());
+                };
+                let (x, y) = ((position.0 / 16.0) as i32, (position.1 / 16.0) as i32);
+                let line = match housing::check_room(&self.world, x, y) {
+                    Ok(room) => format!(
+                        "valid house: {} tiles, {}x{}",
+                        room.tiles.len(),
+                        room.right - room.left + 1,
+                        room.bottom - room.top + 1
+                    ),
+                    Err(reason) => format!("not a house: {}", reason.describe()),
+                };
+                self.tell(slot, &line);
+            }
+            "where" => {
+                let line = self.player(slot).map(|p| {
+                    let (tx, ty) = ((p.position.0 / 16.0) as i32, (p.position.1 / 16.0) as i32);
+                    let (sx, sy) = self.world.section_of(tx, ty);
+                    format!("tile ({tx}, {ty}) in section ({sx}, {sy})")
+                });
+                match line {
+                    Some(line) => self.tell(slot, &line),
+                    None => self.tell(slot, "unknown position"),
+                }
+            }
+            other => self.tell(slot, &format!("unknown command: /{other}  (try /help)")),
+        }
+        Ok(())
+    }
+}
+
+/// Look up an NPC by numeric id or by its `NPCID` name, case-insensitively.
+fn resolve_npc(argument: &str) -> Option<u16> {
+    if argument.is_empty() {
+        return None;
+    }
+    if let Ok(id) = argument.parse::<u16>() {
+        return npc_stats(id).is_some().then_some(id);
+    }
+    (0..terrustia_proto::npc_data::NPC_COUNT)
+        .find(|id| npc_stats(*id).is_some_and(|s| s.name.eq_ignore_ascii_case(argument)))
+}
+
+/// Compare two byte strings without leaking their contents through timing.
+///
+/// A game password is hardly a high-value secret, but a length-independent compare costs nothing
+/// and avoids having to argue about it.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Borrow helper: `introduce` needs the slot list detached from `self`.
+fn other_slots(slots: &[u8]) -> Vec<u8> {
+    slots.to_vec()
+}
+
+/// Lets the AI read world tiles without borrowing the whole server.
+struct WorldTiles<'a>(&'a World);
+
+impl TileView for WorldTiles<'_> {
+    fn tile(&self, x: i32, y: i32) -> Tile {
+        self.0.tile(x, y)
+    }
+}
+
+/// Coin item ids, smallest first.
+const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
+
+impl GameServer {
+    /// Advance every NPC and tell clients about the ones that changed.
+    fn tick_npcs(&mut self) {
+        let targets: Vec<Target> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| Target {
+                slot: p.slot,
+                center: (p.position.0 + 10.0, p.position.1 + 21.0),
+                velocity: p.velocity,
+                alive: p.life > 0,
+            })
+            .collect();
+
+        // The AI needs the world and the NPC table at once, so the tile view is built separately
+        // rather than borrowing `self` twice.
+        // Worm segments trail whatever is in front of them, so leaders are read before anything
+        // moves and the whole chain shifts as one.
+        let leaders: Vec<(u8, u8, (f32, f32))> = self
+            .npcs
+            .iter()
+            .filter_map(|(index, npc)| npc.follows.map(|ahead| (index, ahead)))
+            .filter_map(|(index, ahead)| self.npcs.get(ahead).map(|l| (index, ahead, l.center())))
+            .collect();
+        for (index, ahead, center) in leaders {
+            // A segment whose leader is gone becomes the new head of what remains.
+            if self.npcs.get(ahead).is_none() {
+                if let Some(npc) = self.npcs.get_mut(index) {
+                    npc.follows = None;
+                }
+                continue;
+            }
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc_ai::follow_leader(npc, center);
+            }
+        }
+
+        let mut expired = Vec::new();
+        let mut transformed = Vec::new();
+        let mut carrying = Vec::new();
+        let mut ai_out = npc_ai::AiOutput::default();
+        {
+            // What the timid critters flee from. Only two styles read it, so the list is only
+            // built when one of them is actually about.
+            let anything_timid = self
+                .npcs
+                .iter()
+                .any(|(_, n)| matches!(n.stats.ai_style, 26 | 65));
+            let hazards: Vec<npc_ai::Hazard> = if anything_timid {
+                self.npcs
+                    .iter()
+                    .filter(|(_, n)| !n.stats.friendly && n.stats.damage > 0)
+                    .map(|(_, n)| npc_ai::Hazard {
+                        center: n.center(),
+                        half: (n.width() / 2.0, n.height() / 2.0),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Only one style shoulders its own kind aside, so the list is built only when one of
+            // them is present, and only of that type.
+            let kin: Vec<(f32, f32)> = {
+                let flocking: Vec<u16> = self
+                    .npcs
+                    .iter()
+                    .filter(|(_, n)| npc_ai::reads_kin(n.stats.ai_style))
+                    .map(|(_, n)| n.npc_type)
+                    .collect();
+                if flocking.is_empty() {
+                    Vec::new()
+                } else {
+                    self.npcs
+                        .iter()
+                        .filter(|(_, n)| flocking.contains(&n.npc_type))
+                        .map(|(_, n)| n.center())
+                        .collect()
+                }
+            };
+            // A handful of routines wait on how many of some other type are still alive: the
+            // Brain's armour, the Wall's leeches, a pal's escort. One pass counts them all, and
+            // only for the types anything actually asks about.
+            let census: Vec<(u16, usize)> = crate::game::ai::CENSUS_TYPES
+                .iter()
+                .map(|&ty| {
+                    (
+                        ty,
+                        self.npcs.iter().filter(|(_, n)| n.npc_type == ty).count(),
+                    )
+                })
+                .filter(|(_, count)| *count > 0)
+                .collect();
+            // Where every boss that owns parts currently is, read before anything moves.
+            type BossState = (crate::game::ai::boss::skeletron::Parent, f32, f32);
+            let parents: std::collections::HashMap<u8, BossState> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.stats.boss)
+                .map(|(index, n)| {
+                    (
+                        index,
+                        (
+                            (n.position, (n.width(), n.height())),
+                            n.ai[1],
+                            n.life as f32 / n.life_max.max(1) as f32,
+                        ),
+                    )
+                })
+                .collect();
+            let tiles = WorldTiles(&self.world);
+            // The zone scan reads a forty-tile square, so it runs once a tick for the nearest
+            // player rather than once per NPC that happens to care.
+            let biome = targets
+                .first()
+                .map_or(crate::game::spawn::Biome::Forest, |t| {
+                    crate::game::spawn::biome_at(
+                        &self.world,
+                        (t.center.0 / crate::game::npc::TILE) as i32,
+                        (t.center.1 / crate::game::npc::TILE) as i32,
+                    )
+                });
+            let conditions = crate::game::ai::Conditions {
+                blood_moon: self.world.blood_moon,
+                day: self.world.day_time,
+                // No eclipse yet: it is a hardmode event, so nothing pre-hardmode reads it.
+                eclipse: false,
+                // Weather is not modelled, so only nightfall sends residents indoors, and the
+                // things that need a wind blowing simply wither.
+                raining: false,
+                windy: false,
+                crimson: self.world.crimson,
+                snow: biome == crate::game::spawn::Biome::Snow,
+                jungle: biome == crate::game::spawn::Biome::Jungle,
+                wind: 0.0,
+                // Worked out once a tick from wherever the nearest player is, rather than per NPC:
+                // the zone scan reads a forty-tile square and only the tumbleweed asks.
+                desert: biome == crate::game::spawn::Biome::Desert,
+                surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
+                // Game mode 0 is classic; everything above it is expert or harder, and the
+                // routines that branch only ask whether it is above classic.
+                expert: self.world.game_mode >= 1,
+                hardmode: self.world.progress.hard_mode,
+            };
+            for (index, npc) in self.npcs.iter_mut() {
+                // Segments are positioned by their leader, not by a routine of their own.
+                if npc.follows.is_some() {
+                    continue;
+                }
+                // A boss part reads its parent's position and state; it cannot see the table.
+                let (parent, parent_state, parent_health) = npc
+                    .follows_boss
+                    .and_then(|slot| parents.get(&slot).copied())
+                    .map_or((None, 0.0, 1.0), |(at, state, health)| {
+                        (Some(at), state, health)
+                    });
+                npc_ai::update_with(
+                    npc,
+                    &tiles,
+                    &targets,
+                    &mut self.rng,
+                    &mut ai_out,
+                    npc_ai::Surroundings {
+                        conditions,
+                        hazards: &hazards,
+                        kin: &kin,
+                        census: &census,
+                        parent,
+                        parent_state,
+                        parent_health,
+                    },
+                );
+                // A part raised this tick belongs to the NPC that raised it, which only the
+                // caller knows the slot of.
+                for summon in &mut ai_out.spawn {
+                    if summon.parent == Some(npc_ai::Spawn::OWN_PARENT) {
+                        summon.parent = Some(index);
+                    }
+                }
+                if let Some(into) = ai_out.transform.take() {
+                    transformed.push((index, into));
+                }
+                if let (Some(at), Some(rider)) = (ai_out.carry.take(), npc.passenger) {
+                    carrying.push((rider, at, npc.velocity));
+                }
+                if npc.time_left <= 0 {
+                    expired.push(index);
+                }
+            }
+        }
+
+        // Doors a fighter finished working at.
+        for action in std::mem::take(&mut ai_out.doors) {
+            self.apply_door_action(action);
+        }
+
+        // Doors a resident opened on its way in, or pulled shut on its way out.
+        for action in std::mem::take(&mut ai_out.town_doors) {
+            match action {
+                crate::game::ai::town::DoorAction::Open { x, y, direction } => {
+                    self.apply_door_action(crate::game::ai::fighter::Action::OpenDoor {
+                        x,
+                        y,
+                        direction,
+                    });
+                }
+                crate::game::ai::town::DoorAction::Close { .. }
+                | crate::game::ai::town::DoorAction::None => {}
+            }
+        }
+
+        // Projectiles a routine threw.
+        for shot in std::mem::take(&mut ai_out.shots) {
+            self.shots_thrown += 1;
+            if let Some(index) = self.projectiles.launch(
+                shot.projectile,
+                shot.position,
+                shot.velocity,
+                shot.damage,
+                i32::from(shot.time_left),
+            ) {
+                self.broadcast_projectile(index);
+            }
+        }
+
+        // Minions a boss asked for. Capped so a long fight cannot fill every slot with servants.
+        for summon in ai_out.spawn {
+            if self.npcs.used_slots() >= MAX_MINION_SLOTS {
+                break;
+            }
+            if let Some(index) = self.npcs.spawn(summon.npc_type, summon.position) {
+                if let Some(npc) = self.npcs.get_mut(index) {
+                    npc.velocity = summon.velocity;
+                    // A boss part is raised with its side in the velocity's sign, and needs to
+                    // know which boss it belongs to.
+                    if let Some(owner) = summon.parent {
+                        npc.follows_boss = Some(owner);
+                        npc.ai[0] = summon.velocity.0.signum();
+                        npc.velocity = (0.0, 0.0);
+                    }
+                }
+                self.broadcast_npc(index);
+            }
+        }
+
+        // Whatever is hanging from a balloon goes exactly where the balloon says, at the
+        // balloon's own velocity — it is carried, not trailing.
+        for (rider, at, velocity) in carrying {
+            if let Some(npc) = self.npcs.get_mut(rider) {
+                npc.position = (at.0 - npc.width() / 2.0, at.1 - npc.height() / 2.0);
+                npc.velocity = velocity;
+                npc.dirty = true;
+            }
+        }
+
+        // A lost girl who has stopped pretending, or a truffle worm that has gone to ground.
+        // The slot is kept so clients see one NPC change rather than one vanish and another
+        // appear somewhere in the table.
+        for (index, into) in transformed {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.become_type(into);
+            }
+            self.broadcast_npc(index);
+        }
+
+        for index in expired {
+            self.npcs.remove(index);
+            // A silently vanished NPC would linger on every client, so tell them it is gone.
+            self.broadcast_npc_death(index);
+        }
+        self.resolve_worm_chains();
+
+        // Position updates go out at ten a second rather than sixty: clients interpolate, and a
+        // full-rate stream of every NPC would swamp the connection.
+        if self.ticks.is_multiple_of(NPC_SYNC_INTERVAL) {
+            let dirty: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, npc)| npc.dirty)
+                .map(|(index, _)| index)
+                .collect();
+            for index in dirty {
+                if let Some(npc) = self.npcs.get_mut(index) {
+                    npc.dirty = false;
+                }
+                self.broadcast_npc(index);
+            }
+        }
+    }
+
+    /// Put the Eater of Worlds back together after something has been cut out of it.
+    ///
+    /// This is the whole reason the fight is what it is: a severed body segment does not leave a
+    /// gap, it becomes two worms. The segment ahead of the wound grows a tail and the one behind it
+    /// grows a head, and both keep fighting. A head with nothing behind it, or a tail with nothing
+    /// ahead, is a single segment and dies.
+    fn resolve_worm_chains(&mut self) {
+        use terrustia_proto::npc_params::splitting_worm;
+
+        // Who follows whom, as it stands now.
+        let leaders: std::collections::HashMap<u8, u8> = self
+            .npcs
+            .iter()
+            .filter_map(|(index, npc)| npc.follows.map(|leader| (index, leader)))
+            .collect();
+        let followed: std::collections::HashSet<u8> = leaders.values().copied().collect();
+
+        let mut transformed = Vec::new();
+        let mut orphaned = Vec::new();
+        for (index, npc) in self.npcs.iter() {
+            let Some((head, body, tail)) = splitting_worm(npc.npc_type) else {
+                continue;
+            };
+            let has_leader = npc
+                .follows
+                .is_some_and(|leader| self.npcs.get(leader).is_some());
+            let has_follower = followed.contains(&index);
+
+            if !has_leader && !has_follower {
+                // A lone segment is not a worm.
+                orphaned.push(index);
+            } else if npc.npc_type == body && !has_leader {
+                // The wound is ahead of it: it becomes the head of what is left.
+                transformed.push((index, head));
+            } else if npc.npc_type == body && !has_follower {
+                // The wound is behind it: it becomes the tail.
+                transformed.push((index, tail));
+            } else if (npc.npc_type == head && !has_follower)
+                || (npc.npc_type == tail && !has_leader)
+            {
+                // An end with nothing attached to it is the last of its worm.
+                orphaned.push(index);
+            }
+        }
+
+        for (index, into) in transformed {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                // The chain link survives the change of type; only what it is changes.
+                let follows = npc.follows;
+                npc.become_type(into);
+                npc.follows = follows;
+            }
+            self.broadcast_npc(index);
+        }
+        for index in orphaned {
+            self.npcs.remove(index);
+            self.broadcast_npc_death(index);
+        }
+    }
+
+    /// Pass a player's own projectile on to everyone else.
+    ///
+    /// The server does not simulate player weapons, so a client's arrows are relayed rather than
+    /// re-created. Two checks come straight from the game: the projectile has to claim the sender
+    /// as its owner, and it must not be a hostile type — otherwise a modified client could conjure
+    /// a demon scythe and blame the server for it.
+    fn on_client_projectile(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let sync = terrustia_proto::projectile::SyncProjectile::decode(payload)?;
+        if sync.key.owner != slot {
+            debug!(
+                slot,
+                owner = sync.key.owner,
+                "dropping a mis-owned projectile"
+            );
+            return Ok(());
+        }
+        if terrustia_proto::projectile_data::projectile_stats(sync.projectile_type as u16).is_some()
+        {
+            debug!(
+                slot,
+                projectile = sync.projectile_type,
+                "dropping a hostile projectile from a client"
+            );
+            return Ok(());
+        }
+        let frame = sync.encode()?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
+    }
+
+    /// ...and pass on the news that it is gone.
+    fn on_client_projectile_kill(
+        &mut self,
+        slot: u8,
+        payload: &[u8],
+    ) -> terrustia_proto::Result<()> {
+        let kill = terrustia_proto::projectile::KillProjectile::decode(payload)?;
+        if kill.key.owner != slot {
+            return Ok(());
+        }
+        let frame = kill.encode()?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
+    }
+
+    /// Move every projectile, and remove the ones that are finished.
+    fn tick_projectiles(&mut self) {
+        let mut spent = Vec::new();
+        {
+            let tiles = WorldTiles(&self.world);
+            for (index, projectile) in self.projectiles.iter_mut() {
+                if crate::game::projectile::step(projectile, &tiles)
+                    == crate::game::projectile::Outcome::Spent
+                {
+                    spent.push(index);
+                }
+            }
+        }
+        for index in spent {
+            self.kill_projectile(index);
+        }
+
+        // Clients interpolate between updates, so projectiles go out at the same rate NPCs do.
+        if self.ticks.is_multiple_of(NPC_SYNC_INTERVAL) {
+            let dirty: Vec<u16> = self
+                .projectiles
+                .iter()
+                .filter(|(_, p)| p.dirty)
+                .map(|(index, _)| index)
+                .collect();
+            for index in dirty {
+                if let Some(p) = self.projectiles.get_mut(index) {
+                    p.dirty = false;
+                }
+                self.broadcast_projectile(index);
+            }
+        }
+    }
+
+    /// Hurt anyone standing in an enemy or in something one of them threw.
+    ///
+    /// The invulnerability window is what makes this survivable: without it a player inside a
+    /// zombie would take sixty hits a second rather than one every half second.
+    fn tick_contact_damage(&mut self) {
+        const IMMUNE_TICKS: i32 = 30;
+
+        for slot in 0..self.players.len() {
+            let Some(player) = self.players[slot].as_ref() else {
+                continue;
+            };
+            if !player.is_playing() || player.life <= 0 {
+                continue;
+            }
+            if player.immune_ticks > 0 {
+                if let Some(player) = self.players[slot].as_mut() {
+                    player.immune_ticks -= 1;
+                }
+                continue;
+            }
+            let box_at = player.position;
+            let box_size = (
+                crate::game::ai::PLAYER_WIDTH as f32,
+                crate::game::ai::PLAYER_HEIGHT as f32,
+            );
+
+            // An enemy you are standing in.
+            let hit = self.npcs.iter().find(|(_, npc)| {
+                !npc.stats.friendly
+                    && npc.stats.damage > 0
+                    && npc.is_alive()
+                    && npc.position.0 < box_at.0 + box_size.0
+                    && npc.position.0 + npc.width() > box_at.0
+                    && npc.position.1 < box_at.1 + box_size.1
+                    && npc.position.1 + npc.height() > box_at.1
+            });
+            if let Some((index, npc)) = hit {
+                let damage = npc.stats.damage;
+                let direction = if npc.center().0 < box_at.0 { -1 } else { 1 };
+                self.hurt_player(
+                    slot,
+                    damage,
+                    direction,
+                    terrustia_proto::hurt::DeathReason::from_npc(i16::from(index)),
+                    IMMUNE_TICKS,
+                );
+                continue;
+            }
+
+            // Or something one of them threw.
+            let struck = self
+                .projectiles
+                .iter()
+                .find(|(_, p)| p.damage > 0 && p.overlaps(box_at, box_size))
+                .map(|(index, p)| (index, p.damage, p.center().0, p.projectile_type));
+            if let Some((index, damage, from_x, projectile_type)) = struck {
+                let direction = if from_x < box_at.0 { -1 } else { 1 };
+                self.hurt_player(
+                    slot,
+                    damage,
+                    direction,
+                    terrustia_proto::hurt::DeathReason::from_projectile(
+                        index as i16,
+                        projectile_type as i16,
+                    ),
+                    IMMUNE_TICKS,
+                );
+                // A projectile with a hit budget spends one, and dies when it runs out.
+                let spent = self.projectiles.get_mut(index).is_some_and(|p| {
+                    if p.penetrate > 0 {
+                        p.penetrate -= 1;
+                    }
+                    p.penetrate == 0
+                });
+                if spent {
+                    self.kill_projectile(index);
+                }
+            }
+        }
+    }
+
+    /// Take health off a player, tell everyone, and announce a death if it was fatal.
+    fn hurt_player(
+        &mut self,
+        slot: usize,
+        damage: i32,
+        direction: i8,
+        reason: terrustia_proto::hurt::DeathReason,
+        immune_ticks: i32,
+    ) {
+        let Some(player) = self.players[slot].as_mut() else {
+            return;
+        };
+        let taken = damage.max(1) as i16;
+        player.life -= taken;
+        player.immune_ticks = immune_ticks;
+        let died = player.life <= 0;
+        if died {
+            player.life = 0;
+        }
+        let index = player.slot;
+
+        if died {
+            if let Ok(frame) = (terrustia_proto::hurt::PlayerDeath {
+                player: index,
+                reason,
+                damage: taken,
+                direction,
+                pvp: false,
+            })
+            .encode()
+            {
+                self.broadcast(frame, None);
+            }
+        } else if let Ok(frame) = (terrustia_proto::hurt::PlayerHurt {
+            player: index,
+            reason,
+            damage: taken,
+            direction,
+            crit: false,
+            pvp: false,
+            cooldown: -1,
+        })
+        .encode()
+        {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Tell everyone a projectile is gone, and free its slot.
+    fn kill_projectile(&mut self, index: u16) {
+        let Some(projectile) = self.projectiles.remove(index) else {
+            return;
+        };
+        if let Ok(frame) = (terrustia_proto::projectile::KillProjectile {
+            key: projectile.key,
+            position: projectile.position,
+        })
+        .encode()
+        {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Tell everyone where a projectile is.
+    fn broadcast_projectile(&mut self, index: u16) {
+        let Some(p) = self.projectiles.get(index) else {
+            return;
+        };
+        let sync = terrustia_proto::projectile::SyncProjectile {
+            key: p.key,
+            position: p.position,
+            velocity: p.velocity,
+            projectile_type: p.projectile_type as i16,
+            ai: p.ai,
+            banner: 0,
+            damage: p.damage as i16,
+            knockback: p.knockback,
+            original_damage: p.damage as i16,
+        };
+        if let Ok(frame) = sync.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Drop cached sections whose tiles have changed.
+    ///
+    /// This has to run before a section is served, not merely once a tick: an edit and a join can
+    /// land in the same batch of events, and a section sent in between would carry stale tiles.
+    fn flush_dirty_sections(&mut self) {
+        for section in self.world.take_dirty_sections() {
+            self.section_cache.remove(&section);
+        }
+    }
+
+    fn npc_sync(&self, index: u8) -> Option<SyncNpc> {
+        let npc = self.npcs.get(index)?;
+        Some(SyncNpc {
+            index,
+            generation: npc.generation,
+            position: npc.position,
+            velocity: npc.velocity,
+            target: npc.target,
+            direction: npc.direction,
+            direction_y: npc.direction_y,
+            sprite_direction: npc.sprite_direction,
+            ai: npc.ai,
+            net_id: npc.npc_type as i16,
+            life: npc.life,
+            life_max: npc.life_max,
+            release_owner: 255,
+        })
+    }
+
+    fn broadcast_npc(&mut self, index: u8) {
+        if let Some(sync) = self.npc_sync(index)
+            && let Ok(frame) = sync.encode()
+        {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Carry out what a fighter decided to do to a door.
+    fn apply_door_action(&mut self, action: crate::game::ai::fighter::Action) {
+        use crate::game::ai::fighter::Action;
+        match action {
+            Action::None => {}
+            Action::OpenDoor { x, y, direction } => {
+                // Swinging a door open moves the tile and reframes a 2x3 block, which is placement
+                // logic this server does not implement. Broadcasting the toggle makes every client
+                // open it, which is how vanilla propagates the change anyway.
+                let toggle = terrustia_proto::objects::DoorToggle {
+                    action: 0,
+                    x: x as i16,
+                    y: y as i16,
+                    direction: if direction > 0 { 1 } else { 0 },
+                };
+                if let Ok(frame) = toggle.encode() {
+                    self.broadcast(frame, None);
+                }
+            }
+            Action::BreakDoor { x, y } => {
+                // A broken door really is gone, so the tiles are cleared here and the change is
+                // sent as an ordinary tile edit.
+                for dy in -1..=1 {
+                    let mut tile = self.world.tile(x, y + dy);
+                    if !tile.is_active() {
+                        continue;
+                    }
+                    tile.flags.set(TileFlags::ACTIVE, false);
+                    tile.block = 0;
+                    tile.frame_x = -1;
+                    tile.frame_y = -1;
+                    self.world.set_tile(x, y + dy, tile);
+
+                    let edit = TileManipulation {
+                        action: 0,
+                        x: x as i16,
+                        y: (y + dy) as i16,
+                        arg: 0,
+                        style: 0,
+                    };
+                    if let Ok(frame) = edit.encode() {
+                        self.broadcast(frame, None);
+                    }
+                }
+                info!(x, y, "a door was broken down");
+            }
+        }
+    }
+
+    /// Tell clients an NPC is gone. Zero health in packet 23 is what removes it.
+    fn broadcast_npc_death(&mut self, index: u8) {
+        let sync = SyncNpc {
+            index,
+            generation: 0,
+            position: (0.0, 0.0),
+            velocity: (0.0, 0.0),
+            target: 255,
+            direction: 1,
+            direction_y: 1,
+            sprite_direction: 1,
+            ai: [0.0; 4],
+            net_id: 0,
+            life: 0,
+            life_max: 1,
+            release_owner: 255,
+        };
+        if let Ok(frame) = sync.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Packet 28: a client reporting a hit on an NPC.
+    fn on_damage_npc(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let hit = DamageNpc::decode(payload)?;
+
+        // Acknowledge first, as vanilla does, so the client stops resending the hit.
+        self.send(slot, damage_ack()?);
+
+        let Some(npc) = self.npcs.get_mut(hit.index) else {
+            return Ok(());
+        };
+        // A stale hit aimed at whoever used to hold this slot must not land on its new occupant.
+        if npc.generation != hit.generation {
+            debug!(
+                slot,
+                index = hit.index,
+                "dropping a hit with a stale generation"
+            );
+            return Ok(());
+        }
+
+        let amount = damage_taken(i32::from(hit.damage), npc.stats.defense, hit.crit);
+        let killed = npc.take_damage(amount, hit.knockback, hit.direction);
+        let (npc_type, value, center) = (npc.npc_type, npc.stats.value, npc.center());
+
+        self.broadcast(hit.encode()?, Some(slot));
+
+        if killed {
+            self.npcs.remove(hit.index);
+            self.broadcast_npc_death(hit.index);
+            self.drop_coins(value, center);
+            self.drop_loot(npc_type, center);
+            debug!(slot, npc_type, "npc killed");
+        } else {
+            self.broadcast_npc(hit.index);
+        }
+        Ok(())
+    }
+
+    /// Drop whatever an NPC was carrying.
+    ///
+    /// Each chain is rolled in order and stops at the first success, which is what keeps a
+    /// skeleton's four weapons rare rather than giving it four separate chances at one.
+    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32)) {
+        for chain in terrustia_proto::npc_drops::drops(npc_type) {
+            for rule in *chain {
+                if !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+                    continue;
+                }
+                let stack = if rule.max > rule.min {
+                    rand::Rng::random_range(&mut self.rng, rule.min..=rule.max)
+                } else {
+                    rule.min
+                };
+                if let Some(index) = self
+                    .items
+                    .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
+                {
+                    self.broadcast_item(index);
+                }
+                break;
+            }
+        }
+    }
+
+    /// Scatter an NPC's coin value as item entities.
+    ///
+    /// Type-specific loot tables are not modelled — `NPC.NPCLoot` is thousands of lines of
+    /// per-type rolls — but the coin drop is universal and comes straight from the NPC's `value`.
+    fn drop_coins(&mut self, value: f32, center: (f32, f32)) {
+        let mut copper = value as i64;
+        if copper <= 0 {
+            return;
+        }
+        // Split into platinum, gold, silver and copper, largest denomination first.
+        for (tier, item) in COIN_ITEMS.iter().enumerate().rev() {
+            let unit = 100i64.pow(tier as u32);
+            let count = copper / unit;
+            if count == 0 {
+                continue;
+            }
+            copper -= count * unit;
+            let stack = count.min(i64::from(i16::MAX)) as i16;
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(*item, stack, 0), (center.0, center.1))
+            {
+                self.broadcast_item(index);
+            }
+        }
+    }
+
+    /// Stream every live NPC to a client that has just finished loading the world.
+    fn send_npcs(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        let syncs: Vec<SyncNpc> = self
+            .npcs
+            .iter()
+            .filter_map(|(index, _)| self.npc_sync(index))
+            .collect();
+        for sync in syncs {
+            self.send(slot, sync.encode()?);
+        }
+        Ok(())
+    }
+
+    /// Look for a free house near the players and move a town NPC into it.
+    ///
+    /// Vanilla gates each resident behind conditions that mostly read the players' inventories,
+    /// which this server does not model. The Guide is the exception — it arrives as soon as there
+    /// is somewhere to live — so that is the one moved in automatically; the rest are placed with
+    /// `/spawn` and will take a house of their own.
+    fn tick_town_npcs(&mut self) {
+        if !self.ticks.is_multiple_of(HOUSING_SCAN_INTERVAL) {
+            return;
+        }
+
+        // House any resident that does not have one yet.
+        let homeless: Vec<u8> = self
+            .npcs
+            .iter()
+            .filter(|(_, npc)| npc.stats.town_npc && npc.home.is_none())
+            .map(|(index, _)| index)
+            .collect();
+
+        let guide_present = self.npcs.iter().any(|(_, n)| n.npc_type == GUIDE);
+        if homeless.is_empty() && guide_present {
+            return;
+        }
+
+        let Some(house) = self.find_free_house() else {
+            return;
+        };
+        let (hx, hy) = house;
+
+        if let Some(index) = homeless.first() {
+            if let Some(npc) = self.npcs.get_mut(*index) {
+                npc.home = Some(house);
+                npc.position = (hx as f32 * 16.0, (hy - 3) as f32 * 16.0);
+                npc.dirty = true;
+            }
+            let name = self
+                .npcs
+                .get(*index)
+                .map(|n| n.stats.name)
+                .unwrap_or("Someone");
+            self.announce(&format!("{name} has moved in."));
+            self.broadcast_npc(*index);
+            return;
+        }
+
+        // Nobody is homeless and there is no Guide, so the Guide moves in.
+        if let Some(index) = self
+            .npcs
+            .spawn(GUIDE, (hx as f32 * 16.0, (hy - 3) as f32 * 16.0))
+        {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.home = Some(house);
+            }
+            self.announce("The Guide has moved in.");
+            self.broadcast_npc(index);
+        }
+    }
+
+    /// Find a valid house near a player that no town NPC has claimed.
+    fn find_free_house(&self) -> Option<(i32, i32)> {
+        let taken: Vec<(i32, i32)> = self.npcs.iter().filter_map(|(_, npc)| npc.home).collect();
+
+        for player in self.players.iter().flatten().filter(|p| p.is_playing()) {
+            let (px, py) = (
+                (player.position.0 / 16.0) as i32,
+                (player.position.1 / 16.0) as i32,
+            );
+            // Probe a coarse grid around the player rather than every tile: a house is at least
+            // sixty tiles, so a five-tile step cannot miss one.
+            for dx in (-60..=60).step_by(5) {
+                for dy in (-40..=40).step_by(5) {
+                    let (x, y) = (px + dx, py + dy);
+                    if let Ok(room) = housing::check_room(&self.world, x, y) {
+                        let home = room.home_tile();
+                        // Two residents never share a room.
+                        if taken
+                            .iter()
+                            .any(|(tx, ty)| (tx - home.0).abs() < 20 && (ty - home.1).abs() < 20)
+                        {
+                            continue;
+                        }
+                        return Some(home);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to spawn new NPCs around the players.
+    fn tick_spawning(&mut self) {
+        if self.ticks.is_multiple_of(300) {
+            let active = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing() && p.life > 0)
+                .count();
+            debug!(
+                active,
+                npcs = self.npcs.len(),
+                slots = self.npcs.used_slots(),
+                "spawn tick"
+            );
+        }
+        let spawned = spawn::try_spawn(
+            &self.world,
+            &self.npcs,
+            &self.players,
+            &mut self.rng,
+            self.ticks,
+        );
+        for (npc_type, position) in spawned {
+            if let Some(index) = self.npcs.spawn(npc_type, position) {
+                self.broadcast_npc(index);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod combat_tests {
+    use crate::game::projectile::ProjectileStore;
+
+    /// A shot decided by a routine has to become an entity that moves and can hit somebody.
+    /// Everything up to this point only produced intentions.
+    #[test]
+    fn a_launched_shot_flies_and_then_expires() {
+        let mut store = ProjectileStore::new();
+        let index = store
+            .launch(38, (1000.0, 1000.0), (6.0, 0.0), 15, 60)
+            .expect("harpy feather");
+        let start = store.get(index).unwrap().position;
+
+        struct Sky;
+        impl crate::game::npc::TileView for Sky {
+            fn tile(&self, _x: i32, _y: i32) -> terrustia_proto::tile::Tile {
+                terrustia_proto::tile::Tile::AIR
+            }
+        }
+
+        let mut ticks = 0;
+        loop {
+            let done = {
+                let p = store.get_mut(index).unwrap();
+                crate::game::projectile::step(p, &Sky) == crate::game::projectile::Outcome::Spent
+            };
+            ticks += 1;
+            if done || ticks > 200 {
+                break;
+            }
+        }
+        assert_eq!(ticks, 60, "it should live exactly as long as it was given");
+        let travelled = store.get(index).unwrap().position.0 - start.0;
+        assert!(travelled > 300.0, "and cover ground, got {travelled}");
+    }
+
+    #[test]
+    fn a_shot_that_hits_a_player_overlaps_their_box() {
+        let mut store = ProjectileStore::new();
+        let index = store
+            .launch(38, (1000.0, 1000.0), (0.0, 0.0), 15, 60)
+            .unwrap();
+        let p = store.get(index).unwrap();
+        let player_box = (
+            1000.0 - crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            1000.0 - crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        assert!(p.overlaps(
+            player_box,
+            (
+                crate::game::ai::PLAYER_WIDTH as f32,
+                crate::game::ai::PLAYER_HEIGHT as f32
+            )
+        ));
+    }
+
+    #[test]
+    fn a_penetrating_shot_survives_more_than_one_hit() {
+        let mut store = ProjectileStore::new();
+        // The demon scythe passes through everything.
+        let scythe = store.launch(44, (0.0, 0.0), (1.0, 0.0), 21, 60).unwrap();
+        assert_eq!(store.get(scythe).unwrap().penetrate, -1);
+        // The sand ball does too; the eye laser does not.
+        let laser = store.launch(83, (0.0, 0.0), (1.0, 0.0), 11, 60).unwrap();
+        assert_eq!(store.get(laser).unwrap().penetrate, 3);
+    }
+}
+
+#[cfg(test)]
+mod worm_tests {
+    use crate::game::npc::NpcStore;
+    use terrustia_proto::npc_params::EATER_OF_WORLDS;
+
+    /// Resolve the chains the way the server does, without needing a running server.
+    ///
+    /// Kept in step with `GameServer::resolve_worm_chains` by testing the same rules: this is the
+    /// decision table, and the server method is that table plus broadcasting.
+    fn resolve(store: &mut NpcStore) {
+        use terrustia_proto::npc_params::splitting_worm;
+        let followed: std::collections::HashSet<u8> =
+            store.iter().filter_map(|(_, npc)| npc.follows).collect();
+        let mut transformed = Vec::new();
+        let mut orphaned = Vec::new();
+        for (index, npc) in store.iter() {
+            let Some((head, body, tail)) = splitting_worm(npc.npc_type) else {
+                continue;
+            };
+            let has_leader = npc.follows.is_some_and(|l| store.get(l).is_some());
+            let has_follower = followed.contains(&index);
+            if !has_leader && !has_follower {
+                orphaned.push(index);
+            } else if npc.npc_type == body && !has_leader {
+                transformed.push((index, head));
+            } else if npc.npc_type == body && !has_follower {
+                transformed.push((index, tail));
+            } else if (npc.npc_type == head && !has_follower)
+                || (npc.npc_type == tail && !has_leader)
+            {
+                orphaned.push(index);
+            }
+        }
+        for (index, into) in transformed {
+            if let Some(npc) = store.get_mut(index) {
+                let follows = npc.follows;
+                npc.become_type(into);
+                npc.follows = follows;
+            }
+        }
+        for index in orphaned {
+            store.remove(index);
+        }
+    }
+
+    fn eater(store: &mut NpcStore, segments: usize) -> Vec<u8> {
+        let (head, body, tail) = EATER_OF_WORLDS;
+        store.spawn_worm(head, body, tail, segments, (1000.0, 1000.0));
+        store.iter().map(|(index, _)| index).collect()
+    }
+
+    /// Cut one in half and you have two worms, not a worm with a hole in it.
+    #[test]
+    fn cutting_an_eater_of_worlds_makes_two_of_them() {
+        let mut store = NpcStore::new();
+        let chain = eater(&mut store, 6);
+        assert!(chain.len() >= 5);
+
+        // Take a segment out of the middle.
+        let cut = chain[3];
+        store.remove(cut);
+        resolve(&mut store);
+
+        let (head, _, tail) = EATER_OF_WORLDS;
+        let heads = store.iter().filter(|(_, n)| n.npc_type == head).count();
+        let tails = store.iter().filter(|(_, n)| n.npc_type == tail).count();
+        assert_eq!(heads, 2, "the piece behind the wound grows a head");
+        assert_eq!(tails, 2, "and the piece ahead of it grows a tail");
+    }
+
+    #[test]
+    fn a_single_leftover_segment_dies_rather_than_becoming_a_worm() {
+        let mut store = NpcStore::new();
+        let chain = eater(&mut store, 3);
+        // Leave exactly one segment standing.
+        for index in chain.iter().skip(1) {
+            store.remove(*index);
+        }
+        resolve(&mut store);
+        assert_eq!(store.len(), 0, "one segment is not a worm");
+    }
+
+    #[test]
+    fn an_intact_worm_is_left_alone() {
+        let mut store = NpcStore::new();
+        let chain = eater(&mut store, 6);
+        let before: Vec<u16> = store.iter().map(|(_, n)| n.npc_type).collect();
+        resolve(&mut store);
+        let after: Vec<u16> = store.iter().map(|(_, n)| n.npc_type).collect();
+        assert_eq!(before, after);
+        assert_eq!(store.len(), chain.len());
+    }
+
+    /// Only the Eater does this. Cut a giant worm and the pieces simply die.
+    #[test]
+    fn other_worms_do_not_split() {
+        let mut store = NpcStore::new();
+        // Giant worm: head 10, body 11, tail 12.
+        store.spawn_worm(10, 11, 12, 5, (1000.0, 1000.0));
+        let chain: Vec<u8> = store.iter().map(|(index, _)| index).collect();
+        store.remove(chain[2]);
+        let before = store.len();
+        resolve(&mut store);
+        assert_eq!(store.len(), before, "nothing should have changed");
+        assert!(
+            store
+                .iter()
+                .all(|(_, n)| n.npc_type != 10 || n.follows.is_none())
+        );
+    }
+}

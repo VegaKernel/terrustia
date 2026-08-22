@@ -1,0 +1,782 @@
+//! Styles 115, 118 and 119 — the small drifting things.
+//!
+//! None of these chases anything. A **ladybug** (115) picks a heading at random, glides along it
+//! with the wind, and turns whenever it is about to fly into rock or out over open sky; every so
+//! often it lands and walks instead. A **seahorse** (118) does the same underwater, coasting
+//! between kicks and bouncing off whatever it meets. A **dandelion** (119) does nothing at all
+//! unless the wind is blowing it toward someone.
+//!
+//! The unifying trick is that the heading lives in `ai[0]` as an angle rather than as a velocity,
+//! so bouncing is a reflection of that angle and the drift always resumes on the new course.
+
+use rand::{Rng, rngs::SmallRng};
+
+use super::{Shot, World};
+use crate::game::npc::{Npc, TILE, TileView};
+use terrustia_proto::npc_params::{
+    BUTTERFLY_EASE, BUTTERFLY_FEAR_INTERVAL, BUTTERFLY_HOMING_RANGE, BUTTERFLY_PANIC_SPEED,
+    BUTTERFLY_REPLAN,
+};
+use terrustia_proto::tile_solid::solid;
+
+/// Speed a ladybug glides at, before the wind is added.
+const GLIDE_SPEED: f32 = 1.0;
+/// How much of the wind a ladybug picks up.
+const WIND_PULL: f32 = 0.8;
+/// How sharply it settles onto its chosen heading. Very gently: this is a glide, not a turn.
+const GLIDE_EASE: f32 = 0.0125;
+
+/// How far ahead a ladybug looks for something to fly into, and how far down it checks there is
+/// still a world beneath it before climbing.
+const FLOOR_LOOKAHEAD: i32 = 4;
+const SKY_LOOKAHEAD: i32 = 30;
+
+/// Beyond this a ladybug steers toward the nearest player rather than picking a random heading;
+/// it is what stops them drifting off the edge of the world and never coming back.
+const HOMING_RANGE: f32 = 700.0;
+
+/// Ticks between a ladybug reconsidering, as an inclusive-exclusive range.
+const REPLAN_TICKS: (u32, u32) = (60, 181);
+/// One reconsideration in five also swaps between flying and walking.
+const LANDING_CHANCE: u32 = 5;
+
+/// Seahorse kick strength, top speed, and how long it coasts afterwards.
+const KICK: f32 = 0.06;
+const SWIM_SPEED: f32 = 3.0;
+const COAST_TICKS: (u32, u32) = (450, 600);
+
+/// How close to the surface a seahorse counts as being at the top of the water.
+const SURFACE_MARGIN: f32 = 20.0;
+
+/// A dandelion's seeds: the projectile, its damage, and the cadence of a puff.
+const SEED_PROJECTILE: u16 = 836;
+const SEED_DAMAGE: i32 = 7;
+const PUFF_AT: f32 = 40.0;
+const PUFF_OVER: f32 = 80.0;
+/// How close a target has to be, and how level, for a dandelion to bother.
+const PUFF_RANGE: f32 = 600.0;
+const PUFF_HEIGHT: f32 = 100.0;
+/// ...and the range at which it actually lets go.
+const PUFF_LOOSE_RANGE: f32 = 500.0;
+
+fn liquid_or_rock(tiles: &impl TileView, x: i32, y: i32) -> bool {
+    let tile = tiles.tile(x, y);
+    (tile.is_active() && solid(tile.block)) || tile.liquid > 0
+}
+
+/// Pick a heading: usually at random, but toward a distant player so they do not drift away.
+fn choose_heading(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng) {
+    npc.ai[0] = rng.random::<f32>() * std::f32::consts::TAU;
+    if let Some(t) = world.target {
+        let (cx, cy) = npc.center();
+        let (dx, dy) = (t.center.0 - cx, t.center.1 - cy);
+        if (dx * dx + dy * dy).sqrt() > HOMING_RANGE {
+            npc.ai[0] = dy.atan2(dx) + (rng.random::<f32>() * 2.0 - 1.0) * 0.3;
+        }
+    }
+    npc.dirty = true;
+}
+
+/// Drive one ladybug for a tick.
+pub fn ladybug<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) {
+    // `ai[1]` is its size, rolled once and then kept; `ai[2]` says whether it is walking; `ai[3]`
+    // counts down to the next change of mind.
+    if npc.ai[1] == 0.0 {
+        npc.ai[1] = rng.random::<f32>() * 0.2 + 0.7;
+        npc.dirty = true;
+    }
+    npc.ai[3] -= 1.0;
+    if npc.ai[3] <= 0.0 {
+        npc.ai[3] = rng.random_range(REPLAN_TICKS.0..REPLAN_TICKS.1) as f32;
+        if rng.random_ratio(1, LANDING_CHANCE) {
+            if npc.ai[2] == 0.0 {
+                npc.ai[2] = 1.0;
+                npc.ai[0] = 0.0;
+            } else {
+                npc.ai[2] = 0.0;
+                choose_heading(npc, world, rng);
+            }
+        }
+        choose_heading(npc, world, rng);
+    }
+    npc.scale = npc.ai[1];
+
+    let (tile_x, tile_y) = (
+        (npc.center().0 / TILE) as i32,
+        (npc.center().1 / TILE) as i32,
+    );
+
+    if npc.ai[2] == 0.0 {
+        // Gliding.
+        let heading = (npc.ai[0].cos(), npc.ai[0].sin());
+        let wanted = (
+            heading.0 * GLIDE_SPEED + world.conditions.wind * WIND_PULL,
+            heading.1 * GLIDE_SPEED,
+        );
+        npc.velocity.0 += (wanted.0 - npc.velocity.0) * GLIDE_EASE;
+        npc.velocity.1 += (wanted.1 - npc.velocity.1) * GLIDE_EASE;
+
+        // Something solid coming up: flip the heading and bleed the descent.
+        if npc.velocity.1 > 0.0
+            && (tile_y..tile_y + FLOOR_LOOKAHEAD).any(|y| liquid_or_rock(world.tiles, tile_x, y))
+        {
+            npc.ai[0] = -npc.ai[0];
+            npc.velocity.1 *= 0.9;
+        }
+        // Nothing at all below for thirty tiles: it is over open sky and turns back down.
+        if npc.velocity.1 < 0.0
+            && !(tile_y..tile_y + SKY_LOOKAHEAD).any(|y| liquid_or_rock(world.tiles, tile_x, y))
+        {
+            npc.ai[0] = -npc.ai[0];
+            npc.velocity.1 *= 0.9;
+        }
+        if npc.collide_x {
+            npc.ai[0] = -npc.ai[0] + std::f32::consts::PI;
+            npc.velocity.0 *= -0.2;
+        }
+    } else {
+        // Walking. Water underfoot sends it back into the air.
+        if npc.velocity.1 > 0.0 {
+            let ahead = tile_x + i32::from(npc.direction);
+            if (tile_y..tile_y + FLOOR_LOOKAHEAD).any(|y| world.tiles.tile(ahead, y).liquid > 0) {
+                npc.velocity.1 = -1.0;
+                npc.ai[2] = 0.0;
+                npc.ai[0] =
+                    rng.random::<f32>() * std::f32::consts::FRAC_PI_4 - std::f32::consts::FRAC_PI_2;
+                if let Some(t) = world.target {
+                    let (cx, cy) = npc.center();
+                    let (dx, dy) = (t.center.0 - cx, t.center.1 - cy);
+                    if (dx * dx + dy * dy).sqrt() > HOMING_RANGE {
+                        npc.ai[0] = dy.atan2(dx) + (rng.random::<f32>() * 2.0 - 1.0) * 0.3;
+                    }
+                }
+                npc.direction = if npc.velocity.0 > 0.0 { 1 } else { -1 };
+                npc.dirty = true;
+                return;
+            }
+        }
+        if npc.velocity.1 != 0.0 {
+            npc.velocity.0 *= 0.98;
+            npc.velocity.1 += (2.0 - npc.velocity.1) * 0.005;
+        } else {
+            let wanted = f32::from(npc.direction);
+            npc.velocity.0 += (wanted - npc.velocity.0) * 0.05;
+            npc.velocity.1 += (0.0 - npc.velocity.1) * 0.05;
+            npc.velocity.1 += 0.2;
+            if npc.collide_x {
+                npc.direction = -npc.direction;
+                npc.velocity.0 *= -0.2;
+                npc.dirty = true;
+            }
+        }
+    }
+
+    npc.direction = if npc.velocity.0 > 0.0 { 1 } else { -1 };
+    npc.dirty = true;
+}
+
+/// Height of the water's surface in the column an NPC is in, if it is in water at all.
+///
+/// This is `Collision.GetWaterLineIterate`: walk up until the liquid stops, then measure how full
+/// the last wet tile is.
+pub fn water_line(tiles: &impl TileView, tile_x: i32, mut tile_y: i32) -> Option<f32> {
+    let mut guard = 0;
+    while tile_y > 0 && tiles.tile(tile_x, tile_y).liquid > 0 && guard < 10_000 {
+        tile_y -= 1;
+        guard += 1;
+    }
+    tile_y += 1;
+    (tiles.tile(tile_x, tile_y).liquid > 0)
+        .then(|| (tile_y * 16) as f32 - f32::from(tiles.tile(tile_x, tile_y - 1).liquid / 16))
+}
+
+/// Drive one seahorse for a tick.
+pub fn seahorse<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) {
+    npc.no_gravity = world.wet;
+    let (tile_x, tile_y) = (
+        (npc.center().0 / TILE) as i32,
+        (npc.center().1 / TILE) as i32,
+    );
+    let surface = water_line(world.tiles, tile_x, tile_y);
+    let at_surface = surface.is_some_and(|line| npc.position.1 - line < SURFACE_MARGIN);
+
+    if !world.wet {
+        // Out of water it flops: no propulsion, just friction and a slow tumble.
+        if npc.velocity.1 == 0.0 {
+            npc.velocity.0 *= 0.95;
+        }
+        npc.rotation += (npc.velocity.0 + npc.velocity.1) / 2.0 * 0.05;
+    } else {
+        npc.ai[1] -= 1.0;
+        if npc.ai[1] <= 0.0 {
+            // Kicking. Once it is up to speed it picks a fresh heading and coasts.
+            npc.velocity.0 += npc.ai[0].cos() * KICK;
+            npc.velocity.1 += npc.ai[0].sin() * KICK;
+            let speed = (npc.velocity.0.powi(2) + npc.velocity.1.powi(2)).sqrt();
+            if speed > SWIM_SPEED {
+                npc.velocity.0 = npc.velocity.0.clamp(-SWIM_SPEED, SWIM_SPEED);
+                npc.ai[1] = rng.random_range(COAST_TICKS.0..COAST_TICKS.1) as f32;
+                npc.ai[0] = rng.random::<f32>() * std::f32::consts::TAU;
+                // At the surface it will not choose a heading that takes it further up.
+                if at_surface && npc.ai[0] > std::f32::consts::PI {
+                    npc.ai[0] -= std::f32::consts::PI;
+                }
+                npc.dirty = true;
+            }
+        } else {
+            npc.velocity.0 *= 0.95;
+            npc.velocity.1 *= 0.95;
+        }
+        npc.rotation = npc.velocity.0 * 0.1;
+    }
+
+    // Bouncing reflects the heading, not just the velocity, so the coast resumes on the new course.
+    let bounce_y = npc.collide_y && world.wet && (!at_surface || npc.velocity.1 < 0.0);
+    if npc.collide_x || bounce_y {
+        let mut heading = (npc.ai[0].cos(), npc.ai[0].sin());
+        if npc.collide_x {
+            heading.0 = -heading.0;
+        }
+        if bounce_y {
+            heading.1 = -heading.1;
+        }
+        npc.ai[0] = heading.1.atan2(heading.0);
+        let speed = (npc.velocity.0.powi(2) + npc.velocity.1.powi(2)).sqrt();
+        npc.velocity = (npc.ai[0].cos() * speed, npc.ai[0].sin() * speed);
+        npc.dirty = true;
+    }
+    npc.dirty = true;
+}
+
+/// Drive one dandelion for a tick, returning the seeds it let go of.
+///
+/// Without a wind blowing a player's way a dandelion does nothing but wither: its despawn timer is
+/// cut to ten ticks every tick that the day is not windy.
+pub fn dandelion<T: TileView>(
+    npc: &mut Npc,
+    world: &World<'_, T>,
+    rng: &mut SmallRng,
+) -> Vec<Shot> {
+    if !world.conditions.windy && npc.time_left > 10 {
+        npc.time_left = 10;
+    }
+
+    let mut downwind = false;
+    let mut offset = 0.0;
+    let mut reach = 0.0;
+    if let Some(t) = world.target {
+        let (cx, cy) = npc.center();
+        offset = t.center.0 - cx;
+        reach = offset.abs();
+        downwind = (t.center.1 - cy).abs() < PUFF_HEIGHT
+            && reach < PUFF_RANGE
+            && ((offset > 0.0 && world.conditions.wind > 0.0)
+                || (offset < 0.0 && world.conditions.wind < 0.0));
+    }
+
+    if npc.ai[0] != 1.0 {
+        npc.ai[2] = 0.0;
+        npc.ai[3] = 0.0;
+        if downwind {
+            npc.ai[0] = 1.0;
+            npc.dirty = true;
+        }
+        return Vec::new();
+    }
+
+    npc.ai[2] = if reach < PUFF_LOOSE_RANGE { 1.0 } else { 0.0 };
+    if !downwind {
+        npc.ai[0] = 0.0;
+        npc.dirty = true;
+        return Vec::new();
+    }
+    if npc.ai[2] != 1.0 {
+        return Vec::new();
+    }
+
+    npc.ai[3] += 1.0;
+    if npc.ai[3] > PUFF_OVER {
+        npc.ai[0] = 0.0;
+        npc.dirty = true;
+        return Vec::new();
+    }
+    if npc.ai[3] != PUFF_AT {
+        return Vec::new();
+    }
+
+    // The puff: one to three seeds, scattered and blown downwind.
+    let along = if offset > 0.0 { 1 } else { -1 };
+    let (cx, cy) = npc.center();
+    let mut seeds = Vec::new();
+    for _ in 0..1 + rng.random_range(0..3) {
+        let spread = (
+            along as f32 * rng.random_range(-2..10) as f32,
+            10.0 + rng.random_range(-6..6) as f32,
+        );
+        let mut velocity = (2.0 * along as f32 + spread.0 * 0.25, -2.0 + spread.1 * 0.25);
+        if velocity.1 > -3.0 {
+            velocity.1 = -3.0;
+        }
+        seeds.push(Shot {
+            projectile: SEED_PROJECTILE,
+            damage: SEED_DAMAGE,
+            position: (cx + spread.0 + (along * 6) as f32, cy + spread.1),
+            velocity,
+            time_left: 300,
+        });
+    }
+    npc.dirty = true;
+    seeds
+}
+
+/// Drive one butterfly for a tick.
+///
+/// A butterfly's heading lives in `ai[0..1]` as a velocity it eases toward over a full second, so
+/// its path is all long curves and no corners. Every couple of seconds it picks a new one: while it
+/// is more than seven hundred pixels from anyone it heads back toward them, and the first time it
+/// finds itself closer than that it stops homing for good and wanders freely from then on.
+pub fn butterfly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) {
+    // `ai[2]` is which of the eight varieties it is — the game rolls it once to decide what lands
+    // in your net — and `ai[3]` is its size.
+    if npc.ai[2] == 0.0 {
+        let roll = rng.random_range(0..100);
+        npc.ai[2] = 1.0
+            + match roll {
+                0 => 5.0,
+                1..=2 => 1.0,
+                3..=8 => 2.0,
+                9..=18 => 7.0,
+                19..=33 => 3.0,
+                34..=52 => 6.0,
+                75.. => 0.0,
+                _ => 4.0,
+            };
+        npc.dirty = true;
+    }
+    if npc.ai[3] == 0.0 {
+        npc.ai[3] = rng.random_range(75..111) as f32 * 0.01;
+    }
+    npc.scale = npc.ai[3];
+
+    npc.local_ai[0] -= 1.0;
+    if npc.local_ai[0] <= 0.0 {
+        npc.local_ai[0] = rng.random_range(BUTTERFLY_REPLAN.0..BUTTERFLY_REPLAN.1) as f32;
+        let across = world
+            .target
+            .map_or(0.0, |t| (npc.center().0 - t.center.0).abs());
+        if let Some(t) = world.target {
+            npc.direction = if t.center.0 > npc.center().0 { 1 } else { -1 };
+        }
+        // Homing happens only until the first time it finds itself close enough. After that
+        // `local_ai[3]` is set for good and it drifts wherever it likes.
+        if across > BUTTERFLY_HOMING_RANGE && npc.local_ai[3] == 0.0 {
+            let speed = if across > 1000.0 {
+                rng.random_range(150..201) as f32 * 0.01
+            } else if across > 850.0 {
+                rng.random_range(100..151) as f32 * 0.01
+            } else {
+                rng.random_range(50..151) as f32 * 0.01
+            };
+            let along = i32::from(npc.direction) * rng.random_range(100..251);
+            let mut rise = rng.random_range(-50..51);
+            if let Some(t) = world.target
+                && npc.position.1 > t.center.1 - super::PLAYER_HEIGHT as f32 / 2.0 - 100.0
+            {
+                rise -= rng.random_range(100..251);
+            }
+            let k = speed / ((along * along + rise * rise) as f32).sqrt();
+            npc.ai[0] = along as f32 * k;
+            npc.ai[1] = rise as f32 * k;
+        } else {
+            npc.local_ai[3] = 1.0;
+            let speed = rng.random_range(26..301) as f32 * 0.01;
+            let (dx, dy) = (rng.random_range(-100..101), rng.random_range(-100..101));
+            let k = speed / (((dx * dx + dy * dy) as f32).sqrt()).max(f32::MIN_POSITIVE);
+            npc.ai[0] = dx as f32 * k;
+            npc.ai[1] = dy as f32 * k;
+        }
+        npc.dirty = true;
+    }
+
+    // A full second of easing onto the chosen heading, which is what makes the path a curve.
+    npc.velocity.0 = (npc.velocity.0 * (BUTTERFLY_EASE - 1.0) + npc.ai[0]) / BUTTERFLY_EASE;
+    npc.velocity.1 = (npc.velocity.1 * (BUTTERFLY_EASE - 1.0) + npc.ai[1]) / BUTTERFLY_EASE;
+
+    let (tile_x, tile_y) = (
+        (npc.center().0 / TILE) as i32,
+        (npc.center().1 / TILE) as i32,
+    );
+    if npc.velocity.1 > 0.0 && (tile_y..tile_y + 3).any(|y| liquid_or_rock(world.tiles, tile_x, y))
+    {
+        npc.ai[1] = -npc.ai[1];
+        npc.velocity.1 *= 0.9;
+    }
+    if npc.velocity.1 < 0.0
+        && !(tile_y..tile_y + 30).any(|y| {
+            let t = world.tiles.tile(tile_x, y);
+            t.is_active() && solid(t.block)
+        })
+    {
+        npc.ai[1] = -npc.ai[1];
+        npc.velocity.1 *= 0.9;
+    }
+
+    // A butterfly is afraid of monsters, not of you. The caller works out what is nearby.
+    if npc.local_ai[1] > 0.0 {
+        npc.local_ai[1] -= 1.0;
+    } else {
+        npc.local_ai[1] = BUTTERFLY_FEAR_INTERVAL;
+        let (fx, fy) = world.crowding;
+        if fx != 0.0 || fy != 0.0 {
+            npc.velocity.0 += fx * 2.0;
+            npc.velocity.1 += fy * 2.0;
+            let speed = (npc.velocity.0.powi(2) + npc.velocity.1.powi(2)).sqrt();
+            if speed > BUTTERFLY_PANIC_SPEED {
+                npc.velocity.0 = npc.velocity.0 / speed * BUTTERFLY_PANIC_SPEED;
+                npc.velocity.1 = npc.velocity.1 / speed * BUTTERFLY_PANIC_SPEED;
+            }
+        }
+    }
+
+    if npc.collide_x {
+        npc.ai[0] = if npc.velocity.0 < 0.0 {
+            npc.ai[0].abs()
+        } else {
+            -npc.ai[0].abs()
+        };
+        npc.velocity.0 *= -0.2;
+    }
+    if npc.velocity.0 < 0.0 {
+        npc.direction = -1;
+    }
+    if npc.velocity.0 > 0.0 {
+        npc.direction = 1;
+    }
+    npc.dirty = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::tile::{Liquid, Tile};
+
+    #[derive(Default)]
+    struct Air(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Air {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn rng() -> SmallRng {
+        SmallRng::seed_from_u64(9)
+    }
+
+    fn world<'a>(tiles: &'a Air, target: Option<Target>) -> World<'a, Air> {
+        crate::game::ai::calm(tiles, target)
+    }
+
+    fn at(npc_type: u16, tile_x: i32, tile_y: i32) -> Npc {
+        Npc::new(npc_type, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1).expect("a critter type")
+    }
+
+    #[test]
+    fn a_ladybug_rolls_its_own_size_once_and_keeps_it() {
+        let tiles = Air::default();
+        let mut bug = at(604, 500, 500);
+        ladybug(&mut bug, &world(&tiles, None), &mut rng());
+        let size = bug.ai[1];
+        assert!((0.7..0.9).contains(&size), "got {size}");
+        assert_eq!(bug.scale, size, "and wears it");
+        for _ in 0..50 {
+            ladybug(&mut bug, &world(&tiles, None), &mut rng());
+        }
+        assert_eq!(bug.ai[1], size, "it should not keep rerolling");
+    }
+
+    #[test]
+    fn a_ladybug_over_open_sky_turns_back_down() {
+        // Ground far below, so nothing within thirty tiles.
+        let tiles = Air::default();
+        let mut bug = at(604, 500, 500);
+        bug.ai[3] = 1000.0;
+        bug.ai[1] = 0.8;
+        // Heading upward.
+        bug.ai[0] = -std::f32::consts::FRAC_PI_2;
+        bug.velocity = (0.0, -1.0);
+        let before = bug.ai[0];
+        ladybug(&mut bug, &world(&tiles, None), &mut rng());
+        assert_eq!(bug.ai[0], -before, "should have flipped its heading");
+    }
+
+    #[test]
+    fn a_ladybug_about_to_hit_rock_turns_away() {
+        let mut tiles = Air::default();
+        for y in 500..510 {
+            tiles.0.insert((500, y), Tile::block(1));
+        }
+        let mut bug = at(604, 500, 498);
+        bug.ai[3] = 1000.0;
+        bug.ai[1] = 0.8;
+        bug.ai[0] = std::f32::consts::FRAC_PI_2;
+        bug.velocity = (0.0, 1.0);
+        let before = bug.ai[0];
+        ladybug(&mut bug, &world(&tiles, None), &mut rng());
+        assert_eq!(bug.ai[0], -before);
+    }
+
+    #[test]
+    fn a_ladybug_steers_toward_a_very_distant_player() {
+        let tiles = Air::default();
+        let mut bug = at(604, 500, 500);
+        bug.ai[3] = 1.0;
+        let (cx, cy) = bug.center();
+        let far = Some(Target {
+            slot: 0,
+            center: (cx + 2000.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        ladybug(&mut bug, &world(&tiles, far), &mut rng());
+        // Straight along the positive x axis, give or take the game's own jitter.
+        assert!(
+            bug.ai[0].abs() < 0.4,
+            "should head toward the player, got {}",
+            bug.ai[0]
+        );
+    }
+
+    #[test]
+    fn the_water_line_is_the_top_of_the_column() {
+        let mut tiles = Air::default();
+        for y in 100..120 {
+            tiles
+                .0
+                .insert((50, y), Tile::AIR.with_liquid(Liquid::Water, 255));
+        }
+        let line = water_line(&tiles, 50, 110).expect("in water");
+        assert!(
+            (line - 100.0 * 16.0).abs() < 16.0,
+            "surface should be near tile 100, got {line}"
+        );
+        assert!(water_line(&tiles, 51, 110).is_none(), "and dry elsewhere");
+    }
+
+    #[test]
+    fn a_seahorse_out_of_water_just_flops() {
+        let tiles = Air::default();
+        let mut horse = at(626, 50, 50);
+        horse.velocity = (2.0, 0.0);
+        seahorse(&mut horse, &world(&tiles, None), &mut rng());
+        assert!(!horse.no_gravity, "it should fall");
+        assert!(horse.velocity.0 < 2.0, "and lose its speed");
+    }
+
+    #[test]
+    fn a_seahorse_in_water_kicks_up_to_speed_and_then_coasts() {
+        let tiles = Air::default();
+        let mut horse = at(626, 50, 50);
+        let mut w = world(&tiles, None);
+        w.wet = true;
+        let mut r = rng();
+        for _ in 0..400 {
+            seahorse(&mut horse, &w, &mut r);
+            if horse.ai[1] > 0.0 {
+                break;
+            }
+        }
+        assert!(horse.no_gravity, "weightless in water");
+        assert!(
+            horse.ai[1] >= COAST_TICKS.0 as f32,
+            "should have settled into a coast, got {}",
+            horse.ai[1]
+        );
+        let speed = (horse.velocity.0.powi(2) + horse.velocity.1.powi(2)).sqrt();
+        assert!(
+            speed <= SWIM_SPEED * 1.5,
+            "and not exceed its speed: {speed}"
+        );
+    }
+
+    #[test]
+    fn a_seahorse_bouncing_reflects_its_heading() {
+        let tiles = Air::default();
+        let mut horse = at(626, 50, 50);
+        horse.ai[0] = 0.5;
+        horse.ai[1] = 100.0;
+        horse.velocity = (2.0, 1.0);
+        horse.collide_x = true;
+        let mut w = world(&tiles, None);
+        w.wet = true;
+        seahorse(&mut horse, &w, &mut rng());
+        assert!(
+            horse.ai[0].cos() < 0.0,
+            "should now be heading the other way, got angle {}",
+            horse.ai[0]
+        );
+    }
+
+    #[test]
+    fn a_butterfly_rolls_a_variety_and_a_size_once() {
+        let tiles = Air::default();
+        let mut b = at(356, 500, 400);
+        butterfly(&mut b, &world(&tiles, None), &mut rng());
+        let (variety, size) = (b.ai[2], b.ai[3]);
+        assert!((1.0..=8.0).contains(&variety), "got {variety}");
+        assert!((0.75..1.11).contains(&size), "got {size}");
+        assert_eq!(b.scale, size);
+        for _ in 0..500 {
+            butterfly(&mut b, &world(&tiles, None), &mut rng());
+        }
+        assert_eq!((b.ai[2], b.ai[3]), (variety, size), "and keeps them");
+    }
+
+    #[test]
+    fn a_butterfly_far_from_anyone_heads_back_toward_them() {
+        let mut tiles = Air::default();
+        // Ground beneath, so it does not think it is over open sky and keep flipping.
+        for x in 0..2000 {
+            tiles.0.insert((x, 410), Tile::block(1));
+        }
+        let mut b = at(356, 500, 400);
+        let (cx, cy) = b.center();
+        let far = Some(Target {
+            slot: 0,
+            center: (cx + BUTTERFLY_HOMING_RANGE + 400.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        b.local_ai[0] = 1.0;
+        butterfly(&mut b, &world(&tiles, far), &mut rng());
+        assert!(b.ai[0] > 0.0, "should aim toward them, got {}", b.ai[0]);
+    }
+
+    /// Once a butterfly has been near someone it stops homing, permanently.
+    #[test]
+    fn a_butterfly_that_has_been_close_wanders_freely_ever_after() {
+        let tiles = Air::default();
+        let mut b = at(356, 500, 400);
+        let (cx, cy) = b.center();
+        let close = Some(Target {
+            slot: 0,
+            center: (cx + 50.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        b.local_ai[0] = 1.0;
+        butterfly(&mut b, &world(&tiles, close), &mut rng());
+        assert_eq!(b.local_ai[3], 1.0, "should have given up homing");
+
+        let far = Some(Target {
+            slot: 0,
+            center: (cx + BUTTERFLY_HOMING_RANGE + 400.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        for _ in 0..20 {
+            b.local_ai[0] = 1.0;
+            butterfly(&mut b, &world(&tiles, far), &mut rng());
+            assert_eq!(b.local_ai[3], 1.0);
+        }
+    }
+
+    #[test]
+    fn a_butterfly_bolts_from_something_dangerous() {
+        let tiles = Air::default();
+        let mut b = at(356, 500, 400);
+        butterfly(&mut b, &world(&tiles, None), &mut rng());
+        b.local_ai[1] = 0.0;
+        b.velocity = (0.0, 0.0);
+        let mut w = world(&tiles, None);
+        // A push to the left, as the caller would work out from a nearby monster.
+        w.crowding = (-1.0, 0.0);
+        butterfly(&mut b, &w, &mut rng());
+        assert!(b.velocity.0 < 0.0, "should flee, got {}", b.velocity.0);
+    }
+
+    #[test]
+    fn a_butterfly_eases_onto_its_heading_rather_than_snapping_to_it() {
+        let tiles = Air::default();
+        let mut b = at(356, 500, 400);
+        butterfly(&mut b, &world(&tiles, None), &mut rng());
+        b.local_ai[0] = 1000.0;
+        b.velocity = (0.0, 0.0);
+        b.ai[0] = 3.0;
+        b.ai[1] = 0.0;
+        butterfly(&mut b, &world(&tiles, None), &mut rng());
+        assert!(
+            b.velocity.0 > 0.0 && b.velocity.0 < 0.2,
+            "one sixtieth of the way there, got {}",
+            b.velocity.0
+        );
+    }
+
+    #[test]
+    fn a_dandelion_on_a_still_day_withers() {
+        let tiles = Air::default();
+        let mut d = at(628, 50, 50);
+        let seeds = dandelion(&mut d, &world(&tiles, None), &mut rng());
+        assert!(seeds.is_empty());
+        assert!(d.time_left <= 10, "should be about to vanish");
+    }
+
+    #[test]
+    fn a_dandelion_puffs_at_someone_downwind() {
+        let tiles = Air::default();
+        let mut d = at(628, 50, 50);
+        let (cx, cy) = d.center();
+        let mut w = world(
+            &tiles,
+            Some(Target {
+                slot: 0,
+                center: (cx + 300.0, cy),
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        );
+        w.conditions.windy = true;
+        w.conditions.wind = 0.5;
+        let mut r = rng();
+        let mut seeds = Vec::new();
+        for _ in 0..200 {
+            seeds = dandelion(&mut d, &w, &mut r);
+            if !seeds.is_empty() {
+                break;
+            }
+        }
+        assert!(!seeds.is_empty(), "should have let go");
+        assert!(seeds.len() <= 3);
+        assert!(seeds.iter().all(|s| s.projectile == SEED_PROJECTILE));
+        assert!(
+            seeds.iter().all(|s| s.velocity.0 > 0.0),
+            "and blown downwind"
+        );
+    }
+
+    #[test]
+    fn a_dandelion_ignores_someone_upwind() {
+        let tiles = Air::default();
+        let mut d = at(628, 50, 50);
+        let (cx, cy) = d.center();
+        let mut w = world(
+            &tiles,
+            Some(Target {
+                slot: 0,
+                center: (cx + 300.0, cy),
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        );
+        w.conditions.windy = true;
+        // Wind blowing the other way.
+        w.conditions.wind = -0.5;
+        let mut r = rng();
+        for _ in 0..200 {
+            assert!(dandelion(&mut d, &w, &mut r).is_empty());
+        }
+    }
+}

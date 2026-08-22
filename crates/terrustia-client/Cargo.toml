@@ -1,0 +1,20 @@
+[package]
+name = "terrustia-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A headless Terraria client: handshake, world view, and scripted actions"
+
+[dependencies]
+terrustia-proto = { path = "../terrustia-proto" }
+
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

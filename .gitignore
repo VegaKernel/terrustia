@@ -1,0 +1,25 @@
+# Build output. Regenerated from source; several gigabytes.
+/target/
+**/*.rs.bk
+
+# Worlds. A .wld is a save file, not source: they are large, binary, and personal, and a stray
+# commit of one puts somebody's world into the history permanently.
+*.wld
+*.wld.bak*
+*.twld
+
+# Local configuration, which holds a listen address and a world path for one machine.
+/terrustia.toml
+
+# Editor and OS noise.
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Scratch space for profiling output and captured logs.
+/scratch/
+*.log
+perf.data*
+flamegraph.svg

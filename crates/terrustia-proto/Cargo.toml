@@ -1,0 +1,11 @@
+[package]
+name = "terrustia-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Terraria network wire format: primitives, packet types, tile-section coding"
+
+[dependencies]
+flate2.workspace = true
+thiserror.workspace = true

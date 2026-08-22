@@ -1,0 +1,1201 @@
+//! Gameplay behaviour, driven through the headless client.
+//!
+//! These exercise the parts of the server a player actually touches: chests, signs, multi-tile
+//! edits, the world clock, chat commands and saving.
+
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
+
+use terrustia::{
+    config::Config,
+    game::{GameServer, ServerEvent},
+    net::listener,
+    world::{Chest, Sign, World, wld, wld_save, worldgen},
+};
+use terrustia_client::{Client, Event};
+use terrustia_proto::{ItemStack, Tile, id, square::TileSquare};
+use tokio::{net::TcpListener, sync::mpsc};
+
+/// Start a server on an ephemeral port, letting the caller shape the world first.
+async fn start_with<F: FnOnce(&mut World)>(mut config: Config, prepare: F) -> SocketAddr {
+    config.world_width = 800;
+    config.world_height = 600;
+    config.motd = String::new();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let mut world = worldgen::generate(
+        config.world_width,
+        config.world_height,
+        config.world_name.clone(),
+        7,
+    );
+    prepare(&mut world);
+
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    tokio::spawn(listener::run(listener, config, tx));
+    addr
+}
+
+async fn start() -> SocketAddr {
+    start_with(Config::default(), |_| {}).await
+}
+
+async fn join(addr: SocketAddr, name: &str) -> Client {
+    let mut client = Client::join(addr, name).await.expect("handshake");
+    client.set_timeout(Duration::from_secs(10));
+    client
+}
+
+#[tokio::test]
+async fn a_chest_can_be_opened_and_its_contents_edited() {
+    // Put a chest somewhere the spawn stream will cover.
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![Some(Chest {
+            x: 400,
+            y: 320,
+            name: "Loot".into(),
+            items: vec![ItemStack::new(3507, 5, 0), ItemStack::EMPTY],
+        })];
+    })
+    .await;
+
+    let mut client = join(addr, "looter").await;
+    client.open_chest(400, 320).await.unwrap();
+
+    // The server announces the size, then every slot, then which chest is open.
+    let mut size = None;
+    let mut slots = Vec::new();
+    let mut opened = false;
+    for _ in 0..40 {
+        match client.next_event().await.unwrap() {
+            Event::Other(frame) if frame.id == id::SYNC_CHEST_SIZE => {
+                size = Some(i16::from_le_bytes([frame.payload[2], frame.payload[3]]));
+            }
+            Event::Other(frame) if frame.id == id::SYNC_CHEST_ITEM => {
+                slots
+                    .push(terrustia_proto::objects::SyncChestItem::decode(&frame.payload).unwrap());
+            }
+            Event::Other(frame) if frame.id == id::SYNC_PLAYER_CHEST => {
+                let sync =
+                    terrustia_proto::objects::SyncPlayerChest::decode(&frame.payload).unwrap();
+                assert_eq!(sync.name.as_deref(), Some("Loot"));
+                opened = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(size, Some(2), "the client must be told the chest's size");
+    assert!(opened, "the server never confirmed the chest was open");
+    assert_eq!(slots.len(), 2, "every slot should be sent");
+    assert_eq!(slots[0].item, ItemStack::new(3507, 5, 0));
+    assert!(slots[1].item.is_empty());
+}
+
+#[tokio::test]
+async fn a_chest_edit_is_refused_unless_the_chest_is_open() {
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![Some(Chest {
+            x: 400,
+            y: 320,
+            name: String::new(),
+            items: vec![ItemStack::EMPTY; 4],
+        })];
+    })
+    .await;
+
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    // Bob never opened it, so his edit must not take.
+    let forged = terrustia_proto::objects::SyncChestItem {
+        chest: 0,
+        slot: 0,
+        item: ItemStack::new(99, 1, 0),
+    };
+    bob.send(&forged.encode().unwrap()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Alice opens it and should see an empty slot.
+    alice.open_chest(400, 320).await.unwrap();
+    let mut first_slot = None;
+    for _ in 0..40 {
+        if let Event::Other(frame) = alice.next_event().await.unwrap()
+            && frame.id == id::SYNC_CHEST_ITEM
+        {
+            let sync = terrustia_proto::objects::SyncChestItem::decode(&frame.payload).unwrap();
+            if sync.slot == 0 {
+                first_slot = Some(sync.item);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        first_slot,
+        Some(ItemStack::EMPTY),
+        "an edit from a player who never opened the chest was applied"
+    );
+}
+
+#[tokio::test]
+async fn two_players_cannot_open_the_same_chest() {
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![Some(Chest {
+            x: 400,
+            y: 320,
+            name: String::new(),
+            items: vec![ItemStack::EMPTY; 2],
+        })];
+    })
+    .await;
+
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    alice.open_chest(400, 320).await.unwrap();
+    alice
+        .wait_for(
+            "alice's chest to open",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_PLAYER_CHEST),
+        )
+        .await
+        .unwrap();
+
+    // Bob's attempt should be ignored while alice is inside.
+    bob.open_chest(400, 320).await.unwrap();
+    bob.set_timeout(Duration::from_secs(2));
+    let opened = bob
+        .wait_for(
+            "bob's chest to open",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_PLAYER_CHEST),
+        )
+        .await;
+    assert!(opened.is_err(), "two players opened the same chest at once");
+}
+
+#[tokio::test]
+async fn a_sign_can_be_read_and_rewritten() {
+    let addr = start_with(Config::default(), |world| {
+        world.signs = vec![Some(Sign {
+            x: 400,
+            y: 320,
+            text: "original".into(),
+        })];
+    })
+    .await;
+
+    let mut client = join(addr, "reader").await;
+    client.read_sign(400, 320).await.unwrap();
+
+    let text = client
+        .wait_for(
+            "the sign text",
+            |e| matches!(e, Event::Other(f) if f.id == id::OPEN_SIGN_RESPONSE),
+        )
+        .await
+        .unwrap();
+    let Event::Other(frame) = text else {
+        unreachable!()
+    };
+    let sign = terrustia_proto::objects::SignText::decode(&frame.payload).unwrap();
+    assert_eq!(sign.text, "original");
+
+    // Rewrite it, then have a second player read it back.
+    let update = terrustia_proto::objects::SignText {
+        sign: sign.sign,
+        x: 400,
+        y: 320,
+        text: "rewritten".into(),
+        player: 0,
+        editing: 0,
+    };
+    client.send(&update.encode().unwrap()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut second = join(addr, "second").await;
+    second.read_sign(400, 320).await.unwrap();
+    let event = second
+        .wait_for(
+            "the updated sign",
+            |e| matches!(e, Event::Other(f) if f.id == id::OPEN_SIGN_RESPONSE),
+        )
+        .await
+        .unwrap();
+    let Event::Other(frame) = event else {
+        unreachable!()
+    };
+    assert_eq!(
+        terrustia_proto::objects::SignText::decode(&frame.payload)
+            .unwrap()
+            .text,
+        "rewritten"
+    );
+}
+
+#[tokio::test]
+async fn a_tile_square_is_applied_and_relayed() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    // A 2x2 block of stone, the shape a piece of furniture would arrive as.
+    let square = TileSquare {
+        x: 402,
+        y: 330,
+        width: 2,
+        height: 2,
+        change_type: 0,
+        tiles: vec![Tile::block(1); 4],
+    };
+    bob.send(&square.encode().unwrap()).await.unwrap();
+
+    // Alice sees the relay.
+    alice
+        .wait_for(
+            "the relayed square",
+            |e| matches!(e, Event::Other(f) if f.id == id::AREA_TILE_CHANGE),
+        )
+        .await
+        .unwrap();
+
+    // And a fresh player is streamed the applied result.
+    let fresh = join(addr, "fresh").await;
+    for dx in 0..2 {
+        for dy in 0..2 {
+            let tile = fresh.world().tile(402 + dx, 330 + dy);
+            assert_eq!(
+                tile.map(|t| t.block),
+                Some(1),
+                "square tile ({dx}, {dy}) did not stick"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tile_square_reaching_outside_the_world_is_refused() {
+    let addr = start().await;
+    let mut client = join(addr, "edge").await;
+
+    let square = TileSquare {
+        x: 799,
+        y: 599,
+        width: 4,
+        height: 4,
+        change_type: 0,
+        tiles: vec![Tile::block(1); 16],
+    };
+    client.send(&square.encode().unwrap()).await.unwrap();
+
+    // The server should stay up and keep answering.
+    client.say("still here?").await.unwrap();
+    client
+        .wait_for(
+            "chat to still work",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("still here?")),
+        )
+        .await
+        .expect("server stopped responding after an out-of-bounds square");
+}
+
+#[tokio::test]
+async fn chat_commands_answer() {
+    let addr = start().await;
+    let mut client = join(addr, "asker").await;
+
+    client.say("/players").await.unwrap();
+    let event = client
+        .wait_for(
+            "the player list",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("online")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { text, .. } = event {
+        assert!(text.contains("asker"), "player list should name us: {text}");
+    }
+
+    client.say("/time night").await.unwrap();
+    client
+        .wait_for(
+            "the time change",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("Time set to night")),
+        )
+        .await
+        .unwrap();
+
+    client.say("/nonsense").await.unwrap();
+    client
+        .wait_for(
+            "an unknown-command reply",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("unknown command")),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_generated_world_reports_that_it_cannot_be_saved() {
+    let addr = start().await;
+    let mut client = join(addr, "saver").await;
+
+    client.say("/save").await.unwrap();
+    client
+        .wait_for(
+            "the refusal",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("cannot be saved")),
+        )
+        .await
+        .unwrap();
+}
+
+/// Build a small world, save it, and serve the save so the whole persistence path is exercised.
+#[tokio::test]
+async fn edits_survive_a_save_and_reload() {
+    let dir = std::env::temp_dir().join(format!("terrustia-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source: PathBuf = dir.join("source.wld");
+
+    // A generated world cannot be saved, so this test needs a world that came from a file. There
+    // is no such file to start from, so the test is skipped unless one has been provided.
+    let Ok(seed_world) = std::env::var("TERRUSTIA_TEST_WLD") else {
+        eprintln!("set TERRUSTIA_TEST_WLD to a .wld path to run the save round-trip test");
+        return;
+    };
+    std::fs::copy(&seed_world, &source).unwrap();
+
+    let saved = dir.join("saved.wld");
+    let config = Config {
+        world_file: Some(source.clone()),
+        save_file: Some(saved.clone()),
+        autosave_secs: 0,
+        motd: String::new(),
+        ..Config::default()
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let world = wld::load(&source).unwrap();
+    let (spawn_x, spawn_y) = (world.spawn_x, world.spawn_y);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    tokio::spawn(listener::run(listener, config, tx));
+
+    let mut client = join(addr, "digger").await;
+    let dig_x = i32::from(spawn_x) + 20;
+    let mut dug = Vec::new();
+    for depth in 12..30 {
+        let y = i32::from(spawn_y) + depth;
+        if client.world().tile(dig_x, y).is_some_and(|t| t.is_active()) {
+            client.break_tile(dig_x as i16, y as i16).await.unwrap();
+            dug.push(y);
+        }
+    }
+    assert!(!dug.is_empty(), "found nothing to dig");
+
+    client.say("/save").await.unwrap();
+    client
+        .wait_for(
+            "the save confirmation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("World saved")),
+        )
+        .await
+        .unwrap();
+
+    let reloaded = wld::load(&saved).unwrap();
+    for y in dug {
+        assert!(
+            !reloaded.tile(dig_x, y).is_active(),
+            "block at ({dig_x}, {y}) came back after the save"
+        );
+    }
+
+    // And the save is itself loadable and re-saveable.
+    wld_save::save(&reloaded, &dir.join("again.wld")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn breaking_a_block_drops_the_right_item() {
+    let addr = start_with(Config::default(), |world| {
+        // A lone stone block in mid-air, so the drop is unambiguous.
+        world.set_tile(410, 300, Tile::block(1));
+    })
+    .await;
+
+    let mut client = join(addr, "miner").await;
+    client.break_tile(410, 300).await.unwrap();
+
+    let event = client
+        .wait_for("the dropped item", |e| matches!(e, Event::ItemSynced(_)))
+        .await
+        .unwrap();
+    let Event::ItemSynced(sync) = event else {
+        unreachable!()
+    };
+    // Stone is tile 1, and its item is StoneBlock (3).
+    assert_eq!(sync.item.id, 3, "stone should drop a stone block");
+    assert_eq!(sync.item.stack, 1);
+}
+
+#[tokio::test]
+async fn a_framed_object_drops_nothing_rather_than_the_wrong_item() {
+    let addr = start_with(Config::default(), |world| {
+        // Chests pick their drop from a frame style, which is not modelled.
+        world.set_tile(410, 300, Tile::framed(21, 0, 0));
+    })
+    .await;
+
+    let mut client = join(addr, "miner").await;
+    client.break_tile(410, 300).await.unwrap();
+
+    client.set_timeout(Duration::from_secs(2));
+    let dropped = client
+        .wait_for("an item drop", |e| matches!(e, Event::ItemSynced(_)))
+        .await;
+    assert!(
+        dropped.is_err(),
+        "a framed object dropped something it should not have"
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_item_is_reserved_and_can_be_picked_up() {
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(410, 300, Tile::block(1));
+    })
+    .await;
+
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    // Stand alice on top of the block so the reservation goes to her.
+    alice.move_to(410.0 * 16.0, 300.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    alice.break_tile(410, 300).await.unwrap();
+    let event = alice
+        .wait_for("the drop", |e| matches!(e, Event::ItemSynced(_)))
+        .await
+        .unwrap();
+    let Event::ItemSynced(sync) = event else {
+        unreachable!()
+    };
+
+    let reserved = alice
+        .wait_for(
+            "the reservation",
+            |e| matches!(e, Event::ItemReserved(o) if o.index == sync.index),
+        )
+        .await
+        .unwrap();
+    let Event::ItemReserved(owner) = reserved else {
+        unreachable!()
+    };
+    assert_eq!(owner.owner, alice.slot(), "the nearby player should get it");
+
+    // Alice picks it up; bob is told it is gone.
+    alice.pick_up(sync.index).await.unwrap();
+    bob.wait_for(
+        "the despawn",
+        |e| matches!(e, Event::ItemDespawned(i) if *i == sync.index),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_item_cannot_be_picked_up_by_someone_it_is_not_reserved_for() {
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(410, 300, Tile::block(1));
+    })
+    .await;
+
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    alice.move_to(410.0 * 16.0, 300.0 * 16.0).await.unwrap();
+    // Put bob far away so he never earns the reservation.
+    bob.move_to(100.0 * 16.0, 300.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    alice.break_tile(410, 300).await.unwrap();
+    let event = alice
+        .wait_for("the drop", |e| matches!(e, Event::ItemSynced(_)))
+        .await
+        .unwrap();
+    let Event::ItemSynced(sync) = event else {
+        unreachable!()
+    };
+
+    // Bob claims it anyway.
+    bob.pick_up(sync.index).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A player joining now must still see the item, because bob's claim was refused.
+    let fresh = join(addr, "fresh").await;
+    drop(fresh);
+
+    alice.set_timeout(Duration::from_secs(2));
+    let despawned = alice
+        .wait_for("a despawn", |e| matches!(e, Event::ItemDespawned(_)))
+        .await;
+    assert!(
+        despawned.is_err(),
+        "a stranger was allowed to take the item"
+    );
+}
+
+#[tokio::test]
+async fn a_player_can_throw_an_item_into_the_world() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    alice
+        .drop_item(ItemStack::new(3, 17, 0), (410.0 * 16.0, 300.0 * 16.0))
+        .await
+        .unwrap();
+
+    let event = bob
+        .wait_for("the thrown item", |e| matches!(e, Event::ItemSynced(_)))
+        .await
+        .unwrap();
+    let Event::ItemSynced(sync) = event else {
+        unreachable!()
+    };
+    assert_eq!(sync.item.id, 3);
+    assert_eq!(sync.item.stack, 17);
+    assert_ne!(
+        sync.index, 400,
+        "the server should have allocated a real slot"
+    );
+}
+
+#[tokio::test]
+async fn a_password_is_required_when_one_is_configured() {
+    let addr = start_with(
+        Config {
+            password: "hunter2".into(),
+            ..Config::default()
+        },
+        |_| {},
+    )
+    .await;
+
+    // A plain join never gets a slot, because the server asks for a password first.
+    let mut raw = terrustia_client::Client::connect(addr, "guest")
+        .await
+        .unwrap();
+    raw.set_timeout(Duration::from_secs(3));
+    let joined = raw.handshake().await;
+    assert!(
+        joined.is_err(),
+        "joined a password-protected server without one"
+    );
+}
+
+#[tokio::test]
+async fn the_wrong_password_is_refused_and_the_right_one_accepted() {
+    let addr = start_with(
+        Config {
+            password: "hunter2".into(),
+            ..Config::default()
+        },
+        |_| {},
+    )
+    .await;
+
+    let send_password = |password: &str| {
+        let mut w = terrustia_proto::PacketWriter::new(id::SEND_PASSWORD);
+        w.string(password);
+        w.finish().unwrap()
+    };
+    let hello = || {
+        let mut w = terrustia_proto::PacketWriter::new(id::HELLO);
+        w.string(id::VERSION_STRING);
+        w.finish().unwrap()
+    };
+
+    // Wrong password: kicked.
+    let mut bad = terrustia_client::Client::connect(addr, "bad")
+        .await
+        .unwrap();
+    bad.set_timeout(Duration::from_secs(5));
+    bad.send(&hello()).await.unwrap();
+    bad.wait_for(
+        "the password prompt",
+        |e| matches!(e, Event::Other(f) if f.id == id::REQUEST_PASSWORD),
+    )
+    .await
+    .unwrap();
+    bad.send(&send_password("wrong")).await.unwrap();
+    let result = bad.next_event().await;
+    assert!(
+        matches!(result, Err(terrustia_client::ClientError::Kicked { .. })),
+        "a wrong password should be refused, got {result:?}"
+    );
+
+    // Right password: a slot arrives.
+    let mut good = terrustia_client::Client::connect(addr, "good")
+        .await
+        .unwrap();
+    good.set_timeout(Duration::from_secs(5));
+    good.send(&hello()).await.unwrap();
+    good.wait_for(
+        "the password prompt",
+        |e| matches!(e, Event::Other(f) if f.id == id::REQUEST_PASSWORD),
+    )
+    .await
+    .unwrap();
+    good.send(&send_password("hunter2")).await.unwrap();
+    good.wait_for(
+        "a player slot",
+        |e| matches!(e, Event::Other(f) if f.id == id::PLAYER_INFO),
+    )
+    .await
+    .expect("the right password should be accepted");
+}
+
+#[tokio::test]
+async fn a_password_cannot_be_used_to_skip_the_version_check() {
+    let addr = start_with(
+        Config {
+            password: "hunter2".into(),
+            ..Config::default()
+        },
+        |_| {},
+    )
+    .await;
+
+    // Send only the password, never a Hello.
+    let mut sneaky = terrustia_client::Client::connect(addr, "sneaky")
+        .await
+        .unwrap();
+    sneaky.set_timeout(Duration::from_secs(2));
+    let mut w = terrustia_proto::PacketWriter::new(id::SEND_PASSWORD);
+    w.string("hunter2");
+    sneaky.send(&w.finish().unwrap()).await.unwrap();
+
+    let granted = sneaky
+        .wait_for(
+            "a player slot",
+            |e| matches!(e, Event::Other(f) if f.id == id::PLAYER_INFO),
+        )
+        .await;
+    assert!(granted.is_err(), "the version check was bypassed");
+}
+
+/// Ask the server to spawn an NPC beside us and wait for it to arrive.
+async fn spawn_npc(client: &mut Client, name: &str) -> terrustia_proto::npc::SyncNpc {
+    client.say(&format!("/spawn {name}")).await.unwrap();
+    let event = client
+        .wait_for(
+            "the spawned npc",
+            |e| matches!(e, Event::NpcSynced(n) if n.life != 0),
+        )
+        .await
+        .expect("npc never arrived");
+    match event {
+        Event::NpcSynced(npc) => npc,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn an_npc_can_be_spawned_and_is_announced_to_everyone() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    let npc = spawn_npc(&mut alice, "Zombie").await;
+    assert_eq!(npc.npc_type(), 3, "should be a zombie");
+    assert_eq!(npc.life_max, npc.life, "should arrive at full health");
+
+    // Bob sees it too.
+    bob.wait_for(
+        "the npc",
+        |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 3),
+    )
+    .await
+    .expect("the other player was not told about the npc");
+}
+
+#[tokio::test]
+async fn spawning_by_name_and_by_id_both_work() {
+    let addr = start().await;
+    let mut client = join(addr, "namer").await;
+
+    let by_name = spawn_npc(&mut client, "BlueSlime").await;
+    assert_eq!(by_name.npc_type(), 1);
+
+    let by_id = spawn_npc(&mut client, "49").await;
+    assert_eq!(by_id.npc_type(), 49, "cave bat by id");
+}
+
+#[tokio::test]
+async fn an_unknown_npc_name_is_refused() {
+    let addr = start().await;
+    let mut client = join(addr, "typo").await;
+
+    client.say("/spawn Notarealenemy").await.unwrap();
+    client
+        .wait_for(
+            "the usage hint",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("usage: /spawn")),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn hitting_an_npc_reduces_its_health_and_kills_it() {
+    let addr = start().await;
+    let mut client = join(addr, "fighter").await;
+
+    // A zombie has 45 health and 6 defence, so a 20-damage hit lands for 17.
+    let npc = spawn_npc(&mut client, "Zombie").await;
+    assert_eq!(npc.life_max, 45);
+
+    client
+        .hit_npc(npc.index, npc.generation, 20, 0.0, 1)
+        .await
+        .unwrap();
+    let event = client
+        .wait_for("the wounded npc", |e| {
+            matches!(e, Event::NpcSynced(n) if n.index == npc.index && n.life > 0 && n.life < 45)
+        })
+        .await
+        .unwrap();
+    if let Event::NpcSynced(hurt) = event {
+        assert_eq!(hurt.life, 28, "45 - (20 - 6/2) = 28");
+    }
+
+    // Two more hits finish it.
+    for _ in 0..2 {
+        client
+            .hit_npc(npc.index, npc.generation, 20, 0.0, 1)
+            .await
+            .unwrap();
+    }
+    client
+        .wait_for(
+            "the death",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == npc.index && n.life == 0),
+        )
+        .await
+        .expect("the zombie never died");
+}
+
+#[tokio::test]
+async fn a_dead_npc_drops_its_coin_value() {
+    let addr = start().await;
+    let mut client = join(addr, "looter").await;
+
+    // A zombie is worth 60 copper.
+    let npc = spawn_npc(&mut client, "Zombie").await;
+    for _ in 0..5 {
+        client
+            .hit_npc(npc.index, npc.generation, 40, 0.0, 1)
+            .await
+            .unwrap();
+    }
+
+    let event = client
+        .wait_for(
+            "the coin drop",
+            |e| matches!(e, Event::ItemSynced(i) if (71..=74).contains(&i.item.id)),
+        )
+        .await
+        .expect("no coins dropped");
+    if let Event::ItemSynced(item) = event {
+        assert_eq!(item.item.id, 71, "60 copper should drop copper coins");
+        assert_eq!(item.item.stack, 60);
+    }
+}
+
+#[tokio::test]
+async fn a_hit_with_a_stale_generation_is_ignored() {
+    let addr = start().await;
+    let mut client = join(addr, "stale").await;
+
+    let npc = spawn_npc(&mut client, "Zombie").await;
+    // Claim a generation the NPC does not have; the hit must not land.
+    client
+        .hit_npc(npc.index, npc.generation.wrapping_add(7), 100, 0.0, 1)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    client.say("/npcs").await.unwrap();
+    let event = client
+        .wait_for(
+            "the npc list",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("NPCs")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { text, .. } = event {
+        assert!(
+            text.contains("Zombie"),
+            "the zombie should have survived a stale hit: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn butcher_clears_hostiles_but_spares_town_npcs() {
+    let addr = start().await;
+    let mut client = join(addr, "butcher").await;
+
+    spawn_npc(&mut client, "Zombie").await;
+    spawn_npc(&mut client, "Guide").await;
+
+    client.say("/butcher").await.unwrap();
+    client
+        .wait_for(
+            "the butcher report",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("Butchered")),
+        )
+        .await
+        .unwrap();
+
+    client.say("/npcs").await.unwrap();
+    let event = client
+        .wait_for(
+            "the npc list",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("NPCs")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { text, .. } = event {
+        assert!(text.contains("Guide"), "the guide should remain: {text}");
+        assert!(
+            !text.contains("Zombie"),
+            "the zombie should be gone: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_joining_player_is_told_about_npcs_already_alive() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let npc = spawn_npc(&mut alice, "Skeleton").await;
+
+    // Bob joins afterwards and should be sent the skeleton during his handshake.
+    let mut bob = join(addr, "bob").await;
+    bob.set_timeout(Duration::from_secs(5));
+    let seen = bob
+        .wait_for(
+            "the existing npc",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == npc.index),
+        )
+        .await;
+    assert!(seen.is_ok(), "a late joiner never heard about the skeleton");
+}
+
+/// Build a furnished, sealed room into a world, returning a tile inside it.
+fn build_house(world: &mut World, x0: i32, y0: i32) -> (i32, i32) {
+    let (w, h) = (14, 10);
+    for x in x0..x0 + w {
+        for y in y0..y0 + h {
+            if x == x0 || x == x0 + w - 1 || y == y0 || y == y0 + h - 1 {
+                world.set_tile(x, y, Tile::block(1));
+            } else {
+                let mut air = Tile::AIR;
+                air.wall = 4; // stone wall counts as a house wall
+                world.set_tile(x, y, air);
+            }
+        }
+    }
+    world.set_tile(x0 + 2, y0 + h - 2, Tile::framed(15, 0, 0)); // chair
+    world.set_tile(x0 + 4, y0 + h - 2, Tile::framed(14, 0, 0)); // table
+    world.set_tile(x0 + 6, y0 + h - 2, Tile::framed(4, 0, 0)); // torch
+    world.set_tile(x0 + 1, y0 + h - 2, Tile::framed(10, 0, 0)); // door
+    (x0 + 5, y0 + 3)
+}
+
+#[tokio::test]
+async fn the_house_command_explains_why_a_room_is_rejected() {
+    let addr = start_with(Config::default(), |world| {
+        // A room with everything except a door.
+        let (x0, y0) = (300, 300);
+        for x in x0..x0 + 14 {
+            for y in y0..y0 + 10 {
+                if x == x0 || x == x0 + 13 || y == y0 || y == y0 + 9 {
+                    world.set_tile(x, y, Tile::block(1));
+                } else {
+                    let mut air = Tile::AIR;
+                    air.wall = 4;
+                    world.set_tile(x, y, air);
+                }
+            }
+        }
+        world.set_tile(x0 + 2, y0 + 8, Tile::framed(15, 0, 0));
+        world.set_tile(x0 + 4, y0 + 8, Tile::framed(14, 0, 0));
+        world.set_tile(x0 + 6, y0 + 8, Tile::framed(4, 0, 0));
+    })
+    .await;
+
+    let mut client = join(addr, "builder").await;
+    client.move_to(305.0 * 16.0, 303.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    client.say("/house").await.unwrap();
+    let event = client
+        .wait_for(
+            "the housing verdict",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("house")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { text, .. } = event {
+        assert!(
+            text.contains("needs a door"),
+            "should name the missing door, said: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_finished_house_is_accepted() {
+    let addr = start_with(Config::default(), |world| {
+        build_house(world, 300, 300);
+    })
+    .await;
+
+    let mut client = join(addr, "builder").await;
+    client.move_to(305.0 * 16.0, 303.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    client.say("/house").await.unwrap();
+    let event = client
+        .wait_for(
+            "the housing verdict",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("house")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { text, .. } = event {
+        assert!(
+            text.contains("valid house"),
+            "should accept it, said: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_guide_moves_into_a_finished_house() {
+    let addr = start_with(Config::default(), |world| {
+        build_house(world, 300, 300);
+    })
+    .await;
+
+    let mut client = join(addr, "host").await;
+    // Stand in the house so the housing scan looks here.
+    client.move_to(305.0 * 16.0, 303.0 * 16.0).await.unwrap();
+
+    // The announcement goes out just before the NPC itself, so both have to be watched at once
+    // rather than one after the other.
+    client.set_timeout(Duration::from_secs(25));
+    let mut announced = false;
+    let mut guide_at = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    while tokio::time::Instant::now() < deadline && (!announced || guide_at.is_none()) {
+        match client.next_event().await {
+            Ok(Event::Chat { text, .. }) if text.contains("moved in") => announced = true,
+            Ok(Event::NpcSynced(n)) if n.npc_type() == 22 => {
+                guide_at = Some((n.position.0 / 16.0, n.position.1 / 16.0));
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    let (tx, ty) = guide_at.expect("the Guide never moved in");
+    assert!(
+        (300.0..315.0).contains(&tx) && (295.0..312.0).contains(&ty),
+        "the Guide moved in at ({tx:.0}, {ty:.0}), which is not the house"
+    );
+    assert!(announced, "nobody announced the arrival");
+}
+
+#[tokio::test]
+async fn no_guide_arrives_without_a_house() {
+    let addr = start().await;
+    let mut client = join(addr, "homeless").await;
+    client.set_timeout(Duration::from_secs(12));
+
+    let arrived = client
+        .wait_for(
+            "a guide",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 22),
+        )
+        .await;
+    assert!(arrived.is_err(), "the Guide moved in with nowhere to live");
+}
+
+#[tokio::test]
+async fn a_boss_summons_minions_and_can_be_killed() {
+    let addr = start().await;
+    let mut client = join(addr, "slayer").await;
+    client.set_timeout(Duration::from_secs(20));
+
+    // The Eye leaves at dawn, so the fight has to happen at night.
+    client.say("/time night").await.unwrap();
+    // And it spawns beside you, so stand where the fight is before calling it up — otherwise it
+    // spends the whole test flying across the world to reach you.
+    client.move_to(400.0 * 16.0, 300.0 * 16.0).await.unwrap();
+
+    let eye = spawn_npc(&mut client, "EyeofCthulhu").await;
+    assert_eq!(eye.life_max, 2800, "the Eye has 2800 health");
+
+    // Stay put so it has something to hover over, and watch for its servants. It only summons
+    // while hovering above you and within five hundred pixels, so standing still is the point.
+    let mut saw_servant = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline && !saw_servant {
+        client.move_to(400.0 * 16.0, 300.0 * 16.0).await.unwrap();
+        if let Ok(Event::NpcSynced(n)) = client.next_event().await
+            && n.npc_type() == 5
+        {
+            saw_servant = true;
+        }
+    }
+    assert!(saw_servant, "the Eye never summoned a Servant of Cthulhu");
+
+    // Now kill it. 2800 health, 12 defence: 200-damage hits land for 194.
+    for _ in 0..20 {
+        client
+            .hit_npc(eye.index, eye.generation, 200, 0.0, 1)
+            .await
+            .unwrap();
+    }
+    client
+        .wait_for(
+            "the Eye's death",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == eye.index && n.life == 0),
+        )
+        .await
+        .expect("the Eye never died");
+}
+
+#[tokio::test]
+async fn a_worm_boss_arrives_as_a_linked_chain() {
+    let addr = start().await;
+    let mut client = join(addr, "wormer").await;
+    client.set_timeout(Duration::from_secs(15));
+
+    client.say("/spawn EaterofWorldsHead").await.unwrap();
+
+    // A worm is a head, many body segments and a tail, all as separate NPCs.
+    // Count distinct NPC slots: each one re-syncs as it moves, so counting packets would
+    // over-count the head many times over.
+    let mut seen: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        match client.next_event().await {
+            Ok(Event::NpcSynced(n)) if n.life != 0 => {
+                seen.insert(n.index, n.npc_type());
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let tally = |t: u16| seen.values().filter(|v| **v == t).count();
+        if tally(13) >= 1 && tally(15) >= 1 && tally(14) >= 5 {
+            break;
+        }
+    }
+    let tally = |t: u16| seen.values().filter(|v| **v == t).count();
+    assert_eq!(tally(13), 1, "exactly one head");
+    assert_eq!(tally(15), 1, "exactly one tail");
+    assert!(tally(14) >= 5, "expected body segments, saw {}", tally(14));
+}
+
+#[tokio::test]
+async fn king_slime_hops_toward_a_player() {
+    let addr = start().await;
+    let mut client = join(addr, "royalist").await;
+    client.set_timeout(Duration::from_secs(15));
+
+    let king = spawn_npc(&mut client, "KingSlime").await;
+    assert_eq!(king.life_max, 2000);
+
+    // It should move; a boss that stands still is not a fight.
+    let start_x = king.position.0;
+    let mut moved = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && !moved {
+        client.move_to(420.0 * 16.0, 300.0 * 16.0).await.unwrap();
+        if let Ok(Event::NpcSynced(n)) = client.next_event().await
+            && n.index == king.index
+            && (n.position.0 - start_x).abs() > 16.0
+        {
+            moved = true;
+        }
+    }
+    assert!(moved, "King Slime never moved");
+}
+
+#[tokio::test]
+async fn a_zombie_works_at_a_door_and_opens_it() {
+    // A door standing on flat ground, with a zombie spawned beside it.
+    let addr = start_with(Config::default(), |world| {
+        // Carve a wide, unambiguously open corridor: the generated world is solid rock here, so
+        // anything less leaves the zombie spawning inside a wall.
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // A door standing in the corridor at x = 405.
+        for y in 317..320 {
+            world.set_tile(405, y, Tile::framed(10, 0, 0));
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "doorwatcher").await;
+    client.set_timeout(Duration::from_secs(20));
+
+    // Spawn the zombie on the far side of the door, then stand on this side of it so the only
+    // way to reach the player is through the door.
+    client.move_to(412.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.say("/spawn Zombie").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.move_to(396.0 * 16.0, 318.0 * 16.0).await.unwrap();
+
+    let mut toggled = false;
+    let mut track: Vec<(f32, f32)> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(18);
+    while tokio::time::Instant::now() < deadline && !toggled {
+        client.move_to(396.0 * 16.0, 318.0 * 16.0).await.unwrap();
+        match client.next_event().await {
+            // Packet 19 is the door toggle the server broadcasts when a fighter opens one.
+            Ok(Event::Other(frame)) if frame.id == id::TOGGLE_DOOR_STATE => toggled = true,
+            // Or the door is smashed, which arrives as a tile edit.
+            Ok(Event::TileChanged(edit)) if edit.x == 405 => toggled = true,
+            Ok(Event::NpcSynced(n)) if n.npc_type() == 3 => {
+                track.push((n.position.0 / 16.0, n.position.1 / 16.0));
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        toggled,
+        "a zombie stood at a door for eighteen seconds and did nothing to it. \
+         Zombie was seen at {} positions; first {:?}, last {:?}",
+        track.len(),
+        track.first(),
+        track.last()
+    );
+}

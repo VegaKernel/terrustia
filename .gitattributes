@@ -1,0 +1,31 @@
+# Normalise line endings in the repository, and check out whatever the platform wants.
+* text=auto eol=lf
+
+# Rust and the things around it.
+*.rs      text diff=rust
+*.toml    text
+*.md      text diff=markdown
+*.lock    text -diff linguist-generated
+*.yml     text
+*.yaml    text
+*.json    text
+*.sh      text eol=lf
+
+# Reference material transcribed from the decompiled game. Diffs of these are noise.
+*.cs      text -diff linguist-vendored
+
+# Anything binary, so git never tries to merge or line-end-convert it.
+*.wld     binary
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.bin     binary
+*.dll     binary
+*.exe     binary
+
+# Generated tables are checked in so the build needs no code generation step, but they are
+# thousands of lines of data and reviewing their diffs by eye is not useful.
+crates/terrustia-proto/src/npc_data.rs     linguist-generated
+crates/terrustia-proto/src/npc_drops.rs    linguist-generated
+crates/terrustia-proto/src/tile_drops.rs   linguist-generated
+crates/terrustia-proto/src/projectile_data.rs linguist-generated

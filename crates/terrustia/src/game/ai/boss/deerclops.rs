@@ -1,0 +1,586 @@
+//! Style 123 — Deerclops.
+//!
+//! Unusually for a boss, it walks. Everything it does is a ground attack chosen by where you are
+//! standing and how long it has been since it last did something:
+//!
+//! * up close, a wall of **ice spikes** thrown forward — or, if it has already done that recently,
+//!   thrown out to *both* sides, which is the answer to standing behind it;
+//! * at four seconds, a **slam** that brings rubble down from above;
+//! * standing still for a second and a half, six **shadow hands**;
+//! * at a distance, a **roar** that leaves you Slowed for twelve seconds.
+//!
+//! It also has a den. Leave the snow, or get more than two and a half thousand pixels away, and it
+//! stops fighting and walks home — and if the walk takes too long it simply teleports. Get far
+//! enough away for half a second and it becomes untouchable, so there is no killing it from range.
+
+use rand::{Rng, rngs::SmallRng};
+use terrustia_proto::npc_params::{
+    DEER_DEN, DEER_GIVE_UP, DEER_GOING_HOME, DEER_LEAVING, DEER_PATIENCE, DEER_PATIENCE_DEEP,
+    DEER_ROAR, DEER_ROAR_RANGE, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE, DEER_RUBBLE_SLAM,
+    DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE, DEER_SHADOW_HAND,
+    DEER_SHADOW_HANDS, DEER_SHADOW_HANDS_COUNT, DEER_SHADOW_TICKS, DEER_SHIELD_AFTER,
+    DEER_SHIELD_RANGE, DEER_SPIKE, DEER_SPIKE_COUNT, DEER_SPIKE_DAMAGE, DEER_SPIKE_RANGE,
+    DEER_SPIKES_BOTH, DEER_SPIKES_BOTH_TICKS, DEER_SPIKES_BOTH_WINDUP, DEER_SPIKES_FORWARD,
+    DEER_SPIKES_FORWARD_TICKS, DEER_SPIKES_FORWARD_WINDUP, DEER_STALKING, DEER_STOP_WITHIN,
+    DEER_TELEPORT_AT, DEER_TELEPORTING, DEER_UNTIL_ROAR, DEER_UNTIL_RUBBLE, DEER_UNTIL_SHADOW,
+    DEER_WALK, DEER_WALK_EASE, DEER_WALK_RAGE,
+};
+use terrustia_proto::tile_solid::solid;
+
+use crate::game::ai::{Shot, World};
+use crate::game::npc::{Npc, TILE, TileView};
+
+/// What a tick of the fight produced.
+#[derive(Debug, Default)]
+pub struct Rampage {
+    pub shots: Vec<Shot>,
+    /// Set when its roar should leave everyone nearby Slowed.
+    pub roared: bool,
+    /// Set when it has finished leaving.
+    pub gone: bool,
+}
+
+/// The ground beneath a tile column, within a few tiles of a starting row.
+fn ground_under(tiles: &impl TileView, x: i32, from: i32) -> Option<i32> {
+    (from - 4..from + 16).find(|&y| {
+        let t = tiles.tile(x, y);
+        t.is_active() && solid(t.block) && !tiles.tile(x, y - 1).is_active()
+    })
+}
+
+/// Throw a line of ice spikes out of the ground.
+fn spikes<T: TileView>(npc: &Npc, world: &World<'_, T>, direction: i8, out: &mut Vec<Shot>) {
+    let foot = (
+        (npc.center().0 / TILE) as i32 + i32::from(direction) * 3,
+        ((npc.position.1 + npc.height()) / TILE) as i32,
+    );
+    for step in 0..DEER_SPIKE_COUNT {
+        let x = foot.0 + step * i32::from(direction);
+        let Some(y) = ground_under(world.tiles, x, foot.1) else {
+            continue;
+        };
+        // Each spike leans a little further out than the last, so the wall fans away from it.
+        let lean = (step * i32::from(direction)) as f32
+            * 0.7
+            * (std::f32::consts::FRAC_PI_4 / DEER_SPIKE_COUNT as f32);
+        out.push(Shot {
+            projectile: DEER_SPIKE,
+            damage: DEER_SPIKE_DAMAGE,
+            position: ((x * 16 + 8) as f32, (y * 16 - 8) as f32),
+            velocity: (lean.sin(), -lean.cos()),
+            time_left: 300,
+        });
+    }
+}
+
+/// Whether it should break off and go home.
+fn should_go_home<T: TileView>(npc: &Npc, world: &World<'_, T>, chasing: bool) -> bool {
+    let Some(target) = world.target else {
+        return true;
+    };
+    let home = (npc.ai[2] * 16.0, npc.ai[3] * 16.0);
+    let near_den = ((target.center.0 - home.0).powi(2) + (target.center.1 - home.1).powi(2)).sqrt()
+        <= DEER_DEN;
+    let at_home_in_the_cold = world.conditions.snow || near_den;
+    let (cx, cy) = npc.center();
+    let reach = ((target.center.0 - cx).powi(2) + (target.center.1 - cy).powi(2)).sqrt();
+    !target.alive || (!chasing && !at_home_in_the_cold) || reach >= DEER_GIVE_UP
+}
+
+/// Walk toward something, stepping up what it can and stopping when close enough.
+fn walk<T: TileView>(npc: &mut Npc, world: &World<'_, T>, toward: f32, halt: bool) {
+    let speed = DEER_WALK + DEER_WALK_RAGE * (1.0 - npc.life as f32 / npc.life_max as f32);
+    let across = toward - npc.center().0;
+    let close = across.abs() < DEER_STOP_WITHIN;
+    if close || halt {
+        npc.velocity.0 *= 0.9;
+        if npc.velocity.0.abs() < 0.1 {
+            npc.velocity.0 = 0.0;
+        }
+    } else {
+        let wanted = across.signum() * speed;
+        npc.velocity.0 += (wanted - npc.velocity.0) / DEER_WALK_EASE;
+        npc.direction = across.signum() as i8;
+        npc.sprite_direction = npc.direction;
+    }
+
+    // A wall it can climb rather than be stopped by.
+    if npc.velocity.1 == 0.0 && npc.velocity.0 != 0.0 {
+        let ahead = ((npc.center().0 + npc.width() / 2.0 * npc.velocity.0.signum()) / TILE) as i32;
+        let foot = ((npc.position.1 + npc.height() - 1.0) / TILE) as i32;
+        let blocked = |y: i32| {
+            let t = world.tiles.tile(ahead, y);
+            t.is_active() && solid(t.block)
+        };
+        if blocked(foot) && !blocked(foot - 1) && !blocked(foot - 2) {
+            npc.position.1 = (foot * 16) as f32 - npc.height();
+        } else if blocked(foot) {
+            npc.velocity.1 = -8.0;
+        }
+    }
+}
+
+/// Drive Deerclops for a tick.
+pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> Rampage {
+    let mut out = Rampage::default();
+
+    // First tick: this clearing is its den, and it is what it will walk back to.
+    if npc.ai[2] == 0.0 && npc.ai[3] == 0.0 {
+        npc.ai[2] = (npc.center().0 / TILE).floor();
+        npc.ai[3] = ((npc.position.1 + npc.height()) / TILE).floor();
+        npc.dirty = true;
+    }
+
+    // Out of reach for half a second and it stops being hittable at all.
+    let far = world.target.is_none_or(|t| {
+        let (cx, cy) = npc.center();
+        ((t.center.0 - cx).powi(2) + (t.center.1 - cy).powi(2)).sqrt() >= DEER_SHIELD_RANGE
+    });
+    npc.local_ai[3] =
+        (npc.local_ai[3] + if far { 1.0 } else { -1.0 }).clamp(0.0, DEER_SHIELD_AFTER);
+    npc.stats.dont_take_damage = npc.local_ai[3] >= DEER_SHIELD_AFTER;
+
+    let mut halt = false;
+    let mut going_home = false;
+    let state = npc.ai[0];
+
+    if state == DEER_STALKING {
+        if should_go_home(npc, world, true) {
+            npc.ai[0] = DEER_GOING_HOME;
+            npc.ai[1] = 0.0;
+            npc.local_ai[1] = 0.0;
+            npc.dirty = true;
+        } else if let Some(target) = world.target {
+            npc.ai[1] += 1.0;
+            let from = (npc.center().0, npc.position.1 + npc.height() - 32.0);
+            let to = (target.center.0, target.center.1);
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let facing = dx.abs() >= dy.abs() * 0.6 || (dx * dx + dy * dy).sqrt() < 48.0;
+            let level = dy <= 100.0 + crate::game::ai::PLAYER_HEIGHT as f32 && dy >= -200.0;
+            let close = dx.abs() < DEER_SPIKE_RANGE && level && npc.velocity.1 == 0.0;
+
+            // Which attack, in the order the game checks them.
+            if close && npc.local_ai[1] >= 2.0 {
+                npc.velocity.0 = 0.0;
+                npc.ai[0] = DEER_SPIKES_BOTH;
+                npc.ai[1] = 0.0;
+                npc.local_ai[1] = 0.0;
+            } else if close && facing {
+                npc.velocity.0 = 0.0;
+                npc.ai[0] = DEER_SPIKES_FORWARD;
+                npc.ai[1] = 0.0;
+                npc.local_ai[1] += 1.0;
+            } else if npc.ai[1] >= DEER_UNTIL_RUBBLE
+                && npc.velocity.1 == 0.0
+                && npc.velocity.0 != 0.0
+            {
+                npc.velocity.0 = 0.0;
+                npc.ai[0] = DEER_RUBBLE_SLAM;
+                npc.ai[1] = 0.0;
+                npc.local_ai[1] = 0.0;
+            } else if npc.ai[1] >= DEER_UNTIL_SHADOW
+                && npc.velocity.1 == 0.0
+                && npc.velocity.0 == 0.0
+            {
+                npc.ai[0] = DEER_SHADOW_HANDS;
+                npc.ai[1] = 0.0;
+                npc.local_ai[1] = 0.0;
+            } else if npc.ai[1] >= DEER_UNTIL_ROAR
+                && npc.velocity.1 == 0.0
+                && dx.abs() > DEER_ROAR_RANGE
+            {
+                npc.velocity.0 = 0.0;
+                npc.ai[0] = DEER_ROAR;
+                npc.ai[1] = 0.0;
+                npc.local_ai[1] = 0.0;
+            }
+            if npc.ai[0] != DEER_STALKING {
+                npc.dirty = true;
+            }
+        }
+    } else if state == DEER_SPIKES_FORWARD {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] == DEER_SPIKES_FORWARD_WINDUP {
+            spikes(npc, world, npc.direction, &mut out.shots);
+        }
+        if npc.ai[1] >= DEER_SPIKES_FORWARD_TICKS {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_SPIKES_BOTH {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] == DEER_SPIKES_BOTH_WINDUP {
+            // The answer to standing behind it.
+            spikes(npc, world, 1, &mut out.shots);
+            spikes(npc, world, -1, &mut out.shots);
+        }
+        if npc.ai[1] >= DEER_SPIKES_BOTH_TICKS {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_RUBBLE_SLAM {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] == DEER_RUBBLE_WINDUP {
+            let top = (
+                (npc.center().0 / TILE) as i32 + i32::from(npc.direction) * 3,
+                (npc.position.1 / TILE) as i32 - 10,
+            );
+            for step in 0..DEER_SPIKE_COUNT {
+                let x = top.0 + step * i32::from(npc.direction);
+                let speed = 8.0 + rng.random::<f32>() * 8.0;
+                out.shots.push(Shot {
+                    projectile: DEER_RUBBLE,
+                    damage: DEER_RUBBLE_DAMAGE,
+                    position: ((x * 16 + 8) as f32, ((top.1 + step) * 16 - 8) as f32),
+                    velocity: (0.0, speed),
+                    time_left: 300,
+                });
+            }
+        }
+        if npc.ai[1] >= DEER_RUBBLE_TICKS {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_ROAR {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] == DEER_SHADOW_AT {
+            out.roared = true;
+        }
+        if npc.ai[1] >= DEER_ROAR_TICKS {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_SHADOW_HANDS {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] == DEER_SHADOW_AT
+            && let Some(target) = world.target
+        {
+            for _ in 0..DEER_SHADOW_HANDS_COUNT {
+                // They come out of the dark around whoever it is looking at, not out of Deerclops.
+                let angle = rng.random::<f32>() * std::f32::consts::TAU;
+                let radius = 300.0 + rng.random::<f32>() * 200.0;
+                out.shots.push(Shot {
+                    projectile: DEER_SHADOW_HAND,
+                    damage: DEER_SHADOW_DAMAGE,
+                    position: (
+                        target.center.0 + angle.cos() * radius,
+                        target.center.1 + angle.sin() * radius,
+                    ),
+                    velocity: (-angle.cos() * 4.0, -angle.sin() * 4.0),
+                    time_left: 300,
+                });
+            }
+        }
+        if npc.ai[1] >= DEER_SHADOW_TICKS {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_GOING_HOME {
+        going_home = true;
+        npc.ai[1] += 1.0;
+        if !should_go_home(npc, world, false) {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.local_ai[1] = 0.0;
+            npc.dirty = true;
+        } else {
+            let home = (npc.ai[2] * 16.0, npc.ai[3] * 16.0);
+            let (cx, cy) = npc.center();
+            let from_home = ((home.0 - cx).powi(2) + (home.1 - cy).powi(2)).sqrt();
+            let nearly_there = from_home < 1020.0;
+            // Home, and pacing: it settles for most of every ten-second cycle.
+            if nearly_there && npc.ai[1] % 600.0 < 420.0 {
+                halt = true;
+            }
+            // Too deep, or too long about it, and it gives up walking.
+            let stuck = (npc.position.1 > home.1 + 1600.0 && npc.ai[1] >= DEER_PATIENCE_DEEP)
+                || (!nearly_there && npc.ai[1] >= DEER_PATIENCE);
+            if stuck {
+                npc.ai[0] = DEER_TELEPORTING;
+                npc.ai[1] = 0.0;
+                npc.dirty = true;
+            }
+        }
+    } else if state == DEER_TELEPORTING {
+        npc.ai[1] += 1.0;
+        halt = true;
+        npc.velocity.1 = -0.1;
+        if npc.ai[1] == DEER_TELEPORT_AT {
+            npc.position.0 = npc.ai[2] * 16.0 - npc.width() / 2.0;
+            npc.position.1 = npc.ai[3] * 16.0 - npc.height();
+            npc.dirty = true;
+        }
+        if npc.ai[1] >= 60.0 {
+            npc.ai[0] = DEER_STALKING;
+            npc.ai[1] = 0.0;
+            npc.dirty = true;
+        }
+    } else if state == DEER_LEAVING {
+        npc.ai[1] += 1.0;
+        halt = true;
+        if npc.ai[1] >= DEER_TELEPORT_AT {
+            out.gone = true;
+        }
+    }
+
+    // Movement, whatever it is doing: toward the target, or toward home, or nowhere.
+    let toward = if going_home {
+        let home = npc.ai[2] * 16.0;
+        // Once home it paces rather than standing on the spot.
+        if (home - npc.center().0).abs() < 240.0 {
+            npc.center().0 + 160.0 * f32::from(npc.direction)
+        } else {
+            home
+        }
+    } else {
+        world.target.map_or(npc.center().0, |t| t.center.0)
+    };
+    walk(npc, world, toward, halt);
+
+    npc.dirty = true;
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::ai::Conditions;
+    use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::tile::Tile;
+
+    #[derive(Default)]
+    struct Tundra(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Tundra {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn snowfield() -> Tundra {
+        let mut t = Tundra::default();
+        for x in 0..4000 {
+            for y in 300..320 {
+                t.0.insert((x, y), Tile::block(147));
+            }
+        }
+        t
+    }
+
+    fn rng() -> SmallRng {
+        SmallRng::seed_from_u64(123)
+    }
+
+    fn deerclops(tile_x: i32) -> Npc {
+        let mut n = Npc::new(668, (0.0, 0.0), 1).expect("deerclops");
+        n.position = (tile_x as f32 * TILE, 300.0 * TILE - n.height());
+        n
+    }
+
+    fn tundra<'a>(tiles: &'a Tundra, target: Option<Target>) -> World<'a, Tundra> {
+        World {
+            conditions: Conditions {
+                snow: true,
+                ..Conditions::default()
+            },
+            ..crate::game::ai::calm(tiles, target)
+        }
+    }
+
+    fn player_at(x: f32, y: f32) -> Target {
+        Target {
+            slot: 0,
+            center: (x, y),
+            velocity: (0.0, 0.0),
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn it_remembers_where_the_fight_started() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        let t = Some(player_at(200.0 * TILE + 400.0, 299.0 * TILE));
+        let (cx, bottom) = (d.center().0, d.position.1 + d.height());
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        assert_eq!(d.ai[2], (cx / TILE).floor(), "its den is where it woke up");
+        assert_eq!(d.ai[3], (bottom / TILE).floor());
+    }
+
+    #[test]
+    fn it_walks_at_you_and_faster_as_it_dies() {
+        let tiles = snowfield();
+        let speed_at = |life_fraction: f32| {
+            let mut d = deerclops(200);
+            d.life = (d.life_max as f32 * life_fraction) as i32;
+            let t = Some(player_at(200.0 * TILE + 2000.0, 299.0 * TILE));
+            for _ in 0..60 {
+                d.ai[0] = DEER_STALKING;
+                d.ai[1] = 0.0;
+                update(&mut d, &tundra(&tiles, t), &mut rng());
+            }
+            d.velocity.0
+        };
+        assert!(speed_at(1.0) > 0.0, "it should be coming at you");
+        assert!(
+            speed_at(0.05) > speed_at(1.0),
+            "and faster as it is worn down"
+        );
+    }
+
+    #[test]
+    fn up_close_it_throws_a_wall_of_spikes_forward() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        d.ai[0] = DEER_SPIKES_FORWARD;
+        d.direction = 1;
+        let t = Some(player_at(200.0 * TILE + 60.0, 299.0 * TILE));
+        let mut thrown = Vec::new();
+        for _ in 0..(DEER_SPIKES_FORWARD_TICKS as i32) {
+            thrown.extend(update(&mut d, &tundra(&tiles, t), &mut rng()).shots);
+        }
+        assert!(!thrown.is_empty(), "should have raised spikes");
+        assert!(thrown.iter().all(|s| s.projectile == DEER_SPIKE));
+        assert!(
+            thrown.iter().all(|s| s.position.0 >= d.center().0 - 64.0),
+            "all out in front of it"
+        );
+        assert_eq!(d.ai[0], DEER_STALKING, "and then back to stalking");
+    }
+
+    /// Standing behind it is answered by the both-sides version, which is the point of it.
+    #[test]
+    fn the_second_spike_attack_covers_both_sides() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        d.ai[0] = DEER_SPIKES_BOTH;
+        d.direction = 1;
+        let t = Some(player_at(200.0 * TILE - 60.0, 299.0 * TILE));
+        let mut thrown = Vec::new();
+        for _ in 0..(DEER_SPIKES_BOTH_TICKS as i32) {
+            thrown.extend(update(&mut d, &tundra(&tiles, t), &mut rng()).shots);
+        }
+        let here = d.center().0;
+        assert!(thrown.iter().any(|s| s.position.0 > here));
+        assert!(thrown.iter().any(|s| s.position.0 < here));
+    }
+
+    #[test]
+    fn the_slam_brings_rubble_down_from_above() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        d.ai[0] = DEER_RUBBLE_SLAM;
+        let t = Some(player_at(200.0 * TILE + 400.0, 299.0 * TILE));
+        let mut thrown = Vec::new();
+        for _ in 0..(DEER_RUBBLE_TICKS as i32) {
+            thrown.extend(update(&mut d, &tundra(&tiles, t), &mut rng()).shots);
+        }
+        assert!(!thrown.is_empty());
+        assert!(thrown.iter().all(|s| s.projectile == DEER_RUBBLE));
+        assert!(thrown.iter().all(|s| s.velocity.1 > 0.0), "and it falls");
+    }
+
+    #[test]
+    fn the_shadow_hands_come_out_of_the_dark_around_you() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        d.ai[0] = DEER_SHADOW_HANDS;
+        let player = player_at(200.0 * TILE + 400.0, 299.0 * TILE);
+        let t = Some(player);
+        let mut thrown = Vec::new();
+        for _ in 0..(DEER_SHADOW_TICKS as i32) {
+            thrown.extend(update(&mut d, &tundra(&tiles, t), &mut rng()).shots);
+        }
+        assert_eq!(thrown.len(), DEER_SHADOW_HANDS_COUNT);
+        assert!(thrown.iter().all(|s| s.projectile == DEER_SHADOW_HAND));
+        assert!(
+            thrown.iter().all(|s| {
+                let d = (s.position.0 - player.center.0).hypot(s.position.1 - player.center.1);
+                (250.0..600.0).contains(&d)
+            }),
+            "they should ring the player"
+        );
+    }
+
+    #[test]
+    fn the_roar_is_reported_so_the_caller_can_apply_it() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        d.ai[0] = DEER_ROAR;
+        let t = Some(player_at(200.0 * TILE + 400.0, 299.0 * TILE));
+        let mut roared = false;
+        for _ in 0..(DEER_ROAR_TICKS as i32) {
+            roared |= update(&mut d, &tundra(&tiles, t), &mut rng()).roared;
+        }
+        assert!(roared);
+    }
+
+    #[test]
+    fn out_of_the_snow_it_goes_home() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        let t = Some(player_at(200.0 * TILE + 800.0, 299.0 * TILE));
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        let mut warm = tundra(&tiles, t);
+        warm.conditions.snow = false;
+        // Chasing keeps it going, but the moment it checks as not chasing it turns back.
+        d.ai[0] = DEER_GOING_HOME;
+        update(&mut d, &warm, &mut rng());
+        assert_eq!(d.ai[0], DEER_GOING_HOME, "it should stay on its way home");
+    }
+
+    #[test]
+    fn far_enough_away_and_it_cannot_be_hurt() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        let far = Some(player_at(
+            200.0 * TILE + DEER_SHIELD_RANGE + 200.0,
+            299.0 * TILE,
+        ));
+        for _ in 0..(DEER_SHIELD_AFTER as i32 + 2) {
+            update(&mut d, &tundra(&tiles, far), &mut rng());
+        }
+        assert!(d.stats.dont_take_damage, "no killing it from range");
+
+        let close = Some(player_at(200.0 * TILE + 50.0, 299.0 * TILE));
+        for _ in 0..(DEER_SHIELD_AFTER as i32 + 2) {
+            update(&mut d, &tundra(&tiles, close), &mut rng());
+        }
+        assert!(!d.stats.dont_take_damage, "get close and it is fair game");
+    }
+
+    #[test]
+    fn a_long_walk_home_ends_in_a_teleport() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        let t = Some(player_at(200.0 * TILE + 8000.0, 299.0 * TILE));
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        // Well away from its den, and out of patience.
+        d.position.0 = 200.0 * TILE + 4000.0;
+        d.ai[0] = DEER_GOING_HOME;
+        d.ai[1] = DEER_PATIENCE;
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        assert_eq!(d.ai[0], DEER_TELEPORTING);
+
+        for _ in 0..(DEER_TELEPORT_AT as i32 + 1) {
+            update(&mut d, &tundra(&tiles, t), &mut rng());
+        }
+        assert!(
+            (d.center().0 - 200.0 * TILE).abs() < 100.0,
+            "it should be back at its den, at {}",
+            d.center().0
+        );
+    }
+}

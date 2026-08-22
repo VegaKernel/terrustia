@@ -1,0 +1,1035 @@
+//! NPC behaviour.
+//!
+//! Terraria's `NPC.AI` is roughly 59,000 lines because every type's quirks live inline. These are
+//! re-implementations of each *style's* core behaviour rather than line-by-line ports: an enemy
+//! chases, jumps, flies or swims the way its style does, using the game's own stats and physics
+//! constants, but without the per-type special cases.
+//!
+//! The styles here cover essentially every ordinary pre-hardmode enemy and critter. Which style a
+//! type uses comes from `NpcStats::ai_style`, extracted from the game.
+
+use rand::{Rng, rngs::SmallRng};
+
+use super::npc::{Npc, TILE, TileView, step_physics};
+
+/// An NPC a routine wants brought into the world.
+///
+/// Position and velocity both matter: King Slime throws its slimes, the Brain scatters its
+/// creepers, and a caster places its orb exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spawn {
+    pub npc_type: u16,
+    pub position: (f32, f32),
+    pub velocity: (f32, f32),
+    /// Set when the spawn is a part of the NPC that asked for it, as Skeletron's hands are.
+    ///
+    /// A routine cannot know its own slot, so it sets [`Spawn::OWN_PARENT`] and the caller — which
+    /// does know — fills the real one in.
+    pub parent: Option<u8>,
+}
+
+/// Everything about the world a tick of AI reads that is not the NPC or the tiles.
+///
+/// Bundled because the list only grows: each boss wants one more thing the routine cannot see for
+/// itself, and threading them as positional arguments stopped being readable at about six.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Surroundings<'a> {
+    pub conditions: super::ai::Conditions,
+    /// Anything nearby that a timid critter would rather not be next to.
+    pub hazards: &'a [Hazard],
+    /// Centres of the NPCs sharing this one's type, for the styles that space themselves out.
+    pub kin: &'a [(f32, f32)],
+    /// How many of each NPC type are alive, for the routines that wait on their escort or their
+    /// armour.
+    pub census: &'a [(u16, usize)],
+    /// For a boss part, where its parent is and how big it is.
+    pub parent: Option<super::ai::boss::skeletron::Parent>,
+    /// ...and which state that parent is in.
+    pub parent_state: f32,
+    /// ...and what fraction of its health it has left.
+    pub parent_health: f32,
+}
+
+impl Spawn {
+    /// Stand-in for "the NPC that asked for this", which the caller replaces with a real slot.
+    pub const OWN_PARENT: u8 = u8::MAX;
+}
+
+/// A player an NPC might chase.
+#[derive(Debug, Clone, Copy)]
+pub struct Target {
+    pub slot: u8,
+    pub center: (f32, f32),
+    /// How fast they are moving, which the routines that lead their target need.
+    pub velocity: (f32, f32),
+    pub alive: bool,
+}
+
+/// How far an enemy will look for someone to chase, in pixels.
+pub const AGGRO_RANGE: f32 = 1000.0;
+
+/// Beyond this, an enemy stops counting as "near a player" and begins to expire.
+pub const DESPAWN_RANGE: f32 = 2000.0;
+
+fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Nearest living player within `range`.
+pub fn pick_target(npc: &Npc, targets: &[Target], range: f32) -> Option<Target> {
+    targets
+        .iter()
+        .filter(|t| t.alive)
+        .map(|t| (*t, distance(npc.center(), t.center)))
+        .filter(|(_, d)| *d <= range)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(t, _)| t)
+}
+
+/// Whether a routine exists for an AI style, as opposed to falling back to standing still.
+///
+/// Used by a test to check the whole pre-hardmode roster is covered, so a type whose behaviour was
+/// never written shows up as a failure rather than as an enemy that stands there.
+pub fn style_is_implemented(style: i32) -> bool {
+    super::ai::parity(style).is_some()
+}
+
+/// What a tick of AI wants the world to do beyond moving the NPC itself.
+#[derive(Debug, Default)]
+pub struct AiOutput {
+    /// Minions a boss wants summoned.
+    pub spawn: Vec<Spawn>,
+    /// Doors a fighter has finished working at.
+    pub doors: Vec<super::ai::fighter::Action>,
+    /// Where the NPC just updated wants its passenger to hang, if it is carrying one.
+    pub carry: Option<(f32, f32)>,
+    /// What the NPC just updated turned into, if it turned into anything.
+    ///
+    /// A lost girl dropping her disguise and a truffle worm bolting underground both do this: the
+    /// entity survives, its type does not. Written per NPC, so the caller reads it straight after
+    /// the call that set it.
+    pub transform: Option<u16>,
+    /// Doors a town NPC wants opened or shut.
+    pub town_doors: Vec<super::ai::town::DoorAction>,
+    /// Projectiles a routine decided to throw.
+    ///
+    /// Nothing flies them yet — the projectile entity is its own phase — so the server counts them
+    /// and drops them. The decision to shoot, and the aim, cadence and reload behind it, are the
+    /// ported ones.
+    pub shots: Vec<super::ai::Shot>,
+}
+
+/// Move a worm segment to trail the one in front of it.
+///
+/// Kept as the name the server calls; the behaviour is [`super::ai::worm::follow`].
+pub fn follow_leader(npc: &mut Npc, leader_center: (f32, f32)) {
+    super::ai::worm::follow(npc, leader_center);
+}
+
+/// Drive one NPC for a tick: choose a target, run its style, then move it.
+pub fn update(
+    npc: &mut Npc,
+    tiles: &impl TileView,
+    targets: &[Target],
+    rng: &mut SmallRng,
+    out: &mut AiOutput,
+) {
+    update_with(npc, tiles, targets, rng, out, Surroundings::default())
+}
+
+/// As [`update`], but with the world conditions some routines read.
+pub fn update_with(
+    npc: &mut Npc,
+    tiles: &impl TileView,
+    targets: &[Target],
+    rng: &mut SmallRng,
+    out: &mut AiOutput,
+    around: Surroundings<'_>,
+) {
+    out.transform = None;
+    out.carry = None;
+    let before = (npc.position, npc.velocity, npc.direction);
+
+    // `NPC.TargetClosest` has no range limit: enemies do not lose interest when you outrun them,
+    // and the despawn timer is what removes them instead. Ported routines get those semantics.
+    // The approximations keep the range they were tuned against, except for bosses, whose whole
+    // design assumes an unbounded target — King Slime's catch-up teleport exists for that case.
+    let target = if super::ai::is_ported(npc.stats.ai_style) {
+        super::ai::target_closest(npc, targets)
+    } else {
+        let range = if npc.stats.boss {
+            f32::INFINITY
+        } else {
+            AGGRO_RANGE
+        };
+        pick_target(npc, targets, range)
+    };
+    npc.target = target.map_or(255, |t| u16::from(t.slot));
+
+    if super::ai::is_ported(npc.stats.ai_style) {
+        let liquid_at = |p: (f32, f32)| {
+            tiles
+                .tile((p.0 / TILE).floor() as i32, (p.1 / TILE).floor() as i32)
+                .liquid
+                > 0
+        };
+        let world = super::ai::World {
+            tiles,
+            target,
+            wet: liquid_at(npc.center()),
+            target_wet: target.is_some_and(|t| liquid_at(t.center)),
+            conditions: around.conditions,
+            was_hurt: npc.was_hurt,
+            // Nothing here can see the rest of the NPC table, so the caller supplies this — but
+            // only for the two styles that read it. Working it out for all two hundred NPCs would
+            // be a quadratic scan every tick to feed a butterfly.
+            crowding: if reads_crowding(npc.stats.ai_style) {
+                crowding_at(npc, around.hazards)
+            } else {
+                (0.0, 0.0)
+            },
+            // Same story as crowding: only the styles that jostle their own kind pay for it.
+            kin: if reads_kin(npc.stats.ai_style) {
+                around.kin
+            } else {
+                &[]
+            },
+            target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
+            census: around.census,
+            parent: around.parent,
+            parent_state: around.parent_state,
+            parent_health: around.parent_health,
+        };
+        let effects = super::ai::run(npc, &world, rng);
+        out.spawn.extend(effects.spawn);
+        out.doors.extend(effects.doors);
+        out.town_doors.extend(effects.town_doors);
+        out.shots.extend(effects.shots);
+        if effects.died {
+            npc.life = 0;
+        }
+        if effects.expired {
+            npc.time_left = 0;
+        }
+        out.transform = effects.transform;
+        out.carry = effects.carry;
+        npc.was_hurt = false;
+
+        step_physics(npc, tiles);
+        tick_life(npc, targets);
+        if npc.position != before.0 || npc.velocity != before.1 || npc.direction != before.2 {
+            npc.dirty = true;
+        }
+        return;
+    }
+
+    match npc.stats.ai_style {
+        54 => brain_of_cthulhu(npc, target, rng, out),
+        // 13 is the rooted plants; 19 is the antlion, which sits buried and faces its target;
+        // 20 rolls along a fixed track. All three hold position and turn to face.
+        // 13 rooted plants, 19 the buried antlion, 20 spike balls on a track, 21 blazing wheels,
+        // 42 the Lost Girl waiting to become a Nymph, 119 dandelions: all hold position.
+        // 17 is the vulture, which perches and then flies; grouped with the other wanderers.
+        // The critters: vultures, butterflies, snails, dragonflies, ladybugs, balloons and the
+        // rest wander rather than hunt.
+        // Styles not modelled — bound NPCs, statues, bespoke boss routines — simply hold still and
+        // fall.
+        _ => idle(npc),
+    }
+
+    step_physics(npc, tiles);
+    tick_life(npc, targets);
+
+    // Only tell clients about an NPC that actually did something.
+    if npc.position != before.0 || npc.velocity != before.1 || npc.direction != before.2 {
+        npc.dirty = true;
+    }
+}
+
+/// Somewhere nearby that a timid critter would rather not be.
+#[derive(Debug, Clone, Copy)]
+pub struct Hazard {
+    pub center: (f32, f32),
+    pub half: (f32, f32),
+}
+
+/// Whether a style flinches from things near it, and so needs the hazard scan run for it.
+///
+/// Only the butterflies and the tumbleweeds do. Everything else gets a zero and never notices.
+fn reads_crowding(style: i32) -> bool {
+    matches!(style, 26 | 65)
+}
+
+/// Which styles push away from others of their own type.
+pub fn reads_kin(style: i32) -> bool {
+    matches!(style, 122)
+}
+
+/// The average direction away from every hazard close enough to matter.
+///
+/// A butterfly bolts from anything dangerous within a hundred pixels; a dragonfly counts players
+/// too. Returns a zero vector when there is nothing to avoid.
+fn crowding_at(npc: &Npc, hazards: &[Hazard]) -> (f32, f32) {
+    const REACH: f32 = 100.0;
+    let (cx, cy) = npc.center();
+    let mut sum = (0.0, 0.0);
+    let mut n = 0.0;
+    for hazard in hazards {
+        // Distance from the box, not from its middle, which is what the game measures.
+        let dx = (cx - hazard.center.0).abs() - hazard.half.0;
+        let dy = (cy - hazard.center.1).abs() - hazard.half.1;
+        if dx.max(0.0).hypot(dy.max(0.0)) > REACH {
+            continue;
+        }
+        let away = (cx - hazard.center.0, cy - hazard.center.1);
+        let length = (away.0 * away.0 + away.1 * away.1).sqrt();
+        if length == 0.0 {
+            continue;
+        }
+        sum.0 += away.0 / length;
+        sum.1 += away.1 / length;
+        n += 1.0;
+    }
+    if n == 0.0 {
+        return (0.0, 0.0);
+    }
+    (sum.0 / n, sum.1 / n)
+}
+
+/// Count down toward despawn when nobody is close enough to care.
+fn tick_life(npc: &mut Npc, targets: &[Target]) {
+    if npc.stats.town_npc || npc.stats.boss {
+        return;
+    }
+    let near = targets
+        .iter()
+        .any(|t| t.alive && distance(npc.center(), t.center) < DESPAWN_RANGE);
+    if near {
+        npc.time_left = super::npc::DEFAULT_TIME_LEFT;
+    } else {
+        npc.time_left -= 1;
+    }
+}
+
+fn idle(npc: &mut Npc) {
+    npc.velocity.0 *= 0.9;
+    if npc.velocity.0.abs() < 0.05 {
+        npc.velocity.0 = 0.0;
+    }
+}
+
+/// Steer toward a point, accelerating up to `speed`.
+fn approach(npc: &mut Npc, aim: (f32, f32), speed: f32, accel: f32) {
+    let (cx, cy) = npc.center();
+    let (dx, dy) = (aim.0 - cx, aim.1 - cy);
+    let length = (dx * dx + dy * dy).sqrt().max(0.001);
+    let (wanted_x, wanted_y) = (dx / length * speed, dy / length * speed);
+
+    npc.velocity.0 += (wanted_x - npc.velocity.0) * accel.min(1.0) * 4.0;
+    npc.velocity.1 += (wanted_y - npc.velocity.1) * accel.min(1.0) * 4.0;
+    npc.velocity.0 = npc.velocity.0.clamp(-speed * 1.5, speed * 1.5);
+    npc.velocity.1 = npc.velocity.1.clamp(-speed * 1.5, speed * 1.5);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::npc::Npc;
+    use rand::SeedableRng;
+    use terrustia_proto::Tile;
+
+    pub struct Terrain<F>(F);
+
+    impl<F: Fn(i32, i32) -> Option<u16>> TileView for Terrain<F> {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            match (self.0)(x, y) {
+                Some(block) if terrustia_proto::tile_sets::frame_important(block) => {
+                    Tile::framed(block, 0, 0)
+                }
+                Some(block) => Tile::block(block),
+                None => Tile::AIR,
+            }
+        }
+    }
+
+    /// Flat ground at row 10 and below.
+    fn flat() -> Terrain<impl Fn(i32, i32) -> Option<u16>> {
+        Terrain(|_x: i32, y: i32| if y >= 10 { Some(1) } else { None })
+    }
+
+    /// Ground far enough down for a boss fight to happen above it.
+    pub fn flat_ground() -> Terrain<impl Fn(i32, i32) -> Option<u16>> {
+        Terrain(|_x: i32, y: i32| if y >= 10 { Some(1) } else { None })
+    }
+
+    /// Open sky, for the flying bosses.
+    pub fn empty_terrain() -> Terrain<impl Fn(i32, i32) -> Option<u16>> {
+        Terrain(|_x: i32, _y: i32| None)
+    }
+
+    fn rng() -> SmallRng {
+        SmallRng::seed_from_u64(42)
+    }
+
+    fn player_at(x: f32, y: f32) -> Target {
+        Target {
+            slot: 0,
+            center: (x, y),
+            velocity: (0.0, 0.0),
+            alive: true,
+        }
+    }
+
+    /// Place an NPC standing on top of `ground_row`, so it starts clear of the terrain.
+    ///
+    /// Positioning by hand is easy to get wrong: an NPC's position is its top-left corner, so a
+    /// 40-pixel-tall zombie placed at the ground line starts embedded in it and cannot move.
+    fn stand_on(npc_type: u16, tile_x: f32, ground_row: f32) -> Npc {
+        let mut npc = Npc::new(npc_type, (0.0, 0.0), 1).expect("known npc type");
+        npc.position = (tile_x * 16.0, ground_row * 16.0 - npc.height());
+        npc
+    }
+
+    /// Drop an NPC onto the ground so tests start from a settled state.
+    fn settle(npc: &mut Npc, tiles: &impl TileView) {
+        for _ in 0..120 {
+            super::super::npc::step_physics(npc, tiles);
+            if npc.on_ground {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn a_zombie_walks_toward_the_player() {
+        let terrain = flat();
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+        let start = zombie.position.0;
+
+        let targets = [player_at(120.0 * 16.0, 150.0)];
+        let mut r = rng();
+        for _ in 0..120 {
+            update(
+                &mut zombie,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+        }
+
+        assert!(zombie.position.0 > start, "should have moved east");
+        assert_eq!(zombie.direction, 1, "should face the player");
+        assert_eq!(zombie.target, 0, "should have acquired the target");
+    }
+
+    #[test]
+    fn a_zombie_turns_around_for_a_player_behind_it() {
+        let terrain = flat();
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+
+        let targets = [player_at(80.0 * 16.0, 150.0)];
+        let mut r = rng();
+        for _ in 0..60 {
+            update(
+                &mut zombie,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+        }
+        assert_eq!(zombie.direction, -1, "should face west");
+        assert!(zombie.velocity.0 < 0.0, "should be moving west");
+    }
+
+    #[test]
+    fn a_zombie_hops_over_a_one_tile_step() {
+        // Flat ground with a single block step at x = 105.
+        let terrain = Terrain(|x: i32, y: i32| {
+            if y >= 10 || (x == 105 && y == 9) {
+                Some(1)
+            } else {
+                None
+            }
+        });
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+
+        let targets = [player_at(120.0 * 16.0, 140.0)];
+        let mut r = rng();
+        let mut jumped = false;
+        for _ in 0..400 {
+            update(
+                &mut zombie,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+            if zombie.velocity.1 < -1.0 {
+                jumped = true;
+            }
+        }
+        assert!(jumped, "never attempted to hop the step");
+        assert!(
+            zombie.position.0 > 105.0 * 16.0,
+            "did not get past the step: x={}",
+            zombie.position.0 / 16.0
+        );
+    }
+
+    #[test]
+    fn a_wandering_zombie_does_not_walk_off_a_cliff() {
+        // Ground only up to x = 105; open air beyond.
+        let terrain = Terrain(|x: i32, y: i32| if y >= 10 && x <= 105 { Some(1) } else { None });
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+        zombie.direction = 1;
+
+        let mut r = rng();
+        for _ in 0..600 {
+            update(&mut zombie, &terrain, &[], &mut r, &mut AiOutput::default());
+        }
+        assert!(
+            zombie.position.1 < 200.0,
+            "wandered off the edge and fell: y={}",
+            zombie.position.1
+        );
+    }
+
+    #[test]
+    fn a_slime_hops_rather_than_walking() {
+        let terrain = flat();
+        let mut slime = stand_on(1, 100.0, 10.0);
+        settle(&mut slime, &terrain);
+
+        let targets = [player_at(120.0 * 16.0, 150.0)];
+        let mut r = rng();
+        let mut airborne_ticks = 0;
+        let start = slime.position.0;
+        for _ in 0..300 {
+            update(
+                &mut slime,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+            if !slime.on_ground {
+                airborne_ticks += 1;
+            }
+        }
+        assert!(airborne_ticks > 20, "a slime should spend time mid-hop");
+        assert!(slime.position.0 > start, "should have closed on the player");
+    }
+
+    #[test]
+    fn a_flyer_closes_on_the_player_through_the_air() {
+        // Eater of Souls: noGravity.
+        let terrain = flat();
+        let mut flyer = Npc::new(6, (100.0 * 16.0, 50.0), 1).unwrap();
+        let targets = [player_at(130.0 * 16.0, 60.0)];
+        let start = distance(flyer.center(), targets[0].center);
+
+        let mut r = rng();
+        // An eater of souls takes a while to get going — for its first hundred ticks the jitter
+        // outweighs the acceleration and it barely moves — and then, because it does not turn
+        // hard, it sails past and comes round again. So the question is whether it ever reaches
+        // the player, not where it happens to be after a fixed number of ticks.
+        let mut closest = start;
+        for _ in 0..500 {
+            update(
+                &mut flyer,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+            closest = closest.min(distance(flyer.center(), targets[0].center));
+        }
+        assert!(
+            closest < start * 0.25,
+            "flyer never reached the player: {start} -> {closest}"
+        );
+    }
+
+    #[test]
+    fn a_harpy_shot_reaches_the_ai_output() {
+        let terrain = flat();
+        let mut harpy = Npc::new(48, (1000.0, 60.0), 1).unwrap();
+        let targets = [player_at(1200.0, 60.0)];
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        for _ in 0..100 {
+            // Keep it convinced it can see someone, so it never drops into its drift.
+            harpy.ai[1] = 0.0;
+            update(&mut harpy, &terrain, &targets, &mut r, &mut out);
+        }
+        assert_eq!(out.shots.len(), 3, "three feathers in the first volley");
+        assert!(out.shots.iter().all(|s| s.projectile == 38));
+    }
+
+    #[test]
+    fn a_bat_weaves_toward_its_target_rather_than_flying_at_it() {
+        let terrain = flat();
+        let mut bat = Npc::new(49, (100.0 * 16.0, 60.0), 1).unwrap();
+        let targets = [player_at(140.0 * 16.0, 60.0)];
+        let start = distance(bat.center(), targets[0].center);
+
+        let mut r = rng();
+        let mut deepest: f32 = bat.position.1;
+        let mut weaves = 0;
+        let mut climbing = bat.velocity.1 < 0.0;
+        for _ in 0..400 {
+            update(
+                &mut bat,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut AiOutput::default(),
+            );
+            deepest = deepest.max(bat.position.1);
+            if (bat.velocity.1 < 0.0) != climbing {
+                climbing = !climbing;
+                weaves += 1;
+            }
+        }
+        assert!(
+            distance(bat.center(), targets[0].center) < start,
+            "should have closed the distance"
+        );
+        // The vertical brake term makes a bat overshoot by tens of pixels each way; that long
+        // sine-wave weave, rather than a straight line, is what makes it read as a bat.
+        assert!(
+            weaves >= 4,
+            "should weave up and down, got {weaves} reversals"
+        );
+        assert!(
+            deepest < 10.0 * 16.0,
+            "and never sink into the floor, got {deepest}"
+        );
+    }
+
+    #[test]
+    fn an_npc_with_nobody_around_counts_down_to_despawn() {
+        let terrain = flat();
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+        let start = zombie.time_left;
+
+        let mut r = rng();
+        for _ in 0..100 {
+            update(&mut zombie, &terrain, &[], &mut r, &mut AiOutput::default());
+        }
+        assert!(zombie.time_left < start, "should be expiring");
+
+        // A player arriving resets the clock.
+        let targets = [player_at(100.0 * 16.0, 150.0)];
+        update(
+            &mut zombie,
+            &terrain,
+            &targets,
+            &mut r,
+            &mut AiOutput::default(),
+        );
+        assert_eq!(zombie.time_left, super::super::npc::DEFAULT_TIME_LEFT);
+    }
+
+    #[test]
+    fn a_town_npc_never_expires() {
+        let terrain = flat();
+        let mut guide = stand_on(22, 100.0, 10.0);
+        settle(&mut guide, &terrain);
+        let mut r = rng();
+        for _ in 0..300 {
+            update(&mut guide, &terrain, &[], &mut r, &mut AiOutput::default());
+        }
+        assert_eq!(guide.time_left, super::super::npc::DEFAULT_TIME_LEFT);
+    }
+
+    #[test]
+    fn a_town_npc_stays_on_its_ledge() {
+        let terrain = Terrain(|x: i32, y: i32| {
+            if y >= 10 && (100..=110).contains(&x) {
+                Some(1)
+            } else {
+                None
+            }
+        });
+        let mut guide = stand_on(22, 105.0, 10.0);
+        settle(&mut guide, &terrain);
+
+        let mut r = rng();
+        for _ in 0..2000 {
+            update(&mut guide, &terrain, &[], &mut r, &mut AiOutput::default());
+        }
+        assert!(guide.position.1 < 200.0, "the guide fell off the ledge");
+    }
+
+    #[test]
+    fn a_dead_player_is_not_chased() {
+        let terrain = flat();
+        let mut zombie = stand_on(3, 100.0, 10.0);
+        settle(&mut zombie, &terrain);
+
+        let dead = [Target {
+            slot: 0,
+            center: (110.0 * 16.0, 150.0),
+            velocity: (0.0, 0.0),
+            alive: false,
+        }];
+        let mut r = rng();
+        update(
+            &mut zombie,
+            &terrain,
+            &dead,
+            &mut r,
+            &mut AiOutput::default(),
+        );
+        assert_eq!(zombie.target, 255);
+    }
+
+    #[test]
+    fn the_nearest_player_is_chosen() {
+        let npc = stand_on(3, 100.0, 10.0);
+        let targets = [
+            player_at(140.0 * 16.0, 150.0),
+            Target {
+                slot: 3,
+                center: (105.0 * 16.0, 150.0),
+                velocity: (0.0, 0.0),
+                alive: true,
+            },
+        ];
+        assert_eq!(pick_target(&npc, &targets, AGGRO_RANGE).unwrap().slot, 3);
+    }
+}
+
+// ---------------------------------------------------------------------------- bosses
+//
+// Each boss in the game has a bespoke multi-phase routine running to hundreds of lines. These
+// reproduce the shape of each fight — the phases, the movement pattern, the minions — using the
+// real stats and thresholds, without the per-frame detail.
+
+/// Creeper, which orbits the Brain.
+const CREEPER: u16 = 267;
+
+/// Health fraction at which most pre-hardmode bosses change phase.
+const PHASE_TWO: f32 = 0.5;
+
+fn health_fraction(npc: &Npc) -> f32 {
+    if npc.life_max <= 0 {
+        return 0.0;
+    }
+    npc.life as f32 / npc.life_max as f32
+}
+
+/// Style 54 — Brain of Cthulhu.
+///
+/// Teleports around its target behind a screen of creepers; once they are gone it charges directly.
+fn brain_of_cthulhu(npc: &mut Npc, target: Option<Target>, rng: &mut SmallRng, out: &mut AiOutput) {
+    let Some(t) = target else {
+        return;
+    };
+    let second_phase = health_fraction(npc) < PHASE_TWO;
+    npc.ai[0] += 1.0;
+
+    if !second_phase {
+        // Keep a ring of creepers up early on.
+        if npc.ai[0] % 240.0 == 0.0 {
+            for _ in 0..3 {
+                out.spawn.push(Spawn {
+                    npc_type: CREEPER,
+                    position: npc.center(),
+                    velocity: (0.0, 0.0),
+                    parent: None,
+                });
+            }
+        }
+        // Blink to a new spot around the target.
+        if npc.ai[0] % 150.0 == 0.0 {
+            let angle = rng.random_range(0.0..std::f32::consts::TAU);
+            npc.position = (
+                t.center.0 + angle.cos() * 260.0 - npc.width() / 2.0,
+                t.center.1 + angle.sin() * 260.0 - npc.height() / 2.0,
+            );
+            npc.velocity = (0.0, 0.0);
+            npc.dirty = true;
+        } else {
+            approach(npc, t.center, 1.5, 0.03);
+        }
+    } else {
+        approach(npc, t.center, 8.0, 0.10);
+    }
+
+    npc.direction = if npc.velocity.0 > 0.0 { 1 } else { -1 };
+    npc.sprite_direction = npc.direction;
+}
+
+#[cfg(test)]
+mod boss_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::game::npc::{Npc, NpcStore};
+    use rand::SeedableRng;
+
+    fn rng() -> SmallRng {
+        SmallRng::seed_from_u64(7)
+    }
+
+    fn player(x: f32, y: f32) -> Target {
+        Target {
+            slot: 0,
+            center: (x, y),
+            velocity: (0.0, 0.0),
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn the_eye_of_cthulhu_summons_servants_then_stops_in_phase_two() {
+        let terrain = empty_terrain();
+        let targets = [player(1600.0, 1600.0)];
+
+        let mut eye = Npc::new(4, (1600.0, 1000.0), 1).unwrap();
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        for _ in 0..400 {
+            update(&mut eye, &terrain, &targets, &mut r, &mut out);
+        }
+        assert!(
+            out.spawn.iter().any(|s| s.npc_type == 5),
+            "phase one should summon Servants of Cthulhu"
+        );
+
+        // Below half health it stops summoning and just charges.
+        let mut wounded = Npc::new(4, (1600.0, 1000.0), 1).unwrap();
+        wounded.life = wounded.life_max / 4;
+        let mut out2 = AiOutput::default();
+        for _ in 0..400 {
+            update(&mut wounded, &terrain, &targets, &mut r, &mut out2);
+        }
+        assert!(
+            out2.spawn.is_empty(),
+            "phase two should not summon; it charges instead"
+        );
+    }
+
+    #[test]
+    fn the_eye_closes_on_its_target() {
+        let terrain = empty_terrain();
+        let targets = [player(2400.0, 1600.0)];
+        let mut eye = Npc::new(4, (1000.0, 1000.0), 1).unwrap();
+        let start = distance(eye.center(), targets[0].center);
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        for _ in 0..600 {
+            update(&mut eye, &terrain, &targets, &mut r, &mut out);
+        }
+        assert!(
+            distance(eye.center(), targets[0].center) < start * 0.5,
+            "the eye should have closed the distance"
+        );
+    }
+
+    #[test]
+    fn king_slime_hops_and_sheds_slimes() {
+        let terrain = flat_ground();
+        let targets = [player(120.0 * 16.0, 150.0)];
+        let mut king = Npc::new(50, (100.0 * 16.0, 0.0), 1).unwrap();
+        // Drop it onto the ground first.
+        for _ in 0..200 {
+            crate::game::npc::step_physics(&mut king, &terrain);
+            if king.on_ground {
+                break;
+            }
+        }
+
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        let mut airborne = 0;
+        for tick in 0..600 {
+            update(&mut king, &terrain, &targets, &mut r, &mut out);
+            if !king.on_ground {
+                airborne += 1;
+            }
+            // It sheds on damage taken, not on a timer, so the fight has to actually happen.
+            if tick % 60 == 0 {
+                king.life -= king.life_max / 10;
+            }
+        }
+        assert!(airborne > 50, "King Slime should be hopping");
+        assert!(
+            out.spawn.iter().any(|s| s.npc_type == 1),
+            "it should shed Blue Slimes"
+        );
+    }
+
+    #[test]
+    /// Past three thousand pixels it does not chase, it leaves. The catch-up teleport is for
+    /// someone hiding behind terrain, not someone who has run to the other end of the world.
+    fn king_slime_gives_up_on_a_player_who_runs_right_away() {
+        let terrain = flat_ground();
+        let targets = [player(100_000.0, 150.0)];
+        let mut king = Npc::new(50, (100.0 * 16.0, 100.0), 1).unwrap();
+
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        update(&mut king, &terrain, &targets, &mut r, &mut out);
+        assert!(
+            king.time_left <= 10,
+            "it should be leaving, got {}",
+            king.time_left
+        );
+    }
+
+    #[test]
+    /// Bees are one of three attacks she picks between, so the fight has to run long enough for
+    /// her to choose it. She calls either kind.
+    fn the_queen_bee_releases_bees_while_hovering() {
+        let terrain = empty_terrain();
+        let targets = [player(1600.0, 1600.0)];
+        let mut queen = Npc::new(222, (1600.0, 1400.0), 1).unwrap();
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        for _ in 0..4000 {
+            update(&mut queen, &terrain, &targets, &mut r, &mut out);
+            if out
+                .spawn
+                .iter()
+                .any(|s| s.npc_type == 210 || s.npc_type == 211)
+            {
+                return;
+            }
+        }
+        panic!("she should have called bees at some point in a minute of fighting");
+    }
+
+    #[test]
+    /// The Brain's phases turn on its creepers, not on its health: it puts twenty up on its first
+    /// tick, and stays untouchable until the last of them is dead.
+    fn the_brain_surrounds_itself_with_creepers_then_charges() {
+        let terrain = empty_terrain();
+        let targets = [player(1600.0, 1600.0)];
+
+        let mut brain = Npc::new(266, (1600.0, 1200.0), 1).unwrap();
+        let mut out = AiOutput::default();
+        let mut r = rng();
+        // Creepers reported alive, so it stays in its shielded phase.
+        update_with(
+            &mut brain,
+            &terrain,
+            &targets,
+            &mut r,
+            &mut out,
+            Surroundings {
+                conditions: crate::game::ai::Conditions {
+                    crimson: true,
+                    ..Default::default()
+                },
+                census: &[(terrustia_proto::npc_params::CREEPER, 20)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.spawn.iter().filter(|s| s.npc_type == 267).count(),
+            terrustia_proto::npc_params::BRAIN_CREEPERS,
+            "it should put its whole guard up at once"
+        );
+        assert!(brain.stats.dont_take_damage, "and hide behind them");
+
+        // With them gone it exposes itself and charges.
+        let start = distance(brain.center(), targets[0].center);
+        for _ in 0..300 {
+            update_with(
+                &mut brain,
+                &terrain,
+                &targets,
+                &mut r,
+                &mut out,
+                Surroundings {
+                    conditions: crate::game::ai::Conditions {
+                        crimson: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(!brain.stats.dont_take_damage, "now it can be hurt");
+        assert!(
+            distance(brain.center(), targets[0].center) < start,
+            "and it comes at you"
+        );
+    }
+
+    /// A ported routine gets `TargetClosest` semantics, which have no range at all.
+    ///
+    /// This is not a detail: a zombie in the game keeps walking toward you from off-screen, and
+    /// what eventually removes it is the despawn timer rather than a change of heart. Capping the
+    /// range would make enemies visibly give up mid-chase.
+    #[test]
+    fn a_ported_enemy_never_loses_interest_however_far_away_you_get() {
+        let terrain = empty_terrain();
+        let far = [player(1000.0 + AGGRO_RANGE * 20.0, 1000.0)];
+        let mut zombie = Npc::new(3, (1000.0, 1000.0), 1).unwrap();
+        let mut r = rng();
+        update(
+            &mut zombie,
+            &terrain,
+            &far,
+            &mut r,
+            &mut AiOutput::default(),
+        );
+        assert_eq!(zombie.target, 0);
+        assert_eq!(zombie.direction, 1, "and keeps heading that way");
+    }
+
+    #[test]
+    fn a_worm_is_spawned_as_a_linked_chain() {
+        let mut store = NpcStore::new();
+        let head = store
+            .spawn_worm(13, 14, 15, 5, (1000.0, 1000.0))
+            .expect("worm should spawn");
+
+        assert_eq!(store.len(), 6, "a head plus five segments");
+        assert_eq!(store.get(head).unwrap().npc_type, 13);
+        assert!(store.get(head).unwrap().follows.is_none(), "the head leads");
+
+        // Every other link follows exactly one other, and the last is a tail.
+        let followers: Vec<_> = store
+            .iter()
+            .filter(|(_, n)| n.follows.is_some())
+            .map(|(i, n)| (i, n.npc_type, n.follows.unwrap()))
+            .collect();
+        assert_eq!(followers.len(), 5);
+        assert_eq!(
+            followers.last().unwrap().1,
+            15,
+            "the final segment should be the tail"
+        );
+    }
+
+    #[test]
+    fn a_segment_trails_its_leader_at_a_fixed_distance() {
+        let mut segment = Npc::new(14, (1000.0, 1000.0), 1).unwrap();
+        // Leader well away; the segment should close to exactly one gap.
+        follow_leader(&mut segment, (1400.0, 1000.0));
+        let gap = distance(segment.center(), (1400.0, 1000.0));
+        let want = terrustia_proto::npc_params::worm_segment_gap(14, segment.stats.width);
+        assert!(
+            (gap - want).abs() < 1.0,
+            "expected to sit {want} behind, got {gap}"
+        );
+
+        // Already close enough: it should not jitter.
+        let before = segment.position;
+        let here = segment.center();
+        follow_leader(&mut segment, here);
+        assert_eq!(segment.position, before);
+    }
+}

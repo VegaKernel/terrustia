@@ -1,0 +1,41 @@
+//! Terraria network wire format.
+//!
+//! This crate is deliberately free of I/O so that every packet can be round-tripped in a unit test
+//! without a socket. The async server lives in the `terrustia` crate.
+//!
+//! Copyright (C) 2026 Brooklyn Halmstad.
+//! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
+
+pub mod error;
+pub mod housing;
+pub mod hurt;
+pub mod id;
+pub mod item;
+pub mod items;
+pub mod net_module;
+pub mod net_text;
+pub mod npc;
+pub mod npc_data;
+pub mod npc_drops;
+pub mod npc_params;
+pub mod objects;
+pub mod packets;
+pub mod prehardmode;
+pub mod projectile;
+pub mod projectile_data;
+pub mod reader;
+pub mod section;
+pub mod square;
+pub mod tile;
+pub mod tile_drops;
+pub mod tile_sets;
+pub mod tile_solid;
+pub mod writer;
+
+pub use error::{ProtoError, Result};
+pub use item::ItemStack;
+pub use net_text::{NetworkText, TextMode};
+pub use reader::PacketReader;
+pub use section::{SECTION_HEIGHT, SECTION_WIDTH, SectionBounds, SectionExtras};
+pub use tile::{Liquid, Tile, TileFlags};
+pub use writer::{MAX_FRAME_LEN, PacketWriter, Writer};

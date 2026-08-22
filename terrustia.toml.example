@@ -1,0 +1,33 @@
+# Copy to terrustia.toml to override the defaults. Every key is optional.
+
+listen = "0.0.0.0:7777"
+max_players = 8
+motd = "Welcome to Terrustia"
+
+# Leave empty for an open server. Clients are prompted before they get a player slot.
+password = ""
+
+# Serve an existing save instead of generating a world. When set, the world_* keys below are
+# ignored because the file carries its own dimensions.
+#
+# Only a world loaded from a file can be saved. A generated world is playable but ephemeral.
+# world_file = "/path/to/World.wld"
+
+# Where saves go. Defaults to world_file; set it to leave the original untouched.
+# save_file = "/path/to/Saved.wld"
+
+# Seconds between automatic saves, or 0 to disable them. Saving a full-size world takes about
+# 30 ms and briefly pauses the game loop.
+autosave_secs = 300
+
+world_name = "Terrustia"
+world_width = 4200
+world_height = 1200
+seed = 0
+
+# Longest chat line accepted from a client, in bytes.
+max_chat_len = 500
+
+# Drop a connection that sends nothing at all for this long. A playing client sends control
+# updates continuously, so this only catches dead sockets and stalled handshakes.
+idle_timeout_secs = 60

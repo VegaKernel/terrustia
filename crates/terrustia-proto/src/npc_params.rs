@@ -1,0 +1,2325 @@
+//! Per-type parameters pulled out of the game's AI routines.
+//!
+//! Terraria writes these as branches inside the AI itself — `AI_003_Fighters` is 85% such
+//! branches by line count. They are numbers, not logic, so they live here as data and the
+//! behaviour modules stay algorithms.
+
+/// How a fighter accelerates and how fast it walks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FighterMovement {
+    pub max_speed: f32,
+    pub accel: f32,
+    /// Multiplier applied while over top speed and on the ground.
+    pub friction: f32,
+}
+
+/// The values almost every fighter uses.
+pub const FIGHTER_DEFAULT: FighterMovement = FighterMovement {
+    max_speed: 1.0,
+    accel: 0.07,
+    friction: 0.8,
+};
+
+/// Movement for a fighter type.
+pub fn fighter_movement(npc_type: u16) -> FighterMovement {
+    match npc_type {
+        214 => FighterMovement {
+            max_speed: 2.0,
+            accel: 0.09,
+            friction: 0.8,
+        },
+        215 => FighterMovement {
+            max_speed: 1.5,
+            accel: 0.08,
+            friction: 0.8,
+        },
+        381 => FighterMovement {
+            max_speed: 2.0,
+            accel: 0.5,
+            friction: 0.8,
+        },
+        382 => FighterMovement {
+            max_speed: 2.0,
+            accel: 0.5,
+            friction: 0.8,
+        },
+        409 => FighterMovement {
+            max_speed: 2.0,
+            accel: 0.5,
+            friction: 0.8,
+        },
+        411 => FighterMovement {
+            max_speed: 2.0,
+            accel: 0.5,
+            friction: 0.8,
+        },
+        426 => FighterMovement {
+            max_speed: 4.0,
+            accel: 0.6,
+            friction: 0.95,
+        },
+        520 => FighterMovement {
+            max_speed: 4.0,
+            accel: 1.0,
+            friction: 0.7,
+        },
+        _ => FIGHTER_DEFAULT,
+    }
+}
+
+/// Fighters that open a door rather than smashing it.
+///
+/// The distinction only holds outside a blood moon: on one, even these break through, which is
+/// why zombies come through the door on a blood moon and merely knock on it otherwise.
+pub fn fighter_opens_doors(npc_type: u16) -> bool {
+    matches!(
+        npc_type,
+        3 | 21
+            | 44
+            | 77
+            | 132
+            | 161
+            | 167
+            | 186
+            | 187
+            | 188
+            | 189
+            | 196
+            | 197
+            | 200
+            | 201
+            | 202
+            | 203
+            | 223
+            | 319
+            | 320
+            | 321
+            | 322
+            | 323
+            | 324
+            | 331
+            | 332
+            | 430
+            | 449
+            | 450
+            | 451
+            | 452
+            | 481
+            | 590
+            | 635
+            | 691
+    )
+}
+
+/// Fighters that reach further ahead when looking for an obstacle, because they are wide.
+pub fn fighter_wide_probe(npc_type: u16) -> bool {
+    matches!(
+        npc_type,
+        109 | 163
+            | 164
+            | 199
+            | 236
+            | 239
+            | 257
+            | 258
+            | 290
+            | 391
+            | 415
+            | 425
+            | 426
+            | 427
+            | 508
+            | 530
+            | 532
+            | 580
+            | 582
+    )
+}
+
+/// Fighters that can step up a taller ledge than the usual 16.1 pixels.
+pub fn fighter_tall_step(npc_type: u16) -> bool {
+    matches!(npc_type, 163 | 164 | 236 | 239 | 530)
+}
+
+/// How fast a slime's hop timer fills, beyond the one tick every slime gets.
+///
+/// From the `ai[0]` accumulation at the top of the hop block in `AI_001_Slimes`.
+pub fn slime_timer_bonus(npc_type: u16) -> f32 {
+    match npc_type {
+        59 => 2.0, // LavaSlime
+        71 => 3.0, // DungeonSlime
+        667 => 3.0,
+        138 => 2.0, // RedSlime
+        183 => 1.0,
+        658 => 5.0,
+        659 => 3.0,
+        377 | 446 => 3.0,
+        81 => 4.0, // CorruptSlime, at its normal scale
+        _ => 0.0,
+    }
+}
+
+/// The base of the three hop windows. Negative, and scaled to reach the other two.
+pub fn slime_hop_window(npc_type: u16) -> f32 {
+    match npc_type {
+        659 => -500.0,
+        667 => -400.0,
+        _ => -1000.0,
+    }
+}
+
+/// How a swimmer accelerates and how fast it may go, from the `aiStyle == 16` block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwimSpeed {
+    pub accel: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+/// Swim speeds by type. Sharks and their kin move noticeably faster than a goldfish.
+pub fn swim_speed(npc_type: u16) -> SwimSpeed {
+    match npc_type {
+        65 | 102 | 692 => SwimSpeed {
+            accel: 0.15,
+            max_x: 5.0,
+            max_y: 3.0,
+        },
+        _ => SwimSpeed {
+            accel: 0.1,
+            max_x: 3.0,
+            max_y: 2.0,
+        },
+    }
+}
+
+/// Swimmers that never hunt: they drift regardless of who is in the water with them.
+pub fn swimmer_is_passive(npc_type: u16) -> bool {
+    matches!(npc_type, 55 | 592 | 607 | 615 | 688)
+}
+
+/// Ordinary step-up limit, in pixels.
+pub const STEP_HEIGHT: f32 = 16.1;
+
+/// Step-up limit for the taller fighters.
+pub const STEP_HEIGHT_TALL: f32 = 24.1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_what_almost_every_fighter_uses() {
+        // Zombie and Skeleton take the generic values.
+        assert_eq!(fighter_movement(3), FIGHTER_DEFAULT);
+        assert_eq!(fighter_movement(21), FIGHTER_DEFAULT);
+        assert_eq!(FIGHTER_DEFAULT.max_speed, 1.0);
+        assert_eq!(FIGHTER_DEFAULT.accel, 0.07);
+        assert_eq!(FIGHTER_DEFAULT.friction, 0.8);
+    }
+
+    #[test]
+    fn the_fast_types_keep_their_overrides() {
+        assert_eq!(fighter_movement(520).max_speed, 4.0);
+        assert_eq!(fighter_movement(520).accel, 1.0);
+        assert_eq!(fighter_movement(426).friction, 0.95);
+        assert_eq!(fighter_movement(214).max_speed, 2.0);
+    }
+
+    #[test]
+    fn slime_timers_match_the_types_the_game_singles_out() {
+        assert_eq!(
+            slime_timer_bonus(1),
+            0.0,
+            "a blue slime just gets its one tick"
+        );
+        assert_eq!(slime_timer_bonus(59), 2.0, "LavaSlime is twitchier");
+        assert_eq!(slime_timer_bonus(658), 5.0);
+        assert_eq!(slime_hop_window(1), -1000.0);
+        assert_eq!(slime_hop_window(659), -500.0);
+        assert_eq!(slime_hop_window(667), -400.0);
+    }
+
+    #[test]
+    fn sharks_swim_faster_than_goldfish() {
+        assert_eq!(swim_speed(65).max_x, 5.0, "shark");
+        assert_eq!(swim_speed(55).max_x, 3.0, "goldfish takes the default");
+        assert!(swim_speed(65).accel > swim_speed(55).accel);
+    }
+
+    #[test]
+    fn the_harmless_swimmers_are_listed() {
+        assert!(swimmer_is_passive(55), "goldfish");
+        assert!(!swimmer_is_passive(65), "a shark hunts");
+    }
+
+    #[test]
+    fn the_classic_door_bashers_are_listed() {
+        assert!(fighter_opens_doors(3), "Zombie");
+        assert!(fighter_opens_doors(21), "Skeleton");
+        assert!(!fighter_opens_doors(1), "a slime is not even a fighter");
+    }
+
+    #[test]
+    fn wide_and_tall_lists_are_distinct_from_the_default() {
+        assert!(fighter_wide_probe(109) && !fighter_wide_probe(3));
+        assert!(fighter_tall_step(163) && !fighter_tall_step(3));
+        // The two step limits come from the game as 16.1 and 24.1.
+        assert_eq!(STEP_HEIGHT, 16.1);
+        assert_eq!(STEP_HEIGHT_TALL, 24.1);
+    }
+}
+
+/// How one axis of a flying enemy's steering behaves.
+///
+/// The game writes this same shape a dozen times over — inside the bat routine, the floating-eye
+/// routine and several others — with different numbers in it, and in one place even lifts the
+/// numbers into named locals first. It is one algorithm with a handful of parameters, so it is one
+/// struct.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Steering {
+    /// Added toward the facing direction every tick.
+    pub accel: f32,
+    /// Extra push applied once already moving faster than [`Steering::overshoot_at`] the other way.
+    pub overshoot: f32,
+    /// Applied while the velocity still has the wrong sign. Positive values push *against* the
+    /// turn, which is what gives a bat its lazy arc; negative ones hurry it along instead, which is
+    /// what makes a wandering eye feel darting.
+    pub brake: f32,
+    /// Top speed on this axis, which is also the speed the routine will still accelerate below.
+    pub max: f32,
+    /// Speed at which the overshoot term kicks in. The same as `max` for everything except the
+    /// vampire bat, which is clamped at 7 but starts overshooting at 4.
+    pub overshoot_at: f32,
+    /// Speed below which the *positive* arm will engage. The same as `max` for everything except
+    /// the demon eye's hardmode cousin, which climbs faster than it will choose to dive.
+    pub engage_positive: f32,
+}
+
+impl Steering {
+    /// The usual shape: one speed serves as the engage threshold, the overshoot threshold and the
+    /// clamp.
+    pub const fn new(accel: f32, overshoot: f32, brake: f32, max: f32) -> Self {
+        Self {
+            accel,
+            overshoot,
+            brake,
+            max,
+            overshoot_at: max,
+            engage_positive: max,
+        }
+    }
+
+    pub const fn overshooting_at(mut self, speed: f32) -> Self {
+        self.overshoot_at = speed;
+        self
+    }
+
+    pub const fn engaging_positive_below(mut self, speed: f32) -> Self {
+        self.engage_positive = speed;
+        self
+    }
+}
+
+/// Steering on both axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlierSteering {
+    pub x: Steering,
+    pub y: Steering,
+}
+
+/// What almost every type in the bat style uses.
+pub const BAT_STEERING_DEFAULT: FlierSteering = FlierSteering {
+    x: Steering::new(0.1, 0.1, 0.05, 4.0),
+    y: Steering::new(0.04, 0.05, 0.03, 1.5),
+};
+
+/// Steering for a type in the bat style.
+pub fn bat_steering(npc_type: u16) -> FlierSteering {
+    match npc_type {
+        // VampireBat: fast on both axes, and the only type whose overshoot threshold is not its
+        // top speed.
+        158 => FlierSteering {
+            x: Steering::new(0.2, 0.1, 0.05, 7.0).overshooting_at(4.0),
+            y: Steering::new(0.2, 0.1, 0.05, 7.0).overshooting_at(4.0),
+        },
+        // FlyingSnake: twice the acceleration and a much freer climb.
+        226 => FlierSteering {
+            x: Steering::new(0.2, 0.1, 0.05, 4.0),
+            y: Steering::new(0.1, 0.05, 0.03, 2.5),
+        },
+        // QueenSlimeMinionPurple, the one place the game names these numbers itself.
+        660 => FlierSteering {
+            x: Steering::new(0.35, 0.35, 0.175, 6.0),
+            y: Steering::new(0.3, 0.3, 0.225, 5.0),
+        },
+        _ => BAT_STEERING_DEFAULT,
+    }
+}
+
+/// The second steering pass the true bats run, on top of the shared one.
+///
+/// This is not a refinement of the first pass but a repeat of it: a cave bat accelerates twice per
+/// tick and so closes on a player at double the rate a demon does, while still clamped to the same
+/// top speed. Types outside this set run the shared pass only.
+pub fn bat_extra_steering(npc_type: u16) -> Option<FlierSteering> {
+    match npc_type {
+        // Hellbat, whose second pass brakes more gently than the first.
+        60 => Some(FlierSteering {
+            x: Steering::new(0.1, 0.07, 0.03, 4.0),
+            y: Steering::new(0.04, 0.03, 0.02, 1.5),
+        }),
+        49 | 51 | 62 | 66 | 93 | 137 | 150 | 151 | 152 | 634 => Some(BAT_STEERING_DEFAULT),
+        _ => None,
+    }
+}
+
+/// Whether a type in the bat style swims up out of water rather than flying through it.
+pub fn bat_rises_in_water(npc_type: u16) -> bool {
+    matches!(
+        npc_type,
+        48 | 49 | 51 | 60 | 62 | 66 | 93 | 137 | 150 | 151 | 152 | 634
+    )
+}
+
+/// Whether a type keeps flying the way it already is when it loses sight of its target, instead of
+/// turning to chase through walls. Only the flying snake does.
+pub fn bat_holds_course_when_blind(npc_type: u16) -> bool {
+    npc_type == 226
+}
+
+/// Whether daylight above the surface drives a type off. Only the vampire bat.
+pub fn bat_flees_daylight(npc_type: u16) -> bool {
+    npc_type == 158
+}
+
+/// How a flier drifts once it has lost its target for long enough to give up chasing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BatDrift {
+    pub accel_x: f32,
+    pub accel_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+/// Drift parameters for a type in the bat style.
+pub fn bat_drift(npc_type: u16) -> BatDrift {
+    match npc_type {
+        // Harpy, Demon and Voodoo Demon wander more slowly than the bats do.
+        48 | 62 | 66 => BatDrift {
+            accel_x: 0.12,
+            accel_y: 0.07,
+            max_x: 3.0,
+            max_y: 1.25,
+        },
+        _ => BatDrift {
+            accel_x: 0.2,
+            accel_y: 0.1,
+            max_x: 4.0,
+            max_y: 1.5,
+        },
+    }
+}
+
+/// What a type in the bat style throws, and how often.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BatShot {
+    /// Values of the fire timer at which a shot leaves, counted from the last reload.
+    pub cadence: &'static [u16],
+    /// The timer is reloaded somewhere in `base..base + spread` ticks after the last volley.
+    pub reload_base: u16,
+    pub reload_spread: u16,
+    pub projectile: u16,
+    pub damage: i32,
+    /// Muzzle speed. The demon's scythe is slow because it accelerates once it is out.
+    pub speed: f32,
+    /// Half-width of the square of inaccuracy added to the aim point, in pixels.
+    pub scatter: i32,
+    /// Multiple of the shooter's own velocity added to the muzzle position, so a fast mover leads
+    /// its shot.
+    pub lead: f32,
+    /// Distance along the shot direction the projectile starts ahead of the muzzle.
+    pub standoff: f32,
+}
+
+/// What a type in the bat style shoots, if anything.
+pub fn bat_shot(npc_type: u16) -> Option<BatShot> {
+    match npc_type {
+        // Harpy feathers.
+        48 => Some(BatShot {
+            cadence: &[30, 60, 90],
+            reload_base: 400,
+            reload_spread: 400,
+            projectile: 38,
+            damage: 15,
+            speed: 6.0,
+            scatter: 100,
+            lead: 0.0,
+            standoff: 0.0,
+        }),
+        // Demon and Voodoo Demon: the demon scythe, which leaves slowly and picks up speed.
+        62 | 66 => Some(BatShot {
+            cadence: &[20, 40, 60, 80],
+            reload_base: 300,
+            reload_spread: 300,
+            projectile: 44,
+            damage: 21,
+            speed: 0.2,
+            scatter: 100,
+            lead: 0.0,
+            standoff: 0.0,
+        }),
+        // RedDevil, which throws its scythe from well ahead of itself.
+        156 => Some(BatShot {
+            cadence: &[20, 40, 60, 80, 100],
+            reload_base: 250,
+            reload_spread: 250,
+            projectile: 115,
+            damage: 80,
+            speed: 0.2,
+            scatter: 50,
+            lead: 5.0,
+            standoff: 100.0,
+        }),
+        _ => None,
+    }
+}
+
+/// Steering for a type in the floating-eye style.
+///
+/// The eyes proper share the bat's numbers; the two hardmode variants that use this style are
+/// quicker and, unusually, brake *into* their turns rather than against them.
+pub fn eye_steering(npc_type: u16) -> FlierSteering {
+    match npc_type {
+        // The wandering eye, which phases through walls.
+        170 | 171 | 180 => FlierSteering {
+            x: Steering::new(0.08, 0.04, -0.2, 4.0),
+            y: Steering::new(0.1, 0.05, -0.15, 2.5),
+        },
+        // A hardmode eye that dives faster than it climbs.
+        116 => FlierSteering {
+            x: Steering::new(0.1, 0.1, -0.2, 6.0),
+            y: Steering::new(0.04, 0.05, -0.15, 2.5).engaging_positive_below(1.5),
+        },
+        _ => FlierSteering {
+            x: Steering::new(0.1, 0.1, 0.05, 4.0),
+            y: Steering::new(0.04, 0.05, 0.03, 1.5),
+        },
+    }
+}
+
+/// Faster steering a type switches to below half health, if it has one.
+pub fn eye_enraged_steering(npc_type: u16) -> Option<FlierSteering> {
+    (npc_type == 133).then(|| FlierSteering {
+        x: Steering::new(0.1, 0.1, 0.05, 6.0),
+        y: Steering::new(0.1, 0.1, 0.05, 4.0),
+    })
+}
+
+/// Whether a type in the eye style periodically sinks through terrain to reach its target.
+pub fn eye_phases_through_walls(npc_type: u16) -> bool {
+    matches!(npc_type, 170 | 171 | 180)
+}
+
+/// Whether daylight above the surface sends a type home.
+///
+/// This is what empties the sky of demon eyes at dawn: they are not killed, they turn away and
+/// their despawn timer is cut to ten ticks.
+pub fn eye_flees_daylight(npc_type: u16) -> bool {
+    matches!(npc_type, 2 | 133 | 190 | 191 | 192 | 193 | 194 | 317 | 318)
+}
+
+/// Whether a type in the eye style swims up out of water.
+pub fn eye_rises_in_water(npc_type: u16) -> bool {
+    !eye_phases_through_walls(npc_type)
+}
+
+/// Ticks of being unable to see its target before a phasing eye starts sinking through walls.
+pub const EYE_PHASE_DELAY: f32 = 300.0;
+
+/// How long a discouraged NPC has left once it turns away.
+pub const DESPAWN_ENCOURAGED_TICKS: i32 = 10;
+
+/// How large a type is drawn and, for a few routines, how fast it moves and how hard it hits.
+///
+/// `SetDefaults` sets this for sixty-odd types and leaves the rest at one. The hornet reads it as
+/// `2 - scale` to turn a bigger body into a slower one, and its stinger's damage scales with it
+/// directly.
+///
+/// Types 304 pick their scale per-variant inside a branch rather than once, so they are left at
+/// one here; neither is pre-hardmode.
+pub fn npc_scale(npc_type: u16) -> f32 {
+    match npc_type {
+        16 => 1.25,
+        26 => 0.90,
+        27 => 0.95,
+        28 => 1.10,
+        50 => 1.25,
+        59 => 1.10,
+        60 => 1.10,
+        70 => 1.50,
+        71 => 1.25,
+        72 => 1.20,
+        73 => 0.95,
+        81 => 1.10,
+        95 => 0.90,
+        96 => 0.90,
+        97 => 0.90,
+        111 => 0.95,
+        112 => 0.90,
+        113 => 1.20,
+        114 => 1.20,
+        121 => 1.10,
+        123 => 0.90,
+        134 => 1.25,
+        135 => 1.25,
+        136 => 1.25,
+        138 => 1.05,
+        141 => 1.10,
+        151 => 1.15,
+        183 => 1.10,
+        184 => 1.10,
+        204 => 1.15,
+        319 => 0.90,
+        320 => 1.05,
+        321 => 1.10,
+        324 => 1.05,
+        334 => 0.90,
+        335 => 1.05,
+        336 => 0.85,
+        339 => 1.05,
+        340 => 0.90,
+        354 => 0.90,
+        376 => 0.90,
+        535 => 1.10,
+        631 => 1.10,
+        666 => 0.90,
+        _ => 1.0,
+    }
+}
+
+/// How fast a type in the eater-of-souls style flies, and how hard it accelerates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChaseSpeed {
+    pub max: f32,
+    pub accel: f32,
+}
+
+/// Speed and acceleration for a type in the eater-of-souls style.
+///
+/// `expert` picks the eater of souls' harder acceleration; everything else ignores it.
+pub fn eater_speed(npc_type: u16, expert: bool) -> ChaseSpeed {
+    match npc_type {
+        6 if expert => ChaseSpeed {
+            max: 4.0,
+            accel: 0.035,
+        },
+        6 | 173 => ChaseSpeed {
+            max: 4.0,
+            accel: 0.02,
+        },
+        94 => ChaseSpeed {
+            max: 4.2,
+            accel: 0.022,
+        },
+        619 => ChaseSpeed {
+            max: 6.0,
+            accel: 0.1,
+        },
+        231 => ChaseSpeed {
+            max: 3.0,
+            accel: 0.017,
+        },
+        42 | 232..=235 => ChaseSpeed {
+            max: 3.5,
+            accel: 0.021,
+        },
+        205 => ChaseSpeed {
+            max: 3.25,
+            accel: 0.018,
+        },
+        176 => ChaseSpeed {
+            max: 4.0,
+            accel: 0.017,
+        },
+        23 => ChaseSpeed {
+            max: 1.0,
+            accel: 0.03,
+        },
+        5 => ChaseSpeed {
+            max: 5.0,
+            accel: 0.03,
+        },
+        _ => ChaseSpeed {
+            max: 6.0,
+            accel: 0.05,
+        },
+    }
+}
+
+/// When a type in the eater-of-souls style adds its wandering jitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jitter {
+    /// Only once further from the target than a hundred pixels.
+    WhenFar,
+    /// Every tick, however close it gets.
+    Always,
+}
+
+/// The jitter, if this type has one.
+///
+/// It is what stops these enemies converging into a single line: a slow sawtooth on `ai[0]` nudges
+/// the velocity around so a swarm spreads out instead of stacking.
+pub fn eater_jitter(npc_type: u16) -> Option<Jitter> {
+    match npc_type {
+        6 | 139 | 173 | 205 => Some(Jitter::WhenFar),
+        42 | 94 | 176 | 210 | 211 | 231..=235 | 619 => Some(Jitter::Always),
+        _ => None,
+    }
+}
+
+/// Whether a type puts on a burst of homing inside 150 pixels.
+pub fn eater_homes_in_close(npc_type: u16) -> bool {
+    matches!(npc_type, 6 | 94 | 173 | 619)
+}
+
+/// Whether a type accelerates twice as hard while still moving the wrong way.
+///
+/// The types without it turn lazily, which is what makes an eater of souls drift past you and come
+/// back round rather than snapping onto you.
+pub fn eater_turns_hard(npc_type: u16) -> bool {
+    !matches!(npc_type, 6 | 42 | 94 | 139 | 173 | 231..=235 | 619)
+}
+
+/// How much speed a type keeps when it bounces off terrain, if it bounces at all.
+pub fn eater_bounce(npc_type: u16) -> Option<f32> {
+    match npc_type {
+        6 | 173 => Some(0.4),
+        23 | 42 | 94 | 139 | 176 | 205 | 210 | 211 | 231..=235 | 619 => Some(0.7),
+        _ => None,
+    }
+}
+
+/// How a type climbs out of water.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterRise {
+    pub accel: f32,
+    pub cap: f32,
+    /// Whether surfacing also re-picks a target.
+    pub retarget: bool,
+}
+
+/// Water behaviour for a type in the eater-of-souls style.
+pub fn eater_water_rise(npc_type: u16) -> Option<WaterRise> {
+    match npc_type {
+        6 | 94 | 173 | 619 => Some(WaterRise {
+            accel: 0.3,
+            cap: 2.0,
+            retarget: false,
+        }),
+        42 | 176 | 205 | 231..=235 => Some(WaterRise {
+            accel: 0.5,
+            cap: 4.0,
+            retarget: true,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether daylight sends a type in the eater-of-souls style home.
+///
+/// Written in the game as a long list of exceptions, which inverts to a short list: only the
+/// servants of Cthulhu and their kin leave at dawn.
+pub fn eater_flees_daylight(npc_type: u16) -> bool {
+    !matches!(
+        npc_type,
+        6 | 23 | 42 | 94 | 173 | 176 | 205 | 210 | 211 | 231..=235 | 252 | 619
+    )
+}
+
+/// Whether a type slows its climb and its dive near the surface, so it stays at the treeline.
+pub fn eater_hugs_the_surface(npc_type: u16) -> bool {
+    matches!(npc_type, 42 | 231..=235)
+}
+
+/// A stinger a type in the eater-of-souls style spits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stinger {
+    pub projectile: u16,
+    /// Damage before the shooter's own scale is applied.
+    pub damage: f32,
+    pub speed: f32,
+    pub scatter: i32,
+    /// Charge needed before a shot is attempted.
+    pub charge_needed: f32,
+    /// Charge gained per tick is `rand(5..20) * 0.1 * scale`, applied this many times.
+    pub charge_rolls: u32,
+}
+
+/// What a type in the eater-of-souls style spits, if anything.
+pub fn eater_stinger(npc_type: u16) -> Option<Stinger> {
+    match npc_type {
+        42 | 231..=235 => Some(Stinger {
+            projectile: 55,
+            damage: 10.0,
+            speed: 8.0,
+            scatter: 20,
+            charge_needed: 130.0,
+            charge_rolls: 1,
+        }),
+        // The moss hornet charges twice as fast and stings three times as hard.
+        176 => Some(Stinger {
+            projectile: 55,
+            damage: 30.0,
+            speed: 8.0,
+            scatter: 20,
+            charge_needed: 130.0,
+            charge_rolls: 2,
+        }),
+        _ => None,
+    }
+}
+
+/// How fast a worm swims through rock, and how sharply it can turn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WormMotion {
+    pub speed: f32,
+    /// Change in velocity per tick. A worm has no brakes: this is all it has to steer with, which
+    /// is why a fast one carves such wide circles.
+    pub turn: f32,
+}
+
+/// Speed and turn rate for a worm.
+pub fn worm_motion(npc_type: u16, expert: bool) -> WormMotion {
+    match npc_type {
+        95 => WormMotion {
+            speed: 5.5,
+            turn: 0.045,
+        },
+        10 => WormMotion {
+            speed: 6.0,
+            turn: 0.05,
+        },
+        513 => WormMotion {
+            speed: 7.0,
+            turn: 0.1,
+        },
+        7 => WormMotion {
+            speed: 9.0,
+            turn: 0.1,
+        },
+        13 if expert => WormMotion {
+            speed: 12.0,
+            turn: 0.15,
+        },
+        13 => WormMotion {
+            speed: 10.0,
+            turn: 0.07,
+        },
+        510 => WormMotion {
+            speed: 10.0,
+            turn: 0.25,
+        },
+        87 => WormMotion {
+            speed: 11.0,
+            turn: 0.25,
+        },
+        621 => WormMotion {
+            speed: 15.0,
+            turn: 0.45,
+        },
+        375 => WormMotion {
+            speed: 6.0,
+            turn: 0.15,
+        },
+        454 => WormMotion {
+            speed: 20.0,
+            turn: 0.55,
+        },
+        402 => WormMotion {
+            speed: 9.0,
+            turn: 0.3,
+        },
+        39 => WormMotion {
+            speed: 9.0,
+            turn: 0.1,
+        },
+        _ => WormMotion {
+            speed: 8.0,
+            turn: 0.07,
+        },
+    }
+}
+
+/// How far behind its leader a worm segment sits, in pixels.
+///
+/// Usually its own width, with a handful of types nudged apart or squeezed together so the sprites
+/// meet cleanly.
+pub fn worm_segment_gap(npc_type: u16, width: i32) -> f32 {
+    match npc_type {
+        87..=92 => 42.0,
+        454..=459 => 36.0,
+        513..=515 => width as f32 - 6.0,
+        412..=414 => width as f32 + 6.0,
+        621..=623 => 24.0,
+        _ => width as f32,
+    }
+}
+
+/// Whether a type burrows even in open air, rather than falling when it leaves the ground.
+pub fn worm_always_digs(npc_type: u16) -> bool {
+    matches!(npc_type, 87..=92 | 402 | 412..=414 | 454..=459 | 621..=623)
+}
+
+/// Whether a type leads a worm, as opposed to being dragged along as a segment.
+///
+/// Only a head burrows away when there is nobody near; a segment simply follows.
+pub fn worm_is_head(npc_type: u16) -> bool {
+    matches!(
+        npc_type,
+        7 | 10 | 13 | 39 | 95 | 98 | 117 | 375 | 454 | 510 | 513 | 621
+    )
+}
+
+/// Whether a type gives up on a target who climbs above the surface.
+///
+/// The tomb crawler's version depends on the player standing in an underground desert; with no
+/// biome tracking that reads as false, which is the same answer for anyone outside one.
+pub fn worm_flees_surface_target(npc_type: u16) -> bool {
+    matches!(npc_type, 10 | 39 | 95 | 117 | 510 | 513)
+}
+
+/// How hard a fleeing worm dives back into the rock.
+pub fn worm_sink_accel(npc_type: u16) -> f32 {
+    if npc_type == 513 { 0.1 } else { 0.2 }
+}
+
+/// Gravity on a worm in open air, which the bone serpent halves while it is still rising so its
+/// leaps arc higher.
+pub fn worm_air_gravity(npc_type: u16, rising: bool) -> f32 {
+    if npc_type == 39 && rising { 0.08 } else { 0.11 }
+}
+
+/// How far a worm looks for a player before deciding nobody is around and burrowing off.
+pub const WORM_ATTENTION_RANGE: f32 = 1000.0;
+
+/// How long a worm has left once it gives up.
+pub const WORM_DESPAWN_TICKS: i32 = 300;
+
+/// How fast something in the town style walks, and how quickly it gets there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Walk {
+    pub max: f32,
+    pub accel: f32,
+}
+
+/// Whether a type is one of the wandering critters rather than a resident.
+///
+/// The distinction runs through the whole routine: a critter has no home to return to, faces
+/// whoever is nearest instead of whoever is talking, walks off ledges a resident would stop at,
+/// and takes its rests in shorter bursts.
+pub fn town_is_critter(npc_type: u16) -> bool {
+    matches!(
+        npc_type,
+        46 | 148
+            | 149
+            | 230
+            | 299
+            | 300
+            | 303
+            | 337
+            | 361
+            | 362
+            | 364
+            | 366
+            | 367
+            | 443
+            | 445
+            | 447
+            | 538
+            | 539
+            | 540
+            | 583..=585
+            | 592
+            | 593
+            | 602
+            | 607
+            | 608
+            | 610
+            | 616
+            | 617
+            | 625..=627
+            | 639..=652
+            | 687
+            | 688
+    )
+}
+
+/// The town slimes, which are pets rather than critters and swim rather than sink.
+pub fn town_is_slime(npc_type: u16) -> bool {
+    matches!(npc_type, 670 | 678..=684)
+}
+
+/// A pet, which idles with animations rather than standing still.
+pub fn town_is_pet(npc_type: u16) -> bool {
+    matches!(npc_type, 637 | 638 | 656) || town_is_slime(npc_type)
+}
+
+/// Turtles and frogs, which are at home in water and never drown.
+pub fn town_breathes_underwater(npc_type: u16) -> bool {
+    matches!(npc_type, 361 | 445 | 616 | 617 | 625 | 687)
+}
+
+/// Frogs, which shove themselves forward in a single kick rather than swimming steadily.
+pub fn town_hops_in_water(npc_type: u16) -> bool {
+    matches!(npc_type, 361 | 445 | 687)
+}
+
+/// Mice and rats, which scurry: quick, and quick to stop.
+pub fn town_scurries(npc_type: u16) -> bool {
+    matches!(npc_type, 300 | 447 | 610)
+}
+
+/// Walking speed for a type in the town style.
+pub fn town_walk(npc_type: u16, wet: bool) -> Walk {
+    match npc_type {
+        // Mice outrun everything else on land, and stop just as sharply.
+        300 | 447 | 610 => Walk {
+            max: 2.0,
+            accel: 1.0,
+        },
+        625 if wet => Walk {
+            max: 2.5,
+            accel: 1.0,
+        },
+        625 => Walk {
+            max: 0.2,
+            accel: 0.07,
+        },
+        616 | 617 if wet => Walk {
+            max: 2.0,
+            accel: 1.0,
+        },
+        616 | 617 => Walk {
+            max: 0.5,
+            accel: 0.07,
+        },
+        299 | 538 | 539 | 639..=645 => Walk {
+            max: 1.5,
+            accel: 0.07,
+        },
+        t if town_is_slime(t) && wet => Walk {
+            max: 2.0,
+            accel: 0.2,
+        },
+        _ => Walk {
+            max: 1.0,
+            accel: 0.07,
+        },
+    }
+}
+
+/// How far from its home tile a resident will drift before turning back.
+pub const TOWN_LEASH: i32 = 25;
+/// ...and the distance at which it stops choosing and simply turns.
+pub const TOWN_LEASH_HARD: i32 = 50;
+/// Beyond this, walking away from home burns the walk timer six times as fast.
+pub const TOWN_FAR_FROM_HOME: i32 = 35;
+
+/// Upward impulse for clearing a three-, two- and one-tile obstacle respectively.
+pub const TOWN_JUMP_TALL: f32 = 6.0;
+pub const TOWN_JUMP: f32 = 5.0;
+pub const TOWN_JUMP_LOW: f32 = 4.4;
+
+/// How high a step a town NPC will walk up rather than jump.
+pub const TOWN_STEP_HEIGHT: f32 = 20.0;
+
+/// How fast a grub inches along the ground.
+///
+/// The whole style is one speed and a pair of timers; only the glowing bait worms hurry.
+pub fn grub_speed(npc_type: u16) -> f32 {
+    match npc_type {
+        485 => 0.25,
+        486 => 0.325,
+        487 => 0.4,
+        // The truffle worm covers ground three times as fast as anything else here.
+        374 => 0.2 * 3.0,
+        _ => 0.2,
+    }
+}
+
+/// How long a grub spends resting and moving, as inclusive-exclusive tick ranges.
+pub const GRUB_REST_TICKS: (u32, u32) = (300, 900);
+pub const GRUB_CRAWL_TICKS: (u32, u32) = (600, 1800);
+
+/// Speed of the things that run along tracks and walls.
+pub const WHEEL_SPEED: f32 = 6.0;
+/// How fast a blazing wheel spins, in radians per tick.
+pub const WHEEL_SPIN: f32 = 0.13;
+
+/// A spike ball's launch speed and how hard it accelerates between bounces.
+pub const SPIKE_BALL_SPEED: f32 = 6.0;
+pub const SPIKE_BALL_ACCEL: f32 = 0.2;
+
+/// The antlion's sand ball: speed, damage, projectile type and reload.
+pub const ANTLION_SHOT_SPEED: f32 = 12.0;
+pub const ANTLION_SHOT_DAMAGE: i32 = 10;
+pub const ANTLION_SHOT_TYPE: u16 = 31;
+pub const ANTLION_RELOAD: f32 = 200.0;
+
+/// How close a player has to come, and for how long, before a lost girl drops her disguise.
+pub const LOST_GIRL_RANGE: f32 = 200.0;
+pub const LOST_GIRL_WINDUP: f32 = 21.0;
+
+/// What a lost girl turns into.
+pub const NYMPH: u16 = 196;
+
+/// How close a player has to come, and for how long, before a truffle worm flees.
+pub const TRUFFLE_WORM_RANGE: f32 = 160.0;
+pub const TRUFFLE_WORM_WINDUP: f32 = 90.0;
+/// ...and what it becomes when it does.
+pub const TRUFFLE_WORM_DIGGER: u16 = 375;
+
+/// How far a rooted plant can lunge from its anchor, and how hard it pulls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rooted {
+    /// Reach in pixels.
+    pub reach: f32,
+    /// Acceleration toward the aim point.
+    pub pull: f32,
+    /// Top speed on each axis.
+    pub cap: f32,
+}
+
+/// Reach and speed for a rooted plant.
+pub fn rooted(npc_type: u16) -> Rooted {
+    match npc_type {
+        // Man Eater: the long one.
+        43 => Rooted {
+            reach: 250.0,
+            pull: 0.035,
+            cap: 3.0,
+        },
+        101 => Rooted {
+            reach: 175.0,
+            pull: 0.035,
+            cap: 2.0,
+        },
+        // Fungi Bulb: barely reaches past its own stalk.
+        259 => Rooted {
+            reach: 100.0,
+            pull: 0.035,
+            cap: 2.0,
+        },
+        175 => Rooted {
+            reach: 500.0,
+            pull: 0.05,
+            cap: 4.0,
+        },
+        260 => Rooted {
+            reach: 350.0,
+            pull: 0.15,
+            cap: 2.0,
+        },
+        _ => Rooted {
+            reach: 150.0,
+            pull: 0.035,
+            cap: 2.0,
+        },
+    }
+}
+
+/// A plant's stretch cycle: for the last third of it, its reach grows by 30%.
+pub const ROOTED_CYCLE: f32 = 450.0;
+pub const ROOTED_STRETCH_AT: f32 = 300.0;
+pub const ROOTED_STRETCH: f32 = 1.3;
+
+/// How close a player has to come before a perched vulture takes off.
+pub const PERCH_STARTLE: f32 = 100.0;
+/// The kick it gives itself on take-off.
+pub const PERCH_LAUNCH: f32 = 6.0;
+/// How high above its target a vulture prefers to circle when it is not directly overhead.
+pub const VULTURE_CEILING: f32 = 100.0;
+/// ...and the horizontal distance beyond which it starts climbing to that height.
+pub const VULTURE_CLIMB_AT: f32 = 50.0;
+
+/// How a jellyfish gathers itself before a lunge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Jelly {
+    /// Speed kept each tick while winding up. The closer to one, the longer the wind-up.
+    pub drag: f32,
+    /// Speed it has to drop below before it lets go.
+    pub trigger: f32,
+    /// Speed of the lunge itself.
+    pub lunge: f32,
+}
+
+/// Lunge parameters for a type in the jellyfish style.
+pub fn jelly(npc_type: u16) -> Jelly {
+    match npc_type {
+        103 => Jelly {
+            drag: 0.98 * 0.98,
+            trigger: 0.6,
+            lunge: 9.0,
+        },
+        // A squid barely slows at all and goes off at the slightest excuse.
+        221 => Jelly {
+            drag: 0.99,
+            trigger: 1.0,
+            lunge: 7.0,
+        },
+        242 => Jelly {
+            drag: 0.995,
+            trigger: 3.0,
+            lunge: 7.0,
+        },
+        _ => Jelly {
+            drag: 0.98,
+            trigger: 0.2,
+            lunge: 7.0,
+        },
+    }
+}
+
+/// How something in the flying-fish style hunts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hover {
+    pub accel_x: f32,
+    pub accel_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+    /// Horizontal distance inside which it stops pushing sideways.
+    pub deadband: f32,
+    /// ...and beyond which it climbs to half that height above its target.
+    pub climb_at: f32,
+    /// Whether it shoulders its own kind aside rather than stacking with them.
+    pub avoids_its_own_kind: bool,
+}
+
+/// Hover parameters for a type in the flying-fish style.
+pub fn hover(npc_type: u16) -> Hover {
+    match npc_type {
+        509 => Hover {
+            accel_x: 0.08,
+            accel_y: 0.03,
+            max_x: 4.5,
+            max_y: 2.0,
+            deadband: 40.0,
+            climb_at: 150.0,
+            avoids_its_own_kind: true,
+        },
+        581 => Hover {
+            accel_x: 0.06,
+            accel_y: 0.02,
+            max_x: 4.0,
+            max_y: 2.0,
+            deadband: 40.0,
+            climb_at: 150.0,
+            avoids_its_own_kind: true,
+        },
+        587 => Hover {
+            accel_x: 0.13,
+            accel_y: 0.09,
+            max_x: 6.5,
+            max_y: 3.5,
+            deadband: 0.0,
+            climb_at: 250.0,
+            avoids_its_own_kind: false,
+        },
+        _ => Hover {
+            accel_x: 0.05,
+            accel_y: 0.01,
+            max_x: 3.0,
+            max_y: 1.0,
+            deadband: 30.0,
+            climb_at: 100.0,
+            avoids_its_own_kind: false,
+        },
+    }
+}
+
+/// How long a flying fish keeps hunting after it loses sight of its target.
+pub const HOVER_ATTENTION: f32 = 90.0;
+
+/// A cursed skull's speed and acceleration at a given range.
+///
+/// The tiers are what make one feel like it is stalking you: far away it closes fast, and the
+/// closer it gets the more it slows, until inside 250 pixels it stops steering altogether and just
+/// jitters around you waiting for its charge.
+pub fn skull_approach(distance: f32) -> (f32, f32) {
+    if distance > 350.0 {
+        (5.0, 0.3)
+    } else if distance > 300.0 {
+        (3.0, 0.2)
+    } else if distance > 250.0 {
+        (1.5, 0.1)
+    } else {
+        (1.0, 0.011)
+    }
+}
+
+/// How long a cursed skull circles before it charges, and how long the charge lasts.
+pub const SKULL_CHARGE_AT: f32 = 600.0;
+pub const SKULL_CHARGE_OVER: f32 = 650.0;
+/// Speed and acceleration during that charge.
+pub const SKULL_CHARGE_SPEED: f32 = 4.0;
+pub const SKULL_CHARGE_ACCEL: f32 = 0.011 * 8.0;
+/// Range inside which it starts jittering rather than steering.
+pub const SKULL_JITTER_RANGE: f32 = 250.0;
+/// The jitter itself: how fast the sawtooth runs and how hard it pushes.
+pub const SKULL_JITTER_RATE: f32 = 0.9;
+pub const SKULL_JITTER_PUSH: f32 = 0.019;
+pub const SKULL_JITTER_PERIOD: f32 = 200.0;
+pub const SKULL_JITTER_TURN: f32 = 100.0;
+
+/// The giant cursed skull's shot: range, cycle, speed, damage and type.
+pub const GIANT_SKULL_RANGE: f32 = 500.0;
+pub const GIANT_SKULL_WINDUP: f32 = 120.0;
+pub const GIANT_SKULL_RECOVER: f32 = 40.0;
+pub const GIANT_SKULL_RELEASE: f32 = 20.0;
+pub const GIANT_SKULL_SHOT_SPEED: f32 = 6.0;
+pub const GIANT_SKULL_SHOT_DAMAGE: i32 = 25;
+pub const GIANT_SKULL_SHOT_TYPE: u16 = 299;
+
+/// How long a butterfly holds a heading before picking another, as an inclusive-exclusive range.
+pub const BUTTERFLY_REPLAN: (u32, u32) = (90, 240);
+/// How gently it eases onto that heading: one sixtieth of the difference per tick.
+pub const BUTTERFLY_EASE: f32 = 60.0;
+/// Beyond this it flies back toward the nearest player rather than wandering freely.
+pub const BUTTERFLY_HOMING_RANGE: f32 = 700.0;
+/// How close something dangerous has to be before a butterfly bolts, and how often it checks.
+pub const BUTTERFLY_FEAR_RANGE: f32 = 100.0;
+pub const BUTTERFLY_FEAR_INTERVAL: f32 = 15.0;
+/// The hardest a fleeing butterfly can be flying.
+pub const BUTTERFLY_PANIC_SPEED: f32 = 16.0;
+
+/// Walls that mark the dungeon, which is where the dungeon's casters will teleport and nowhere
+/// else.
+pub const fn dungeon_wall(wall: u16) -> bool {
+    matches!(wall, 7 | 8 | 9 | 94..=99)
+}
+
+/// What a caster conjures, and where.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Conjuring {
+    /// The NPC it summons. Every pre-hardmode caster summons an NPC rather than firing a
+    /// projectile — the fire imp's burning sphere and the dark caster's water sphere are NPCs with
+    /// one hit point and no gravity.
+    pub summons: Option<u16>,
+    /// A projectile instead, for the one caster that throws rather than summons.
+    pub throws: Option<(u16, i32)>,
+    /// Offset from the caster's own position, in pixels. The x component is applied along its
+    /// facing for the types that conjure to the side.
+    pub offset: (f32, f32),
+    /// Whether the offset's x follows the caster's facing.
+    pub offset_follows_facing: bool,
+    /// Tick of the wind-up at which it lets go.
+    pub release_at: f32,
+    /// How far from its target it will teleport, in tiles.
+    pub teleport_range: i32,
+    /// Whether it will only teleport within the dungeon.
+    pub dungeon_bound: bool,
+}
+
+/// What a type in the caster style conjures.
+pub fn conjuring(npc_type: u16) -> Option<Conjuring> {
+    let base = Conjuring {
+        summons: None,
+        throws: None,
+        offset: (0.0, -8.0),
+        offset_follows_facing: false,
+        release_at: 25.0,
+        teleport_range: 20,
+        dungeon_bound: false,
+    };
+    match npc_type {
+        // Fire Imp: a burning sphere, thrown out to the side, and it barely moves to do it.
+        24 => Some(Conjuring {
+            summons: Some(25),
+            offset: (8.0, 20.0),
+            offset_follows_facing: true,
+            release_at: 10.0,
+            teleport_range: 5,
+            ..base
+        }),
+        29 => Some(Conjuring {
+            summons: Some(30),
+            ..base
+        }),
+        32 => Some(Conjuring {
+            summons: Some(33),
+            dungeon_bound: true,
+            ..base
+        }),
+        45 => Some(Conjuring {
+            summons: Some(665),
+            ..base
+        }),
+        693 => Some(Conjuring {
+            throws: Some((1092, 13)),
+            dungeon_bound: true,
+            ..base
+        }),
+        _ => None,
+    }
+}
+
+/// A caster's cycle: it casts at these points and teleports when the timer runs out.
+pub const CASTER_CADENCE: [f32; 3] = [100.0, 200.0, 300.0];
+pub const CASTER_CYCLE: f32 = 650.0;
+/// The wind-up a cast sets going.
+pub const CASTER_WINDUP: f32 = 30.0;
+/// How long the caster is held in place after choosing somewhere to teleport to.
+pub const CASTER_BLINK: f32 = 20.0;
+pub const CASTER_BLINK_SHORT: f32 = 5.0;
+/// How near a player a caster refuses to land, in tiles.
+pub const CASTER_TELEFRAG_GUARD: i32 = 5;
+/// Beyond this many pixels of Manhattan distance it will not attempt a teleport at all.
+pub const CASTER_TELEPORT_LIMIT: f32 = 2000.0;
+
+/// How fast a member of the frost legion hops, and how hard it pushes off.
+pub fn frost_hop(npc_type: u16) -> Walk {
+    match npc_type {
+        143 => Walk {
+            max: 3.0,
+            accel: 0.7,
+        },
+        145 => Walk {
+            max: 3.5,
+            accel: 0.8,
+        },
+        _ => Walk {
+            max: 4.0,
+            accel: 1.0,
+        },
+    }
+}
+
+/// The two hop impulses: every third hop is the big one.
+pub const FROST_HOP: f32 = -6.0;
+pub const FROST_LEAP: f32 = -8.2;
+/// How long a frost legionnaire keeps its own counsel after walking into a wall.
+pub const FROST_STUBBORN: f32 = 60.0;
+
+/// What a member of the frost legion throws, if anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrostShot {
+    pub projectile: u16,
+    pub damage: i32,
+    pub speed: f32,
+    /// Whether it fires flat along its facing rather than aiming.
+    pub flat: bool,
+    /// Ticks between volleys for the flat shooter, or the length of the pause for the aimer.
+    pub cycle: f32,
+    /// Tick of that pause at which the aimer lets go.
+    pub release_at: f32,
+}
+
+/// What a type in the frost legion throws.
+pub fn frost_shot(npc_type: u16) -> Option<FrostShot> {
+    match npc_type {
+        // Snowman Gangsta: a flat burst along its facing, every two seconds, without stopping.
+        143 => Some(FrostShot {
+            projectile: 110,
+            damage: 25,
+            speed: 12.0,
+            flat: true,
+            cycle: 120.0,
+            release_at: 0.0,
+        }),
+        // Snow Balla: stops, winds up for eight ticks, throws, and sets off again.
+        145 => Some(FrostShot {
+            projectile: 109,
+            damage: 35,
+            speed: 10.0,
+            flat: false,
+            cycle: 16.0,
+            release_at: 8.0,
+        }),
+        _ => None,
+    }
+}
+
+/// How long Mister Stabby stands still between charges.
+pub const FROST_STABBY_PAUSE: f32 = 200.0;
+/// How many hops any of them take before stopping to do whatever they do.
+pub const FROST_HOPS_BEFORE_PAUSE: f32 = 3.0;
+
+/// How fast a snail crawls.
+pub fn snail_speed(npc_type: u16) -> f32 {
+    if matches!(npc_type, 360 | 655) {
+        0.6
+    } else {
+        0.3
+    }
+}
+
+/// One chance in this many, per tick, that a snail simply lets go of its wall.
+pub const SNAIL_SLIP_CHANCE: u32 = 7200;
+/// ...and how many ticks of touching nothing before it accepts it has fallen off.
+pub const SNAIL_LOST_GRIP: f32 = 5.0;
+
+/// How a balloon-borne NPC drifts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Balloon {
+    /// Base horizontal speed, before the wind is added.
+    pub speed: f32,
+    /// How hard it pulls itself along.
+    pub push: f32,
+    /// The extra shove it gives itself while still going the wrong way, over and under speed.
+    pub reverse_fast: f32,
+    pub reverse_slow: f32,
+}
+
+/// Drift parameters for a balloon type.
+pub fn balloon(npc_type: u16) -> Balloon {
+    match npc_type {
+        // The clumsy slime balloon is the brisker of the two.
+        125 | 686 => Balloon {
+            speed: 3.0,
+            push: 0.04,
+            reverse_fast: 0.15,
+            reverse_slow: 0.1,
+        },
+        _ => Balloon {
+            speed: 2.0,
+            push: 0.01,
+            reverse_fast: 0.1,
+            reverse_slow: 0.05,
+        },
+    }
+}
+
+/// How far a balloon looks down for ground before it decides it is over open air.
+pub const BALLOON_LOOKDOWN: i32 = 8;
+/// ...and how close that ground has to be before it climbs harder.
+pub const BALLOON_TOO_LOW: i32 = 5;
+/// Range within which a balloon stops drifting and starts matching its target's height.
+pub const BALLOON_CHASE_RANGE: f32 = 400.0;
+/// Vertical speed and acceleration while it is doing that.
+pub const BALLOON_CHASE_SPEED: f32 = 2.0;
+pub const BALLOON_CHASE_ACCEL: f32 = 0.035;
+
+/// How long a dragonfly rests, and how long it flies, in ticks.
+pub const DRAGONFLY_REST: (u32, u32) = (60, 120);
+pub const DRAGONFLY_FLIGHT: f32 = 4.0;
+/// ...unless it has strayed this far from its perch, in which case it flies until it is back.
+pub const DRAGONFLY_TETHER: f32 = 112.0;
+pub const DRAGONFLY_LONG_FLIGHT: f32 = 200.0;
+/// Distances at which it heads home briskly, gently, or not at all.
+pub const DRAGONFLY_FAR: f32 = 96.0;
+pub const DRAGONFLY_NEAR: f32 = 16.0;
+/// How close something has to come before a dragonfly bolts.
+pub const DRAGONFLY_FEAR_NPC: f32 = 100.0;
+pub const DRAGONFLY_FEAR_PLAYER: f32 = 150.0;
+
+/// How something in the haunting style drifts and how far ahead it feels for ground.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Haunt {
+    /// Steering on both axes: the same shape the bats use, with its own numbers.
+    pub steering: FlierSteering,
+    /// How many tiles ahead and down it feels for something to float above.
+    pub feel: i32,
+    /// How hard it sinks with nothing beneath it, and how fast that sink gets.
+    pub sink: f32,
+    pub sink_cap: f32,
+    /// How hard it pushes back up off whatever it finds.
+    pub lift: f32,
+    /// A cap on that climb, where the type has one.
+    pub lift_cap: Option<f32>,
+}
+
+/// Drift parameters for a type in the haunting style.
+pub fn haunt(npc_type: u16) -> Haunt {
+    match npc_type {
+        // The drippler hangs much lower and much more slowly than a ghost, and feels further
+        // ahead the further away its target is.
+        490 => Haunt {
+            steering: FlierSteering {
+                x: Steering::new(0.1, 0.1, 0.05, 1.5),
+                y: Steering::new(0.04, 0.05, 0.03, 1.0),
+            },
+            feel: 4,
+            sink: 0.03,
+            sink_cap: 0.75,
+            lift: 0.075,
+            lift_cap: Some(0.75),
+        },
+        75 | 169 => Haunt {
+            steering: FlierSteering {
+                x: Steering::new(0.1, 0.1, 0.05, 3.0),
+                y: Steering::new(0.04, 0.05, 0.03, 1.5),
+            },
+            feel: if npc_type == 75 { 4 } else { 10 },
+            sink: 0.2,
+            sink_cap: 2.0,
+            lift: 0.2,
+            lift_cap: None,
+        },
+        _ => Haunt {
+            steering: FlierSteering {
+                x: Steering::new(0.1, 0.1, 0.05, 2.0),
+                y: Steering::new(0.04, 0.05, 0.03, 1.5),
+            },
+            feel: 3,
+            sink: 0.1,
+            sink_cap: 3.0,
+            lift: 0.1,
+            lift_cap: None,
+        },
+    }
+}
+
+/// Whether a type in the haunting style feels further ahead the further off its target is.
+pub fn haunt_feels_by_distance(npc_type: u16) -> bool {
+    npc_type == 490
+}
+
+/// Whether daylight sends a type in the haunting style away.
+pub fn haunt_flees_daylight(npc_type: u16) -> bool {
+    npc_type == 490
+}
+
+/// Whether a type gives up on a target who is dead or has got a long way away.
+pub fn haunt_gives_up_at_range(npc_type: u16) -> Option<f32> {
+    (npc_type == 316).then_some(3000.0)
+}
+
+/// How long something in the haunting style will hover in one spot before it decides it is stuck.
+pub const HAUNT_STUCK_AT: f32 = 30.0;
+pub const HAUNT_STUCK_OVER: f32 = 60.0;
+/// ...and how long it then spends backing away.
+pub const HAUNT_BACK_OFF: f32 = 200.0;
+
+/// How a granite flyer moves in each of its states.
+pub const GRANITE_CHASE_BASE: f32 = 2.0;
+/// Its chase speed grows with distance, at this many pixels per pixel of range.
+pub const GRANITE_CHASE_RAMP: f32 = 200.0;
+/// How heavily each state smooths its steering: the higher, the lazier the turn.
+pub const GRANITE_CHASE_SMOOTH: f32 = 50.0;
+pub const GRANITE_PHASE_SMOOTH: f32 = 4.0;
+pub const GRANITE_ROUTE_SMOOTH: f32 = 3.0;
+pub const GRANITE_WANDER_SMOOTH: f32 = 20.0;
+pub const GRANITE_ROUTE_SPEED: f32 = 1.0;
+pub const GRANITE_WANDER_SPEED: f32 = 1.5;
+/// How long it will keep wandering before giving up and re-planning.
+pub const GRANITE_WANDER_LIMIT: f32 = 180.0;
+/// ...and how often, while wandering, it looks for a route again.
+pub const GRANITE_REPLAN_EVERY: f32 = 5.0;
+/// How far a waypoint has to be to be worth flying to.
+pub const GRANITE_WAYPOINT_MIN: f32 = 8.0;
+/// ...and how far is too far.
+pub const GRANITE_WAYPOINT_MAX: f32 = 800.0;
+
+/// How close a statue mimic lets you get before it stops pretending.
+pub const MIMIC_TRIGGER: f32 = 96.0;
+/// How long it holds still between hops once it is moving.
+pub const MIMIC_HOP_DELAY: f32 = 20.0;
+/// The hop itself: a fixed impulse plus a share of the height it has to make up.
+pub const MIMIC_HOP: f32 = -9.01;
+pub const MIMIC_HOP_PER_DROP: f32 = 40.0;
+pub const MIMIC_HOP_EXTRA_CAP: f32 = 10.0;
+/// Horizontal speed: a base plus a share of the gap, capped.
+pub const MIMIC_RUN: f32 = 4.0;
+pub const MIMIC_RUN_PER_GAP: f32 = 50.0;
+pub const MIMIC_RUN_EXTRA_CAP: f32 = 12.0;
+/// How often a dormant mimic considers moving somewhere better.
+pub const MIMIC_RELOCATE_EVERY: f32 = 10.0;
+
+/// A tumbleweed's rolling speed in still air, and how quickly it gets there.
+pub const TUMBLEWEED_SPEED: f32 = 4.0;
+pub const TUMBLEWEED_ACCEL: f32 = 0.05;
+/// How much a sandstorm adds to that, at full strength.
+pub const TUMBLEWEED_WIND: f32 = 3.0;
+/// How long it will keep failing to get anywhere before it stops trying to chase.
+pub const TUMBLEWEED_PATIENCE: f32 = 30.0;
+/// ...and the cap on that counter, so it eventually recovers.
+pub const TUMBLEWEED_PATIENCE_CAP: f32 = 120.0;
+/// The four upward impulses, by how tall the obstacle ahead turns out to be.
+pub const TUMBLEWEED_JUMPS: [f32; 4] = [-8.5, -7.5, -7.0, -6.0];
+/// ...and the one it uses to clear a gap when it is already rolling fast.
+pub const TUMBLEWEED_LEAP: f32 = -8.0;
+/// How high a step it rolls over rather than jumping.
+pub const TUMBLEWEED_STEP: f32 = 16.1;
+
+/// King Slime's hop cycle: three ordinary hops and then a leap.
+///
+/// The impulses are (rise, horizontal push, recovery ticks), and the fourth entry is the leap —
+/// higher, flatter and followed by nearly twice the pause.
+pub const KING_SLIME_HOPS: [(f32, f32, f32); 4] = [
+    (-8.0, 4.0, -120.0),
+    (-8.0, 4.0, -120.0),
+    (-6.0, 4.5, -120.0),
+    (-13.0, 3.5, -200.0),
+];
+
+/// How fast the hop timer fills, and the extra it gains at each health threshold.
+pub const KING_SLIME_WIND: f32 = 2.0;
+pub const KING_SLIME_RAGE: [(f32, f32); 5] =
+    [(0.8, 1.0), (0.6, 1.0), (0.4, 2.0), (0.2, 3.0), (0.1, 4.0)];
+
+/// Airborne steering speed, and how hard it pushes to reach it.
+pub const KING_SLIME_DRIFT: f32 = 3.0;
+pub const KING_SLIME_DRIFT_PUSH: f32 = 0.2;
+
+/// How long out of sight before King Slime teleports, and the two halves of that teleport.
+pub const KING_SLIME_PATIENCE: f32 = 300.0;
+pub const KING_SLIME_FADE_OUT: f32 = 60.0;
+pub const KING_SLIME_FADE_IN: f32 = 30.0;
+/// How long it will tolerate being unreachable before it stops being fussy about where it lands.
+pub const KING_SLIME_ANTI_CHEESE: f32 = 360.0;
+/// Vertical slack within which it counts as being on your level.
+pub const KING_SLIME_LEVEL: f32 = 160.0;
+/// Beyond this it gives up entirely.
+pub const KING_SLIME_GIVE_UP: f32 = 3000.0;
+
+/// Its unscaled size, which the routine multiplies by the current scale every tick.
+pub const KING_SLIME_SIZE: (f32, f32) = (98.0, 92.0);
+/// Scale runs from this fraction of health, plus this floor.
+pub const KING_SLIME_SCALE_SPAN: f32 = 0.5;
+pub const KING_SLIME_SCALE_FLOOR: f32 = 0.75;
+
+/// Every this fraction of its health lost, it sheds a slime or three.
+pub const KING_SLIME_SHED_STEP: f32 = 0.05;
+/// What it sheds.
+pub const KING_SLIME_SPAWN: u16 = 1;
+
+/// How many creepers the Brain of Cthulhu surrounds itself with.
+pub const BRAIN_CREEPERS: usize = 20;
+/// What they are.
+pub const CREEPER: u16 = 267;
+
+/// Drift speed while the creepers are alive, and charge speed once they are not.
+pub const BRAIN_DRIFT: f32 = 1.0;
+pub const BRAIN_CHARGE: f32 = 8.0;
+/// How heavily the charge is smoothed. Fifty to one, so it turns like a barge.
+pub const BRAIN_CHARGE_SMOOTH: f32 = 50.0;
+
+/// How long between teleports in each phase, as (base, extra).
+pub const BRAIN_BLINK_SHIELDED: (u32, u32) = (120, 300);
+pub const BRAIN_BLINK_EXPOSED: (u32, u32) = (60, 120);
+/// How far from the target it appears, in tiles, in each phase.
+pub const BRAIN_RANGE_SHIELDED: (i32, i32) = (12, 40);
+pub const BRAIN_RANGE_EXPOSED: (i32, i32) = (10, 12);
+/// How much of the target's own speed is added to that offset, so it leads a running player.
+pub const BRAIN_LEAD: f32 = 16.0;
+
+/// Fade rate per tick while blinking, in each phase.
+pub const BRAIN_FADE_SHIELDED: f32 = 5.0;
+pub const BRAIN_FADE_EXPOSED: f32 = 25.0;
+
+/// Beyond this Manhattan distance the Brain simply leaves.
+pub const BRAIN_GIVE_UP: f32 = 6000.0;
+/// How long out of the crimson before it sinks away, and how fast it then falls.
+pub const BRAIN_HOMESICK: f32 = 120.0;
+pub const BRAIN_SINK_AFTER: f32 = 60.0;
+pub const BRAIN_SINK_RATE: f32 = 0.25;
+
+/// The Eye of Cthulhu's servant.
+pub const SERVANT_OF_CTHULHU: u16 = 5;
+
+/// How the Eye hovers in each of its two forms: (offset above the target, speed, acceleration).
+pub const EYE_HOVER_FIRST: (f32, f32, f32) = (200.0, 5.0, 0.04);
+pub const EYE_HOVER_SECOND: (f32, f32, f32) = (120.0, 6.0, 0.07);
+/// How long it hovers before the first dash of a set.
+pub const EYE_HOVER_TICKS_FIRST: f32 = 600.0;
+pub const EYE_HOVER_TICKS_SECOND: f32 = 200.0;
+
+/// Dash speed in each form.
+pub const EYE_DASH_FIRST: f32 = 6.0;
+pub const EYE_DASH_SECOND: f32 = 6.8;
+/// How long a dash runs before it starts bleeding off, and how long the whole dash lasts.
+pub const EYE_DASH_DRIVE: f32 = 40.0;
+pub const EYE_DASH_TICKS_FIRST: f32 = 150.0;
+pub const EYE_DASH_TICKS_SECOND: f32 = 130.0;
+/// Friction once a dash is spent, in each form.
+pub const EYE_DASH_DRAG_FIRST: f32 = 0.98;
+pub const EYE_DASH_DRAG_SECOND: f32 = 0.97;
+/// Dashes per set.
+pub const EYE_DASHES: f32 = 3.0;
+
+/// How often the first form throws out a servant, and how far it can be to bother.
+pub const EYE_SERVANT_EVERY: f32 = 110.0;
+pub const EYE_SERVANT_RANGE: f32 = 500.0;
+pub const EYE_SERVANT_SPEED: f32 = 5.0;
+
+/// The health fraction at which it splits open.
+pub const EYE_SPLIT_AT: f32 = 0.5;
+/// How long the transformation takes, in each of its two halves.
+pub const EYE_SPLIT_TICKS: f32 = 100.0;
+/// How fast the spin builds during it, and where it tops out.
+pub const EYE_SPIN_RAMP: f32 = 0.005;
+pub const EYE_SPIN_MAX: f32 = 0.5;
+
+/// Its damage and defence once it has split.
+pub const EYE_SECOND_FORM_DAMAGE: i32 = 23;
+pub const EYE_SECOND_FORM_DEFENSE: i32 = 0;
+
+/// Skeletron's hand.
+pub const SKELETRON_HAND: u16 = 36;
+
+/// How long the head spends hovering, and how long it then spins.
+pub const SKELETRON_HOVER_TICKS: f32 = 800.0;
+pub const SKELETRON_SPIN_TICKS: f32 = 400.0;
+/// How far above its target the head holds station.
+pub const SKELETRON_HOVER_ABOVE: f32 = 250.0;
+/// Hover steering: (vertical accel, vertical cap, horizontal accel, horizontal cap).
+pub const SKELETRON_HOVER: (f32, f32, f32, f32) = (0.02, 2.0, 0.05, 8.0);
+/// How fast it charges while spinning, and how fast it spins.
+pub const SKELETRON_SPIN_SPEED: f32 = 1.5;
+pub const SKELETRON_SPIN_RATE: f32 = 0.3;
+/// How much of its defence it drops while spinning — the window the fight gives you.
+pub const SKELETRON_SPIN_DEFENSE: i32 = 10;
+/// Daylight makes it unkillable and lethal instead of ending the fight.
+pub const SKELETRON_ENRAGED_SPEED: f32 = 8.0;
+pub const SKELETRON_ENRAGED_STAT: i32 = 9999;
+/// Beyond this on either axis it gives up.
+pub const SKELETRON_GIVE_UP: f32 = 2000.0;
+
+/// Where a hand docks relative to the head while the head is hovering, and while it is not.
+pub const HAND_DOCK_HIGH: (f32, f32) = (120.0, -100.0);
+pub const HAND_DOCK_LOW: (f32, f32) = (200.0, 230.0);
+/// Docking steering: (accel, cap) for the near dock and the far one.
+pub const HAND_DOCK_HIGH_DRIVE: (f32, f32, f32, f32) = (0.07, 6.0, 0.1, 8.0);
+pub const HAND_DOCK_LOW_DRIVE: (f32, f32, f32, f32) = (0.04, 3.0, 0.07, 8.0);
+/// How long a hand waits at the low dock before winding up.
+pub const HAND_WINDUP_AT: f32 = 300.0;
+/// The wind-up climb, and how far above the head it goes before it lets go.
+pub const HAND_RISE: f32 = 0.1;
+pub const HAND_RISE_CAP: f32 = 8.0;
+pub const HAND_RISE_ABOVE: f32 = 200.0;
+/// How fast it lunges.
+pub const HAND_LUNGE: f32 = 18.0;
+/// How far it will chase before giving the lunge up.
+pub const HAND_LUNGE_LIMIT: f32 = 2000.0;
+/// The sideways sweep: acceleration and cap.
+pub const HAND_SWEEP: f32 = 0.1;
+pub const HAND_SWEEP_CAP: f32 = 8.0;
+
+/// The bees the Queen calls up, and the stinger she spits.
+pub const BEE: u16 = 210;
+pub const BEE_STRONG: u16 = 211;
+pub const STINGER: u16 = 719;
+pub const STINGER_DAMAGE: i32 = 11;
+pub const STINGER_SPEED: f32 = 8.0;
+
+/// Queen Bee's attacks, as `ai[0]` records them.
+pub const QUEEN_CHOOSING: f32 = -1.0;
+pub const QUEEN_CHARGING: f32 = 0.0;
+pub const QUEEN_SUMMONING: f32 = 1.0;
+pub const QUEEN_CLIMBING: f32 = 2.0;
+pub const QUEEN_STINGING: f32 = 3.0;
+pub const QUEEN_LEAVING: f32 = 5.0;
+
+/// Charge speed at full health, and the extra it gains at each quarter lost.
+pub const QUEEN_CHARGE: f32 = 12.0;
+pub const QUEEN_CHARGE_RAGE: [(f32, f32); 4] = [(0.75, 1.0), (0.5, 1.0), (0.25, 2.0), (0.1, 2.0)];
+/// How level with you she has to be before she commits, in pixels.
+pub const QUEEN_CHARGE_ALIGN: f32 = 20.0;
+/// How many charges she strings together, and the extra at each health threshold.
+pub const QUEEN_CHARGES: i32 = 2;
+/// The band she holds while lining a charge up.
+pub const QUEEN_STANDOFF: (f32, f32) = (300.0, 600.0);
+/// How fast she climbs into position, and her acceleration.
+pub const QUEEN_HOVER: f32 = 12.0;
+pub const QUEEN_HOVER_ACCEL: f32 = 0.07;
+/// How far above you she hovers to summon, and to sting.
+pub const QUEEN_SUMMON_ABOVE: f32 = 200.0;
+pub const QUEEN_STING_ABOVE: f32 = 300.0;
+/// How often she calls a bee, how fast it leaves, and how many she calls before moving on.
+pub const QUEEN_SUMMON_EVERY: f32 = 40.0;
+pub const QUEEN_BEE_SPEED: f32 = 5.0;
+pub const QUEEN_SUMMONS: f32 = 5.0;
+/// How often she spits, at full health and at a tenth.
+pub const QUEEN_STING_EVERY: f32 = 40.0;
+pub const QUEEN_STING_EVERY_ENRAGED: f32 = 15.0;
+/// Beyond this she leaves.
+pub const QUEEN_GIVE_UP: f32 = 3000.0;
+/// Her defence climbs by this much as her health falls away.
+pub const QUEEN_DEFENSE_RAMP: f32 = 20.0;
+
+/// Deerclops' three projectiles: the ice spike, the falling rubble, and the shadow hand.
+pub const DEER_SPIKE: u16 = 961;
+pub const DEER_RUBBLE: u16 = 962;
+pub const DEER_SHADOW_HAND: u16 = 965;
+pub const DEER_SPIKE_DAMAGE: i32 = 13;
+pub const DEER_RUBBLE_DAMAGE: i32 = 18;
+pub const DEER_SHADOW_DAMAGE: i32 = 15;
+
+/// Deerclops' states, as `ai[0]` records them.
+pub const DEER_STALKING: f32 = 0.0;
+pub const DEER_SPIKES_FORWARD: f32 = 1.0;
+pub const DEER_RUBBLE_SLAM: f32 = 2.0;
+pub const DEER_ROAR: f32 = 3.0;
+pub const DEER_SPIKES_BOTH: f32 = 4.0;
+pub const DEER_SHADOW_HANDS: f32 = 5.0;
+pub const DEER_GOING_HOME: f32 = 6.0;
+pub const DEER_TELEPORTING: f32 = 7.0;
+pub const DEER_LEAVING: f32 = 8.0;
+
+/// How long each of its attacks lasts, and the wind-up before the damage lands.
+pub const DEER_SPIKES_FORWARD_TICKS: f32 = 80.0;
+pub const DEER_SPIKES_FORWARD_WINDUP: f32 = 36.0;
+pub const DEER_SPIKES_BOTH_TICKS: f32 = 90.0;
+pub const DEER_SPIKES_BOTH_WINDUP: f32 = 56.0;
+pub const DEER_RUBBLE_TICKS: f32 = 60.0;
+pub const DEER_RUBBLE_WINDUP: f32 = 32.0;
+pub const DEER_ROAR_TICKS: f32 = 60.0;
+pub const DEER_SHADOW_TICKS: f32 = 60.0;
+pub const DEER_SHADOW_AT: f32 = 30.0;
+pub const DEER_SHADOW_HANDS_COUNT: usize = 6;
+/// How many spikes go up in a line, and how far apart.
+pub const DEER_SPIKE_COUNT: i32 = 20;
+
+/// How long it stalks before each attack becomes available.
+pub const DEER_UNTIL_RUBBLE: f32 = 240.0;
+pub const DEER_UNTIL_SHADOW: f32 = 90.0;
+pub const DEER_UNTIL_ROAR: f32 = 120.0;
+/// How close it has to be for the spike attacks.
+pub const DEER_SPIKE_RANGE: f32 = 120.0;
+/// How far it has to be for the roar.
+pub const DEER_ROAR_RANGE: f32 = 100.0;
+
+/// Walking speed at full health, and the extra it gains as it is worn down.
+pub const DEER_WALK: f32 = 3.5;
+pub const DEER_WALK_RAGE: f32 = 1.0;
+/// How sharply it changes speed: one quarter of the difference a tick.
+pub const DEER_WALK_EASE: f32 = 4.0;
+/// It stops pushing once this close.
+pub const DEER_STOP_WITHIN: f32 = 80.0;
+
+/// How far a player can get before it goes home, and how far from home counts as its den.
+pub const DEER_GIVE_UP: f32 = 2400.0;
+pub const DEER_DEN: f32 = 480.0;
+/// How long it will spend walking home before simply teleporting there.
+pub const DEER_PATIENCE_DEEP: f32 = 300.0;
+pub const DEER_PATIENCE: f32 = 1500.0;
+pub const DEER_TELEPORT_AT: f32 = 40.0;
+/// How long it goes untouchable once its target is well out of reach.
+pub const DEER_SHIELD_RANGE: f32 = 450.0;
+pub const DEER_SHIELD_AFTER: f32 = 30.0;
+
+/// The Wall of Flesh's parts, and what it spits.
+pub const WALL_EYE: u16 = 114;
+pub const WALL_HUNGRY: u16 = 115;
+pub const WALL_LEECH: u16 = 117;
+pub const WALL_IMP: u16 = 24;
+/// The eye's laser.
+pub const WALL_LASER: u16 = 83;
+pub const WALL_LASER_DAMAGE: i32 = 11;
+pub const WALL_LASER_SPEED: f32 = 9.0;
+
+/// How many Hungry hang off it at the start.
+pub const WALL_HUNGRY_COUNT: usize = 11;
+/// The most leeches it keeps alive at once, and how often it spits one.
+pub const WALL_LEECH_CAP: usize = 10;
+pub const WALL_LEECH_EVERY: f32 = 60.0;
+/// How long before it starts spitting at all, and the extra its wounds buy.
+pub const WALL_LEECH_AFTER: f32 = 2700.0;
+
+/// Its walking speed at full health, and what each threshold adds.
+pub const WALL_SPEED: f32 = 1.5;
+pub const WALL_SPEED_RAGE: [(f32, f32); 4] = [(0.75, 0.25), (0.5, 0.4), (0.25, 0.5), (0.1, 0.6)];
+/// The flat multiplier and bonus the game applies on top.
+pub const WALL_SPEED_SCALE: f32 = 1.1;
+pub const WALL_SPEED_BONUS: f32 = 0.2;
+/// How tall the wall is kept, at least.
+pub const WALL_MIN_HEIGHT: f32 = 160.0;
+/// How long it takes to fade out once everyone is dead.
+pub const WALL_FADE_TICKS: f32 = 180.0;
+
+/// How long an eye charges before its first shot, and between shots in a volley.
+pub const WALL_EYE_CHARGE: f32 = 600.0;
+pub const WALL_EYE_CADENCE: f32 = 45.0;
+/// How many shots are in a volley at full health, and what each threshold adds.
+pub const WALL_EYE_VOLLEY: i32 = 4;
+
+/// How far a Hungry will stray from the wall, and how that leash grows as the wall dies.
+pub const HUNGRY_LEASH: f32 = 300.0;
+pub const HUNGRY_LEASH_WOUNDED: f32 = 500.0;
+pub const HUNGRY_LEASH_DYING: f32 = 700.0;
+/// Its acceleration and top speed.
+pub const HUNGRY_ACCEL: f32 = 0.1;
+pub const HUNGRY_SPEED: f32 = 4.0;
+/// How long a hit knocks it out of its chase.
+pub const HUNGRY_RECOIL: f32 = 10.0;
+
+/// The Eater of Worlds' three parts, in order: head, body, tail.
+pub const EATER_OF_WORLDS: (u16, u16, u16) = (13, 14, 15);
+
+/// The head, body and tail of a worm type, if it splits when cut.
+///
+/// Only the Eater of Worlds does. Every other worm in the game dies as one animal: sever a giant
+/// worm and the pieces simply vanish.
+pub fn splitting_worm(npc_type: u16) -> Option<(u16, u16, u16)> {
+    matches!(npc_type, 13..=15).then_some(EATER_OF_WORLDS)
+}
+
+/// How long a Mothron egg takes to hatch, and what it hatches into.
+pub const MOTHRON_EGG_TICKS: f32 = 900.0;
+pub const MOTHRON_SPAWN: u16 = 479;
+
+/// How long a stardust cell takes to grow up, and what into.
+pub const STARDUST_CELL_TICKS: f32 = 300.0;
+pub const STARDUST_CELL_GROWN: u16 = 405;
+
+/// A dungeon spirit's chase speed and how heavily it is smoothed.
+pub const SPIRIT_SPEED: f32 = 12.0;
+pub const SPIRIT_SMOOTH: f32 = 100.0;
+
+/// A flocko's charge speed, the range at which it commits, and how long it spins afterwards.
+pub const FLOCKO_SPEED: f32 = 11.0;
+pub const FLOCKO_RANGE: f32 = 200.0;
+pub const FLOCKO_SPIN_TICKS: f32 = 20.0;
+
+/// The big stardust jellyfish: how far above its target it hangs, its speed, and its cadence.
+pub const JELLYFISH_ABOVE: f32 = 250.0;
+pub const JELLYFISH_SPEED: f32 = 5.0;
+pub const JELLYFISH_EASE: f32 = 0.15;
+pub const JELLYFISH_EVERY: f32 = 70.0;
+pub const JELLYFISH_SHOT: u16 = 539;
+pub const JELLYFISH_SHOT_DAMAGE: i32 = 60;
+
+/// Solar goop: how long it sits before it dries up once it has landed.
+pub const GOOP_SETTLE_TICKS: f32 = 5.0;
+
+/// An elf copter's hover, and the missile it drops.
+pub const COPTER_SPEED: f32 = 7.0;
+pub const COPTER_RANGE: f32 = 600.0;
+pub const COPTER_RELOAD: f32 = 15.0;
+pub const COPTER_SHOT: u16 = 180;
+pub const COPTER_SHOT_DAMAGE: i32 = 32;
+pub const COPTER_SHOT_SPEED: f32 = 10.0;
+
+/// An angry nimbus: how far above you it sits and how often it rains.
+pub const NIMBUS_ABOVE: f32 = 200.0;
+pub const NIMBUS_SPEED: f32 = 4.0;
+pub const NIMBUS_ACCEL: f32 = 0.25;
+pub const NIMBUS_EVERY: f32 = 8.0;
+pub const NIMBUS_SHOT: u16 = 264;
+pub const NIMBUS_SHOT_DAMAGE: i32 = 20;
+
+/// A detonating bubble: how long it drifts before it goes off, and how near you have to be to
+/// trigger it early.
+pub const BUBBLE_FUSE: f32 = 150.0;
+pub const BUBBLE_TRIGGER: f32 = 40.0;
+pub const BUBBLE_BLAST_TICKS: f32 = 4.0;
+pub const BUBBLE_BLAST_SIZE: i32 = 100;
+
+/// A flying weapon's charge speed, and how long it rests between charges.
+pub const FLYING_WEAPON_SPEED: f32 = 9.0;
+pub const FLYING_WEAPON_DRIVE: f32 = 100.0;
+pub const FLYING_WEAPON_REST: f32 = 120.0;
+
+/// An ancient doom: how long it grows before it fires, how fast it grows once its parent is hurt,
+/// and the four shots it lets go.
+pub const DOOM_LIFETIME: f32 = 420.0;
+pub const DOOM_FADE_IN: f32 = 120.0;
+pub const DOOM_SHOT: u16 = 593;
+pub const DOOM_SHOT_SPEED: f32 = 4.0;
+
+/// A water strider: how hard it pushes off the surface, and how long it waits between skips.
+pub const STRIDER_RISE: f32 = 0.8;
+pub const STRIDER_RISE_CAP: f32 = 4.0;
+pub const STRIDER_SKIP: f32 = 5.0;
+pub const STRIDER_WAIT: (u32, u32) = (120, 241);
+pub const STRIDER_WAIT_DRY: (u32, u32) = (60, 241);
+
+// --- Fixtures: the tethered, stationary and short-lived hardmode NPCs -------------------------
+
+/// Style 124: an elder slime chest is a falling prop and nothing else.
+pub const CHEST_GRAVITY: f32 = 0.2;
+
+/// Style 122: a pirate ghost closes at four pixels a tick, easing by two fifteenths.
+pub const GHOST_SPEED: f32 = 4.0;
+pub const GHOST_EASE: f32 = 2.0 / 15.0;
+/// It fades in and out five steps of alpha at a time, and dies once fully faded.
+pub const GHOST_FADE: i32 = 5;
+/// Ghosts closer than this shove each other apart.
+pub const GHOST_PERSONAL_SPACE: f32 = 50.0;
+pub const GHOST_SHOVE: f32 = 0.1;
+
+/// Style 92: a training dummy gives up on a player further away than this.
+pub const DUMMY_RANGE: f32 = 4800.0;
+/// The tile a dummy is anchored to; without it there is nothing holding it up.
+pub const DUMMY_TILE: u16 = 378;
+
+/// The Martian turret, the one style-73 type that spends two seconds deploying before it fires.
+pub const MARTIAN_TURRET: u16 = 387;
+/// The force bubble a Martian turret is pinned to; without it the turret has nothing to sit on.
+pub const FORCE_BUBBLE: u16 = 386;
+
+/// Style 73: how long a turret waits between casts, and how far the shot is thrown off.
+pub const CASTER_RELOAD: f32 = 60.0;
+pub const CASTER_COOLDOWN: f32 = -120.0;
+/// Being hit interrupts the cast and costs half a reload.
+pub const CASTER_FLINCH: f32 = -30.0;
+pub const CASTER_SPREAD: i32 = 100;
+pub const CASTER_SHOT: u16 = 435;
+pub const CASTER_SHOT_SPEED: f32 = 14.0;
+pub const CASTER_SHOT_DAMAGE: i32 = 35;
+/// The friction a stationary caster settles under.
+pub const CASTER_DRAG: f32 = 0.93;
+/// Type 387 spends this long materialising, untouchable, before it will fight.
+pub const CASTER_ARRIVAL: f32 = 120.0;
+pub const CASTER_FADE_IN: f32 = 60.0;
+
+/// Style 127: the two "pals" wait for their escort to die, then two seconds more before paying out.
+pub const PAL_ESCORT: u16 = 111;
+pub const PAL_ESCORTS: usize = 2;
+pub const PAL_APPROACH: f32 = 100.0;
+pub const PAL_PAYOUT_TICKS: f32 = 120.0;
+pub const PAL_DRAG: f32 = 0.93;
+
+// --- The Martian invasion and its scout -------------------------------------------------------
+
+/// Style 80: how far below itself a probe looks for ground, and the two bands it steers between.
+pub const PROBE_SCAN: i32 = 30;
+pub const PROBE_TOO_LOW: i32 = 15;
+pub const PROBE_COMFORTABLE: i32 = 20;
+pub const PROBE_CRUISE: f32 = 3.0;
+pub const PROBE_CLIMB: f32 = 0.05;
+pub const PROBE_CLIMB_CAP: f32 = 3.5;
+pub const PROBE_SINK_CAP: f32 = 1.5;
+/// It only counts a player it can see below it, within this far.
+pub const PROBE_SIGHT: f32 = 352.0;
+/// Then it hangs still for a second before bolting.
+pub const PROBE_ALERT_TICKS: f32 = 60.0;
+pub const PROBE_ESCAPE_TICKS: f32 = 180.0;
+pub const PROBE_ESCAPE_CLIMB: f32 = 0.1;
+pub const PROBE_ESCAPE_CLIMB_CAP: f32 = 10.0;
+pub const PROBE_ESCAPE_DRIFT: f32 = 0.05;
+pub const PROBE_ESCAPE_DRIFT_CAP: f32 = 4.0;
+
+/// Style 93: the Flying Dutchman's four cannon, and how it holds station above the ground.
+pub const DUTCHMAN_GUN: u16 = 492;
+pub const DUTCHMAN_CANNON: usize = 4;
+pub const DUTCHMAN_CANNON_SPACING: f32 = 40.0;
+pub const DUTCHMAN_CANNON_OFFSET: f32 = 150.0;
+/// It aims to fly this high, and corrects while it is outside the band.
+pub const DUTCHMAN_HOVER: f32 = 350.0;
+pub const DUTCHMAN_HOVER_SLACK: f32 = 100.0;
+pub const DUTCHMAN_HOVER_EASE: f32 = 0.05;
+pub const DUTCHMAN_HOVER_RATE: f32 = 4.0;
+pub const DUTCHMAN_GROUND_SCAN: i32 = 150;
+/// It closes only when the player is further away than this, and never past this speed.
+pub const DUTCHMAN_STANDOFF: f32 = 300.0;
+pub const DUTCHMAN_SPEED: f32 = 6.0;
+pub const DUTCHMAN_ACCEL: f32 = 0.06;
+/// Every so often it drops one of the invasion's foot soldiers.
+pub const DUTCHMAN_DROP_CHANCE: u32 = 300;
+pub const DUTCHMAN_DROPS: [u16; 4] = [213, 215, 214, 212];
+pub const DUTCHMAN_DROP_RISE: f32 = -8.01;
+
+/// The Snowman Gangsta, which only wakes up during the Frost Moon.
+pub const SNOWMAN_GANGSTA: u16 = 341;
+
+/// Style 25: a hopper's two-beat jump — a long low one, then a high one.
+pub const HOP_REST: f32 = 20.0;
+pub const HOP_FIRST_REST: f32 = 12.0;
+pub const HOP_LONG: (f32, f32) = (3.5, -4.0);
+pub const HOP_HIGH: (f32, f32) = (2.5, -8.0);
+/// It wakes when a player comes this close to its box, or when anything hurts it.
+pub const HOP_WAKE_MARGIN: f32 = 100.0;
+/// Airborne it leans into its direction, gently, up to this.
+pub const HOP_LEAN: f32 = 0.1;
+pub const HOP_LEAN_CAP: f32 = 1.0;
+/// Grounded and waiting, it sheds speed at this rate.
+pub const HOP_DRAG: f32 = 0.9;
+
+// --- Wall crawlers and leapers -----------------------------------------------------------------
+
+/// Style 40: how fast each wall-crawling form homes, and how hard it accelerates.
+///
+/// The jungle creeper and desert scorpion are quicker than the rest; everything else shares the
+/// base pair.
+pub const CRAWLER_SPEED: f32 = 2.0;
+pub const CRAWLER_ACCEL: f32 = 0.08;
+pub const JUNGLE_CRAWLER_SPEED: f32 = 3.0;
+pub const JUNGLE_CRAWLER_ACCEL: f32 = 0.12;
+pub const SCORPION_CRAWLER_SPEED: f32 = 4.0;
+pub const SCORPION_CRAWLER_ACCEL: f32 = 0.16;
+/// Blind, it wanders on this ramp, turning over at these bounds.
+pub const CRAWLER_WANDER: f32 = 0.023;
+/// The sideways ramp switches over at a hundred either way, so a full cycle pushes left as long as
+/// it pushes right and the wander itself goes nowhere; the lean toward the player is what moves it.
+pub const CRAWLER_WANDER_BAND: f32 = 100.0;
+/// The cycle runs to two hundred and then starts again from the other end.
+pub const CRAWLER_WANDER_TURN: f32 = 200.0;
+pub const CRAWLER_PULL: f32 = 0.007;
+pub const CRAWLER_DRIFT_BRAKE: f32 = 1.5;
+pub const CRAWLER_DRIFT_CAP: f32 = 3.0;
+/// It rebounds off terrain at half the speed it hit at, but never slower than this.
+pub const CRAWLER_BOUNCE: f32 = 0.5;
+pub const CRAWLER_BOUNCE_FLOOR: f32 = 2.0;
+/// In expert it spits web, on a random fuse, and being hit sets the fuse back.
+pub const CRAWLER_SPIT: u16 = 472;
+pub const CRAWLER_SPIT_DAMAGE: i32 = 18;
+pub const CRAWLER_SPIT_SPEED: f32 = 8.0;
+/// The wall forms and the ground forms they turn into once they have room.
+pub const CRAWLER_FORMS: [(u16, u16); 5] = [
+    (165, 164),
+    (237, 236),
+    (238, 163),
+    (240, 239),
+    (531, 530),
+];
+
+/// Style 41: a leaper's charge-up, which counts *faster* the closer you are.
+pub const LEAPER_CHARGE: f32 = 5.0;
+pub const DERPLING_CHARGE: f32 = 2.0;
+pub const LEAPER_URGENCY: f32 = 400.0;
+pub const LEAPER_URGENCY_SCALE: f32 = 10.0;
+pub const DERPLING_URGENCY_SCALE: f32 = 5.0;
+pub const LEAPER_URGENCY_CAP: f32 = 30.0;
+/// The small hop, then the big one that ends the set.
+pub const LEAPER_HOP: (f32, f32) = (5.0, -5.0);
+pub const LEAPER_LEAP: (f32, f32) = (3.0, -9.0);
+pub const LEAPER_HOPS_BEFORE_LEAP: f32 = 3.0;
+pub const DERPLING_HOP: (f32, f32) = (4.0, -7.5);
+pub const DERPLING_LEAP: (f32, f32) = (2.0, -11.5);
+pub const DERPLING_HOPS_BEFORE_LEAP: f32 = 2.0;
+/// The rest after a hop, and the longer one after a leap.
+pub const LEAPER_REST: f32 = -120.0;
+pub const LEAPER_LONG_REST: f32 = -200.0;
+/// Stuck against a wall, it turns round and waits this long.
+pub const LEAPER_STUCK_WAIT: f32 = 300.0;
+/// Airborne it leans into its direction up to this, gently.
+pub const LEAPER_AIR_LEAN: f32 = 0.2;
+pub const LEAPER_AIR_CAP: f32 = 3.0;
+pub const DERPLING_AIR_CAP: f32 = 4.0;
+/// The chattering teeth bomb, which is a leaper that detonates instead of biting.
+pub const TEETH_BOMB: u16 = 378;
+pub const TEETH_FUSE: f32 = 10.0;
+pub const TEETH_TRIGGER: f32 = 64.0;
+pub const TEETH_BLAST_SIZE: f32 = 160.0;
+/// The herpling, whose numbers differ from the derpling's throughout.
+pub const DERPLING: u16 = 177;
+
+// --- Rollers: tortoises, shellies and the solar sroller ----------------------------------------
+
+/// Style 39: the charge meter, which fills faster the further away and the clearer the shot.
+pub const ROLLER_READY: f32 = 400.0;
+pub const ROLLER_SEEN_BONUS: f32 = 4.0;
+pub const ROLLER_FAR_BONUS: f32 = 10.0;
+pub const SHELLY_SEEN_BONUS: f32 = 2.0;
+pub const SHELLY_FAR_BONUS: f32 = 4.0;
+pub const ROLLER_SEEN_RANGE: f32 = 200.0;
+pub const ROLLER_FAR_RANGE: f32 = 600.0;
+/// Getting wet makes one charge immediately: it will not swim.
+pub const ROLLER_WET_READY: f32 = 1000.0;
+/// Patrol speeds — slower while you are close, quicker once you are not.
+pub const ROLLER_WALK_NEAR: f32 = 1.0;
+pub const ROLLER_WALK_FAR: f32 = 1.5;
+pub const ROLLER_WALK_ACCEL: f32 = 0.07;
+pub const ROLLER_NEAR_RANGE: f32 = 400.0;
+pub const SHELLY_WALK: f32 = 0.5;
+/// Winding up, then rolling, then slowing, then standing back up.
+pub const ROLLER_WINDUP: f32 = 30.0;
+pub const ROLLER_ROLL_TICKS: f32 = 90.0;
+pub const ROLLER_STANDUP: f32 = 30.0;
+/// A rolling tortoise hits twice as hard and takes half as much.
+pub const ROLLER_ROLL_DAMAGE: f32 = 2.0;
+pub const SHELLY_ROLL_DAMAGE: f32 = 1.5;
+pub const ROLLER_ROLL_DEFENSE: i32 = 2;
+/// How fast it rolls, and how much slower when it cannot see where you are.
+pub const ROLLER_ROLL_SPEED: f32 = 10.0;
+pub const ROLLER_BLIND_SPEED: f32 = 6.0;
+pub const SHELLY_ROLL_SCALE: f32 = 0.75;
+/// A roll aims slightly above you, by a fifth of the horizontal gap.
+pub const ROLLER_LEAD: f32 = 0.2;
+/// And climbs as it goes, which is what makes one come up a slope at you.
+pub const ROLLER_CLIMB: f32 = 0.22;
+pub const ROLLER_SPIN: f32 = 0.3;
+pub const ROLLER_SPIN_DECAY: f32 = 0.01;
+/// The solar sroller, which bounces several times instead of rolling once.
+pub const SOLAR_SROLLER: u16 = 417;
+pub const SROLLER_SPEED: f32 = 16.0;
+pub const SROLLER_BLIND_SPEED: f32 = 10.0;
+pub const SROLLER_DAMAGE: f32 = 1.8;
+pub const SROLLER_BOUNCE_LIMIT: f32 = 1200.0;
+/// Curled up it is shorter, and it stands back up to its full height afterwards.
+pub const SROLLER_CURLED_HEIGHT: f32 = 32.0;
+pub const SROLLER_STANDING_HEIGHT: f32 = 52.0;
+/// The two shellies, which are slower and gentler than the tortoises throughout.
+pub const SHELLY_FIRST: u16 = 496;
+pub const SHELLY_LAST: u16 = 497;
+
+// --- The sand: sharks that swim through it, and the elemental that raises it -------------------
+
+/// Style 103: a sand shark only swims where there is sand — or water — to swim in.
+pub const SHARK_SWIM_SPEED: f32 = 6.0;
+pub const SHARK_SWIM_ACCEL: f32 = 0.1;
+pub const SHARK_BOB: f32 = 0.06;
+pub const SHARK_BOB_ACCEL: f32 = 0.01;
+/// Out of the sand it walks, badly, and falls.
+pub const SHARK_BEACHED_SPEED: f32 = 1.0;
+pub const SHARK_GRAVITY: f32 = 0.3;
+pub const SHARK_FALL_CAP: f32 = 10.0;
+/// The lunge: it breaks the surface at this speed when it has a clear run at you.
+pub const SHARK_LUNGE_SPEED: f32 = 12.0;
+pub const SHARK_LUNGE_RANGE: f32 = 400.0;
+pub const SHARK_LUNGE_ARC: f32 = -80.0;
+pub const SHARK_LUNGE_COOLDOWN: f32 = -30.0;
+pub const SHARK_LUNGE_READY: f32 = 30.0;
+/// Homing while submerged is slower vertically than horizontally.
+pub const SHARK_HOME_ACCEL: f32 = 0.15;
+pub const SHARK_HOME_X: f32 = 5.0;
+pub const SHARK_HOME_Y: f32 = 3.0;
+/// It will only commit to a lunge at a player who is not already falling onto it.
+pub const SHARK_MIN_RANGE: f32 = 150.0;
+
+/// Style 102: how a sand elemental drifts, and how it raises sandnadoes.
+pub const ELEMENTAL: u16 = 541;
+pub const ELEMENTAL_GRAVITY: f32 = 0.1;
+pub const ELEMENTAL_FALL_CAP: f32 = 2.0;
+pub const ELEMENTAL_RISE: f32 = -0.1;
+pub const ELEMENTAL_RISE_CAP: f32 = -4.0;
+pub const ELEMENTAL_SPEED: f32 = 2.0;
+pub const ELEMENTAL_ACCEL: f32 = 0.1;
+pub const ELEMENTAL_CLIMB_SPEED: f32 = 1.0;
+pub const ELEMENTAL_CLIMB_ACCEL: f32 = 0.04;
+/// A wounded one moves faster: full health adds nothing, an almost-dead one adds all of this.
+pub const ELEMENTAL_WOUNDED_SPEED: f32 = 2.0;
+pub const ELEMENTAL_WOUNDED_ACCEL: f32 = 0.02;
+/// Below half it cannot be knocked back at all.
+pub const ELEMENTAL_STUBBORN_AT: f32 = 0.5;
+/// The cast: it holds still from the moment it starts until a hundred and thirty-five ticks later,
+/// raising the sandnadoes on tick fifty-four.
+pub const ELEMENTAL_CAST_TICKS: f32 = 135.0;
+pub const ELEMENTAL_CAST_AT: f32 = 54.0;
+pub const ELEMENTAL_CAST_REST: f32 = -300.0;
+pub const ELEMENTAL_MISS_REST: f32 = -200.0;
+pub const ELEMENTAL_CAST_RANGE: f32 = 900.0;
+pub const ELEMENTAL_DRAG: f32 = 0.96;
+pub const SANDNADO: u16 = 658;
+pub const SANDNADOES: usize = 3;
+/// They are raised within this many tiles of where the player is heading, and no two within ten.
+pub const SANDNADO_SPREAD: i32 = 30;
+pub const SANDNADO_APART: i32 = 10;
+/// The cast leads the player by a second of their own movement.
+pub const SANDNADO_LEAD: f32 = 30.0;
+
+/// How long an NPC has to make no progress before it gives up and turns round. Used by the
+/// drifting hunters, which have no ground contact to tell them they are against a wall.
+pub const STUCK_TURN_TICKS: f32 = 60.0;
+pub const STUCK_TURN_REST: f32 = -180.0;
+pub const STUCK_TOLERANCE: f32 = 16.0;
+
+/// The sand sharks and their variants, which pass through sand rather than colliding with it.
+pub const SANDSHARK_FIRST: u16 = 542;
+pub const SANDSHARK_LAST: u16 = 545;
+
+/// Whether an NPC of this type moves through a tile as though it were not there.
+///
+/// Almost every NPC either collides with all solid tiles or with none, and the two flags on
+/// `NpcStats` cover that. The sand sharks are the exception the game itself carves out: they use a
+/// collision routine that ignores sand, hardened sand, sandstone and desert fossil, which is what
+/// lets one swim through a dune and still be stopped by the stone underneath it.
+pub fn phases_through(npc_type: u16, block: u16) -> bool {
+    if !(SANDSHARK_FIRST..=SANDSHARK_LAST).contains(&npc_type) {
+        return false;
+    }
+    // `TileID.Sets.ForAdvancedCollision.ForSandshark`: the three sand families plus desert fossil
+    // and its hardened form.
+    crate::tile_sets::sandy(block) || matches!(block, 404 | 407)
+}

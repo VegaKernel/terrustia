@@ -1,0 +1,605 @@
+//! A headless Terraria client.
+//!
+//! It speaks the same protocol a real client does — handshake, world streaming, movement, chat,
+//! tile edits — without any rendering. That makes it useful for three things: driving integration
+//! tests against a server, probing a real `TerrariaServer` to compare behaviour, and scripting a
+//! bot.
+//!
+//! Copyright (C) 2026 Brooklyn Halmstad.
+//! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
+
+pub mod codec;
+pub mod error;
+pub mod world;
+
+use std::{net::SocketAddr, time::Duration};
+
+use bytes::BytesMut;
+use terrustia_proto::{
+    ItemStack, NetworkText, PacketWriter, id,
+    items::{ItemOwner, NEW_ITEM_INDEX, SyncItem, decode_item_despawn},
+    net_module::{self, MODULE_TEXT},
+    npc::{DamageNpc, SyncNpc},
+    objects::DoorToggle,
+    packets::{self, PlayerSpawn, TileManipulation},
+    reader::PacketReader,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    time::timeout,
+};
+use tracing::debug;
+
+pub use codec::Frame;
+pub use error::{ClientError, Result};
+pub use world::ClientWorld;
+
+/// How long to wait for any single expected packet.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Something the server told us.
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// A chat line, from a player or from the server itself.
+    Chat { author: u8, text: String },
+    /// A tile section arrived and has been folded into the world view.
+    SectionLoaded { section_x: i32, section_y: i32 },
+    /// Another player appeared or vanished.
+    PlayerActive { slot: u8, active: bool },
+    /// Another player moved.
+    PlayerMoved { slot: u8, x: f32, y: f32 },
+    /// A single-tile edit.
+    TileChanged(TileManipulation),
+    /// An NPC appeared, moved, or died (life 0).
+    NpcSynced(SyncNpc),
+    /// An item entity appeared or moved.
+    ItemSynced(SyncItem),
+    /// An item was reserved for a player, who may now pick it up.
+    ItemReserved(ItemOwner),
+    /// An item is gone.
+    ItemDespawned(i16),
+    /// Something is in flight.
+    ProjectileSynced(terrustia_proto::projectile::SyncProjectile),
+    /// ...and is not any more.
+    ProjectileKilled(terrustia_proto::projectile::KillProjectile),
+    /// A player took a hit.
+    PlayerHurt(terrustia_proto::hurt::PlayerHurt),
+    /// A player died.
+    PlayerDied(terrustia_proto::hurt::PlayerDeath),
+    /// The handshake finished.
+    FinishedConnecting,
+    /// Anything not otherwise interpreted.
+    Other(Frame),
+}
+
+/// A connected client.
+pub struct Client {
+    stream: TcpStream,
+    buf: BytesMut,
+    slot: u8,
+    name: String,
+    world: ClientWorld,
+    position: (f32, f32),
+    timeout: Duration,
+}
+
+impl Client {
+    /// Connect and run the full handshake, returning once the world is ready to walk around in.
+    pub async fn join(addr: SocketAddr, name: &str) -> Result<Self> {
+        let mut client = Self::connect(addr, name).await?;
+        client.handshake().await?;
+        Ok(client)
+    }
+
+    /// Connect without starting the handshake.
+    pub async fn connect(addr: SocketAddr, name: &str) -> Result<Self> {
+        let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        Ok(Self {
+            stream,
+            buf: BytesMut::with_capacity(64 * 1024),
+            slot: 0,
+            name: name.to_string(),
+            world: ClientWorld::default(),
+            position: (0.0, 0.0),
+            timeout: DEFAULT_TIMEOUT,
+        })
+    }
+
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    pub fn slot(&self) -> u8 {
+        self.slot
+    }
+
+    pub fn world(&self) -> &ClientWorld {
+        &self.world
+    }
+
+    pub fn position(&self) -> (f32, f32) {
+        self.position
+    }
+
+    // ------------------------------------------------------------------ handshake
+
+    /// Drive the connection sequence a real client performs.
+    pub async fn handshake(&mut self) -> Result<()> {
+        self.send(&{
+            let mut w = PacketWriter::new(id::HELLO);
+            w.string(id::VERSION_STRING);
+            w.finish()?
+        })
+        .await?;
+
+        // The server answers with a slot, or refuses.
+        let frame = self
+            .expect_one_of(&[id::PLAYER_INFO, id::KICK], "a player slot")
+            .await?;
+        if frame.id == id::KICK {
+            return Err(ClientError::Kicked {
+                reason: kick_reason(&frame.payload),
+            });
+        }
+        self.slot = *frame.payload.first().unwrap_or(&0);
+
+        self.send(&self.appearance_packet()?).await?;
+        self.send(
+            &packets::PlayerHealth {
+                player: self.slot,
+                life: 100,
+                life_max: 100,
+            }
+            .encode()?,
+        )
+        .await?;
+        self.send(
+            &packets::PlayerMana {
+                player: self.slot,
+                mana: 20,
+                mana_max: 20,
+            }
+            .encode()?,
+        )
+        .await?;
+        self.send(&{
+            let mut w = PacketWriter::new(id::CLIENT_UUID);
+            w.string("terrustia-client");
+            w.finish()?
+        })
+        .await?;
+        self.send(&packets::empty(id::REQUEST_WORLD_DATA)?).await?;
+
+        // World data, then ask for the tiles around spawn.
+        let frame = self.expect(id::WORLD_DATA, "world data").await?;
+        self.absorb_world_data(&frame.payload)?;
+
+        self.send(&{
+            let mut w = PacketWriter::new(id::SPAWN_TILE_DATA);
+            w.i32(-1).i32(-1).u8(0);
+            w.finish()?
+        })
+        .await?;
+
+        // Sections stream in until the server says it is done.
+        loop {
+            let frame = self.read_frame().await?;
+            let done = frame.id == id::INITIAL_SPAWN;
+            self.interpret(frame)?;
+            if done {
+                break;
+            }
+        }
+
+        // Spawn in, then wait to be told the connection is complete.
+        let spawn = PlayerSpawn {
+            player: self.slot,
+            spawn_x: -1,
+            spawn_y: -1,
+            respawn_timer: 0,
+            deaths_pve: 0,
+            deaths_pvp: 0,
+            team: 0,
+            context: PlayerSpawn::CONTEXT_SPAWNING_INTO_WORLD,
+        };
+        self.send(&spawn.encode()?).await?;
+
+        loop {
+            let frame = self.read_frame().await?;
+            let done = frame.id == id::FINISHED_CONNECTING_TO_SERVER;
+            self.interpret(frame)?;
+            if done {
+                break;
+            }
+        }
+
+        self.position = (
+            f32::from(self.world.spawn.0) * 16.0,
+            f32::from(self.world.spawn.1) * 16.0,
+        );
+        Ok(())
+    }
+
+    /// A complete packet 4, in the field order the 1.4.5.7 client uses.
+    fn appearance_packet(&self) -> Result<Vec<u8>> {
+        let mut w = PacketWriter::new(id::SYNC_PLAYER);
+        w.u8(self.slot)
+            .u8(0) // skin variant
+            .u8(1) // voice variant
+            .f32(0.0) // voice pitch offset
+            .u8(0) // hair
+            .string(&self.name)
+            .u8(0) // hair dye
+            .u16(0) // accessory visibility
+            .u8(0) // hidden misc slots
+            .rgb([215, 90, 55])
+            .rgb([255, 125, 90])
+            .rgb([105, 90, 75])
+            .rgb([175, 165, 140])
+            .rgb([160, 180, 215])
+            .rgb([255, 230, 175])
+            .rgb([160, 105, 60])
+            .u8(0) // difficulty and extra accessory
+            .u8(0) // torch flags
+            .u8(0); // consumable flags
+        Ok(w.finish()?)
+    }
+
+    fn absorb_world_data(&mut self, payload: &[u8]) -> Result<()> {
+        let mut r = PacketReader::new(payload);
+        r.i32()?; // time
+        r.u8()?; // day and moon flags
+        r.u8()?; // moon phase
+        self.world.width = i32::from(r.i16()?);
+        self.world.height = i32::from(r.i16()?);
+        self.world.spawn = (r.i16()?, r.i16()?);
+        r.i16()?; // world surface
+        r.i16()?; // rock layer
+        r.i32()?; // world id
+        self.world.name = r.string()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ actions
+
+    /// Report a new position, as a real client does every tick.
+    pub async fn move_to(&mut self, x: f32, y: f32) -> Result<()> {
+        self.position = (x, y);
+        let mut w = PacketWriter::new(id::PLAYER_CONTROLS);
+        w.u8(self.slot)
+            .u8(0x40) // facing right
+            .u8(0) // no velocity block follows
+            .u8(0)
+            .u8(0)
+            .u8(0) // selected item
+            .vec2(x, y);
+        self.send(&w.finish()?).await
+    }
+
+    /// Walk to a tile position, pulling in any sections needed along the way.
+    ///
+    /// This is what a real client does as it moves: the server no longer pushes sections, so a
+    /// client that never asks simply sees empty sky.
+    pub async fn walk_to_tile(&mut self, tile_x: i32, tile_y: i32) -> Result<()> {
+        self.move_to(tile_x as f32 * 16.0, tile_y as f32 * 16.0)
+            .await?;
+        let (sx, sy) = ClientWorld::section_of(tile_x, tile_y);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let (nx, ny) = (sx + dx, sy + dy);
+                if nx >= 0 && ny >= 0 && !self.world.has_section(nx, ny) {
+                    self.request_section(nx as u16, ny as u16).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn request_section(&mut self, section_x: u16, section_y: u16) -> Result<()> {
+        let mut w = PacketWriter::new(id::REQUEST_SECTION);
+        w.u16(section_x).u16(section_y);
+        self.send(&w.finish()?).await
+    }
+
+    /// Come back to life at the world spawn.
+    ///
+    /// The server only knows you are back when you tell it, and until you do, every routine that
+    /// looks for a living player will pass you over.
+    pub async fn respawn(&mut self) -> Result<()> {
+        let (x, y) = self.world().spawn;
+        let frame = terrustia_proto::packets::PlayerSpawn {
+            player: self.slot(),
+            spawn_x: x,
+            spawn_y: y,
+            respawn_timer: 0,
+            deaths_pve: 0,
+            deaths_pvp: 0,
+            team: 0,
+            context: 0,
+        }
+        .encode()?;
+        self.send(&frame).await
+    }
+
+    pub async fn say(&mut self, text: &str) -> Result<()> {
+        let mut w = PacketWriter::new(id::NET_MODULES);
+        w.u16(MODULE_TEXT).string("Say").string(text);
+        self.send(&w.finish()?).await
+    }
+
+    pub async fn break_tile(&mut self, x: i16, y: i16) -> Result<()> {
+        self.tile_action(0, x, y, 0, 0).await
+    }
+
+    pub async fn place_tile(&mut self, x: i16, y: i16, block: u16) -> Result<()> {
+        self.tile_action(1, x, y, block as i16, 0).await
+    }
+
+    pub async fn break_wall(&mut self, x: i16, y: i16) -> Result<()> {
+        self.tile_action(2, x, y, 0, 0).await
+    }
+
+    pub async fn place_wall(&mut self, x: i16, y: i16, wall: u16) -> Result<()> {
+        self.tile_action(3, x, y, wall as i16, 0).await
+    }
+
+    async fn tile_action(&mut self, action: u8, x: i16, y: i16, arg: i16, style: u8) -> Result<()> {
+        let edit = TileManipulation {
+            action,
+            x,
+            y,
+            arg,
+            style,
+        };
+        self.send(&edit.encode()?).await
+    }
+
+    /// Report hitting an NPC.
+    pub async fn hit_npc(
+        &mut self,
+        index: u8,
+        generation: u8,
+        damage: i16,
+        knockback: f32,
+        direction: i8,
+    ) -> Result<()> {
+        let hit = DamageNpc {
+            index,
+            generation,
+            damage,
+            knockback,
+            direction,
+            crit: false,
+        };
+        self.send(&hit.encode()?).await
+    }
+
+    /// Report picking an item up. Only works for an item the server reserved for us.
+    pub async fn pick_up(&mut self, index: i16) -> Result<()> {
+        self.send(&terrustia_proto::items::item_despawn(index)?)
+            .await
+    }
+
+    /// Throw an item into the world, asking the server for a slot.
+    pub async fn drop_item(&mut self, item: ItemStack, position: (f32, f32)) -> Result<()> {
+        let sync = SyncItem::dropped(NEW_ITEM_INDEX, position, item);
+        self.send(&sync.encode()?).await
+    }
+
+    pub async fn open_chest(&mut self, x: i16, y: i16) -> Result<()> {
+        let mut w = PacketWriter::new(id::REQUEST_CHEST_OPEN);
+        w.i16(x).i16(y);
+        self.send(&w.finish()?).await
+    }
+
+    pub async fn read_sign(&mut self, x: i16, y: i16) -> Result<()> {
+        let mut w = PacketWriter::new(id::OPEN_SIGN_REQUEST);
+        w.i16(x).i16(y);
+        self.send(&w.finish()?).await
+    }
+
+    pub async fn toggle_door(&mut self, action: u8, x: i16, y: i16, direction: u8) -> Result<()> {
+        let door = DoorToggle {
+            action,
+            x,
+            y,
+            direction,
+        };
+        self.send(&door.encode()?).await
+    }
+
+    /// Send an already-encoded frame, for anything this API does not cover.
+    pub async fn send(&mut self, frame: &[u8]) -> Result<()> {
+        self.stream.write_all(frame).await?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------ receiving
+
+    /// Wait for the next event, interpreting the packet and updating the world view.
+    pub async fn next_event(&mut self) -> Result<Event> {
+        let frame = self.read_frame().await?;
+        self.interpret(frame)
+    }
+
+    /// Read events until one matches, or the timeout expires.
+    pub async fn wait_for<F>(&mut self, what: &str, mut matches: F) -> Result<Event>
+    where
+        F: FnMut(&Event) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ClientError::Timeout {
+                    expected: what.to_string(),
+                    seconds: self.timeout.as_secs(),
+                });
+            }
+            let event = self.next_event().await?;
+            if matches(&event) {
+                return Ok(event);
+            }
+        }
+    }
+
+    /// Turn a frame into an event, folding tile data into the world view on the way.
+    fn interpret(&mut self, frame: Frame) -> Result<Event> {
+        match frame.id {
+            id::TILE_SECTION => {
+                let bounds = self.world.apply_section(&frame.payload)?;
+                let (sx, sy) = ClientWorld::section_of(bounds.x, bounds.y);
+                Ok(Event::SectionLoaded {
+                    section_x: sx,
+                    section_y: sy,
+                })
+            }
+            id::AREA_TILE_CHANGE => {
+                let square = terrustia_proto::square::TileSquare::decode(&frame.payload)?;
+                for dx in 0..usize::from(square.width) {
+                    for dy in 0..usize::from(square.height) {
+                        if let Some(tile) = square.tile(dx, dy) {
+                            self.world.set_tile(
+                                i32::from(square.x) + dx as i32,
+                                i32::from(square.y) + dy as i32,
+                                tile,
+                            );
+                        }
+                    }
+                }
+                Ok(Event::Other(frame))
+            }
+            id::TILE_MANIPULATION => {
+                let edit = TileManipulation::decode(&frame.payload)?;
+                self.apply_edit(&edit);
+                Ok(Event::TileChanged(edit))
+            }
+            id::PLAYER_ACTIVE => {
+                let mut r = PacketReader::new(&frame.payload);
+                Ok(Event::PlayerActive {
+                    slot: r.u8()?,
+                    active: r.bool()?,
+                })
+            }
+            id::PLAYER_CONTROLS => {
+                let controls = packets::PlayerControls::decode(&frame.payload)?;
+                Ok(Event::PlayerMoved {
+                    slot: controls.player,
+                    x: controls.position.0,
+                    y: controls.position.1,
+                })
+            }
+            id::NET_MODULES => {
+                // A server-to-client chat line is `[module][author][text][colour]`, which is a
+                // different shape from the `[module][command][text]` a client sends.
+                let mut r = PacketReader::new(&frame.payload);
+                if r.u16()? == net_module::MODULE_TEXT {
+                    let author = r.u8()?;
+                    let text = NetworkText::read(&mut r)?;
+                    return Ok(Event::Chat {
+                        author,
+                        text: text.text,
+                    });
+                }
+                Ok(Event::Other(frame))
+            }
+            id::SYNC_ITEM | id::SPAWN_INSTANCED_ITEM => {
+                Ok(Event::ItemSynced(SyncItem::decode(&frame.payload)?))
+            }
+            id::SYNC_N_P_C => Ok(Event::NpcSynced(SyncNpc::decode(&frame.payload)?)),
+            id::SYNC_PROJECTILE => Ok(Event::ProjectileSynced(
+                terrustia_proto::projectile::SyncProjectile::decode(&frame.payload)?,
+            )),
+            id::KILL_PROJECTILE => Ok(Event::ProjectileKilled(
+                terrustia_proto::projectile::KillProjectile::decode(&frame.payload)?,
+            )),
+            id::PLAYER_HURT_V2 => Ok(Event::PlayerHurt(
+                terrustia_proto::hurt::PlayerHurt::decode(&frame.payload)?,
+            )),
+            id::PLAYER_DEATH_V2 => Ok(Event::PlayerDied(
+                terrustia_proto::hurt::PlayerDeath::decode(&frame.payload)?,
+            )),
+            id::ITEM_OWNER => Ok(Event::ItemReserved(ItemOwner::decode(&frame.payload)?)),
+            id::SYNC_ITEM_DESPAWN => Ok(Event::ItemDespawned(decode_item_despawn(&frame.payload)?)),
+            id::FINISHED_CONNECTING_TO_SERVER => Ok(Event::FinishedConnecting),
+            id::KICK => Err(ClientError::Kicked {
+                reason: kick_reason(&frame.payload),
+            }),
+            _ => Ok(Event::Other(frame)),
+        }
+    }
+
+    /// Mirror a single-tile edit into the local world view.
+    fn apply_edit(&mut self, edit: &TileManipulation) {
+        let (x, y) = (i32::from(edit.x), i32::from(edit.y));
+        let Some(mut tile) = self.world.tile(x, y) else {
+            return;
+        };
+        match edit.action {
+            0 | 4 if edit.destroyed() => {
+                tile.flags.set(terrustia_proto::TileFlags::ACTIVE, false);
+                tile.block = 0;
+            }
+            1 => {
+                tile.block = edit.arg.max(0) as u16;
+                tile.flags.set(terrustia_proto::TileFlags::ACTIVE, true);
+            }
+            2 if edit.destroyed() => tile.wall = 0,
+            3 => tile.wall = edit.arg.max(0) as u16,
+            _ => return,
+        }
+        self.world.set_tile(x, y, tile);
+    }
+
+    async fn expect(&mut self, id: u8, what: &str) -> Result<Frame> {
+        self.expect_one_of(&[id], what).await
+    }
+
+    /// Read until one of `ids` arrives, folding anything else in on the way.
+    async fn expect_one_of(&mut self, ids: &[u8], what: &str) -> Result<Frame> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ClientError::Timeout {
+                    expected: what.to_string(),
+                    seconds: self.timeout.as_secs(),
+                });
+            }
+            let frame = self.read_frame().await?;
+            if ids.contains(&frame.id) {
+                return Ok(frame);
+            }
+            debug!(
+                id = frame.id,
+                name = id::name(frame.id),
+                "skipping while waiting for {what}"
+            );
+        }
+    }
+
+    /// Read one whole frame, waiting for as much of the socket as it takes.
+    async fn read_frame(&mut self) -> Result<Frame> {
+        loop {
+            if let Some(frame) = codec::decode(&mut self.buf)? {
+                return Ok(frame);
+            }
+            let read = timeout(self.timeout, self.stream.read_buf(&mut self.buf))
+                .await
+                .map_err(|_| ClientError::Timeout {
+                    expected: "a packet".into(),
+                    seconds: self.timeout.as_secs(),
+                })??;
+            if read == 0 {
+                return Err(ClientError::Closed);
+            }
+        }
+    }
+}
+
+fn kick_reason(payload: &[u8]) -> String {
+    let mut r = PacketReader::new(payload);
+    NetworkText::read(&mut r)
+        .map(|t| t.text)
+        .unwrap_or_else(|_| "no reason given".into())
+}
