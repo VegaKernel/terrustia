@@ -3811,6 +3811,8 @@ pub const DD2_KOBOLD_FLYER_T3: u16 = 575;
 pub const DD2_OGRE_T2: u16 = 576;
 pub const DD2_OGRE_T3: u16 = 577;
 pub const DD2_LIGHTNING_BUG_T3: u16 = 578;
+/// Not part of the event at all — it shares the troops' routine, and swims.
+pub const GOBLIN_SHARK: u16 = 620;
 pub const FAIRY_CRITTER_PINK: u16 = 583;
 pub const FAIRY_CRITTER_GREEN: u16 = 584;
 pub const FAIRY_CRITTER_BLUE: u16 = 585;
@@ -4191,3 +4193,361 @@ pub const BETSY_SCREAM_CLOSE: f32 = 350.0;
 pub const BETSY_SCREAM_TICKS: f32 = 90.0;
 pub const BETSY_SCREAM_AT: [f32; 3] = [20.0, 45.0, 70.0];
 pub const BETSY_LEAP_AT: f32 = 20.0;
+
+/// What style 107 — the Old One's Army's ground troops — needs to know about a type.
+///
+/// One routine drives twenty creatures, from a goblin that runs at you to an ogre that has three
+/// separate attacks. Everything that differs between them is here; the routine itself holds only
+/// the machinery they share.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Walker {
+    /// Whether it chases at all. A goblin shark by day does not.
+    pub chases: bool,
+    /// Whether it wanders off when there is nobody to chase.
+    pub despawns: bool,
+    /// Whether it fades in out of a lane portal, and can walk through walls to reach the arena.
+    pub from_portal: bool,
+    /// Whether it can shove itself past terrain it has been stuck against.
+    pub teleports_when_stuck: bool,
+    /// Whether it swims when it is in water.
+    pub swims: bool,
+
+    /// Whether it has a close attack on the `ai[0]` timer.
+    pub melee: bool,
+    /// How close it must be to start one, how long it takes, and how long it waits afterwards.
+    pub melee_range: f32,
+    pub melee_ticks: i32,
+    pub melee_cooldown: i32,
+    /// How hard it brakes while swinging.
+    pub melee_brake: f32,
+    /// Whether the close attack also throws something.
+    pub melee_throws: bool,
+    /// Whether the close attack leaps: when in the swing, how far down it must be, how hard.
+    pub leaps: bool,
+    pub leap_at: i32,
+    pub leap_floor: i32,
+    pub leap_speed: f32,
+
+    /// Whether it has a ranged attack on the `ai[1]` timer.
+    pub ranged: bool,
+    /// How long the throw takes and at which tick of it the thing actually leaves.
+    pub ranged_ticks: i32,
+    pub ranged_at: i32,
+    /// How close it must be to start one.
+    pub ranged_range: f32,
+    /// How long it stands still after being hit before it will throw again.
+    pub hurt_delay: f32,
+    /// How long it waits between throws, beyond the throw itself.
+    pub shot_cooldown: f32,
+    /// Whether it turns to face what it just threw.
+    pub turn_to_shot: bool,
+    /// Whether it keeps re-aiming during the throw, and from when in the throw.
+    pub retarget_from: i32,
+
+    /// What it throws, how much it hurts, how fast it goes, and how many at once.
+    pub shot: u16,
+    pub shot_damage: i32,
+    pub shot_speed: f32,
+    pub shot_count: i32,
+    /// How much the throw arcs upward with distance, and how much it scatters.
+    pub shot_arc: f32,
+    pub shot_spread: f32,
+    /// How far along its own throw the projectile starts.
+    pub shot_lead: f32,
+    /// Where on the creature the throw comes from.
+    pub muzzle: (f32, f32),
+
+    /// Walking: top speed, how fast it gets there, and how hard it slows when it is over.
+    pub max_speed: f32,
+    pub accel: f32,
+    pub brake: f32,
+    /// How far in front of itself it looks for a step to climb, beyond half its own width.
+    pub step_reach: f32,
+    /// How long it must be stuck before it does something about it.
+    pub stuck_ticks: i32,
+    /// Whether it explodes rather than dying.
+    pub explodes: bool,
+    /// Whether it stands in an aura that hurts you and heals it.
+    pub aura: bool,
+    /// How long it takes to climb out of the ground before it can be touched.
+    pub rises_for: f32,
+}
+
+impl Walker {
+    /// The plain walker every type starts from.
+    pub const PLAIN: Self = Self {
+        chases: false,
+        despawns: false,
+        from_portal: true,
+        teleports_when_stuck: true,
+        swims: false,
+        melee: false,
+        melee_range: 40.0,
+        melee_ticks: 30,
+        melee_cooldown: 0,
+        melee_brake: 0.9,
+        melee_throws: false,
+        leaps: false,
+        leap_at: 32,
+        leap_floor: 15,
+        leap_speed: 9.0,
+        ranged: false,
+        ranged_ticks: 70,
+        ranged_at: 35,
+        ranged_range: 700.0,
+        hurt_delay: 30.0,
+        shot_cooldown: 0.0,
+        turn_to_shot: false,
+        retarget_from: i32::MAX,
+        shot: 81,
+        shot_damage: 1,
+        shot_speed: 11.0,
+        shot_count: 1,
+        shot_arc: 0.1,
+        shot_spread: 0.5,
+        shot_lead: 1.0,
+        muzzle: (0.0, 0.0),
+        max_speed: 1.0,
+        accel: 0.07,
+        brake: 0.8,
+        step_reach: 6.0,
+        stuck_ticks: 30,
+        explodes: false,
+        aura: false,
+        rises_for: 0.0,
+    };
+}
+
+/// The projectiles the army's troops throw.
+pub const OGRE_SPIT: u16 = 676;
+pub const OGRE_POUND: u16 = 683;
+pub const DRAKIN_FIREBALL: u16 = 671;
+pub const JAVELIN: u16 = 662;
+pub const JAVELIN_T3: u16 = 685;
+pub const GOBLIN_BOMB: u16 = 681;
+pub const GOBLIN_SHARK_SHOT: u16 = 811;
+/// How large a kobold's blast is, and how long the fuse burns before it goes.
+pub const KOBOLD_BLAST: f32 = 192.0;
+pub const KOBOLD_BLAST_DAMAGE: i32 = 80;
+/// The wither beast's aura: how far it reaches, how often it feeds, and how much it gives back.
+pub const WITHER_AURA: f32 = 400.0;
+pub const WITHER_FEEDS_EVERY: f32 = 60.0;
+pub const WITHER_HEALS: i32 = 20;
+
+/// The numbers for one of style 107's types.
+pub fn walker(npc_type: u16) -> Walker {
+    let base = Walker::PLAIN;
+    match npc_type {
+        DD2_GOBLIN_T1 | DD2_GOBLIN_T2 | DD2_GOBLIN_T3 => Walker {
+            chases: true,
+            melee: true,
+            accel: base.accel
+                + match npc_type {
+                    DD2_GOBLIN_T2 => 0.01,
+                    DD2_GOBLIN_T3 => 0.02,
+                    _ => 0.0,
+                },
+            max_speed: base.max_speed
+                + match npc_type {
+                    DD2_GOBLIN_T2 => 0.2,
+                    DD2_GOBLIN_T3 => 0.4,
+                    _ => 0.0,
+                },
+            ..base
+        },
+        DD2_GOBLIN_BOMBER_T1 | DD2_GOBLIN_BOMBER_T2 | DD2_GOBLIN_BOMBER_T3 => Walker {
+            chases: true,
+            ranged: true,
+            retarget_from: 18,
+            ranged_ticks: 42,
+            ranged_at: 18,
+            ranged_range: 280.0,
+            shot: GOBLIN_BOMB,
+            shot_speed: 6.0,
+            shot_arc: 0.4,
+            muzzle: (0.0, -14.0),
+            shot_damage: match npc_type {
+                DD2_GOBLIN_BOMBER_T3 => 35,
+                DD2_GOBLIN_BOMBER_T2 => 25,
+                _ => 15,
+            },
+            shot_spread: if npc_type == DD2_GOBLIN_BOMBER_T3 {
+                0.4
+            } else {
+                0.6
+            },
+            max_speed: if npc_type == DD2_GOBLIN_BOMBER_T3 {
+                1.12
+            } else {
+                0.88
+            },
+            ..base
+        },
+        DD2_JAVELINST_T1 | DD2_JAVELINST_T2 | DD2_JAVELINST_T3 => Walker {
+            chases: true,
+            ranged: true,
+            retarget_from: 82,
+            ranged_ticks: 90,
+            ranged_at: 82,
+            shot: if npc_type == DD2_JAVELINST_T3 {
+                JAVELIN_T3
+            } else {
+                JAVELIN
+            },
+            shot_arc: 0.0,
+            muzzle: (0.0, -14.0),
+            ranged_range: match npc_type {
+                DD2_JAVELINST_T1 => 500.0,
+                DD2_JAVELINST_T2 => 550.0,
+                _ => 600.0,
+            },
+            shot_speed: match npc_type {
+                DD2_JAVELINST_T1 => 11.5,
+                DD2_JAVELINST_T2 => 12.2,
+                _ => 13.0,
+            },
+            shot_damage: match npc_type {
+                DD2_JAVELINST_T1 => 10,
+                DD2_JAVELINST_T2 => 20,
+                _ => 30,
+            },
+            shot_spread: match npc_type {
+                DD2_JAVELINST_T1 => 0.6,
+                DD2_JAVELINST_T2 => 0.5,
+                _ => 0.4,
+            },
+            max_speed: match npc_type {
+                DD2_JAVELINST_T1 => 0.88,
+                DD2_JAVELINST_T2 => 0.94,
+                _ => 1.0,
+            },
+            ..base
+        },
+        DD2_DRAKIN_T2 | DD2_DRAKIN_T3 => Walker {
+            chases: true,
+            ranged: true,
+            retarget_from: 40,
+            ranged_ticks: 60,
+            ranged_at: 40,
+            ranged_range: 600.0,
+            shot: DRAKIN_FIREBALL,
+            shot_speed: 13.0,
+            shot_arc: 0.15,
+            shot_lead: 0.0,
+            muzzle: (22.0, 0.0),
+            shot_spread: if npc_type == DD2_DRAKIN_T2 { 2.5 } else { 1.5 },
+            shot_damage: if npc_type == DD2_DRAKIN_T3 { 45 } else { 25 },
+            max_speed: 0.77,
+            ..base
+        },
+        DD2_KOBOLD_WALKER_T2 | DD2_KOBOLD_WALKER_T3 => Walker {
+            chases: true,
+            melee: true,
+            melee_ticks: 40,
+            melee_range: 700.0,
+            max_speed: 0.88,
+            explodes: true,
+            ..base
+        },
+        DD2_WITHER_BEAST_T2 | DD2_WITHER_BEAST_T3 => Walker {
+            chases: true,
+            melee: true,
+            melee_ticks: 110,
+            melee_range: 600.0,
+            accel: 0.16,
+            brake: 0.7,
+            max_speed: 1.4,
+            aura: true,
+            ..base
+        },
+        DD2_SKELETON_T1 | DD2_SKELETON_T3 => Walker {
+            chases: true,
+            rises_for: 120.0,
+            ..base
+        },
+        DD2_OGRE_T2 | DD2_OGRE_T3 => Walker {
+            chases: true,
+            melee: true,
+            melee_range: 130.0,
+            melee_ticks: 44,
+            melee_cooldown: 60,
+            melee_brake: 0.7,
+            step_reach: base.step_reach - 32.0,
+            ..base
+        },
+        GOBLIN_SHARK => Walker {
+            chases: true,
+            despawns: true,
+            from_portal: false,
+            swims: true,
+            ranged: true,
+            turn_to_shot: true,
+            retarget_from: 40,
+            ranged_ticks: 60,
+            ranged_at: 40,
+            ranged_range: 600.0,
+            hurt_delay: 20.0,
+            shot_cooldown: 150.0,
+            shot: GOBLIN_SHARK_SHOT,
+            shot_speed: 13.0,
+            shot_damage: 30,
+            shot_arc: 0.15,
+            shot_spread: 2.5,
+            shot_lead: 0.0,
+            muzzle: (-4.0, -20.0),
+            max_speed: 8.0,
+            accel: base.accel * 3.0,
+            brake: 0.9,
+            ..base
+        },
+        _ => base,
+    }
+}
+
+/// The ogre's three attacks, chosen by range rather than cycled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OgreAttack {
+    /// Close: a swing of the club.
+    Swipe = 0,
+    /// Far: a lobbed spit.
+    Spit = 1,
+    /// Middle: a leap and a ground pound.
+    Pound = 2,
+}
+
+/// How the ogre's numbers change for each of its three attacks.
+pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
+    match attack {
+        OgreAttack::Swipe => Walker {
+            melee_ticks: 44,
+            ..walker
+        },
+        OgreAttack::Spit => Walker {
+            melee_throws: true,
+            melee_ticks: 90,
+            melee_range: 1000.0,
+            melee_cooldown: 240,
+            shot: OGRE_SPIT,
+            shot_damage: 30,
+            muzzle: (30.0, -70.0),
+            ..walker
+        },
+        OgreAttack::Pound => Walker {
+            melee_throws: true,
+            leaps: true,
+            melee_ticks: 90,
+            melee_range: 250.0,
+            shot: OGRE_POUND,
+            shot_damage: 40,
+            ranged_at: 36,
+            leap_at: 56,
+            leap_floor: 41,
+            leap_speed: 13.0,
+            muzzle: (-20.0, 0.0),
+            ..walker
+        },
+    }
+}
+
+/// How long the ogre waits before it will pound again.
+pub const OGRE_POUND_COOLDOWN: f32 = 300.0;

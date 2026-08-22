@@ -142,6 +142,8 @@ pub struct AiOutput {
     pub raising: bool,
     /// Set on the tick Betsy screams.
     pub screamed: bool,
+    /// How far a draining aura reaches, while one is out.
+    pub aura: Option<f32>,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -263,6 +265,7 @@ pub fn update_with(
         out.close_gates = effects.close_gates;
         out.raising = effects.raising;
         out.screamed = effects.screamed;
+        out.aura = effects.aura;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;
