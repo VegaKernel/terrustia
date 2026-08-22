@@ -196,6 +196,11 @@ pub struct GameServer {
     army: crate::game::army::ArmyState,
     /// The arena's two ends, surveyed once when the crystal goes down and kept until it is gone.
     army_arena: Option<((i32, i32), (i32, i32))>,
+    /// Which moon is up, how far through its waves it is, and how far into the current wave.
+    ///
+    /// A moon is not an invasion: there is nothing to see off, only twenty waves and one night to
+    /// get through as many of them as you can. Dawn ends it wherever you got to.
+    moon: crate::game::moons::MoonState,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -231,6 +236,7 @@ impl GameServer {
             invasion: None,
             army: crate::game::army::ArmyState::default(),
             army_arena: None,
+            moon: crate::game::moons::MoonState::default(),
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -347,7 +353,25 @@ impl GameServer {
         };
 
         self.ticks += 1;
+        let was_day = self.world.day_time;
         self.world.tick_time();
+        // Dawn puts the moons away and takes the blood moon with them, and rolls for an eclipse.
+        if self.world.day_time && !was_day {
+            self.stop_moon();
+            self.world.blood_moon = false;
+            self.roll_dawn_events();
+            self.broadcast_world_data();
+        }
+        // Dusk rolls for a blood moon, which needs somebody with more than a hundred and twenty
+        // life to be worth having.
+        if !self.world.day_time && was_day {
+            self.roll_dusk_events();
+        }
+        if !self.world.day_time && was_day && self.world.eclipse {
+            self.world.eclipse = false;
+            self.announce("The solar eclipse is over.");
+            self.broadcast_world_data();
+        }
 
         if let Some(every) = self.autosave_ticks
             && self.ticks.is_multiple_of(every)
@@ -1352,11 +1376,12 @@ impl GameServer {
         match what {
             // A pumpkin or frost moon, which only rise at night.
             -4 | -5 => {
-                if !self.world.day_time {
-                    let name = if what == -4 { "pumpkin" } else { "frost" };
-                    self.announce(&format!("The {name} moon is rising..."));
-                    info!(slot, event = name, "moon summoned");
-                }
+                let moon = if what == -4 {
+                    crate::game::moons::Moon::Pumpkin
+                } else {
+                    crate::game::moons::Moon::Frost
+                };
+                self.start_moon(moon, slot);
             }
             // A solar eclipse, which only happens by day.
             -6 => {
@@ -2312,8 +2337,7 @@ impl GameServer {
             let conditions = crate::game::ai::Conditions {
                 blood_moon: self.world.blood_moon,
                 day: self.world.day_time,
-                // No eclipse yet: it is a hardmode event, so nothing pre-hardmode reads it.
-                eclipse: false,
+                eclipse: self.world.eclipse,
                 // Weather is not modelled, so only nightfall sends residents indoors, and the
                 // things that need a wind blowing simply wither.
                 raining: false,
@@ -3148,6 +3172,7 @@ impl GameServer {
             self.note_invasion_kill(npc_type);
             self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
             self.note_army_kill(npc_type);
+            self.note_moon_kill(npc_type);
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
@@ -3310,8 +3335,6 @@ impl GameServer {
         None
     }
 
-    /// Send in the next invader, if it is time and there is room.
-    ///
     /// Packet 113: a player put an Eternia Crystal on its stand.
     ///
     /// This is the only way the Old One's Army begins, and it is refused more often than not: the
@@ -3378,6 +3401,77 @@ impl GameServer {
             "old one's army started"
         );
         Ok(())
+    }
+
+    /// The world's own rolls at first light: an eclipse, once a mechanical boss is down.
+    fn roll_dawn_events(&mut self) {
+        if self.world.progress.hard_mode
+            && self.world.progress.downed_mech_any
+            && !self.world.eclipse
+            && rand::Rng::random_range(&mut self.rng, 0..20) == 0
+        {
+            self.world.eclipse = true;
+            self.announce("A solar eclipse is happening!");
+            info!("solar eclipse");
+        }
+    }
+
+    /// ...and at nightfall: a blood moon, which will not rise on a new moon and will not rise for
+    /// a party of characters who have not found a life crystal between them.
+    fn roll_dusk_events(&mut self) {
+        if self.world.blood_moon || self.moon.running() || self.world.moon_phase == 4 {
+            return;
+        }
+        let worth_it = self
+            .players
+            .iter()
+            .flatten()
+            .any(|p| p.is_playing() && p.life_max > 120);
+        if worth_it && rand::Rng::random_range(&mut self.rng, 0..9) == 0 {
+            self.world.blood_moon = true;
+            self.announce("The blood moon is rising...");
+            info!("blood moon");
+            self.broadcast_world_data();
+        }
+    }
+
+    /// Raise a moon, if it is night and one is not already up.
+    ///
+    /// The two are exclusive and both cancel a blood moon: whichever went up last is the one you
+    /// are fighting.
+    fn start_moon(&mut self, moon: crate::game::moons::Moon, slot: u8) {
+        use crate::game::moons::Moon;
+        if self.world.day_time || self.moon.running() {
+            return;
+        }
+        self.world.blood_moon = false;
+        self.moon.start(moon);
+        self.announce(match moon {
+            Moon::Pumpkin => "The pumpkin moon is rising...",
+            Moon::Frost => "The frost moon is rising...",
+        });
+        self.broadcast_world_data();
+        info!(slot, ?moon, "moon started");
+    }
+
+    /// Put a moon away. Dawn does this, and so does raising the other one.
+    fn stop_moon(&mut self) {
+        let wave = self.moon.wave;
+        let Some(moon) = self.moon.stop() else {
+            return;
+        };
+        info!(?moon, wave, "moon over");
+        self.broadcast_world_data();
+    }
+
+    /// Count a kill against whatever moon is up.
+    ///
+    /// Kills are worth points rather than one each — a Pumpking is a third of a wave by itself and
+    /// a scarecrow is nothing — so what you choose to fight decides how far the night gets.
+    fn note_moon_kill(&mut self, npc_type: u16) {
+        if let Some(wave) = self.moon.note_kill(npc_type, self.world.game_mode) {
+            self.announce(&format!("Wave {wave}!"));
+        }
     }
 
     /// Which tier the world has earned. There is no choosing it: it is whatever the progression
@@ -3530,6 +3624,8 @@ impl GameServer {
         }
     }
 
+    /// Send in the next invader, if it is time and there is room.
+    ///
     /// Invaders arrive at the invasion's column rather than around a player, which is what makes
     /// one feel like something marching toward you instead of something appearing on top of you.
     fn spawn_invaders(&mut self, state: InvasionState) {
@@ -3650,10 +3746,36 @@ impl GameServer {
             return;
         }
 
+        // A moon or an eclipse takes the surface pool over entirely, so the census the tables
+        // need is built here once rather than per candidate tile.
+        let census: std::collections::HashMap<u16, usize> =
+            if self.moon.running() || self.world.eclipse {
+                let mut counts = std::collections::HashMap::new();
+                for (_, n) in self.npcs.iter() {
+                    *counts.entry(n.npc_type).or_insert(0) += 1;
+                }
+                counts
+            } else {
+                std::collections::HashMap::new()
+            };
+        let count = |ty: u16| census.get(&ty).copied().unwrap_or(0);
+        let progress = &self.world.progress;
+        let events = spawn::EventSpawns {
+            moon: self.moon.moon.map(|m| (m, self.moon.wave)),
+            eclipse: self.world.eclipse,
+            downed_plantera: progress.downed_plantera,
+            downed_all_mechs: progress.downed_mech1
+                && progress.downed_mech2
+                && progress.downed_mech3,
+            // Three of an event's heavies at once is as many as it will put out.
+            boss_cap: self.npcs.iter().filter(|(_, n)| n.stats.boss).count() >= 3,
+            census: &count,
+        };
         let spawned = spawn::try_spawn(
             &self.world,
             &self.npcs,
             &self.players,
+            &events,
             &mut self.rng,
             self.ticks,
         );

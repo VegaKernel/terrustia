@@ -3,6 +3,7 @@ pub mod army;
 pub mod clock;
 pub mod event;
 pub mod housing;
+pub mod moons;
 pub mod npc;
 pub mod npc_ai;
 pub mod player;

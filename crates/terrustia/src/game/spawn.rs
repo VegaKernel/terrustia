@@ -288,10 +288,35 @@ fn has_room(world: &World, x: i32, y: i32) -> bool {
 ///
 /// Returns the types and pixel positions to create; the caller owns the NPC table, so this stays a
 /// pure decision and is straightforward to test.
+/// What the events running right now do to the spawn pool.
+///
+/// A moon or an eclipse does not add to the ordinary pool — it replaces it on the surface, which
+/// is why standing outside during one is a different game and standing in a cave is not.
+pub struct EventSpawns<'a> {
+    /// Which moon is up, and which wave it is on.
+    pub moon: Option<(crate::game::moons::Moon, i32)>,
+    /// Whether a solar eclipse is happening.
+    pub eclipse: bool,
+    pub downed_plantera: bool,
+    pub downed_all_mechs: bool,
+    /// Whether the field already holds as many event bosses as it will take.
+    pub boss_cap: bool,
+    /// How many of a type are alive, for the tables that cap their heavies.
+    pub census: &'a dyn Fn(u16) -> usize,
+}
+
+impl EventSpawns<'_> {
+    /// Whether anything is running that overrides the surface pool.
+    fn running(&self) -> bool {
+        self.moon.is_some() || self.eclipse
+    }
+}
+
 pub fn try_spawn(
     world: &World,
     npcs: &NpcStore,
     players: &[Option<Player>],
+    events: &EventSpawns<'_>,
     rng: &mut SmallRng,
     _ticks: u64,
 ) -> Vec<(u16, (f32, f32))> {
@@ -343,12 +368,38 @@ pub fn try_spawn(
             }
 
             let depth = depth_at(world, y);
-            let biome = biome_at(world, x, y);
-            let choices = pool(depth, biome, world.day_time);
-            if choices.is_empty() {
-                continue;
-            }
-            let npc_type = choices[rng.random_range(0..choices.len())];
+            // An event owns the surface while it runs, and nothing below it.
+            let event_type = if events.running() && depth == Depth::Surface {
+                match (events.moon, events.eclipse) {
+                    (Some((moon, wave)), _) if !world.day_time => crate::game::moons::moon_spawn(
+                        moon,
+                        wave,
+                        events.census,
+                        events.boss_cap,
+                        rng,
+                    ),
+                    (_, true) if world.day_time => Some(crate::game::moons::eclipse_spawn(
+                        events.downed_plantera,
+                        events.downed_all_mechs,
+                        events.census,
+                        rng,
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let npc_type = match event_type {
+                Some(npc_type) => npc_type,
+                None => {
+                    let biome = biome_at(world, x, y);
+                    let choices = pool(depth, biome, world.day_time);
+                    if choices.is_empty() {
+                        continue;
+                    }
+                    choices[rng.random_range(0..choices.len())]
+                }
+            };
 
             // Position is the NPC's top-left, so it stands on the tile below.
             out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
@@ -361,6 +412,18 @@ pub fn try_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing running: what the ordinary world looks like to `try_spawn`.
+    fn quiet() -> EventSpawns<'static> {
+        EventSpawns {
+            moon: None,
+            eclipse: false,
+            downed_plantera: false,
+            downed_all_mechs: false,
+            boss_cap: false,
+            census: &|_| 0,
+        }
+    }
     use crate::world::worldgen;
     use rand::SeedableRng;
 
@@ -443,7 +506,7 @@ mod tests {
         let world = test_world();
         let npcs = NpcStore::new();
         let mut rng = SmallRng::seed_from_u64(1);
-        assert!(try_spawn(&world, &npcs, &[], &mut rng, 0).is_empty());
+        assert!(try_spawn(&world, &npcs, &[], &quiet(), &mut rng, 0).is_empty());
     }
 
     #[test]
@@ -464,7 +527,7 @@ mod tests {
         // Run many ticks so the one-in-600 roll fires repeatedly.
         let mut seen = 0;
         for _ in 0..20_000 {
-            for (npc_type, (px, py)) in try_spawn(&world, &npcs, &players, &mut rng, 0) {
+            for (npc_type, (px, py)) in try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0) {
                 seen += 1;
                 assert!(
                     terrustia_proto::npc_data::npc_stats(npc_type).is_some(),
@@ -523,7 +586,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut spawned = 0;
         for _ in 0..3600 {
-            spawned += try_spawn(&world, &npcs, &players, &mut rng, 0).len();
+            spawned += try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0).len();
         }
         assert!(
             spawned >= 3,
@@ -550,7 +613,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(3);
         for _ in 0..5_000 {
             assert!(
-                try_spawn(&world, &npcs, &players, &mut rng, 0).is_empty(),
+                try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0).is_empty(),
                 "spawned past the cap"
             );
         }
