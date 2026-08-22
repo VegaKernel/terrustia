@@ -3,8 +3,11 @@
 An async Terraria server written from scratch in Rust, targeting **Terraria 1.4.5.7**
 (protocol release **325**).
 
-A real 1.4.5.7 client connects, the world streams in, players walk around, edit tiles, and chat.
-It can generate a world or serve an existing `.wld` save.
+A real 1.4.5.7 client connects, the world streams in, players walk around, edit tiles, fight
+everything the game has, and chat. It can generate a world or serve an existing `.wld` save.
+
+Every one of the game's 691 NPC types runs a routine transcribed from the decompiled source rather
+than an approximation of it, and a test walks the whole roster to prove each one is reachable.
 
 ## Status
 
@@ -26,33 +29,44 @@ Implemented:
   for a nearby player, pickup and player-thrown items both sync
 - **Chests**: open, read and edit contents, with the same one-player-at-a-time rule vanilla uses
 - **Signs**: read and rewrite
-- **NPCs and enemies**: the complete pre-hardmode roster — **244 types, every one of them running a
-  routine transcribed from the game rather than an approximation of it**. They spawn by biome,
-  depth and time of day, chase, jump, fly, swim, burrow, perch, glide, dig and ambush; they take
-  damage, die, drop their coin value and their loot. Worms spawn as linked chains, and cutting an
-  Eater of Worlds in half leaves you fighting two of them.
-- **Bosses**: King Slime, the Eye of Cthulhu, the Eater of Worlds, the Brain of Cthulhu, Queen Bee,
-  Skeletron and its hands, the Wall of Flesh with its eyes and Hungry, Deerclops and the Dungeon
-  Guardian, each as its real phase machine
+- **NPCs and enemies**: the **whole roster — 691 types across all 128 AI styles, every one of them
+  running a routine transcribed from the game rather than an approximation of it**. They spawn by
+  biome, depth and time of day, chase, jump, fly, swim, burrow, perch, glide, dig and ambush; they
+  take damage, die, drop their coin value and their loot. Worms spawn as linked chains, and cutting
+  an Eater of Worlds in half leaves you fighting two of them.
+- **Bosses**: every one, as its real phase machine — King Slime, the Eye of Cthulhu, the Eater of
+  Worlds, the Brain of Cthulhu, Queen Bee, Skeletron, the Wall of Flesh, Deerclops, the Destroyer,
+  the Twins, Skeletron Prime, Plantera, Golem, Duke Fishron, Queen Slime, the Empress of Light, the
+  Lunatic Cultist, the four lunar pillars and the Moon Lord
+- **Events**: goblin, frost legion, pirate and Martian invasions; the Old One's Army across all
+  three tiers with its crystal, lane portals and wave tables; the pumpkin and frost moons with the
+  game's own point quotas; the solar eclipse; blood moons; and the Lunar Apocalypse
+- **Hardmode**: the Wall of Flesh cuts the two stripes through the world, altars seed the three ore
+  tiers, and the biomes creep — held off by sunflowers and halved for good once Plantera is down
+- **Weather**: wind and rain on the game's own simulation, and the sandstorms a strong wind raises
+  over a desert
+- **Liquids**: water, lava and honey fall and level, and react where they meet — obsidian, crispy
+  honey, honey blocks
 - **Town NPCs**: housing validation to the game's own rules, move-in, and the movement routine —
-  the leash around their house, going indoors at nightfall, opening doors and stopping at ledges
+  the leash around their house, going indoors at nightfall and in rain, opening doors and stopping
+  at ledges. Shops need nothing from the server: a client builds one from the world flags, and
+  those are sent in full
 - **Chat**: player chat plus `/help`, `/players`, `/time`, `/save`, `/where`, `/spawn`, `/npcs`,
   `/butcher`, `/house`
 - **Worlds**: procedural generation, a reader for `.wld` saves (format 279 and newer), and a writer
-  that saves losslessly, with autosave and a save on shutdown
+  that saves losslessly, with autosave and a save on shutdown. Progression flags, weather and the
+  lunar state survive a save
 - **Day/night clock**
 
 Not implemented:
 
-- **Hardmode.** The roster, spawn pools and boss routines stop at the Wall of Flesh.
-- **Conditional loot.** The flat "one in N" drop rules are here, including the chained ones. What is
-  missing is anything gated on a condition — a moon event, a boss already beaten, expert mode — and
-  the boss bags, which need the condition system behind them.
-- **Town NPC shops and dialogue.** They move in, take houses and walk about; they do not sell
-  anything. That needs an item model and the localisation data.
-- **Inventories.** The server never inspects what a player is carrying, so it cannot stop a client
-  from claiming to hold something.
-- **Liquid simulation**, weather, events and invasions.
+- **Player inventories.** The server does not inspect what a player is carrying, so it cannot stop
+  a client from claiming to hold something. Every server-side consequence of an item — a drop, a
+  purchase, a key — is handled; the carrying is not.
+- **Wiring.** Wires, actuators and switches are placed and relayed, so a circuit fires the same way
+  on every client, but the server does not run one itself.
+- **Player weapons.** Projectiles an NPC throws are flown by the server; a player's own are
+  relayed.
 - **Saving a generated world.** Saving requires a world that came from a file; see below.
 
 ## Running
@@ -175,8 +189,8 @@ Results at the time of writing, against Terraria 1.4.5.7:
   and serves correctly**, with the edits in place.
 - Pointing both servers at the same pristine `.wld` and capturing their spawn streams gives
   **15 of 15 sections byte-identical and zero differing tiles** out of 450,000.
-- The `bestiary` example spawns **all 201 pre-hardmode NPC types** on a running server over the
-  real protocol and confirms every one arrives and syncs.
+- The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol
+  and confirms every one arrives and syncs: 691 of 691, exercising 126 distinct AI styles.
 
 ## Licence
 
