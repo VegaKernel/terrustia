@@ -89,6 +89,8 @@ fn main() -> ExitCode {
                     hazards: &[],
                     avoid: &[],
                     target_taken: false,
+                    hooks: None,
+                    kin_moving: false,
                     census: &[],
                     parent: None,
                     parent_state: 0.0,
