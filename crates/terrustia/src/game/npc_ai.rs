@@ -288,7 +288,7 @@ pub enum Avoids {
 /// NPC table, so it is only built when something present actually reads it.
 pub fn avoidance(style: i32) -> Option<Avoids> {
     match style {
-        85 | 90 | 122 => Some(Avoids::OwnKind),
+        85 | 86 | 90 | 122 => Some(Avoids::OwnKind),
         64 => Some(Avoids::AnythingAlive),
         _ => None,
     }

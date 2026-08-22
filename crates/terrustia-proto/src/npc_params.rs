@@ -2626,3 +2626,95 @@ pub const SPAWN_POUNCE_GAIN: f32 = 1.01;
 pub const SPAWN_LEAVE_CLIMB: f32 = -0.2;
 pub const SPAWN_LEAVE_CAP: f32 = -8.0;
 pub const SPAWN_DESPAWN_RANGE: f32 = 3000.0;
+
+// --- Swoopers: the things that run past you and come back ---------------------------------------
+
+/// Style 86's numbers. The apparition is slower and ranges wider; the squidhead is faster and
+/// turns tighter.
+#[derive(Debug, Clone, Copy)]
+pub struct Swoop {
+    /// Horizontal acceleration and cap during the run.
+    pub run_accel: f32,
+    pub run_cap: f32,
+    /// How closely it tracks your height while running, and the band inside which it tracks
+    /// gently rather than hard.
+    pub track_band: f32,
+    pub track_smooth: f32,
+    /// How far past you it goes before turning.
+    pub overshoot: f32,
+    /// The vertical leg: acceleration, speed cap and the drag past it.
+    pub climb_accel: f32,
+    pub climb_cap: f32,
+    pub climb_drag: f32,
+    /// The return leg.
+    pub return_accel: f32,
+    pub return_pull: f32,
+    pub return_cap: f32,
+    pub return_drag: f32,
+}
+
+/// The shadowflame apparition.
+pub const APPARITION: u16 = 472;
+/// The ancient cultist's squidhead.
+pub const SQUIDHEAD: u16 = 521;
+
+pub const APPARITION_SWOOP: Swoop = Swoop {
+    run_accel: 0.3,
+    run_cap: 7.0,
+    track_band: 4.0,
+    track_smooth: 4.0,
+    overshoot: 660.0,
+    climb_accel: 0.4,
+    climb_cap: 5.0,
+    climb_drag: 0.95,
+    return_accel: 0.4,
+    return_pull: 0.2,
+    return_cap: 5.0,
+    return_drag: 0.95,
+};
+
+pub const SQUIDHEAD_SWOOP: Swoop = Swoop {
+    run_accel: 0.7,
+    run_cap: 14.0,
+    track_band: 6.0,
+    track_smooth: 3.0,
+    overshoot: 500.0,
+    climb_accel: 0.3,
+    climb_cap: 7.0,
+    climb_drag: 0.9,
+    return_accel: 0.6,
+    return_pull: 0.3,
+    return_cap: 7.0,
+    return_drag: 0.9,
+};
+
+/// Outside the tracking band it corrects much harder, which is what keeps a run level with you.
+pub const SWOOP_HARD_TRACK: f32 = 15.0;
+/// They fade in over this many ticks, with a shove to get them moving.
+pub const SWOOP_ENTRANCE: f32 = 120.0;
+pub const SWOOP_ENTRANCE_SHOVE: f32 = 2.0;
+pub const SWOOP_FADE: i32 = 30;
+/// Two closer than this shoulder each other apart.
+pub const SWOOP_PERSONAL_SPACE: f32 = 50.0;
+pub const SWOOP_SHOVE: f32 = 0.4;
+
+// --- The nebula brain, which teleports rather than travels --------------------------------------
+
+/// How fast it closes, and how heavily that is smoothed.
+pub const BRAIN_APPROACH: f32 = 7.0;
+pub const BRAIN_APPROACH_SMOOTH: f32 = 30.0;
+/// It stops closing inside this, and drifts instead.
+pub const BRAIN_STANDOFF: f32 = 400.0;
+pub const BRAIN_DRIFT_DRAG: f32 = 0.98;
+/// It relocates every eight seconds, to somewhere within twenty tiles of you.
+pub const BRAIN_TELEPORT_EVERY: f32 = 480.0;
+pub const BRAIN_TELEPORT_RANGE: i32 = 20;
+/// ...but never within twelve tiles of a player, so it cannot land on top of you.
+pub const BRAIN_TELEPORT_CLEARANCE: i32 = 12;
+/// The floaters it puts out: three of them, one a second, at the start of its life.
+pub const NEBULA_FLOATER: u16 = 574;
+pub const BRAIN_FLOATER_WINDOW: f32 = 180.0;
+pub const BRAIN_FLOATER_EVERY: f32 = 60.0;
+pub const BRAIN_FLOATER_SPEED: (f32, f32) = (4.0, 2.5);
+/// A teleport hurries its floaters along by half a second each.
+pub const BRAIN_FLOATER_HURRY: f32 = 30.0;

@@ -20,3 +20,5 @@ pub mod leaper;
 pub mod rider;
 pub mod roller;
 pub mod sand;
+pub mod swooper;
+pub mod teleporter;

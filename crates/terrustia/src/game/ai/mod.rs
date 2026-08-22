@@ -346,8 +346,10 @@ pub fn parity(style: i32) -> Option<Parity> {
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
         | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 74 | 75 | 72 | 73
-        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 85 | 90 | 93 | 102 | 103
-        | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
+        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 85 | 86 | 90 | 93 | 97
+        | 102 | 103 | 122 | 124 | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => {
+            Parity::Ported
+        }
         _ => return None,
     };
     Some(level)
@@ -562,6 +564,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         23 => hardmode::hoverers::flying_weapon(npc, world),
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
+        86 => hardmode::swooper::swooper(npc, world),
+        97 => {
+            let out = hardmode::teleporter::nebula_brain(npc, world, rng);
+            effects.shots.extend(out.base.shots);
+        }
         85 => {
             // Another of its kind already on the player's head is what stops this one trying.
             let taken = world.target_taken;
