@@ -344,9 +344,9 @@ pub fn parity(style: i32) -> Option<Parity> {
         // Ported from the decompiled source.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 26 | 27 | 28 | 29 | 38 | 42 | 43 | 44 | 49 | 50 | 54 | 55
-        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 72 | 73 | 80 | 89
-        | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124 | 127
-        | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
+        | 56 | 62 | 63 | 65 | 66 | 67 | 25 | 39 | 40 | 41 | 64 | 68 | 70 | 74 | 75 | 72 | 73
+        | 80 | 89 | 91 | 92 | 95 | 96 | 99 | 100 | 101 | 104 | 116 | 93 | 102 | 103 | 122 | 124
+        | 127 | 113 | 114 | 115 | 118 | 119 | 123 | 125 | 126 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -556,6 +556,16 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         23 => hardmode::hoverers::flying_weapon(npc, world),
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
+        75 => {
+            let out = hardmode::rider::rider(npc, world, world.parent, rng);
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
+        }
+        74 => {
+            let out = hardmode::charger::charger(npc, world, rng);
+            effects.expired = out.spent;
+            effects.detonated = out.detonated;
+        }
         68 => {
             let landing = bird::waterfowl(npc, world, rng);
             if let Some(walker) = landing.becomes {
@@ -597,9 +607,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         72 => {
             // A pinned part is drawn on its parent, so it needs the parent's centre rather than
             // its corner.
-            let at = world
-                .parent
-                .map(|(position, (w, h))| (position.0 + w / 2.0, position.1 + h / 2.0));
+            let at = world.parent.map(|p| p.center());
             effects.expired = hardmode::fixtures::pinned(npc, at).spent;
         }
         73 => {

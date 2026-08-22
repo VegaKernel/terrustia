@@ -2378,3 +2378,192 @@ pub const DUCK_TOO_CLOSE: i32 = 5;
 /// Landing on dry ground turns a flying duck back into a walking one.
 pub const DUCK_LANDS_AS: [u16; 4] = [363, 365, 603, 609];
 pub const DUCK_LANDED_REST: (u32, u32) = (200, 400);
+
+// --- Chargers: the things that line you up and then throw themselves at you --------------------
+
+/// Style 74's numbers, which differ enough between the two types to be a table rather than a pair
+/// of branches.
+#[derive(Debug, Clone, Copy)]
+pub struct Charge {
+    /// How fast it drifts while it is choosing a moment.
+    pub approach: f32,
+    /// How far above you it prefers to sit, and how far to the side.
+    pub above: f32,
+    pub beside: f32,
+    /// It will not commit closer than this, nor further than this.
+    pub too_close: f32,
+    pub too_far: f32,
+    /// How heavily the drift is smoothed, and how long the wind-up lasts.
+    pub drift_smooth: f32,
+    pub windup: f32,
+    /// How much speed it keeps each tick of the wind-up.
+    pub windup_drag: f32,
+    /// Aim scatter, in hundredths of a pixel per tick.
+    pub scatter: i32,
+    /// Launch speed, and how long the dash may last.
+    pub dash: f32,
+    pub dash_ticks: f32,
+    /// It only breaks off once it is this far past you and below you.
+    pub break_off: f32,
+    /// How hard it keeps steering during the dash, and how much it accelerates.
+    pub steer: f32,
+    pub steer_gain: f32,
+    /// Below this speed the dash is spent.
+    pub spent_below: f32,
+    /// Knockback it takes while drifting; during a dash it takes none.
+    pub knockback: f32,
+    /// Whether hitting something makes it go off.
+    pub explodes: bool,
+}
+
+/// The Martian drone: it explodes on contact and on terrain.
+pub const MARTIAN_DRONE: u16 = 388;
+/// The solar corite: it bounces off and recovers rather than detonating.
+pub const SOLAR_CORITE: u16 = 418;
+
+pub const DRONE_CHARGE: Charge = Charge {
+    approach: 10.0,
+    above: 200.0,
+    beside: 0.0,
+    too_close: 0.0,
+    too_far: 750.0,
+    drift_smooth: 30.0,
+    windup: 30.0,
+    windup_drag: 0.95,
+    scatter: 50,
+    dash: 14.0,
+    dash_ticks: 30.0,
+    break_off: 100.0,
+    steer: 20.0,
+    steer_gain: 0.0,
+    spent_below: 7.0,
+    knockback: 0.4,
+    explodes: true,
+};
+
+pub const CORITE_CHARGE: Charge = Charge {
+    approach: 8.0,
+    above: 175.0,
+    beside: 175.0,
+    too_close: 80.0,
+    too_far: 600.0,
+    drift_smooth: 60.0,
+    windup: 20.0,
+    windup_drag: 0.75,
+    scatter: 0,
+    dash: 9.0,
+    dash_ticks: 30.0,
+    break_off: 150.0,
+    steer: 60.0,
+    steer_gain: 4.0 / 15.0,
+    spent_below: 7.0,
+    knockback: 0.3,
+    explodes: false,
+};
+
+/// A drone's blast: it swells to this across, hits this hard, and is gone three ticks later.
+pub const DRONE_BLAST_SIZE: f32 = 192.0;
+pub const DRONE_BLAST_DAMAGE: i32 = 80;
+pub const DRONE_BLAST_TICKS: f32 = 3.0;
+/// It goes off on contact at this range as well as on terrain.
+pub const DRONE_TOUCH: f32 = 64.0;
+/// A corite that has finished a dash rests for this long, counting down three at a time.
+pub const CORITE_REST: f32 = 45.0;
+/// Blocked for two seconds, a charger commits anyway rather than circling forever.
+pub const CHARGE_PATIENCE: f32 = 120.0;
+/// It will not dash at a target more than this far off the horizontal, in eighths of a half-turn.
+pub const CHARGE_ARC: f32 = 8.0;
+
+// --- Riders: the parts that sit on something else ---------------------------------------------
+
+/// Style 75: where each riding part sits on its mount, before the mount's rotation and scale are
+/// applied.
+///
+/// The offsets are in pixels from the mount's centre. `mirrored` marks the parts that come in
+/// left-and-right pairs, whose `ai[1]` says which side this one is.
+#[derive(Debug, Clone, Copy)]
+pub struct Seat {
+    /// The type it rides on.
+    pub mount: u16,
+    /// Offset from the mount's centre.
+    pub offset: (f32, f32),
+    /// Extra sideways offset applied `+` on one side and `-` on the other.
+    pub side_offset: f32,
+    /// Whether the part faces outward rather than the way the mount faces.
+    pub faces_outward: bool,
+}
+
+/// A scutlix rider sits above its mount, which it also summons.
+pub const SCUTLIX_RIDER: u16 = 390;
+pub const SCUTLIX: u16 = 391;
+/// A drakomire rider likewise.
+pub const DRAKOMIRE_RIDER: u16 = 416;
+pub const DRAKOMIRE: u16 = 415;
+/// The Martian saucer's hull, its top, its two turrets and its two cannon.
+pub const SAUCER_CORE: u16 = 395;
+pub const SAUCER_TOP: u16 = 392;
+pub const SAUCER_TURRET: u16 = 393;
+pub const SAUCER_CANNON: u16 = 394;
+
+/// Where each of them sits.
+pub fn seat(npc_type: u16) -> Option<Seat> {
+    Some(match npc_type {
+        SCUTLIX_RIDER => Seat {
+            mount: SCUTLIX,
+            offset: (0.0, -14.0),
+            side_offset: 0.0,
+            faces_outward: false,
+        },
+        DRAKOMIRE_RIDER => Seat {
+            mount: DRAKOMIRE,
+            offset: (-10.0, -30.0),
+            side_offset: 0.0,
+            faces_outward: false,
+        },
+        SAUCER_TOP => Seat {
+            mount: SAUCER_CORE,
+            offset: (0.0, 2.0),
+            side_offset: 0.0,
+            faces_outward: false,
+        },
+        SAUCER_TURRET => Seat {
+            mount: SAUCER_CORE,
+            offset: (0.0, 29.0),
+            side_offset: 60.0,
+            faces_outward: false,
+        },
+        SAUCER_CANNON => Seat {
+            mount: SAUCER_CORE,
+            offset: (0.0, -13.0),
+            side_offset: 49.0,
+            faces_outward: true,
+        },
+        DUTCHMAN_GUN => Seat {
+            mount: 491,
+            // The Dutchman's four guns are spaced along the hull rather than mirrored.
+            offset: (-122.0, -6.0),
+            side_offset: 0.0,
+            faces_outward: false,
+        },
+        _ => return None,
+    })
+}
+
+/// The Dutchman's guns are spaced this far apart along the hull.
+pub const DUTCHMAN_GUN_SPACING: f32 = 68.0;
+
+/// A scutlix rider's shot.
+pub const RIDER_SHOT: u16 = 438;
+pub const RIDER_SHOT_DAMAGE: i32 = 30;
+pub const RIDER_SHOT_SPEED: f32 = 7.0;
+pub const RIDER_RELOAD: f32 = 60.0;
+pub const RIDER_FLINCH: f32 = -30.0;
+pub const RIDER_RANGE: f32 = 700.0;
+pub const RIDER_SPREAD: i32 = 50;
+
+/// A Dutchman cannon's shot: a slow lobbed ball, fired every four seconds.
+pub const CANNON_SHOT: u16 = 240;
+pub const CANNON_SHOT_DAMAGE: i32 = 30;
+pub const CANNON_SHOT_SPEED: f32 = 14.0;
+pub const CANNON_SHOT_RISE: f32 = -5.0;
+pub const CANNON_RELOAD: f32 = 240.0;

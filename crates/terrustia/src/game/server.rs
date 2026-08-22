@@ -1840,23 +1840,30 @@ impl GameServer {
                 })
                 .filter(|(_, count)| *count > 0)
                 .collect();
-            // Where every boss that owns parts currently is, read before anything moves.
-            type BossState = (crate::game::ai::boss::skeletron::Parent, f32, f32);
-            let parents: std::collections::HashMap<u8, BossState> = self
-                .npcs
-                .iter()
-                .filter(|(_, n)| n.stats.boss)
-                .map(|(index, n)| {
-                    (
-                        index,
+            // What every NPC that owns parts looks like, read before anything moves so the whole
+            // assembly shifts as one. Not only bosses: a Flying Dutchman's cannon and a scutlix's
+            // rider hang off ordinary NPCs the same way.
+            let parents: std::collections::HashMap<u8, crate::game::ai::boss::skeletron::Parent> =
+                self.npcs
+                    .iter()
+                    .map(|(index, n)| {
                         (
-                            (n.position, (n.width(), n.height())),
-                            n.ai[1],
-                            n.life as f32 / n.life_max.max(1) as f32,
-                        ),
-                    )
-                })
-                .collect();
+                            index,
+                            crate::game::ai::boss::skeletron::Parent {
+                                position: n.position,
+                                size: (n.width(), n.height()),
+                                rotation: n.rotation,
+                                scale: n.scale,
+                                velocity: n.velocity,
+                                direction: n.direction,
+                                sprite_direction: n.sprite_direction,
+                                time_left: n.time_left,
+                                state: n.ai[1],
+                                health: n.life as f32 / n.life_max.max(1) as f32,
+                            },
+                        )
+                    })
+                    .collect();
             let tiles = WorldTiles(&self.world);
             // The zone scan reads a forty-tile square, so it runs once a tick for the nearest
             // player rather than once per NPC that happens to care.
@@ -1897,13 +1904,12 @@ impl GameServer {
                 if npc.follows.is_some() {
                     continue;
                 }
-                // A boss part reads its parent's position and state; it cannot see the table.
-                let (parent, parent_state, parent_health) = npc
+                // A part reads its parent through this; it cannot see the table itself.
+                let parent = npc
                     .follows_boss
-                    .and_then(|slot| parents.get(&slot).copied())
-                    .map_or((None, 0.0, 1.0), |(at, state, health)| {
-                        (Some(at), state, health)
-                    });
+                    .and_then(|slot| parents.get(&slot).copied());
+                let (parent_state, parent_health) =
+                    parent.map_or((0.0, 1.0), |p| (p.state, p.health));
                 npc_ai::update_with(
                     npc,
                     &tiles,

@@ -33,8 +33,37 @@ pub const SPINNING: f32 = 1.0;
 pub const ENRAGED: f32 = 2.0;
 pub const LEAVING: f32 = 3.0;
 
-/// Where a boss part's parent is, how big it is, and which state it is in.
-pub type Parent = ((f32, f32), (f32, f32));
+/// What a part can see of whatever it is attached to.
+///
+/// A part has no view of the NPC table, so everything it needs about its parent has to arrive
+/// here. Riding parts need more than a position: a saucer's guns sit at offsets *rotated by the
+/// hull*, so they need its rotation and scale too, and they inherit its despawn timer so a hull
+/// that leaves does not strand its guns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Parent {
+    pub position: (f32, f32),
+    pub size: (f32, f32),
+    pub rotation: f32,
+    pub scale: f32,
+    pub velocity: (f32, f32),
+    pub direction: i8,
+    pub sprite_direction: i8,
+    pub time_left: i32,
+    /// Which state the parent is in, from its own `ai[1]`.
+    pub state: f32,
+    /// How much of its health it has left, from zero to one.
+    pub health: f32,
+}
+
+impl Parent {
+    /// The middle of the parent, which is what offsets are measured from.
+    pub fn center(&self) -> (f32, f32) {
+        (
+            self.position.0 + self.size.0 / 2.0,
+            self.position.1 + self.size.1 / 2.0,
+        )
+    }
+}
 
 /// The Dungeon Guardian, which is Skeletron's routine with no off switch.
 const DUNGEON_GUARDIAN: u16 = 68;
@@ -187,7 +216,12 @@ pub fn hand(
     head_leaving: bool,
     target: Option<crate::game::npc_ai::Target>,
 ) -> HandOutcome {
-    let Some((head_position, head_size)) = head_at else {
+    let Some(Parent {
+        position: head_position,
+        size: head_size,
+        ..
+    }) = head_at
+    else {
         return HandOutcome::Orphaned;
     };
     // `ai[0]` is which side of the head it belongs to.
@@ -295,6 +329,22 @@ pub fn hand(
 
 #[cfg(test)]
 mod tests {
+
+    /// A parent standing still at a given place, which is all these tests need of one.
+    fn parent_at(position: (f32, f32), size: (f32, f32)) -> Parent {
+        Parent {
+            position,
+            size,
+            rotation: 0.0,
+            scale: 1.0,
+            velocity: (0.0, 0.0),
+            direction: 1,
+            sprite_direction: 1,
+            time_left: 3600,
+            state: HOVERING,
+            health: 1.0,
+        }
+    }
     use super::*;
     use crate::game::npc_ai::Target;
     use terrustia_proto::tile::Tile;
@@ -422,7 +472,7 @@ mod tests {
     #[test]
     fn a_hand_winds_up_from_its_low_dock_and_lunges() {
         let mut h = a_hand();
-        let head_at = Some(((10_000.0, 9_600.0), (100.0, 100.0)));
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         let t = Some(player_at(10_000.0, 10_400.0));
         // Docked low, because the head is spinning.
         for _ in 0..(HAND_WINDUP_AT as i32 + 1) {
@@ -447,7 +497,7 @@ mod tests {
     #[test]
     fn a_hand_gives_up_its_lunge_once_it_has_passed_you() {
         let mut h = a_hand();
-        let head_at = Some(((10_000.0, 9_600.0), (100.0, 100.0)));
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         h.ai[2] = 2.0;
         h.velocity = (0.0, 18.0);
         // Already below the player.
@@ -467,7 +517,7 @@ mod tests {
         assert!(HAND_DOCK_HIGH.1 < HAND_DOCK_LOW.1, "high dock is above");
         let mut close = a_hand();
         let mut low = a_hand();
-        let head_at = Some(((10_000.0, 9_600.0), (100.0, 100.0)));
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         for _ in 0..200 {
             hand(&mut close, head_at, true, false, None);
             close.position.1 += close.velocity.1;

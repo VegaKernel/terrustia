@@ -8,6 +8,7 @@
 //! Split from `super` only by when they appear in a playthrough; the same rule holds throughout —
 //! per-type variation lives in tables, and the modules here contain algorithms.
 
+pub mod charger;
 pub mod crawler;
 pub mod drifters;
 pub mod fixtures;
@@ -15,5 +16,6 @@ pub mod hopper;
 pub mod hoverers;
 pub mod invasion;
 pub mod leaper;
+pub mod rider;
 pub mod roller;
 pub mod sand;

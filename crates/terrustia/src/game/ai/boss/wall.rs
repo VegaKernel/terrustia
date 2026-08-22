@@ -173,7 +173,11 @@ pub fn eye<T: TileView>(
     wall_at: Option<super::skeletron::Parent>,
     wall_health: f32,
 ) -> Option<Shot> {
-    let (wall_position, wall_size) = wall_at?;
+    let super::skeletron::Parent {
+        position: wall_position,
+        size: wall_size,
+        ..
+    } = wall_at?;
     // It rides the Wall's column, at the top or bottom of the band depending on its side.
     npc.position.0 = wall_position.0;
     npc.direction = if wall_position.0 < npc.position.0 {
@@ -271,7 +275,12 @@ pub fn hungry<T: TileView>(
     wall_at: Option<super::skeletron::Parent>,
     wall_health: f32,
 ) -> bool {
-    let Some((wall_position, wall_size)) = wall_at else {
+    let Some(super::skeletron::Parent {
+        position: wall_position,
+        size: wall_size,
+        ..
+    }) = wall_at
+    else {
         return false;
     };
     // Being hit knocks it out of its lunge for a moment.
@@ -357,6 +366,22 @@ pub fn hungry<T: TileView>(
 
 #[cfg(test)]
 mod tests {
+
+    /// A wall standing still at a given place, which is all these tests need of one.
+    fn wall_at(position: (f32, f32), size: (f32, f32)) -> crate::game::ai::boss::skeletron::Parent {
+        crate::game::ai::boss::skeletron::Parent {
+            position,
+            size,
+            rotation: 0.0,
+            scale: 1.0,
+            velocity: (0.0, 0.0),
+            direction: 1,
+            sprite_direction: 1,
+            time_left: 3600,
+            state: 0.0,
+            health: 1.0,
+        }
+    }
     use super::*;
     use crate::game::npc_ai::Target;
     use rand::SeedableRng;
@@ -518,7 +543,7 @@ mod tests {
         let tiles = Hell;
         let mut e = an_eye(1.0);
         e.position.0 = 9_000.0;
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         let t = Some(player_at(11_000.0, 20_000.0));
         eye(&mut e, &hell(&tiles, t), at, 1.0);
         assert_eq!(e.position.0, 10_000.0, "it is carried, not steered");
@@ -527,7 +552,7 @@ mod tests {
     #[test]
     fn the_two_eyes_ride_at_different_heights() {
         let tiles = Hell;
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         let t = Some(player_at(11_000.0, 20_000.0));
         let mut top = an_eye(1.0);
         let mut bottom = an_eye(-1.0);
@@ -549,7 +574,7 @@ mod tests {
     fn an_eye_charges_and_then_fires_a_volley() {
         let tiles = Hell;
         let mut e = an_eye(1.0);
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         let t = Some(player_at(11_000.0, 20_000.0));
         let mut fired = Vec::new();
         for _ in 0..2000 {
@@ -565,7 +590,7 @@ mod tests {
     #[test]
     fn a_dying_wall_makes_its_eyes_fire_harder() {
         let tiles = Hell;
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         let t = Some(player_at(11_000.0, 20_000.0));
         let volley = |health: f32| {
             let mut e = an_eye(1.0);
@@ -602,7 +627,7 @@ mod tests {
     fn a_hungry_lunges_at_you_but_only_so_far() {
         let tiles = Hell;
         let mut h = a_hungry();
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         // Someone way beyond its leash.
         let t = Some(player_at(10_000.0 + HUNGRY_LEASH * 6.0, 20_000.0));
         for _ in 0..600 {
@@ -623,7 +648,7 @@ mod tests {
         let tiles = Hell;
         let strays = |wall_health: f32| {
             let mut h = a_hungry();
-            let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+            let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
             let t = Some(player_at(10_000.0 + HUNGRY_LEASH * 6.0, 20_000.0));
             let mut furthest: f32 = 0.0;
             for _ in 0..900 {
@@ -643,7 +668,7 @@ mod tests {
     fn hitting_a_hungry_knocks_it_out_of_its_lunge() {
         let tiles = Hell;
         let mut h = a_hungry();
-        let at = Some(((10_000.0, 20_000.0), (16.0, 200.0)));
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
         let t = Some(player_at(10_500.0, 20_000.0));
         let mut hit = hell(&tiles, t);
         hit.was_hurt = true;
