@@ -142,6 +142,9 @@ const HOUSING_SCAN_INTERVAL: u64 = 60 * 5;
 /// One invader every this many ticks. An invasion arrives steadily rather than all at once.
 const INVASION_SPAWN_EVERY: u64 = 45;
 
+/// The chest tile. Placing one needs a container behind it, not just tiles.
+const CHEST_BLOCK: u16 = 21;
+
 /// Ticks between NPC position broadcasts. Clients interpolate between them.
 const NPC_SYNC_INTERVAL: u64 = 6;
 
@@ -665,6 +668,22 @@ impl GameServer {
             id::PLAYER_HURT_V2 | id::PLAYER_DEATH_V2 | id::DEAD_PLAYER => {
                 self.relay_player_packet(slot, frame.id, &payload)
             }
+            // Everything a player does that only other clients need to be told about: a heal, a
+            // mana burst, the angle of the item they are holding, a ninja dodge, their stealth, a
+            // flute note, which NPC their minions are on, which tile they are mining, and which
+            // loadout they just switched to. Each is the same shape — the owner byte is rewritten
+            // to the connection it arrived on, so nobody can act as anybody else — and none of
+            // them is something the server has an opinion about.
+            id::PLAYER_HEAL
+            | id::ITEM_ROTATION_AND_ANIMATION
+            | id::MANA_EFFECT
+            | id::INSTRUMENT_SOUND
+            | id::SYNC_DODGE
+            | id::PLAYER_STEALTH
+            | id::MINION_ATTACK_TARGET_UPDATE
+            | id::SYNC_TILE_PICKING
+            | id::SYNC_LOADOUT => self.relay_player_packet(slot, frame.id, &payload),
+            id::PLACE_OBJECT => self.on_place_object(slot, &payload),
             id::REQUEST_SECTION => self.on_request_section(slot, &payload),
             id::AREA_TILE_CHANGE => self.on_tile_square(slot, &payload),
             id::SYNC_ITEM | id::SPAWN_INSTANCED_ITEM => self.on_sync_item(slot, &payload),
@@ -1139,6 +1158,82 @@ impl GameServer {
             player.zone = Some(Bytes::copy_from_slice(payload));
         }
         self.relay_player_packet(slot, id::SYNC_PLAYER_ZONE, payload)
+    }
+
+    /// A player placed a multi-tile object: a chest, a door, a bed, a workbench.
+    ///
+    /// This has to happen on the server as well as on the clients. Every other client is told and
+    /// places it locally, but if the server does not write the tiles too the object is gone the
+    /// moment the world is saved, invisible to anyone who joins later, and does not count toward a
+    /// house.
+    fn on_place_object(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        let x = i32::from(r.i16()?);
+        let y = i32::from(r.i16()?);
+        let block = r.i16()?;
+        let style = i32::from(r.i16()?);
+        let _alternate = r.u8()?;
+        let random = i32::from(r.i8()?);
+        let _direction = r.bool()?;
+
+        let Ok(block) = u16::try_from(block) else {
+            return Ok(());
+        };
+        let Some(object) = terrustia_proto::tile_object::tile_object(block) else {
+            debug!(
+                slot,
+                block, "ignoring a placement of something that is not an object"
+            );
+            return Ok(());
+        };
+        // Ten tiles clear of the world's edge, as the game requires.
+        if x < 10 || y < 10 || x >= self.world.width() - 10 || y >= self.world.height() - 10 {
+            return Ok(());
+        }
+
+        // The packet gives the cursor tile; the object's own origin says where its corner goes.
+        let (left, top) = (x - object.origin.0, y - object.origin.1);
+        // Nothing is placed over anything already there — the game refuses the whole object
+        // rather than filling in the gaps.
+        for dx in 0..object.width {
+            for dy in 0..object.height {
+                if self.world.tile(left + dx, top + dy).is_active() {
+                    return Ok(());
+                }
+            }
+        }
+
+        let (frame_x, frame_y) = object.frame_of(style, random);
+        for dx in 0..object.width {
+            let fx = frame_x + dx * (object.coord_width + object.padding);
+            let mut fy = frame_y;
+            for dy in 0..object.height {
+                // A framed tile, which is what marks it active — setting the block alone leaves an
+                // inactive tile that every client draws as empty air.
+                let was = self.world.tile(left + dx, top + dy);
+                let tile = terrustia_proto::tile::Tile::framed(block, fx as i16, fy as i16)
+                    .with_wall(was.wall);
+                self.world.set_tile(left + dx, top + dy, tile);
+                fy += object.coord_heights.get(dy as usize).copied().unwrap_or(16) + object.padding;
+            }
+        }
+
+        // A chest is not only tiles: it needs somewhere to keep what is put in it.
+        if block == CHEST_BLOCK {
+            let anchor = (left as i16, top as i16);
+            if self.world.chest_at(anchor.0, anchor.1).is_none() {
+                self.world
+                    .add_chest(crate::world::Chest::empty_at(anchor.0, anchor.1));
+            }
+        }
+
+        // Everyone else places it themselves from the same packet.
+        self.broadcast(
+            terrustia_proto::packets::place_object(x, y, block, style, random)?,
+            Some(slot),
+        );
+        debug!(slot, block, x, y, "object placed");
+        Ok(())
     }
 
     /// Tell everyone the world itself has changed — an eclipse begun, a blood moon risen.

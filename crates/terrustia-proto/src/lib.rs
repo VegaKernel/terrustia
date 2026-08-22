@@ -29,6 +29,7 @@ pub mod section;
 pub mod square;
 pub mod tile;
 pub mod tile_drops;
+pub mod tile_object;
 pub mod tile_sets;
 pub mod tile_solid;
 pub mod writer;

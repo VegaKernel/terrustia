@@ -1353,3 +1353,83 @@ async fn only_the_games_own_list_can_be_summoned() {
         .await;
     assert!(arrived.is_err(), "that is not a summonable boss");
 }
+
+/// A multi-tile object has to be written into the server's own world, not merely relayed. If the
+/// server does not place it, the object is gone the moment the world is saved and invisible to
+/// anyone who joins afterwards.
+#[tokio::test]
+async fn a_placed_object_lands_in_the_world() {
+    let addr = start_with(Config::default(), |world| {
+        // A cleared pocket with solid ground under it. The generated world already has terrain
+        // here, and an object is refused outright if anything is in its way.
+        for x in 380..420 {
+            for y in 310..322 {
+                world.set_tile(x, y, terrustia_proto::tile::Tile::AIR);
+            }
+            world.set_tile(x, 322, terrustia_proto::tile::Tile::block(1));
+        }
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+
+    // A workbench: two wide, one tall, origin at its top-left.
+    alice.place_object(400, 321, 18, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Bob's handshake already streams the sections around spawn, so asking for one he has would
+    // simply be ignored and the wait would time out. Draining what arrives is enough.
+    let mut bob = join(addr, "bob").await;
+    bob.set_timeout(Duration::from_millis(50));
+    for _ in 0..200 {
+        if bob.next_event().await.is_err() {
+            break;
+        }
+    }
+
+    let placed = bob
+        .world()
+        .tile(400, 321)
+        .expect("the tile should have arrived");
+    assert!(placed.is_active(), "the workbench should be in the world");
+    assert_eq!(placed.block, 18, "and be a workbench");
+    let second = bob.world().tile(401, 321).expect("its second tile too");
+    assert_eq!(second.block, 18, "both of its tiles");
+    assert!(
+        second.frame_x > placed.frame_x,
+        "with the second column framed after the first: {} then {}",
+        placed.frame_x,
+        second.frame_x
+    );
+}
+
+/// Placing an object over something already there is refused outright rather than filling gaps.
+#[tokio::test]
+async fn an_object_will_not_be_placed_over_something() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..420 {
+            for y in 310..322 {
+                world.set_tile(x, y, terrustia_proto::tile::Tile::AIR);
+            }
+            world.set_tile(x, 322, terrustia_proto::tile::Tile::block(1));
+        }
+        // Something in the way of the second half of the workbench.
+        world.set_tile(401, 321, terrustia_proto::tile::Tile::block(1));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.place_object(400, 321, 18, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut bob = join(addr, "bob").await;
+    bob.set_timeout(Duration::from_millis(50));
+    for _ in 0..200 {
+        if bob.next_event().await.is_err() {
+            break;
+        }
+    }
+    assert_ne!(
+        bob.world().tile(400, 321).map(|t| t.block),
+        Some(18),
+        "half a workbench should not have been placed"
+    );
+}

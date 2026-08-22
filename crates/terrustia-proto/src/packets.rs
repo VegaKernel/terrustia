@@ -200,6 +200,24 @@ impl TimeSet {
 }
 
 /// Packets `49` and `129`: both are bare signals with no payload.
+/// Packet 79: place a multi-tile object.
+///
+/// Relayed to every other client so they place it themselves; the server has already written the
+/// tiles into its own world by the time this goes out.
+pub fn place_object(x: i32, y: i32, block: u16, style: i32, random: i32) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(crate::id::PLACE_OBJECT);
+    w.i16(x as i16);
+    w.i16(y as i16);
+    w.i16(block as i16);
+    w.i16(style as i16);
+    // The alternate index; the server does not choose one.
+    w.u8(0);
+    w.i8(random as i8);
+    // Direction, which the client applies to the sprite rather than to the tiles.
+    w.bool(true);
+    w.finish()
+}
+
 pub fn empty(message_id: u8) -> Result<Vec<u8>> {
     PacketWriter::new(message_id).finish()
 }
