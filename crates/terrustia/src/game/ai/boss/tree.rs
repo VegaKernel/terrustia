@@ -1,0 +1,343 @@
+//! Mourning Wood and the Everscream: style 57.
+//!
+//! Both walk — through terrain, since neither collides with it — and neither ever closes. They
+//! hold a distance, wait five seconds, and throw something; the wait shortens as they are worn
+//! down, so the second half of either fight is markedly busier than the first.
+//!
+//! What they throw is where they differ. Mourning Wood alternates flaming spears fired straight at
+//! you with a wave of spheres lobbed over your head, and below a quarter health it gains harder
+//! versions of both that the Everscream never gets. The Everscream throws ornaments fast and flat,
+//! or pine needles slowly and high.
+//!
+//! Inside fifty pixels either stops walking entirely, which is what makes standing directly under
+//! one a real tactic against the lobbed attacks and a terrible one against the flat ones.
+//!
+//! Daylight ends both fights: they walk away at eight pixels a tick.
+
+use rand::{Rng, rngs::SmallRng};
+use terrustia_proto::npc_params::{
+    EVERSCREAM, SCREAM_NEEDLES, SCREAM_ORNAMENTS, TREE_DESPERATE_AT, TREE_FLEE, TREE_STEER,
+    TREE_TOO_CLOSE, TREE_WAIT, TREE_WALK, TREE_WALK_HALF, TREE_WALK_HURT, TreeAttack,
+    WOOD_DESPERATE_SPEARS, WOOD_DESPERATE_SPHERES, WOOD_SPEARS, WOOD_SPHERES,
+};
+
+use crate::game::ai::{Shot, World, face};
+use crate::game::npc::{Npc, TileView};
+
+/// What one of them did this tick.
+#[derive(Debug, Default)]
+pub struct TreeOutcome {
+    pub shots: Vec<Shot>,
+    /// Set when daylight has sent it away.
+    pub fleeing: bool,
+}
+
+/// Which attack a state number means, for this type.
+fn attack_for(npc_type: u16, state: f32) -> Option<TreeAttack> {
+    let everscream = npc_type == EVERSCREAM;
+    Some(match (state as i32, everscream) {
+        (1, false) => WOOD_SPEARS,
+        (2, false) => WOOD_SPHERES,
+        (3, false) => WOOD_DESPERATE_SPEARS,
+        (4, false) => WOOD_DESPERATE_SPHERES,
+        (1, true) => SCREAM_ORNAMENTS,
+        (2, true) => SCREAM_NEEDLES,
+        _ => return None,
+    })
+}
+
+/// Style 57.
+pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng) -> TreeOutcome {
+    let mut out = TreeOutcome::default();
+    npc.dirty = true;
+    npc.no_gravity = true;
+    npc.no_tile_collide = true;
+
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+    let mut walk = if health < 0.5 {
+        TREE_WALK_HALF
+    } else if health < 0.75 {
+        TREE_WALK_HURT
+    } else {
+        TREE_WALK
+    };
+    // Whether it is standing still this tick, either because it is attacking or because you are
+    // right on top of it.
+    let mut planted = false;
+
+    let Some(target) = world.target.filter(|t| t.alive) else {
+        return out;
+    };
+    if world.conditions.day {
+        // Daylight ends it. They walk away rather than fighting.
+        out.fleeing = true;
+        walk = TREE_FLEE;
+        npc.time_left = npc.time_left.min(600);
+    } else {
+        face(npc, target);
+        match npc.ai[0] {
+            s if s == 0.0 => {
+                // Waiting. The wait shortens as it is worn down.
+                npc.ai[1] += 1.0;
+                if health < 0.5 {
+                    npc.ai[1] += 1.0;
+                }
+                if health < 0.25 {
+                    npc.ai[1] += 1.0;
+                }
+                if npc.ai[1] >= TREE_WAIT {
+                    npc.ai[1] = 0.0;
+                    // Below a quarter, Mourning Wood switches to its two heavier attacks.
+                    npc.ai[0] = if health < TREE_DESPERATE_AT && npc.npc_type != EVERSCREAM {
+                        rng.random_range(3..5) as f32
+                    } else {
+                        rng.random_range(1..3) as f32
+                    };
+                }
+            }
+            state => {
+                let Some(attack) = attack_for(npc.npc_type, state) else {
+                    npc.ai[0] = 0.0;
+                    npc.ai[1] = 0.0;
+                    return out;
+                };
+                // The desperate attacks are thrown on the move; the others stop it dead.
+                planted = state < 3.0;
+                if state >= 3.0 {
+                    walk = TREE_WALK_HALF;
+                }
+                npc.ai[1] += 1.0;
+                let due = npc.ai[1] > attack.warmup
+                    && (attack.warmup == 0.0 || npc.ai[1] < attack.ticks - 60.0)
+                    && npc.ai[1] % attack.every == 0.0;
+                if due {
+                    out.shots.push(throw(npc, target.center, &attack, rng));
+                }
+                if npc.ai[1] >= attack.ticks {
+                    npc.ai[1] = 0.0;
+                    npc.ai[0] = 0.0;
+                }
+            }
+        }
+    }
+
+    // Standing right on top of it stops it walking.
+    let (cx, _) = npc.center();
+    if (cx - target.center.0).abs() < TREE_TOO_CLOSE {
+        planted = true;
+    }
+    if planted {
+        npc.velocity.0 *= 0.9;
+        if npc.velocity.0.abs() < 0.1 {
+            npc.velocity.0 = 0.0;
+        }
+    } else {
+        // It drifts onto its walking speed rather than turning: a twentieth at a time.
+        let wanted = walk * f32::from(npc.direction);
+        npc.velocity.0 = (npc.velocity.0 * TREE_STEER + wanted) / (TREE_STEER + 1.0);
+    }
+    out
+}
+
+/// One thrown projectile: aimed at the player, lifted into an arc, and scattered.
+fn throw(npc: &Npc, player: (f32, f32), attack: &TreeAttack, rng: &mut SmallRng) -> Shot {
+    let from = (
+        npc.position.0 + npc.width() * 0.5,
+        npc.position.1 + npc.height() * 0.5 + attack.from,
+    );
+    let mut across = player.0 - from.0;
+    let mut rise = player.1 - from.1;
+    // The lobbed attacks aim above you by a fraction of how far off you are, and gain speed with
+    // distance — which is what makes them land on you rather than short.
+    let mut speed = attack.speed + across.abs() * attack.reach_gain;
+    if speed > attack.speed_cap {
+        speed = attack.speed_cap;
+    }
+    if attack.arc > 0.0 {
+        rise -= across.abs() * attack.arc;
+        across += rng.random_range(-50..=50) as f32;
+        rise -= rng.random_range(50..201) as f32;
+    }
+    let length = across.hypot(rise).max(f32::MIN_POSITIVE);
+    let mut velocity = (across / length * speed, rise / length * speed);
+    let jitter = |rng: &mut SmallRng| {
+        1.0 + rng.random_range(-attack.spread..=attack.spread) as f32 * attack.spread_scale
+    };
+    velocity.0 *= jitter(rng);
+    velocity.1 *= jitter(rng);
+
+    // A few attacks pick from a run of projectile ids rather than using one.
+    let projectile = if attack.projectile_span > 1 {
+        attack.projectile + rng.random_range(0..attack.projectile_span)
+    } else {
+        attack.projectile
+    };
+    Shot {
+        projectile,
+        damage: attack.damage,
+        position: from,
+        velocity,
+        time_left: 600,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::ai::Conditions;
+    use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+    use terrustia_proto::npc_params::MOURNING_WOOD;
+    use terrustia_proto::tile::Tile;
+
+    struct Night(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Night {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn night(tiles: &Night, target: Option<(f32, f32)>) -> World<'_, Night> {
+        let mut w = crate::game::ai::calm(
+            tiles,
+            target.map(|center| Target {
+                slot: 0,
+                center,
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+        );
+        w.conditions = Conditions {
+            day: false,
+            ..Conditions::default()
+        };
+        w
+    }
+
+    fn boss(npc_type: u16, x: f32, y: f32) -> Npc {
+        Npc::new(npc_type, (x, y), 1).expect("a moon boss")
+    }
+
+    /// It waits, then throws, and the wait shortens as it is worn down.
+    #[test]
+    fn a_worn_down_tree_attacks_more_often() {
+        let tiles = Night(HashMap::new());
+        let w = night(&tiles, Some((600.0, 0.0)));
+        let attacks = |health: f32| {
+            let mut rng = SmallRng::seed_from_u64(57);
+            let mut t = boss(MOURNING_WOOD, 0.0, 0.0);
+            t.life = (t.life_max as f32 * health) as i32;
+            let mut count = 0;
+            let mut was = t.ai[0];
+            for _ in 0..3000 {
+                tree(&mut t, &w, &mut rng);
+                if was == 0.0 && t.ai[0] != 0.0 {
+                    count += 1;
+                }
+                was = t.ai[0];
+            }
+            count
+        };
+        assert!(
+            attacks(0.2) > attacks(1.0),
+            "a hurt one should attack more: {} vs {}",
+            attacks(0.2),
+            attacks(1.0)
+        );
+    }
+
+    /// Mourning Wood gains two attacks below a quarter health; the Everscream never does.
+    #[test]
+    fn only_mourning_wood_gets_desperate() {
+        let tiles = Night(HashMap::new());
+        let w = night(&tiles, Some((600.0, 0.0)));
+        let states = |npc_type: u16| {
+            let mut rng = SmallRng::seed_from_u64(3);
+            let mut t = boss(npc_type, 0.0, 0.0);
+            t.life = t.life_max / 10;
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..6000 {
+                tree(&mut t, &w, &mut rng);
+                if t.ai[0] != 0.0 {
+                    seen.insert(t.ai[0] as i32);
+                }
+            }
+            seen
+        };
+        let wood = states(MOURNING_WOOD);
+        assert!(
+            wood.contains(&3) || wood.contains(&4),
+            "Mourning Wood should get its heavier attacks: {wood:?}"
+        );
+        let scream = states(EVERSCREAM);
+        assert!(
+            !scream.contains(&3) && !scream.contains(&4),
+            "the Everscream should not: {scream:?}"
+        );
+    }
+
+    /// The two of them throw different things.
+    #[test]
+    fn each_throws_its_own_ammunition() {
+        let tiles = Night(HashMap::new());
+        let w = night(&tiles, Some((600.0, 0.0)));
+        let thrown = |npc_type: u16| {
+            let mut rng = SmallRng::seed_from_u64(5);
+            let mut t = boss(npc_type, 0.0, 0.0);
+            let mut ids = std::collections::HashSet::new();
+            for _ in 0..4000 {
+                for shot in tree(&mut t, &w, &mut rng).shots {
+                    ids.insert(shot.projectile);
+                }
+            }
+            ids
+        };
+        let wood = thrown(MOURNING_WOOD);
+        let scream = thrown(EVERSCREAM);
+        assert!(!wood.is_empty() && !scream.is_empty(), "both should throw");
+        assert!(
+            wood.is_disjoint(&scream),
+            "and never the same thing: {wood:?} vs {scream:?}"
+        );
+    }
+
+    /// Standing right under one stops it walking.
+    #[test]
+    fn standing_under_one_pins_it() {
+        let tiles = Night(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(7);
+        let mut t = boss(MOURNING_WOOD, 0.0, 0.0);
+        t.velocity.0 = 3.0;
+        let (cx, cy) = t.center();
+        let w = night(&tiles, Some((cx + 10.0, cy)));
+
+        for _ in 0..60 {
+            tree(&mut t, &w, &mut rng);
+        }
+        assert_eq!(t.velocity.0, 0.0, "it should have stopped");
+    }
+
+    /// Daylight sends it away rather than letting the fight run on.
+    #[test]
+    fn daylight_sends_it_off() {
+        let tiles = Night(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(9);
+        let mut t = boss(MOURNING_WOOD, 0.0, 0.0);
+        let mut w = night(&tiles, Some((6000.0, 0.0)));
+        w.conditions.day = true;
+
+        let out = tree(&mut t, &w, &mut rng);
+        assert!(out.fleeing);
+        assert!(out.shots.is_empty(), "it stops fighting");
+        for _ in 0..200 {
+            tree(&mut t, &w, &mut rng);
+        }
+        assert!(
+            t.velocity.0.abs() > TREE_WALK_HALF,
+            "and leaves quickly: {}",
+            t.velocity.0
+        );
+    }
+}

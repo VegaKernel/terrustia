@@ -3434,3 +3434,132 @@ pub const FISHRON_SHIFT_TICKS: f32 = 120.0;
 /// Half health starts the second phase; in expert, fifteen per cent starts the third.
 pub const FISHRON_SECOND_AT: f32 = 0.5;
 pub const FISHRON_THIRD_AT: f32 = 0.15;
+
+// --- The moon events' walking bosses ---------------------------------------------------------------
+
+pub const MOURNING_WOOD: u16 = 325;
+pub const EVERSCREAM: u16 = 344;
+
+/// How fast one of them walks, at each health threshold. Daylight makes it flee at eight.
+pub const TREE_WALK: f32 = 2.0;
+pub const TREE_WALK_HURT: f32 = 3.0;
+pub const TREE_WALK_HALF: f32 = 4.0;
+pub const TREE_FLEE: f32 = 8.0;
+/// It waits five seconds between attacks, less as it is worn down.
+pub const TREE_WAIT: f32 = 300.0;
+/// Below a quarter, Mourning Wood gains two heavier attacks the Everscream never gets.
+pub const TREE_DESPERATE_AT: f32 = 0.25;
+/// Inside fifty pixels it stops walking, which is what lets you stand under one.
+pub const TREE_TOO_CLOSE: f32 = 50.0;
+/// It steers toward the player at a twenty-first of the difference, so it drifts rather than turns.
+pub const TREE_STEER: f32 = 20.0;
+
+/// One attack: what it throws, how often, for how long, and how fast.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeAttack {
+    pub projectile: u16,
+    pub damage: i32,
+    /// A range means the projectile id is chosen from it at random.
+    pub projectile_span: u16,
+    pub every: f32,
+    pub ticks: f32,
+    pub from: f32,
+    pub speed: f32,
+    /// How much the aim is lifted, as a fraction of the horizontal gap: a lob rather than a shot.
+    pub arc: f32,
+    /// How much the speed grows with distance.
+    pub reach_gain: f32,
+    pub speed_cap: f32,
+    /// How wide the scatter is, in hundredths.
+    pub spread: i32,
+    pub spread_scale: f32,
+    /// Whether it starts partway through, as the two lobbing attacks do.
+    pub warmup: f32,
+}
+
+const NO_SPREAD: TreeAttack = TreeAttack {
+    projectile: 0,
+    damage: 0,
+    projectile_span: 1,
+    every: 15.0,
+    ticks: 120.0,
+    from: 30.0,
+    speed: 10.0,
+    arc: 0.0,
+    reach_gain: 0.0,
+    speed_cap: f32::MAX,
+    spread: 20,
+    spread_scale: 0.01,
+    warmup: 0.0,
+};
+
+/// Mourning Wood's flaming spears, straight at you.
+pub const WOOD_SPEARS: TreeAttack = TreeAttack {
+    projectile: 325,
+    damage: 50,
+    ..NO_SPREAD
+};
+/// ...and its wave of flaming spheres, lobbed.
+pub const WOOD_SPHERES: TreeAttack = TreeAttack {
+    projectile: 326,
+    projectile_span: 3,
+    damage: 40,
+    every: 8.0,
+    ticks: 300.0,
+    speed: 10.0,
+    arc: 0.3,
+    reach_gain: 0.004,
+    speed_cap: 14.0,
+    spread: 30,
+    warmup: 60.0,
+    ..NO_SPREAD
+};
+/// Below a quarter it fires spears twice as hard, and spheres faster.
+pub const WOOD_DESPERATE_SPEARS: TreeAttack = TreeAttack {
+    projectile: 325,
+    damage: 75,
+    every: 30.0,
+    ticks: 120.0,
+    speed: 16.0,
+    spread: 20,
+    spread_scale: 0.001,
+    ..NO_SPREAD
+};
+pub const WOOD_DESPERATE_SPHERES: TreeAttack = TreeAttack {
+    projectile: 326,
+    projectile_span: 3,
+    damage: 50,
+    every: 10.0,
+    ticks: 240.0,
+    speed: 12.0,
+    arc: 0.2,
+    reach_gain: 0.002,
+    speed_cap: 16.0,
+    spread: 30,
+    spread_scale: 0.005,
+    ..NO_SPREAD
+};
+/// The Everscream's ornaments, thrown fast and wide.
+pub const SCREAM_ORNAMENTS: TreeAttack = TreeAttack {
+    projectile: 345,
+    damage: 43,
+    every: 5.0,
+    ticks: 180.0,
+    speed: 12.5,
+    spread: 20,
+    spread_scale: 0.02,
+    ..NO_SPREAD
+};
+/// ...and its pine needles, lobbed slowly.
+pub const SCREAM_NEEDLES: TreeAttack = TreeAttack {
+    projectile: 346,
+    damage: 57,
+    every: 15.0,
+    ticks: 300.0,
+    speed: 4.5,
+    arc: 0.3,
+    reach_gain: 0.004,
+    spread: 30,
+    warmup: 60.0,
+    ..NO_SPREAD
+};
