@@ -362,11 +362,12 @@ mod tests {
     #[test]
     fn a_sandstorm_lives_and_dies_by_the_wind() {
         let mut rng = SmallRng::seed_from_u64(20);
-        let mut weather = Weather::default();
-
         // A calm world never gets one, however long it waits.
-        weather.wind = 0.1;
-        weather.target = 0.1;
+        let mut weather = Weather {
+            wind: 0.1,
+            target: 0.1,
+            ..Default::default()
+        };
         for _ in 0..500_000 {
             weather.tick_sandstorm(true, &mut rng);
         }
