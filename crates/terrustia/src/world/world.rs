@@ -567,6 +567,24 @@ mod cache_tests {
     }
 }
 
+impl crate::world::liquid::LiquidWorld for World {
+    fn tile(&self, x: i32, y: i32) -> Tile {
+        World::tile(self, x, y)
+    }
+
+    fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
+        World::set_tile(self, x, y, tile);
+    }
+
+    fn width(&self) -> i32 {
+        World::width(self)
+    }
+
+    fn height(&self) -> i32 {
+        World::height(self)
+    }
+}
+
 #[cfg(test)]
 mod flag_tests {
     use super::*;

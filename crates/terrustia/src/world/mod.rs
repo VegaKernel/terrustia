@@ -1,4 +1,5 @@
 pub mod items;
+pub mod liquid;
 pub mod objects;
 pub mod progress;
 pub mod wld;

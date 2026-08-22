@@ -205,6 +205,8 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// Liquid waiting to settle. Empty unless something has disturbed it.
+    liquids: crate::world::liquid::Liquids,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -254,6 +256,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            liquids: crate::world::liquid::Liquids::default(),
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -395,6 +398,7 @@ impl GameServer {
         {
             self.save_world("autosave");
         }
+        self.tick_liquids();
         self.tick_weather();
         self.tick_lunar();
         lap(&mut cost, Phase::World);
@@ -1333,6 +1337,7 @@ impl GameServer {
                 let tile = terrustia_proto::tile::Tile::framed(block, fx as i16, fy as i16)
                     .with_wall(was.wall);
                 self.world.set_tile(left + dx, top + dy, tile);
+                self.liquids.disturb(left + dx, top + dy);
                 fy += object.coord_heights.get(dy as usize).copied().unwrap_or(16) + object.padding;
             }
         }
@@ -1624,6 +1629,8 @@ impl GameServer {
 
         if changed {
             self.world.set_tile(x, y, tile);
+            // Mining a block is the commonest way liquid starts moving.
+            self.liquids.disturb(x, y);
         }
         if let Some(block) = broke {
             self.spawn_tile_drop(block, x, y);
@@ -1668,7 +1675,10 @@ impl GameServer {
         for dx in 0..usize::from(square.width) {
             for dy in 0..usize::from(square.height) {
                 if let Some(tile) = square.tile(dx, dy) {
-                    self.world.set_tile(x0 + dx as i32, y0 + dy as i32, tile);
+                    let (x, y) = (x0 + dx as i32, y0 + dy as i32);
+                    self.world.set_tile(x, y, tile);
+                    // Anything a client rewrites might have been holding liquid up.
+                    self.liquids.disturb(x, y);
                 }
             }
         }
@@ -3104,6 +3114,7 @@ impl GameServer {
                     tile.frame_x = -1;
                     tile.frame_y = -1;
                     self.world.set_tile(x, y + dy, tile);
+                    self.liquids.disturb(x, y + dy);
 
                     let edit = TileManipulation {
                         action: 0,
@@ -3436,6 +3447,54 @@ impl GameServer {
             "old one's army started"
         );
         Ok(())
+    }
+
+    /// One tick of settling liquid.
+    ///
+    /// Nothing happens unless something has been disturbed, so a world nobody is digging in costs
+    /// nothing here. What moves is sent as tile squares, batched by row, because a flowing pool
+    /// changes a run of neighbours at once and one packet each would be a flood of its own.
+    fn tick_liquids(&mut self) {
+        if self.liquids.pending() == 0 {
+            return;
+        }
+        let settled = {
+            let world = &mut self.world;
+            self.liquids.tick(world)
+        };
+        let mut touched: Vec<(i32, i32)> = settled.changed;
+        touched.extend(settled.reacted.iter().map(|(x, y, _)| (*x, *y)));
+        if touched.is_empty() {
+            return;
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        // Runs of changed tiles in the same column go out as one square. A flowing pool changes a
+        // stripe of neighbours every tick, and a packet each would be a flood of its own.
+        let mut runs: Vec<(i32, i32, i32)> = Vec::new();
+        for (x, y) in touched {
+            match runs.last_mut() {
+                Some((rx, _, end)) if *rx == x && *end + 1 == y => *end = y,
+                _ => runs.push((x, y, y)),
+            }
+        }
+        for (x, top, bottom) in runs {
+            let height = (bottom - top + 1).clamp(1, 255) as u8;
+            let tiles: Vec<terrustia_proto::Tile> = (0..i32::from(height))
+                .map(|dy| self.world.tile(x, top + dy))
+                .collect();
+            let square = TileSquare {
+                x: x as i16,
+                y: top as i16,
+                width: 1,
+                height,
+                change_type: 0,
+                tiles,
+            };
+            if let Ok(frame) = square.encode() {
+                self.broadcast(frame, None);
+            }
+        }
     }
 
     /// One tick of the wind and the rain.
