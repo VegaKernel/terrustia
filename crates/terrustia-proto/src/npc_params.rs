@@ -3355,3 +3355,82 @@ pub const SUMMON_ATTEMPTS: usize = 500;
 /// It will not put one inside this box around the player.
 pub const SUMMON_SAFE_X: i32 = 20;
 pub const SUMMON_SAFE_Y: i32 = 12;
+
+// --- Duke Fishron ---------------------------------------------------------------------------------
+
+pub const FISHRON: u16 = 370;
+pub const SHARKRON: u16 = 371;
+pub const SHARKRON_2: u16 = 372;
+
+/// One phase of the fight. Fishron runs the same skeleton three times over with different numbers,
+/// which is why they are a table rather than a stack of branches.
+#[derive(Debug, Clone, Copy)]
+pub struct FishronPhase {
+    /// How long it holds station before choosing an attack.
+    pub hover_ticks: f32,
+    pub hover_accel: f32,
+    pub hover_speed: f32,
+    /// The charge: how long it lasts and how fast it goes.
+    pub charge_ticks: f32,
+    pub charge_speed: f32,
+    /// How hard it hits and how much it soaks, relative to its type.
+    pub damage: f32,
+    pub defense: f32,
+}
+
+/// The first phase: measured, and it still has its armour.
+pub const FISHRON_FIRST: FishronPhase = FishronPhase {
+    hover_ticks: 60.0,
+    hover_accel: 0.45,
+    hover_speed: 7.5,
+    charge_ticks: 30.0,
+    charge_speed: 16.0,
+    damage: 1.0,
+    defense: 1.0,
+};
+
+/// The second, below half health: faster, harder, and thinner-skinned.
+pub const FISHRON_SECOND: FishronPhase = FishronPhase {
+    hover_ticks: 20.0,
+    hover_accel: 0.5,
+    hover_speed: 8.0,
+    charge_ticks: 30.0,
+    charge_speed: 16.0,
+    damage: 1.2,
+    defense: 0.8,
+};
+
+/// The third, in expert below fifteen per cent: no armour at all, and very fast.
+pub const FISHRON_THIRD: FishronPhase = FishronPhase {
+    hover_ticks: 30.0,
+    hover_accel: 0.7,
+    hover_speed: 12.0,
+    charge_ticks: 25.0,
+    charge_speed: 27.0,
+    damage: 1.1,
+    defense: 0.0,
+};
+
+/// Expert makes everything a fifth faster again.
+pub const FISHRON_EXPERT_PACE: f32 = 1.2;
+/// Where it holds station: three hundred pixels to one side, two hundred above.
+pub const FISHRON_BESIDE: f32 = 300.0;
+pub const FISHRON_ABOVE: f32 = 200.0;
+/// The attack cycle: ten charges, then a sharkron burst, then bubbles, repeating.
+pub const FISHRON_CYCLE_SHARKRONS: i32 = 10;
+pub const FISHRON_CYCLE_BUBBLES: i32 = 11;
+/// The sharkron burst: one every so many ticks, for this long.
+pub const FISHRON_BURST_TICKS: f32 = 120.0;
+pub const FISHRON_BURST_EVERY: f32 = 20.0;
+pub const FISHRON_BURST_SPEED: f32 = 10.0;
+pub const FISHRON_BURST_ACCEL: f32 = 0.4;
+/// The bubbles: two, thrown from its mouth partway through the wind-up.
+pub const FISHRON_BUBBLE_TICKS: f32 = 90.0;
+pub const FISHRON_BUBBLE_AT: f32 = 30.0;
+pub const FISHRON_BUBBLE: u16 = 385;
+pub const FISHRON_BUBBLE_SPEED: (f32, f32) = (2.0, 8.0);
+/// The pause between phases, during which it does nothing at all.
+pub const FISHRON_SHIFT_TICKS: f32 = 120.0;
+/// Half health starts the second phase; in expert, fifteen per cent starts the third.
+pub const FISHRON_SECOND_AT: f32 = 0.5;
+pub const FISHRON_THIRD_AT: f32 = 0.15;

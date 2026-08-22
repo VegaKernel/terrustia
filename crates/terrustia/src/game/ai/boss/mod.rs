@@ -8,6 +8,7 @@ pub mod brain;
 pub mod deerclops;
 pub mod destroyer;
 pub mod eye;
+pub mod fishron;
 pub mod golem;
 pub mod king_slime;
 pub mod plantera;
