@@ -25,7 +25,7 @@ use terrustia_proto::npc_params::{
 
 use super::drifters::Outcome;
 use crate::game::ai::{Shot, World, face};
-use crate::game::npc::{Npc, TILE, TileView};
+use crate::game::npc::{Npc, TileView};
 
 /// Style 124: falls, and that is the whole routine.
 pub fn slime_chest(npc: &mut Npc) {
@@ -54,7 +54,7 @@ pub fn training_dummy(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcom
     // A dummy has no armour: the point of it is to show what a hit really does.
     npc.defense = 0;
 
-    let anchor = (npc.ai[0] as i32, npc.ai[1] as i32);
+    let anchor = dummy_anchor(npc);
     let still_placed = world.tiles.tile(anchor.0, anchor.1).is_active()
         && world.tiles.tile(anchor.0, anchor.1).block == DUMMY_TILE;
     let watched = world.target.is_some_and(|t| {
@@ -251,15 +251,12 @@ pub fn pal(npc: &mut Npc, world: &World<'_, impl TileView>, escorts_alive: usize
     out
 }
 
-/// Whether a tile column position is where a dummy was planted, used by the server to fill `ai`.
+/// Where a dummy was planted, which the server writes into its `ai` when it raises it.
+///
+/// A dummy that finds nothing there any more takes itself away, so this is the whole of how it
+/// knows its tile has been mined out from under it.
 pub fn dummy_anchor(npc: &Npc) -> (i32, i32) {
     (npc.ai[0] as i32, npc.ai[1] as i32)
-}
-
-/// The tile a dummy stands on, in tile coordinates, worked out from where it was placed.
-pub fn dummy_anchor_from_position(npc: &Npc) -> (i32, i32) {
-    let (cx, cy) = npc.center();
-    ((cx / TILE) as i32, (cy / TILE) as i32)
 }
 
 #[cfg(test)]

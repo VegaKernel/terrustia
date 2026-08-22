@@ -964,11 +964,6 @@ pub fn town_is_slime(npc_type: u16) -> bool {
     matches!(npc_type, 670 | 678..=684)
 }
 
-/// A pet, which idles with animations rather than standing still.
-pub fn town_is_pet(npc_type: u16) -> bool {
-    matches!(npc_type, 637 | 638 | 656) || town_is_slime(npc_type)
-}
-
 /// Turtles and frogs, which are at home in water and never drown.
 pub fn town_breathes_underwater(npc_type: u16) -> bool {
     matches!(npc_type, 361 | 445 | 616 | 617 | 625 | 687)

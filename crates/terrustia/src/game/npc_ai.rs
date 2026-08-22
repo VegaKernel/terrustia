@@ -101,14 +101,6 @@ pub fn pick_target(npc: &Npc, targets: &[Target], range: f32) -> Option<Target> 
         .map(|(t, _)| t)
 }
 
-/// Whether a routine exists for an AI style, as opposed to falling back to standing still.
-///
-/// Used by a test to check the whole pre-hardmode roster is covered, so a type whose behaviour was
-/// never written shows up as a failure rather than as an enemy that stands there.
-pub fn style_is_implemented(style: i32) -> bool {
-    super::ai::parity(style).is_some()
-}
-
 /// What a tick of AI wants the world to do beyond moving the NPC itself.
 #[derive(Debug, Default)]
 pub struct AiOutput {
