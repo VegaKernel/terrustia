@@ -2185,6 +2185,12 @@ const SPREAD_RANGE: i32 = 120;
 /// The demon altar, which is a crafting station before hardmode and an ore mine after it.
 const DEMON_ALTAR: u16 = 26;
 
+/// How far a roar carries, and how long what it leaves behind lasts.
+const ROAR_REACH: f32 = 800.0;
+const ROAR_SLOW_TICKS: i32 = 720;
+/// The Slow debuff, which is what a roar leaves.
+const BUFF_SLOW: u16 = 32;
+
 /// How far a Dark Mage looks for something worth healing, and for a corpse worth raising.
 const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE;
 const RAISE_CHECK_RANGE: f32 = terrustia_proto::npc_params::RAISE_CHECK_RANGE;
@@ -2243,6 +2249,7 @@ impl GameServer {
         let mut close_gates = false;
         let mut raisings: Vec<(f32, f32)> = Vec::new();
         let mut screams = 0usize;
+        let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
@@ -2557,6 +2564,11 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.screamed) {
                     screams += 1;
                 }
+                // A roar leaves everyone within earshot slowed, which is what makes Deerclops's
+                // opening something you have to be somewhere else for.
+                if std::mem::take(&mut ai_out.roared) {
+                    roars.push(npc.center());
+                }
                 // A wither beast standing in its aura weakens whoever is standing in it too.
                 if let Some(reach) = ai_out.aura.take() {
                     let here = npc.center();
@@ -2616,6 +2628,28 @@ impl GameServer {
                 let at = (corpse.0, (ground - 1) as f32 * crate::game::npc::TILE);
                 if let Some(index) = self.npcs.spawn(npc_type, at) {
                     self.broadcast_npc(index);
+                }
+            }
+        }
+
+        // A roar is one moment rather than a state, so what it leaves lasts on its own.
+        for at in roars {
+            let caught: Vec<u8> = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing() && p.life > 0)
+                .filter(|p| {
+                    let (x, y) = (p.position.0 + 10.0, p.position.1 + 21.0);
+                    (x - at.0).hypot(y - at.1) < ROAR_REACH
+                })
+                .map(|p| p.slot)
+                .collect();
+            for slot in caught {
+                if let Ok(frame) =
+                    terrustia_proto::packets::add_player_buff(slot, BUFF_SLOW, ROAR_SLOW_TICKS)
+                {
+                    self.broadcast(frame, None);
                 }
             }
         }

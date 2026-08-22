@@ -134,6 +134,8 @@ pub struct AiOutput {
     pub raising: bool,
     /// Set on the tick Betsy screams.
     pub screamed: bool,
+    /// Set when a roar should leave everyone nearby slowed.
+    pub roared: bool,
     /// How far a draining aura reaches, while one is out.
     pub aura: Option<f32>,
     /// Where the NPC just updated wants to be put, once it has finished going.
@@ -266,6 +268,10 @@ pub fn update_with(
         out.ritual_complete = effects.ritual_complete;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
+        out.roared = effects.roared;
+        // A routine that is bouncing projectiles this tick is one nothing should be able to hurt,
+        // and the flag has to survive out of the routine for the server to hold that line.
+        npc.invulnerable |= effects.reflecting;
         npc.was_hurt = false;
 
         step_physics(npc, tiles);
