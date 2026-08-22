@@ -534,6 +534,8 @@ mod tests {
             crowding: (0.0, 0.0),
             avoid: &[],
             target_taken: false,
+            hooks: None,
+            kin_moving: false,
         }
     }
 

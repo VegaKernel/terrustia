@@ -3244,3 +3244,73 @@ pub const GOLEM_PUNCH_TICKS: f32 = 60.0;
 pub const GOLEM_FREE_ABOVE: f32 = 300.0;
 pub const GOLEM_FREE_SPEED: f32 = 7.0;
 pub const GOLEM_FREE_ACCEL: f32 = 0.05;
+
+// --- Plantera -------------------------------------------------------------------------------------
+
+pub const PLANTERA: u16 = 262;
+pub const PLANTERA_HOOK: u16 = 263;
+pub const PLANTERA_TENTACLE: u16 = 264;
+/// It starts with three hooks and, in its second form, eight tentacles.
+pub const PLANTERA_HOOKS: usize = 3;
+pub const PLANTERA_TENTACLES: usize = 8;
+
+/// How fast it swings, and how hard it accelerates, at each health threshold.
+pub const PLANTERA_SPEED: f32 = 2.5;
+pub const PLANTERA_SPEED_HALF: f32 = 5.0;
+pub const PLANTERA_SPEED_QUARTER: f32 = 7.0;
+pub const PLANTERA_ACCEL: f32 = 0.025;
+pub const PLANTERA_ACCEL_HALF: f32 = 0.05;
+/// Dragged out of the jungle it becomes far faster and hits twice as hard — the same refusal the
+/// Golem makes about its temple.
+pub const PLANTERA_ENRAGED_SPEED: f32 = 8.0;
+pub const PLANTERA_ENRAGED_ACCEL: f32 = 0.15;
+pub const PLANTERA_ENRAGED_LEASH: f32 = 350.0;
+/// How far from its hooks it will swing.
+pub const PLANTERA_LEASH: f32 = 500.0;
+pub const PLANTERA_LEASH_EXPERT: f32 = 150.0;
+
+/// The first form: armoured, and it shoots.
+pub const PLANTERA_DEFENSE: i32 = 36;
+pub const PLANTERA_DAMAGE: i32 = 50;
+pub const PLANTERA_CHARGE: f32 = 80.0;
+pub const PLANTERA_SEED: u16 = 275;
+pub const PLANTERA_SEED_DAMAGE: i32 = 22;
+pub const PLANTERA_SEED_SPEED: f32 = 15.0;
+pub const PLANTERA_SEED_SPEED_EXPERT: f32 = 17.0;
+/// Below eighty per cent it mixes in thorn balls and spiky seeds, which cost it a pause.
+pub const PLANTERA_THORN_BALL: u16 = 276;
+pub const PLANTERA_THORN_BALL_DAMAGE: i32 = 27;
+pub const PLANTERA_THORN_BALL_REST: f32 = -30.0;
+pub const PLANTERA_SPIKY: u16 = 277;
+pub const PLANTERA_SPIKY_DAMAGE: i32 = 31;
+pub const PLANTERA_SPIKY_REST: f32 = -120.0;
+pub const PLANTERA_MIX_AT: f32 = 0.8;
+
+/// The second form: it drops most of its armour, hits far harder, and grows tentacles.
+pub const PLANTERA_SECOND_DEFENSE: i32 = 10;
+pub const PLANTERA_SECOND_DAMAGE: i32 = 70;
+
+/// A hook re-anchors somewhere new every five to ten seconds, sooner as Plantera weakens.
+pub const HOOK_REST: (u32, u32) = (300, 600);
+pub const HOOK_STAGGER: (u32, u32) = (60, 300);
+pub const HOOK_HURRY_HALF: f32 = 2.0;
+pub const HOOK_HURRY_QUARTER: f32 = 2.0;
+pub const HOOK_HURRY_ENRAGED: f32 = 6.0;
+/// How far from its anchor point it looks for somewhere to bite.
+pub const HOOK_SEARCH: i32 = 20;
+pub const HOOK_SEARCH_WIDEN: f32 = 100.0;
+pub const HOOK_SPEED: f32 = 6.0;
+pub const HOOK_SPEED_HALF: f32 = 8.0;
+pub const HOOK_SPEED_QUARTER: f32 = 10.0;
+
+/// A tentacle orbits Plantera at a radius that grows as Plantera weakens.
+pub const TENTACLE_RADIUS: f32 = 200.0;
+pub const TENTACLE_RADIUS_QUARTER: f32 = 100.0;
+pub const TENTACLE_RADIUS_TENTH: f32 = 100.0;
+pub const TENTACLE_ACCEL: f32 = 0.2;
+pub const TENTACLE_ACCEL_EXPERT: f32 = 0.3;
+pub const TENTACLE_EXPERT_RADIUS: f32 = 300.0;
+pub const TENTACLE_CAP: f32 = 8.0;
+/// It picks a new offset within its orbit every two to eight seconds.
+pub const TENTACLE_DRIFT: (u32, u32) = (120, 480);
+pub const TENTACLE_SPREAD: i32 = 100;

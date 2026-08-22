@@ -276,6 +276,18 @@ pub struct Shot {
     pub time_left: u16,
 }
 
+/// What Plantera can see of its own fight.
+fn plantera_state<T: TileView>(world: &World<'_, T>) -> boss::plantera::PlanteraState {
+    boss::plantera::PlanteraState {
+        hooks: world.hooks,
+        // The jungle, underground: the only place it fights at its ordinary pace.
+        at_home: world.conditions.jungle
+            && world
+                .target
+                .is_some_and(|t| t.center.1 > world.conditions.surface_y),
+    }
+}
+
 /// What the Golem can see of its own assembly.
 ///
 /// Which of its parts are still standing changes how often the body hops, and where it is being
@@ -349,6 +361,8 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         crowding: (0.0, 0.0),
         avoid: &[],
         target_taken: false,
+        hooks: None,
+        kin_moving: false,
     }
 }
 
@@ -370,10 +384,11 @@ pub fn parity(style: i32) -> Option<Parity> {
         // a missing number is visible.
         0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
         | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36
-        | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 54 | 55 | 56
-        | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75 | 80 | 85 | 86 | 87 | 88
-        | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113
-        | 114 | 115 | 116 | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
+        | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53
+        | 54 | 55 | 56 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 70 | 72 | 73 | 74 | 75 | 80 | 85
+        | 86 | 87 | 88 | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102
+        | 103 | 104 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 122 | 123 | 124 | 125 | 126
+        | 127 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -406,6 +421,11 @@ pub struct World<'a, T: TileView> {
     pub parent_state: f32,
     /// ...and what fraction of its health it has left.
     pub parent_health: f32,
+    /// Where Plantera's hooks have bitten, averaged. `None` when none have.
+    pub hooks: Option<(f32, f32)>,
+    /// Whether another of this NPC's own type is still travelling, which is how Plantera's hooks
+    /// take turns rather than all letting go at once.
+    pub kin_moving: bool,
     /// Whether something of this NPC's own type is already riding the target.
     ///
     /// Only the nebula headcrab asks, and only so that a swarm of them deals with you one at a
@@ -593,6 +613,20 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         39 => hardmode::roller::roller(npc, world, rng),
         64 => critter::firefly(npc, world, rng),
         86 => hardmode::swooper::swooper(npc, world),
+        51 => {
+            let out = boss::plantera::plantera(npc, world, plantera_state(world), rng);
+            effects.shots.extend(out.shots);
+            effects.spawn.extend(out.spawn);
+        }
+        52 => {
+            // A hook waits its turn: it will not let go while another is still travelling.
+            let out = boss::plantera::hook(npc, world, world.parent, world.kin_moving, rng);
+            effects.expired = out.spent;
+        }
+        53 => {
+            let out = boss::plantera::tentacle(npc, world, world.parent, rng);
+            effects.expired = out.spent;
+        }
         45 => {
             let out = boss::golem::body(npc, world, golem_state(world));
             effects.spawn.extend(out.spawn);
@@ -902,6 +936,8 @@ mod tests {
                 crowding: (0.0, 0.0),
                 avoid: &[],
                 target_taken: false,
+                hooks: None,
+                kin_moving: false,
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);

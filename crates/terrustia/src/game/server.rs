@@ -1827,6 +1827,28 @@ impl GameServer {
                     list
                 }
             };
+            // Where Plantera's hooks have bitten, and how many are still on their way somewhere.
+            let hook_anchors: Vec<(f32, f32)> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.stats.ai_style == 52)
+                .map(|(_, n)| n.center())
+                .collect();
+            let hooks = if hook_anchors.is_empty() {
+                None
+            } else {
+                let count = hook_anchors.len() as f32;
+                Some((
+                    hook_anchors.iter().map(|a| a.0).sum::<f32>() / count,
+                    hook_anchors.iter().map(|a| a.1).sum::<f32>() / count,
+                ))
+            };
+            let moving_hooks = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.stats.ai_style == 52 && n.velocity != (0.0, 0.0))
+                .count();
+
             // Which NPCs are currently riding a player, and whose head each is on.
             let latched: Vec<(u16, u8)> = self
                 .npcs
@@ -1929,6 +1951,11 @@ impl GameServer {
                         avoid: &avoid,
                         // A headcrab already on this player's head is the only thing that stops
                         // another trying, so it is worked out once per NPC that asks.
+                        // Plantera swings from the average of wherever its hooks have bitten.
+                        hooks,
+                        // A hook holds on while any of its siblings is still travelling.
+                        kin_moving: npc.stats.ai_style == 52
+                            && moving_hooks > usize::from(npc.velocity != (0.0, 0.0)),
                         target_taken: npc.stats.ai_style == 85
                             && latched.iter().any(|(ty, slot)| {
                                 *ty == npc.npc_type

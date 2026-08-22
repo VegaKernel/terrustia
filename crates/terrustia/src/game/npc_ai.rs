@@ -41,6 +41,10 @@ pub struct Surroundings<'a> {
     pub avoid: &'a [(f32, f32)],
     /// Whether a nebula headcrab is already latched onto the target.
     pub target_taken: bool,
+    /// Where Plantera's hooks have bitten, averaged.
+    pub hooks: Option<(f32, f32)>,
+    /// Whether another hook is still travelling.
+    pub kin_moving: bool,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -204,6 +208,8 @@ pub fn update_with(
                 &[]
             },
             target_taken: around.target_taken,
+            hooks: around.hooks,
+            kin_moving: around.kin_moving,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,

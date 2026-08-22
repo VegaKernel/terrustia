@@ -10,6 +10,7 @@ pub mod destroyer;
 pub mod eye;
 pub mod golem;
 pub mod king_slime;
+pub mod plantera;
 pub mod prime;
 pub mod queen_bee;
 pub mod skeletron;
