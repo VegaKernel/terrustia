@@ -8,7 +8,7 @@ use terrustia::{
     world::{wld, worldgen},
 };
 use tokio::{net::TcpListener, signal, sync::mpsc};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Events queued from all connections before the game task applies backpressure.
@@ -120,18 +120,57 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
-    let game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
+    let mut game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone()));
 
-    // Dropping the last sender is what tells the game task to stop.
+    // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
+    // than moved so it is still here afterwards to be waited on.
     tokio::select! {
-        _ = signal::ctrl_c() => info!("shutting down"),
-        _ = game => info!("game task ended"),
+        reason = stop_signal() => info!(reason, "shutting down"),
+        _ = &mut game => info!("game task ended"),
     }
 
     accept.abort();
     drop(events_tx);
+    // Wait for the game task to finish. It saves the world on its way out, and returning here
+    // without waiting would drop the runtime mid-write — which is a shutdown that quietly loses
+    // everything since the last autosave.
+    if let Err(e) = game.await
+        && !e.is_cancelled()
+    {
+        error!(error = %e, "the game task did not shut down cleanly");
+    }
     Ok(())
+}
+
+/// Wait for whichever signal asks the server to stop, and say which it was.
+///
+/// A process manager sends `SIGTERM`, not `SIGINT`: systemd, Docker and Kubernetes all stop a
+/// service that way. Handling only Ctrl-C means every managed shutdown kills the server outright
+/// and the world is lost back to its last autosave.
+async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal as unix_signal};
+        let mut term = match unix_signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            // Without a handler, Ctrl-C alone is better than refusing to start.
+            Err(e) => {
+                warn!(error = %e, "cannot listen for SIGTERM; only Ctrl-C will stop cleanly");
+                let _ = signal::ctrl_c().await;
+                return "ctrl-c";
+            }
+        };
+        tokio::select! {
+            _ = signal::ctrl_c() => "ctrl-c",
+            _ = term.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+        "ctrl-c"
+    }
 }
 
 struct Args {
