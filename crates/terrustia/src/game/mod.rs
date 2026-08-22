@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod army;
 pub mod clock;
 pub mod event;
 pub mod housing;

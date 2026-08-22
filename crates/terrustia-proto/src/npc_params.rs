@@ -3774,3 +3774,189 @@ pub const FREE_EYE_ACCEL: f32 = 0.2;
 /// A leech ferries life back to whichever part is most hurt.
 pub const LEECH_TICKS: f32 = 90.0;
 pub const LEECH_HEAL: i32 = 1000;
+
+/// The Old One's Army: the crystal, its lane portals and everything that comes out of them.
+///
+/// Every one of these is a separate type per tier rather than one type with a level, which is why
+/// the wave tables read as long lists of ids.
+pub const MARTIAN_SAUCER_CORE: u16 = 395;
+pub const DD2_ETERNIA_CRYSTAL: u16 = 548;
+pub const DD2_LANE_PORTAL: u16 = 549;
+pub const DD2_BARTENDER: u16 = 550;
+pub const DD2_BETSY: u16 = 551;
+pub const DD2_GOBLIN_T1: u16 = 552;
+pub const DD2_GOBLIN_T2: u16 = 553;
+pub const DD2_GOBLIN_T3: u16 = 554;
+pub const DD2_GOBLIN_BOMBER_T1: u16 = 555;
+pub const DD2_GOBLIN_BOMBER_T2: u16 = 556;
+pub const DD2_GOBLIN_BOMBER_T3: u16 = 557;
+pub const DD2_WYVERN_T1: u16 = 558;
+pub const DD2_WYVERN_T2: u16 = 559;
+pub const DD2_WYVERN_T3: u16 = 560;
+pub const DD2_JAVELINST_T1: u16 = 561;
+pub const DD2_JAVELINST_T2: u16 = 562;
+pub const DD2_JAVELINST_T3: u16 = 563;
+pub const DD2_DARK_MAGE_T1: u16 = 564;
+pub const DD2_DARK_MAGE_T3: u16 = 565;
+pub const DD2_SKELETON_T1: u16 = 566;
+pub const DD2_SKELETON_T3: u16 = 567;
+pub const DD2_WITHER_BEAST_T2: u16 = 568;
+pub const DD2_WITHER_BEAST_T3: u16 = 569;
+pub const DD2_DRAKIN_T2: u16 = 570;
+pub const DD2_DRAKIN_T3: u16 = 571;
+pub const DD2_KOBOLD_WALKER_T2: u16 = 572;
+pub const DD2_KOBOLD_WALKER_T3: u16 = 573;
+pub const DD2_KOBOLD_FLYER_T2: u16 = 574;
+pub const DD2_KOBOLD_FLYER_T3: u16 = 575;
+pub const DD2_OGRE_T2: u16 = 576;
+pub const DD2_OGRE_T3: u16 = 577;
+pub const DD2_LIGHTNING_BUG_T3: u16 = 578;
+pub const FAIRY_CRITTER_PINK: u16 = 583;
+pub const FAIRY_CRITTER_GREEN: u16 = 584;
+pub const FAIRY_CRITTER_BLUE: u16 = 585;
+pub const HALLOW_BOSS: u16 = 636;
+
+/// What style 108 — the diving flyers — needs to know about a type.
+///
+/// It is one routine with two very different creatures in it: the wyvern circles, dives, and pulls
+/// out; the kobold flyer circles, dives, and does not pull out. The difference is entirely in these
+/// numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DivingFlyer {
+    /// How much knockback it takes while circling. It takes none at all once committed.
+    pub knockback_resist: f32,
+    /// Circling speed.
+    pub speed: f32,
+    /// How far above its target it wants to sit.
+    pub hover_above: f32,
+    /// How close it must be before it will commit.
+    pub engage: f32,
+    /// Smoothing while circling: larger is lazier.
+    pub approach: f32,
+    /// How long it hangs still before the dive.
+    pub wind_up: f32,
+    /// How much speed it sheds each tick of that wind-up.
+    pub decay: f32,
+    /// Random spread on the dive, in fortieths of a pixel per tick.
+    pub spread: i32,
+    /// Dive speed.
+    pub dive_speed: f32,
+    /// How long a dive runs before it is allowed to end.
+    pub dive_ticks: f32,
+    /// How far past its target it must get before a dive counts as finished.
+    pub break_off: f32,
+    /// Steering smoothing during the dive.
+    pub turn: f32,
+    /// How much speed the dive gains per tick, before smoothing.
+    pub accel: f32,
+    /// Below this speed the dive is spent.
+    pub min_dive_speed: f32,
+    /// Downward drift during the wind-up.
+    pub sink: f32,
+    /// Whether hitting the world — or the player — ends it in an explosion.
+    pub splat: bool,
+    /// Whether it ever pulls out of a dive of its own accord.
+    pub commits: bool,
+    /// How long it will chase without a line of sight before taking one on faith.
+    pub patience: f32,
+    /// How hard the flock pushes itself apart.
+    pub separation: f32,
+}
+
+pub const DIVING_FLYER_EXPLOSION: i32 = 192;
+pub const DIVING_FLYER_EXPLOSION_DAMAGE: i32 = 80;
+
+/// The numbers for one of style 108's types.
+pub fn diving_flyer(npc_type: u16) -> DivingFlyer {
+    let base = DivingFlyer {
+        knockback_resist: 0.4,
+        speed: 10.0,
+        hover_above: 200.0,
+        engage: 750.0,
+        approach: 30.0,
+        wind_up: 30.0,
+        decay: 0.95,
+        spread: 50,
+        dive_speed: 14.0,
+        dive_ticks: 30.0,
+        break_off: 100.0,
+        turn: 20.0,
+        accel: 0.0,
+        min_dive_speed: 7.0,
+        sink: 0.0,
+        splat: true,
+        commits: false,
+        patience: 120.0,
+        separation: 0.05,
+    };
+    match npc_type {
+        DD2_WYVERN_T1 | DD2_WYVERN_T2 | DD2_WYVERN_T3 => DivingFlyer {
+            knockback_resist: match npc_type {
+                DD2_WYVERN_T2 => 0.5,
+                DD2_WYVERN_T3 => 0.2,
+                _ => 0.7,
+            },
+            speed: 3.0,
+            hover_above: 400.0,
+            engage: 500.0,
+            approach: 90.0,
+            wind_up: 20.0,
+            dive_speed: 8.0,
+            break_off: 150.0,
+            turn: 60.0,
+            accel: 0.05,
+            min_dive_speed: 6.0,
+            spread: 0,
+            splat: false,
+            ..base
+        },
+        DD2_KOBOLD_FLYER_T2 | DD2_KOBOLD_FLYER_T3 => DivingFlyer {
+            knockback_resist: if npc_type == DD2_KOBOLD_FLYER_T3 {
+                0.4
+            } else {
+                0.6
+            },
+            speed: 4.0,
+            hover_above: 400.0,
+            engage: 500.0,
+            approach: 90.0,
+            dive_speed: 8.0,
+            break_off: 150.0,
+            turn: 10.0,
+            accel: 0.05,
+            min_dive_speed: 0.0,
+            spread: 3,
+            sink: -0.1,
+            commits: true,
+            ..base
+        },
+        _ => base,
+    }
+}
+
+/// How long a lane portal takes to open, and how long it takes to fade once the event ends.
+pub const LANE_PORTAL_OPENING: f32 = 180.0;
+pub const LANE_PORTAL_CLOSING: f32 = 550.0;
+/// Where a gate stands relative to the arena edge, in tiles.
+pub const LANE_PORTAL_INSET: i32 = 2;
+/// How long the crystal's own countdown between checks is.
+pub const CRYSTAL_TICK: f32 = 180.0;
+/// The two death dramas, won and lost, both run ten seconds.
+pub const CRYSTAL_DRAMA: f32 = 600.0;
+
+/// The lightning bug: hover at range, gather, and throw a bolt.
+pub const LIGHTNING_BUG_SPEED: f32 = 4.0;
+pub const LIGHTNING_BUG_SMOOTHING: f32 = 20.0;
+pub const LIGHTNING_BUG_RANGE: f32 = 200.0;
+/// How close it will let its target get vertically before it climbs away.
+pub const LIGHTNING_BUG_FLOOR: f32 = 50.0;
+pub const LIGHTNING_BUG_SETTLE: f32 = 1.0;
+pub const LIGHTNING_BUG_DECAY: f32 = 0.96;
+pub const LIGHTNING_BUG_CHARGE: f32 = 5.0;
+pub const LIGHTNING_BUG_COOLDOWN: f32 = 30.0;
+pub const LIGHTNING_BUG_SEPARATION: f32 = 0.1;
+pub const LIGHTNING_BUG_BOLT: u16 = 682;
+pub const LIGHTNING_BUG_BOLT_DAMAGE: i32 = 50;
+pub const LIGHTNING_BUG_BOLT_SPEED: f32 = 10.0;
+/// How long a spawned army enemy spends fading in out of its gate.
+pub const ARMY_FADE_IN: f32 = 60.0;

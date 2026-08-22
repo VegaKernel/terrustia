@@ -9,6 +9,7 @@
 //!    is still an approximation is visible in a test rather than hidden behind one.
 
 pub mod ambush;
+pub mod army;
 pub mod balloon;
 pub mod bat;
 pub mod bird;
@@ -369,6 +370,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         hooks: None,
         kin_moving: false,
         sockets_open: 0,
+        army: ArmyView::default(),
     }
 }
 
@@ -393,10 +395,9 @@ pub fn parity(style: i32) -> Option<Parity> {
         | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53
         | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70
         | 71 | 72 | 73 | 74 | 75 | 77 | 78 | 79 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88
-        | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113
-        | 114 | 115 | 116 | 117 | 118 | 119 | 121 | 122 | 123 | 124 | 125 | 126 | 127 => {
-            Parity::Ported
-        }
+        | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 105
+        | 106 | 108 | 111 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 121 | 122 | 123 | 124
+        | 125 | 126 | 127 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -433,6 +434,8 @@ pub struct World<'a, T: TileView> {
     pub hooks: Option<(f32, f32)>,
     /// How many of the Moon Lord's sockets have been broken open without the part dying.
     pub sockets_open: usize,
+    /// What the Old One's Army looks like right now, for the crystal and its gates.
+    pub army: ArmyView,
     /// Whether another of this NPC's own type is still travelling, which is how Plantera's hooks
     /// take turns rather than all letting go at once.
     pub kin_moving: bool,
@@ -450,6 +453,22 @@ pub struct World<'a, T: TileView> {
     /// The routines that read this cannot see other NPCs, so the caller averages the directions
     /// away from anything dangerous close by and hands the result in. Zero means all clear.
     pub crowding: (f32, f32),
+}
+
+/// What the Old One's Army's fixtures need to know about the event around them.
+///
+/// The crystal and its gates are the only NPCs whose behaviour is driven by the event rather than
+/// the other way round, so this is the one direction the world reaches into a routine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArmyView {
+    /// How often a gate lets one through, in ticks. Zero means the event is not running.
+    pub rate: i32,
+    /// Whether the gap between waves is holding everything back.
+    pub on_hold: bool,
+    /// Whether there is still a crystal to defend.
+    pub crystal_alive: bool,
+    /// The arena's two ends in tiles, once something has surveyed them.
+    pub arena: Option<((i32, i32), (i32, i32))>,
 }
 
 /// What a ported routine did beyond moving its NPC.
@@ -481,6 +500,14 @@ pub struct Effects {
     pub rest_for: i32,
     /// Where this NPC wants whatever it is carrying to hang.
     pub carry: Option<(f32, f32)>,
+    /// Gates the crystal wants raised, as (tile x, tile y, left gate).
+    pub gates: Vec<army::crystal::Gate>,
+    /// Set when a gate wants an enemy let out, and from which side.
+    pub release: Option<bool>,
+    /// Set on the tick the crystal's drama finishes, carrying whether it was won.
+    pub army_ended: Option<bool>,
+    /// Set when the crystal wants its gates told to shut.
+    pub close_gates: bool,
 }
 
 /// Drive an NPC whose style is [`Parity::Ported`].
@@ -960,6 +987,7 @@ mod tests {
                 hooks: None,
                 kin_moving: false,
                 sockets_open: 0,
+                army: ArmyView::default(),
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);

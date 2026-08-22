@@ -150,6 +150,7 @@ mod tests {
             hooks: None,
             kin_moving: false,
             sockets_open: 0,
+            army: crate::game::ai::ArmyView::default(),
         }
     }
 

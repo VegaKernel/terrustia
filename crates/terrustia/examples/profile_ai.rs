@@ -86,6 +86,7 @@ fn main() -> ExitCode {
                 &mut out,
                 Surroundings {
                     sockets_open: 0,
+                    army: Default::default(),
                     conditions,
                     hazards: &[],
                     avoid: &[],

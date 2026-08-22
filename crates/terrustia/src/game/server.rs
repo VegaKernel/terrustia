@@ -192,6 +192,10 @@ pub struct GameServer {
     /// The longest tick seen in the current reporting window.
     /// The invasion under way, if any.
     invasion: Option<InvasionState>,
+    /// The Old One's Army, which is a siege rather than an invasion and so keeps its own state.
+    army: crate::game::army::ArmyState,
+    /// The arena's two ends, surveyed once when the crystal goes down and kept until it is gone.
+    army_arena: Option<((i32, i32), (i32, i32))>,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -225,6 +229,8 @@ impl GameServer {
             projectiles: crate::game::projectile::ProjectileStore::new(),
             shots_thrown: 0,
             invasion: None,
+            army: crate::game::army::ArmyState::default(),
+            army_arena: None,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -683,6 +689,7 @@ impl GameServer {
             | id::MINION_ATTACK_TARGET_UPDATE
             | id::SYNC_TILE_PICKING
             | id::SYNC_LOADOUT => self.relay_player_packet(slot, frame.id, &payload),
+            id::CRYSTAL_INVASION_START => self.on_crystal_placed(slot, &payload),
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
             id::TELEPORT_ENTITY => self.on_teleport(slot, &payload),
             // Which town NPC a player is talking to. The owner byte is first, so the ordinary
@@ -2115,6 +2122,10 @@ impl GameServer {
         let mut blasts = Vec::new();
         // Life carried home by leeches this tick, delivered once everything has moved.
         let mut healing: Vec<i32> = Vec::new();
+        let mut gates: Vec<(i32, i32, bool)> = Vec::new();
+        let mut releases: Vec<((f32, f32), bool)> = Vec::new();
+        let mut ended: Option<bool> = None;
+        let mut close_gates = false;
         let mut escaped_probe = false;
         let mut carrying = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
@@ -2202,6 +2213,21 @@ impl GameServer {
                 .filter(|(_, n)| n.stats.ai_style == 85 && n.ai[0] == 5.0)
                 .map(|(_, n)| (n.npc_type, n.target as u8))
                 .collect();
+            // The event as its own fixtures see it. The arena is surveyed once, when the crystal
+            // first asks for its gates, and kept: re-walking it every tick would let a player
+            // change where the gates are by building mid-fight.
+            let army = crate::game::ai::ArmyView {
+                rate: self
+                    .army
+                    .tier
+                    .map_or(0, |tier| tier.lane_spawn_rate(self.army.wave)),
+                on_hold: self.army.spawning_on_hold(),
+                crystal_alive: self
+                    .npcs
+                    .iter()
+                    .any(|(_, n)| n.npc_type == terrustia_proto::npc_params::DD2_ETERNIA_CRYSTAL),
+                arena: self.army_arena,
+            };
             // A Moon Lord socket that has been broken open stays in the fight as an empty
             // shell, so counting the parts is not enough to know how far along the fight is.
             let sockets_open = self
@@ -2315,6 +2341,7 @@ impl GameServer {
                                     && Some(*slot) == targets.first().map(|t| t.slot)
                             }),
                         census: &census,
+                        army,
                         sockets_open,
                         parent,
                         parent_state,
@@ -2342,6 +2369,18 @@ impl GameServer {
                 if let (Some(at), Some(rider)) = (ai_out.carry.take(), npc.passenger) {
                     carrying.push((rider, at, npc.velocity));
                 }
+                // Gates the crystal wants raised, enemies a gate wants let out, and the tick the
+                // whole thing ends: all decided by a fixture, all carried out by the server.
+                gates.extend(std::mem::take(&mut ai_out.gates));
+                if let Some(left) = ai_out.release.take() {
+                    releases.push((npc.center(), left));
+                }
+                if let Some(won) = ai_out.army_ended.take() {
+                    ended = Some(won);
+                }
+                if std::mem::take(&mut ai_out.close_gates) {
+                    close_gates = true;
+                }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -2368,6 +2407,8 @@ impl GameServer {
                 npc.dirty = true;
             }
         }
+
+        self.apply_army(gates, releases, ended, close_gates);
 
         // Doors a fighter finished working at.
         for action in std::mem::take(&mut ai_out.doors) {
@@ -2920,8 +2961,18 @@ impl GameServer {
 
         // Live armour, not the type's: a rolling tortoise really is twice as hard to hurt.
         let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
-        let killed = npc.take_damage(amount, hit.knockback, hit.direction);
+        let mut killed = npc.take_damage(amount, hit.knockback, hit.direction);
         let (npc_type, value, center) = (npc.npc_type, npc.stats.value, npc.center());
+
+        // The Eternia Crystal does not die when it runs out of life — it goes into its losing
+        // drama, which is what actually ends the event ten seconds later.
+        if killed && npc_type == terrustia_proto::npc_params::DD2_ETERNIA_CRYSTAL {
+            killed = false;
+            npc.ai[1] = 1.0;
+            npc.ai[0] = 0.0;
+            npc.life = npc.life_max;
+            npc.dirty = true;
+        }
 
         self.broadcast(hit.encode()?, Some(slot));
 
@@ -2931,6 +2982,7 @@ impl GameServer {
             self.drop_coins(value, center);
             self.drop_loot(npc_type, center);
             self.note_invasion_kill(npc_type);
+            self.note_army_kill(npc_type);
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
@@ -3095,6 +3147,221 @@ impl GameServer {
 
     /// Send in the next invader, if it is time and there is room.
     ///
+    /// Packet 113: a player put an Eternia Crystal on its stand.
+    ///
+    /// This is the only way the Old One's Army begins, and it is refused more often than not: the
+    /// stand has to be real, there cannot already be a crystal, and the arena has to be sixty
+    /// tiles clear on both sides. That last check is why building a proper arena is part of
+    /// preparing for the event rather than a nicety.
+    fn on_crystal_placed(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::npc_params::DD2_ETERNIA_CRYSTAL;
+        /// The Eternia Crystal Stand.
+        const STAND: u16 = 466;
+        /// How much room the arena needs each side of the stand, in tiles.
+        const ARENA_CLEARANCE: i32 = 60;
+
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+
+        if self
+            .npcs
+            .iter()
+            .any(|(_, n)| n.npc_type == DD2_ETERNIA_CRYSTAL)
+        {
+            return Ok(());
+        }
+        let tile = self.world.tile(x, y);
+        if !tile.is_active() || tile.block != STAND {
+            debug!(slot, x, y, "no crystal stand there");
+            return Ok(());
+        }
+        // The crystal sits at the middle of the stand, not at the tile that was clicked.
+        let origin = (
+            x - i32::from(tile.frame_x) / 18,
+            y - i32::from(tile.frame_y) / 18,
+        );
+        let (left, right) = crate::game::army::arena_ends(&WorldTiles(&self.world), origin);
+        if right.0 - origin.0 < ARENA_CLEARANCE || origin.0 - left.0 < ARENA_CLEARANCE {
+            debug!(slot, x, y, "the arena is too small for the army");
+            return Ok(());
+        }
+
+        let Some(tier) = self.army_tier() else {
+            return Ok(());
+        };
+        self.army.start(tier, origin);
+        self.army_arena = Some((left, right));
+        // Three hundred ticks before the first wave, so the arena has a moment to settle.
+        self.army.hold = 300;
+
+        let at = (
+            origin.0 as f32 * crate::game::npc::TILE + 40.0,
+            origin.1 as f32 * crate::game::npc::TILE + 64.0,
+        );
+        if let Some(index) = self.npcs.spawn(DD2_ETERNIA_CRYSTAL, at) {
+            self.broadcast_npc(index);
+        }
+        self.announce("The Old One's Army is approaching!");
+        info!(
+            slot,
+            ?tier,
+            x = origin.0,
+            y = origin.1,
+            "old one's army started"
+        );
+        Ok(())
+    }
+
+    /// Which tier the world has earned. There is no choosing it: it is whatever the progression
+    /// allows, and a fresh world only ever gets tier one.
+    fn army_tier(&self) -> Option<crate::game::army::Tier> {
+        use crate::game::army::Tier;
+        let progress = &self.world.progress;
+        Some(if progress.hard_mode && progress.downed_golem {
+            Tier::Three
+        } else if progress.hard_mode && progress.downed_mech_any {
+            Tier::Two
+        } else {
+            Tier::One
+        })
+    }
+
+    /// Carry out what the event's fixtures decided this tick.
+    ///
+    /// The crystal and the gates only ever *ask*: they have no way to make an NPC or end an event
+    /// themselves. Keeping the decisions in the routines and the consequences here is what lets
+    /// both be tested on their own.
+    fn apply_army(
+        &mut self,
+        gates: Vec<(i32, i32, bool)>,
+        releases: Vec<((f32, f32), bool)>,
+        ended: Option<bool>,
+        close_gates: bool,
+    ) {
+        use terrustia_proto::npc_params::DD2_LANE_PORTAL;
+
+        self.army.tick();
+
+        for (x, y, left) in gates {
+            let at = (
+                x as f32 * crate::game::npc::TILE,
+                (y as f32 + 1.0) * crate::game::npc::TILE,
+            );
+            if let Some(index) = self.npcs.spawn(DD2_LANE_PORTAL, at)
+                && let Some(gate) = self.npcs.get_mut(index)
+            {
+                // Which side it is on is the one thing a gate cannot work out for itself.
+                gate.ai[2] = if left { 0.0 } else { 1.0 };
+                gate.position.0 -= gate.width() / 2.0;
+                gate.position.1 -= gate.height();
+                self.broadcast_npc(index);
+            }
+        }
+
+        // A gate that has been told to shut goes into its closing phase wherever it is in its
+        // cycle, which is what makes the ending look like the whole arena powering down at once.
+        if close_gates {
+            let closing: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == DD2_LANE_PORTAL && n.ai[1] == 0.0)
+                .map(|(index, _)| index)
+                .collect();
+            for index in closing {
+                if let Some(gate) = self.npcs.get_mut(index) {
+                    gate.ai[1] = 1.0;
+                    gate.ai[0] = 0.0;
+                    gate.dirty = true;
+                }
+            }
+        }
+
+        if !releases.is_empty()
+            && let Some(tier) = self.army.tier
+        {
+            let players = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing() && p.life > 0)
+                .count();
+            for (bottom, left) in releases {
+                let census: Vec<(u16, usize)> = {
+                    let mut counts: std::collections::HashMap<u16, usize> =
+                        std::collections::HashMap::new();
+                    for (_, n) in self.npcs.iter() {
+                        *counts.entry(n.npc_type).or_default() += 1;
+                    }
+                    counts.into_iter().collect()
+                };
+                let count = |ty: u16| census.iter().find(|(t, _)| *t == ty).map_or(0, |(_, c)| *c);
+                let wanted = crate::game::army::from_gate(
+                    tier,
+                    self.army.wave,
+                    left,
+                    self.army.kills,
+                    &count,
+                    players,
+                    &mut self.rng,
+                );
+                for npc_type in wanted {
+                    if let Some(index) = self.npcs.spawn(npc_type, bottom)
+                        && let Some(spawned) = self.npcs.get_mut(index)
+                    {
+                        spawned.position.0 -= spawned.width() / 2.0;
+                        spawned.position.1 -= spawned.height();
+                        self.broadcast_npc(index);
+                    }
+                }
+            }
+        }
+
+        if let Some(won) = ended {
+            self.announce(if won {
+                "The Old One's Army has been defeated!"
+            } else {
+                "The Eternia Crystal was destroyed!"
+            });
+            info!(won, wave = self.army.wave, "old one's army over");
+            self.army.stop();
+            self.army_arena = None;
+        }
+    }
+
+    /// Count a kill against the Old One's Army, and advance its waves.
+    fn note_army_kill(&mut self, npc_type: u16) {
+        if !self.army.ongoing() {
+            return;
+        }
+        // Expert and above count double.
+        let expert = self.world.game_mode >= 1;
+        if let Some(wave) = self.army.note_kill(npc_type, expert) {
+            if self.army.won() {
+                // Winning does not end the event here: the crystal plays it out first, and the
+                // event ends when the drama does.
+                let crystals: Vec<u8> = self
+                    .npcs
+                    .iter()
+                    .filter(|(_, n)| n.npc_type == terrustia_proto::npc_params::DD2_ETERNIA_CRYSTAL)
+                    .map(|(index, _)| index)
+                    .collect();
+                for index in crystals {
+                    if let Some(crystal) = self.npcs.get_mut(index) {
+                        crystal.ai[1] = 2.0;
+                        crystal.ai[0] = 0.0;
+                        crystal.dirty = true;
+                    }
+                }
+                self.announce("The Old One's Army has been defeated!");
+            } else {
+                self.announce(&format!("Old One's Army: wave {} complete!", wave));
+            }
+        }
+    }
+
     /// Invaders arrive at the invasion's column rather than around a player, which is what makes
     /// one feel like something marching toward you instead of something appearing on top of you.
     fn spawn_invaders(&mut self, state: InvasionState) {

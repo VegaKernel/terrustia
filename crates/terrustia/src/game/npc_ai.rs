@@ -47,6 +47,8 @@ pub struct Surroundings<'a> {
     pub kin_moving: bool,
     /// How many of the Moon Lord's sockets are broken open.
     pub sockets_open: usize,
+    /// What the Old One's Army looks like right now.
+    pub army: super::ai::ArmyView,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -124,6 +126,14 @@ pub struct AiOutput {
     pub detonated: bool,
     /// Life the NPC just updated carried home, on the tick it arrived.
     pub healed: i32,
+    /// Gates the Eternia Crystal wants raised, as (tile x, tile y, left gate).
+    pub gates: Vec<super::ai::army::crystal::Gate>,
+    /// Set when a lane portal wants an enemy let out, and from which side.
+    pub release: Option<bool>,
+    /// Set on the tick the crystal's drama finishes, carrying whether the event was won.
+    pub army_ended: Option<bool>,
+    /// Set when the crystal wants its gates told to shut.
+    pub close_gates: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -215,6 +225,7 @@ pub fn update_with(
             hooks: around.hooks,
             kin_moving: around.kin_moving,
             sockets_open: around.sockets_open,
+            army: around.army,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,
@@ -236,6 +247,10 @@ pub fn update_with(
         out.rest_for = effects.rest_for;
         out.detonated = effects.detonated;
         out.healed = effects.healed;
+        out.gates = effects.gates;
+        out.release = effects.release;
+        out.army_ended = effects.army_ended;
+        out.close_gates = effects.close_gates;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;
@@ -300,7 +315,7 @@ pub enum Avoids {
 /// NPC table, so it is only built when something present actually reads it.
 pub fn avoidance(style: i32) -> Option<Avoids> {
     match style {
-        85 | 86 | 90 | 122 => Some(Avoids::OwnKind),
+        85 | 86 | 90 | 108 | 111 | 122 => Some(Avoids::OwnKind),
         64 => Some(Avoids::AnythingAlive),
         _ => None,
     }
