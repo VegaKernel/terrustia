@@ -80,8 +80,10 @@ pub struct InvasionState {
     pub remaining: i32,
     /// How many it started with, which is what the progress bar and the wave rules divide by.
     pub started_with: i32,
-    /// The tile column it is coming from.
+    /// The tile column its front has reached, which moves.
     pub from_x: i32,
+    /// Where it is marching to, which is spawn.
+    pub toward_x: i32,
 }
 
 impl InvasionState {
@@ -112,6 +114,9 @@ impl InvasionState {
             remaining: size,
             started_with: size,
             from_x,
+            // Everything marches on the town. The Martians begin there, so their front is already
+            // where it is going and they never move.
+            toward_x: spawn_x,
         })
     }
 
@@ -130,7 +135,39 @@ impl InvasionState {
 
     /// Which side it came from, for the announcement.
     pub fn side(&self) -> &'static str {
-        if self.from_x <= 0 { "west" } else { "east" }
+        if self.from_x <= self.toward_x {
+            "west"
+        } else {
+            "east"
+        }
+    }
+
+    /// How far an invasion's front moves in a tick.
+    pub const MARCH: i32 = 1;
+    /// How close to that front a player must be for invaders to arrive around them, in tiles.
+    pub const FRONT: i32 = 187;
+
+    /// Advance the front one tick. Returns whether it has just arrived at spawn.
+    ///
+    /// An invasion *marches*: it is not a column that spawns things forever, it is a line that
+    /// closes on the town, and invaders appear around whichever player is near it. Left fixed at
+    /// the edge it came from, an invasion is something that happens at the far side of the ocean
+    /// and nowhere a player would ever stand.
+    pub fn march(&mut self) -> bool {
+        if self.from_x == self.toward_x {
+            return false;
+        }
+        if self.from_x > self.toward_x {
+            self.from_x = (self.from_x - Self::MARCH).max(self.toward_x);
+        } else {
+            self.from_x = (self.from_x + Self::MARCH).min(self.toward_x);
+        }
+        self.from_x == self.toward_x
+    }
+
+    /// Whether a player standing here is close enough to the front to be attacked.
+    pub fn reaches(&self, player_x: i32) -> bool {
+        (player_x - self.from_x).abs() <= Self::FRONT
     }
 
     /// Pick the next invader to send in.
@@ -256,6 +293,61 @@ mod tests {
         assert_eq!(Invasion::Goblin.size_for(4), 240);
         assert!(Invasion::FrostLegion.size_for(1) > Invasion::Goblin.size_for(1));
         assert!(Invasion::Martian.size_for(1) > Invasion::FrostLegion.size_for(1));
+    }
+
+    /// An invasion marches on the town, and arrives.
+    #[test]
+    fn an_invasion_marches_on_the_town() {
+        let mut rng = SmallRng::seed_from_u64(1);
+        let mut army =
+            InvasionState::begin(Invasion::Goblin, 1, 2100, 4200, &mut rng).expect("an invasion");
+        let started = army.from_x;
+        assert_ne!(started, 2100, "it should begin at an edge");
+        assert!(!army.reaches(2100), "and not reach the town yet");
+
+        let mut arrived = None;
+        for tick in 1..10_000 {
+            if army.march() {
+                arrived = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(
+            arrived,
+            Some((started - 2100).abs()),
+            "it should take a tick a tile"
+        );
+        assert_eq!(army.from_x, 2100, "and stop at the town");
+        assert!(army.reaches(2100), "and reach whoever is standing there");
+        assert!(!army.march(), "and stay arrived rather than marching past");
+    }
+
+    /// The front only reaches a player who is near it.
+    #[test]
+    fn the_front_only_reaches_who_is_near_it() {
+        let mut rng = SmallRng::seed_from_u64(2);
+        let army =
+            InvasionState::begin(Invasion::Pirate, 1, 2100, 4200, &mut rng).expect("an invasion");
+        assert!(army.reaches(army.from_x), "somebody standing on it");
+        assert!(
+            army.reaches(army.from_x + InvasionState::FRONT),
+            "and somebody at the edge of its reach"
+        );
+        assert!(
+            !army.reaches(army.from_x + InvasionState::FRONT + 1),
+            "but not one step further"
+        );
+    }
+
+    /// The Martians land on the town, so their front never has to move.
+    #[test]
+    fn the_martians_are_already_here() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut martians =
+            InvasionState::begin(Invasion::Martian, 1, 2100, 4200, &mut rng).expect("an invasion");
+        assert!(martians.reaches(2100), "they are already on the town");
+        martians.march();
+        assert!(!martians.march());
     }
 
     /// The Martians land where you are; everything else marches in from an edge.

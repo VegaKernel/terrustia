@@ -49,6 +49,10 @@ async fn main() -> ExitCode {
 
     // Any further arguments are chat commands to run first, so an operator can set the scene:
     // `watch 127.0.0.1:7777 60 "/time night"`.
+    // A fresh character has a hundred life, and an invasion will not begin for a party who have
+    // never found a life crystal. A watcher is here to see things happen, so it says otherwise.
+    let _ = client.set_life(400, 400).await;
+
     // Stand where we were asked to before saying anything, so a `/where` reports the real spot
     // rather than where the client happened to start.
     for _ in 0..4 {

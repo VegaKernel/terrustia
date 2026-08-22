@@ -4638,8 +4638,27 @@ impl GameServer {
             return;
         };
 
-        // They come in at the column the invasion owns, standing on whatever ground is there.
-        let column = state.from_x.clamp(10, self.world.width() - 10);
+        // They arrive around a player near the front rather than at the front itself, which is
+        // what puts an invasion in front of somebody instead of over the horizon.
+        let near_front: Vec<i32> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && p.life > 0)
+            .map(|p| (p.position.0 / crate::game::npc::TILE) as i32)
+            .filter(|x| state.reaches(*x))
+            .collect();
+        let column = match near_front.as_slice() {
+            // Nobody near the front: the army waits rather than spawning into an empty ocean.
+            [] => return,
+            columns => {
+                let at = columns[rand::Rng::random_range(&mut self.rng, 0..columns.len())];
+                let side = if state.from_x > state.toward_x { 1 } else { -1 };
+                // Just off screen on the side the army is coming from.
+                (at + side * rand::Rng::random_range(&mut self.rng, 40..80))
+                    .clamp(10, self.world.width() - 10)
+            }
+        };
         let Some(ground) = spawn::find_ground(&self.world, column, i32::from(self.world.spawn_y))
         else {
             return;
@@ -4723,8 +4742,16 @@ impl GameServer {
                 "spawn tick"
             );
         }
-        // While an invasion is running its members replace the ordinary pool, and they walk in
-        // from the column it is coming from rather than appearing around each player.
+        // While an invasion is running its members replace the ordinary pool. The front closes on
+        // the town a tile a tick and they arrive around whoever is near it, so an invasion is
+        // something that comes to you rather than something waiting at the edge of the map.
+        if let Some(state) = self.invasion.as_mut()
+            && state.march()
+        {
+            let kind = state.kind;
+            self.announce(&format!("{} {}", kind.arrival(), "have reached the town!"));
+            info!(invasion = ?kind, "the invasion has arrived");
+        }
         if let Some(state) = self.invasion {
             self.spawn_invaders(state);
             return;

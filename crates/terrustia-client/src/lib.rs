@@ -494,6 +494,20 @@ impl Client {
         }
     }
 
+    /// Tell the server how much life this client has.
+    ///
+    /// A fresh character has a hundred, and several things in the game are gated on two hundred —
+    /// an invasion will not begin for a party who have never found a life crystal, and the wind
+    /// will not blow hard. A test or a probe that wants to reach those has to say so.
+    pub async fn set_life(&mut self, life: i16, life_max: i16) -> Result<()> {
+        let packet = packets::PlayerHealth {
+            player: self.slot,
+            life,
+            life_max,
+        };
+        self.send(&packet.encode()?).await
+    }
+
     /// Read events until one matches, or a shorter deadline than the client's own expires.
     ///
     /// For asserting that something does *not* arrive, where waiting the full timeout would only
