@@ -2113,6 +2113,8 @@ impl GameServer {
         let mut expired = Vec::new();
         let mut transformed = Vec::new();
         let mut blasts = Vec::new();
+        // Life carried home by leeches this tick, delivered once everything has moved.
+        let mut healing: Vec<i32> = Vec::new();
         let mut escaped_probe = false;
         let mut carrying = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
@@ -2200,6 +2202,13 @@ impl GameServer {
                 .filter(|(_, n)| n.stats.ai_style == 85 && n.ai[0] == 5.0)
                 .map(|(_, n)| (n.npc_type, n.target as u8))
                 .collect();
+            // A Moon Lord socket that has been broken open stays in the fight as an empty
+            // shell, so counting the parts is not enough to know how far along the fight is.
+            let sockets_open = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| matches!(n.stats.ai_style, 78 | 79) && n.ai[0] == -2.0)
+                .count();
             // A handful of routines wait on how many of some other type are still alive: the
             // Brain's armour, the Wall's leeches, a pal's escort. One pass counts them all, and
             // only for the types anything actually asks about.
@@ -2306,6 +2315,7 @@ impl GameServer {
                                     && Some(*slot) == targets.first().map(|t| t.slot)
                             }),
                         census: &census,
+                        sockets_open,
                         parent,
                         parent_state,
                         parent_health,
@@ -2332,9 +2342,30 @@ impl GameServer {
                 if let (Some(at), Some(rider)) = (ai_out.carry.take(), npc.passenger) {
                     carrying.push((rider, at, npc.velocity));
                 }
+                // A leech that got home puts its load into whichever part is worst off, which is
+                // what makes ignoring them cost you work you have already done.
+                if std::mem::take(&mut ai_out.healed) > 0 {
+                    healing.push(std::mem::take(&mut ai_out.healed));
+                }
                 if npc.time_left <= 0 {
                     expired.push(index);
                 }
+            }
+        }
+
+        // Each load goes to the most hurt part still standing.
+        for amount in healing {
+            let worst = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| matches!(n.stats.ai_style, 77..=79) && n.life < n.life_max)
+                .min_by_key(|(_, n)| n.life)
+                .map(|(index, _)| index);
+            if let Some(index) = worst
+                && let Some(npc) = self.npcs.get_mut(index)
+            {
+                npc.life = (npc.life + amount).min(npc.life_max);
+                npc.dirty = true;
             }
         }
 

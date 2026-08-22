@@ -149,6 +149,7 @@ mod tests {
             target_taken: false,
             hooks: None,
             kin_moving: false,
+            sockets_open: 0,
         }
     }
 

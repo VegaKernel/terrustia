@@ -13,6 +13,7 @@ pub mod fishron;
 pub mod golem;
 pub mod king_slime;
 pub mod moon;
+pub mod moon_lord;
 pub mod plantera;
 pub mod prime;
 pub mod queen_bee;

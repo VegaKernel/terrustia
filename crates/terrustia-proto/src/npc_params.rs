@@ -3716,3 +3716,61 @@ pub const TABLET_SHARD: u16 = 526;
 /// A devote paces, turning to face the tablet, and gives up after five seconds of nothing.
 pub const DEVOTE_DRAG: f32 = 0.93;
 pub const DEVOTE_PATIENCE: f32 = 300.0;
+
+// --- The Moon Lord --------------------------------------------------------------------------------
+
+pub const MOON_LORD_CORE: u16 = 398;
+pub const MOON_LORD_HEAD: u16 = 396;
+pub const MOON_LORD_HAND: u16 = 397;
+pub const MOON_LORD_FREE_EYE: u16 = 400;
+pub const MOON_LORD_LEECH: u16 = 401;
+
+/// Each part runs one of three attack scripts. A script is five entries of
+/// `(attack, how long it lasts)`, and which script a part gets is fixed when it opens — so the
+/// three eyes are always doing different things at once, and the fight has a shape rather than a
+/// rhythm.
+///
+/// Attack 0 is "wait", 1 is the bolts, 2 is the heavy attack — a deathray from the head, a
+/// phantasmal sphere from a hand — and 3 is the spread of spheres.
+pub const MOON_LORD_SCRIPTS: [[(u8, i32); 5]; 3] = [
+    [(0, 50), (1, 70), (2, 330), (0, 60), (3, 90)],
+    [(1, 70), (0, 50), (3, 90), (0, 60), (2, 330)],
+    [(3, 180), (0, 30), (2, 435), (3, 180), (1, 375)],
+];
+
+/// The core hangs a hundred and thirty pixels below the player and cannot be hurt until every eye
+/// is open.
+pub const MOON_LORD_BELOW: f32 = 130.0;
+pub const MOON_LORD_SPEED: f32 = 8.0;
+pub const MOON_LORD_ACCEL: f32 = 0.5;
+/// Its parts stand this far out from the core.
+pub const MOON_LORD_HAND_OUT: f32 = 400.0;
+pub const MOON_LORD_HAND_UP: f32 = 100.0;
+pub const MOON_LORD_HEAD_UP: f32 = 400.0;
+/// The opening and the death both take a second.
+pub const MOON_LORD_OPENING: f32 = 60.0;
+/// The death drama runs for ten seconds.
+pub const MOON_LORD_DEATH_TICKS: f32 = 600.0;
+/// Past this it leaves.
+pub const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
+
+/// What its parts throw.
+pub const PHANTASMAL_BOLT: u16 = 452;
+pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
+pub const PHANTASMAL_EYE: u16 = 454;
+pub const PHANTASMAL_EYE_DAMAGE: i32 = 40;
+pub const PHANTASMAL_DEATHRAY: u16 = 455;
+pub const PHANTASMAL_DEATHRAY_DAMAGE: i32 = 75;
+pub const PHANTASMAL_SPHERE: u16 = 462;
+pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 30;
+/// The bolts come in threes, a fifth of a second apart.
+pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
+pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;
+/// The head's deathray sweeps across nine seconds.
+pub const MOON_LORD_RAY_SWEEP: f32 = 540.0;
+/// A free eye, once its socket is broken, hunts on its own.
+pub const FREE_EYE_SPEED: f32 = 9.0;
+pub const FREE_EYE_ACCEL: f32 = 0.2;
+/// A leech ferries life back to whichever part is most hurt.
+pub const LEECH_TICKS: f32 = 90.0;
+pub const LEECH_HEAL: i32 = 1000;

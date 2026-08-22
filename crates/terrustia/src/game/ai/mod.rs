@@ -307,7 +307,7 @@ fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
 }
 
 /// The types worth counting each tick, because some routine's behaviour turns on how many are up.
-pub const CENSUS_TYPES: [u16; 13] = [
+pub const CENSUS_TYPES: [u16; 15] = [
     terrustia_proto::npc_params::CREEPER,
     terrustia_proto::npc_params::WALL_LEECH,
     terrustia_proto::npc_params::PAL_ESCORT,
@@ -321,6 +321,8 @@ pub const CENSUS_TYPES: [u16; 13] = [
     terrustia_proto::npc_params::CULTIST_DEVOTE,
     terrustia_proto::npc_params::CULTIST_ARCHER,
     terrustia_proto::npc_params::CULTIST_CLONE,
+    terrustia_proto::npc_params::MOON_LORD_HAND,
+    terrustia_proto::npc_params::MOON_LORD_HEAD,
 ];
 
 impl<T: TileView> World<'_, T> {
@@ -366,6 +368,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         target_taken: false,
         hooks: None,
         kin_moving: false,
+        sockets_open: 0,
     }
 }
 
@@ -389,9 +392,11 @@ pub fn parity(style: i32) -> Option<Parity> {
         | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36
         | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 48 | 49 | 50 | 51 | 52 | 53
         | 54 | 55 | 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 67 | 68 | 69 | 70
-        | 71 | 72 | 73 | 74 | 75 | 80 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 90 | 91 | 92 | 93
-        | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113 | 114 | 115 | 116 | 117
-        | 118 | 119 | 121 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
+        | 71 | 72 | 73 | 74 | 75 | 77 | 78 | 79 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88
+        | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104 | 113
+        | 114 | 115 | 116 | 117 | 118 | 119 | 121 | 122 | 123 | 124 | 125 | 126 | 127 => {
+            Parity::Ported
+        }
         _ => return None,
     };
     Some(level)
@@ -426,6 +431,8 @@ pub struct World<'a, T: TileView> {
     pub parent_health: f32,
     /// Where Plantera's hooks have bitten, averaged. `None` when none have.
     pub hooks: Option<(f32, f32)>,
+    /// How many of the Moon Lord's sockets have been broken open without the part dying.
+    pub sockets_open: usize,
     /// Whether another of this NPC's own type is still travelling, which is how Plantera's hooks
     /// take turns rather than all letting go at once.
     pub kin_moving: bool,
@@ -466,6 +473,8 @@ pub struct Effects {
     pub called_invasion: bool,
     /// Set when it went off rather than merely dying, which hurts whatever is next to it.
     pub detonated: bool,
+    /// Life this one just carried back to whatever it belongs to.
+    pub healed: i32,
     /// Set while it is in a phase that bounces projectiles off rather than taking them.
     pub reflecting: bool,
     /// How long the thing it just turned into should sit still before doing anything.
@@ -950,6 +959,7 @@ mod tests {
                 target_taken: false,
                 hooks: None,
                 kin_moving: false,
+                sockets_open: 0,
             };
             // Panics here rather than silently doing nothing, which is the point.
             let _ = run(&mut npc, &world, &mut rng);

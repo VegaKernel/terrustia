@@ -45,6 +45,8 @@ pub struct Surroundings<'a> {
     pub hooks: Option<(f32, f32)>,
     /// Whether another hook is still travelling.
     pub kin_moving: bool,
+    /// How many of the Moon Lord's sockets are broken open.
+    pub sockets_open: usize,
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
@@ -120,6 +122,8 @@ pub struct AiOutput {
     pub rest_for: i32,
     /// Set when the NPC just updated went off rather than merely dying.
     pub detonated: bool,
+    /// Life the NPC just updated carried home, on the tick it arrived.
+    pub healed: i32,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -210,6 +214,7 @@ pub fn update_with(
             target_taken: around.target_taken,
             hooks: around.hooks,
             kin_moving: around.kin_moving,
+            sockets_open: around.sockets_open,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
             parent: around.parent,
@@ -230,6 +235,7 @@ pub fn update_with(
         out.transform = effects.transform;
         out.rest_for = effects.rest_for;
         out.detonated = effects.detonated;
+        out.healed = effects.healed;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         npc.was_hurt = false;

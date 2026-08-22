@@ -85,6 +85,7 @@ fn main() -> ExitCode {
                 &mut rng,
                 &mut out,
                 Surroundings {
+                    sockets_open: 0,
                     conditions,
                     hazards: &[],
                     avoid: &[],
