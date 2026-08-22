@@ -4141,3 +4141,53 @@ pub const RAISE_MINIMUM: usize = 3;
 pub const RAISE_MOST: usize = 8;
 /// Where it puts the healing sigil, relative to itself.
 pub const DARK_MAGE_HEAL_OUT: f32 = 240.0;
+
+/// Betsy, tier three's champion.
+///
+/// Her fight is a script rather than a reaction: eight slots, cycled, each naming one attack. Only
+/// one slot is uncertain — the spin has a one-in-three chance of being skipped for the scream —
+/// so learning Betsy is learning the order.
+pub const BETSY_SCRIPT: [u8; 8] = [2, 2, 3, 2, 4, 5, 3, 6];
+/// The slot that sometimes gets skipped, and what it turns into.
+pub const BETSY_SKIPPABLE: usize = 5;
+/// Her two projectiles.
+pub const BETSY_FLAME_BREATH: u16 = 687;
+pub const BETSY_FIREBALL: u16 = 686;
+pub const BETSY_ATTACK_DAMAGE: i32 = 35;
+/// The wyverns she screams up, and how many she will have out at once.
+pub const BETSY_WYVERN: u16 = DD2_WYVERN_T3;
+pub const BETSY_WYVERN_CAP: usize = 4;
+/// Hovering between attacks: where she sits, how fast she gets there, how long she waits.
+pub const BETSY_HOVER_OUT: f32 = 300.0;
+pub const BETSY_HOVER_UP: f32 = 200.0;
+pub const BETSY_HOVER_SPEED: f32 = 7.5;
+pub const BETSY_HOVER_ACCEL: f32 = 0.45;
+pub const BETSY_HOVER_TICKS: f32 = 30.0;
+pub const BETSY_ARRIVE: f32 = 10.0;
+/// The plain dash.
+pub const BETSY_DASH_SPEED: f32 = 23.0;
+pub const BETSY_DASH_TICKS: f32 = 30.0;
+/// The flame breath: line up this far out, fire, and hold the run this long.
+pub const BETSY_BREATH_OUT: f32 = 600.0;
+pub const BETSY_BREATH_UP: f32 = 250.0;
+pub const BETSY_BREATH_APPROACH: f32 = 12.0;
+pub const BETSY_BREATH_LINE_UP: f32 = 40.0;
+pub const BETSY_BREATH_RUN: f32 = 80.0;
+pub const BETSY_BREATH_DASH: f32 = 10.0;
+/// The fireball run: much further out, much faster, six fireballs ten ticks apart.
+pub const BETSY_RUN_OUT: f32 = 1500.0;
+pub const BETSY_RUN_UP: f32 = 350.0;
+pub const BETSY_RUN_APPROACH: f32 = 13.0;
+pub const BETSY_RUN_LINE_UP: f32 = 60.0;
+pub const BETSY_RUN_SPEED: f32 = 12.0;
+pub const BETSY_FIREBALL_EVERY: i32 = 10;
+pub const BETSY_FIREBALLS: i32 = 6;
+pub const BETSY_RUN_CLIMB: f32 = 60.0;
+/// The spin: one full turn in a second.
+pub const BETSY_SPIN_TICKS: f32 = 60.0;
+/// The scream: how long she will chase before doing it anyway, and when the wyverns come.
+pub const BETSY_SCREAM_CHASE: f32 = 180.0;
+pub const BETSY_SCREAM_CLOSE: f32 = 350.0;
+pub const BETSY_SCREAM_TICKS: f32 = 90.0;
+pub const BETSY_SCREAM_AT: [f32; 3] = [20.0, 45.0, 70.0];
+pub const BETSY_LEAP_AT: f32 = 20.0;

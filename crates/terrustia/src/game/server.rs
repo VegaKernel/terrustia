@@ -2132,6 +2132,7 @@ impl GameServer {
         let mut ended: Option<bool> = None;
         let mut close_gates = false;
         let mut raisings: Vec<(f32, f32)> = Vec::new();
+        let mut screams = 0usize;
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -2441,6 +2442,11 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.raising) {
                     raisings.push(npc.center());
                 }
+                // Betsy's scream also brings wyverns down through the lane portals, which is what
+                // makes it a wall of them rather than the one she calls to herself.
+                if std::mem::take(&mut ai_out.screamed) {
+                    screams += 1;
+                }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -2483,6 +2489,27 @@ impl GameServer {
                 };
                 let at = (corpse.0, (ground - 1) as f32 * crate::game::npc::TILE);
                 if let Some(index) = self.npcs.spawn(npc_type, at) {
+                    self.broadcast_npc(index);
+                }
+            }
+        }
+
+        for _ in 0..screams {
+            let gates: Vec<(f32, f32)> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == terrustia_proto::npc_params::DD2_LANE_PORTAL)
+                .map(|(_, n)| n.center())
+                .collect();
+            if gates.is_empty() {
+                continue;
+            }
+            for _ in 0..3 {
+                let at = gates[rand::Rng::random_range(&mut self.rng, 0..gates.len())];
+                if let Some(index) = self
+                    .npcs
+                    .spawn(terrustia_proto::npc_params::BETSY_WYVERN, at)
+                {
                     self.broadcast_npc(index);
                 }
             }

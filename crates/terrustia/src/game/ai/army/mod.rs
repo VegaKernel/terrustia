@@ -5,6 +5,7 @@
 //! Crystal is an NPC you are defending rather than fighting, and a lane portal is an NPC whose
 //! whole behaviour is a spawn timer. Neither has an attack.
 
+pub mod betsy;
 pub mod bug;
 pub mod crystal;
 pub mod flyer;
