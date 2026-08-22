@@ -264,8 +264,8 @@ pub fn is_a_guess(npc: &Npc) -> bool {
 
 /// One of the positions on the ellipse above the player, shared out between the group.
 fn orbit_slot(player: (f32, f32), index: usize, of: usize) -> (f32, f32) {
-    let even = of % 2 == 0;
-    let step = ((index + usize::from(even) + 1) / 2) as f32;
+    let even = of.is_multiple_of(2);
+    let step = (index + usize::from(even)).div_ceil(2) as f32;
     let mut angle = step * std::f32::consts::TAU * CULTIST_ORBIT_SPREAD / of as f32;
     if index % 2 == 1 {
         angle = -angle;
