@@ -57,6 +57,7 @@ fn main() -> ExitCode {
         windy: false,
         wind: 0.0,
         desert: false,
+        sandstorm: false,
         crimson: world.crimson,
         jungle: false,
         snow: false,

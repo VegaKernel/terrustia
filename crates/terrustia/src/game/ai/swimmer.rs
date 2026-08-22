@@ -30,8 +30,8 @@ const SUBMERGED: u8 = 128;
 
 /// Drive one jellyfish for a tick.
 pub fn jellyfish<T: TileView>(npc: &mut Npc, world: &World<'_, T>) {
-    // The expert-mode electrified phase is not modelled: it needs expert difficulty, which this
-    // server does not run, and it only gates damage rather than movement.
+    // The expert-mode electrified phase only gates damage rather than movement, so it does not
+    // change anything here.
     if npc.direction == 0
         && let Some(t) = world.target
     {

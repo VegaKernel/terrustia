@@ -2423,8 +2423,6 @@ impl GameServer {
                 blood_moon: self.world.blood_moon,
                 day: self.world.day_time,
                 eclipse: self.world.eclipse,
-                // Weather is not modelled, so only nightfall sends residents indoors, and the
-                // things that need a wind blowing simply wither.
                 raining: self.world.raining,
                 windy: self.weather.windy(),
                 crimson: self.world.crimson,
@@ -2434,6 +2432,7 @@ impl GameServer {
                 // Worked out once a tick from wherever the nearest player is, rather than per NPC:
                 // the zone scan reads a forty-tile square and only the tumbleweed asks.
                 desert: biome == crate::game::spawn::Biome::Desert,
+                sandstorm: self.weather.sandstorm,
                 surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
                 // Game mode 0 is classic; everything above it is expert or harder, and the
                 // routines that branch only ask whether it is above classic.
@@ -3972,7 +3971,8 @@ impl GameServer {
             .flatten()
             .any(|p| p.is_playing() && p.life_max >= 120);
         let was_raining = self.weather.raining;
-        self.weather.tick(strong_enough, &mut self.rng);
+        let hard_mode = self.world.progress.hard_mode;
+        self.weather.tick(strong_enough, hard_mode, &mut self.rng);
         // The world carries the weather so it goes into the save with everything else.
         self.world.wind = self.weather.wind;
         self.world.raining = self.weather.raining;

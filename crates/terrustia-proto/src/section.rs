@@ -66,7 +66,7 @@ pub struct SignInfo {
 
 /// Non-tile contents of a section.
 ///
-/// Tile entities (training dummies, item frames, pylons) are not modelled yet; the count is always
+/// Tile entities are kept beside the world rather than in a section's trailer; the count is always
 /// written as zero, which is what a world without them would send anyway.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SectionExtras {

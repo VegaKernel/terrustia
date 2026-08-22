@@ -38,6 +38,16 @@ pub struct Weather {
     pub rain_time: i32,
     /// How hard it is coming down, nought to one.
     pub max_rain: f32,
+    /// Whether a sandstorm is blowing, and how long it has left.
+    ///
+    /// A sandstorm is not weather of its own — it is what a strong enough wind does over a desert,
+    /// and it dies when the wind drops. Nothing but the tumbleweed reads it, and the tumbleweed is
+    /// a different creature in one.
+    pub sandstorm: bool,
+    pub sandstorm_time: i32,
+    pub severity: f32,
+    /// What the severity is heading toward. Kept public so a loaded world can restore it.
+    pub intended_severity: f32,
 }
 
 impl Default for Weather {
@@ -50,6 +60,10 @@ impl Default for Weather {
             raining: false,
             rain_time: 0,
             max_rain: 0.0,
+            sandstorm: false,
+            sandstorm_time: 0,
+            severity: 0.0,
+            intended_severity: 0.0,
         }
     }
 }
@@ -60,9 +74,10 @@ const DAY: i32 = 86_400;
 impl Weather {
     /// One tick. `strong_enough` is whether anyone in the world has found a life crystal, which
     /// is the gate on real weather happening at all.
-    pub fn tick(&mut self, strong_enough: bool, rng: &mut SmallRng) {
+    pub fn tick(&mut self, strong_enough: bool, hard_mode: bool, rng: &mut SmallRng) {
         self.tick_wind(strong_enough, rng);
         self.tick_rain(strong_enough, rng);
+        self.tick_sandstorm(hard_mode, rng);
     }
 
     fn tick_wind(&mut self, strong_enough: bool, rng: &mut SmallRng) {
@@ -193,6 +208,62 @@ impl Weather {
         self.max_rain = 0.0;
     }
 
+    /// One tick of the sandstorm.
+    ///
+    /// It needs a real wind to begin and a real wind to continue: drop below the threshold and it
+    /// bleeds away fifteen times faster than it otherwise would, and a dead calm kills it outright.
+    fn tick_sandstorm(&mut self, hard_mode: bool, rng: &mut SmallRng) {
+        if self.sandstorm {
+            self.sandstorm_time -= 1;
+            if !self.wind_enough_for_sand() {
+                self.sandstorm_time -= 15;
+            }
+            if self.wind == 0.0 {
+                self.sandstorm_time = 0;
+            }
+            if self.sandstorm_time <= 0 {
+                self.sandstorm = false;
+                self.sandstorm_time = 0;
+                self.roll_severity(rng);
+            }
+        } else if self.wind_enough_for_sand() {
+            // Twice as likely in hardmode as before it, which is what makes a desert a worse
+            // place to be later than it was.
+            let one_in = if hard_mode { 21_600 * 2 } else { 21_600 * 3 };
+            if rng.random_range(0..one_in) == 0 {
+                self.sandstorm = true;
+                // Eight hours to a full day of it.
+                self.sandstorm_time = rng.random_range(28_800..=86_400);
+                self.roll_severity(rng);
+            }
+        }
+        if rng.random_range(0..18_000) == 0 {
+            self.roll_severity(rng);
+        }
+        // The severity creeps toward what it is aiming at rather than jumping.
+        let toward = (self.intended_severity - self.severity).signum();
+        let next = (self.severity + 0.003 * toward).clamp(0.0, 1.0);
+        // Overshooting means it has arrived.
+        self.severity = if (self.intended_severity - next).signum() != toward {
+            self.intended_severity
+        } else {
+            next
+        };
+    }
+
+    fn roll_severity(&mut self, rng: &mut SmallRng) {
+        self.intended_severity = if self.sandstorm {
+            rng.random_range(0.2..=1.0)
+        } else {
+            0.0
+        };
+    }
+
+    /// A sandstorm needs six tenths of a full wind behind it.
+    fn wind_enough_for_sand(&self) -> bool {
+        self.wind.abs() >= 0.6
+    }
+
     /// Whether it is windy enough for the things that need wind to do anything.
     pub fn windy(&self) -> bool {
         self.wind.abs() >= WINDY
@@ -210,7 +281,7 @@ mod tests {
         let mut weather = Weather::default();
         let mut trace = Vec::new();
         for _ in 0..ticks {
-            weather.tick(strong_enough, &mut rng);
+            weather.tick(strong_enough, false, &mut rng);
             trace.push(weather.wind);
         }
         (weather, trace)
@@ -287,6 +358,105 @@ mod tests {
         );
     }
 
+    /// A sandstorm needs a real wind, and dies when the wind drops.
+    #[test]
+    fn a_sandstorm_lives_and_dies_by_the_wind() {
+        let mut rng = SmallRng::seed_from_u64(20);
+        let mut weather = Weather::default();
+
+        // A calm world never gets one, however long it waits.
+        weather.wind = 0.1;
+        weather.target = 0.1;
+        for _ in 0..500_000 {
+            weather.tick_sandstorm(true, &mut rng);
+        }
+        assert!(!weather.sandstorm, "a breeze should not raise a sandstorm");
+
+        // A real wind eventually does.
+        weather.wind = 0.7;
+        let mut raised = false;
+        for _ in 0..500_000 {
+            weather.tick_sandstorm(true, &mut rng);
+            if weather.sandstorm {
+                raised = true;
+                break;
+            }
+        }
+        assert!(raised, "a strong wind should raise one");
+        assert!(weather.sandstorm_time >= 28_800, "and it should last hours");
+
+        // Dropping the wind kills it far faster than it would have died.
+        let was = weather.sandstorm_time;
+        weather.wind = 0.1;
+        for _ in 0..100 {
+            weather.tick_sandstorm(true, &mut rng);
+        }
+        assert!(
+            weather.sandstorm_time < was - 100,
+            "the wind dropping should be costing it more than time alone"
+        );
+
+        // And a dead calm ends it outright.
+        weather.wind = 0.0;
+        weather.tick_sandstorm(true, &mut rng);
+        assert!(!weather.sandstorm, "a dead calm should have ended it");
+    }
+
+    /// Hardmode makes sandstorms half again as likely.
+    #[test]
+    fn hardmode_raises_more_sandstorms() {
+        let count = |hard_mode: bool| {
+            let mut raised = 0;
+            for seed in 0..6u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                let mut weather = Weather {
+                    wind: 0.7,
+                    ..Default::default()
+                };
+                let mut was = false;
+                for _ in 0..400_000 {
+                    weather.tick_sandstorm(hard_mode, &mut rng);
+                    if weather.sandstorm && !was {
+                        raised += 1;
+                    }
+                    was = weather.sandstorm;
+                }
+            }
+            raised
+        };
+        let before = count(false);
+        let after = count(true);
+        assert!(
+            after > before,
+            "{after} in hardmode against {before} before it"
+        );
+    }
+
+    /// The severity creeps rather than jumping, and stays inside its bounds.
+    #[test]
+    fn the_severity_creeps() {
+        let mut rng = SmallRng::seed_from_u64(21);
+        let mut weather = Weather {
+            wind: 0.7,
+            ..Default::default()
+        };
+        let mut last = weather.severity;
+        for _ in 0..200_000 {
+            weather.tick_sandstorm(true, &mut rng);
+            assert!(
+                (0.0..=1.0).contains(&weather.severity),
+                "severity {} is out of bounds",
+                weather.severity
+            );
+            assert!(
+                (weather.severity - last).abs() <= 0.0031,
+                "severity jumped from {last} to {}",
+                weather.severity
+            );
+            last = weather.severity;
+        }
+    }
+
     /// Rain starts, runs for hours, and stops on its own.
     #[test]
     fn rain_starts_and_stops() {
@@ -305,7 +475,7 @@ mod tests {
         let started = weather.rain_time;
         let mut ticks = 0;
         while weather.raining && ticks < started + 10 {
-            weather.tick(true, &mut rng);
+            weather.tick(true, false, &mut rng);
             ticks += 1;
         }
         assert!(!weather.raining, "and it should have stopped");
@@ -320,7 +490,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut weather = Weather::default();
             for _ in 0..2_000_000 {
-                weather.tick(true, &mut rng);
+                weather.tick(true, false, &mut rng);
                 if weather.raining {
                     rained = true;
                     break;

@@ -78,6 +78,8 @@ pub struct Conditions {
     /// Whether the nearest player is standing in a desert, which is the only place a tumbleweed
     /// will stay.
     pub desert: bool,
+    /// Whether a sandstorm is blowing. A tumbleweed in one is a different creature.
+    pub sandstorm: bool,
     /// Pixel depth of the surface layer, below which "outdoors" stops applying.
     pub surface_y: f32,
     /// Whether the world is expert or better.
@@ -111,6 +113,7 @@ impl Default for Conditions {
             snow: false,
             wind: 0.0,
             desert: false,
+            sandstorm: false,
             surface_y: 0.0,
             expert: false,
             hardmode: false,
@@ -879,8 +882,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         99 => effects.expired = hardmode::drifters::solar_goop(npc).spent,
         // Nothing but a marker: it removes itself the moment it is asked to do anything.
         104 => effects.expired = true,
-        // Sandstorms are not modelled, so the wind never reaches a tumbleweed.
-        26 => tumbleweed::update(npc, world, false),
+        // A tumbleweed in a sandstorm is carried by the wind rather than merely rolling.
+        26 => {
+            let carried = world.conditions.sandstorm && world.conditions.desert;
+            tumbleweed::update(npc, world, carried);
+        }
         113 | 125 => {
             if balloon::update(npc, world) == balloon::Outcome::Popped {
                 effects.died = true;
