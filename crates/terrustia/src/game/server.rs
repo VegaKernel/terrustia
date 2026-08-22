@@ -203,6 +203,8 @@ pub struct GameServer {
     moon: crate::game::moons::MoonState,
     /// The Lunar Apocalypse: four pillars and what comes after them.
     lunar: crate::game::lunar::LunarState,
+    /// The wind and the rain, which several ported routines read.
+    weather: crate::game::weather::Weather,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -224,6 +226,17 @@ impl GameServer {
             warn!("saving is unavailable: this world was generated rather than loaded from a file");
         }
 
+        // The weather comes off the world it was loaded with, so a reloaded save picks up the
+        // shower it was in the middle of rather than starting clear.
+        let weather = crate::game::weather::Weather {
+            wind: world.wind,
+            target: world.wind,
+            raining: world.raining,
+            rain_time: world.rain_time,
+            max_rain: world.max_rain,
+            ..Default::default()
+        };
+
         Self {
             config,
             world,
@@ -240,6 +253,7 @@ impl GameServer {
             army_arena: None,
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
+            weather,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -381,6 +395,7 @@ impl GameServer {
         {
             self.save_world("autosave");
         }
+        self.tick_weather();
         self.tick_lunar();
         lap(&mut cost, Phase::World);
 
@@ -2344,12 +2359,12 @@ impl GameServer {
                 eclipse: self.world.eclipse,
                 // Weather is not modelled, so only nightfall sends residents indoors, and the
                 // things that need a wind blowing simply wither.
-                raining: false,
-                windy: false,
+                raining: self.world.raining,
+                windy: self.weather.windy(),
                 crimson: self.world.crimson,
                 snow: biome == crate::game::spawn::Biome::Snow,
                 jungle: biome == crate::game::spawn::Biome::Jungle,
-                wind: 0.0,
+                wind: self.weather.wind,
                 // Worked out once a tick from wherever the nearest player is, rather than per NPC:
                 // the zone scan reads a forty-tile square and only the tumbleweed asks.
                 desert: biome == crate::game::spawn::Biome::Desert,
@@ -3423,6 +3438,33 @@ impl GameServer {
         Ok(())
     }
 
+    /// One tick of the wind and the rain.
+    ///
+    /// Both are gated on somebody in the world having found a life crystal, which is the game's
+    /// own way of keeping a brand-new world's weather quiet.
+    fn tick_weather(&mut self) {
+        let strong_enough = self
+            .players
+            .iter()
+            .flatten()
+            .any(|p| p.is_playing() && p.life_max >= 120);
+        let was_raining = self.weather.raining;
+        self.weather.tick(strong_enough, &mut self.rng);
+        // The world carries the weather so it goes into the save with everything else.
+        self.world.wind = self.weather.wind;
+        self.world.raining = self.weather.raining;
+        self.world.rain_time = self.weather.rain_time;
+        self.world.max_rain = self.weather.max_rain;
+        if was_raining != self.weather.raining {
+            self.announce(if self.weather.raining {
+                "It has started to rain."
+            } else {
+                "The rain has stopped."
+            });
+            self.broadcast_world_data();
+        }
+    }
+
     /// One tick of the Lunar Apocalypse: the pillars' shields, and the minute after the last one.
     fn tick_lunar(&mut self) {
         use crate::game::lunar::{MOON_LORD, PILLARS};
@@ -3580,6 +3622,8 @@ impl GameServer {
         }
         self.world.blood_moon = false;
         self.moon.start(moon);
+        self.world.pumpkin_moon = moon == Moon::Pumpkin;
+        self.world.snow_moon = moon == Moon::Frost;
         self.announce(match moon {
             Moon::Pumpkin => "The pumpkin moon is rising...",
             Moon::Frost => "The frost moon is rising...",
@@ -3595,6 +3639,8 @@ impl GameServer {
             return;
         };
         info!(?moon, wave, "moon over");
+        self.world.pumpkin_moon = false;
+        self.world.snow_moon = false;
         self.broadcast_world_data();
     }
 

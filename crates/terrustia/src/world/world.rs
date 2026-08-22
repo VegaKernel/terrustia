@@ -42,6 +42,9 @@ pub struct World {
     pub raining: bool,
     pub rain_time: i32,
     pub max_rain: f32,
+    /// Which moon is up, if either. Kept on the world because the client is told about it.
+    pub pumpkin_moon: bool,
+    pub snow_moon: bool,
     /// The wind the world is blowing, signed: positive blows east.
     ///
     /// Several ported routines read it and have been reading nothing but calm until now.
@@ -101,6 +104,8 @@ impl World {
             blood_moon: false,
             eclipse: false,
             moon_phase: 0,
+            pumpkin_moon: false,
+            snow_moon: false,
             raining: false,
             rain_time: 0,
             max_rain: 0.0,
@@ -319,11 +324,58 @@ impl World {
     }
 
     /// Build the packet `7` payload describing this world.
+    ///
+    /// The flag block is filled in from the world's own history rather than left blank. The client
+    /// drives real behaviour off it — which shops open, what a Dryad will talk about, whether the
+    /// map draws an event — so a server that sends zeroes leaves every client believing it has
+    /// joined a brand-new world however far along the save actually is.
     pub fn world_data(&self) -> WorldData {
+        use terrustia_proto::packets::WorldFlag as F;
         let mut flags = WorldFlags::default();
-        flags.set_crimson(self.crimson);
+        let p = &self.progress;
+        for (flag, on) in [
+            (F::Crimson, self.crimson),
+            (F::HardMode, p.hard_mode),
+            (F::ShadowOrbSmashed, p.shadow_orb_smashed),
+            (F::DownedBoss1, p.downed_boss1),
+            (F::DownedBoss2, p.downed_boss2),
+            (F::DownedBoss3, p.downed_boss3),
+            (F::DownedClown, p.downed_clown),
+            (F::DownedPlantera, p.downed_plantera),
+            (F::DownedMech1, p.downed_mech1),
+            (F::DownedMech2, p.downed_mech2),
+            (F::DownedMech3, p.downed_mech3),
+            (F::DownedMechAny, p.downed_mech_any),
+            (F::DownedKingSlime, p.downed_king_slime),
+            (F::DownedQueenBee, p.downed_queen_bee),
+            (F::DownedFishron, p.downed_fishron),
+            (F::DownedMartians, p.downed_martians),
+            (F::DownedAncientCultist, p.downed_ancient_cultist),
+            (F::DownedMoonLord, p.downed_moon_lord),
+            (F::DownedHalloweenKing, p.downed_halloween_king),
+            (F::DownedHalloweenTree, p.downed_halloween_tree),
+            (F::DownedChristmasIceQueen, p.downed_christmas_ice_queen),
+            (F::DownedChristmasSantank, p.downed_christmas_santank),
+            (F::DownedChristmasTree, p.downed_christmas_tree),
+            (F::DownedGolem, p.downed_golem),
+            (F::DownedPirates, p.downed_pirates),
+            (F::DownedFrostLegion, p.downed_frost),
+            (F::DownedGoblins, p.downed_goblins),
+            (F::DownedTowerSolar, p.downed_tower_solar),
+            (F::DownedTowerVortex, p.downed_tower_vortex),
+            (F::DownedTowerNebula, p.downed_tower_nebula),
+            (F::DownedTowerStardust, p.downed_tower_stardust),
+            (F::PumpkinMoon, self.pumpkin_moon),
+            (F::SnowMoon, self.snow_moon),
+        ] {
+            flags.set_flag(flag, on);
+        }
 
         WorldData {
+            wind_speed_target: self.wind,
+            // The client reads rain from its strength, so a dry world has to send nought rather
+            // than the strength of whatever the last shower was.
+            max_raining: if self.raining { self.max_rain } else { 0.0 },
             time: self.time,
             day_time: self.day_time,
             blood_moon: self.blood_moon,
@@ -512,5 +564,90 @@ mod cache_tests {
         w.start_tracking_changes();
         assert!(!w.set_tile(-1, 0, Tile::block(1)));
         assert!(w.take_dirty_sections().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+    use terrustia_proto::packets::WorldFlag as F;
+
+    fn bit(data: &WorldData, flag: F) -> bool {
+        // The flag positions are private to the packet, so this reads them the way a client does:
+        // by asking for a world with only that one flag set and seeing which bit moved.
+        let mut probe = WorldFlags::default();
+        probe.set_flag(flag, true);
+        data.flags
+            .0
+            .iter()
+            .zip(probe.0.iter())
+            .any(|(sent, wanted)| *wanted != 0 && sent & wanted != 0)
+    }
+
+    /// Every flag the world knows about reaches the client.
+    #[test]
+    fn the_flag_block_carries_the_world_history() {
+        let mut world = crate::world::worldgen::generate(400, 300, "flags", 1);
+        world.crimson = true;
+        world.progress.hard_mode = true;
+        world.progress.downed_plantera = true;
+        world.progress.downed_moon_lord = true;
+        world.progress.downed_tower_nebula = true;
+        world.pumpkin_moon = true;
+
+        let data = world.world_data();
+        for flag in [
+            F::Crimson,
+            F::HardMode,
+            F::DownedPlantera,
+            F::DownedMoonLord,
+            F::DownedTowerNebula,
+            F::PumpkinMoon,
+        ] {
+            assert!(bit(&data, flag), "{flag:?} did not reach the client");
+        }
+        for flag in [
+            F::DownedGolem,
+            F::SnowMoon,
+            F::DownedBoss1,
+            F::DownedTowerSolar,
+        ] {
+            assert!(!bit(&data, flag), "{flag:?} was set and should not be");
+        }
+    }
+
+    /// A blank world sends a blank flag block, so nothing is set by accident.
+    #[test]
+    fn a_fresh_world_sends_nothing() {
+        let world = crate::world::worldgen::generate(400, 300, "fresh", 2);
+        let data = world.world_data();
+        let crimson_only = world.crimson;
+        let set: u32 = data.flags.0.iter().map(|b| b.count_ones()).sum();
+        assert_eq!(
+            set,
+            u32::from(crimson_only),
+            "a fresh world set {set} flags: {:?}",
+            data.flags.0
+        );
+    }
+
+    /// The rain the client is told about is the rain that is actually falling.
+    #[test]
+    fn a_dry_world_reports_no_rain() {
+        let mut world = crate::world::worldgen::generate(400, 300, "rain", 3);
+        world.max_rain = 0.8;
+        world.raining = false;
+        assert_eq!(world.world_data().max_raining, 0.0, "not raining, no rain");
+
+        world.raining = true;
+        assert_eq!(world.world_data().max_raining, 0.8);
+    }
+
+    /// The wind reaches the client too, both ways.
+    #[test]
+    fn the_wind_reaches_the_client() {
+        let mut world = crate::world::worldgen::generate(400, 300, "wind", 4);
+        world.wind = -0.42;
+        assert_eq!(world.world_data().wind_speed_target, -0.42);
     }
 }

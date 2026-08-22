@@ -11,6 +11,7 @@ pub mod player;
 pub mod projectile;
 pub mod server;
 pub mod spawn;
+pub mod weather;
 
 pub use player::{ConnState, Player};
 pub use server::{GameServer, ServerEvent};
