@@ -40,6 +40,24 @@ fn main() -> ExitCode {
         p.downed_queen_bee
     );
     println!(
+        "late        cultist={} moon_lord={} fishron={} martians={} towers={:?} apocalypse={}",
+        p.downed_ancient_cultist,
+        p.downed_moon_lord,
+        p.downed_fishron,
+        p.downed_martians,
+        (
+            p.downed_tower_solar,
+            p.downed_tower_vortex,
+            p.downed_tower_nebula,
+            p.downed_tower_stardust
+        ),
+        p.lunar_apocalypse_up,
+    );
+    println!(
+        "weather     raining={} rain_time={} max_rain={:.2} wind={:.3}",
+        world.raining, world.rain_time, world.max_rain, world.wind,
+    );
+    println!(
         "            mechs={}/{}/{} any={} plantera={} golem={} king_slime={}",
         p.downed_mech1,
         p.downed_mech2,

@@ -35,6 +35,17 @@ pub struct World {
     /// A solar eclipse: a daytime event, and the only time Mothron and its brood appear.
     pub eclipse: bool,
     pub moon_phase: u8,
+    /// Whether it is raining, how long the shower has left, and how hard it is coming down.
+    ///
+    /// Rain is not only weather: it changes which town NPCs will go outside, and several routines
+    /// read it directly.
+    pub raining: bool,
+    pub rain_time: i32,
+    pub max_rain: f32,
+    /// The wind the world is blowing, signed: positive blows east.
+    ///
+    /// Several ported routines read it and have been reading nothing but calm until now.
+    pub wind: f32,
     pub crimson: bool,
     /// What the world has already been through.
     ///
@@ -90,6 +101,10 @@ impl World {
             blood_moon: false,
             eclipse: false,
             moon_phase: 0,
+            raining: false,
+            rain_time: 0,
+            max_rain: 0.0,
+            wind: 0.0,
             crimson: false,
             progress: Progress::default(),
             game_mode: 0,

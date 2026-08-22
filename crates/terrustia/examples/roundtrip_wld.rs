@@ -107,6 +107,69 @@ fn main() -> ExitCode {
         problems += 1;
     }
 
+    // The header is preserved verbatim and patched in place, so the only way to know a flag
+    // really survives a save is to change one and read it back off the disk.
+    {
+        let mut changed = match wld::load(&input) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("reload failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let before = changed.progress;
+        changed.progress.downed_moon_lord = !before.downed_moon_lord;
+        changed.progress.downed_ancient_cultist = !before.downed_ancient_cultist;
+        changed.progress.tower_active_solar = !before.tower_active_solar;
+        changed.progress.altar_count = before.altar_count + 1;
+        changed.wind = 0.375;
+        changed.raining = !changed.raining;
+        changed.rain_time = 4321;
+        let probe = output.with_extension("flags.wld");
+        if let Err(e) = wld_save::save(&changed, &probe) {
+            eprintln!("probe save failed: {e}");
+            return ExitCode::FAILURE;
+        }
+        let back = match wld::load(&probe) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("probe reload failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let ok = back.progress.downed_moon_lord == changed.progress.downed_moon_lord
+            && back.progress.downed_ancient_cultist == changed.progress.downed_ancient_cultist
+            && back.progress.tower_active_solar == changed.progress.tower_active_solar
+            && back.progress.altar_count == changed.progress.altar_count
+            && (back.wind - 0.375).abs() < 1e-6
+            && back.raining == changed.raining
+            && back.rain_time == 4321;
+        println!(
+            "flags       {} (moon lord {} -> {}, cultist {} -> {}, solar tower {} -> {}, \
+             altars {} -> {}, wind {:.3}, rain {}/{})",
+            if ok {
+                "survive a save"
+            } else {
+                "DID NOT SURVIVE"
+            },
+            before.downed_moon_lord,
+            back.progress.downed_moon_lord,
+            before.downed_ancient_cultist,
+            back.progress.downed_ancient_cultist,
+            before.tower_active_solar,
+            back.progress.tower_active_solar,
+            before.altar_count,
+            back.progress.altar_count,
+            back.wind,
+            back.raining,
+            back.rain_time,
+        );
+        std::fs::remove_file(&probe).ok();
+        if !ok {
+            return ExitCode::FAILURE;
+        }
+    }
+
     if problems == 0 {
         println!("\nround-trip is faithful: every tile, chest and sign survived");
         ExitCode::SUCCESS

@@ -79,6 +79,18 @@ pub struct PreservedWorld {
     pub time_offset: usize,
     pub day_time_offset: usize,
     pub moon_phase_offset: usize,
+    /// Offsets of the progression flags, which the server also changes.
+    ///
+    /// `None` where a world's header did not reach that far, in which case the flag is kept in
+    /// memory for the session and simply not written back.
+    pub progress_offset: Option<usize>,
+    pub hard_mode_offset: Option<usize>,
+    pub altar_offset: Option<usize>,
+    pub orb_count_offset: Option<usize>,
+    pub downed_run_offset: Option<usize>,
+    pub tower_run_offset: Option<usize>,
+    pub rain_offset: Option<usize>,
+    pub wind_offset: Option<usize>,
     /// Original absolute offsets of section 4 onwards.
     ///
     /// The bytes are written back unchanged, so the new offsets are these shifted by however much

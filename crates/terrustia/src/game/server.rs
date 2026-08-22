@@ -201,6 +201,8 @@ pub struct GameServer {
     /// A moon is not an invasion: there is nothing to see off, only twenty waves and one night to
     /// get through as many of them as you can. Dawn ends it wherever you got to.
     moon: crate::game::moons::MoonState,
+    /// The Lunar Apocalypse: four pillars and what comes after them.
+    lunar: crate::game::lunar::LunarState,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -237,6 +239,7 @@ impl GameServer {
             army: crate::game::army::ArmyState::default(),
             army_arena: None,
             moon: crate::game::moons::MoonState::default(),
+            lunar: crate::game::lunar::LunarState::default(),
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -378,6 +381,7 @@ impl GameServer {
         {
             self.save_world("autosave");
         }
+        self.tick_lunar();
         lap(&mut cost, Phase::World);
 
         self.flush_dirty_sections();
@@ -3173,6 +3177,22 @@ impl GameServer {
             self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
             self.note_army_kill(npc_type);
             self.note_moon_kill(npc_type);
+            self.lunar.note_kill(npc_type);
+            match npc_type {
+                // The Cultist's death is what tears the sky open.
+                terrustia_proto::npc_params::CULTIST => {
+                    self.world.progress.downed_ancient_cultist = true;
+                    self.trigger_lunar_apocalypse();
+                }
+                // ...and the Moon Lord's is what closes it for good.
+                crate::game::lunar::MOON_LORD => {
+                    self.lunar.stop();
+                    self.world.progress.downed_moon_lord = true;
+                    self.world.progress.lunar_apocalypse_up = false;
+                    self.announce("The Moon Lord has been defeated!");
+                }
+                _ => {}
+            }
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
@@ -3401,6 +3421,120 @@ impl GameServer {
             "old one's army started"
         );
         Ok(())
+    }
+
+    /// One tick of the Lunar Apocalypse: the pillars' shields, and the minute after the last one.
+    fn tick_lunar(&mut self) {
+        use crate::game::lunar::{MOON_LORD, PILLARS};
+        let standing = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| PILLARS.contains(&n.npc_type))
+            .count();
+        let here = self.npcs.iter().any(|(_, n)| n.npc_type == MOON_LORD);
+        let was_up = self.lunar.up;
+        if self.lunar.tick(standing, here) {
+            self.summon_moon_lord();
+        }
+        if was_up && !self.lunar.up {
+            self.announce("Impending doom approaches...");
+            info!("the last pillar has fallen");
+        }
+        // The world remembers which pillars are standing, so a save mid-apocalypse comes back to
+        // the same fight rather than an empty sky.
+        let standing_now = |ty: u16| self.npcs.iter().any(|(_, n)| n.npc_type == ty);
+        let towers = (
+            standing_now(crate::game::lunar::SOLAR),
+            standing_now(crate::game::lunar::VORTEX),
+            standing_now(crate::game::lunar::NEBULA),
+            standing_now(crate::game::lunar::STARDUST),
+        );
+        let p = &mut self.world.progress;
+        p.lunar_apocalypse_up = self.lunar.up;
+        // A pillar that was standing and is not any more has been beaten, and that is permanent.
+        p.downed_tower_solar |= p.tower_active_solar && !towers.0;
+        p.downed_tower_vortex |= p.tower_active_vortex && !towers.1;
+        p.downed_tower_nebula |= p.tower_active_nebula && !towers.2;
+        p.downed_tower_stardust |= p.tower_active_stardust && !towers.3;
+        (
+            p.tower_active_solar,
+            p.tower_active_vortex,
+            p.tower_active_nebula,
+            p.tower_active_stardust,
+        ) = towers;
+        // Each pillar carries its own shield on itself, so its routine can read it without
+        // knowing the event exists.
+        if self.lunar.up {
+            let shields: Vec<(u8, i32)> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| PILLARS.contains(&n.npc_type))
+                .map(|(index, n)| (index, self.lunar.shield_of(n.npc_type)))
+                .collect();
+            for (index, shield) in shields {
+                if let Some(pillar) = self.npcs.get_mut(index)
+                    && pillar.shield != shield
+                {
+                    pillar.shield = shield;
+                    pillar.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Tear the sky open. This is what killing the Lunatic Cultist does.
+    fn trigger_lunar_apocalypse(&mut self) {
+        if self.lunar.up || self.lunar.countdown > 0 {
+            return;
+        }
+        let raised = self.lunar.trigger(
+            self.world.width(),
+            i32::from(self.world.surface),
+            self.world.progress.downed_moon_lord,
+            &mut self.rng,
+        );
+        for (npc_type, x, y) in raised {
+            let x = x.clamp(20, self.world.width() - 20);
+            let at = (
+                x as f32 * crate::game::npc::TILE,
+                y as f32 * crate::game::npc::TILE,
+            );
+            if let Some(index) = self.npcs.spawn(npc_type, at) {
+                if let Some(pillar) = self.npcs.get_mut(index) {
+                    pillar.shield = self.lunar.shield_of(npc_type);
+                }
+                self.broadcast_npc(index);
+            }
+        }
+        self.announce("The Lunar Apocalypse is upon us!");
+        info!("lunar apocalypse");
+    }
+
+    /// He arrives on whoever is nearest the middle of the world, not on whoever killed the last
+    /// pillar — which is why standing somewhere sensible during the countdown matters.
+    fn summon_moon_lord(&mut self) {
+        let middle = (
+            self.world.width() as f32 / 2.0 * crate::game::npc::TILE,
+            f32::from(self.world.surface) / 2.0 * crate::game::npc::TILE,
+        );
+        let nearest = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && p.life > 0)
+            .min_by(|a, b| {
+                let reach = |p: &&crate::game::player::Player| {
+                    (p.position.0 - middle.0).hypot(p.position.1 - middle.1)
+                };
+                reach(a).total_cmp(&reach(b))
+            })
+            .map(|p| p.slot);
+        let Some(slot) = nearest else {
+            return;
+        };
+        self.summon_on_player(slot, crate::game::lunar::MOON_LORD);
+        self.announce("The Moon Lord has awoken!");
+        info!(slot, "moon lord");
     }
 
     /// The world's own rolls at first light: an eclipse, once a mechanical boss is down.

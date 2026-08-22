@@ -56,6 +56,12 @@ pub enum WldError {
     BadDimensions { width: i32, height: i32 },
 
     #[error(
+        "the late header stopped making sense at byte {at}: a count of {count} where a small \
+         list was expected, so the reader is no longer where it thinks it is"
+    )]
+    LateHeaderOutOfStep { at: usize, count: i64 },
+
+    #[error(
         "the progression flags did not decode as flags (invasion type {invasion_type}, size \
          {invasion_size}); the header layout has changed and this reader is reading the wrong bytes"
     )]
@@ -157,6 +163,14 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         time_offset: offsets.time,
         day_time_offset: offsets.day_time,
         moon_phase_offset: offsets.moon_phase,
+        progress_offset: offsets.progress,
+        hard_mode_offset: offsets.hard_mode,
+        altar_offset: offsets.altar,
+        orb_count_offset: offsets.orb_count,
+        downed_run_offset: offsets.late.downed_run,
+        tower_run_offset: offsets.late.tower_run,
+        rain_offset: offsets.late.rain,
+        wind_offset: offsets.late.wind,
         trailing_offsets,
         trailing_bytes,
         importance: file.importance,
@@ -253,6 +267,144 @@ struct HeaderOffsets {
     time: usize,
     day_time: usize,
     moon_phase: usize,
+    /// The run of twenty booleans beginning at `downedBoss1`.
+    progress: Option<usize>,
+    hard_mode: Option<usize>,
+    altar: Option<usize>,
+    orb_count: Option<usize>,
+    late: LateOffsets,
+}
+
+/// Where in the header the flags past the invasion block live.
+///
+/// They are recorded rather than re-derived because saving preserves the header verbatim and
+/// patches it in place: writing a flag means knowing the byte, and the byte is only knowable by
+/// having walked there.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LateOffsets {
+    /// The run of nine "downed" booleans beginning at `downedFishron`.
+    pub downed_run: Option<usize>,
+    /// The run of nine pillar flags: four beaten, four standing, and the apocalypse itself.
+    pub tower_run: Option<usize>,
+    /// The weather block: raining, how long for, and how hard.
+    pub rain: Option<usize>,
+    /// The wind the world is blowing toward.
+    pub wind: Option<usize>,
+}
+
+/// What the late header says about the weather.
+#[derive(Debug, Default, Clone, Copy)]
+struct Weather {
+    raining: bool,
+    rain_time: i32,
+    max_rain: f32,
+    wind: f32,
+}
+
+/// Walk the header past the invasion block, picking up the flags the server actually uses.
+///
+/// Everything here is positional: there is no framing, so a field read at the wrong width puts
+/// every flag after it in the wrong place. The two variable-length lists in the middle are why it
+/// cannot simply be seeked into.
+fn read_late_header(
+    r: &mut PacketReader<'_>,
+    progress: &mut Progress,
+    weather: &mut Weather,
+    offsets: &mut LateOffsets,
+    section_start: usize,
+) -> Result<()> {
+    let _slime_rain_time = num(r.f64(), r)?;
+    let _sundial_cooldown = num(r.u8(), r)?;
+
+    offsets.rain = Some(r.position() - section_start);
+    weather.raining = num(r.bool(), r)?;
+    weather.rain_time = num(r.i32(), r)?;
+    weather.max_rain = num(r.f32(), r)?;
+
+    // The hardmode ore tiers the world rolled when the wall fell.
+    for _ in 0..3 {
+        num(r.i32(), r)?;
+    }
+    // Eight background styles.
+    for _ in 0..8 {
+        num(r.u8(), r)?;
+    }
+    let _cloud_bg_active = num(r.i32(), r)?;
+    let _num_clouds = num(r.i16(), r)?;
+    offsets.wind = Some(r.position() - section_start);
+    weather.wind = num(r.f32(), r)?;
+
+    // Who has already handed in an angler quest today: a list of names.
+    let anglers = num(r.i32(), r)?;
+    if !(0..=255).contains(&anglers) {
+        return Err(WldError::LateHeaderOutOfStep {
+            at: r.position(),
+            count: i64::from(anglers),
+        });
+    }
+    for _ in 0..anglers {
+        num(r.string(), r)?;
+    }
+    progress.saved_angler = num(r.bool(), r)?;
+    let _angler_quest = num(r.i32(), r)?;
+    progress.saved_stylist = num(r.bool(), r)?;
+    progress.saved_tax_collector = num(r.bool(), r)?;
+    progress.saved_golfer = num(r.bool(), r)?;
+    let _invasion_size_start = num(r.i32(), r)?;
+    let _cultist_delay = num(r.i32(), r)?;
+
+    // The banner kill counts, then the claimable banners.
+    let kinds = num(r.i16(), r)?;
+    if !(0..=10_000).contains(&kinds) {
+        return Err(WldError::LateHeaderOutOfStep {
+            at: r.position(),
+            count: i64::from(kinds),
+        });
+    }
+    for _ in 0..kinds {
+        num(r.i32(), r)?;
+    }
+    let claimable = num(r.i16(), r)?;
+    if !(0..=10_000).contains(&claimable) {
+        return Err(WldError::LateHeaderOutOfStep {
+            at: r.position(),
+            count: i64::from(claimable),
+        });
+    }
+    for _ in 0..claimable {
+        num(r.u16(), r)?;
+    }
+
+    let _fast_forward_to_dawn = num(r.bool(), r)?;
+    offsets.downed_run = Some(r.position() - section_start);
+    for flag in [
+        &mut progress.downed_fishron,
+        &mut progress.downed_martians,
+        &mut progress.downed_ancient_cultist,
+        &mut progress.downed_moon_lord,
+        &mut progress.downed_halloween_king,
+        &mut progress.downed_halloween_tree,
+        &mut progress.downed_christmas_ice_queen,
+        &mut progress.downed_christmas_santank,
+        &mut progress.downed_christmas_tree,
+    ] {
+        *flag = num(r.bool(), r)?;
+    }
+    offsets.tower_run = Some(r.position() - section_start);
+    for flag in [
+        &mut progress.downed_tower_solar,
+        &mut progress.downed_tower_vortex,
+        &mut progress.downed_tower_nebula,
+        &mut progress.downed_tower_stardust,
+        &mut progress.tower_active_solar,
+        &mut progress.tower_active_vortex,
+        &mut progress.tower_active_nebula,
+        &mut progress.tower_active_stardust,
+        &mut progress.lunar_apocalypse_up,
+    ] {
+        *flag = num(r.bool(), r)?;
+    }
+    Ok(())
 }
 
 fn read_world_header(
@@ -316,10 +468,15 @@ fn read_world_header(
     let surface = num(r.f64(), r)?;
     let rock_layer = num(r.f64(), r)?;
 
-    let offsets = HeaderOffsets {
+    let mut offsets = HeaderOffsets {
         time: r.position() - section_start,
         day_time: r.position() - section_start + 8,
         moon_phase: r.position() - section_start + 9,
+        progress: None,
+        hard_mode: None,
+        altar: None,
+        orb_count: None,
+        late: LateOffsets::default(),
     };
     let time = num(r.f64(), r)?;
     let day_time = num(r.bool(), r)?;
@@ -333,6 +490,8 @@ fn read_world_header(
     // What the world has already been through. These have to be read in file order, and they are
     // read rather than skipped because routines, spawn pools and shops all ask about them.
     let mut progress = Progress::default();
+    let mut world_weather = Weather::default();
+    offsets.progress = Some(r.position() - section_start);
     for flag in [
         &mut progress.downed_boss1,
         &mut progress.downed_boss2,
@@ -357,9 +516,12 @@ fn read_world_header(
     ] {
         *flag = num(r.bool(), r)?;
     }
+    offsets.orb_count = Some(r.position() - section_start);
     progress.shadow_orb_count = num(r.u8(), r)?;
+    offsets.altar = Some(r.position() - section_start);
     progress.altar_count = num(r.i32(), r)?;
     let hard_mode_at = r.position();
+    offsets.hard_mode = Some(hard_mode_at - section_start);
     progress.hard_mode = num(r.bool(), r)?;
     // Reading a little further is how the offset above is checked: if `hardMode` were even one
     // byte out, these would not decode as an invasion.
@@ -386,10 +548,31 @@ fn read_world_header(
             invasion_size,
         });
     }
+    // The rest of the header is read for the flags that matter and skipped for the rest. It has
+    // to be walked rather than seeked because two of the runs are variable-length lists.
+    let mut late = LateOffsets::default();
+    if let Err(error) = read_late_header(
+        r,
+        &mut progress,
+        &mut world_weather,
+        &mut late,
+        section_start,
+    ) {
+        // A header that runs out is not fatal: the tile pointer is what actually finds the tiles,
+        // and everything read up to here is already good. It only means the late flags stay at
+        // their defaults, which is what an older world would have anyway.
+        debug!(?error, "world header ended before the late flags");
+    }
+
     // Everything past this point is skipped: the tile section pointer takes us straight to the
     // next section regardless of how long the rest of the header is.
 
+    offsets.late = late;
     let mut world = World::empty(width, height, name);
+    world.raining = world_weather.raining;
+    world.rain_time = world_weather.rain_time;
+    world.max_rain = world_weather.max_rain;
+    world.wind = world_weather.wind;
     world.id = id;
     world.unique_id = unique_id;
     world.world_gen_version = world_gen_version;

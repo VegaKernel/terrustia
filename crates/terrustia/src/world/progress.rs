@@ -45,6 +45,33 @@ pub struct Progress {
     pub altar_count: i32,
     /// The wall has fallen.
     pub hard_mode: bool,
+    pub downed_fishron: bool,
+    pub downed_martians: bool,
+    /// The Lunatic Cultist, whose death tears the sky open.
+    pub downed_ancient_cultist: bool,
+    /// The Moon Lord, after which every lunar shield is half strength.
+    pub downed_moon_lord: bool,
+    pub downed_halloween_king: bool,
+    pub downed_halloween_tree: bool,
+    pub downed_christmas_ice_queen: bool,
+    pub downed_christmas_santank: bool,
+    pub downed_christmas_tree: bool,
+    /// Which pillars have ever been beaten...
+    pub downed_tower_solar: bool,
+    pub downed_tower_vortex: bool,
+    pub downed_tower_nebula: bool,
+    pub downed_tower_stardust: bool,
+    /// ...and which are standing right now, which is not the same question.
+    pub tower_active_solar: bool,
+    pub tower_active_vortex: bool,
+    pub tower_active_nebula: bool,
+    pub tower_active_stardust: bool,
+    pub lunar_apocalypse_up: bool,
+    pub saved_angler: bool,
+    pub saved_stylist: bool,
+    pub saved_tax_collector: bool,
+    pub saved_golfer: bool,
+    pub saved_bartender: bool,
 }
 
 impl Progress {
