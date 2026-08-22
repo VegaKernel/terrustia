@@ -8,6 +8,7 @@ pub mod brain;
 pub mod cultist;
 pub mod deerclops;
 pub mod destroyer;
+pub mod empress;
 pub mod eye;
 pub mod fishron;
 pub mod golem;

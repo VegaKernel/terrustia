@@ -4551,3 +4551,46 @@ pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
 
 /// How long the ogre waits before it will pound again.
 pub const OGRE_POUND_COOLDOWN: f32 = 300.0;
+
+/// The Empress of Light.
+///
+/// Her fight is a fixed rotation of set pieces rather than a reaction to what you do, and the
+/// rotation changes wholesale at half health: a second script, faster, with two attacks the first
+/// one never uses. Fighting her by day enrages her and every one of her attacks kills outright.
+pub const EMPRESS_GIVE_UP: f32 = 6400.0;
+pub const EMPRESS_FLY_SPEED: f32 = 12.0;
+pub const EMPRESS_FLY_ACCEL: f32 = 0.5;
+/// How close to its station she considers herself arrived.
+pub const EMPRESS_SETTLED: f32 = 40.0;
+/// How long she takes to arrive, and how long the idle between attacks runs in each phase.
+pub const EMPRESS_ARRIVAL: f32 = 180.0;
+pub const EMPRESS_IDLE: f32 = 45.0;
+pub const EMPRESS_IDLE_PHASE_2: f32 = 20.0;
+/// The first script, and the second. Numbers are attack ids, not slots.
+pub const EMPRESS_SCRIPT: [u8; 10] = [2, 8, 6, 8, 5, 2, 8, 4, 8, 5];
+pub const EMPRESS_SCRIPT_PHASE_2: [u8; 9] = [7, 2, 8, 5, 2, 6, 4, 8, 12];
+pub const EMPRESS_SCRIPT_PHASE_2_EXPERT: [u8; 10] = [7, 2, 8, 11, 5, 2, 6, 4, 8, 12];
+/// Her projectiles.
+pub const EMPRESS_RAINBOW: u16 = 872;
+pub const EMPRESS_BLAST: u16 = 873;
+pub const EMPRESS_SUN_DANCE: u16 = 874;
+pub const EMPRESS_LANCE: u16 = 919;
+pub const EMPRESS_ETHEREAL_LANCE: u16 = 923;
+/// Damage per attack, classic then expert, in the order: sun dance, blast, rainbow, lance, wall.
+pub const EMPRESS_DAMAGE: [(i32, i32); 5] = [(30, 40), (30, 50), (30, 45), (35, 45), (65, 70)];
+pub const EMPRESS_DAMAGE_PHASE_2: [(i32, i32); 5] =
+    [(30, 40), (35, 60), (35, 50), (40, 60), (30, 65)];
+/// Where she stations herself for each attack, relative to you.
+pub const EMPRESS_STATION_LEFT: (f32, f32) = (-150.0, -250.0);
+pub const EMPRESS_STATION_RIGHT: (f32, f32) = (150.0, -250.0);
+pub const EMPRESS_STATION_HIGH: (f32, f32) = (0.0, -350.0);
+pub const EMPRESS_STATION_RING: (f32, f32) = (-80.0, -500.0);
+/// How far to one side she pulls back before a dash, and how fast she comes through.
+pub const EMPRESS_DASH_OUT: f32 = 550.0;
+pub const EMPRESS_DASH_SPEED: f32 = 50.0;
+/// The prismatic bolts: how many, how fast, and how long the volley runs.
+pub const EMPRESS_RAINBOW_COUNT: i32 = 13;
+pub const EMPRESS_RAINBOW_SPEED: f32 = 8.0;
+/// The lance walls: how many lances to a wall, and how far apart.
+pub const EMPRESS_WALL_LANCES: f32 = 13.0;
+pub const EMPRESS_WALL_SPACING: f32 = 150.0;
