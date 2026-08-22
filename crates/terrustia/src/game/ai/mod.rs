@@ -403,7 +403,7 @@ pub fn parity(style: i32) -> Option<Parity> {
         | 71 | 72 | 73 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 82 | 83 | 84 | 85 | 86 | 87
         | 88 | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 99 | 100 | 101 | 102 | 103 | 104
         | 105 | 106 | 107 | 108 | 109 | 110 | 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118
-        | 119 | 121 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
+        | 119 | 120 | 121 | 122 | 123 | 124 | 125 | 126 | 127 => Parity::Ported,
         _ => return None,
     };
     Some(level)
@@ -1045,6 +1045,29 @@ mod tests {
             approximate.is_empty(),
             "still approximations: {approximate:?}"
         );
+    }
+
+    /// Every NPC the game defines is driven by a ported routine.
+    ///
+    /// This is the whole point of the exercise, and it is easy to lose by accident: adding a
+    /// dispatch arm without adding the number to the parity list leaves the routine unreachable
+    /// and the style silently unported. So it is asserted rather than reported.
+    #[test]
+    fn every_npc_in_the_game_has_a_ported_routine() {
+        use terrustia_proto::npc_data::{NPC_COUNT, npc_stats};
+        let mut orphans = std::collections::BTreeMap::new();
+        for npc_type in 0..NPC_COUNT {
+            let Some(stats) = npc_stats(npc_type) else {
+                continue;
+            };
+            if parity(stats.ai_style) != Some(Parity::Ported) {
+                orphans
+                    .entry(stats.ai_style)
+                    .or_insert_with(Vec::new)
+                    .push(stats.name);
+            }
+        }
+        assert!(orphans.is_empty(), "styles with no ported routine: {orphans:?}");
     }
 
     /// How much of the *whole* game is ported, not just what appears before hardmode.
