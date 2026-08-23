@@ -3415,3 +3415,183 @@ async fn a_town_npc_has_a_name_of_its_own() {
         "{name:?} is not one of the game's names for that type"
     );
 }
+
+// ---------------------------------------------------------- tile entities
+
+/// An item frame that is never told to anybody hangs empty for every client in the world. The
+/// sharing packet is what makes a tile entity exist at all, and it was not being sent.
+#[tokio::test]
+async fn a_placed_tile_entity_is_told_to_everyone() {
+    // Tile 395 is the item frame's own tile; the entity has to stand on one.
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(400, 320, Tile::framed(395, 0, 0));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+    alice.set_timeout(Duration::from_secs(3));
+    bob.set_timeout(Duration::from_secs(3));
+
+    alice.place_tile_entity(400, 320, 1).await.unwrap();
+
+    let Event::Other(frame) = bob
+        .wait_for("the entity", |e| {
+            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
+        })
+        .await
+        .expect("a placed entity should reach every client")
+    else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    let _id = r.i32().unwrap();
+    assert!(r.bool().unwrap(), "it should say the entity is present");
+    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    assert_eq!((entity.x, entity.y), (400, 320));
+    assert_eq!(entity.kind, terrustia_proto::tile_entity::EntityKind::ItemFrame);
+}
+
+/// The whole point of a frame is that it holds something, and the thing it held before comes back
+/// rather than being eaten.
+#[tokio::test]
+async fn an_item_frame_holds_what_is_put_in_it() {
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(400, 320, Tile::framed(395, 0, 0));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+    alice.place_tile_entity(400, 320, 1).await.unwrap();
+    alice
+        .wait_for("the entity", |e| {
+            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
+        })
+        .await
+        .unwrap();
+
+    // A Zenith, for the sake of an item nobody would want eaten.
+    alice
+        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 320, ItemStack::new(3507, 1, 0))
+        .await
+        .unwrap();
+    let Event::Other(frame) = alice
+        .wait_for("the frame's contents", |e| {
+            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING && f.payload.len() > 10)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    r.i32().unwrap();
+    r.bool().unwrap();
+    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    assert_eq!(entity.held().map(|i| i.id), Some(3507));
+
+    // Swapping it should give the first one back rather than destroying it.
+    alice
+        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 320, ItemStack::new(3506, 1, 0))
+        .await
+        .unwrap();
+    let dropped = alice
+        .try_wait_for(
+            "the old item falling out",
+            |e| matches!(e, Event::ItemSynced(i) if i.item.id == 3507),
+            Duration::from_secs(3),
+        )
+        .await;
+    assert!(
+        dropped.is_some(),
+        "swapping a frame's contents should not eat the old item"
+    );
+}
+
+/// Two people must not be able to empty the same mannequin at once.
+#[tokio::test]
+async fn only_one_player_may_hold_a_tile_entity() {
+    let addr = start_with(Config::default(), |world| {
+        world.set_tile(400, 320, Tile::framed(470, 0, 0));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+    alice.set_timeout(Duration::from_secs(3));
+    bob.set_timeout(Duration::from_secs(3));
+
+    alice.place_tile_entity(400, 320, 3).await.unwrap();
+    let Event::Other(frame) = alice
+        .wait_for("the mannequin", |e| {
+            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let entity_id = i32::from_le_bytes([
+        frame.payload[0],
+        frame.payload[1],
+        frame.payload[2],
+        frame.payload[3],
+    ]);
+
+    alice.claim_tile_entity(entity_id).await.unwrap();
+    let claimed = alice
+        .wait_for("alice's claim", |e| {
+            matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION)
+        })
+        .await;
+    assert!(claimed.is_ok(), "the first claim should be granted");
+
+    // Bob asking for the same one is refused, so nothing further is announced.
+    bob.claim_tile_entity(entity_id).await.unwrap();
+    let stolen = bob
+        .try_wait_for(
+            "bob's claim",
+            |e| matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION
+                && f.payload[4] == 1),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(
+        stolen.is_none(),
+        "a mannequin somebody else has open should not be handed over"
+    );
+}
+
+/// A pylon placed on this server has to still be there after a save, or a restart wipes the
+/// travel network. Tile entities were carried through the file untouched, so anything placed
+/// while the server ran was lost and anything mined came back.
+#[tokio::test]
+async fn tile_entities_survive_a_save() {
+    let dir = std::env::temp_dir().join(format!("terrustia-te-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path: PathBuf = dir.join("entities.wld");
+
+    let mut world = worldgen::generate(800, 600, String::from("entities"), 7);
+    world.set_tile(400, 320, Tile::framed(395, 0, 0));
+    let mut frame = terrustia_proto::tile_entity::TileEntity::new(
+        0,
+        terrustia_proto::tile_entity::EntityKind::ItemFrame,
+        400,
+        320,
+    );
+    frame.data = terrustia_proto::tile_entity::EntityData::Held(ItemStack::new(3507, 1, 0));
+    world.tile_entities.push(frame);
+    world.next_tile_entity = 1;
+
+    std::fs::write(&path, wld_save::serialize(&world).unwrap()).unwrap();
+    let back = wld::parse(&std::fs::read(&path).unwrap()).unwrap();
+
+    assert_eq!(back.tile_entities.len(), 1, "the frame should have survived");
+    let survivor = &back.tile_entities[0];
+    assert_eq!((survivor.x, survivor.y), (400, 320));
+    assert_eq!(survivor.held().map(|i| i.id), Some(3507));
+    assert_eq!(
+        back.next_tile_entity, 1,
+        "the next id must clear the ones already used, or a new entity collides"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

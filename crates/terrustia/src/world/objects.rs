@@ -105,13 +105,16 @@ pub struct PreservedWorld {
     pub combat_book_offset: Option<usize>,
     pub late_downed_run_offset: Option<usize>,
     pub combat_book_two_offset: Option<usize>,
-    /// Original absolute offsets of section 4 onwards.
+    /// Sections 4 onwards, one blob each, in order.
     ///
-    /// The bytes are written back unchanged, so the new offsets are these shifted by however much
-    /// the rewritten sections before them grew or shrank.
-    pub trailing_offsets: Vec<i32>,
-    /// Everything from the start of section 4 to the end of the file, including the footer.
-    pub trailing_bytes: Vec<u8>,
+    /// Kept separately rather than as one run of bytes so that a section this server *does* model
+    /// can be written from its own state while its neighbours are carried through untouched. Only
+    /// section 5, the tile entities, is currently rewritten that way; the rest — townsfolk,
+    /// pressure plates, the room assignments, the bestiary, the creative powers — pass through.
+    ///
+    /// The last blob carries the file's footer with it, which is what the game checks a save
+    /// against, so it must stay attached to the section it followed.
+    pub trailing_sections: Vec<Vec<u8>>,
     /// The save's own frame-importance table, which decides how its tiles were encoded.
     pub importance: Vec<bool>,
 }

@@ -136,18 +136,41 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         world.signs = read_signs(&mut r)?;
     }
 
-    // Sections 4 onwards hold NPCs, tile entities, pressure plates, the town manager, the bestiary
-    // and creative powers. None of those are modelled here, so they are carried through untouched
-    // rather than dropped.
-    let (trailing_offsets, trailing_bytes) = if file.sections.len() > 4 {
-        let start = file.sections[4] as usize;
-        (
-            file.sections[4..].to_vec(),
-            bytes.get(start..).unwrap_or_default().to_vec(),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // Sections 4 onwards hold townsfolk, tile entities, pressure plates, the town manager, the
+    // bestiary and creative powers. Each is sliced out on its own so the one this server models —
+    // the tile entities — can be rewritten from its own state while the rest pass through.
+    let mut trailing_sections = Vec::new();
+    if file.sections.len() > 4 {
+        for (nth, &start) in file.sections[4..].iter().enumerate() {
+            // Each section runs to the start of the next; the last runs to the end of the file,
+            // taking the footer with it.
+            let end = file
+                .sections
+                .get(5 + nth)
+                .map_or(bytes.len(), |&next| next as usize);
+            let (start, end) = (start as usize, end.min(bytes.len()));
+            trailing_sections.push(
+                bytes
+                    .get(start..end.max(start))
+                    .unwrap_or_default()
+                    .to_vec(),
+            );
+        }
+    }
+
+    // Section 5 is the tile entities: pylons, item frames, mannequins, logic sensors. Read rather
+    // than carried, because a pylon a client cannot be told about is a pylon nobody can use, and
+    // because carrying them through means a pylon placed on this server is lost on the next save.
+    if let Some(section) = trailing_sections.get(1) {
+        let mut r = PacketReader::new(section);
+        world.tile_entities = read_tile_entities(&mut r).unwrap_or_default();
+        world.next_tile_entity = world
+            .tile_entities
+            .iter()
+            .map(|e| e.id + 1)
+            .max()
+            .unwrap_or(0);
+    }
 
     world.preserved = Some(PreservedWorld {
         version: file.version,
@@ -171,8 +194,7 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         combat_book_offset: offsets.late.combat_book,
         late_downed_run_offset: offsets.late.late_downed_run,
         combat_book_two_offset: offsets.late.combat_book_two,
-        trailing_offsets,
-        trailing_bytes,
+        trailing_sections,
         importance: file.importance,
     });
 
@@ -820,6 +842,28 @@ fn read_signs(r: &mut PacketReader<'_>) -> Result<Vec<Option<Sign>>> {
         }));
     }
     Ok(signs)
+}
+
+/// Read section 5: the furniture that remembers something.
+///
+/// A count, then each entity in its file form — with its id, and with a logic sensor's state,
+/// neither of which the network form carries.
+///
+/// A truncated or unrecognised section gives up rather than failing the whole load. It is the
+/// difference between "this world has an item frame this build does not know about" and "this
+/// world will not open", and the first is much the better answer.
+fn read_tile_entities(
+    r: &mut PacketReader<'_>,
+) -> Result<Vec<terrustia_proto::tile_entity::TileEntity>> {
+    let count = num(r.i32(), r)?;
+    let mut entities = Vec::with_capacity(count.clamp(0, 1 << 16) as usize);
+    for _ in 0..count.max(0) {
+        match terrustia_proto::tile_entity::TileEntity::read(r, false) {
+            Ok(entity) => entities.push(entity),
+            Err(_) => break,
+        }
+    }
+    Ok(entities)
 }
 
 /// Jump to a section pointer, checking it lies inside the file.

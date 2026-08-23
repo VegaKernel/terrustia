@@ -90,6 +90,19 @@ pub struct World {
     /// a hole rather than renumbering everything after it.
     pub chests: Vec<Option<Chest>>,
     pub signs: Vec<Option<Sign>>,
+    /// The furniture that remembers something: item frames, mannequins, logic sensors, pylons.
+    ///
+    /// World state rather than server state, for two reasons that both bite. They are written to
+    /// the world file, so a server that keeps them to itself loses every pylon on restart; and
+    /// they ride the section stream, so the section builder has to be able to see them or a
+    /// joining client is told about none of the ones that were already there.
+    pub tile_entities: Vec<terrustia_proto::tile_entity::TileEntity>,
+    /// The id the next tile entity placed will be given.
+    ///
+    /// Ids are handed out rather than derived from position, because a client refers to an
+    /// entity by id in every message about it and the id has to survive the entity being moved
+    /// out from under it.
+    pub next_tile_entity: i32,
     /// Parts of the save this server does not model, kept so saving stays lossless.
     pub preserved: Option<PreservedWorld>,
     /// Sections whose tiles changed since anything last looked.
@@ -150,6 +163,8 @@ impl World {
             hell_back_style: 0,
             chests: Vec::new(),
             signs: Vec::new(),
+            tile_entities: Vec::new(),
+            next_tile_entity: 0,
             preserved: None,
             dirty_sections: HashSet::new(),
             track_dirty: false,
@@ -256,7 +271,19 @@ impl World {
         chests.sort_by_key(|c| (c.y, c.x));
         signs.sort_by_key(|s| (s.y, s.x));
 
-        SectionExtras { chests, signs }
+        let mut tile_entities: Vec<_> = self
+            .tile_entities
+            .iter()
+            .filter(|e| contains(e.x, e.y))
+            .cloned()
+            .collect();
+        tile_entities.sort_by_key(|e| (e.y, e.x));
+
+        SectionExtras {
+            chests,
+            signs,
+            tile_entities,
+        }
     }
 
     pub fn width(&self) -> i32 {

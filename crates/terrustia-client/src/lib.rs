@@ -378,6 +378,40 @@ impl Client {
         self.send(&hit.encode()?).await
     }
 
+    /// Place a tile entity: an item frame, a mannequin, a pylon.
+    pub async fn place_tile_entity(&mut self, x: i16, y: i16, kind: u8) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::TILE_ENTITY_PLACEMENT);
+        w.i16(x).i16(y).u8(kind);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
+    /// Put an item into a frame, onto a rack or platter, or into a display jar.
+    pub async fn display_item(
+        &mut self,
+        message: u8,
+        x: i16,
+        y: i16,
+        item: ItemStack,
+    ) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(message);
+        w.i16(x)
+            .i16(y)
+            .i16(item.id as i16)
+            .u8(item.prefix)
+            .i16(item.stack);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
+    /// Claim a tile entity, or release whatever was claimed by passing -1.
+    pub async fn claim_tile_entity(&mut self, id: i32) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::REQUEST_TILE_ENTITY_INTERACTION);
+        w.i32(id).u8(self.slot());
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Report inflicting a buff on an NPC, the way a weapon's on-hit effect does.
     pub async fn buff_npc(&mut self, index: u8, buff: u16, ticks: i16) -> Result<()> {
         let request = terrustia_proto::packets::AddNpcBuff {

@@ -43,7 +43,7 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
         return Ok(serialize_fresh(world));
     };
 
-    let section_count = 4 + preserved.trailing_offsets.len();
+    let section_count = 4 + preserved.trailing_sections.len();
     let mut w = Writer::with_capacity(4 * 1024 * 1024);
 
     // --- file format header ---------------------------------------------------------------
@@ -110,15 +110,23 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     pointers[3] = w.len() as i32;
     write_signs(&mut w, world);
 
-    // --- sections 4..: carried through unchanged -------------------------------------------
-    if let Some(&first) = preserved.trailing_offsets.first() {
-        let delta = w.len() as i64 - i64::from(first);
-        for (index, &offset) in preserved.trailing_offsets.iter().enumerate() {
-            let shifted = i64::from(offset) + delta;
-            pointers[4 + index] =
-                i32::try_from(shifted).map_err(|_| WldError::SaveTooLarge { bytes: shifted })?;
+    // --- sections 4..: carried through, except the tile entities ---------------------------
+    //
+    // Section 5 is written from the server's own state rather than copied. It has to be: a pylon
+    // placed while the server was running is not in the bytes that were loaded, and one that was
+    // mined still is. Copying it back would mean the world remembered the pylons it had when it
+    // was opened and nothing since.
+    //
+    // Because that section can change length, the pointers cannot be a single shift any more —
+    // each is taken from where its section actually lands.
+    for (index, section) in preserved.trailing_sections.iter().enumerate() {
+        pointers[4 + index] =
+            i32::try_from(w.len()).map_err(|_| WldError::SaveTooLarge { bytes: w.len() as i64 })?;
+        if index == TILE_ENTITY_SECTION {
+            write_tile_entities(&mut w, world);
+        } else {
+            w.bytes(section);
         }
-        w.bytes(&preserved.trailing_bytes);
     }
 
     let mut bytes = w.into_bytes();
@@ -353,7 +361,7 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
     w.bool(false); // no town NPCs
     w.bool(false); // and none of the few enemies that persist
     pointers[5] = w.len() as i32;
-    w.i32(0); // no tile entities
+    write_tile_entities(&mut w, world);
     pointers[6] = w.len() as i32;
     w.i32(0); // no pressure plates held down
     pointers[7] = w.len() as i32;
@@ -372,6 +380,22 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
         bytes[at..at + 4].copy_from_slice(&pointer.to_le_bytes());
     }
     bytes
+}
+
+/// Where the tile entities sit among the sections after the signs.
+///
+/// Section 5 overall, which is index 1 of the run this server carries through.
+const TILE_ENTITY_SECTION: usize = 1;
+
+/// Write section 5: the furniture that remembers something.
+///
+/// The file form, which carries each entity's id and a logic sensor's state — neither of which
+/// goes over the network.
+fn write_tile_entities(w: &mut Writer, world: &World) {
+    w.i32(world.tile_entities.len() as i32);
+    for entity in &world.tile_entities {
+        entity.write(w, false);
+    }
 }
 
 /// The frame-importance bitset, packed least significant bit first.
@@ -678,8 +702,7 @@ mod tests {
             combat_book_offset: Some(810),
             late_downed_run_offset: Some(820),
             combat_book_two_offset: Some(830),
-            trailing_offsets: Vec::new(),
-            trailing_bytes: Vec::new(),
+            trailing_sections: Vec::new(),
             importance: Vec::new(),
         }
     }

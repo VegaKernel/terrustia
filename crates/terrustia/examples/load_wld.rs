@@ -101,12 +101,22 @@ fn main() -> ExitCode {
         .sum();
     println!("chests      {} ({stored} item stacks inside)", chests.len());
     println!("signs       {}", signs.len());
+    println!("entities    {}", world.tile_entities.len());
+    if !world.tile_entities.is_empty() {
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for entity in &world.tile_entities {
+            *kinds.entry(format!("{:?}", entity.kind)).or_default() += 1;
+        }
+        for (kind, count) in kinds {
+            println!("              {count:>5}  {kind}");
+        }
+    }
     if let Some(p) = &world.preserved {
         println!(
             "preserved   header {} B, trailing sections {} ({} B)",
             p.header_bytes.len(),
-            p.trailing_offsets.len(),
-            p.trailing_bytes.len()
+            p.trailing_sections.len(),
+            p.trailing_sections.iter().map(Vec::len).sum::<usize>()
         );
     }
     println!("loaded in   {} ms", elapsed.as_millis());

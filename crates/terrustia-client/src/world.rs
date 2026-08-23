@@ -196,6 +196,7 @@ mod tests {
                 y: 20,
                 text: "hi".into(),
             }],
+            tile_entities: Vec::new(),
         };
         let mut stream = Writer::new();
         write_section_stream(&mut stream, bounds, &extras, |_, _| Tile::AIR);

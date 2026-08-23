@@ -72,6 +72,13 @@ pub struct SignInfo {
 pub struct SectionExtras {
     pub chests: Vec<ChestInfo>,
     pub signs: Vec<SignInfo>,
+    /// The tile entities standing in this section.
+    ///
+    /// They ride the section rather than being sent one at a time because that is the only
+    /// moment a client learns about the ones that were already there. Without them a world's
+    /// item frames arrive empty and its pylons cannot be travelled to, however many times the
+    /// section is re-sent.
+    pub tile_entities: Vec<crate::tile_entity::TileEntity>,
 }
 
 /// Serialise the uncompressed section stream: header, run-length tiles, then the trailers.
@@ -122,7 +129,13 @@ pub fn write_section_stream<F>(
     for sign in &extras.signs {
         out.i16(sign.id).i16(sign.x).i16(sign.y).string(&sign.text);
     }
-    out.i16(0); // tile entities
+    // The section carries the *file* form of an entity — with its id, and with a logic sensor's
+    // state — rather than the network form used by the sharing packet. The game writes it with
+    // `TileEntity.Write`'s default argument, which is easy to miss.
+    out.i16(extras.tile_entities.len() as i16);
+    for entity in &extras.tile_entities {
+        entity.write(out, false);
+    }
 }
 
 /// Encode one tile plus its trailing run length, using the built-in frame table.
@@ -346,11 +359,16 @@ pub fn decode_section_stream(stream: &[u8]) -> Result<(SectionBounds, Vec<Tile>,
         });
     }
     let entities = r.i16()?;
-    if entities != 0 {
+    if entities < 0 {
         return Err(ProtoError::OutOfRange {
             field: "tile entity count",
-            value: entities as i64,
+            value: i64::from(entities),
         });
+    }
+    for _ in 0..entities {
+        extras
+            .tile_entities
+            .push(crate::tile_entity::TileEntity::read(&mut r, false)?);
     }
 
     Ok((bounds, tiles, extras))
@@ -656,6 +674,17 @@ mod tests {
                 x: 5,
                 y: 6,
                 text: "hello \u{1F600}".into(),
+            }],
+            tile_entities: vec![{
+                let mut frame = crate::tile_entity::TileEntity::new(
+                    9,
+                    crate::tile_entity::EntityKind::ItemFrame,
+                    7,
+                    8,
+                );
+                frame.data =
+                    crate::tile_entity::EntityData::Held(crate::ItemStack::new(3507, 1, 0));
+                frame
             }],
         };
         let mut stream = Writer::new();

@@ -192,6 +192,23 @@ const TENTACLE_SPIKE: u16 = 971;
 const BLOOD_BUTCHERER: u16 = 975;
 const STARDUST_CELL: u16 = 614;
 
+// The three commands a mannequin's slot-sync message can carry, besides the armour slots which
+// are everything else. Named because the numbers appear nowhere else and mean nothing on sight.
+const DOLL_DYE: u8 = 1;
+const DOLL_POSE: u8 = 2;
+const DOLL_MISC: u8 = 3;
+
+/// What a client sends to say it has closed whatever tile entity it had open.
+const NO_TILE_ENTITY: i32 = -1;
+
+/// The world position of a tile's top-left corner.
+fn tile_corner(x: i16, y: i16) -> (f32, f32) {
+    (
+        f32::from(x) * crate::game::npc::TILE,
+        f32::from(y) * crate::game::npc::TILE,
+    )
+}
+
 /// A target dummy, whose whole purpose is to be hit without ever dying.
 const TARGET_DUMMY_AI: i32 = 92;
 /// The one other type the game marks immortal outright.
@@ -301,9 +318,11 @@ pub struct GameServer {
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
     /// tile up is what it is for.
     mech_cooldown: HashMap<(i32, i32), i32>,
-    /// The furniture that remembers something: dummies, frames, racks, pylons.
-    tile_entities: Vec<terrustia_proto::tile_entity::TileEntity>,
-    next_tile_entity: i32,
+    /// Which tile entity each player currently has open, if any.
+    ///
+    /// One player per entity, which is the point: without it two people can open the same
+    /// mannequin and each take everything off it.
+    tile_entity_anchors: HashMap<u8, i32>,
     /// Liquid waiting to settle. Empty unless something has disturbed it.
     liquids: crate::world::liquid::Liquids,
     /// Which of each pair of hardmode ores this world settled on.
@@ -373,8 +392,7 @@ impl GameServer {
             housing_turn: 0,
             running_timers,
             mech_cooldown: HashMap::new(),
-            tile_entities: Vec::new(),
-            next_tile_entity: 0,
+            tile_entity_anchors: HashMap::new(),
             liquids: crate::world::liquid::Liquids::default(),
             ore_tiers: crate::world::hardmode::OreTiers::default(),
             worst_tick: TickCost::default(),
@@ -663,6 +681,18 @@ impl GameServer {
         self.broadcast_item(index);
     }
 
+    /// Put an item into the world at a place, as a thing that can be picked up.
+    fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) {
+        if item.is_empty() {
+            return;
+        }
+        let Some(index) = self.items.spawn(item, position) else {
+            debug!("item slots are full; the drop was discarded");
+            return;
+        };
+        self.broadcast_item(index);
+    }
+
     /// Packet 21: a client dropping something, or updating an item it holds the reservation on.
     fn on_sync_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
@@ -758,6 +788,18 @@ impl GameServer {
             return;
         };
         info!(slot, name = %player.name, "player disconnected");
+
+        // Whatever they had open is free again. Without this a mannequin somebody was looking at
+        // when their connection dropped stays locked for the rest of the world's life.
+        if self.tile_entity_anchors.remove(&slot).is_some()
+            && let Ok(frame) = {
+                let mut w = terrustia_proto::PacketWriter::new(id::REQUEST_TILE_ENTITY_INTERACTION);
+                w.i32(NO_TILE_ENTITY).u8(slot);
+                w.finish()
+            }
+        {
+            self.broadcast(frame, Some(slot));
+        }
 
         if player.state == ConnState::Playing {
             if let Ok(frame) = packets::player_active(slot, false) {
@@ -934,6 +976,18 @@ impl GameServer {
             id::NET_MODULES => self.on_net_module(slot, &payload),
             id::SYNC_PROJECTILE => self.on_client_projectile(slot, &payload),
             id::KILL_PROJECTILE => self.on_client_projectile_kill(slot, &payload),
+            // Four different ids for one message: putting an item into a frame, onto a weapon
+            // rack, onto a food platter, or into a display jar.
+            id::ITEM_FRAME_TRY_PLACING
+            | id::WEAPONS_RACK_TRY_PLACING
+            | id::FOOD_PLATTER_TRY_PLACING
+            | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
+            id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
+            id::T_E_DISPLAY_DOLL_DATA_SYNC => self.on_display_doll_slot(slot, &payload),
+            id::T_E_HAT_RACK_ITEM_SYNC => self.on_hat_rack_slot(slot, &payload),
+            id::REQUEST_TILE_ENTITY_INTERACTION => {
+                self.on_tile_entity_interaction(slot, &payload)
+            }
             id::ADD_N_P_C_BUFF => self.on_add_npc_buff(slot, &payload),
             id::REQUEST_N_P_C_BUFF_REMOVAL => self.on_remove_npc_buff(slot, &payload),
             id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST => self.on_town_npc_name_request(slot, &payload),
@@ -4278,6 +4332,208 @@ impl GameServer {
         Ok(())
     }
 
+    /// Packets 89, 123, 133 and 149: putting an item into a frame, rack, platter or jar.
+    ///
+    /// All four are the same message with a different id, and all four are the whole point of the
+    /// furniture they belong to: a weapon rack that cannot be given a weapon is a wall decoration.
+    ///
+    /// Whatever was in it already falls out, which is what the game does and what a player
+    /// expects — swapping the sword on your rack should not eat the old one.
+    fn on_display_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::tile_entity::EntityData;
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (r.i16()?, r.i16()?);
+        let item = ItemStack {
+            id: i32::from(r.i16()?),
+            prefix: r.u8()?,
+            stack: r.i16()?,
+        };
+
+        let Some(at) = self
+            .world
+            .tile_entities
+            .iter()
+            .position(|e| e.x == x && e.y == y)
+        else {
+            // Nothing there to put it in, so it lands on the floor rather than vanishing.
+            self.spawn_item(item, tile_corner(x, y));
+            return Ok(());
+        };
+        let entity = &mut self.world.tile_entities[at];
+        let EntityData::Held(existing) = entity.data else {
+            // That kind of furniture does not hold a single item; the packet is for the wrong one.
+            return Ok(());
+        };
+        entity.data = EntityData::Held(item);
+        let id = entity.id;
+        if !existing.is_empty() {
+            self.spawn_item(existing, tile_corner(x, y));
+        }
+        self.share_tile_entity(id);
+        Ok(())
+    }
+
+    /// Packet 156: a kite or a critter being clipped onto its anchor.
+    fn on_anchor_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::tile_entity::EntityData;
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (r.i16()?, r.i16()?);
+        let item = r.i16()?;
+        let Some(entity) = self
+            .world
+            .tile_entities
+            .iter_mut()
+            .find(|e| e.x == x && e.y == y)
+        else {
+            return Ok(());
+        };
+        let EntityData::Anchor { item: held } = &mut entity.data else {
+            return Ok(());
+        };
+        *held = item;
+        let id = entity.id;
+        self.share_tile_entity(id);
+        Ok(())
+    }
+
+    /// Packet 121: one slot of a mannequin.
+    ///
+    /// The message names a slot and a command rather than sending the whole thing, because a
+    /// mannequin has nineteen slots and a player changes one at a time. Command 2 is the pose;
+    /// 0, 1 and 3 are the armour, the dyes and the accessory.
+    fn on_display_doll_slot(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::tile_entity::EntityData;
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed_player = r.u8()?; // rewritten to the sender, as vanilla does
+        let id = r.i32()?;
+        let index = usize::from(r.u8()?);
+        let command = r.u8()?;
+
+        let Some(entity) = self.world.tile_entities.iter_mut().find(|e| e.id == id) else {
+            return Ok(());
+        };
+        let EntityData::DisplayDoll(doll) = &mut entity.data else {
+            return Ok(());
+        };
+        if command == DOLL_POSE {
+            doll.pose = r.u8()?;
+        } else {
+            let item = ItemStack {
+                id: i32::from(r.u16()? as i16),
+                stack: r.u16()? as i16,
+                prefix: r.u8()?,
+            };
+            let into = match command {
+                DOLL_DYE => doll.dyes.get_mut(index),
+                DOLL_MISC => doll.misc.get_mut(index),
+                _ => doll.equip.get_mut(index),
+            };
+            let Some(into) = into else {
+                return Ok(()); // a slot number past the end is a crafted packet
+            };
+            *into = item;
+        }
+        // Relayed rather than re-serialised: the payload is exactly what every other client
+        // needs, and the sender already has it.
+        self.broadcast(packets::rewrite_owner(id::T_E_DISPLAY_DOLL_DATA_SYNC, payload, slot)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 124: one slot of a hat rack.
+    ///
+    /// Two hats and two dyes, with the dye flag folded into the slot number by adding two — which
+    /// is why the number has to be split apart again before it is used as an index.
+    fn on_hat_rack_slot(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use terrustia_proto::tile_entity::EntityData;
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed_player = r.u8()?;
+        let id = r.i32()?;
+        let mut index = usize::from(r.u8()?);
+        let dye = index >= 2;
+        if dye {
+            index -= 2;
+        }
+
+        let Some(entity) = self.world.tile_entities.iter_mut().find(|e| e.id == id) else {
+            return Ok(());
+        };
+        let EntityData::HatRack(rack) = &mut entity.data else {
+            return Ok(());
+        };
+        let item = ItemStack {
+            id: i32::from(r.u16()? as i16),
+            stack: r.u16()? as i16,
+            prefix: r.u8()?,
+        };
+        let into = if dye {
+            rack.dyes.get_mut(index)
+        } else {
+            rack.items.get_mut(index)
+        };
+        let Some(into) = into else {
+            return Ok(());
+        };
+        *into = item;
+        self.broadcast(
+            packets::rewrite_owner(id::T_E_HAT_RACK_ITEM_SYNC, payload, slot)?,
+            Some(slot),
+        );
+        Ok(())
+    }
+
+    /// Packet 122: which tile entity a player currently has open.
+    ///
+    /// Two things hang off it. A client cannot edit an entity it has not claimed, and only one
+    /// player may hold a given entity at a time — which is what stops two people emptying the
+    /// same mannequin into their own inventories at once.
+    fn on_tile_entity_interaction(
+        &mut self,
+        slot: u8,
+        payload: &[u8],
+    ) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let id = r.i32()?;
+
+        if id == NO_TILE_ENTITY {
+            self.tile_entity_anchors.remove(&slot);
+        } else {
+            if !self.world.tile_entities.iter().any(|e| e.id == id) {
+                return Ok(());
+            }
+            // Somebody else already has it open, so this claim is refused rather than shared.
+            if self
+                .tile_entity_anchors
+                .iter()
+                .any(|(&who, &held)| who != slot && held == id)
+            {
+                return Ok(());
+            }
+            self.tile_entity_anchors.insert(slot, id);
+        }
+
+        // Everyone is told who holds what, so each client can grey the thing out.
+        let mut w = terrustia_proto::PacketWriter::new(id::REQUEST_TILE_ENTITY_INTERACTION);
+        w.i32(id).u8(slot);
+        let frame = w.finish()?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
     /// Packet 87: a client placed a tile entity.
     ///
     /// The tile has to be there and be the right one, and there has to be nothing there already.
@@ -4296,7 +4552,7 @@ impl GameServer {
         if !self.world.in_bounds(i32::from(x), i32::from(y)) {
             return Ok(());
         }
-        if self.tile_entities.iter().any(|e| e.x == x && e.y == y) {
+        if self.world.tile_entities.iter().any(|e| e.x == x && e.y == y) {
             return Ok(());
         }
         // The tile it claims to stand on has to actually be there.
@@ -4308,17 +4564,43 @@ impl GameServer {
             }
         }
 
-        let id = self.next_tile_entity;
-        self.next_tile_entity += 1;
-        self.tile_entities.push(TileEntity {
-            id,
-            kind,
-            x,
-            y,
-            npc: None,
-        });
+        let id = self.world.next_tile_entity;
+        self.world.next_tile_entity += 1;
+        self.world.tile_entities.push(TileEntity::new(id, kind, x, y));
         debug!(slot, x, y, ?kind, id, "tile entity placed");
+        // Everyone has to be told, the placer included: the client sends the placement but does
+        // not create the entity itself, and the id it will refer to from now on is the server's
+        // to hand out.
+        self.share_tile_entity(id);
         Ok(())
+    }
+
+    /// Tell everyone nearby what a tile entity now holds.
+    ///
+    /// Until this goes out an entity does not exist as far as a client is concerned. An item
+    /// frame hangs empty, a mannequin stands bare, and a pylon is scenery you cannot travel to —
+    /// which is what every one of them was before this was sent at all.
+    /// To everyone rather than only to those nearby, which is what the game does at every one of
+    /// its own call sites. It matters: a client keeps its copy of an entity after it has walked
+    /// away, and a section is only re-sent when its *tiles* change — which filling an item frame
+    /// does not do. Sending only to those in range would leave that client believing in the
+    /// contents it saw last, permanently. There are a few hundred of these in a world and they
+    /// change when somebody touches them, so the cost is nothing like an NPC sync's.
+    fn share_tile_entity(&mut self, id: i32) {
+        let Some(entity) = self.world.tile_entities.iter().find(|e| e.id == id) else {
+            return;
+        };
+        let Ok(frame) = terrustia_proto::tile_entity::share(entity) else {
+            return;
+        };
+        self.broadcast(frame, None);
+    }
+
+    /// Tell everyone a tile entity has gone.
+    fn unshare_tile_entity(&mut self, id: i32) {
+        if let Ok(frame) = terrustia_proto::tile_entity::unshare(id) {
+            self.broadcast(frame, None);
+        }
     }
 
     /// One tick of the tile entities.
@@ -4332,7 +4614,7 @@ impl GameServer {
         const DUMMY_REACH: f32 = 1600.0;
         const DUMMY_NPC: u16 = 488;
 
-        if self.tile_entities.is_empty() {
+        if self.world.tile_entities.is_empty() {
             return;
         }
         let watchers: Vec<(f32, f32)> = self
@@ -4346,26 +4628,29 @@ impl GameServer {
         // An entity whose tile has gone is gone with it. Without this it is a ghost: it keeps its
         // spot reserved so nothing can be placed there again, and it goes on being ticked forever.
         let mut orphaned = Vec::new();
-        for (at, entity) in self.tile_entities.iter().enumerate() {
+        for (at, entity) in self.world.tile_entities.iter().enumerate() {
             let Some(wanted) = entity.kind.tile() else {
                 continue;
             };
             let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
             if !tile.is_active() || tile.block != wanted {
-                orphaned.push((at, entity.npc));
+                orphaned.push((at, entity.npc(), entity.id));
             }
         }
-        for (at, npc) in orphaned.iter().rev() {
+        for (at, npc, id) in orphaned.iter().rev() {
             if let Some(index) = npc {
                 self.npcs.remove(*index);
                 self.broadcast_npc_death(*index);
             }
-            self.tile_entities.remove(*at);
+            self.world.tile_entities.remove(*at);
+            // Clients keep their own copy, so one that is not told goes on believing in an item
+            // frame nobody can see or take from.
+            self.unshare_tile_entity(*id);
         }
 
         let mut raise = Vec::new();
         let mut lower = Vec::new();
-        for (at, entity) in self.tile_entities.iter().enumerate() {
+        for (at, entity) in self.world.tile_entities.iter().enumerate() {
             if entity.kind != EntityKind::TrainingDummy {
                 continue;
             }
@@ -4379,7 +4664,7 @@ impl GameServer {
             // A dummy whose own tile has gone takes its NPC with it.
             let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
             let planted = tile.is_active() && Some(tile.block) == entity.kind.tile();
-            match entity.npc {
+            match entity.npc() {
                 Some(index) if !watched || !planted => lower.push((at, index)),
                 None if watched && planted => raise.push((at, here)),
                 _ => {}
@@ -4389,8 +4674,8 @@ impl GameServer {
         for (at, index) in lower {
             self.npcs.remove(index);
             self.broadcast_npc_death(index);
-            if let Some(entity) = self.tile_entities.get_mut(at) {
-                entity.npc = None;
+            if let Some(entity) = self.world.tile_entities.get_mut(at) {
+                entity.set_npc(None);
             }
         }
         for (at, here) in raise {
@@ -4399,14 +4684,14 @@ impl GameServer {
             let Some(index) = self.npcs.spawn(DUMMY_NPC, (here.0 + 16.0, here.1 + 48.0)) else {
                 continue;
             };
-            if let Some(entity) = self.tile_entities.get(at)
+            if let Some(entity) = self.world.tile_entities.get(at)
                 && let Some(dummy) = self.npcs.get_mut(index)
             {
                 dummy.ai[0] = f32::from(entity.x);
                 dummy.ai[1] = f32::from(entity.y);
             }
-            if let Some(entity) = self.tile_entities.get_mut(at) {
-                entity.npc = Some(index);
+            if let Some(entity) = self.world.tile_entities.get_mut(at) {
+                entity.set_npc(Some(index));
             }
             self.broadcast_npc(index);
         }
