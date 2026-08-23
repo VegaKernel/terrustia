@@ -66,7 +66,16 @@ impl Sign {
 #[derive(Debug, Clone, Default)]
 pub struct PreservedWorld {
     /// Format version of the file this came from.
+    ///
+    /// Saving writes the sections it rebuilds in *this* version's shape, not the newest one: the
+    /// header is copied verbatim and still says 279, so a chest section written the way 294
+    /// writes them would be read back with the wrong field widths and take the rest of the file
+    /// with it.
     pub version: i32,
+    /// How many slots every chest has, for the versions that stated it once for the whole file.
+    ///
+    /// `None` from 294 onward, where each chest carries its own count.
+    pub chest_slots: Option<i16>,
     pub revision: u32,
     pub favorite: u64,
     /// The entire world-header section, verbatim.
@@ -91,6 +100,11 @@ pub struct PreservedWorld {
     pub tower_run_offset: Option<usize>,
     pub rain_offset: Option<usize>,
     pub wind_offset: Option<usize>,
+    pub sandstorm_offset: Option<usize>,
+    pub army_run_offset: Option<usize>,
+    pub combat_book_offset: Option<usize>,
+    pub late_downed_run_offset: Option<usize>,
+    pub combat_book_two_offset: Option<usize>,
     /// Original absolute offsets of section 4 onwards.
     ///
     /// The bytes are written back unchanged, so the new offsets are these shifted by however much

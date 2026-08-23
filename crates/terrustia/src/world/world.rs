@@ -42,6 +42,14 @@ pub struct World {
     pub raining: bool,
     pub rain_time: i32,
     pub max_rain: f32,
+    /// The sandstorm, which the file records separately from the wind that raises it.
+    ///
+    /// Kept on the world so a save resumes the storm it was in rather than a calm desert, and so
+    /// the two severities — where it is now and where it is heading — survive with it.
+    pub sandstorm: bool,
+    pub sandstorm_time: i32,
+    pub sandstorm_severity: f32,
+    pub sandstorm_intended_severity: f32,
     /// Where the dungeon is, when the world file said. Hardmode's stripes steer around it.
     pub dungeon_x: Option<i32>,
     /// Which moon is up, if either. Kept on the world because the client is told about it.
@@ -112,6 +120,10 @@ impl World {
             raining: false,
             rain_time: 0,
             max_rain: 0.0,
+            sandstorm: false,
+            sandstorm_time: 0,
+            sandstorm_severity: 0.0,
+            sandstorm_intended_severity: 0.0,
             wind: 0.0,
             crimson: false,
             progress: Progress::default(),

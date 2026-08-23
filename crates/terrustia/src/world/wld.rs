@@ -133,9 +133,10 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
     seek(&mut r, bytes, file.sections[1], 1)?;
     read_tiles(&mut r, &mut world, &file.importance)?;
 
+    let mut chest_slots = None;
     if file.sections.len() > 2 {
         seek(&mut r, bytes, file.sections[2], 2)?;
-        world.chests = read_chests(&mut r, file.version)?;
+        world.chests = read_chests(&mut r, file.version, &mut chest_slots)?;
     }
     if file.sections.len() > 3 {
         seek(&mut r, bytes, file.sections[3], 3)?;
@@ -157,6 +158,7 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
 
     world.preserved = Some(PreservedWorld {
         version: file.version,
+        chest_slots,
         revision: file.revision,
         favorite: file.favorite,
         header_bytes,
@@ -171,6 +173,11 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         tower_run_offset: offsets.late.tower_run,
         rain_offset: offsets.late.rain,
         wind_offset: offsets.late.wind,
+        sandstorm_offset: offsets.late.sandstorm,
+        army_run_offset: offsets.late.army_run,
+        combat_book_offset: offsets.late.combat_book,
+        late_downed_run_offset: offsets.late.late_downed_run,
+        combat_book_two_offset: offsets.late.combat_book_two,
         trailing_offsets,
         trailing_bytes,
         importance: file.importance,
@@ -290,6 +297,16 @@ pub struct LateOffsets {
     pub rain: Option<usize>,
     /// The wind the world is blowing toward.
     pub wind: Option<usize>,
+    /// The sandstorm block: happening, how long for, and its two severities.
+    pub sandstorm: Option<usize>,
+    /// The bartender, then the three Old One's Army tiers.
+    pub army_run: Option<usize>,
+    /// The first combat book, which sits alone between two blocks that are not flags.
+    pub combat_book: Option<usize>,
+    /// The Empress of Light, Queen Slime and Deerclops, in that order.
+    pub late_downed_run: Option<usize>,
+    /// The second combat book, after the run of unlocked town-NPC spawns.
+    pub combat_book_two: Option<usize>,
 }
 
 /// What the late header says about the weather.
@@ -299,6 +316,10 @@ struct Weather {
     rain_time: i32,
     max_rain: f32,
     wind: f32,
+    sandstorm: bool,
+    sandstorm_time: i32,
+    severity: f32,
+    intended_severity: f32,
 }
 
 /// Walk the header past the invasion block, picking up the flags the server actually uses.
@@ -308,6 +329,7 @@ struct Weather {
 /// cannot simply be seeked into.
 fn read_late_header(
     r: &mut PacketReader<'_>,
+    version: i32,
     progress: &mut Progress,
     weather: &mut Weather,
     offsets: &mut LateOffsets,
@@ -353,7 +375,13 @@ fn read_late_header(
     let _invasion_size_start = num(r.i32(), r)?;
     let _cultist_delay = num(r.i32(), r)?;
 
-    // The banner kill counts, then the claimable banners.
+    // The banner kill counts, then — only from 289 — the claimable banners.
+    //
+    // The second list is the one version gate in this whole run that is easy to miss, because a
+    // world that predates it usually has nothing after the kill counts that looks wrong: the two
+    // bytes read for a count that is not there come back as zero, no items follow, and every flag
+    // from here to the end of the header is silently two bytes out. That misplaces the Moon Lord,
+    // the cultist and the four pillars on any world older than 1.4.4.9.
     let kinds = num(r.i16(), r)?;
     if !(0..=10_000).contains(&kinds) {
         return Err(WldError::LateHeaderOutOfStep {
@@ -364,15 +392,17 @@ fn read_late_header(
     for _ in 0..kinds {
         num(r.i32(), r)?;
     }
-    let claimable = num(r.i16(), r)?;
-    if !(0..=10_000).contains(&claimable) {
-        return Err(WldError::LateHeaderOutOfStep {
-            at: r.position(),
-            count: i64::from(claimable),
-        });
-    }
-    for _ in 0..claimable {
-        num(r.u16(), r)?;
+    if version >= 289 {
+        let claimable = num(r.i16(), r)?;
+        if !(0..=10_000).contains(&claimable) {
+            return Err(WldError::LateHeaderOutOfStep {
+                at: r.position(),
+                count: i64::from(claimable),
+            });
+        }
+        for _ in 0..claimable {
+            num(r.u16(), r)?;
+        }
     }
 
     let _fast_forward_to_dawn = num(r.bool(), r)?;
@@ -404,6 +434,91 @@ fn read_late_header(
     ] {
         *flag = num(r.bool(), r)?;
     }
+
+    // A party in progress, and who is celebrating.
+    let _party_manual = num(r.bool(), r)?;
+    let _party_genuine = num(r.bool(), r)?;
+    let _party_cooldown = num(r.i32(), r)?;
+    let partiers = num(r.i32(), r)?;
+    if !(0..=1_000).contains(&partiers) {
+        return Err(WldError::LateHeaderOutOfStep {
+            at: r.position(),
+            count: i64::from(partiers),
+        });
+    }
+    for _ in 0..partiers {
+        num(r.i32(), r)?;
+    }
+
+    offsets.sandstorm = Some(r.position() - section_start);
+    weather.sandstorm = num(r.bool(), r)?;
+    weather.sandstorm_time = num(r.i32(), r)?;
+    weather.severity = num(r.f32(), r)?;
+    weather.intended_severity = num(r.f32(), r)?;
+
+    // The Old One's Army: the bartender who starts it, then the three tiers it has lost.
+    offsets.army_run = Some(r.position() - section_start);
+    for flag in [
+        &mut progress.saved_bartender,
+        &mut progress.downed_army_t1,
+        &mut progress.downed_army_t2,
+        &mut progress.downed_army_t3,
+    ] {
+        *flag = num(r.bool(), r)?;
+    }
+
+    // Five more background styles.
+    for _ in 0..5 {
+        num(r.u8(), r)?;
+    }
+    offsets.combat_book = Some(r.position() - section_start);
+    progress.combat_book = num(r.bool(), r)?;
+
+    // Lantern night: its cooldown, then three flags about the night to come.
+    num(r.i32(), r)?;
+    for _ in 0..3 {
+        num(r.bool(), r)?;
+    }
+
+    // One tree-top variation per biome, counted rather than fixed.
+    let tree_tops = num(r.i32(), r)?;
+    if !(0..=1_000).contains(&tree_tops) {
+        return Err(WldError::LateHeaderOutOfStep {
+            at: r.position(),
+            count: i64::from(tree_tops),
+        });
+    }
+    for _ in 0..tree_tops {
+        num(r.i32(), r)?;
+    }
+
+    // Forced holidays for today, the four ore tiers the wall handed out, and the three pets.
+    for _ in 0..2 {
+        num(r.bool(), r)?;
+    }
+    for _ in 0..4 {
+        num(r.i32(), r)?;
+    }
+    for _ in 0..3 {
+        num(r.bool(), r)?;
+    }
+
+    offsets.late_downed_run = Some(r.position() - section_start);
+    for flag in [
+        &mut progress.downed_empress_of_light,
+        &mut progress.downed_queen_slime,
+        &mut progress.downed_deerclops,
+    ] {
+        *flag = num(r.bool(), r)?;
+    }
+
+    // Nine town NPCs whose arrival has been unlocked by other means, then the second book.
+    for _ in 0..9 {
+        num(r.bool(), r)?;
+    }
+    offsets.combat_book_two = Some(r.position() - section_start);
+    progress.combat_book_two = num(r.bool(), r)?;
+
     Ok(())
 }
 
@@ -553,6 +668,7 @@ fn read_world_header(
     let mut late = LateOffsets::default();
     if let Err(error) = read_late_header(
         r,
+        version,
         &mut progress,
         &mut world_weather,
         &mut late,
@@ -574,6 +690,10 @@ fn read_world_header(
     world.rain_time = world_weather.rain_time;
     world.max_rain = world_weather.max_rain;
     world.wind = world_weather.wind;
+    world.sandstorm = world_weather.sandstorm;
+    world.sandstorm_time = world_weather.sandstorm_time;
+    world.sandstorm_severity = world_weather.severity;
+    world.sandstorm_intended_severity = world_weather.intended_severity;
     world.id = id;
     world.unique_id = unique_id;
     world.world_gen_version = world_gen_version;
@@ -636,12 +756,20 @@ fn read_tiles(r: &mut PacketReader<'_>, world: &mut World, importance: &[bool]) 
     Ok(())
 }
 
-fn read_chests(r: &mut PacketReader<'_>, version: i32) -> Result<Vec<Option<Chest>>> {
+fn read_chests(
+    r: &mut PacketReader<'_>,
+    version: i32,
+    shared: &mut Option<i16>,
+) -> Result<Vec<Option<Chest>>> {
     let count = num(r.i16(), r)?;
-    // Before 294 every chest had the same capacity; since then each carries its own.
+    // Before 294 every chest had the same capacity; since then each carries its own. Which it was
+    // has to be remembered, because saving writes the section back in this file's own shape.
     let shared_slots = if version < 294 {
-        num(r.i16(), r)? as i32
+        let slots = num(r.i16(), r)?;
+        *shared = Some(slots);
+        i32::from(slots)
     } else {
+        *shared = None;
         0
     };
 
@@ -711,4 +839,131 @@ fn num<T>(
         offset: r.position(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use terrustia_proto::Writer;
+
+    /// The whole late header, as a world of `version` writes it.
+    ///
+    /// Only the fields the reader distinguishes are given real values; the rest are the right
+    /// widths filled with zero, which is what makes an off-by-two visible rather than plausible.
+    fn late_tail(version: i32) -> Vec<u8> {
+        let mut w = Writer::new();
+        // The slime rain clock and the sundial, then the rain the reader keeps.
+        w.f64(0.0).u8(0);
+        w.bool(true).i32(600).f32(0.9);
+        // Three hardmode ore tiers, eight background styles, the clouds, then the wind.
+        for _ in 0..3 {
+            w.i32(0);
+        }
+        for _ in 0..8 {
+            w.u8(0);
+        }
+        w.i32(0).i16(0).f32(-0.3);
+        // Nobody has handed in an angler quest, and the five saved townsfolk.
+        w.i32(0);
+        w.bool(false).i32(0).bool(false).bool(false).bool(false);
+        w.i32(0).i32(0);
+        // Banner kill counts, then the claimable list that only exists from 289.
+        w.i16(2).i32(7).i32(9);
+        if version >= 289 {
+            w.i16(1).u16(1234);
+        }
+        w.bool(false); // fast forward to dawn
+        // The nine "downed" flags: only the Moon Lord, the fourth, is set.
+        for i in 0..9 {
+            w.bool(i == 3);
+        }
+        // The nine pillar flags: only the vortex tower is standing, the sixth.
+        for i in 0..9 {
+            w.bool(i == 5);
+        }
+        // A party nobody is at.
+        w.bool(false).bool(false).i32(0).i32(0);
+        // The sandstorm, which is the first thing after the party with a recognisable value.
+        w.bool(true).i32(4321).f32(0.25).f32(0.5);
+        // The bartender and the three army tiers.
+        w.bool(true).bool(true).bool(false).bool(false);
+        // Five background styles, then the first combat book.
+        for _ in 0..5 {
+            w.u8(0);
+        }
+        w.bool(true);
+        // Lantern night, then thirteen tree tops.
+        w.i32(0).bool(false).bool(false).bool(false);
+        w.i32(13);
+        for _ in 0..13 {
+            w.i32(1);
+        }
+        // Forced holidays, the four ore tiers, the three pets.
+        w.bool(false).bool(false);
+        for tier in [7, 167, 9, 169] {
+            w.i32(tier);
+        }
+        for _ in 0..3 {
+            w.bool(false);
+        }
+        // The empress, the queen and Deerclops: only the queen is down.
+        w.bool(false).bool(true).bool(false);
+        // Nine unlocked town spawns, then the second combat book.
+        for _ in 0..9 {
+            w.bool(false);
+        }
+        w.bool(false);
+        w.into_bytes()
+    }
+
+    fn walk(version: i32) -> (Progress, Weather) {
+        let bytes = late_tail(version);
+        let mut r = PacketReader::new(&bytes);
+        let mut progress = Progress::default();
+        let mut weather = Weather::default();
+        let mut offsets = LateOffsets::default();
+        read_late_header(
+            &mut r,
+            version,
+            &mut progress,
+            &mut weather,
+            &mut offsets,
+            0,
+        )
+        .unwrap_or_else(|e| panic!("version {version}: {e}"));
+        (progress, weather)
+    }
+
+    /// A world older than 289 has no claimable-banner list, and reading one anyway puts every
+    /// flag after it two bytes out.
+    ///
+    /// The two bytes come back as a count of zero, so nothing fails loudly: the world simply
+    /// reports the wrong bosses. Both versions have to land on the same answers.
+    #[test]
+    fn the_claimable_banner_list_is_gated_on_its_version() {
+        for version in [MIN_VERSION, 288, 289, 319] {
+            let (p, weather) = walk(version);
+            assert!(p.downed_moon_lord, "{version}: the moon lord");
+            assert!(!p.downed_fishron, "{version}: fishron, which is not down");
+            assert!(
+                p.tower_active_vortex,
+                "{version}: the vortex tower standing"
+            );
+            assert!(!p.downed_tower_solar, "{version}: solar, never beaten");
+            assert!(
+                weather.raining && weather.rain_time == 600,
+                "{version}: rain"
+            );
+            assert_eq!(weather.wind, -0.3, "{version}: wind");
+            assert!(weather.sandstorm, "{version}: the sandstorm");
+            assert_eq!(weather.sandstorm_time, 4321, "{version}");
+            assert_eq!(weather.severity, 0.25, "{version}");
+            assert!(p.saved_bartender, "{version}: the bartender");
+            assert!(p.downed_army_t1 && !p.downed_army_t2, "{version}: the army");
+            assert!(p.combat_book && !p.combat_book_two, "{version}: the books");
+            assert!(p.downed_queen_slime, "{version}: the queen");
+            assert!(!p.downed_empress_of_light, "{version}: the empress");
+            assert!(!p.downed_deerclops, "{version}: deerclops");
+        }
+    }
 }

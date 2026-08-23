@@ -72,9 +72,16 @@ pub struct Progress {
     pub saved_tax_collector: bool,
     pub saved_golfer: bool,
     pub saved_bartender: bool,
+    /// The Old One's Army, which is three separate victories rather than one.
+    pub downed_army_t1: bool,
+    pub downed_army_t2: bool,
+    pub downed_army_t3: bool,
     pub downed_deerclops: bool,
     pub downed_empress_of_light: bool,
     pub downed_queen_slime: bool,
+    /// The two combat books, each of which permanently toughens the townsfolk.
+    pub combat_book: bool,
+    pub combat_book_two: bool,
 }
 
 impl Progress {

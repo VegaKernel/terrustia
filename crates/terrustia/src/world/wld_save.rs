@@ -88,7 +88,7 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
 
     // --- section 2: chests -----------------------------------------------------------------
     pointers[2] = w.len() as i32;
-    write_chests(&mut w, world);
+    write_chests(&mut w, world, preserved.chest_slots);
 
     // --- section 3: signs ------------------------------------------------------------------
     pointers[3] = w.len() as i32;
@@ -199,6 +199,31 @@ fn patch_clock(header: &mut [u8], preserved: &super::objects::PreservedWorld, wo
             p.lunar_apocalypse_up,
         ],
     );
+    flags(
+        header,
+        preserved.army_run_offset,
+        &[
+            p.saved_bartender,
+            p.downed_army_t1,
+            p.downed_army_t2,
+            p.downed_army_t3,
+        ],
+    );
+    flags(header, preserved.combat_book_offset, &[p.combat_book]);
+    flags(
+        header,
+        preserved.late_downed_run_offset,
+        &[
+            p.downed_empress_of_light,
+            p.downed_queen_slime,
+            p.downed_deerclops,
+        ],
+    );
+    flags(
+        header,
+        preserved.combat_book_two_offset,
+        &[p.combat_book_two],
+    );
     if let Some(at) = preserved.rain_offset {
         write(header, at, &[u8::from(world.raining)]);
         write(header, at + 1, &world.rain_time.to_le_bytes());
@@ -206,6 +231,16 @@ fn patch_clock(header: &mut [u8], preserved: &super::objects::PreservedWorld, wo
     }
     if let Some(at) = preserved.wind_offset {
         write(header, at, &world.wind.to_le_bytes());
+    }
+    if let Some(at) = preserved.sandstorm_offset {
+        write(header, at, &[u8::from(world.sandstorm)]);
+        write(header, at + 1, &world.sandstorm_time.to_le_bytes());
+        write(header, at + 5, &world.sandstorm_severity.to_le_bytes());
+        write(
+            header,
+            at + 9,
+            &world.sandstorm_intended_severity.to_le_bytes(),
+        );
     }
     write(
         header,
@@ -248,9 +283,33 @@ fn write_tiles(w: &mut Writer, world: &World, importance: &dyn Fn(u16) -> bool) 
     }
 }
 
-fn write_chests(w: &mut Writer, world: &World) {
+/// Write the chest section in the shape this file's own version uses.
+///
+/// Before 294 the capacity is stated once for the whole section and every chest writes exactly
+/// that many slots; from 294 each chest carries its own count. The header is copied verbatim and
+/// still names the old version, so writing the new shape into an old file makes the reader take
+/// the first chest's coordinates for a slot count and lose the rest of the file with it.
+fn write_chests(w: &mut Writer, world: &World, shared_slots: Option<i16>) {
     let chests: Vec<_> = world.chests.iter().flatten().collect();
     w.i16(chests.len() as i16);
+    if let Some(slots) = shared_slots {
+        w.i16(slots);
+        for chest in chests {
+            w.i32(i32::from(chest.x))
+                .i32(i32::from(chest.y))
+                .string(&chest.name);
+            // Padded or truncated to the shared capacity: a chest the server created carries the
+            // modern default, which need not be what this file says.
+            for index in 0..slots.max(0) as usize {
+                chest
+                    .items
+                    .get(index)
+                    .unwrap_or(&terrustia_proto::ItemStack::EMPTY)
+                    .write_save(w);
+            }
+        }
+        return;
+    }
     for chest in chests {
         w.i32(i32::from(chest.x))
             .i32(i32::from(chest.y))
@@ -304,6 +363,7 @@ mod tests {
     fn preserved() -> PreservedWorld {
         PreservedWorld {
             version: 279,
+            chest_slots: None,
             revision: 1,
             favorite: 0,
             header_bytes: Vec::new(),
@@ -318,6 +378,11 @@ mod tests {
             tower_run_offset: Some(400),
             rain_offset: Some(500),
             wind_offset: Some(600),
+            sandstorm_offset: Some(700),
+            army_run_offset: Some(800),
+            combat_book_offset: Some(810),
+            late_downed_run_offset: Some(820),
+            combat_book_two_offset: Some(830),
             trailing_offsets: Vec::new(),
             trailing_bytes: Vec::new(),
             importance: Vec::new(),
@@ -342,6 +407,14 @@ mod tests {
         world.rain_time = 4200;
         world.max_rain = 0.75;
         world.wind = -0.4;
+        world.sandstorm = true;
+        world.sandstorm_time = 30_000;
+        world.sandstorm_severity = 0.5;
+        world.sandstorm_intended_severity = 0.8;
+        world.progress.downed_army_t2 = true;
+        world.progress.combat_book = true;
+        world.progress.downed_deerclops = true;
+        world.progress.combat_book_two = true;
 
         patch_clock(&mut header, &keep, &world);
 
@@ -383,6 +456,30 @@ mod tests {
             -0.4,
             "wind"
         );
+        assert_eq!(header[700], 1, "sandstorm");
+        assert_eq!(
+            i32::from_le_bytes(header[701..705].try_into().unwrap()),
+            30_000,
+            "sandstorm time"
+        );
+        assert_eq!(
+            f32::from_le_bytes(header[705..709].try_into().unwrap()),
+            0.5,
+            "severity"
+        );
+        assert_eq!(
+            f32::from_le_bytes(header[709..713].try_into().unwrap()),
+            0.8,
+            "intended severity"
+        );
+        // The army run: the bartender first, then the three tiers.
+        assert_eq!(header[800], 0, "the bartender, never saved");
+        assert_eq!(header[800 + 2], 1, "the second tier, beaten");
+        assert_eq!(header[810], 1, "the first combat book");
+        // The late downed run: the empress, the queen, then Deerclops.
+        assert_eq!(header[820], 0, "the empress, still alive");
+        assert_eq!(header[820 + 2], 1, "deerclops");
+        assert_eq!(header[830], 1, "the second combat book");
     }
 
     /// A world whose header never reached a field simply does not write it, rather than writing
@@ -402,5 +499,49 @@ mod tests {
         assert_eq!(header[300], 0xAA, "nothing written where nothing was read");
         assert_eq!(header[400], 0xAA);
         assert_eq!(header[600], 0xAA);
+    }
+
+    /// A pre-294 world states its chest capacity once, and every chest writes exactly that many
+    /// slots with no count of its own.
+    ///
+    /// Writing the modern shape into an old file is not a cosmetic difference: the reader takes
+    /// the first chest's x coordinate for the shared count and loses every byte after it.
+    #[test]
+    fn an_old_world_keeps_its_shared_chest_capacity() {
+        let mut world = crate::world::worldgen::generate(400, 300, "old", 1);
+        world.chests = vec![Some(crate::world::objects::Chest::empty_at(10, 20))];
+
+        let mut w = Writer::new();
+        write_chests(&mut w, &world, Some(40));
+        let old = w.into_bytes();
+
+        let mut w = Writer::new();
+        write_chests(&mut w, &world, None);
+        let new = w.into_bytes();
+
+        // count, shared capacity, x, y, an empty name, then forty empty slots.
+        assert_eq!(&old[..4], &[1, 0, 40, 0], "count then the shared capacity");
+        assert_eq!(old.len(), 2 + 2 + 4 + 4 + 1 + 40 * 2);
+        // The modern shape spends four bytes on a per-chest count instead of two on a shared one.
+        assert_eq!(new.len(), 2 + 4 + 4 + 1 + 4 + 40 * 2);
+        assert_ne!(old, new);
+    }
+
+    /// A chest the server created carries the modern default, which need not match what an older
+    /// file says its chests hold. It is padded or truncated rather than written at its own size.
+    #[test]
+    fn a_chest_is_written_at_the_files_capacity_not_its_own() {
+        let mut world = crate::world::worldgen::generate(400, 300, "old", 1);
+        world.chests = vec![Some(crate::world::objects::Chest::empty_at(10, 20))];
+
+        for slots in [20i16, 40, 60] {
+            let mut w = Writer::new();
+            write_chests(&mut w, &world, Some(slots));
+            assert_eq!(
+                w.len(),
+                2 + 2 + 4 + 4 + 1 + slots as usize * 2,
+                "{slots} slots"
+            );
+        }
     }
 }
