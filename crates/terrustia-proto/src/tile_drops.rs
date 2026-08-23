@@ -3,9 +3,12 @@
 //! Transcribed from the top-level `switch (tileCache.type)` in `WorldGen.KillTile_GetItemDrops`
 //! in the 1.4.5.7 build, keeping only the cases whose whole body is a single constant drop.
 //!
-//! That covers 334 tile types — dirt, stone, ores, wood, sand, ice and the rest of the
-//! plain blocks. The other 75 cases pick their drop from a frame style, a world flag or a
-//! random roll, and are deliberately absent: guessing at them would hand players the wrong item.
+//! That covers 345 tile types — dirt, stone, ores, wood, sand, ice, the vines and plants, and
+//! the rest of the plain blocks: every case in the game's switch whose body is one constant. The
+//! other 64 pick their drop from a frame style, a world flag or a random roll, and are
+//! deliberately absent. Furniture is the bulk of those, and handing a player the wrong piece of
+//! furniture is worse than handing them none — the style a frame names is a table of its own, and
+//! this file will not guess at it.
 
 /// Item a tile type drops, or `None` when the drop is not a simple constant.
 pub fn tile_drop(tile: u16) -> Option<i32> {
@@ -19,6 +22,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         9 => 14,
         22 => 56,
         23 => 2,
+        24 => 60,
         25 => 61,
         30 => 9,
         36 => 1869,
@@ -35,6 +39,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         48 => 147,
         49 => 148,
         51 => 150,
+        52 => 2996,
         53 => 169,
         54 => 170,
         56 => 173,
@@ -42,7 +47,9 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         58 => 174,
         59 => 176,
         60 => 176,
+        62 => 2996,
         70 => 176,
+        73 => 283,
         75 => 192,
         76 => 214,
         78 => 222,
@@ -51,6 +58,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         107 => 364,
         108 => 365,
         109 => 2,
+        110 => 5,
         111 => 366,
         112 => 370,
         116 => 408,
@@ -111,6 +119,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         198 => 775,
         199 => 2,
         200 => 835,
+        201 => 2887,
         202 => 824,
         203 => 836,
         204 => 880,
@@ -124,6 +133,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         222 => 1105,
         223 => 1106,
         224 => 1103,
+        225 => 1124,
         226 => 1101,
         229 => 1125,
         230 => 1127,
@@ -178,6 +188,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         372 => 3117,
         379 => 3214,
         381 => 3,
+        382 => 2996,
         383 => 620,
         385 => 3234,
         396 => 3271,
@@ -247,7 +258,9 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         515 => 129,
         516 => 129,
         517 => 129,
+        519 => 183,
         520 => 4326,
+        528 => 183,
         534 => 3,
         535 => 129,
         536 => 3,
@@ -279,6 +292,7 @@ pub fn tile_drop(tile: u16) -> Option<i32> {
         631 => 5138,
         633 => 172,
         635 => 5215,
+        637 => 5214,
         641 => 5306,
         646 => 5322,
         656 => 5333,

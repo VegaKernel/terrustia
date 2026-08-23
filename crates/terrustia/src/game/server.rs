@@ -3553,8 +3553,8 @@ impl GameServer {
 
     /// Scatter an NPC's coin value as item entities.
     ///
-    /// Type-specific loot tables are not modelled — `NPC.NPCLoot` is thousands of lines of
-    /// per-type rolls — but the coin drop is universal and comes straight from the NPC's `value`.
+    /// This is only the coin half of a death: it is universal and comes straight from the NPC's
+    /// `value`. What the thing was actually carrying is [`Self::drop_loot`].
     fn drop_coins(&mut self, value: f32, center: (f32, f32)) {
         let mut copper = value as i64;
         if copper <= 0 {

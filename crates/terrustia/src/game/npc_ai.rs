@@ -291,8 +291,9 @@ pub fn update_with(
         // 17 is the vulture, which perches and then flies; grouped with the other wanderers.
         // The critters: vultures, butterflies, snails, dragonflies, ladybugs, balloons and the
         // rest wander rather than hunt.
-        // Styles not modelled — bound NPCs, statues, bespoke boss routines — simply hold still and
-        // fall.
+        // Nothing in the build reaches here any more: every NPC type's style is ported, and a
+        // test walks the whole roster to prove it. It is kept as the floor rather than a panic,
+        // because a style added later should hold still rather than take the server down.
         _ => idle(npc),
     }
 

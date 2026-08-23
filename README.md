@@ -81,6 +81,11 @@ Not implemented:
 - **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
   player's own are simulated by their own client and relayed, which is what a vanilla server does
   too. The server still refuses any a client claims that would hurt other players.
+- **Furniture drops.** Mining a plain block gives the right item — all 345 tile types whose drop
+  the game states as a constant, checked against its own table with no disagreements. A framed
+  object picks its drop from a *style*, which is a second table the game derives from the tile's
+  frame differently for every type. Those are deliberately absent: handing a player the wrong
+  piece of furniture is worse than handing them none.
 
 ## Running
 
