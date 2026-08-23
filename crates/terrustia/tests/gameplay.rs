@@ -2151,3 +2151,142 @@ async fn an_enemy_kills_a_townsperson_it_is_standing_in() {
          (seen at full health: {seen_full})"
     );
 }
+
+/// A dart trap wired to a lever throws a dart when the lever is pulled, and the dart hurts.
+///
+/// This is the whole chain in one test: the flood finds the trap, the table works out what it
+/// throws, the projectile flies, and standing in front of it costs health.
+#[tokio::test]
+async fn a_wired_dart_trap_shoots_a_player() {
+    let addr = start_with(Config::default(), |world| {
+        // A corridor with a lever at one end and a dart trap at the other, joined by red wire.
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // The lever.
+        world.set_tile(390, 319, Tile::framed(136, 0, 0));
+        // Red wire from the lever to the trap.
+        for x in 390..=410 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        // A dart trap at the far end, frame_x 0 so it fires west, back down the corridor.
+        let mut trap = Tile::framed(137, 0, 0);
+        trap.flags
+            .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+        world.set_tile(410, 319, trap);
+    })
+    .await;
+
+    let mut client = join(addr, "trapfodder").await;
+    client.set_timeout(Duration::from_secs(20));
+    // Stand in the dart's way, a few tiles west of the trap.
+    client.move_to(404.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    client.hit_switch(390, 319).await.unwrap();
+
+    let mut dart = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && dart.is_none() {
+        client.move_to(404.0 * 16.0, 318.0 * 16.0).await.unwrap();
+        match client.next_event().await {
+            Ok(Event::ProjectileSynced(p)) => dart = Some(p),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let dart = dart.expect("the lever should have fired the trap");
+    assert_eq!(dart.projectile_type, 98, "a dart trap throws a dart");
+    assert!(
+        dart.velocity.0 < -10.0,
+        "it should fly west at twelve, not {:?}",
+        dart.velocity
+    );
+
+    // And a dart in the face costs health.
+    let mut hurt = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && !hurt {
+        client.move_to(404.0 * 16.0, 318.0 * 16.0).await.unwrap();
+        // Keep pulling the lever: one dart may pass before the player is standing still.
+        client.hit_switch(390, 319).await.unwrap();
+        match client.next_event().await {
+            Ok(Event::PlayerHurt(_)) => hurt = true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(hurt, "a dart flew through the player and did nothing");
+}
+
+/// A trap has a cooldown, which is the difference between a trap and a machine gun.
+///
+/// A pressure plate a slime is sitting on is hit every tick; without the cooldown every one of
+/// those hits would be a dart, and a dungeon corridor would be a wall of them.
+#[tokio::test]
+async fn a_trap_will_not_fire_faster_than_its_cooldown() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        world.set_tile(390, 319, Tile::framed(136, 0, 0));
+        for x in 390..=410 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        let mut trap = Tile::framed(137, 0, 0);
+        trap.flags
+            .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+        world.set_tile(410, 319, trap);
+    })
+    .await;
+
+    let mut client = join(addr, "leverpuller").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(385.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Pull the lever fifty times over about a second — well inside the dart trap's 200-tick wait.
+    for _ in 0..50 {
+        client.hit_switch(390, 319).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Count the distinct darts that were born, not the syncs: one projectile is synced many times.
+    let mut born = std::collections::HashSet::new();
+    while let Some(Event::ProjectileSynced(p)) = client
+        .try_wait_for(
+            "a projectile",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_millis(400),
+        )
+        .await
+    {
+        born.insert((p.key.owner, p.key.index, p.key.generation));
+    }
+    assert!(
+        !born.is_empty(),
+        "fifty pulls should have fired the trap at least once"
+    );
+    assert!(
+        born.len() <= 2,
+        "fifty pulls in a second fired {} darts; the cooldown is not holding",
+        born.len()
+    );
+}

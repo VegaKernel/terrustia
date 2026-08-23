@@ -205,6 +205,11 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// Trap tiles that have fired recently, and how long until each can fire again.
+    ///
+    /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
+    /// tile up is what it is for.
+    mech_cooldown: HashMap<(i32, i32), i32>,
     /// The furniture that remembers something: dummies, frames, racks, pylons.
     tile_entities: Vec<terrustia_proto::tile_entity::TileEntity>,
     next_tile_entity: i32,
@@ -265,6 +270,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            mech_cooldown: HashMap::new(),
             tile_entities: Vec::new(),
             next_tile_entity: 0,
             liquids: crate::world::liquid::Liquids::default(),
@@ -414,6 +420,7 @@ impl GameServer {
         self.tick_liquids();
         self.tick_spread();
         self.tick_weather();
+        self.tick_mech_cooldowns();
         self.tick_lunar();
         lap(&mut cost, Phase::World);
 
@@ -2942,10 +2949,11 @@ impl GameServer {
     /// Move every projectile, and remove the ones that are finished.
     fn tick_projectiles(&mut self) {
         let mut spent = Vec::new();
+        let mut emitted = Vec::new();
         {
             let tiles = WorldTiles(&self.world);
             for (index, projectile) in self.projectiles.iter_mut() {
-                if crate::game::projectile::step(projectile, &tiles)
+                if crate::game::projectile::step(projectile, &tiles, &mut emitted)
                     == crate::game::projectile::Outcome::Spent
                 {
                     spent.push(index);
@@ -2954,6 +2962,18 @@ impl GameServer {
         }
         for index in spent {
             self.kill_projectile(index);
+        }
+        // A flamethrower's flames, and anything else a projectile decided to put in the air.
+        for emit in emitted {
+            if let Some(index) = self.projectiles.launch(
+                emit.projectile_type,
+                emit.position,
+                emit.velocity,
+                emit.damage,
+                0,
+            ) {
+                self.broadcast_projectile(index);
+            }
         }
 
         // Clients interpolate between updates, so projectiles go out at the same rate NPCs do.
@@ -3905,9 +3925,8 @@ impl GameServer {
 
     /// Packet 59: a switch, lever or pressure plate was hit.
     ///
-    /// The wiring itself is not simulated — what a circuit does when it fires is a system of its
-    /// own — but the hit is relayed so every client runs the same circuit, which is what makes a
-    /// door open on everybody's screen rather than only the one who stepped on the plate.
+    /// The circuit runs here as well as being relayed: an actuator changes what the world *is*,
+    /// and a trap has to throw the same dart at everybody rather than one per client.
     fn on_hit_switch(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
@@ -3942,9 +3961,66 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
         }
+        for (tx, ty) in fired.traps {
+            self.fire_trap(tx, ty);
+        }
 
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
         Ok(())
+    }
+
+    /// Fire one trap the current reached, if it is not still cooling down.
+    ///
+    /// The cooldown is what separates a trap from a machine gun: a pressure plate a slime is
+    /// sitting on is hit every tick, and without this every one of those hits would be a dart.
+    fn fire_trap(&mut self, x: i32, y: i32) {
+        /// The one trap projectile that is rationed by how many are already out.
+        const SPIKY_BALL: u16 = 185;
+
+        let tile = self.world.tile(x, y);
+        let Some(shot) = crate::world::wiring::trap_shot(tile, x, y, &mut self.rng) else {
+            return;
+        };
+        if self.mech_cooldown.contains_key(&shot.cools_at) {
+            return;
+        }
+        // Spiky balls are also rationed by how many are already lying about, which is what stops
+        // a held-down plate burying a corridor in them.
+        if shot.projectile_type == SPIKY_BALL {
+            let at = (shot.position.0, shot.position.1);
+            let allowed = crate::world::wiring::spiky_ball_allowed(
+                self.projectiles
+                    .iter()
+                    .filter(|(_, p)| p.projectile_type == SPIKY_BALL)
+                    .map(|(_, p)| {
+                        let c = p.center();
+                        ((c.0 - at.0).powi(2) + (c.1 - at.1).powi(2)).sqrt()
+                    }),
+            );
+            if !allowed {
+                return;
+            }
+        }
+        // The cooldown is taken whether or not a slot was free: a trap that could not fire for
+        // want of a projectile slot has still gone off, and should not retry every tick.
+        self.mech_cooldown.insert(shot.cools_at, shot.cooldown);
+        if let Some(index) = self.projectiles.launch(
+            shot.projectile_type,
+            shot.position,
+            shot.velocity,
+            shot.damage,
+            0,
+        ) {
+            self.broadcast_projectile(index);
+        }
+    }
+
+    /// Count down every trap that has fired recently, and forget the ones that are ready again.
+    fn tick_mech_cooldowns(&mut self) {
+        self.mech_cooldown.retain(|_, ticks| {
+            *ticks -= 1;
+            *ticks > 0
+        });
     }
 
     /// Packet 70: a critter was caught in a net, and is now an item.
@@ -4989,7 +5065,8 @@ mod combat_tests {
         loop {
             let done = {
                 let p = store.get_mut(index).unwrap();
-                crate::game::projectile::step(p, &Sky) == crate::game::projectile::Outcome::Spent
+                crate::game::projectile::step(p, &Sky, &mut Vec::new())
+                    == crate::game::projectile::Outcome::Spent
             };
             ticks += 1;
             if done || ticks > 200 {

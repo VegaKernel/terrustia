@@ -460,6 +460,17 @@ impl Client {
         self.send(&door.encode()?).await
     }
 
+    /// Hit a switch, lever or pressure plate, which runs whatever it is wired to.
+    pub async fn hit_switch(&mut self, x: i16, y: i16) -> Result<()> {
+        let mut w = terrustia_proto::Writer::new();
+        w.i16(x).i16(y);
+        self.send(&terrustia_proto::packets::verbatim(
+            id::HIT_SWITCH,
+            w.as_slice(),
+        )?)
+        .await
+    }
+
     /// Send an already-encoded frame, for anything this API does not cover.
     pub async fn send(&mut self, frame: &[u8]) -> Result<()> {
         self.stream.write_all(frame).await?;
