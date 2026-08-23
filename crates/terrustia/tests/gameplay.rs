@@ -4018,3 +4018,40 @@ async fn an_absurd_quick_stack_is_refused() {
         .await;
     assert!(alive.is_some(), "the server should shrug that off");
 }
+
+/// Fishing brings up a handful of enemies. The packet that says so must not be a free spawn of
+/// anything in the game at any coordinates a client cares to name.
+#[tokio::test]
+async fn only_the_fishable_can_be_fished_out() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+
+    let fish_out = |npc_type: i16| {
+        let mut w = terrustia_proto::PacketWriter::new(id::FISH_OUT_N_P_C);
+        w.u16(400).u16(320).i16(npc_type);
+        w.finish().unwrap()
+    };
+
+    // A Moon Lord is not something you catch.
+    alice.send(&fish_out(398)).await.unwrap();
+    let cheated = alice
+        .try_wait_for(
+            "a moon lord",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 398),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(cheated.is_none(), "that is not a fish");
+
+    // A Zombie Merman is.
+    alice.send(&fish_out(586)).await.unwrap();
+    let caught = alice
+        .try_wait_for(
+            "the catch",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 586),
+            Duration::from_secs(3),
+        )
+        .await;
+    assert!(caught.is_some(), "but that one is");
+}

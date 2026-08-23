@@ -215,6 +215,26 @@ const NO_SPACE_RESCUE: u8 = 4;
 /// a server runs out of memory.
 const MAX_QUICK_STACK_SLOTS: i32 = 200;
 
+// The two town slimes that are made rather than found, and what packet 140 calls each.
+const TRANSFORM_COPPER_SLIME: u8 = 1;
+const TRANSFORM_ELDER_SLIME: u8 = 2;
+const COPPER_SLIME: u16 = 684;
+const OLD_SLIME: u16 = 679;
+/// The only slime an Old Slime can be made from.
+const OLD_SLIME_SOURCE: u16 = 685;
+
+/// Whether an NPC is one a fishing rod can bring up.
+///
+/// Six types, all blood-moon catches: the Red Slime that unlocks itself, two hardmode fish and
+/// two pre-hardmode ones, and the Eyefish. Named rather than tabled — the set is tiny, has not
+/// changed since 1.4.0, and `Projectile.FishingCheck_RollEnemySpawns` lists it in one place.
+///
+/// The check matters more than its size suggests. Without it, packet 130 is a free spawn of
+/// anything in the game at any coordinates a client cares to name.
+fn is_fishable(npc_type: u16) -> bool {
+    matches!(npc_type, 586 | 587 | 618 | 620 | 621 | 682)
+}
+
 /// The Portal Gun's two ends, which are projectiles rather than tiles.
 const PORTAL_PROJECTILE: u16 = 602;
 
@@ -1072,6 +1092,9 @@ impl GameServer {
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
             id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
             id::QUICK_STACK_CHESTS => self.on_quick_stack(slot, &payload),
+            id::FISH_OUT_N_P_C => self.on_fished_out_npc(slot, &payload),
+            id::SET_MISC_EVENT_VALUES => self.on_misc_event_value(slot, &payload),
+            id::REQUEST_LUCY_POPUP => self.on_lucy_popup(slot, &payload),
             id::RELEASE_ITEM_OWNERSHIP => self.on_release_item(slot, &payload),
             id::MURDER_SOMEONE_ELSES_PORTAL => self.on_close_portal(slot, &payload),
             id::TELEPORT_PLAYER_THROUGH_PORTAL => self.on_portal_teleport(slot, &payload),
@@ -2272,6 +2295,93 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = id;
         }
+        Ok(())
+    }
+
+    /// Packet 130: an NPC pulled out of the water on a fishing line.
+    ///
+    /// Fishing is how three town slimes and a handful of enemies arrive, and the Red Slime is a
+    /// permanent unlock — catching one for the first time means the world can spawn them from
+    /// then on. Placing the NPC is the server's, since only it owns the roster.
+    fn on_fished_out_npc(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.u16()?), i32::from(r.u16()?));
+        let npc_type = r.i16()?;
+        let Ok(npc_type) = u16::try_from(npc_type) else {
+            return Ok(());
+        };
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+        // Only what a rod can actually bring up. Without this the packet is a free spawn of
+        // anything in the game, Moon Lord included.
+        if !is_fishable(npc_type) {
+            debug!(slot, npc_type, "that is not something you can fish out");
+            return Ok(());
+        }
+
+        let at = (
+            x as f32 * crate::game::npc::TILE,
+            y as f32 * crate::game::npc::TILE,
+        );
+        if let Some(index) = self.npcs.spawn(npc_type, at) {
+            self.broadcast_npc(index);
+            debug!(slot, npc_type, "fished out an npc");
+        }
+        Ok(())
+    }
+
+    /// Packet 140: the two town slimes that are made rather than found.
+    ///
+    /// A Copper Slime and an Old Slime are each transformed from another slime, once per world,
+    /// and the transformation is a permanent unlock. Both have to be the server's: the unlock is
+    /// world state and the transformation is a roster change.
+    fn on_misc_event_value(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let what = r.u8()?;
+        let value = r.i32()?;
+        let Ok(index) = u8::try_from(value) else {
+            return Ok(());
+        };
+
+        let (wanted, into) = match what {
+            TRANSFORM_COPPER_SLIME => (None, COPPER_SLIME),
+            TRANSFORM_ELDER_SLIME => (Some(OLD_SLIME_SOURCE), OLD_SLIME),
+            // Case 0 is the credits roll's clock, which only ever goes the other way.
+            _ => return Ok(()),
+        };
+        let Some(npc) = self.npcs.get(index) else {
+            return Ok(());
+        };
+        if let Some(wanted) = wanted
+            && npc.npc_type != wanted
+        {
+            return Ok(());
+        }
+        if let Some(npc) = self.npcs.get_mut(index) {
+            npc.become_type(into);
+            npc.dirty = true;
+        }
+        self.broadcast_npc(index);
+        Ok(())
+    }
+
+    /// Packet 141: Lucy the Axe having something to say.
+    ///
+    /// Pure flavour, and relayed rather than modelled — but a talking axe only its owner can hear
+    /// is a talking axe nobody believes in.
+    fn on_lucy_popup(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let frame = packets::verbatim(id::REQUEST_LUCY_POPUP, payload)?;
+        self.broadcast(frame, Some(slot));
         Ok(())
     }
 

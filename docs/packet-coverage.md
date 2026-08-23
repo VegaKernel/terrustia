@@ -18,10 +18,10 @@ receiving side.
 | | |
 |---|---:|
 | Live messages | 148 |
-| Referenced anywhere (sent or received) | 118 |
-| Dispatched inbound | 97 |
-| Never touched | 30 |
-| ...of those, ones a client actually sends | **5** |
+| Referenced anywhere (sent or received) | 124 |
+| Dispatched inbound | 101 |
+| Never touched | 24 |
+| ...of those, ones a client actually sends | **2** |
 
 For comparison, the audit that started this work found **76 never touched**, including NPC
 debuffs, town NPC names, every tile entity, all five server-side teleports, the Angler's whole
@@ -29,32 +29,30 @@ quest system, the invasion progress bar, the lunar pillar shields and the Grand 
 
 ## Still missing, and what it costs
 
-### A client sends these (5)
+### A client sends these (2)
 
 | Id | Name | Cost of not handling |
 |---:|---|---|
 | 94 | `DevCommands` | none — developer-only, and handling it would be a liability |
 | 107 | `SmartTextMessage` | signs and tombstones do not announce themselves in chat |
-| 130 | `FishOutNPC` | an NPC caught while fishing does not appear |
-| 140 | `SetMiscEventValues` | some event counters do not reach other clients |
-| 141 | `RequestLucyPopup` | Lucy the Axe says nothing |
 
-### Server-to-client only (25)
+`DevCommands` will stay unhandled. It is a channel for a client to ask the server to do
+developer things, and a public server that honours it is a public server anyone can rewrite.
+
+### Server-to-client only (22)
 
 Grouped by what they would buy:
 
 **Shops** — `TravelingMerchantItems` (72), `ShopOverride` (104). The Travelling Merchant's stock
 and any overridden shop. Both need a shop model that does not exist yet.
 
-**Storage** — `QuickStackChests` (85), `SyncPlayerChestIndex` (80), `ItemTweaker` (88). Quick
-stack to nearby chests is the notable one; it is used constantly and is not hard, just not done.
+**Storage** — `SyncPlayerChestIndex` (80), `ItemTweaker` (88).
 
 **Shimmer** — `ShimmerActions` (146). Transmutation is a 1.4.4 system this server does not model
-at all.
+at all. It is the largest remaining gap by content.
 
-**The Old One's Army's timing** — `CrystalInvasionWipeAllTheThingssss` (114),
-`CrystalInvasionSendWaitTime` (116). The event runs; clients are not told how long the gap
-between waves has left.
+**The Old One's Army** — `CrystalInvasionWipeAllTheThingssss` (114), which clears the field when
+the event ends. The wave countdown (116) is now sent.
 
 **Cosmetic** — `TemporaryAnimation` (77), `PoofOfSmoke` (106), `PlayLegacySound` (132),
 `WiredCannonShot` (108), `TamperWithNPC` (131). Effects other clients would otherwise not see.
@@ -67,7 +65,7 @@ and `ClientSyncedInventory` (138) are journey-mode and server-side-character fea
 does not offer.
 
 **Other** — `TeleportNPCThroughPortal` (100) needs NPCs to use portals, which they do not here.
-`SyncCavernMonsterType` (136), `ExtraSpawnSectionLoaded` (158), `ItemPosition` (160).
+`ExtraSpawnSectionLoaded` (158), `ItemPosition` (160).
 
 ## What was fixed, and in what order
 
@@ -86,9 +84,13 @@ Roughly by how much of the game each unblocked:
 6. **The Angler** (74/75/76/144) — a hundred and fifty quests deep, entirely inert.
 7. **Progress feedback** (78/101/103) — the invasion bar, the pillar shields, the Moon Lord's
    countdown. All tracked correctly and told to nobody.
-8. **Smaller ones** — chest names for the map (69), gem locks (105), portals (95/96), Nebula
-   boosters (102), item ownership release (39), coin-loss revenge (92), the Old One's Army's skip
-   (143).
+8. **Quick stack** (85) — one of the most-used buttons in the game, and one of the few inventory
+   operations that genuinely has to be the server's.
+9. **World-specific cavern monsters** (136) — each world draws six of the thirteen from its own
+   id, which is why two worlds feel different underground.
+10. **Smaller ones** — chest names for the map (69), gem locks (105), portals (95/96), Nebula
+    boosters (102), item ownership release (39), coin-loss revenge (92), the Old One's Army's skip
+    and countdown (143/116), fished-up NPCs (130), the two made town slimes (140), Lucy (141).
 
 ## A note on the audit's method
 
