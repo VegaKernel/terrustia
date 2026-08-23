@@ -49,8 +49,9 @@ Implemented:
   honey, honey blocks
 - **Town NPCs**: housing validation to the game's own rules, move-in, and the movement routine —
   the leash around their house, going indoors at nightfall and in rain, opening doors and stopping
-  at ledges. Shops need nothing from the server: a client builds one from the world flags, and
-  those are sent in full
+  at ledges. Enemies can kill them, and their armour comes off everything the world has beaten, so
+  a blood moon that walks through a town is a threat rather than scenery. Shops need nothing from
+  the server: a client builds one from the world flags, and those are sent in full
 - **Chat**: player chat plus `/help`, `/players`, `/time`, `/save`, `/where`, `/spawn`, `/npcs`,
   `/butcher`, `/house`
 - **Worlds**: procedural generation, a reader for `.wld` saves (format 279 and newer), and a writer
@@ -191,6 +192,11 @@ Results at the time of writing, against Terraria 1.4.5.7:
   streams in response to a walk.
 - Re-saving a 2.9 MB world produces a file **byte-identical to the original except the revision
   counter**, which the game increments too.
+- A 12 MB world in the **older format 279** — where the chest section states its capacity once for
+  the whole file rather than per chest, and the claimable-banner list does not exist yet — loads,
+  re-saves and reloads with every tile, chest and sign intact. Its header alignment was checked
+  against the file itself rather than against this reader: the four saved ore tiers land on tiles
+  7, 167, 9 and 169, which are copper, lead, silver and platinum.
 - A world edited through this server, saved, and then handed to the real `TerrariaServer` **loads
   and serves correctly**, with the edits in place.
 - Pointing both servers at the same pristine `.wld` and capturing their spawn streams gives
