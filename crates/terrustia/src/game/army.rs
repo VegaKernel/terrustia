@@ -176,6 +176,19 @@ impl ArmyState {
         }
     }
 
+    /// Call the next wave early, which is what the crystal's own button does.
+    ///
+    /// The gap between waves is generous on purpose — it is when you rebuild and re-arm — but a
+    /// group that is ready should not have to stand about. Returns whether there was a wait to
+    /// skip, so a request made mid-wave is refused rather than silently doing nothing.
+    pub fn skip_wait(&mut self) -> bool {
+        if !self.ongoing() || self.hold <= 0 {
+            return false;
+        }
+        self.hold = 0;
+        true
+    }
+
     /// Record a kill. Returns the wave that just finished, if one did.
     pub fn note_kill(&mut self, npc_type: u16, expert: bool) -> Option<i32> {
         let tier = self.tier?;

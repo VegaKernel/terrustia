@@ -165,6 +165,12 @@ pub struct Npc {
     /// shows the type's name until it is answered, so a server that never answers gives you a
     /// town full of people called "Guide".
     pub given_name: String,
+    /// Coins this one is carrying beyond what its type is worth.
+    ///
+    /// The Coin Loss revenge system: money dropped on death is remembered against whatever killed
+    /// you, and killing that back gives it up. It accumulates rather than being set, because two
+    /// players can both feed the same enemy.
+    pub extra_value: i32,
     /// Which of a type's two looks it wears, for the four types that have two.
     ///
     /// The Dryad, the Truffle, the Princess and the Guide each have an alternate; the game keeps
@@ -216,6 +222,7 @@ impl Npc {
             buffs: super::buffs::Buffs::new(),
             buffs_dirty: false,
             given_name: String::new(),
+            extra_value: 0,
             town_variation: 0,
         })
     }

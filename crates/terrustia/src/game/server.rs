@@ -208,6 +208,9 @@ const DEMON_CONCH: u8 = 2;
 const SHELLPHONE_SPAWN: u8 = 3;
 const NO_SPACE_RESCUE: u8 = 4;
 
+/// The Portal Gun's two ends, which are projectiles rather than tiles.
+const PORTAL_PROJECTILE: u16 = 602;
+
 /// Wire and actuators, as items, which is what a wiring tool spends.
 const WIRE_ITEM: i16 = 530;
 const ACTUATOR_ITEM: i16 = 849;
@@ -1053,6 +1056,13 @@ impl GameServer {
             | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
             id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
+            id::RELEASE_ITEM_OWNERSHIP => self.on_release_item(slot, &payload),
+            id::MURDER_SOMEONE_ELSES_PORTAL => self.on_close_portal(slot, &payload),
+            id::TELEPORT_PLAYER_THROUGH_PORTAL => self.on_portal_teleport(slot, &payload),
+            id::NEBULA_LEVELUP_REQUEST => self.on_nebula_booster(slot, &payload),
+            id::SYNC_EXTRA_VALUE => self.on_extra_value(slot, &payload),
+            id::CRYSTAL_INVASION_REQUESTED_TO_SKIP_WAIT_TIME => self.on_skip_army_wait(slot),
+            id::REQUEST_QUEST_EFFECT => self.on_quest_effect(slot),
             id::MASS_WIRE_OPERATION => self.on_mass_wire(slot, &payload),
             id::CHEST_NAME => self.on_chest_name_request(slot, &payload),
             id::GEM_LOCK_TOGGLE => self.on_gem_lock(slot, &payload),
@@ -2234,6 +2244,190 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = id;
         }
+        Ok(())
+    }
+
+    /// Packet 39: a player giving up their claim on an item.
+    ///
+    /// A dropped item is reserved for whoever is nearest so two players cannot both grab it. This
+    /// is the other half of that: a player whose inventory is full, or who simply walked past,
+    /// releases the claim so somebody else can have it. Without it a full player standing over a
+    /// pile locks all of it for as long as they stand there.
+    fn on_release_item(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let index = r.i16()?;
+        let _force_to_server = r.bool()?;
+
+        let Some(item) = self.items.get_mut(index) else {
+            return Ok(());
+        };
+        // Only the holder may release it, or one client could free another's claim from under it.
+        if item.owner != slot {
+            return Ok(());
+        }
+        item.owner = items::NO_OWNER;
+        item.reservation = 0;
+        let position = item.position;
+        // Told to everyone: the next tick will offer it to whoever is nearest, and until then no
+        // client should believe it is spoken for.
+        if let Ok(frame) = ItemOwner::reserve(index, items::NO_OWNER, position).encode() {
+            self.broadcast(frame, None);
+        }
+        Ok(())
+    }
+
+    /// Packet 95: closing somebody else's portal.
+    ///
+    /// The Portal Gun's two ends are projectiles. Firing a third replaces the oldest, and the
+    /// client that owns them says which one to close — because it is the one that knows which of
+    /// its own pair is which.
+    fn on_close_portal(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let owner = r.u16()?;
+        let which = f32::from(r.u8()?);
+        // The owner named has to be the sender, or one player could close another's portals.
+        if usize::from(owner) != usize::from(slot) {
+            return Ok(());
+        }
+
+        let found = self
+            .projectiles
+            .iter()
+            .find(|(_, p)| {
+                p.projectile_type == PORTAL_PROJECTILE
+                    && p.key.owner == slot
+                    && p.ai[1] == which
+            })
+            .map(|(index, p)| (index, p.key, p.position));
+        let Some((index, key, position)) = found else {
+            return Ok(());
+        };
+        self.projectiles.remove(index);
+        let kill = terrustia_proto::projectile::KillProjectile { key, position };
+        if let Ok(frame) = kill.encode() {
+            self.broadcast(frame, None);
+        }
+        Ok(())
+    }
+
+    /// Packet 96: a player stepping through a portal.
+    ///
+    /// The client works out where it comes out — it knows where both ends are and how it entered
+    /// — and the server's job is to agree and tell everybody else. Refusing would desync the one
+    /// client that has already moved.
+    fn on_portal_teleport(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed = r.u8()?;
+        let colour = r.i16()?;
+        let (x, y) = r.vec2()?;
+        let velocity = r.vec2()?;
+        if !x.is_finite() || !y.is_finite() || !velocity.0.is_finite() || !velocity.1.is_finite() {
+            return Ok(());
+        }
+        // A portal only reaches as far as its other end, which the server can bound even without
+        // knowing where that is: nothing on the map is further than the map.
+        if !self.world.in_bounds(
+            (x / crate::game::npc::TILE) as i32,
+            (y / crate::game::npc::TILE) as i32,
+        ) {
+            return Ok(());
+        }
+        if let Some(player) = self.player_mut(slot) {
+            player.position = (x, y);
+            player.velocity = velocity;
+        }
+        let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_PLAYER_THROUGH_PORTAL);
+        w.u8(slot)
+            .i16(colour)
+            .f32(x)
+            .f32(y)
+            .f32(velocity.0)
+            .f32(velocity.1);
+        let frame = w.finish()?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 102: a Nebula armour booster being picked up.
+    ///
+    /// Purely a relay — the effect is each client's own — but without it nobody else sees the
+    /// burst, and a booster picked up in a group looks to everyone else like nothing happened.
+    fn on_nebula_booster(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed = r.u8()?;
+        let kind = r.u16()?;
+        let at = r.vec2()?;
+        let mut w = terrustia_proto::PacketWriter::new(id::NEBULA_LEVELUP_REQUEST);
+        w.u8(slot).u16(kind).f32(at.0).f32(at.1);
+        let frame = w.finish()?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Packet 92: coins an NPC is carrying beyond its own worth.
+    ///
+    /// This is the Coin Loss revenge system: money dropped on death is remembered against
+    /// whatever killed you, and killing that back gives it up. The server accumulates rather than
+    /// overwrites, because two players can both feed the same enemy.
+    fn on_extra_value(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let index = r.i16()?;
+        let extra = r.i32()?;
+        let at = r.vec2()?;
+        let Ok(index) = u8::try_from(index) else {
+            return Ok(());
+        };
+        let Some(npc) = self.npcs.get_mut(index) else {
+            return Ok(());
+        };
+        npc.extra_value = npc.extra_value.saturating_add(extra);
+        let total = npc.extra_value;
+        let mut w = terrustia_proto::PacketWriter::new(id::SYNC_EXTRA_VALUE);
+        w.i16(i16::from(index)).i32(total).f32(at.0).f32(at.1);
+        let frame = w.finish()?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Packet 143: a player asking the Old One's Army to send the next wave early.
+    ///
+    /// The gap between waves is generous on purpose, and skipping it is how a group that is
+    /// ready gets on with it. Refused unless the event is actually waiting.
+    fn on_skip_army_wait(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        if self.army.skip_wait() {
+            debug!(slot, "the next army wave was called early");
+        }
+        Ok(())
+    }
+
+    /// Packet 144: the Dryad's little animation when a quest is handed in.
+    ///
+    /// Nothing but a flourish, and relayed rather than modelled — but a flourish only one client
+    /// can see is worse than none.
+    fn on_quest_effect(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let frame = packets::empty(id::REQUEST_QUEST_EFFECT)?;
+        self.broadcast(frame, None);
         Ok(())
     }
 
