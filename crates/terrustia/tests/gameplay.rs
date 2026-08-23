@@ -4120,3 +4120,116 @@ async fn only_the_fishable_can_be_fished_out() {
         .await;
     assert!(caught.is_some(), "but that one is");
 }
+
+// ------------------------------------------------------------------ shimmer
+
+/// An item dropped into shimmer becomes another item. It takes about a second and a half, which
+/// is what lets a player change their mind.
+#[tokio::test]
+async fn shimmer_transmutes_what_is_dropped_into_it() {
+    let addr = start_with(Config::default(), |world| {
+        // A pool of shimmer with air above it for the item to rest in.
+        for x in 396..406 {
+            for y in 316..322 {
+                let mut tile = Tile::AIR;
+                tile.liquid = 255;
+                tile.liquid_kind = terrustia_proto::Liquid::Shimmer;
+                world.set_tile(x, y, tile);
+            }
+            world.set_tile(x, 322, Tile::block(1));
+        }
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(10));
+
+    // Wood, which the game turns into stone.
+    let wood = ItemStack::new(9, 1, 0);
+    assert_eq!(
+        terrustia_proto::shimmer::transforms_into(9),
+        Some(2),
+        "wood should transmute into stone"
+    );
+    alice
+        .drop_item(wood, (400.0 * 16.0, 318.0 * 16.0))
+        .await
+        .unwrap();
+
+    let became = alice
+        .try_wait_for(
+            "the transmutation",
+            |e| matches!(e, Event::ItemSynced(i) if i.item.id == 2),
+            Duration::from_secs(10),
+        )
+        .await;
+    assert!(
+        became.is_some(),
+        "wood left in shimmer should have become stone"
+    );
+}
+
+/// Coins are not transmuted but spent: they become luck and are gone.
+#[tokio::test]
+async fn coins_dropped_into_shimmer_become_luck() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 396..406 {
+            for y in 316..322 {
+                let mut tile = Tile::AIR;
+                tile.liquid = 255;
+                tile.liquid_kind = terrustia_proto::Liquid::Shimmer;
+                world.set_tile(x, y, tile);
+            }
+            world.set_tile(x, 322, Tile::block(1));
+        }
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(10));
+
+    // A stack of silver, which is a hundred coppers each.
+    let silver = ItemStack::new(
+        i32::from(terrustia_proto::shimmer::COPPER_COIN + 1),
+        5,
+        0,
+    );
+    alice
+        .drop_item(silver, (400.0 * 16.0, 318.0 * 16.0))
+        .await
+        .unwrap();
+
+    let Some(Event::Other(frame)) = alice
+        .try_wait_for(
+            "the coin luck",
+            |e| matches!(e, Event::Other(f) if f.id == id::SHIMMER_ACTIONS && f.payload[0] == 1),
+            Duration::from_secs(10),
+        )
+        .await
+    else {
+        panic!("coins in shimmer should have become luck")
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    assert_eq!(r.u8().unwrap(), 1, "the coin-luck action");
+    let _at = r.vec2().unwrap();
+    assert_eq!(r.i32().unwrap(), 500, "five silver is five hundred coppers");
+}
+
+/// An item resting on ordinary ground is left alone.
+#[tokio::test]
+async fn an_item_out_of_shimmer_is_not_transmuted() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+
+    alice
+        .drop_item(ItemStack::new(9, 1, 0), (400.0 * 16.0, 200.0 * 16.0))
+        .await
+        .unwrap();
+    let changed = alice
+        .try_wait_for(
+            "a transmutation",
+            |e| matches!(e, Event::ItemSynced(i) if i.item.id == 2),
+            Duration::from_secs(3),
+        )
+        .await;
+    assert!(changed.is_none(), "wood on dry land stays wood");
+}

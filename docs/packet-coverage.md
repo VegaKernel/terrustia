@@ -18,10 +18,10 @@ receiving side.
 | | |
 |---|---:|
 | Live messages | 148 |
-| Referenced anywhere (sent or received) | 124 |
-| Dispatched inbound | 101 |
-| Never touched | 24 |
-| ...of those, ones a client actually sends | **2** |
+| Referenced anywhere (sent or received) | 136 |
+| Dispatched inbound | 109 |
+| Never touched | 12 |
+| ...of those, ones a client actually sends | **1** |
 
 For comparison, the audit that started this work found **76 never touched**, including NPC
 debuffs, town NPC names, every tile entity, all five server-side teleports, the Angler's whole
@@ -29,43 +29,28 @@ quest system, the invasion progress bar, the lunar pillar shields and the Grand 
 
 ## Still missing, and what it costs
 
-### A client sends these (2)
+### A client sends this one (1)
 
-| Id | Name | Cost of not handling |
-|---:|---|---|
-| 94 | `DevCommands` | none — developer-only, and handling it would be a liability |
-| 107 | `SmartTextMessage` | signs and tombstones do not announce themselves in chat |
+`DevCommands` (94), and it will stay unhandled. It is a channel for a client to ask the server to
+do developer things, and a public server that honours it is a public server anyone can rewrite.
 
-`DevCommands` will stay unhandled. It is a channel for a client to ask the server to do
-developer things, and a public server that honours it is a public server anyone can rewrite.
+### Server-to-client only (11)
 
-### Server-to-client only (22)
+Every one of these needs a system this build does not have, or does not apply to a dedicated
+server at all.
 
-Grouped by what they would buy:
+**Needs a shop model** — `ShopOverride` (104). Town NPC inventories with prices. The Travelling
+Merchant's own stock (72) *is* implemented; this is the rest of them.
 
-**Shops** — `TravelingMerchantItems` (72), `ShopOverride` (104). The Travelling Merchant's stock
-and any overridden shop. Both need a shop model that does not exist yet.
+**Not applicable to this build** — `TileFrameSection` (11) is legacy; `SocialHandshake` (93) is
+Steam; `SpectatePlayer` (150) and `HostToken` (161) are host migration;
+`SetCountsAsHostForGameplay` (139) and `ClientSyncedInventory` (138) are journey mode and
+server-side characters.
 
-**Storage** — `SyncPlayerChestIndex` (80), `ItemTweaker` (88).
+**Client-side bookkeeping** — `SyncPlayerChestIndex` (80), `ExtraSpawnSectionLoaded` (158).
 
-**Shimmer** — `ShimmerActions` (146). Transmutation is a 1.4.4 system this server does not model
-at all. It is the largest remaining gap by content.
-
-**The Old One's Army** — `CrystalInvasionWipeAllTheThingssss` (114), which clears the field when
-the event ends. The wave countdown (116) is now sent.
-
-**Cosmetic** — `TemporaryAnimation` (77), `PoofOfSmoke` (106), `PlayLegacySound` (132),
-`WiredCannonShot` (108), `TamperWithNPC` (131). Effects other clients would otherwise not see.
-
-**Achievements** — `AchievementMessageNPCKilled` (97), `AchievementMessageEventHappened` (98).
-
-**Not applicable** — `TileFrameSection` (11) is legacy, `SocialHandshake` (93) is Steam,
-`SpectatePlayer` (150) and `HostToken` (161) are host-migration, `SetCountsAsHostForGameplay` (139)
-and `ClientSyncedInventory` (138) are journey-mode and server-side-character features this build
-does not offer.
-
-**Other** — `TeleportNPCThroughPortal` (100) needs NPCs to use portals, which they do not here.
-`ExtraSpawnSectionLoaded` (158), `ItemPosition` (160).
+**Other** — `ItemTweaker` (88) is a modding hook. `TeleportNPCThroughPortal` (100) needs NPCs to
+use portals, which they do not here.
 
 ## What was fixed, and in what order
 
@@ -88,9 +73,16 @@ Roughly by how much of the game each unblocked:
    operations that genuinely has to be the server's.
 9. **World-specific cavern monsters** (136) — each world draws six of the thirteen from its own
    id, which is why two worlds feel different underground.
-10. **Smaller ones** — chest names for the map (69), gem locks (105), portals (95/96), Nebula
-    boosters (102), item ownership release (39), coin-loss revenge (92), the Old One's Army's skip
-    and countdown (143/116), fished-up NPCs (130), the two made town slimes (140), Lucy (141).
+10. **Shimmer** (146) — the 1.4.4 transmutation pool, which did not exist here at all. See
+    [shimmer.md](shimmer.md); decrafting is still missing and is recorded there.
+11. **The Travelling Merchant** (72) — who did not exist here either. He arrives at random during
+    the morning once the town has two other residents, carries four to six things chosen by the
+    game's own chain of rolls, and leaves at dusk.
+12. **Smaller ones** — chest names for the map (69), gem locks (105), portals (95/96), Nebula
+    boosters (102), item ownership release (39), coin-loss revenge (92), the Old One's Army's
+    skip, countdown and field-wipe (143/116/114), fished-up NPCs (130), the two made town slimes
+    (140), Lucy (141), signs read aloud (107), item drift correction (160), and the cosmetic
+    effects other clients would otherwise not see (77, 97, 98, 106, 108, 131, 132).
 
 ## A note on the audit's method
 

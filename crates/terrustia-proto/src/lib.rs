@@ -34,6 +34,7 @@ pub mod projectile;
 pub mod projectile_data;
 pub mod reader;
 pub mod section;
+pub mod shimmer;
 pub mod square;
 pub mod statues;
 pub mod tile;
@@ -43,6 +44,7 @@ pub mod tile_object;
 pub mod tile_sets;
 pub mod tile_solid;
 pub mod touch_debuffs;
+pub mod travel_shop;
 pub mod town_names;
 pub mod writer;
 

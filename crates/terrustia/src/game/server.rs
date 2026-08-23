@@ -241,6 +241,37 @@ fn is_fishable(npc_type: u16) -> bool {
     matches!(npc_type, 586 | 587 | 618 | 620 | 621 | 682)
 }
 
+/// How often a resting item's true position is re-announced, and how many go out at a time.
+///
+/// Drift is slow, so this is deliberately lazy: a full sweep every tick would cost more than the
+/// problem it fixes.
+const ITEM_DRIFT_INTERVAL: u64 = 60 * 5;
+const ITEMS_PER_SWEEP: usize = 16;
+
+/// The Travelling Merchant, who is not a resident and has no house.
+const TRAVELLING_MERCHANT: u16 = 368;
+/// The Old Man at the dungeon door, who is not a resident either.
+const OLD_MAN: u16 = 37;
+/// ...nor is the Skeleton Merchant. Neither counts towards the two townsfolk the Travelling
+/// Merchant wants to see before he will visit.
+const SKELETON_MERCHANT: u16 = 453;
+/// He only turns up in the first half of the day, and leaves at this hour.
+const MERCHANT_ARRIVES_BEFORE: i32 = 27_000;
+const MERCHANT_LEAVES_AT: i32 = 48_600;
+/// The odds of his arriving on any given tick of the morning. `Main.UpdateTime`'s own figure.
+const MERCHANT_ODDS: i32 = 27_000 * 4;
+/// How many passes over the offer chain are made to fill his stock.
+const MERCHANT_ROLLS: usize = 50;
+/// How many slots the stock packet carries, whatever he actually has. `Main.TravelShopMaxSlots`.
+const TRAVEL_SHOP_SLOTS: usize = 40;
+
+// The two things packet 146 can announce: a transmutation's sparkle, and coins becoming luck.
+const SHIMMER_EFFECT: u8 = 0;
+const SHIMMER_COIN_LUCK: u8 = 1;
+
+/// One world tile in pixels, for the arithmetic that turns a position into a tile.
+const TILE_SIZE: f32 = crate::game::npc::TILE;
+
 /// The Portal Gun's two ends, which are projectiles rather than tiles.
 const PORTAL_PROJECTILE: u16 = 602;
 
@@ -422,6 +453,11 @@ pub struct GameServer {
     last_sent_shields: [i32; 4],
     last_sent_countdown: i32,
     last_sent_invasion: (i32, i32),
+    /// What the Travelling Merchant is carrying, if he is here.
+    ///
+    /// Rolled on arrival and thrown away when he leaves. Not world state: he takes his stock
+    /// with him, so a world reloaded mid-visit simply has no merchant.
+    travel_shop: Vec<u16>,
     /// Which fish the Angler is asking for today, as an index into the quest table.
     angler_quest: u8,
     /// Who has already handed one in since dawn.
@@ -514,6 +550,7 @@ impl GameServer {
             last_sent_shields: [-1; 4],
             last_sent_countdown: -1,
             last_sent_invasion: (-1, -1),
+            travel_shop: Vec::new(),
             angler_quest: 0,
             angler_finished_today: std::collections::HashSet::new(),
             liquids: crate::world::liquid::Liquids::default(),
@@ -775,6 +812,7 @@ impl GameServer {
         self.tick_spawning();
         lap(&mut cost, Phase::Spawning);
         self.tick_town_npcs();
+        self.tick_travelling_merchant();
         self.tick_old_man();
         lap(&mut cost, Phase::Housing);
 
@@ -830,6 +868,8 @@ impl GameServer {
         for index in landed {
             self.broadcast_item(index);
         }
+        self.tick_shimmer();
+        self.correct_item_drift();
 
         // Offer unreserved items to the nearest player in range.
         let positions: Vec<(u8, (f32, f32))> = self
@@ -895,6 +935,254 @@ impl GameServer {
             return;
         };
         self.broadcast_item(index);
+    }
+
+    /// The Travelling Merchant: whether he turns up today, and whether he has gone.
+    ///
+    /// He is not a resident — he has no house and no permanent slot. He arrives at random during
+    /// the first half of a day, provided the town already has two other townsfolk, and he leaves
+    /// at dusk whether or not anybody bought anything.
+    ///
+    /// `Main.UpdateTime`'s own arrangement: the odds are one in `27000 / dayRate * 4` per tick,
+    /// which over a morning works out at rather better than it sounds.
+    fn tick_travelling_merchant(&mut self) {
+        let here = self
+            .npcs
+            .iter()
+            .find(|(_, n)| n.npc_type == TRAVELLING_MERCHANT)
+            .map(|(index, _)| index);
+
+        // Dusk, or past the hour he leaves at, and he packs up.
+        let leaving = !self.world.day_time || self.world.time > MERCHANT_LEAVES_AT;
+        if let Some(index) = here {
+            if leaving {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+                self.announce("The Traveling Merchant has departed!");
+                info!("the travelling merchant left");
+            }
+            return;
+        }
+        if leaving || self.world.time >= MERCHANT_ARRIVES_BEFORE {
+            return;
+        }
+        // Two other townsfolk, not counting the Old Man or the Skeleton Merchant, who are not
+        // residents either.
+        let townsfolk = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| {
+                n.stats.town_npc && n.npc_type != OLD_MAN && n.npc_type != SKELETON_MERCHANT
+            })
+            .count();
+        if townsfolk < 2 {
+            return;
+        }
+        if rand::Rng::random_range(&mut self.rng, 0..MERCHANT_ODDS) != 0 {
+            return;
+        }
+
+        // He arrives at the world's spawn, since he has no home to arrive at.
+        let at = (
+            f32::from(self.world.spawn_x) * TILE_SIZE,
+            f32::from(self.world.spawn_y) * TILE_SIZE - 48.0,
+        );
+        let Some(index) = self.npcs.spawn(TRAVELLING_MERCHANT, at) else {
+            return;
+        };
+        self.roll_travel_shop();
+        self.broadcast_npc(index);
+        self.broadcast_travel_shop();
+        self.announce("The Traveling Merchant has arrived!");
+        info!("the travelling merchant arrived");
+    }
+
+    /// Pick what he is carrying today. `Chest.SetupTravelShop`.
+    ///
+    /// The stock is a chain of rolls rather than a list: each candidate that comes up overwrites
+    /// the last, so the final match wins and rarer things are rarer because their odds are
+    /// longer, not because they are drawn from a smaller pool.
+    fn roll_travel_shop(&mut self) {
+        use terrustia_proto::travel_shop::{Needs, OFFERS, TIER_ODDS};
+        let p = &self.world.progress;
+        let mut world = 0u16;
+        for (yes, flag) in [
+            (p.hard_mode, Needs::HARDMODE),
+            (p.downed_mech_any, Needs::ANY_MECH),
+            (p.downed_mech1, Needs::DESTROYER),
+            (p.downed_mech2, Needs::TWINS),
+            (p.downed_mech3, Needs::PRIME),
+            (p.downed_boss1, Needs::EYE),
+            (p.downed_boss3, Needs::SKELETRON),
+            (p.shadow_orb_smashed, Needs::ORB_SMASHED),
+        ] {
+            if yes {
+                world |= flag;
+            }
+        }
+        let world = Needs(world);
+
+        // Four to six things, as the game rolls it.
+        let wanted = rand::Rng::random_range(&mut self.rng, 4..7);
+        self.travel_shop.clear();
+        // Fifty passes over the chain is plenty to fill six slots and bounded whatever the odds
+        // do; the game's own loop is capped at five thousand for the same reason.
+        for _ in 0..MERCHANT_ROLLS {
+            if self.travel_shop.len() >= wanted {
+                break;
+            }
+            let mut chosen = None;
+            for offer in OFFERS {
+                if !offer.needs.met_by(world) {
+                    continue;
+                }
+                let odds = TIER_ODDS
+                    .get(offer.tier as usize)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                if rand::Rng::random_range(&mut self.rng, 0..odds) == 0 {
+                    // Later entries overwrite earlier ones, which is what makes the chain work.
+                    chosen = Some(offer.item);
+                }
+            }
+            if let Some(item) = chosen
+                && !self.travel_shop.contains(&item)
+            {
+                self.travel_shop.push(item);
+            }
+        }
+        debug!(stock = self.travel_shop.len(), "travelling merchant's stock");
+    }
+
+    /// Tell everyone what he is carrying.
+    ///
+    /// Forty slots on the wire whatever he actually has, zero-filled — the client reads a fixed
+    /// count, so a short packet desynchronises everything after it.
+    fn broadcast_travel_shop(&mut self) {
+        let mut w = terrustia_proto::PacketWriter::new(id::TRAVEL_MERCHANT_ITEMS);
+        for slot in 0..TRAVEL_SHOP_SLOTS {
+            w.i16(self.travel_shop.get(slot).copied().unwrap_or(0) as i16);
+        }
+        if let Ok(frame) = w.finish() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Tell clients where resting items actually are.
+    ///
+    /// A client simulates a dropped item's fall itself from the moment it is told the item
+    /// exists, so the two can end up a few pixels apart — over a slope, in water, or after a
+    /// tile is broken out from under it. The gap is invisible until somebody tries to walk over
+    /// an item that is not where they see it.
+    ///
+    /// This is packet 160, which carries a position and nothing else. Sent for a handful of items
+    /// per second rather than all of them: the drift is slow, and a full sweep every tick would
+    /// cost more than the problem.
+    fn correct_item_drift(&mut self) {
+        if !self.ticks.is_multiple_of(ITEM_DRIFT_INTERVAL) || self.items.is_empty() {
+            return;
+        }
+        let resting: Vec<(i16, (f32, f32))> = self
+            .items
+            .iter()
+            .filter(|(_, item)| item.resting)
+            .map(|(index, item)| (index, item.position))
+            .take(ITEMS_PER_SWEEP)
+            .collect();
+        for (index, at) in resting {
+            let mut w = terrustia_proto::PacketWriter::new(id::ITEM_POSITION);
+            w.i16(index).f32(at.0).f32(at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast_to_nearby(frame, at);
+            }
+        }
+    }
+
+    /// Sink whatever is lying in shimmer, and transmute what has gone far enough in.
+    ///
+    /// Shimmer is the 1.4.4 transmutation pool: an item dropped into it becomes another item,
+    /// a creature, or — for coins — luck. It does not happen on contact. An item sinks over about
+    /// a second and a half and changes at nine tenths, which is what makes the mechanic feel
+    /// deliberate rather than punishing: you can pull something back out.
+    ///
+    /// One branch of the game's shimmer is missing and is a gap rather than a decision: an item
+    /// with no transform and no creature falls back to being **decrafted** into its recipe's
+    /// ingredients, which needs the whole recipe database. Such an item simply sits in the
+    /// shimmer here. See `docs/shimmer.md`.
+    fn tick_shimmer(&mut self) {
+        use crate::world::items::{Shimmering, shimmer};
+        // Almost always nothing is in shimmer, and finding that out should cost one scan of the
+        // item table rather than a tile lookup per item.
+        if self.items.is_empty() {
+            return;
+        }
+
+        let mut transmuted: Vec<(i16, ItemStack, (f32, f32))> = Vec::new();
+        let mut luck: Vec<((f32, f32), i32)> = Vec::new();
+        {
+            let world = &self.world;
+            for (index, item) in self.items.iter_mut() {
+                // The game's own test: the tile *above* the item, since it is sinking through a
+                // surface rather than standing in a pool.
+                let x = (item.position.0 + crate::world::items::ITEM_SIZE / 2.0) / TILE_SIZE;
+                let y = item.position.1 / TILE_SIZE - 1.0;
+                let tile = world.tile(x as i32, y as i32);
+                let in_shimmer =
+                    tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Shimmer;
+
+                if shimmer(item, in_shimmer) != Shimmering::Transmute {
+                    continue;
+                }
+                let held = item.item;
+                let at = item.position;
+                let kind = u16::try_from(held.id).unwrap_or(0);
+
+                if terrustia_proto::shimmer::is_coin(kind) {
+                    // Coins are not transmuted but spent: they become luck, and are gone.
+                    luck.push((at, terrustia_proto::shimmer::coin_luck(kind, i32::from(held.stack))));
+                    transmuted.push((index, ItemStack::EMPTY, at));
+                } else if let Some(into) = terrustia_proto::shimmer::transforms_into(kind) {
+                    item.shimmered = true;
+                    item.item = ItemStack {
+                        id: i32::from(into),
+                        stack: held.stack,
+                        prefix: 0,
+                    };
+                    transmuted.push((index, item.item, at));
+                } else {
+                    // No transform: it would decraft in the game, which this server cannot do.
+                    // Stop it sinking further rather than leaving it stuck at the threshold and
+                    // asking the same question every tick.
+                    item.shimmered = true;
+                }
+            }
+        }
+
+        for (index, now, at) in transmuted {
+            if now.is_empty() {
+                self.items.remove(index);
+                if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+                    self.broadcast(frame, None);
+                }
+            } else {
+                self.broadcast_item(index);
+            }
+            // The sparkle, which every client draws for itself once it is told where.
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_EFFECT).f32(at.0).f32(at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+        }
+        for (at, amount) in luck {
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_COIN_LUCK).f32(at.0).f32(at.1).i32(amount);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+            debug!(amount, "coins turned into luck");
+        }
     }
 
     /// Put an item into the world at a place, as a thing that can be picked up.
@@ -1164,6 +1452,16 @@ impl GameServer {
             | id::REMOVE_REVENGE_MARKER
             | id::LAND_GOLF_BALL_IN_CUP
             | id::COMBAT_TEXT_INT
+            // Effects nobody but the sender would otherwise see: a temporary animation, a puff
+            // of smoke, a legacy sound, a wired cannon firing, an NPC being interfered with, and
+            // the two achievement announcements.
+            | id::TEMPORARY_ANIMATION
+            | id::POOF_OF_SMOKE
+            | id::PLAY_LEGACY_SOUND
+            | id::WIRED_CANNON_SHOT
+            | id::TAMPER_WITH_N_P_C
+            | id::ACHIEVEMENT_MESSAGE_N_P_C_KILLED
+            | id::ACHIEVEMENT_MESSAGE_EVENT_HAPPENED
             | id::COMBAT_TEXT_STRING => {
                 if self.player(slot).is_some_and(Player::is_playing)
                     && let Ok(relayed) = packets::verbatim(frame.id, &payload)
@@ -1204,6 +1502,17 @@ impl GameServer {
             id::FISH_OUT_N_P_C => self.on_fished_out_npc(slot, &payload),
             id::SET_MISC_EVENT_VALUES => self.on_misc_event_value(slot, &payload),
             id::REQUEST_LUCY_POPUP => self.on_lucy_popup(slot, &payload),
+            // Chat a client asks the server to put in front of everybody: a sign read aloud, a
+            // tombstone's epitaph. Relayed rather than modelled, but relayed *to everybody*,
+            // which is the part that was missing.
+            id::SMART_TEXT_MESSAGE => {
+                if self.player(slot).is_some_and(Player::is_playing)
+                    && let Ok(relayed) = packets::verbatim(frame.id, &payload)
+                {
+                    self.broadcast(relayed, Some(slot));
+                }
+                Ok(())
+            }
             id::RELEASE_ITEM_OWNERSHIP => self.on_release_item(slot, &payload),
             id::MURDER_SOMEONE_ELSES_PORTAL => self.on_close_portal(slot, &payload),
             id::TELEPORT_PLAYER_THROUGH_PORTAL => self.on_portal_teleport(slot, &payload),
@@ -1532,6 +1841,18 @@ impl GameServer {
         }
 
         self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
+
+        // What the Travelling Merchant is carrying, if he is here. A client that joins mid-visit
+        // and is not told finds him with nothing to sell.
+        if !self.travel_shop.is_empty() {
+            let mut w = terrustia_proto::PacketWriter::new(id::TRAVEL_MERCHANT_ITEMS);
+            for at in 0..TRAVEL_SHOP_SLOTS {
+                w.i16(self.travel_shop.get(at).copied().unwrap_or(0) as i16);
+            }
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
 
         // Which six cavern enemies this world has. Fixed for the world's life, so it is sent once
         // on joining rather than kept up to date.
@@ -7168,7 +7489,6 @@ impl GameServer {
     /// is the only way to start that fight. If he is missing — a fresh server on a world that
     /// never had him, or one where something killed him — he is put back.
     fn tick_old_man(&mut self) {
-        const OLD_MAN: u16 = 37;
         const SKELETRON: u16 = 35;
 
         if !self.ticks.is_multiple_of(OLD_MAN_CHECK_INTERVAL) {
@@ -7208,7 +7528,6 @@ impl GameServer {
     /// the dungeon has no guardian afterwards. The Clothier will do instead, because he is the
     /// same man once the curse is off him.
     fn summon_skeletron(&mut self) {
-        const OLD_MAN: u16 = 37;
         const CLOTHIER: u16 = 54;
         const SKELETRON: u16 = 35;
 
@@ -7519,6 +7838,30 @@ impl GameServer {
             info!(won, wave = self.army.wave, "old one's army over");
             self.army.stop();
             self.army_arena = None;
+            self.wipe_army_field();
+        }
+    }
+
+    /// Clear the field when the Old One's Army ends.
+    ///
+    /// The event leaves behind its own furniture — the lane portals, whatever was still coming
+    /// through them, and the players' towers. None of it belongs to the world afterwards, and a
+    /// server that leaves it standing leaves a permanent goblin camp where the arena was.
+    ///
+    /// The packet tells clients to do the same on their side, since they draw the towers.
+    fn wipe_army_field(&mut self) {
+        let leftovers: Vec<u8> = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| crate::game::army::belongs(n.npc_type))
+            .map(|(index, _)| index)
+            .collect();
+        for index in leftovers {
+            self.npcs.remove(index);
+            self.broadcast_npc_death(index);
+        }
+        if let Ok(frame) = packets::empty(id::CRYSTAL_INVASION_WIPE_ALL_THE_THINGSSS) {
+            self.broadcast(frame, None);
         }
     }
 

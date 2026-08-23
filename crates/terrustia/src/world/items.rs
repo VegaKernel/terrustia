@@ -33,6 +33,18 @@ pub struct WorldItem {
     pub reservation: u32,
     /// Ticks this item has existed for.
     pub age: u32,
+    /// How far through shimmering this item is, from zero to one.
+    ///
+    /// Shimmer does not transmute on contact — an item sinks into it over about a second and a
+    /// half, and the transformation happens at nine tenths. That delay is the whole feel of the
+    /// mechanic: you can pull something back out if you change your mind.
+    pub shimmer_time: f32,
+    /// Whether it has already been transmuted, so it does not go round again.
+    ///
+    /// The result of a shimmering usually has a transform of its own — the pairs are symmetric,
+    /// so wood becomes stone and stone becomes wood — and without this flag an item dropped in
+    /// would flicker between the two forever.
+    pub shimmered: bool,
     /// Whether the item has settled on the ground and no longer needs simulating.
     pub resting: bool,
 }
@@ -47,11 +59,126 @@ impl WorldItem {
             reservation: 0,
             age: 0,
             resting: false,
+            shimmer_time: 0.0,
+            shimmered: false,
         }
     }
 
     pub fn is_reserved(&self) -> bool {
         self.owner != NO_OWNER && self.reservation > 0
+    }
+}
+
+/// How fast an item sinks into shimmer, per tick. `WorldItem.UpdateShimmer`.
+pub const SHIMMER_RATE: f32 = 0.01;
+/// ...and how far in it has to be before it transmutes, which is not all the way.
+pub const SHIMMER_AT: f32 = 0.9;
+
+/// What one tick of sitting in shimmer does to an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shimmering {
+    /// Nothing yet — still sinking, or backing out of it.
+    Waiting,
+    /// It has gone far enough in, and should be transmuted now.
+    Transmute,
+}
+
+/// Sink an item further into shimmer, or let it climb back out.
+///
+/// `in_shimmer` is whether the tile above the item's position holds shimmer, which is the game's
+/// own test — the item is *under* the surface it is sinking through, not standing in it.
+///
+/// An item already transmuted never goes again. Most transform pairs are symmetric, so without
+/// that a shimmered item would flicker between its two forms forever.
+pub fn shimmer(item: &mut WorldItem, in_shimmer: bool) -> Shimmering {
+    if item.shimmered {
+        return Shimmering::Waiting;
+    }
+    if !in_shimmer {
+        item.shimmer_time = (item.shimmer_time - SHIMMER_RATE).max(0.0);
+        return Shimmering::Waiting;
+    }
+    item.shimmer_time = (item.shimmer_time + SHIMMER_RATE).min(1.0);
+    if item.shimmer_time >= SHIMMER_AT {
+        // Held just short of the top, as the game holds it, so the item does not vanish before
+        // the transformation is shown.
+        item.shimmer_time = SHIMMER_AT;
+        return Shimmering::Transmute;
+    }
+    Shimmering::Waiting
+}
+
+#[cfg(test)]
+mod shimmer_tests {
+    use super::*;
+
+    fn dropped() -> WorldItem {
+        WorldItem::new(ItemStack::new(9, 1, 0), (100.0, 100.0))
+    }
+
+    /// It takes about a second and a half to sink far enough in, not one tick.
+    ///
+    /// The delay is the whole feel of the mechanic: you can pull something back out.
+    #[test]
+    fn an_item_sinks_before_it_transmutes() {
+        let mut item = dropped();
+        let mut ticks = 0;
+        loop {
+            ticks += 1;
+            if shimmer(&mut item, true) == Shimmering::Transmute {
+                break;
+            }
+            assert!(ticks < 1000, "it should transmute eventually");
+        }
+        // About ninety ticks — a second and a half. Not exactly ninety: adding 0.01 to a `f32`
+        // ninety times lands a hair under 0.9, so it takes one more. The game accumulates the
+        // same way and arrives at the same place, so this is faithful rather than sloppy.
+        assert!(
+            (90..=92).contains(&ticks),
+            "should take about a second and a half, took {ticks} ticks"
+        );
+    }
+
+    /// Taken out part-way, it climbs back out rather than staying half-sunk.
+    #[test]
+    fn an_item_taken_out_climbs_back() {
+        let mut item = dropped();
+        for _ in 0..40 {
+            shimmer(&mut item, true);
+        }
+        assert!(item.shimmer_time > 0.0);
+        for _ in 0..100 {
+            shimmer(&mut item, false);
+        }
+        assert_eq!(item.shimmer_time, 0.0, "it should be fully back out");
+        assert!(!item.shimmered);
+    }
+
+    /// Something already transmuted never goes again.
+    ///
+    /// Most transform pairs are symmetric — wood becomes stone and stone becomes wood — so
+    /// without this an item dropped in would flicker between its two forms forever.
+    #[test]
+    fn a_transmuted_item_does_not_go_round_again() {
+        let mut item = dropped();
+        while shimmer(&mut item, true) != Shimmering::Transmute {}
+        item.shimmered = true;
+        for _ in 0..1000 {
+            assert_eq!(
+                shimmer(&mut item, true),
+                Shimmering::Waiting,
+                "a shimmered item should never transmute a second time"
+            );
+        }
+    }
+
+    /// The threshold is held just short of the top, so the transformation is visible.
+    #[test]
+    fn it_stops_short_of_the_surface() {
+        let mut item = dropped();
+        while shimmer(&mut item, true) != Shimmering::Transmute {}
+        assert_eq!(item.shimmer_time, SHIMMER_AT);
+        assert!(item.shimmer_time < 1.0);
     }
 }
 
@@ -107,6 +234,14 @@ impl ItemStore {
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| slot.as_ref().map(|item| (i as i16, item)))
+    }
+
+    /// ...and the same, to change them in place.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (i16, &mut WorldItem)> {
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_mut().map(|item| (i as i16, item)))
     }
 
     /// Age every item by one tick, returning the indices that have expired.
