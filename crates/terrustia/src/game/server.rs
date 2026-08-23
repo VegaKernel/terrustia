@@ -1709,7 +1709,10 @@ impl GameServer {
                 // clears the tile.
                 if edit.destroyed() {
                     if tile.is_active() && matches!(edit.kind(), TileAction::KillTile) {
-                        broke = Some(tile.block);
+                        // The frame goes with the block: several things that matter on breaking —
+                        // which evil an orb belongs to, which statue a statue is — are only in the
+                        // frame, and it is about to be cleared.
+                        broke = Some((tile.block, tile.frame_x));
                     }
                     tile.flags.set(TileFlags::ACTIVE, false);
                     tile.block = 0;
@@ -1778,12 +1781,27 @@ impl GameServer {
             // Mining a block is the commonest way liquid starts moving.
             self.liquids.disturb(x, y);
         }
-        if let Some(block) = broke {
+        if let Some((block, frame_x)) = broke {
             self.spawn_tile_drop(block, x, y);
             // A demon altar is the only way hardmode ore gets into a world, and it always costs
             // something to break.
             if block == DEMON_ALTAR {
                 self.smash_altar(x, y, slot);
+            }
+            // The handful of tiles that are worth more than the item they leave behind.
+            if block == terrustia_proto::orbs::ORB_TILE {
+                self.smash_orb(x, y, frame_x);
+            }
+            // Neither of these has a summon item: breaking the thing *is* the summon.
+            if block == crate::world::bulbs::BULB {
+                self.wake_from_tile(x, y, PLANTERA);
+                // And another grows, so a world cannot be left with no way back to her.
+                if !self.world.progress.downed_plantera {
+                    self.grow_plantera_bulb();
+                }
+            }
+            if block == BEE_LARVA {
+                self.wake_from_tile(x, y, QUEEN_BEE);
             }
         }
 
@@ -2302,6 +2320,11 @@ const SPREAD_RANGE: i32 = 120;
 
 /// The demon altar, which is a crafting station before hardmode and an ore mine after it.
 const DEMON_ALTAR: u16 = 26;
+/// A bee larva in a hive, which is the second way to reach the Queen.
+const BEE_LARVA: u16 = 231;
+/// The two bosses that have no summon item at all: breaking their tile is the only way in.
+const PLANTERA: u16 = 262;
+const QUEEN_BEE: u16 = 222;
 
 /// How far a roar carries, and how long what it leaves behind lasts.
 const ROAR_REACH: f32 = 800.0;
@@ -5113,6 +5136,14 @@ impl GameServer {
             }
             _ => return,
         }
+        // All three mechs down is what starts the bulbs growing, and the bulbs are the only way
+        // to Plantera. One goes in immediately so the jungle is worth walking into straight away.
+        if self.world.progress.downed_mech1
+            && self.world.progress.downed_mech2
+            && self.world.progress.downed_mech3
+        {
+            self.grow_plantera_bulb();
+        }
         if let Some(text) = announce {
             self.announce(text);
         }
@@ -5218,6 +5249,114 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
         }
+    }
+
+    /// Put one Plantera's bulb somewhere in the underground jungle, and tell everyone.
+    ///
+    /// Called when the third mechanical boss falls, and again whenever the last one is broken —
+    /// the jungle is never without one, which is what keeps Plantera reachable.
+    fn grow_plantera_bulb(&mut self) {
+        let grown = {
+            let world = &mut self.world;
+            crate::world::bulbs::grow(world, &mut self.rng)
+        };
+        let Some((x, y)) = grown else {
+            debug!("nowhere in the jungle to grow a bulb");
+            return;
+        };
+        let square = TileSquare {
+            x: x as i16,
+            y: (y - 1) as i16,
+            width: 2,
+            height: 2,
+            change_type: 0,
+            tiles: (0..4)
+                .map(|i| self.world.tile(x + i % 2, y - 1 + i / 2))
+                .collect(),
+        };
+        if let Ok(frame) = square.encode() {
+            self.broadcast(frame, None);
+        }
+        debug!(x, y, "a plantera's bulb grew");
+    }
+
+    /// Wake a boss that has no summon item, from the tile that was its only door.
+    ///
+    /// A Plantera's bulb and a bee larva are both "break this and it comes" — there is no crafted
+    /// summon for either, so without this neither boss can ever appear.
+    fn wake_from_tile(&mut self, x: i32, y: i32, boss: u16) {
+        if self.npcs.iter().any(|(_, n)| n.npc_type == boss) {
+            return;
+        }
+        let at = (x as f32 * 16.0, y as f32 * 16.0);
+        let nearest = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|player| player.is_playing())
+            .min_by(|a, b| {
+                let d = |p: &Player| (p.position.0 - at.0).abs() + (p.position.1 - at.1).abs();
+                d(a).total_cmp(&d(b))
+            })
+            .map(|p| p.slot);
+        if let Some(slot) = nearest {
+            self.summon_on_player(slot, boss);
+        }
+    }
+
+    /// Break a shadow orb or a crimson heart.
+    ///
+    /// This is the early game's hinge. The first one in a world always gives a gun, which is what
+    /// makes the corruption worth going into at all; every third one wakes the evil's boss, which
+    /// is the only way to reach it without crafting a summon. Breaking one also makes a meteor
+    /// possible, and that is where the next tier of gear comes from.
+    fn smash_orb(&mut self, x: i32, y: i32, frame_x: i16) {
+        use terrustia_proto::orbs;
+
+        let already = self.world.progress.shadow_orb_smashed;
+        let roll = self.rng.random_range(0..5);
+        let at = (x as f32 * 16.0, y as f32 * 16.0);
+        for reward in orbs::reward(frame_x, already, roll) {
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(reward.item, reward.stack, 0), at)
+            {
+                self.broadcast_item(index);
+            }
+        }
+
+        let p = &mut self.world.progress;
+        p.shadow_orb_smashed = true;
+        p.shadow_orb_count = p.shadow_orb_count.saturating_add(1);
+
+        if p.shadow_orb_count >= orbs::ORBS_PER_BOSS {
+            p.shadow_orb_count = 0;
+            let boss = orbs::boss_for(frame_x);
+            self.broadcast_world_data();
+            // One at a time: a third orb broken while the boss is already awake is wasted, which
+            // is the game's own rule and stops a stack of orbs summoning a stack of bosses.
+            if self.npcs.iter().any(|(_, n)| n.npc_type == boss) {
+                return;
+            }
+            // On the nearest player, which is who it holds responsible.
+            let nearest = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|player| player.is_playing())
+                .min_by(|a, b| {
+                    let d = |p: &Player| (p.position.0 - at.0).abs() + (p.position.1 - at.1).abs();
+                    d(a).total_cmp(&d(b))
+                })
+                .map(|p| p.slot);
+            if let Some(slot) = nearest {
+                self.summon_on_player(slot, boss);
+            }
+            return;
+        }
+        let omen = orbs::omen(p.shadow_orb_count);
+        self.announce(omen);
+        self.broadcast_world_data();
     }
 
     /// Break an altar: seed a tier, spray the ore, and put a wraith on whoever did it.

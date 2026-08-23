@@ -1,3 +1,4 @@
+pub mod bulbs;
 pub mod hardmode;
 pub mod items;
 pub mod liquid;

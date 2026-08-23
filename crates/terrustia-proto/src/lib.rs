@@ -23,6 +23,7 @@ pub mod npc_data;
 pub mod npc_drops;
 pub mod npc_params;
 pub mod objects;
+pub mod orbs;
 pub mod packets;
 pub mod prehardmode;
 pub mod projectile;

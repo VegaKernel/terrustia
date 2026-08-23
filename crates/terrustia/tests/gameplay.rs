@@ -2896,3 +2896,179 @@ async fn an_npc_far_away_is_not_broadcast() {
         "the distant player was sent the zombie {count} times in five seconds"
     );
 }
+
+/// Breaking shadow orbs gives the gun, then the boss.
+///
+/// This is the early game's hinge: the first orb in a world always gives a musket, and the third
+/// wakes the Eater of Worlds. Neither happened before — breaking an orb did nothing at all, so
+/// Skeletron and everything past it was unreachable.
+#[tokio::test]
+async fn breaking_shadow_orbs_gives_a_gun_and_then_a_boss() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // Three shadow orbs. Frame 0 is a shadow orb; 36 would be a crimson heart.
+        for (i, x) in [400i32, 404, 408].into_iter().enumerate() {
+            let _ = i;
+            world.set_tile(x, 318, Tile::framed(31, 0, 0));
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "orbbreaker").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(395.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The first orb always gives the musket (96) and a hundred musket balls (97).
+    client.break_tile(400, 318).await.unwrap();
+    let mut got: std::collections::HashMap<i32, i16> = std::collections::HashMap::new();
+    while let Some(Event::ItemSynced(item)) = client
+        .try_wait_for(
+            "the orb's reward",
+            |e| matches!(e, Event::ItemSynced(_)),
+            Duration::from_millis(600),
+        )
+        .await
+    {
+        got.insert(item.item.id, item.item.stack);
+    }
+    assert_eq!(
+        got.get(&96),
+        Some(&1),
+        "no musket from the first orb: {got:?}"
+    );
+    assert_eq!(got.get(&97), Some(&100), "no musket balls: {got:?}");
+
+    // The third wakes the Eater of Worlds.
+    client.break_tile(404, 318).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.break_tile(408, 318).await.unwrap();
+
+    let worm = client
+        .try_wait_for(
+            "the Eater of Worlds",
+            |e| matches!(e, Event::NpcSynced(n) if (13..=15).contains(&n.npc_type())),
+            Duration::from_secs(6),
+        )
+        .await;
+    assert!(
+        worm.is_some(),
+        "three orbs did not wake the Eater of Worlds"
+    );
+}
+
+/// A crimson heart gives the Undertaker and wakes the Brain of Cthulhu instead.
+#[tokio::test]
+async fn crimson_hearts_wake_the_other_boss() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // Frame 36 and beyond is a crimson heart.
+        for x in [400i32, 404, 408] {
+            world.set_tile(x, 318, Tile::framed(31, 36, 0));
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "heartbreaker").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(395.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    client.break_tile(400, 318).await.unwrap();
+    let mut got = std::collections::HashSet::new();
+    while let Some(Event::ItemSynced(item)) = client
+        .try_wait_for(
+            "the heart's reward",
+            |e| matches!(e, Event::ItemSynced(_)),
+            Duration::from_millis(600),
+        )
+        .await
+    {
+        got.insert(item.item.id);
+    }
+    assert!(
+        got.contains(&800),
+        "no Undertaker from the first heart: {got:?}"
+    );
+    assert!(
+        !got.contains(&96),
+        "that is the corruption's gun, not the crimson's"
+    );
+
+    client.break_tile(404, 318).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.break_tile(408, 318).await.unwrap();
+    let brain = client
+        .try_wait_for(
+            "the Brain of Cthulhu",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 266),
+            Duration::from_secs(6),
+        )
+        .await;
+    assert!(
+        brain.is_some(),
+        "three hearts did not wake the Brain of Cthulhu"
+    );
+}
+
+/// Breaking a Plantera's bulb wakes her, and another bulb takes its place.
+///
+/// Plantera has no summon item, so the bulb is the only door. Before this she could not be
+/// reached at all, and everything past her — the temple, Golem, the cultist, the Moon Lord —
+/// went with her.
+#[tokio::test]
+async fn a_plantera_bulb_wakes_her_and_regrows() {
+    let addr = start_with(Config::default(), |world| {
+        world.dungeon_x = Some(700);
+        // A stretch of underground jungle on the far side from the dungeon.
+        for x in 100..300 {
+            for y in 300..340 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 340..360 {
+                world.set_tile(x, y, Tile::block(60));
+            }
+        }
+        // A bulb ready to break, sitting on the jungle floor.
+        for dx in 0..2i16 {
+            for dy in 0..2i16 {
+                world.set_tile(
+                    200 + i32::from(dx),
+                    339 - i32::from(dy),
+                    Tile::framed(238, dx * 18, (1 - dy) * 18),
+                );
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "gardener").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(195.0 * 16.0, 338.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    client.break_tile(200, 339).await.unwrap();
+
+    let plantera = client
+        .try_wait_for(
+            "Plantera",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 262),
+            Duration::from_secs(6),
+        )
+        .await;
+    assert!(plantera.is_some(), "breaking a bulb did not wake Plantera");
+}
