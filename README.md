@@ -59,11 +59,14 @@ Implemented:
   own header byte for byte; a generated one gets a header written from scratch at format 325, so a
   fresh server keeps the world it made. Progression flags, weather and the lunar state survive a
   save
-- **Wiring**: hitting a switch runs the circuit on the server — the flood over whatever is
-  connected, four colours as four independent circuits. Actuators toggle the block they sit on;
-  traps throw what they are framed to throw, on the game's own cooldowns; statues produce
-  monsters, items or a fetched townsperson, under the game's crowding limits; teleporters swap
-  whoever is on each pad; and pumps move liquid, refusing to mix water into lava
+- **Wiring**: circuits run on the server — the flood over whatever is connected, four colours as
+  four independent circuits. Actuators toggle the block they sit on; traps throw what they are
+  framed to throw, on the game's own cooldowns; statues produce monsters, items or a fetched
+  townsperson, under the game's crowding limits; teleporters swap whoever is on each pad; and
+  pumps move liquid, refusing to mix water into lava. **Timers** keep a contraption running with
+  nobody touching it, and **logic gates** — all six kinds, including the faulty one that rolls a
+  die — read their stack of lamps and start a circuit of their own, so a machine built out of
+  gates works rather than just lighting up
 - **Tile entities**: placed and remembered, with the training dummy raising and dismissing its NPC
 - **Day/night clock**
 

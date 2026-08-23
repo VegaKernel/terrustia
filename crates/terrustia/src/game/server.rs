@@ -148,6 +148,12 @@ const CHEST_BLOCK: u16 = 21;
 /// Ticks between NPC position broadcasts. Clients interpolate between them.
 const NPC_SYNC_INTERVAL: u64 = 6;
 
+/// The count a running timer is set back to whenever it fires.
+///
+/// Five minutes of ticks, and a multiple of every timer period, which is what keeps two timers of
+/// the same kind firing on the same tick however long they have been running.
+const TIMER_WINDOW: i32 = 18_000;
+
 /// Chat colour for server notices.
 const SERVER_CHAT_COLOUR: [u8; 3] = [255, 240, 20];
 
@@ -205,6 +211,8 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// Timers that are switched on, and how long each has left in its window.
+    running_timers: HashMap<(i32, i32), i32>,
     /// Trap tiles that have fired recently, and how long until each can fire again.
     ///
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
@@ -271,6 +279,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            running_timers: HashMap::new(),
             mech_cooldown: HashMap::new(),
             tile_entities: Vec::new(),
             next_tile_entity: 0,
@@ -422,6 +431,7 @@ impl GameServer {
         self.tick_spread();
         self.tick_weather();
         self.tick_mech_cooldowns();
+        self.tick_timers();
         self.tick_lunar();
         lap(&mut cost, Phase::World);
 
@@ -3956,38 +3966,148 @@ impl GameServer {
             let world = &mut self.world;
             crate::world::wiring::hit_switch(world, x, y)
         };
-        if fired.truncated {
-            warn!(slot, x, y, reached = fired.reached, "circuit cut short");
-        }
-        for (cx, cy) in fired.changed {
-            let tile = self.world.tile(cx, cy);
-            let square = TileSquare {
-                x: cx as i16,
-                y: cy as i16,
-                width: 1,
-                height: 1,
-                change_type: 0,
-                tiles: vec![tile],
-            };
-            if let Ok(frame) = square.encode() {
-                self.broadcast(frame, None);
-            }
-        }
-        for (tx, ty) in fired.traps {
-            self.fire_trap(tx, ty);
-        }
-        for (sx, sy) in fired.statues {
-            self.run_statue(sx, sy);
-        }
-        if let [a, b] = fired.teleporters[..] {
-            self.run_teleporters(a, b);
-        }
-        if !fired.pump_in.is_empty() && !fired.pump_out.is_empty() {
-            self.run_pumps(&fired.pump_in, &fired.pump_out);
-        }
+        self.apply_circuit(fired, (x, y));
 
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
         Ok(())
+    }
+
+    /// Everything a circuit set in motion, including whatever its logic gates went on to do.
+    ///
+    /// A gate does not act on the world itself: it works out its new state and then starts a
+    /// circuit of its own, which can toggle further lamps and run further gates. That cascade is
+    /// what makes wiring a machine rather than a switchboard, and it is run here to a ceiling,
+    /// because a ring of gates would otherwise go round for ever.
+    fn apply_circuit(&mut self, fired: crate::world::wiring::Fired, from: (i32, i32)) {
+        /// How many rounds of gates one circuit is allowed to set off.
+        const MAX_CASCADE: usize = 64;
+
+        let mut pending = vec![fired];
+        let mut fired_gates: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
+        let mut rounds = 0;
+
+        while let Some(fired) = pending.pop() {
+            if fired.truncated {
+                warn!(
+                    x = from.0,
+                    y = from.1,
+                    reached = fired.reached,
+                    "circuit cut short"
+                );
+            }
+            for (cx, cy) in fired.changed {
+                self.broadcast_tile(cx, cy);
+            }
+            for (tx, ty) in fired.traps {
+                self.fire_trap(tx, ty);
+            }
+            for (sx, sy) in fired.statues {
+                self.run_statue(sx, sy);
+            }
+            if let [a, b] = fired.teleporters[..] {
+                self.run_teleporters(a, b);
+            }
+            if !fired.pump_in.is_empty() && !fired.pump_out.is_empty() {
+                self.run_pumps(&fired.pump_in, &fired.pump_out);
+            }
+            for (tx, ty) in fired.timers_started {
+                self.running_timers.insert((tx, ty), TIMER_WINDOW);
+            }
+            for (tx, ty) in fired.timers_stopped {
+                self.running_timers.remove(&(tx, ty));
+            }
+
+            if rounds >= MAX_CASCADE {
+                if !fired.lamps.is_empty() {
+                    warn!(
+                        x = from.0,
+                        y = from.1,
+                        "logic gates went round too many times"
+                    );
+                }
+                continue;
+            }
+            rounds += 1;
+            for (lx, ly) in fired.lamps {
+                self.broadcast_tile(lx, ly);
+                let result = {
+                    let world = &mut self.world;
+                    crate::world::wiring::check_logic_gate(
+                        world,
+                        lx,
+                        ly,
+                        &fired_gates,
+                        &mut self.rng,
+                    )
+                };
+                let Some(result) = result else { continue };
+                self.broadcast_tile(result.at.0, result.at.1);
+                if !result.fires {
+                    continue;
+                }
+                fired_gates.insert(result.at);
+                let onward = {
+                    let world = &mut self.world;
+                    crate::world::wiring::trip_wire(world, result.at.0, result.at.1)
+                };
+                pending.push(onward);
+            }
+        }
+    }
+
+    /// Tell everybody about one tile that changed.
+    fn broadcast_tile(&mut self, x: i32, y: i32) {
+        let tile = self.world.tile(x, y);
+        let square = TileSquare {
+            x: x as i16,
+            y: y as i16,
+            width: 1,
+            height: 1,
+            change_type: 0,
+            tiles: vec![tile],
+        };
+        if let Ok(frame) = square.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Fire every running timer whose turn it is.
+    ///
+    /// A timer is the only thing in the wire table that starts a circuit with nobody touching it,
+    /// and it is how most contraptions actually run: a farm, a lift, a light that blinks. Each one
+    /// counts down from the same window the game uses and fires whenever the count is a multiple
+    /// of its own period, which is what keeps two timers of the same kind in step.
+    fn tick_timers(&mut self) {
+        use crate::world::wiring::{timer_is_running, timer_period};
+
+        if self.running_timers.is_empty() {
+            return;
+        }
+        let mut due = Vec::new();
+        let mut gone = Vec::new();
+        for (&(x, y), left) in &mut self.running_timers {
+            let tile = self.world.tile(x, y);
+            if !timer_is_running(tile) {
+                gone.push((x, y));
+                continue;
+            }
+            *left -= 1;
+            if *left <= 0 || (*left).rem_euclid(timer_period(tile.frame_x)) == 0 {
+                *left = TIMER_WINDOW;
+                due.push((x, y));
+            }
+        }
+        for at in gone {
+            self.running_timers.remove(&at);
+        }
+        for (x, y) in due {
+            let fired = {
+                let world = &mut self.world;
+                crate::world::wiring::trip_wire(world, x, y)
+            };
+            self.apply_circuit(fired, (x, y));
+        }
     }
 
     /// Fire one trap the current reached, if it is not still cooling down.

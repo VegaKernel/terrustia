@@ -16,18 +16,26 @@
 //! * **Statues**, which produce monsters, items or a fetched townsperson.
 //! * **Teleporters**, which swap whoever is standing on one pad with whoever is on the other.
 //! * **Pumps**, which move liquid from every inlet cell a circuit reaches to every outlet.
+//! * **Timers**, the one thing here that starts a circuit with nobody touching it.
+//! * **Logic gates**, which read a stack of lamps, decide, and start a circuit of their own.
 //!
-//! Only the actuator and the pump are done inside the flood, because they are the two that need
-//! nothing but the tiles. The rest are *reported*: firing a trap needs a die roll, a cooldown and
-//! the projectile store; a statue needs the NPC table; a teleporter needs the players. All of
+//! The last two are what make wiring a machine rather than a switchboard. Almost every
+//! contraption anybody builds runs off a timer, and almost every interesting one has a gate in
+//! it; a server that only ran a circuit when a player hit a switch would run hardly any of them.
+//!
+//! Only the actuator, the pump, the lamp and the timer are handled inside the flood, because they
+//! need nothing but the tiles. The rest are *reported*: firing a trap needs a die roll, a cooldown
+//! and the projectile store; a statue needs the NPC table; a teleporter needs the players; a gate
+//! needs to start a new circuit, which cannot happen from inside the one that is running. All of
 //! that lives on the server, so the flood hands back which tiles it reached and the server does
-//! the work — [`trap_shot`] is the table it calls for each trap.
+//! the work — [`trap_shot`] and [`check_logic_gate`] are the tables it calls.
 //!
-//! The remaining entries are cosmetic: lamps, candles, chandeliers and the like change a frame
-//! and nothing else, and a client does that for itself from the relayed hit.
+//! The remaining entries are cosmetic: candles, chandeliers and the like change a frame and
+//! nothing else, and a client does that for itself from the relayed hit.
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
-//! broken by it.
+//! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
+//! timer switching itself off the first time it fires.
 
 use std::collections::HashSet;
 
@@ -116,10 +124,22 @@ pub struct Fired {
     pub pump_in: Vec<(i32, i32)>,
     /// ...and of every outlet.
     pub pump_out: Vec<(i32, i32)>,
+    /// Logic-gate lamps the current toggled, for the caller to run the gates below them.
+    pub lamps: Vec<(i32, i32)>,
+    /// Timers the current switched on, which then run on their own until switched off.
+    pub timers_started: Vec<(i32, i32)>,
+    /// ...and the ones it switched off.
+    pub timers_stopped: Vec<(i32, i32)>,
     /// How many tiles the current reached, for the record.
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
     pub truncated: bool,
+    /// Tiles already acted on in this run, which are not acted on again.
+    ///
+    /// The four colours run one after another over the same world, so without this a lamp with
+    /// two colours on it would toggle twice and end up where it started. The game keeps the same
+    /// list and calls adding to it `SkipWire`.
+    skipped: HashSet<(i32, i32)>,
 }
 
 /// Hit a trigger, and run whatever it is connected to.
@@ -133,6 +153,21 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         return out;
     }
 
+    // A timer hit by hand is only switched on or off. It does not run its circuit there and then
+    // — that is what it will do on its own, on its own schedule, from now on.
+    if tile.block == TIMER {
+        let mut flipped = tile;
+        flipped.frame_y = if tile.frame_y == 0 { 18 } else { 0 };
+        world.set_tile(x, y, flipped);
+        out.changed.push((x, y));
+        if flipped.frame_y == 0 {
+            out.timers_stopped.push((x, y));
+        } else {
+            out.timers_started.push((x, y));
+        }
+        return out;
+    }
+
     // A lever or a switch remembers which way it is thrown.
     if flips(tile.block) {
         let mut flipped = tile;
@@ -142,6 +177,29 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
     }
 
     let (w, h) = footprint(tile.block);
+    run_from(world, x, y, w, h, &mut out);
+    out
+}
+
+/// Run whatever is connected to a tile, without it having to be something a player can hit.
+///
+/// This is how a timer fires and how a logic gate passes its result on: both start a circuit from
+/// their own tile, and neither is a switch.
+pub fn trip_wire(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
+    let mut out = Fired::default();
+    run_from(world, x, y, 1, 1, &mut out);
+    out
+}
+
+/// Flood every colour present on a footprint, each as its own circuit.
+fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &mut Fired) {
+    // The tiles a circuit starts from are not acted on by it. Without this a timer's own circuit
+    // would reach the timer and switch it off, so every timer would fire exactly once.
+    for dx in 0..w {
+        for dy in 0..h {
+            out.skipped.insert((x + dx, y + dy));
+        }
+    }
     for colour in Wire::ALL {
         let mut seeds = Vec::new();
         for dx in 0..w {
@@ -154,9 +212,8 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         if seeds.is_empty() {
             continue;
         }
-        trip(world, colour, seeds, &mut out);
+        trip(world, colour, seeds, out);
     }
-    out
 }
 
 /// Flood the current outward from a set of seeds and act on everything it reaches.
@@ -190,7 +247,41 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
 /// A tile with nothing to do is not an error and does not stop the current: the flood is over
 /// connectedness, not over things that respond.
 fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
+    if out.skipped.contains(&(x, y)) {
+        return;
+    }
     let tile = world.tile(x, y);
+    if tile.is_active() && tile.block == LAMP {
+        // A logic lamp toggles, unless it is the faulty one, which has no state to toggle. The
+        // gate below it is then worth checking, because its inputs have changed.
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        if tile.frame_x != LAMP_FAULTY {
+            let mut flipped = tile;
+            flipped.frame_x = if tile.frame_x == 0 { LAMP_ON } else { 0 };
+            world.set_tile(x, y, flipped);
+            out.changed.push((x, y));
+        }
+        out.lamps.push((x, y));
+        return;
+    }
+    if tile.is_active() && tile.block == TIMER {
+        // A timer on the circuit is toggled by it, the same as one hit by hand.
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        let mut flipped = tile;
+        flipped.frame_y = if tile.frame_y == 0 { 18 } else { 0 };
+        world.set_tile(x, y, flipped);
+        out.changed.push((x, y));
+        if flipped.frame_y == 0 {
+            out.timers_stopped.push((x, y));
+        } else {
+            out.timers_started.push((x, y));
+        }
+        return;
+    }
     // An actuator toggles its block between solid and passable. It runs whether or not the block
     // is active, which is the only way a block that has been actuated away can ever come back.
     if tile.flags.has(TileFlags::ACTUATOR) {
@@ -257,6 +348,15 @@ const GEYSER: u16 = 443;
 const STATUE: u16 = 105;
 /// The teleporter, which is three wide.
 const TELEPORTER: u16 = 235;
+/// The timer, which is the one trigger that keeps firing on its own.
+const TIMER: u16 = 144;
+/// A logic gate's input lamp...
+const LAMP: u16 = 419;
+/// ...and the gate itself, which sits under a stack of them.
+const GATE: u16 = 420;
+/// A lamp or gate frame of 18 is on; of 36, faulty.
+const LAMP_ON: i16 = 18;
+const LAMP_FAULTY: i16 = 36;
 /// The two pumps, which are two by two.
 const PUMP_IN: u16 = 142;
 const PUMP_OUT: u16 = 143;
@@ -334,6 +434,136 @@ pub fn transfer_liquid(
         }
     }
     changed
+}
+
+/// How often a timer fires, from the frame it is set to.
+///
+/// The five timers are a quarter of a second, half a second, one second, three and five. A timer
+/// keeps a contraption running with nobody standing on it, which is what most wiring is actually
+/// for, so a server that only runs a circuit when somebody hits a switch runs almost none of it.
+pub fn timer_period(frame_x: i16) -> i32 {
+    match frame_x / 18 {
+        0 => 60,
+        1 => 180,
+        2 => 300,
+        3 => 30,
+        4 => 15,
+        _ => 60,
+    }
+}
+
+/// Whether this tile is a timer that is switched on.
+pub fn timer_is_running(tile: Tile) -> bool {
+    tile.is_active() && tile.block == TIMER && tile.frame_y != 0
+}
+
+/// What one logic gate decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateResult {
+    /// Where the gate is.
+    pub at: (i32, i32),
+    /// Whether it should now pass current on.
+    pub fires: bool,
+}
+
+/// Run the gate under a lamp the current just toggled.
+///
+/// A gate is a stack: one gate tile with a column of lamps directly above it. The gate reads all
+/// of them at once and decides in one step — there is no notion of an input arriving before
+/// another, which is why a logic gate in Terraria settles rather than oscillates.
+///
+/// A *faulty* lamp turns the whole gate into a coin toss weighted by how many of its lamps are
+/// lit, which is the only source of randomness in the wire table.
+pub fn check_logic_gate(
+    world: &mut impl WiredWorld,
+    lamp_x: i32,
+    lamp_y: i32,
+    already_fired: &HashSet<(i32, i32)>,
+    rng: &mut impl rand::Rng,
+) -> Option<GateResult> {
+    // Walk down from the lamp through the rest of the stack to the gate under it.
+    let mut y = lamp_y;
+    let gate_y = loop {
+        if y >= world.height() {
+            return None;
+        }
+        let tile = world.tile(lamp_x, y);
+        if !tile.is_active() {
+            return None;
+        }
+        if tile.block == GATE {
+            break y;
+        }
+        if tile.block != LAMP {
+            return None;
+        }
+        y += 1;
+    };
+
+    let gate = world.tile(lamp_x, gate_y);
+    let kind = i32::from(gate.frame_y) / 18;
+    let was_on = gate.frame_x == LAMP_ON;
+    let gate_is_faulty = gate.frame_x == LAMP_FAULTY;
+
+    // Count the lamps above the gate, stopping at a faulty one.
+    let (mut lamps, mut lit, mut faulty_lamp) = (0, 0, false);
+    let mut above = gate_y - 1;
+    while above > 0 {
+        let tile = world.tile(lamp_x, above);
+        if !tile.is_active() || tile.block != LAMP {
+            break;
+        }
+        if tile.frame_x == LAMP_FAULTY {
+            faulty_lamp = true;
+            break;
+        }
+        lamps += 1;
+        lit += i32::from(tile.frame_x == LAMP_ON);
+        above -= 1;
+    }
+
+    let now_on = match kind {
+        0 => lamps == lit, // and
+        1 => lit > 0,      // or
+        2 => lamps != lit, // nand
+        3 => lit == 0,     // nor
+        4 => lit == 1,     // xor
+        5 => lit != 1,     // xnor
+        _ => return None,
+    };
+
+    // A faulty gate with no faulty lamp is stuck: it changes nothing and passes nothing on.
+    let stuck = !faulty_lamp && gate_is_faulty;
+    // A faulty lamp at the top of the stack is what makes the gate roll a die instead.
+    let rolls = faulty_lamp && world.tile(lamp_x, lamp_y).frame_x == LAMP_FAULTY;
+    if now_on == was_on && !stuck && !rolls {
+        return None;
+    }
+
+    let mut updated = gate;
+    updated.frame_x = if faulty_lamp {
+        LAMP_FAULTY
+    } else {
+        LAMP_ON * i16::from(now_on)
+    };
+    world.set_tile(lamp_x, gate_y, updated);
+
+    let mut fires = !faulty_lamp || rolls;
+    if rolls {
+        fires = lamps > 0 && lit > 0 && rng.random_range(0..lamps) < lit;
+    }
+    if stuck {
+        fires = false;
+    }
+    // A gate that has already fired in this pass has found a loop. The game puffs smoke at it and
+    // refuses to go round again, which is what stops a wired ring locking the server up.
+    if fires && already_fired.contains(&(lamp_x, gate_y)) {
+        fires = false;
+    }
+    Some(GateResult {
+        at: (lamp_x, gate_y),
+        fires,
+    })
 }
 
 /// A shot a wired trap wants to take.
@@ -880,6 +1110,239 @@ mod tests {
                 .teleporters
                 .iter()
                 .all(|p| [110, 120, 130].contains(&p.0))
+        );
+    }
+
+    /// Build a gate with a stack of lamps above it. `lamps` is on/off from the top down.
+    fn gate_stack(board: &mut Board, x: i32, gate_y: i32, kind: i16, lamps: &[bool]) {
+        let mut gate = Tile::framed(GATE, 0, kind * 18);
+        gate.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(x, gate_y, gate);
+        for (i, &on) in lamps.iter().enumerate() {
+            let y = gate_y - lamps.len() as i32 + i as i32;
+            let mut lamp = Tile::framed(LAMP, if on { LAMP_ON } else { 0 }, 0);
+            lamp.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, y, lamp);
+        }
+    }
+
+    /// Each of the six gate kinds reads its whole stack at once and answers in one step.
+    #[test]
+    fn every_gate_kind_answers_the_way_it_should() {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+        let done = HashSet::new();
+        // kind, lamps, expected output.
+        let cases: &[(i16, &[bool], bool)] = &[
+            (0, &[true, true], true), // and
+            (0, &[true, false], false),
+            (1, &[false, true], true), // or
+            (1, &[false, false], false),
+            (2, &[true, true], false), // nand
+            (2, &[true, false], true),
+            (3, &[false, false], true), // nor
+            (3, &[true, false], false),
+            (4, &[true, false], true), // xor: exactly one
+            (4, &[true, true], false),
+            (5, &[true, true], true), // xnor: not exactly one
+            (5, &[true, false], false),
+        ];
+        for &(kind, lamps, want) in cases {
+            let mut board = Board(HashMap::new());
+            gate_stack(&mut board, 100, 100, kind, lamps);
+            // Start the gate at the opposite state, so it always has something to say.
+            let mut gate = board.tile(100, 100);
+            gate.frame_x = if want { 0 } else { LAMP_ON };
+            board.set_tile(100, 100, gate);
+
+            let top = 100 - lamps.len() as i32;
+            let result = check_logic_gate(&mut board, 100, top, &done, &mut rng)
+                .unwrap_or_else(|| panic!("kind {kind} with {lamps:?} said nothing"));
+            assert_eq!(result.at, (100, 100));
+            assert_eq!(
+                board.tile(100, 100).frame_x == LAMP_ON,
+                want,
+                "kind {kind} with {lamps:?}"
+            );
+            assert!(result.fires, "a gate that changed should pass it on");
+        }
+    }
+
+    /// A gate whose answer has not changed says nothing, which is what stops a circuit running in
+    /// circles through a stable machine.
+    #[test]
+    fn a_gate_that_did_not_change_stays_quiet() {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(2);
+        let done = HashSet::new();
+        let mut board = Board(HashMap::new());
+        // An OR gate with a lamp lit, already reading true.
+        gate_stack(&mut board, 100, 100, 1, &[true, false]);
+        let mut gate = board.tile(100, 100);
+        gate.frame_x = LAMP_ON;
+        board.set_tile(100, 100, gate);
+
+        assert!(check_logic_gate(&mut board, 100, 98, &done, &mut rng).is_none());
+    }
+
+    /// A gate that has already fired in this pass has found a loop, and refuses to go round again.
+    #[test]
+    fn a_gate_will_not_go_round_twice() {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(3);
+        let mut board = Board(HashMap::new());
+        gate_stack(&mut board, 100, 100, 1, &[true, false]);
+
+        let done: HashSet<(i32, i32)> = [(100, 100)].into_iter().collect();
+        let result = check_logic_gate(&mut board, 100, 98, &done, &mut rng).unwrap();
+        assert!(!result.fires, "a gate already fired should not fire again");
+        assert_eq!(
+            board.tile(100, 100).frame_x,
+            LAMP_ON,
+            "though it still records what it worked out"
+        );
+    }
+
+    /// The current toggles a lamp and reports it, rather than acting on the gate itself.
+    #[test]
+    fn the_flood_toggles_a_lamp_and_reports_it() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut lamp = Tile::framed(LAMP, 0, 0);
+        lamp.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(105, 100, lamp);
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.lamps, vec![(105, 100)]);
+        assert_eq!(board.tile(105, 100).frame_x, LAMP_ON, "the lamp came on");
+    }
+
+    /// A lamp on two colours is toggled once, not twice: the four floods share one skip list, or
+    /// a two-colour lamp would end every circuit exactly where it started.
+    #[test]
+    fn a_lamp_on_two_colours_toggles_once() {
+        let mut board = Board(HashMap::new());
+        let mut lever = wired(136, Wire::Red);
+        lever.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(100, 100, lever);
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            wire.flags.set(TileFlags::WIRE_BLUE, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut lamp = Tile::framed(LAMP, 0, 0);
+        lamp.flags.set(TileFlags::WIRE_RED, true);
+        lamp.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(105, 100, lamp);
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(105, 100).frame_x,
+            LAMP_ON,
+            "on, not back off again"
+        );
+    }
+
+    /// Hitting a timer switches it on, and hitting it again switches it off.
+    #[test]
+    fn a_timer_is_switched_on_and_off() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(TIMER, Wire::Red));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.timers_started, vec![(100, 100)]);
+        assert!(fired.timers_stopped.is_empty());
+        assert!(timer_is_running(board.tile(100, 100)));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.timers_stopped, vec![(100, 100)]);
+        assert!(!timer_is_running(board.tile(100, 100)));
+    }
+
+    /// The five timers run at the five rates the game gives them.
+    #[test]
+    fn each_timer_has_its_own_rate() {
+        assert_eq!(timer_period(0), 60, "one second");
+        assert_eq!(timer_period(18), 180, "three seconds");
+        assert_eq!(timer_period(36), 300, "five seconds");
+        assert_eq!(timer_period(54), 30, "half a second");
+        assert_eq!(timer_period(72), 15, "a quarter");
+        // And the window they reset to is a multiple of all of them, so two of a kind stay in step.
+        for frame in [0i16, 18, 36, 54, 72] {
+            assert_eq!(18_000 % timer_period(frame), 0, "frame {frame}");
+        }
+    }
+
+    /// The whole chain on a board: two levers, two lamps, an AND gate, and a trap beyond it.
+    #[test]
+    fn a_gate_passes_current_on_only_when_it_should() {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(9);
+        let mut board = Board(HashMap::new());
+        let wire = |board: &mut Board, x: i32, y: i32, flag: u16| {
+            let mut t = board.tile(x, y);
+            t.flags.set(flag, true);
+            board.set_tile(x, y, t);
+        };
+
+        // Red runs from its lever along the row of the lower lamp; blue along the row of the
+        // upper one. Neither passes through the gate tile, which carries green and would
+        // otherwise cut the wire that feeds it.
+        board.set_tile(390, 318, wired(136, Wire::Red));
+        board.set_tile(390, 317, wired(136, Wire::Blue));
+        for x in 390..=400 {
+            wire(&mut board, x, 318, TileFlags::WIRE_RED);
+            wire(&mut board, x, 317, TileFlags::WIRE_BLUE);
+        }
+
+        let mut upper = Tile::framed(LAMP, 0, 0);
+        upper.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(400, 317, upper);
+        let mut lower = Tile::framed(LAMP, 0, 0);
+        lower.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(400, 318, lower);
+        let mut gate = Tile::framed(GATE, 0, 0);
+        gate.flags.set(TileFlags::WIRE_GREEN, true);
+        board.set_tile(400, 319, gate);
+        for x in 401..=420 {
+            wire(&mut board, x, 319, TileFlags::WIRE_GREEN);
+        }
+        let mut trap = Tile::framed(TRAPS, 0, 0);
+        trap.flags.set(TileFlags::WIRE_GREEN, true);
+        board.set_tile(420, 319, trap);
+
+        let done = HashSet::new();
+        // One lamp: an AND gate says nothing.
+        let fired = hit_switch(&mut board, 390, 318);
+        assert_eq!(
+            fired.lamps,
+            vec![(400, 318)],
+            "the red lever reached the lower lamp"
+        );
+        assert!(
+            check_logic_gate(&mut board, 400, 318, &done, &mut rng).is_none(),
+            "one of two lamps is not an AND"
+        );
+
+        // Both: the gate flips and fires, and its own circuit reaches the trap.
+        let fired = hit_switch(&mut board, 390, 317);
+        assert_eq!(
+            fired.lamps,
+            vec![(400, 317)],
+            "the blue lever reached the upper lamp"
+        );
+        let result = check_logic_gate(&mut board, 400, 317, &done, &mut rng)
+            .expect("both lamps lit is an AND");
+        assert!(result.fires);
+        assert_eq!(result.at, (400, 319));
+
+        let onward = trip_wire(&mut board, 400, 319);
+        assert_eq!(
+            onward.traps,
+            vec![(420, 319)],
+            "and the gate reached the trap"
         );
     }
 }

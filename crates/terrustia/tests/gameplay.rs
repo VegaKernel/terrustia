@@ -2496,3 +2496,186 @@ async fn a_teleporter_pair_moves_a_player() {
         landed.0 / 16.0
     );
 }
+
+/// A timer keeps a contraption running with nobody touching it, which is what most wiring is for.
+///
+/// A server that only runs a circuit when a player hits a switch runs almost none of it: the
+/// timers are what make a farm a farm.
+#[tokio::test]
+async fn a_timer_keeps_firing_a_trap_on_its_own() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // A quarter-second timer, frame_x 4 * 18, off to begin with.
+        world.set_tile(390, 319, Tile::framed(144, 4 * 18, 0));
+        for x in 390..=410 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        // A spear trap, which has the shortest cooldown of the lot.
+        let mut trap = Tile::framed(137, 3 * 18, 4 * 18);
+        trap.flags
+            .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+        world.set_tile(410, 319, trap);
+    })
+    .await;
+
+    let mut client = join(addr, "timekeeper").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(385.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // One hit switches the timer on. Nothing else is touched from here.
+    client.hit_switch(390, 319).await.unwrap();
+
+    // The spear trap has the shortest cooldown of the lot at ninety ticks, so the gap between
+    // shots is a second and a half however fast the timer runs.
+    let mut born = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match client
+            .try_wait_for(
+                "a spear",
+                |e| matches!(e, Event::ProjectileSynced(_)),
+                Duration::from_secs(2),
+            )
+            .await
+        {
+            Some(Event::ProjectileSynced(p)) => {
+                born.insert((p.key.owner, p.key.index, p.key.generation));
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        born.len() >= 3,
+        "a running timer should have fired the trap several times, not {} time(s)",
+        born.len()
+    );
+
+    // And switching it off stops it.
+    client.hit_switch(390, 319).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Drain whatever was already in flight.
+    while client
+        .try_wait_for(
+            "leftovers",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_millis(300),
+        )
+        .await
+        .is_some()
+    {}
+    let quiet = client
+        .try_wait_for(
+            "another spear",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_millis(1200),
+        )
+        .await;
+    assert!(
+        quiet.is_none(),
+        "the timer kept firing after it was switched off"
+    );
+}
+
+/// An AND gate passes current on only when both its lamps are lit.
+///
+/// A gate is what turns wiring from a switchboard into a machine: it reads its whole stack at
+/// once, decides, and starts a circuit of its own. Nothing downstream of a gate works without it.
+#[tokio::test]
+async fn an_and_gate_only_fires_when_both_its_lamps_are_lit() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..440 {
+            for y in 290..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        let red = terrustia_proto::tile::TileFlags::WIRE_RED;
+        let blue = terrustia_proto::tile::TileFlags::WIRE_BLUE;
+        let green = terrustia_proto::tile::TileFlags::WIRE_GREEN;
+
+        // Two levers, each on its own colour, each running along the row of its own lamp.
+        // Neither wire passes through the gate tile, which carries green: a wire that ran through
+        // it would be cut by the gate rather than reaching the lamp.
+        let mut lever_a = Tile::framed(136, 0, 0);
+        lever_a.flags.set(red, true);
+        world.set_tile(390, 318, lever_a);
+        let mut lever_b = Tile::framed(136, 0, 0);
+        lever_b.flags.set(blue, true);
+        world.set_tile(390, 317, lever_b);
+
+        for x in 390..=400 {
+            let mut t = world.tile(x, 318);
+            t.flags.set(red, true);
+            world.set_tile(x, 318, t);
+            let mut t = world.tile(x, 317);
+            t.flags.set(blue, true);
+            world.set_tile(x, 317, t);
+        }
+
+        // The stack: two lamps at y=317 and 318, the gate at y=319, all in column 400.
+        let mut upper = Tile::framed(419, 0, 0);
+        upper.flags.set(blue, true);
+        world.set_tile(400, 317, upper);
+        let mut lower = Tile::framed(419, 0, 0);
+        lower.flags.set(red, true);
+        world.set_tile(400, 318, lower);
+        // Gate kind 0 is AND. Green carries whatever it decides onward.
+        let mut gate = Tile::framed(420, 0, 0);
+        gate.flags.set(green, true);
+        world.set_tile(400, 319, gate);
+
+        // Green from the gate to a dart trap facing west.
+        for x in 401..=420 {
+            let mut t = world.tile(x, 319);
+            t.flags.set(green, true);
+            world.set_tile(x, 319, t);
+        }
+        let mut trap = Tile::framed(137, 0, 0);
+        trap.flags.set(green, true);
+        world.set_tile(420, 319, trap);
+    })
+    .await;
+
+    let mut client = join(addr, "logician").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(385.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // One lamp lit is not enough for an AND gate.
+    client.hit_switch(390, 318).await.unwrap();
+    let early = client
+        .try_wait_for(
+            "a dart too soon",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(early.is_none(), "one lamp should not have fired the gate");
+
+    // The second one is.
+    client.hit_switch(390, 317).await.unwrap();
+    let dart = client
+        .try_wait_for(
+            "the dart",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_secs(4),
+        )
+        .await;
+    assert!(
+        dart.is_some(),
+        "both lamps lit should have fired the gate, and the gate the trap"
+    );
+}
