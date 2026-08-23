@@ -233,6 +233,8 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// Whose turn it is to have the ground around them searched for a house.
+    housing_turn: usize,
     /// Timers that are switched on, and how long each has left in its window.
     running_timers: HashMap<(i32, i32), i32>,
     /// Trap tiles that have fired recently, and how long until each can fire again.
@@ -308,6 +310,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            housing_turn: 0,
             running_timers,
             mech_cooldown: HashMap::new(),
             tile_entities: Vec::new(),
@@ -3650,10 +3653,34 @@ impl GameServer {
     }
 
     /// Find a valid house near a player that no town NPC has claimed.
-    fn find_free_house(&self) -> Option<(i32, i32)> {
-        let taken: Vec<(i32, i32)> = self.npcs.iter().filter_map(|(_, npc)| npc.home).collect();
+    /// Look for a room somebody could move into, around one player.
+    ///
+    /// One player, not all of them: the search is four hundred and twenty-five probes and each
+    /// promising one is a flood fill, which is a few tenths of a millisecond. That is nothing once
+    /// every five seconds — but it is *per player*, and thirty players would put the whole tick
+    /// budget into a single tick. Taking them in turn caps the cost at one player's worth however
+    /// many are on, and only means a house is found within a few scans rather than the first.
+    fn find_free_house(&mut self) -> Option<(i32, i32)> {
+        let playing: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| p.slot)
+            .collect();
+        if playing.is_empty() {
+            return None;
+        }
+        self.housing_turn = (self.housing_turn + 1) % playing.len();
+        let whose = playing[self.housing_turn];
 
-        for player in self.players.iter().flatten().filter(|p| p.is_playing()) {
+        let taken: Vec<(i32, i32)> = self.npcs.iter().filter_map(|(_, npc)| npc.home).collect();
+        for player in self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.slot == whose && p.is_playing())
+        {
             let (px, py) = (
                 (player.position.0 / 16.0) as i32,
                 (player.position.1 / 16.0) as i32,
