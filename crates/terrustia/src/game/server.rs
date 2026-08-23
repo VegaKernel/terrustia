@@ -148,6 +148,19 @@ const CHEST_BLOCK: u16 = 21;
 /// Ticks between NPC position broadcasts. Clients interpolate between them.
 const NPC_SYNC_INTERVAL: u64 = 6;
 
+/// How many sections either way still count as near enough to be told about.
+///
+/// One section is 200 by 150 tiles, so this reaches 600 by 450 — comfortably past what anybody
+/// can see, which is the point: a client should be told about something before it comes on
+/// screen, not as it arrives.
+const SECTION_REACH: i32 = 1;
+
+/// How many times in a row an NPC's state may be withheld from a player who is not near it.
+///
+/// Withholding it entirely would leave a distant NPC frozen where a client last saw it; the game
+/// lets four go by and then sends one anyway.
+const MAX_NPC_SYNC_SKIPS: u8 = 4;
+
 /// The count a running timer is set back to whenever it fires.
 ///
 /// Five minutes of ticks, and a multiple of every timer period, which is what keeps two timers of
@@ -233,6 +246,8 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// How many syncs in a row each NPC has been withheld from each player.
+    npc_skips: HashMap<(u8, u8), u8>,
     /// Whose turn it is to have the ground around them searched for a house.
     housing_turn: usize,
     /// Timers that are switched on, and how long each has left in its window.
@@ -310,6 +325,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            npc_skips: HashMap::new(),
             housing_turn: 0,
             running_timers,
             mech_cooldown: HashMap::new(),
@@ -718,9 +734,28 @@ impl GameServer {
         };
         // A client that cannot keep up would otherwise grow the queue without bound. Dropping it is
         // the same call vanilla makes, and the read task notices the closed channel.
-        if out.try_send(frame).is_err() {
-            warn!(slot, "outbound queue full or closed; dropping connection");
-            self.remove_player(slot);
+        //
+        // A *closed* channel is a different thing and must not be reported as the same: it means
+        // the connection has already gone, which happens every time anybody leaves — and every
+        // player still on the server is then sent the news, one send per departed connection.
+        // Calling that "dropping connection" at warning level sends an operator looking for a
+        // network problem that is not there.
+        let id = frame.get(2).copied().unwrap_or(255);
+        match out.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!(slot, "sending to a connection that has already gone");
+                self.remove_player(slot);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    slot,
+                    packet = id,
+                    name = terrustia_proto::id::name(id),
+                    "outbound queue full; dropping a client that cannot keep up"
+                );
+                self.remove_player(slot);
+            }
         }
     }
 
@@ -3350,10 +3385,59 @@ impl GameServer {
     }
 
     fn broadcast_npc(&mut self, index: u8) {
-        if let Some(sync) = self.npc_sync(index)
-            && let Ok(frame) = sync.encode()
-        {
-            self.broadcast(frame, None);
+        let Some(sync) = self.npc_sync(index) else {
+            return;
+        };
+        let Ok(frame) = sync.encode() else {
+            return;
+        };
+        let at = sync.position;
+        self.broadcast_near(frame, at, index);
+    }
+
+    /// Send an NPC's state only to the players whose part of the world it is in.
+    ///
+    /// A broadcast to everybody is what a server can least afford: with two hundred NPCs awake and
+    /// a sync every six ticks, sending each to every player is thousands of frames a second per
+    /// client, and a client that cannot drain that fast is dropped for being slow. The game's own
+    /// rule is to skip an NPC for a client whose loaded sections do not cover it — but never more
+    /// than four times in a row, so something far away still gets an occasional update rather than
+    /// freezing where it was last seen.
+    fn broadcast_near(&mut self, frame: Vec<u8>, at: (f32, f32), index: u8) {
+        let bytes = Bytes::from(frame);
+        let section = (
+            (at.0 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_WIDTH,
+            (at.1 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_HEIGHT,
+        );
+        let targets: Vec<(u8, bool)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| {
+                let theirs = (
+                    (p.position.0 / crate::game::npc::TILE) as i32
+                        / terrustia_proto::section::SECTION_WIDTH,
+                    (p.position.1 / crate::game::npc::TILE) as i32
+                        / terrustia_proto::section::SECTION_HEIGHT,
+                );
+                // A section is near if it is theirs or one of its neighbours, which is the same
+                // reach the game keeps a section active over.
+                let near = (theirs.0 - section.0).abs() <= SECTION_REACH
+                    && (theirs.1 - section.1).abs() <= SECTION_REACH;
+                (p.slot, near)
+            })
+            .collect();
+        for (slot, near) in targets {
+            if !near {
+                let skipped = self.npc_skips.entry((index, slot)).or_insert(0);
+                if *skipped < MAX_NPC_SYNC_SKIPS {
+                    *skipped += 1;
+                    continue;
+                }
+            }
+            self.npc_skips.remove(&(index, slot));
+            self.send_bytes(slot, bytes.clone());
         }
     }
 

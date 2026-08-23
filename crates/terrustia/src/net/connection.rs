@@ -79,9 +79,29 @@ pub async fn serve(
 /// Pump the outbound queue to the socket.
 ///
 /// Frames arrive fully encoded, so this is a plain write rather than a `FramedWrite`.
+/// How much of the queue one write may coalesce.
+///
+/// Frames are small and there are a lot of them: with players in sight of one another, every
+/// movement one makes is a frame to each of the others. Writing them one at a time is one syscall
+/// each, and the queue then drains slower than the game fills it — which shows up not as slowness
+/// but as clients being *dropped* for falling behind. Gathering whatever is already waiting into
+/// one write costs nothing and is what stops that.
+const WRITE_BATCH: usize = 64 * 1024;
+
 async fn write_loop(mut out: mpsc::Receiver<Bytes>, mut sink: tokio::net::tcp::OwnedWriteHalf) {
+    let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH);
     while let Some(frame) = out.recv().await {
-        if sink.write_all(&frame).await.is_err() {
+        batch.clear();
+        batch.extend_from_slice(&frame);
+        // Everything else already queued goes out in the same write. `try_recv` never waits, so
+        // this only ever gathers what the game task has *already* produced.
+        while batch.len() < WRITE_BATCH {
+            match out.try_recv() {
+                Ok(next) => batch.extend_from_slice(&next),
+                Err(_) => break,
+            }
+        }
+        if sink.write_all(&batch).await.is_err() {
             break;
         }
     }
