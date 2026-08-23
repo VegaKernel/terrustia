@@ -10,7 +10,7 @@ use terrustia::{
     config::Config,
     game::{GameServer, ServerEvent},
     net::{Frame, TerrariaCodec, listener},
-    world::worldgen,
+    world::{World, worldgen},
 };
 use terrustia_proto::{
     PacketWriter, id,
@@ -43,6 +43,15 @@ fn init_logs() {
 
 /// Start a server on an ephemeral port and return its address.
 async fn start_server() -> SocketAddr {
+    start_server_with(|_| {}).await
+}
+
+/// The same, letting a test shape the world first.
+///
+/// A test that needs a particular tile has to put it there. Relying on the generator happening to
+/// leave one is a test that fails the next time the generator changes — which is exactly what
+/// happened when the world started having caves in it.
+async fn start_server_with<F: FnOnce(&mut World)>(prepare: F) -> SocketAddr {
     init_logs();
     let config = Config {
         // Small enough that generation and section encoding stay quick under a debug build.
@@ -56,12 +65,13 @@ async fn start_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let world = worldgen::generate(
+    let mut world = worldgen::generate(
         config.world_width,
         config.world_height,
         config.world_name.clone(),
         config.seed,
     );
+    prepare(&mut world);
 
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), world).run(rx));
@@ -650,7 +660,12 @@ async fn a_tile_edit_reaches_other_players_and_sticks_in_the_world() {
 
 #[tokio::test]
 async fn a_partially_damaged_block_is_not_removed() {
-    let addr = start_server().await;
+    // The test needs something solid to damage, so it puts it there rather than hoping the
+    // generator did.
+    let addr = start_server_with(|world| {
+        world.set_tile(401, 401, terrustia_proto::Tile::block(1));
+    })
+    .await;
     let mut client = FakeClient::connect(addr).await;
     client.join("miner").await;
     client.recv_until(id::FINISHED_CONNECTING_TO_SERVER).await;

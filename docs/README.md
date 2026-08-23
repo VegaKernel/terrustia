@@ -34,6 +34,7 @@ The generators live in [`tools/`](../tools) and each one names its source. See
 In rough order of how much it proves:
 
 ```sh
+./tools/test_summary.sh     # the whole suite, honestly counted — see below
 cargo test                  # unit and integration tests
 cargo clippy --all-targets  # kept at zero warnings
 cargo run --release -p terrustia --example bestiary -- 127.0.0.1:7777    # every NPC type, live
@@ -47,3 +48,9 @@ python3 tools/packet_audit.py <decompiled-tree>   # what is still unhandled
 ```
 
 A tick has 16,666 µs to spend. Anything approaching that is a bug, not a tuning problem.
+
+**Use `tools/test_summary.sh` rather than eyeballing `cargo test`.** `cargo test` stops at the
+first failing target, so counting "N passed" lines both misses the failure and silently omits
+every target after it. That is not hypothetical: a summary here once read 1,052 passing while a
+handshake test was red and the entire proto crate had never run. The script runs every target,
+reports how many failed, and exits non-zero when any did.
