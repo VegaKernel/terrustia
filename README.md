@@ -55,8 +55,10 @@ Implemented:
 - **Chat**: player chat plus `/help`, `/players`, `/time`, `/save`, `/where`, `/spawn`, `/npcs`,
   `/butcher`, `/house`
 - **Worlds**: procedural generation, a reader for `.wld` saves (format 279 and newer), and a writer
-  that saves losslessly, with autosave and a save on shutdown. Progression flags, weather and the
-  lunar state survive a save
+  that saves losslessly, with autosave and a save on shutdown. A world loaded from a file keeps its
+  own header byte for byte; a generated one gets a header written from scratch at format 325, so a
+  fresh server keeps the world it made. Progression flags, weather and the lunar state survive a
+  save
 - **Wiring**: hitting a switch runs the circuit on the server — the flood over whatever is
   connected, four colours as four independent circuits. Actuators toggle the block they sit on;
   traps throw what they are framed to throw, on the game's own cooldowns; statues produce
@@ -73,21 +75,19 @@ Not implemented:
   handled; verifying the claim is not.
 - **Player weapons.** Projectiles an NPC throws are flown by the server; a player's own are
   relayed.
-- **Saving a generated world.** Saving requires a world that came from a file; see below.
 
 ## Running
 
 ```sh
 cargo run --release                                  # generate a world, listen on 0.0.0.0:7777
+cargo run --release -- --save world.wld              # generate one, and keep it
 cargo run --release -- --world path/to/World.wld     # serve an existing save
 cargo run --release -- --listen 127.0.0.1:7777 --seed 42
 ```
 
-A world loaded from a file is saved back on shutdown, every `autosave_secs`, and on `/save`. Set
-`save_file` to write somewhere other than the original. A **generated** world cannot be saved:
-writing a world header from scratch means reproducing 138 further fields across 26 version gates
-and five nested sub-loaders, and drift there would corrupt a save silently rather than fail
-loudly. Generate a world in Terraria and serve that instead.
+Worlds are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from a file
+saves back over itself; set `save_file`, or pass `--save`, to write somewhere else — which is also
+how a generated world is given somewhere to live.
 
 Then in Terraria: **Multiplayer → Join via IP → `127.0.0.1`**, port `7777`.
 
@@ -198,6 +198,10 @@ Results at the time of writing, against Terraria 1.4.5.7:
   7, 167, 9 and 169, which are copper, lead, silver and platinum.
 - A world edited through this server, saved, and then handed to the real `TerrariaServer` **loads
   and serves correctly**, with the edits in place.
+- A world this server **generated** — with no header to copy from — is written at format 325, and
+  every section boundary lands exactly on its own pointer when walked by a decoder written from
+  the game's source independently of this reader. It reloads with zero differing tiles out of
+  1.26 million, and serving it back runs the whole 691-type bestiary.
 - Pointing both servers at the same pristine `.wld` and capturing their spawn streams gives
   **15 of 15 sections byte-identical and zero differing tiles** out of 450,000.
 - The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol

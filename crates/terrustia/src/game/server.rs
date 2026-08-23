@@ -228,14 +228,15 @@ impl GameServer {
         world.start_tracking_changes();
         let slots = config.max_players;
         let save_path = config.save_target().map(Path::to_path_buf);
-        // Saving needs a world that came from a file; a generated one has no header to preserve.
-        let can_save = save_path.is_some() && world.preserved.is_some();
-        let autosave_ticks = match (can_save, config.autosave_secs) {
+        let autosave_ticks = match (save_path.is_some(), config.autosave_secs) {
             (true, secs) if secs > 0 => Some(secs * 60),
             _ => None,
         };
-        if save_path.is_some() && !can_save {
-            warn!("saving is unavailable: this world was generated rather than loaded from a file");
+        if save_path.is_none() {
+            warn!(
+                "no save target: set `save_file`, or pass --save, to keep this world when the \
+                 server stops"
+            );
         }
 
         // The weather comes off the world it was loaded with, so a reloaded save picks up the
@@ -2032,10 +2033,10 @@ impl GameServer {
                 }
             }
             "save" => {
-                if self.save_path.is_none() || self.world.preserved.is_none() {
+                if self.save_path.is_none() {
                     self.tell(
                         slot,
-                        "This world cannot be saved: it was generated, not loaded from a file.",
+                        "This world has nowhere to be saved: start the server with --save <path>.",
                     );
                 } else {
                     self.save_world("command");

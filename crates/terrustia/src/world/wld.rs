@@ -80,13 +80,6 @@ pub enum WldError {
     #[error("tile data ended early: {decoded} of {expected} tiles")]
     TruncatedTiles { decoded: usize, expected: usize },
 
-    #[error(
-        "this world was generated rather than loaded from a file, and generated worlds cannot be \
-         saved yet: writing a world header from scratch means reproducing 138 further fields \
-         across 26 version gates, which would corrupt a save silently if it drifted"
-    )]
-    CannotSaveGeneratedWorld,
-
     #[error("world would serialise to {bytes} bytes, past the format's 2 GiB section offsets")]
     SaveTooLarge { bytes: i64 },
 

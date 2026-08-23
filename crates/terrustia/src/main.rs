@@ -64,6 +64,9 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(world_file) = args.world {
         config.world_file = Some(world_file);
     }
+    if let Some(save_file) = args.save {
+        config.save_file = Some(save_file);
+    }
 
     let started = Instant::now();
     let world = match &config.world_file {
@@ -178,6 +181,8 @@ struct Args {
     listen: Option<std::net::SocketAddr>,
     seed: Option<u64>,
     world: Option<PathBuf>,
+    /// Where to write the world, for a generated one that has nowhere else to go.
+    save: Option<PathBuf>,
     help: bool,
 }
 
@@ -188,6 +193,7 @@ impl Args {
             listen: None,
             seed: None,
             world: None,
+            save: None,
             help: false,
         };
         let mut args = args.peekable();
@@ -208,6 +214,9 @@ impl Args {
                 }
                 "-w" | "--world" => {
                     parsed.world = Some(args.next().ok_or("--world needs a path")?.into());
+                }
+                "--save" => {
+                    parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
                 "-s" | "--seed" => {
                     let value = args.next().ok_or("--seed needs a number")?;
@@ -237,6 +246,11 @@ fn print_usage(palette: Palette) {
         (
             "-w, --world <PATH>",
             "Serve an existing .wld instead of generating",
+            "",
+        ),
+        (
+            "    --save <PATH>",
+            "Where to write the world; a loaded one saves back over itself",
             "",
         ),
         ("-s, --seed <NUMBER>", "World generation seed", "random"),

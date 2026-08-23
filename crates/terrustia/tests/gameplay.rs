@@ -337,8 +337,9 @@ async fn chat_commands_answer() {
         .unwrap();
 }
 
+/// A generated world with nowhere to be saved says so, rather than pretending it saved.
 #[tokio::test]
-async fn a_generated_world_reports_that_it_cannot_be_saved() {
+async fn a_world_with_no_save_target_says_so() {
     let addr = start().await;
     let mut client = join(addr, "saver").await;
 
@@ -346,10 +347,81 @@ async fn a_generated_world_reports_that_it_cannot_be_saved() {
     client
         .wait_for(
             "the refusal",
-            |e| matches!(e, Event::Chat { text, .. } if text.contains("cannot be saved")),
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("nowhere to be saved")),
         )
         .await
         .unwrap();
+}
+
+/// A generated world can be saved and served back, which is what makes a fresh server keep
+/// anything at all.
+///
+/// The header has no original to copy — it is written from scratch at the format's current
+/// version — so this is the check that the whole of it lands where it should.
+#[tokio::test]
+async fn a_generated_world_saves_and_reloads() {
+    let dir = std::env::temp_dir().join(format!("terrustia-fresh-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target: PathBuf = dir.join("fresh.wld");
+    let _ = std::fs::remove_file(&target);
+
+    let config = Config {
+        save_file: Some(target.clone()),
+        ..Config::default()
+    };
+    let addr = start_with(config, |world| {
+        world.set_tile(400, 300, Tile::block(57));
+    })
+    .await;
+
+    let mut client = join(addr, "founder").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.place_tile(402, 300, 30).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.say("/save").await.unwrap();
+    client
+        .wait_for(
+            "the save",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("World saved")),
+        )
+        .await
+        .unwrap();
+
+    // The file this server never had a template for reads back with the edits in place.
+    let reloaded = wld::load(&target).expect("a world this server wrote loads again");
+    assert_eq!(
+        reloaded.tile(400, 300).block,
+        57,
+        "the world it was built with"
+    );
+    assert_eq!(
+        reloaded.tile(402, 300).block,
+        30,
+        "and the player's own block"
+    );
+    assert_eq!(reloaded.name, "Terrustia", "and its name");
+
+    // And it serves: a client joining the reloaded world streams the section with the edit in it.
+    let config = Config {
+        world_file: Some(target.clone()),
+        motd: String::new(),
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), reloaded).run(rx));
+    tokio::spawn(listener::run(listener, config, tx));
+
+    let mut client = join(addr, "returner").await;
+    client.set_timeout(Duration::from_secs(20));
+    assert_eq!(
+        client.world().tile(402, 300).map(|t| t.block),
+        Some(30),
+        "the streamed world should carry the edit"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Build a small world, save it, and serve the save so the whole persistence path is exercised.
@@ -359,13 +431,18 @@ async fn edits_survive_a_save_and_reload() {
     std::fs::create_dir_all(&dir).unwrap();
     let source: PathBuf = dir.join("source.wld");
 
-    // A generated world cannot be saved, so this test needs a world that came from a file. There
-    // is no such file to start from, so the test is skipped unless one has been provided.
-    let Ok(seed_world) = std::env::var("TERRUSTIA_TEST_WLD") else {
-        eprintln!("set TERRUSTIA_TEST_WLD to a .wld path to run the save round-trip test");
-        return;
-    };
-    std::fs::copy(&seed_world, &source).unwrap();
+    // A world to start from. It can be one this server generated and wrote itself, which is what
+    // makes this run without a Terraria install to borrow a save from; set TERRUSTIA_TEST_WLD to
+    // a real one to exercise the same path against a world the game made.
+    match std::env::var("TERRUSTIA_TEST_WLD") {
+        Ok(seed_world) => {
+            std::fs::copy(&seed_world, &source).unwrap();
+        }
+        Err(_) => {
+            let world = worldgen::generate(800, 600, "roundtrip", 7);
+            wld_save::save(&world, &source).unwrap();
+        }
+    }
 
     let saved = dir.join("saved.wld");
     let config = Config {

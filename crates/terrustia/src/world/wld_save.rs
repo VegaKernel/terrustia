@@ -1,13 +1,20 @@
 //! Writer for Terraria's `.wld` save format.
 //!
-//! Only worlds that were **loaded from a file** can be saved. Saving re-serialises the header
-//! (verbatim, with the clock patched), the tiles, the chests and the signs; every later section —
-//! NPCs, tile entities, pressure plates, the town manager, the bestiary, creative powers and the
-//! footer — is written back exactly as it was read.
+//! There are two paths, and which one runs depends on where the world came from.
 //!
-//! That restriction is deliberate. Re-creating a world header from nothing means transcribing 138
-//! further fields across 26 version gates plus five nested sub-loaders, and any drift there would
-//! corrupt a save silently rather than fail loudly.
+//! A world **loaded from a file** keeps its own header. Saving re-serialises the header verbatim
+//! with the mutable fields patched in place, then the tiles, chests and signs; every later
+//! section — NPCs, tile entities, pressure plates, the town manager, the bestiary, creative
+//! powers and the footer — is written back exactly as it was read. Nothing is re-derived, so
+//! nothing can drift: a world round-trips byte-identically apart from the revision counter, and
+//! the state this server does not model survives untouched.
+//!
+//! A **generated** world has no header to copy, so one is written from scratch at
+//! [`SAVE_VERSION`] — the whole of the game's own flag order, with the fields this server does
+//! not model written as the values a fresh world holds. The format has no framing, so a field of
+//! the wrong width there would put every field after it in the wrong place and corrupt the save
+//! silently. That is why it is checked rather than trusted: the header written here is walked
+//! independently and has to end exactly on the tile-section pointer.
 
 use std::path::Path;
 
@@ -20,12 +27,21 @@ type Result<T> = std::result::Result<T, WldError>;
 const MAGIC: &[u8; 7] = b"relogic";
 const FILE_TYPE_WORLD: u8 = 2;
 
+/// The format this writer emits for a world that has no file of its own.
+///
+/// A world loaded from a file keeps whatever version it came with, because its header is copied
+/// verbatim and patched. A generated one has no header to copy, so it is written fresh at the
+/// version this server was transcribed from.
+pub const SAVE_VERSION: i32 = 325;
+
+/// How many sections the format has at [`SAVE_VERSION`].
+const SECTIONS: usize = 11;
+
 /// Serialise a world into `.wld` bytes.
 pub fn serialize(world: &World) -> Result<Vec<u8>> {
-    let preserved = world
-        .preserved
-        .as_ref()
-        .ok_or(WldError::CannotSaveGeneratedWorld)?;
+    let Some(preserved) = world.preserved.as_ref() else {
+        return Ok(serialize_fresh(world));
+    };
 
     let section_count = 4 + preserved.trailing_offsets.len();
     let mut w = Writer::with_capacity(4 * 1024 * 1024);
@@ -289,6 +305,285 @@ fn write_tiles(w: &mut Writer, world: &World, importance: &dyn Fn(u16) -> bool) 
 /// that many slots; from 294 each chest carries its own count. The header is copied verbatim and
 /// still names the old version, so writing the new shape into an old file makes the reader take
 /// the first chest's coordinates for a slot count and lose the rest of the file with it.
+/// Serialise a world that was generated rather than loaded, writing every section from scratch.
+///
+/// The header this produces is not a copy of anything: it is the whole of the game's own
+/// `SaveWorldFlags` in order, at [`SAVE_VERSION`], with the fields this server does not model
+/// written as the values a fresh world has. That is the risk the preserved path exists to avoid,
+/// so the writer is checked against the reader rather than trusted: a generated world is
+/// serialised, read back, and compared before it is offered as a save.
+fn serialize_fresh(world: &World) -> Vec<u8> {
+    let mut w = Writer::with_capacity(4 * 1024 * 1024);
+    let importance: Vec<bool> = (0..terrustia_proto::tile_sets::TILE_COUNT)
+        .map(terrustia_proto::tile_sets::frame_important)
+        .collect();
+
+    // --- file format header ---------------------------------------------------------------
+    w.i32(SAVE_VERSION)
+        .bytes(MAGIC)
+        .u8(FILE_TYPE_WORLD)
+        .u32(1)
+        .u64(0)
+        .i16(SECTIONS as i16);
+    let pointer_table = w.len();
+    for _ in 0..SECTIONS {
+        w.i32(0);
+    }
+    write_importance(&mut w, &importance);
+
+    let mut pointers = [0i32; SECTIONS];
+    pointers[0] = w.len() as i32;
+    write_fresh_header(&mut w, world);
+    pointers[1] = w.len() as i32;
+    write_tiles(&mut w, world, &|tile: u16| {
+        importance.get(usize::from(tile)).copied().unwrap_or(false)
+    });
+    pointers[2] = w.len() as i32;
+    write_chests(&mut w, world, None);
+    pointers[3] = w.len() as i32;
+    write_signs(&mut w, world);
+
+    // Sections 5 to 11 hold state this server keeps in memory rather than on the world: the
+    // townsfolk who have moved in, the tile entities, the pressure plates that are held down, the
+    // rooms the town manager has assigned, the bestiary and the creative powers. A generated world
+    // that has just been made has none of them, and one this server has been running keeps them
+    // elsewhere, so each is written empty in the shape its loader expects.
+    pointers[4] = w.len() as i32;
+    w.i32(0); // no shimmered townsfolk
+    w.bool(false); // no town NPCs
+    w.bool(false); // and none of the few enemies that persist
+    pointers[5] = w.len() as i32;
+    w.i32(0); // no tile entities
+    pointers[6] = w.len() as i32;
+    w.i32(0); // no pressure plates held down
+    pointers[7] = w.len() as i32;
+    w.i32(0); // no rooms assigned
+    pointers[8] = w.len() as i32;
+    w.i32(0).i32(0).i32(0); // bestiary: kills, sightings, conversations
+    pointers[9] = w.len() as i32;
+    w.bool(false); // no creative powers
+    pointers[10] = w.len() as i32;
+    // The footer, which is what the game checks a save against before trusting it.
+    w.bool(true).string(&world.name).i32(world.id);
+
+    let mut bytes = w.into_bytes();
+    for (index, pointer) in pointers.iter().enumerate() {
+        let at = pointer_table + index * 4;
+        bytes[at..at + 4].copy_from_slice(&pointer.to_le_bytes());
+    }
+    bytes
+}
+
+/// The frame-importance bitset, packed least significant bit first.
+fn write_importance(w: &mut Writer, importance: &[bool]) {
+    w.u16(importance.len() as u16);
+    let mut current = 0u8;
+    let mut bit = 0x80u8;
+    for &framed in importance {
+        if bit == 0x80 {
+            bit = 1;
+            current = 0;
+        } else {
+            bit <<= 1;
+        }
+        if framed {
+            current |= bit;
+        }
+        if bit == 0x80 {
+            w.u8(current);
+        }
+    }
+    if bit != 0x80 && !importance.is_empty() {
+        w.u8(current);
+    }
+}
+
+/// The whole world header, in the order the game writes it.
+///
+/// Every field is here, including the ones this server does not model — they are written as the
+/// values a world that has just been generated holds, because the format has no framing and a
+/// field left out puts every field after it in the wrong place.
+fn write_fresh_header(w: &mut Writer, world: &World) {
+    let p = &world.progress;
+    w.string(&world.name)
+        .string("") // the seed text, which this server does not keep
+        .u64(world.world_gen_version)
+        .bytes(&world.unique_id)
+        .i32(world.id);
+    // The world rectangle in pixels, then its size in tiles — height first.
+    w.i32(0)
+        .i32(world.width() * 16)
+        .i32(0)
+        .i32(world.height() * 16)
+        .i32(world.height())
+        .i32(world.width());
+
+    // The nine special world seeds, none of which a generated world has, then the skyblock flag.
+    w.i32(i32::from(world.game_mode));
+    for _ in 0..9 {
+        w.bool(false);
+    }
+    // Created and last played, which the game stores as .NET tick counts. Zero is a valid one.
+    w.i64(0).i64(0);
+
+    w.u8(world.moon_type);
+    for x in world.tree_x {
+        w.i32(x);
+    }
+    for style in world.tree_style {
+        w.i32(i32::from(style));
+    }
+    for x in world.cave_back_x {
+        w.i32(x);
+    }
+    for style in world.cave_back_style {
+        w.i32(i32::from(style));
+    }
+    w.i32(i32::from(world.ice_back_style))
+        .i32(i32::from(world.jungle_back_style))
+        .i32(i32::from(world.hell_back_style));
+
+    w.i32(i32::from(world.spawn_x))
+        .i32(i32::from(world.spawn_y))
+        .f64(f64::from(world.surface))
+        .f64(f64::from(world.rock_layer));
+    w.f64(f64::from(world.time))
+        .bool(world.day_time)
+        .i32(i32::from(world.moon_phase))
+        .bool(world.blood_moon)
+        .bool(world.eclipse);
+    let dungeon_x = world.dungeon_x.unwrap_or(world.width() / 2);
+    w.i32(dungeon_x).i32(i32::from(world.surface));
+    w.bool(world.crimson);
+
+    for flag in [
+        p.downed_boss1,
+        p.downed_boss2,
+        p.downed_boss3,
+        p.downed_queen_bee,
+        p.downed_mech1,
+        p.downed_mech2,
+        p.downed_mech3,
+        p.downed_mech_any,
+        p.downed_plantera,
+        p.downed_golem,
+        p.downed_king_slime,
+        p.saved_goblin,
+        p.saved_wizard,
+        p.saved_mechanic,
+        p.downed_goblins,
+        p.downed_clown,
+        p.downed_frost,
+        p.downed_pirates,
+        p.shadow_orb_smashed,
+        p.spawn_meteor,
+    ] {
+        w.bool(flag);
+    }
+    w.u8(p.shadow_orb_count).i32(p.altar_count);
+    w.bool(p.hard_mode).bool(false); // the party of doom, which is a one-off event flag
+    // No invasion is saved: one in progress is abandoned when the server stops, exactly as the
+    // game abandons one when a world is closed.
+    w.i32(0).i32(0).i32(0).f64(0.0);
+    w.f64(0.0).u8(0); // slime rain, sundial cooldown
+
+    w.bool(world.raining)
+        .i32(world.rain_time)
+        .f32(world.max_rain);
+    // The three hardmode ore tiers, which are rolled when the wall falls.
+    for _ in 0..3 {
+        w.i32(0);
+    }
+    // Eight background styles, then the clouds and the wind.
+    for _ in 0..8 {
+        w.u8(0);
+    }
+    w.i32(0).i16(0).f32(world.wind);
+
+    w.i32(0); // nobody has handed in an angler quest today
+    w.bool(p.saved_angler)
+        .i32(0)
+        .bool(p.saved_stylist)
+        .bool(p.saved_tax_collector)
+        .bool(p.saved_golfer);
+    w.i32(0).i32(0); // invasion size at the start, cultist delay
+
+    w.i16(0).i16(0); // no banner kill counts, no claimable banners
+    w.bool(false); // not fast-forwarding to dawn
+    for flag in [
+        p.downed_fishron,
+        p.downed_martians,
+        p.downed_ancient_cultist,
+        p.downed_moon_lord,
+        p.downed_halloween_king,
+        p.downed_halloween_tree,
+        p.downed_christmas_ice_queen,
+        p.downed_christmas_santank,
+        p.downed_christmas_tree,
+        p.downed_tower_solar,
+        p.downed_tower_vortex,
+        p.downed_tower_nebula,
+        p.downed_tower_stardust,
+        p.tower_active_solar,
+        p.tower_active_vortex,
+        p.tower_active_nebula,
+        p.tower_active_stardust,
+        p.lunar_apocalypse_up,
+    ] {
+        w.bool(flag);
+    }
+
+    w.bool(false).bool(false).i32(0).i32(0); // no party
+    w.bool(world.sandstorm)
+        .i32(world.sandstorm_time)
+        .f32(world.sandstorm_severity)
+        .f32(world.sandstorm_intended_severity);
+    w.bool(p.saved_bartender)
+        .bool(p.downed_army_t1)
+        .bool(p.downed_army_t2)
+        .bool(p.downed_army_t3);
+    for _ in 0..5 {
+        w.u8(0); // five more background styles
+    }
+    w.bool(p.combat_book);
+    w.i32(0).bool(false).bool(false).bool(false); // lantern night
+
+    // One tree-top variation per biome.
+    w.i32(13);
+    for _ in 0..13 {
+        w.i32(0);
+    }
+    w.bool(false).bool(false); // no forced holiday today
+    // The four ore tiers the wall hands out, which a fresh world has not chosen.
+    for _ in 0..4 {
+        w.i32(-1);
+    }
+    for _ in 0..3 {
+        w.bool(false); // no pets bought
+    }
+    w.bool(p.downed_empress_of_light)
+        .bool(p.downed_queen_slime)
+        .bool(p.downed_deerclops);
+    for _ in 0..9 {
+        w.bool(false); // no town spawns unlocked by other means
+    }
+    w.bool(p.combat_book_two);
+    w.bool(false); // no peddler's satchel
+    for _ in 0..7 {
+        w.bool(false); // the seven slime spawns
+    }
+    w.bool(false).u8(0); // not fast-forwarding to dusk, no moondial cooldown
+    w.bool(false).bool(false); // no forced holiday forever
+    w.bool(false).bool(false); // vampire and infected seeds
+    w.i32(0).i32(0); // meteor showers seen, coin rain
+    w.bool(false); // team-based spawns
+    w.u8(0); // no extra spawn points
+    w.bool(false); // dual dungeons
+    w.bool(false).bool(false); // more lightning, no lightning
+    // The generation manifest, which the game parses as JSON and falls back to empty on.
+    w.string(r#"{"GenPassResults":[],"Version":"terrustia","GitSHA":"","FinalHash":null}"#);
+}
+
 fn write_chests(w: &mut Writer, world: &World, shared_slots: Option<i16>) {
     let chests: Vec<_> = world.chests.iter().flatten().collect();
     w.i16(chests.len() as i16);
