@@ -4592,3 +4592,130 @@ pub const EMPRESS_WALL_SPACING: f32 = 150.0;
 
 /// Debuffs an enemy can land on you by standing near you rather than by hitting you.
 pub const BUFF_WITHERED_ARMOR: u16 = 195;
+
+/// How much tougher a town NPC is for everything the world has beaten.
+///
+/// A townsperson is not a fixed creature: every boss down makes them hit harder, reload faster and
+/// soak more, which is why the guide who was killed by a zombie on night one can hold a doorway by
+/// hardmode. The steps are the game's own, and the wall falling is worth more than any single boss.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TownToughness {
+    /// A multiplier on what they hit for; starts at one.
+    pub damage: f32,
+    /// A multiplier on how long they take between attacks; starts at two and only ever falls.
+    pub reload: f32,
+    /// Armour on top of the type's own.
+    pub defense: i32,
+}
+
+/// What the world's history has done to its townsfolk.
+///
+/// The flags are taken as booleans in the game's own order, because each step is applied in turn
+/// rather than being looked up: two worlds with the same *number* of bosses down are not equally
+/// dangerous places to live.
+#[allow(clippy::too_many_arguments)]
+pub fn town_toughness(down: &[bool; 15], combat_books: (bool, bool)) -> TownToughness {
+    // (damage added, defence added) for each step, in the order the game applies them.
+    const STEPS: [(f32, i32); 15] = [
+        (0.05, 2), // King Slime
+        (0.05, 2), // Eye of Cthulhu
+        (0.1, 3),  // Deerclops
+        (0.1, 3),  // the evil boss
+        (0.1, 3),  // Skeletron
+        (0.1, 3),  // Queen Bee
+        (0.4, 12), // the wall falling, which is worth more than any boss
+        (0.15, 6), // Queen Slime
+        (0.15, 6), // the Destroyer
+        (0.15, 6), // the Twins
+        (0.15, 6), // Skeletron Prime
+        (0.15, 8), // Plantera
+        (0.15, 8), // the Empress
+        (0.15, 8), // Duke Fishron
+        (0.15, 8), // Golem
+    ];
+    let mut out = TownToughness {
+        damage: 1.0,
+        reload: 2.0,
+        defense: 0,
+    };
+    // The combat books come first and are worth far more than a boss.
+    for used in [combat_books.0, combat_books.1] {
+        if used {
+            out.reload *= 0.8;
+            out.damage += 0.25;
+            out.defense += 8;
+        }
+    }
+    for (step, beaten) in STEPS.iter().zip(down) {
+        if *beaten {
+            out.reload *= 0.985;
+            out.damage += step.0;
+            out.defense += step.1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod town_toughness_tests {
+    use super::*;
+
+    /// A fresh world's townsfolk are exactly the type's own.
+    #[test]
+    fn a_fresh_world_leaves_them_alone() {
+        let plain = town_toughness(&[false; 15], (false, false));
+        assert_eq!(plain.damage, 1.0);
+        assert_eq!(plain.reload, 2.0);
+        assert_eq!(plain.defense, 0);
+    }
+
+    /// Every step makes them tougher, and none makes them weaker.
+    #[test]
+    fn every_step_only_helps() {
+        let mut last = town_toughness(&[false; 15], (false, false));
+        for step in 0..15 {
+            let mut down = [false; 15];
+            for d in down.iter_mut().take(step + 1) {
+                *d = true;
+            }
+            let now = town_toughness(&down, (false, false));
+            assert!(now.damage >= last.damage, "damage fell at step {step}");
+            assert!(now.defense >= last.defense, "defence fell at step {step}");
+            assert!(now.reload <= last.reload, "reload rose at step {step}");
+            last = now;
+        }
+    }
+
+    /// The wall falling is worth more than any single boss.
+    #[test]
+    fn the_wall_is_worth_more_than_a_boss() {
+        let mut boss = [false; 15];
+        boss[5] = true; // Queen Bee
+        let mut wall = [false; 15];
+        wall[6] = true; // hardmode
+        assert!(
+            town_toughness(&wall, (false, false)).defense
+                > town_toughness(&boss, (false, false)).defense
+        );
+    }
+
+    /// A combat book is worth more than a boss, and two are worth more than one.
+    #[test]
+    fn the_books_are_worth_more_than_a_boss() {
+        let none = town_toughness(&[false; 15], (false, false));
+        let one = town_toughness(&[false; 15], (true, false));
+        let both = town_toughness(&[false; 15], (true, true));
+        assert!(one.defense > none.defense);
+        assert!(both.defense > one.defense);
+        assert!(both.reload < one.reload, "and they reload faster still");
+    }
+
+    /// A finished world's townsfolk are a different creature from a new one's.
+    #[test]
+    fn a_finished_world_has_hard_townsfolk() {
+        let done = town_toughness(&[true; 15], (true, true));
+        assert!(done.defense > 80, "only {} armour", done.defense);
+        assert!(done.damage > 2.5, "only {}x damage", done.damage);
+        assert!(done.reload < 1.2, "still reloading at {}", done.reload);
+    }
+}

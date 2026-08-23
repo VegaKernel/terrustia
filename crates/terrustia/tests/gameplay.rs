@@ -2095,3 +2095,59 @@ async fn an_enemy_can_kill_a_player_and_everyone_hears() {
         .await
         .expect("a death should reach every player, not only the one who died");
 }
+
+/// A blood moon that walks through a town and leaves it standing is scenery, not a threat.
+///
+/// The townsfolk take contact damage from anything hostile they are standing in, and their armour
+/// — which is the only place the world's history reaches them — decides how long they last.
+#[tokio::test]
+async fn an_enemy_kills_a_townsperson_it_is_standing_in() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "mayor").await;
+    client.set_timeout(Duration::from_secs(30));
+    client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A guide, and then something that wants him dead in the same spot.
+    client.say("/spawn Guide").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for _ in 0..6 {
+        client.say("/spawn Zombie").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The guide is NPC type 22. Watch until his life falls, or he stops being synced at all.
+    let mut seen_full = false;
+    let mut hurt = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    while tokio::time::Instant::now() < deadline && !hurt {
+        client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+        match client.next_event().await {
+            Ok(Event::NpcSynced(n)) if n.npc_type() == 22 => {
+                if n.life >= 250 {
+                    seen_full = true;
+                } else if seen_full && n.life < 250 {
+                    hurt = true;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(
+        hurt,
+        "a guide stood in a crowd of zombies for twenty-five seconds and took no damage \
+         (seen at full health: {seen_full})"
+    );
+}

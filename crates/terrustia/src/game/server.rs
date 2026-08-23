@@ -241,6 +241,10 @@ impl GameServer {
             raining: world.raining,
             rain_time: world.rain_time,
             max_rain: world.max_rain,
+            sandstorm: world.sandstorm,
+            sandstorm_time: world.sandstorm_time,
+            severity: world.sandstorm_severity,
+            intended_severity: world.sandstorm_intended_severity,
             ..Default::default()
         };
 
@@ -3052,6 +3056,102 @@ impl GameServer {
                 }
             }
         }
+
+        self.tick_town_casualties();
+    }
+
+    /// Enemies hurt the townsfolk too.
+    ///
+    /// A blood moon or an invasion that walks through a town and leaves it standing is not a
+    /// threat, it is scenery. This is also the only thing that makes a townsperson's armour mean
+    /// anything, and their armour is most of what the world's history does for them: the guide who
+    /// died to a zombie on the first night can hold a doorway by hardmode.
+    fn tick_town_casualties(&mut self) {
+        /// How long a townsperson is safe for after being hit.
+        ///
+        /// Counted on the world's clock rather than per NPC: they are all hit on the same tick,
+        /// which costs one field fewer on every NPC and is indistinguishable in play.
+        const TOWN_IMMUNE_TICKS: u64 = 30;
+        if !self.ticks.is_multiple_of(TOWN_IMMUNE_TICKS) {
+            return;
+        }
+
+        let residents: Vec<u8> = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.stats.town_npc && n.is_alive())
+            .map(|(index, _)| index)
+            .collect();
+        if residents.is_empty() {
+            return;
+        }
+        let toughness = self.town_toughness();
+
+        for index in residents {
+            // Their armour is the type's plus everything the world has beaten.
+            let Some(resident) = self.npcs.get_mut(index) else {
+                continue;
+            };
+            resident.defense = resident.stats.defense + toughness.defense;
+            let (at, size) = (resident.position, (resident.width(), resident.height()));
+
+            let attacker = self.npcs.iter().find(|(other, n)| {
+                *other != index
+                    && !n.stats.friendly
+                    && n.stats.damage > 0
+                    && n.is_alive()
+                    && n.position.0 < at.0 + size.0
+                    && n.position.0 + n.width() > at.0
+                    && n.position.1 < at.1 + size.1
+                    && n.position.1 + n.height() > at.1
+            });
+            let Some((_, enemy)) = attacker else {
+                continue;
+            };
+            let (damage, from_x) = (enemy.stats.damage, enemy.center().0);
+            let Some(resident) = self.npcs.get_mut(index) else {
+                continue;
+            };
+            let taken = damage_taken(damage, resident.defense, false);
+            let direction = if from_x < at.0 { -1 } else { 1 };
+            let (killed, name) = (
+                resident.take_damage(taken, 0.0, direction),
+                resident.stats.name,
+            );
+            if killed {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+                self.announce(&format!("{name} was slain..."));
+                info!(name, "a townsperson was killed");
+            } else {
+                self.broadcast_npc(index);
+            }
+        }
+    }
+
+    /// How tough this world's townsfolk are, from everything it has beaten.
+    fn town_toughness(&self) -> terrustia_proto::npc_params::TownToughness {
+        let p = &self.world.progress;
+        terrustia_proto::npc_params::town_toughness(
+            &[
+                p.downed_king_slime,
+                p.downed_boss1,
+                p.downed_deerclops,
+                p.downed_boss2,
+                p.downed_boss3,
+                p.downed_queen_bee,
+                p.hard_mode,
+                p.downed_queen_slime,
+                p.downed_mech1,
+                p.downed_mech2,
+                p.downed_mech3,
+                p.downed_plantera,
+                p.downed_empress_of_light,
+                p.downed_fishron,
+                p.downed_golem,
+            ],
+            (p.combat_book, p.combat_book_two),
+        )
     }
 
     /// Take health off a player, tell everyone, and announce a death if it was fatal.
@@ -4058,6 +4158,10 @@ impl GameServer {
         self.world.raining = self.weather.raining;
         self.world.rain_time = self.weather.rain_time;
         self.world.max_rain = self.weather.max_rain;
+        self.world.sandstorm = self.weather.sandstorm;
+        self.world.sandstorm_time = self.weather.sandstorm_time;
+        self.world.sandstorm_severity = self.weather.severity;
+        self.world.sandstorm_intended_severity = self.weather.intended_severity;
         if was_raining != self.weather.raining {
             self.announce(if self.weather.raining {
                 "It has started to rain."
