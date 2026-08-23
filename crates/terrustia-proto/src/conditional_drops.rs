@@ -19,6 +19,9 @@ pub struct Conditions {
     pub master: bool,
     pub hard_mode: bool,
     pub downed_plantera: bool,
+    /// Which evil this *world* has, which is not the same question as where the kill happened:
+    /// the Eye of Cthulhu drops the ore of its world's evil wherever it dies.
+    pub world_is_crimson: bool,
     /// Where it happened, for the drops that only come from one biome.
     pub in_hallow: bool,
     pub in_corruption: bool,
@@ -161,6 +164,17 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     }
     if !at.expert {
         out.extend(classic_only(npc_type));
+        // The Eye of Cthulhu drops its world's evil ore, and only in classic — in expert the bag
+        // carries it. Which evil is a property of the world, not of the ground it died on.
+        if npc_type == 4 {
+            if at.world_is_crimson {
+                out.push(a_few(880, 1, 30, 90));
+                out.push(a_few(2171, 1, 1, 3));
+            } else {
+                out.push(a_few(56, 1, 30, 90));
+                out.push(a_few(59, 1, 1, 3));
+            }
+        }
     }
     out.extend(by_mode(npc_type, at));
     out
@@ -457,6 +471,7 @@ mod tests {
         let everything = Conditions {
             expert: true,
             master: false,
+            world_is_crimson: false,
             hard_mode: true,
             downed_plantera: true,
             in_hallow: false,

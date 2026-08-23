@@ -3512,6 +3512,7 @@ impl GameServer {
         let at = terrustia_proto::conditional_drops::Conditions {
             expert: self.world.game_mode >= 1,
             master: self.world.game_mode >= 2,
+            world_is_crimson: self.world.crimson,
             hard_mode: p.hard_mode,
             downed_plantera: p.downed_plantera,
             in_hallow: matches!(
