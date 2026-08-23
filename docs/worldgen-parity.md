@@ -2,6 +2,11 @@
 
 The target: **the same seed produces the same world as Terraria does**.
 
+This is not the same thing as *working* world generation, which is done and described in
+[worldgen.md](worldgen.md). A generated world here is complete and can be played through; what it
+is not is byte-identical to the one Terraria would build from the same seed. This document is
+about closing that second gap, which is a far larger job.
+
 This is the largest single piece of work in the project, and this document exists mostly so that
 the decision to continue or stop can be taken deliberately rather than by drift.
 
@@ -87,14 +92,17 @@ Recorded here because three of them contradict the obvious approach.
    which **18 touch RNG on the same line**. Strip the *bodies*; keep any RNG evaluated in the
    *condition*, or parity breaks silently.
 
-## The fallback
+## The fallback, which is now the shipping generator
 
-Available free at every milestone, provided the generator always emits a loadable world:
-vanilla-exact through the last verified pass, hand-written tail. Every structure present, built
-with our own algorithms — beatable but not seed-identical.
+The plan named a graceful degradation: every structure present, built with our own algorithms,
+beatable but not seed-identical. That has been **built** — see [worldgen.md](worldgen.md) — so the
+question is no longer "what if parity does not converge" but "is parity worth its cost on top of a
+working generator".
 
-That decision should be taken explicitly, not by drift. It is the reason the milestones are
-defined by "a green `genparity` run" rather than by lines of code.
+That makes the decision cleaner rather than harder. Parity buys one thing: a seed shared with
+another player or a wiki reproduces their world. Everything else about playing on this server
+already works. The milestones are still defined by a green `genparity` run, and the go/no-go is
+still the terrain spine.
 
 ## What is needed from a human
 

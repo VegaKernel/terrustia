@@ -38,6 +38,28 @@ async fn start_with<F: FnOnce(&mut World)>(mut config: Config, prepare: F) -> So
     addr
 }
 
+/// Hollow out a working area in a generated world.
+///
+/// Tests that place, break, paint or pour need somewhere empty to do it, and a *generated* world
+/// is mostly solid — relying on the generator happening to leave a particular tile open makes a
+/// test that fails the next time the generator changes, which is exactly what happened. Clearing
+/// the space explicitly says what the test needs instead of hoping for it.
+fn clear_area(world: &mut World, x: i32, y: i32, half_w: i32, half_h: i32) {
+    for cx in x - half_w..=x + half_w {
+        for cy in y - half_h..=y + half_h {
+            world.set_tile(cx, cy, Tile::AIR);
+        }
+    }
+}
+
+/// The same, with a floor under it, for anything that has to stand on something.
+fn clear_with_floor(world: &mut World, x: i32, y: i32, half_w: i32, half_h: i32) {
+    clear_area(world, x, y, half_w, half_h);
+    for cx in x - half_w..=x + half_w {
+        world.set_tile(cx, y + half_h + 1, Tile::block(1));
+    }
+}
+
 async fn start() -> SocketAddr {
     start_with(Config::default(), |_| {}).await
 }
@@ -370,6 +392,7 @@ async fn a_generated_world_saves_and_reloads() {
         ..Config::default()
     };
     let addr = start_with(config, |world| {
+        clear_with_floor(world, 401, 300, 8, 4);
         world.set_tile(400, 300, Tile::block(57));
     })
     .await;
@@ -1598,6 +1621,7 @@ async fn a_teleport_moves_the_player_for_everyone() {
 #[tokio::test]
 async fn paint_sticks_to_the_world() {
     let addr = start_with(Config::default(), |world| {
+        clear_area(world, 402, 330, 6, 4);
         world.set_tile(402, 330, Tile::block(1));
     })
     .await;
@@ -1686,6 +1710,7 @@ async fn a_biome_chest_waits_for_plantera() {
 #[tokio::test]
 async fn a_dungeon_chest_opens() {
     let addr = start_with(Config::default(), |world| {
+        clear_with_floor(world, 402, 330, 6, 4);
         // Style 2 is a locked dungeon chest.
         for dx in 0..2 {
             for dy in 0..2 {

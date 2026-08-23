@@ -14,7 +14,8 @@ written to be read before touching the code it describes.
 | [performance.md](performance.md) | The tick budget, where the time goes, and the autosave stall that hid behind a wrong guess |
 | [shimmer.md](shimmer.md) | Transmutation and decrafting: what turns into what, why it takes a second and a half, and why a cascade is not a loop |
 | [world-file.md](world-file.md) | The `.wld` format as this server reads and writes it, including what is preserved verbatim |
-| [worldgen-parity.md](worldgen-parity.md) | The plan for vanilla-identical world generation, and the oracle that steers it |
+| [worldgen.md](worldgen.md) | How a playable world is built, and four things that were got wrong first |
+| [worldgen-parity.md](worldgen-parity.md) | The separate, much longer job of making a seed match Terraria's |
 | [generated-tables.md](generated-tables.md) | Which source files are generated, from what, and how to regenerate them |
 
 ## The rule the whole codebase follows
@@ -41,6 +42,7 @@ cargo run --release -p terrustia --example crowd -- 127.0.0.1:7777       # many 
 cargo run --release -p terrustia --example stress -- 127.0.0.1:7777      # the tick budget
 cargo run --release -p terrustia --example roundtrip_wld -- in.wld out.wld
 cargo run --release -p terrustia --example genparity -- reference.wld
+cargo run --release -p terrustia --example playable  -- world.wld    # can it be finished?
 python3 tools/packet_audit.py <decompiled-tree>   # what is still unhandled
 ```
 

@@ -1837,12 +1837,17 @@ impl GameServer {
         let mut wanted = HashSet::new();
         let (max_x, max_y) = (self.world.sections_x(), self.world.sections_y());
 
+        // The block is *slid* inside the world rather than clipped against it. Clipping loses a
+        // row or column whenever a player is near an edge — a player who spawns in the topmost
+        // section used to get one fewer section beneath them than intended, which left the world
+        // simply absent a hundred and fifty tiles below their feet. It only showed up when the
+        // generator started putting the surface high enough to reach section zero.
         let mut add_block = |cx: i32, cy: i32, w: i32, h: i32| {
-            for sx in (cx - 2)..(cx - 2 + w) {
-                for sy in (cy - 1)..(cy - 1 + h) {
-                    if sx >= 0 && sy >= 0 && sx < max_x && sy < max_y {
-                        wanted.insert((sx, sy));
-                    }
+            let first_x = (cx - 2).clamp(0, (max_x - w).max(0));
+            let first_y = (cy - 1).clamp(0, (max_y - h).max(0));
+            for sx in first_x..(first_x + w).min(max_x) {
+                for sy in first_y..(first_y + h).min(max_y) {
+                    wanted.insert((sx, sy));
                 }
             }
         };

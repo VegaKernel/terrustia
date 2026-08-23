@@ -1,274 +1,295 @@
-//! Procedural world generation.
+//! World generation.
 //!
-//! Deliberately simple: a rolling surface, a dirt shell over stone, a scattering of ore, and caves.
-//! It exists so the connect path is testable before the `.wld` reader lands, and it only uses tile
-//! types that are neither frame-important nor batching-exempt, which keeps the section encoder on
-//! its simplest path.
+//! This builds a world that can be **played through**: every biome, a dungeon, an underworld, an
+//! evil with orbs in it, altars, a temple, chests, life crystals. Not a vanilla-identical world —
+//! the same seed here and in Terraria produce different maps — but a complete one.
+//!
+//! The distinction is the whole design and is worth being plain about. Seed-identical generation
+//! means transcribing a hundred and six passes in exact order with exact random-number
+//! consumption; it is measured in months and its progress is tracked in `docs/worldgen-parity.md`,
+//! steered by the oracle in [`manifest`] and [`passes`]. What is here instead is the fallback
+//! that plan names: every structure present, built with our own algorithms, beatable but not
+//! identical. It exists because a server that generates unplayable worlds is not a working
+//! server, and that is a much nearer target than parity.
+//!
+//! Passes run in a fixed order and each carves into what the last left:
+//!
+//! 1. [`layout`] decides where everything goes, before any tile is written.
+//! 2. [`terrain`] lays the surface line and the layers, with biome materials over both.
+//! 3. Caves are dug through the stone.
+//! 4. Ore is seeded into what is left of it, in depth bands.
+//! 5. The structures go in: evil chasms, the dungeon, the temple, the hive, the underworld.
+//! 6. Altars, life crystals and chests fill the space that is left.
+//! 7. Grass, plants and cobwebs finish it.
+//!
+//! Ordering is load-bearing rather than tidy. Ore seeded before the caves would be hollowed back
+//! out; chests placed before the caves would have nowhere to stand.
 
+pub mod layout;
 pub mod manifest;
 pub mod passes;
 pub mod rand;
+pub mod structures;
+pub mod terrain;
+pub mod tiles;
 
 pub use passes::compare_against;
 
-use ::rand::{Rng, SeedableRng, rngs::SmallRng};
-use terrustia_proto::Tile;
+use layout::{Evil, Layout};
+use rand::UnifiedRandom;
 
 use super::World;
-
-/// Tile ids used by the generator.
-mod tiles {
-    pub const DIRT: u16 = 0;
-    pub const STONE: u16 = 1;
-    pub const GRASS: u16 = 2;
-    pub const IRON: u16 = 6;
-    pub const COPPER: u16 = 7;
-    pub const GOLD: u16 = 8;
-    pub const SILVER: u16 = 9;
-}
-
-/// Wall ids used by the generator.
-mod walls {
-    pub const DIRT: u16 = 2;
-    pub const STONE: u16 = 1;
-}
 
 /// Standard "small" world dimensions.
 pub const SMALL_WIDTH: i32 = 4200;
 pub const SMALL_HEIGHT: i32 = 1200;
 
+/// What a generated world came out holding.
+///
+/// Returned so callers — and the tests that guard this — can assert a world is playable rather
+/// than merely non-empty. Every count here gates something; see [`structures`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Built {
+    pub orbs: usize,
+    pub altars: usize,
+    pub life_crystals: usize,
+    pub chests: usize,
+    pub hive: bool,
+}
+
 /// Generate a world of the given size.
 pub fn generate(width: i32, height: i32, name: impl Into<String>, seed: u64) -> World {
+    build(width, height, name, seed).0
+}
+
+/// Generate a world, and say what went into it.
+pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (World, Built) {
     let mut world = World::empty(width, height, name);
-    let mut rng = SmallRng::seed_from_u64(seed);
+    // The same generator the parity work uses, so a seed means the same thing in both.
+    let mut rand = UnifiedRandom::new(seed as i32);
 
-    world.id = rng.random();
-    rng.fill(&mut world.unique_id);
-    world.crimson = rng.random_bool(0.5);
+    let plan = Layout::plan(width, height, &mut rand);
+    world.id = rand.next();
+    for byte in &mut world.unique_id {
+        *byte = rand.next_max(256) as u8;
+    }
+    world.crimson = plan.evil == Evil::Crimson;
+    world.seed_text = seed.to_string();
+    world.surface = plan.surface as i16;
+    world.rock_layer = plan.rock as i16;
+    world.dungeon_x = Some(plan.dungeon_x);
 
-    // Surface sits around a third of the way down, as it does in a vanilla world.
-    let base = (height as f32 / 3.0).round() as i32;
-    let surface_at = |x: i32| -> i32 {
-        let x = x as f32;
-        let rolling = (x / 190.0).sin() * 14.0 + (x / 47.0).sin() * 5.0 + (x / 13.0).sin() * 1.5;
-        base + rolling.round() as i32
+    let heights = terrain::heightmap(&plan, &mut rand);
+    terrain::fill(&mut world, &plan, &heights, &mut rand);
+
+    structures::caves(&mut world, &plan, &mut rand);
+    structures::ores(&mut world, &plan, &mut rand);
+
+    let orbs = structures::evil_chasms(&mut world, &plan, &heights, &mut rand);
+    structures::dungeon(&mut world, &plan, &heights, &mut rand);
+    structures::temple(&mut world, &plan, &mut rand);
+    let hive = structures::hive(&mut world, &plan, &mut rand);
+    structures::underworld(&mut world, &plan, &mut rand);
+
+    let altars = structures::altars(&mut world, &plan, &mut rand);
+    let life_crystals = structures::life_crystals(&mut world, &plan, &mut rand);
+    let chests = structures::chests(&mut world, &plan, &mut rand);
+
+    structures::greenery(&mut world, &plan, &heights, &mut rand);
+    structures::cobwebs(&mut world, &plan, &mut rand);
+
+    // Spawn goes on the surface in the middle, in a pocket cleared for it.
+    let spawn_y = heights[plan.spawn_x as usize];
+    world.spawn_x = plan.spawn_x as i16;
+    world.spawn_y = spawn_y as i16;
+    terrain::clear_spawn(&mut world, plan.spawn_x, spawn_y);
+    world.dungeon_y = Some(heights[plan.dungeon_x.clamp(0, width - 1) as usize]);
+
+    let built = Built {
+        orbs,
+        altars,
+        life_crystals,
+        chests,
+        hive,
     };
-
-    let dirt_depth = 48;
-    for x in 0..width {
-        let top = surface_at(x);
-        for y in top..height {
-            let depth = y - top;
-            let block = if depth == 0 {
-                tiles::GRASS
-            } else if depth < dirt_depth {
-                tiles::DIRT
-            } else {
-                tiles::STONE
-            };
-
-            // Walls start just below the surface so the top layer still shows sky behind it.
-            let wall = if depth < 2 {
-                0
-            } else if depth < dirt_depth {
-                walls::DIRT
-            } else {
-                walls::STONE
-            };
-
-            let mut tile = Tile::block(block);
-            tile.wall = wall;
-            world.set_tile(x, y, tile);
-        }
-    }
-
-    carve_caves(&mut world, &mut rng, base, dirt_depth);
-    scatter_ore(&mut world, &mut rng, base, dirt_depth);
-
-    // Drop the spawn onto the surface at the middle of the map.
-    world.spawn_x = (width / 2) as i16;
-    world.spawn_y = surface_at(width / 2) as i16;
-    world.surface = base as i16;
-    world.rock_layer = (base + dirt_depth) as i16;
-
-    // Clear a small pocket so a player cannot spawn inside the ground.
-    for x in (world.spawn_x as i32 - 6)..=(world.spawn_x as i32 + 6) {
-        for y in (world.spawn_y as i32 - 8)..world.spawn_y as i32 {
-            let mut tile = world.tile(x, y);
-            tile.flags.set(terrustia_proto::TileFlags::ACTIVE, false);
-            tile.block = 0;
-            world.set_tile(x, y, tile);
-        }
-    }
-
-    world
-}
-
-/// Hollow out wandering tunnels below the dirt line.
-fn carve_caves(world: &mut World, rng: &mut SmallRng, base: i32, dirt_depth: i32) {
-    let cave_count = (world.width() / 120).max(1);
-    for _ in 0..cave_count {
-        let mut x = rng.random_range(0..world.width()) as f32;
-        let mut y = rng.random_range((base + dirt_depth)..world.height()) as f32;
-        let mut angle: f32 = rng.random_range(0.0..std::f32::consts::TAU);
-        let length = rng.random_range(120..600);
-
-        for _ in 0..length {
-            angle += rng.random_range(-0.25..0.25);
-            x += angle.cos() * 1.5;
-            y += angle.sin() * 1.5;
-            if x < 1.0
-                || y < (base + 4) as f32
-                || x >= (world.width() - 1) as f32
-                || y >= (world.height() - 1) as f32
-            {
-                break;
-            }
-
-            let radius = rng.random_range(2..5);
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx * dx + dy * dy > radius * radius {
-                        continue;
-                    }
-                    let (cx, cy) = (x as i32 + dx, y as i32 + dy);
-                    let mut tile = world.tile(cx, cy);
-                    tile.flags.set(terrustia_proto::TileFlags::ACTIVE, false);
-                    tile.block = 0;
-                    world.set_tile(cx, cy, tile);
-                }
-            }
-        }
-    }
-}
-
-/// Sprinkle small ore veins through the stone.
-fn scatter_ore(world: &mut World, rng: &mut SmallRng, base: i32, dirt_depth: i32) {
-    let ores = [tiles::COPPER, tiles::IRON, tiles::SILVER, tiles::GOLD];
-    let vein_count = world.width() * 2;
-
-    for _ in 0..vein_count {
-        let ore = ores[rng.random_range(0..ores.len())];
-        let x = rng.random_range(0..world.width());
-        let y = rng.random_range((base + dirt_depth)..world.height());
-        let size = rng.random_range(3..12);
-
-        let (mut cx, mut cy) = (x, y);
-        for _ in 0..size {
-            if world.tile(cx, cy).block == tiles::STONE && world.tile(cx, cy).is_active() {
-                let mut tile = world.tile(cx, cy);
-                tile.block = ore;
-                world.set_tile(cx, cy, tile);
-            }
-            cx += rng.random_range(-1..=1);
-            cy += rng.random_range(-1..=1);
-        }
-    }
+    (world, built)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terrustia_proto::tile_sets::{allows_batching, frame_important};
+    use terrustia_proto::Tile;
 
-    fn small_test_world() -> World {
-        // Full-size generation is slow under a debug build; a slice exercises the same code.
-        generate(600, 400, "Test", 42)
+    fn small() -> (World, Built) {
+        build(2400, 900, "test", 1234)
     }
 
+    /// A world has to hold every structure a playthrough needs, or the game cannot be finished
+    /// in it. This is the test that makes "playable" mean something.
     #[test]
-    fn the_surface_separates_sky_from_ground() {
-        let world = small_test_world();
-        let x = 300;
-        let surface = world.surface as i32;
+    fn a_generated_world_can_be_played_through() {
+        let (world, built) = small();
 
-        // Well above the surface is open sky.
-        assert!(!world.tile(x, surface - 40).is_active());
-        // Well below it is solid.
-        assert!(world.tile(x, surface + 100).is_active());
-    }
+        assert!(
+            built.orbs >= 3,
+            "only {} orbs: three must be smashable to wake the evil's boss",
+            built.orbs
+        );
+        assert!(
+            built.altars >= 6,
+            "only {} altars: hardmode ore comes from nowhere else",
+            built.altars
+        );
+        assert!(
+            built.life_crystals >= 10,
+            "only {} life crystals: a hundred hit points is the whole game",
+            built.life_crystals
+        );
+        assert!(
+            built.chests >= 30,
+            "only {} chests: no starter gear",
+            built.chests
+        );
 
-    #[test]
-    fn generated_tiles_stay_on_the_encoder_fast_path() {
-        // Every generated type must be plain and batchable, or the section encoder would need
-        // frame data we do not produce.
-        let world = small_test_world();
-        for y in 0..world.height() {
-            for x in 0..world.width() {
-                let tile = world.tile(x, y);
-                if tile.is_active() {
-                    assert!(
-                        !frame_important(tile.block),
-                        "type {} is framed",
-                        tile.block
-                    );
-                    assert!(
-                        allows_batching(tile.block),
-                        "type {} blocks batching",
-                        tile.block
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn spawn_is_clear_of_ground() {
-        let world = small_test_world();
-        let (sx, sy) = (world.spawn_x as i32, world.spawn_y as i32);
-        for y in (sy - 8)..sy {
-            assert!(!world.tile(sx, y).is_active(), "spawn blocked at y={y}");
-        }
-    }
-
-    #[test]
-    fn generation_is_deterministic_for_a_seed() {
-        let a = generate(200, 200, "a", 7);
-        let b = generate(200, 200, "b", 7);
-        for y in 0..200 {
-            for x in 0..200 {
-                assert_eq!(a.tile(x, y), b.tile(x, y), "tile ({x}, {y}) differs");
-            }
-        }
-    }
-
-    #[test]
-    fn different_seeds_produce_different_worlds() {
-        let a = generate(200, 200, "a", 1);
-        let b = generate(200, 200, "b", 2);
-        let differences = (0..200)
-            .flat_map(|y| (0..200).map(move |x| (x, y)))
-            .filter(|(x, y)| a.tile(*x, *y) != b.tile(*x, *y))
-            .count();
-        assert!(differences > 0, "seeds produced identical worlds");
-    }
-
-    #[test]
-    fn ore_is_underground_and_never_breaks_the_surface() {
-        // `rock_layer` is a single nominal depth while the real dirt/stone boundary undulates with
-        // the terrain, so the invariant worth asserting is positional relative to each column's
-        // own surface, not to that one number.
-        let world = small_test_world();
-        let is_ore = |x: i32, y: i32| {
-            let tile = world.tile(x, y);
-            tile.is_active() && matches!(tile.block, 6..=9)
+        let has = |block: u16| {
+            (0..world.width()).step_by(3).any(|x| {
+                (0..world.height()).step_by(3).any(|y| world.tile(x, y).block == block)
+            })
         };
+        assert!(has(tiles::HELLSTONE), "no hellstone: no Wall of Flesh");
+        assert!(has(tiles::LIHZAHRD_BRICK), "no temple: no Golem");
+        assert!(has(tiles::JUNGLE_GRASS), "no jungle");
+        assert!(has(tiles::SNOW), "no snow biome");
+        assert!(has(tiles::SAND), "no desert or ocean");
+        assert!(
+            has(tiles::BLUE_DUNGEON_BRICK)
+                || has(tiles::GREEN_DUNGEON_BRICK)
+                || has(tiles::PINK_DUNGEON_BRICK),
+            "no dungeon: no Skeletron"
+        );
+        assert!(
+            has(tiles::EBONSTONE) || has(tiles::CRIMSTONE),
+            "no evil biome"
+        );
+        assert!(has(tiles::COPPER) && has(tiles::IRON), "no early ore");
+        assert!(has(tiles::GOLD) && has(tiles::SILVER), "no deep ore");
+    }
 
-        let mut ore_seen = 0usize;
-        for x in 0..world.width() {
-            let surface = (0..world.height())
-                .find(|y| world.tile(x, *y).is_active())
-                .unwrap_or(world.height());
-            for y in 0..world.height() {
-                if is_ore(x, y) {
-                    ore_seen += 1;
-                    assert!(
-                        y > surface,
-                        "ore at ({x}, {y}) is at or above the surface {surface}"
-                    );
-                }
+    /// The same seed makes the same world, twice running.
+    #[test]
+    fn a_seed_makes_the_same_world() {
+        let (a, built_a) = build(1200, 600, "seeded", 77);
+        let (b, built_b) = build(1200, 600, "seeded", 77);
+        assert_eq!(built_a, built_b);
+        assert_eq!(a.crimson, b.crimson);
+        assert_eq!((a.spawn_x, a.spawn_y), (b.spawn_x, b.spawn_y));
+        let differing = (0..a.width())
+            .step_by(7)
+            .flat_map(|x| (0..a.height()).step_by(7).map(move |y| (x, y)))
+            .filter(|&(x, y)| a.tile(x, y) != b.tile(x, y))
+            .count();
+        assert_eq!(differing, 0, "the same seed produced two different worlds");
+    }
+
+    /// ...and different seeds make different worlds.
+    #[test]
+    fn different_seeds_make_different_worlds() {
+        let (a, _) = build(1200, 600, "a", 1);
+        let (b, _) = build(1200, 600, "b", 2);
+        let differing = (0..a.width())
+            .step_by(5)
+            .flat_map(|x| (0..a.height()).step_by(5).map(move |y| (x, y)))
+            .filter(|&(x, y)| a.tile(x, y).block != b.tile(x, y).block)
+            .count();
+        assert!(
+            differing > 500,
+            "two seeds differ in only {differing} sampled tiles"
+        );
+    }
+
+    /// Spawn is somewhere a player can stand: air above, ground below, no water.
+    #[test]
+    fn spawn_is_somewhere_survivable() {
+        for seed in [1u64, 2, 3, 99, 12345] {
+            let (world, _) = build(1600, 700, "spawn", seed);
+            let (x, y) = (i32::from(world.spawn_x), i32::from(world.spawn_y));
+            for above in 1..8 {
+                assert!(
+                    !world.tile(x, y - above).is_active(),
+                    "seed {seed}: spawn is buried at {above} above"
+                );
+                assert_eq!(
+                    world.tile(x, y - above).liquid,
+                    0,
+                    "seed {seed}: spawn is underwater"
+                );
             }
         }
-        assert!(ore_seen > 0, "no ore was generated at all");
+    }
+
+    /// A generated world saves and loads back unchanged, which is what makes it worth generating.
+    #[test]
+    fn a_generated_world_survives_a_save() {
+        use crate::world::{wld, wld_save};
+        let (world, built) = build(1200, 600, "roundtrip", 5);
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+
+        assert_eq!(back.width(), world.width());
+        assert_eq!(back.height(), world.height());
+        assert_eq!(
+            back.chests.iter().flatten().count(),
+            world.chests.iter().flatten().count(),
+            "chests were lost across a save"
+        );
+        assert!(
+            world.chests.iter().flatten().count() >= built.chests,
+            "the world should hold at least the cavern chests, plus the dungeon's"
+        );
+        let differing = (0..world.width())
+            .flat_map(|x| (0..world.height()).map(move |y| (x, y)))
+            .filter(|&(x, y)| world.tile(x, y) != back.tile(x, y))
+            .count();
+        assert_eq!(differing, 0, "{differing} tiles changed across a save");
+    }
+
+    /// Chests hold something. An empty chest is worse than no chest.
+    #[test]
+    fn chests_are_not_empty() {
+        let (world, _) = small();
+        let filled = world
+            .chests
+            .iter()
+            .flatten()
+            .filter(|c| c.items.iter().any(|i| !i.is_empty()))
+            .count();
+        let total = world.chests.iter().flatten().count();
+        assert!(total > 0);
+        assert_eq!(filled, total, "{} of {total} chests are empty", total - filled);
+    }
+
+    /// The world's own flags agree with what was built, since clients and saves read those
+    /// rather than the tiles.
+    #[test]
+    fn the_world_flags_match_what_was_built() {
+        let (world, _) = small();
+        assert!(world.surface > 0 && world.surface < world.height() as i16);
+        assert!(world.rock_layer > world.surface);
+        assert!(world.dungeon_x.is_some(), "the dungeon has no recorded x");
+        assert!(world.dungeon_y.is_some(), "the dungeon has no recorded y");
+        assert!(!world.seed_text.is_empty(), "the seed is not recorded");
+    }
+
+    /// Nothing is written outside the world, and the top rows stay sky.
+    #[test]
+    fn the_sky_is_left_alone() {
+        let (world, _) = small();
+        for x in (0..world.width()).step_by(11) {
+            assert!(
+                !world.tile(x, 2).is_active(),
+                "column {x} has ground at the very top of the world"
+            );
+        }
+        assert_eq!(world.tile(-1, -1), Tile::AIR, "out of bounds reads as air");
     }
 }
