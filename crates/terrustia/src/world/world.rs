@@ -70,6 +70,11 @@ pub struct World {
     pub progress: Progress,
     pub game_mode: u8,
     pub world_gen_version: u64,
+    /// The seed as it was typed, which is what the generator is started from.
+    ///
+    /// Kept because it is the other half of the parity oracle: a reference world names both the
+    /// seed it was built from and the state of the generator after every pass.
+    pub seed_text: String,
     pub moon_type: u8,
     pub tree_x: [i32; 3],
     pub tree_style: [u8; 4],
@@ -132,6 +137,7 @@ impl World {
             progress: Progress::default(),
             game_mode: 0,
             world_gen_version: 0,
+            seed_text: String::new(),
             moon_type: 0,
             // Anchor the parallax layers past the right edge so no tree or cave background is
             // drawn over the playfield.

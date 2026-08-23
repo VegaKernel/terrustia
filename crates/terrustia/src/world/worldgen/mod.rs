@@ -5,7 +5,11 @@
 //! types that are neither frame-important nor batching-exempt, which keeps the section encoder on
 //! its simplest path.
 
+pub mod manifest;
+pub mod passes;
 pub mod rand;
+
+pub use passes::compare_against;
 
 use ::rand::{Rng, SeedableRng, rngs::SmallRng};
 use terrustia_proto::Tile;

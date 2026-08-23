@@ -176,6 +176,18 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         importance: file.importance,
     });
 
+    if let Some(manifest) = world
+        .preserved
+        .as_ref()
+        .and_then(|p| crate::world::worldgen::manifest::Manifest::from_header(&p.header_bytes))
+    {
+        debug!(
+            passes = manifest.passes.len(),
+            version = manifest.version.as_deref().unwrap_or("?"),
+            "world carries a generation manifest"
+        );
+    }
+
     debug!(
         version = file.version,
         width = world.width(),
@@ -521,7 +533,7 @@ fn read_world_header(
     section_start: usize,
 ) -> Result<(World, HeaderOffsets)> {
     let name = num(r.string(), r)?;
-    let _seed = num(r.string(), r)?;
+    let seed_text = num(r.string(), r)?;
     let world_gen_version = num(r.u64(), r)?;
     let mut unique_id = [0u8; 16];
     unique_id.copy_from_slice(num(r.bytes(16), r)?);
@@ -691,6 +703,7 @@ fn read_world_header(
     world.id = id;
     world.unique_id = unique_id;
     world.world_gen_version = world_gen_version;
+    world.seed_text = seed_text;
     world.game_mode = game_mode.clamp(0, 3) as u8;
     world.spawn_x = spawn_x.clamp(0, width - 1) as i16;
     world.spawn_y = spawn_y.clamp(0, height - 1) as i16;
