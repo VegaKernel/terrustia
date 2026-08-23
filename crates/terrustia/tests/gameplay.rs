@@ -3778,3 +3778,137 @@ async fn an_invasion_reports_its_progress() {
     assert_eq!(done, 0, "nothing has been killed yet");
     assert!(total > 0, "an invasion with nobody in it is not an invasion");
 }
+
+// ------------------------------------------------------- the wiring tools
+
+/// The Grand Design lays wire along a whole path in one drag. It was not handled at all, so
+/// every wiring tool past the first did nothing.
+#[tokio::test]
+async fn the_grand_design_lays_a_line_of_wire() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    // The server counts what the player is carrying, so it has to be told about the wire.
+    alice
+        .set_equipment(0, ItemStack::new(530, 999, 0))
+        .await
+        .unwrap();
+
+    // Red wire, straight across.
+    alice.mass_wire((400, 320), (405, 320), 1).await.unwrap();
+
+    let mut wired = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && wired.len() < 6 {
+        match alice
+            .try_wait_for(
+                "a wire edit",
+                |e| matches!(e, Event::TileChanged(t) if t.action == 5),
+                Duration::from_millis(400),
+            )
+            .await
+        {
+            Some(Event::TileChanged(t)) => {
+                wired.insert(t.x);
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        wired.len(),
+        6,
+        "six tiles from 400 to 405 inclusive, got {wired:?}"
+    );
+
+    // ...and the player is told what it cost, or their client believes it still has the wire.
+    // The bill for *this* run, not a later one: the two are sent together and mixing them up is
+    // how a test convinces itself of the wrong number.
+    let paid = alice
+        .try_wait_for(
+            "the bill",
+            |e| matches!(e, Event::Other(f) if f.id == id::MASS_WIRE_OPERATION_PAY
+                && i16::from_le_bytes([f.payload[0], f.payload[1]]) == 530),
+            Duration::from_secs(3),
+        )
+        .await;
+    let Some(Event::Other(frame)) = paid else {
+        panic!("the server should say what the run cost")
+    };
+    let spent = i16::from_le_bytes([frame.payload[2], frame.payload[3]]);
+    assert_eq!(spent, 6, "six tiles of wire, matching what was laid");
+    assert_eq!(frame.payload[4], alice.slot(), "billed to the right player");
+}
+
+/// A player with no wire lays none, however confidently the client asks.
+#[tokio::test]
+async fn a_wiring_tool_cannot_conjure_wire() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+
+    alice.mass_wire((400, 320), (410, 320), 1).await.unwrap();
+    let laid = alice
+        .try_wait_for(
+            "a wire edit",
+            |e| matches!(e, Event::TileChanged(t) if t.action == 5),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(laid.is_none(), "an empty inventory buys no wire");
+}
+
+/// A drag across the whole world is refused rather than turned into a hundred thousand edits.
+#[tokio::test]
+async fn an_absurd_drag_is_refused() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice
+        .set_equipment(0, ItemStack::new(530, 999, 0))
+        .await
+        .unwrap();
+
+    alice.mass_wire((0, 0), (799, 599), 1).await.unwrap();
+    let laid = alice
+        .try_wait_for(
+            "a wire edit",
+            |e| matches!(e, Event::TileChanged(t) if t.action == 5),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(
+        laid.is_none(),
+        "a drag across the world is a denial of service, not a wiring job"
+    );
+}
+
+/// A chest's name reaches the map without the chest being opened.
+#[tokio::test]
+async fn a_chest_can_be_asked_its_name() {
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![Some(Chest {
+            x: 400,
+            y: 320,
+            name: "Ore".into(),
+            items: vec![ItemStack::EMPTY],
+        })];
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+
+    alice.ask_chest_name(400, 320).await.unwrap();
+    let Event::Other(frame) = alice
+        .wait_for("the chest's name", |e| {
+            matches!(e, Event::Other(f) if f.id == id::CHEST_NAME)
+        })
+        .await
+        .expect("the map should be able to ask")
+    else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    assert_eq!(r.i16().unwrap(), 0, "chest zero");
+    assert_eq!((r.i16().unwrap(), r.i16().unwrap()), (400, 320));
+    assert_eq!(r.string().unwrap(), "Ore");
+}

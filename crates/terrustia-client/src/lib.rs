@@ -378,6 +378,27 @@ impl Client {
         self.send(&hit.encode()?).await
     }
 
+    /// Drag a wiring tool from one tile to another.
+    pub async fn mass_wire(
+        &mut self,
+        from: (i16, i16),
+        to: (i16, i16),
+        mode: u8,
+    ) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::MASS_WIRE_OPERATION);
+        w.i16(from.0).i16(from.1).i16(to.0).i16(to.1).u8(mode);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
+    /// Ask what a chest is called, the way the map does.
+    pub async fn ask_chest_name(&mut self, x: i16, y: i16) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::CHEST_NAME);
+        w.i16(-1).i16(x).i16(y);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Ask the server to move us: 0 potion, 1 magic conch, 2 demon conch, 3 shellphone,
     /// 4 the rescue that fires when there is nowhere to stand.
     pub async fn ask_teleport(&mut self, kind: u8) -> Result<()> {

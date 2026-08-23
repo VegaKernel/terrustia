@@ -208,6 +208,34 @@ const DEMON_CONCH: u8 = 2;
 const SHELLPHONE_SPAWN: u8 = 3;
 const NO_SPACE_RESCUE: u8 = 4;
 
+/// Wire and actuators, as items, which is what a wiring tool spends.
+const WIRE_ITEM: i16 = 530;
+const ACTUATOR_ITEM: i16 = 849;
+
+/// The longest drag a wiring tool will honour, in tiles.
+///
+/// Not the game's rule — the game has none, relying on the client's own tool range — which is
+/// exactly why one is wanted here. A drag across a large world is a hundred thousand tile edits
+/// broadcast to every client, which is a denial of service dressed up as a wiring tool.
+const MAX_WIRE_DRAG: i32 = 512;
+
+/// A gem lock, and how tall one frame of its sprite sheet is.
+///
+/// Whether it is locked lives in the frame rather than in a flag: the lower band of the sheet is
+/// the locked form, so toggling one is a matter of moving all nine of its cells between bands.
+const GEM_LOCK: u16 = 442;
+const GEM_LOCK_FRAME_HEIGHT: i16 = 54;
+
+/// How much of one item a player is carrying, across every slot.
+fn count_held(player: &Player, item: i16) -> i32 {
+    player
+        .inventory
+        .values()
+        .filter(|slot| slot.item.id == i32::from(item))
+        .map(|slot| i32::from(slot.item.stack))
+        .sum()
+}
+
 /// How far in from either edge the ocean reaches. `WorldGen.beachDistance`.
 const BEACH_DISTANCE: i32 = 380;
 /// ...and how much of that is water rather than sand worth standing on.
@@ -1025,6 +1053,9 @@ impl GameServer {
             | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
             id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
+            id::MASS_WIRE_OPERATION => self.on_mass_wire(slot, &payload),
+            id::CHEST_NAME => self.on_chest_name_request(slot, &payload),
+            id::GEM_LOCK_TOGGLE => self.on_gem_lock(slot, &payload),
             id::ANGLER_QUEST_FINISHED => self.on_angler_finished(slot),
             id::QUESTS_COUNT_SYNC => self.on_quest_count(slot, &payload),
             id::T_E_DISPLAY_DOLL_DATA_SYNC => self.on_display_doll_slot(slot, &payload),
@@ -1437,6 +1468,9 @@ impl GameServer {
                 controls.position.1 - player.position.1,
             );
             player.position = controls.position;
+            // Which way they are looking. Only one thing reads it — a wiring tool's L turns the
+            // other way depending on it — but that one thing is visible the moment it is wrong.
+            player.facing_right = controls.facing_right();
             player.last_controls = Some(Bytes::copy_from_slice(payload));
             if !player.is_playing() {
                 return Ok(());
@@ -2200,6 +2234,161 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = id;
         }
+        Ok(())
+    }
+
+    /// Packet 109: the Grand Design, run along a path.
+    ///
+    /// Every wiring tool past the first works this way, and it has to be the server's job: the
+    /// client does not know how much wire the player has left, and a run that stops halfway has
+    /// to stop at the same tile for everybody or two players see different circuits.
+    ///
+    /// The reply is packet 110 — how much was actually spent — which is what stops a client
+    /// believing it still has wire the server has already used.
+    fn on_mass_wire(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use crate::world::mass_wire::{self, Supplies, ToolMode};
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let from = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let to = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let mode = ToolMode(r.u8()?);
+        if !mode.does_anything() {
+            return Ok(());
+        }
+
+        // A drag across the whole world would be a denial of service dressed as a wiring tool.
+        let span = (to.0 - from.0).abs().max((to.1 - from.1).abs());
+        if span > MAX_WIRE_DRAG {
+            debug!(slot, span, "refusing an implausibly long wire drag");
+            return Ok(());
+        }
+
+        let Some(player) = self.player(slot) else {
+            return Ok(());
+        };
+        let supplies = Supplies {
+            wire: count_held(player, WIRE_ITEM),
+            actuators: count_held(player, ACTUATOR_ITEM),
+        };
+        let facing_right = player.facing_right;
+
+        let outcome = mass_wire::run(&mut self.world, from, to, mode, supplies, facing_right);
+        for change in &outcome.changes {
+            let edit = TileManipulation {
+                action: change.action,
+                x: change.x as i16,
+                y: change.y as i16,
+                arg: 0,
+                style: 0,
+            };
+            if let Ok(frame) = edit.encode() {
+                self.broadcast(frame, None);
+            }
+        }
+
+        // Tell the player what it cost. Both are sent even when zero, as the game sends both.
+        for (item, spent) in [
+            (WIRE_ITEM, outcome.wire_spent),
+            (ACTUATOR_ITEM, outcome.actuators_spent),
+        ] {
+            let mut w = terrustia_proto::PacketWriter::new(id::MASS_WIRE_OPERATION_PAY);
+            w.i16(item).i16(spent as i16).u8(slot);
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
+        debug!(
+            slot,
+            wire = outcome.wire_spent,
+            actuators = outcome.actuators_spent,
+            tiles = outcome.changes.len(),
+            "mass wire operation"
+        );
+        Ok(())
+    }
+
+    /// Packet 69: a client asking what a chest is called.
+    ///
+    /// Sent for the map, which shows a chest's name without opening it. Answered to the asker
+    /// alone, since another client that has not looked at the chest has no use for it.
+    fn on_chest_name_request(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let claimed = r.i16()?;
+        let (x, y) = (r.i16()?, r.i16()?);
+
+        // A client may name the chest by id or ask the server to find it by position.
+        let found = if claimed == -1 {
+            self.world.chest_at(x, y)
+        } else {
+            self.world
+                .chests
+                .get(usize::try_from(claimed).unwrap_or(usize::MAX))
+                .and_then(|c| c.as_ref())
+                .filter(|c| c.x == x && c.y == y)
+                .map(|c| (claimed, c))
+        };
+        let Some((id, chest)) = found else {
+            return Ok(());
+        };
+        let mut w = terrustia_proto::PacketWriter::new(id::CHEST_NAME);
+        w.i16(id).i16(x).i16(y).string(&chest.name);
+        let frame = w.finish()?;
+        self.send(slot, frame);
+        Ok(())
+    }
+
+    /// Packet 105: locking or unlocking a gem lock.
+    ///
+    /// A tile toggle rather than a wiring one, but the effect is a circuit's: a locked gem lock
+    /// is what a Chlorophyte Extractinator run is wired to.
+    fn on_gem_lock(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
+        let lock = r.bool()?;
+        if !self.world.in_bounds(x, y) {
+            return Ok(());
+        }
+        let tile = self.world.tile(x, y);
+        if !tile.is_active() || tile.block != GEM_LOCK {
+            return Ok(());
+        }
+        // A gem lock is a three-by-three object whose locked state lives in the frame's Y band:
+        // the lower half of the sprite sheet is the locked form.
+        let origin_y = tile.frame_y % GEM_LOCK_FRAME_HEIGHT;
+        let wanted = if lock {
+            origin_y + GEM_LOCK_FRAME_HEIGHT
+        } else {
+            origin_y
+        };
+        if tile.frame_y == wanted {
+            return Ok(());
+        }
+        let (ox, oy) = (x - i32::from(tile.frame_x % 54) / 18, y - i32::from(origin_y) / 18);
+        for dx in 0..3 {
+            for dy in 0..3 {
+                let (tx, ty) = (ox + dx, oy + dy);
+                let mut cell = self.world.tile(tx, ty);
+                if !cell.is_active() || cell.block != GEM_LOCK {
+                    continue;
+                }
+                cell.frame_y = if lock {
+                    cell.frame_y % GEM_LOCK_FRAME_HEIGHT + GEM_LOCK_FRAME_HEIGHT
+                } else {
+                    cell.frame_y % GEM_LOCK_FRAME_HEIGHT
+                };
+                self.world.set_tile(tx, ty, cell);
+            }
+        }
+        // Two tiles of reach covers the whole three-by-three from its centre.
+        self.push_region(ox + 1, oy + 1, 2);
         Ok(())
     }
 

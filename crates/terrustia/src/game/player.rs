@@ -57,6 +57,12 @@ pub struct Player {
     pub last_controls: Option<Bytes>,
     /// Which town NPC this player has open, if any. A shop needs to know.
     pub talking_to: Option<u8>,
+    /// Which way this player is looking.
+    ///
+    /// Only a wiring tool reads it, and only to decide which way its path turns the corner — but
+    /// getting that wrong lays the wire along the wrong two sides of the rectangle, which is
+    /// obvious the moment it happens.
+    pub facing_right: bool,
     /// How many of the Angler's quests this character has finished.
     ///
     /// Character state rather than world state, so the server remembers what it is told and
@@ -117,6 +123,7 @@ impl Player {
             appearance: None,
             last_controls: None,
             talking_to: None,
+            facing_right: true,
             angler_quests: 0,
             golf_score: 0,
             inventory: std::collections::HashMap::new(),

@@ -3,8 +3,12 @@
 //! This is the end-to-end form of the coverage test: it proves the roster is reachable through
 //! the real protocol, not just that a table exists.
 //!
+//! The `terrustia` crate's own `bestiary` does the same for the *whole* roster and is what to
+//! reach for normally. This one stays because it is much faster — a few dozen types rather than
+//! six hundred and ninety-seven — which makes it the one worth running between edits.
+//!
 //! ```text
-//! cargo run --release --example bestiary -- 127.0.0.1:7777
+//! cargo run --release -p terrustia-client --example bestiary_prehardmode -- 127.0.0.1:7777
 //! ```
 
 use std::{collections::HashMap, env, process::ExitCode, time::Duration};
