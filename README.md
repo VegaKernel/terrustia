@@ -175,6 +175,17 @@ prove each routine in isolation; this proves the whole thing works together over
 cargo run --release --example verify -- 127.0.0.1:7777
 ```
 
+`stress` fills the world with three rounds of the whole roster and holds it there while the server
+reports its own per-phase tick costs, and `crowd` joins a given number of players and walks them
+about. Between them they are what a server's cost actually looks like — one measures NPCs, the
+other measures players, and several of the per-tick surveys scale with the second:
+
+```sh
+TERRUSTIA_LOG=terrustia=debug cargo run --release -- --world World.wld   # then, elsewhere:
+cargo run --release -p terrustia --example stress -- 127.0.0.1:7777 60
+cargo run --release -p terrustia --example crowd -- 127.0.0.1:7777 24 30
+```
+
 `load` fills the world with a crowd of every kind of enemy and reports the traffic, for checking
 that the server keeps its tick budget under pressure:
 
@@ -220,6 +231,17 @@ Results at the time of writing, against Terraria 1.4.5.7:
 - The `watch` example joins a running server, stands where it is told, and reports what spawns
   nearby — which is how the hardmode pools were checked against a real world rather than a test
   fixture.
+- Every table was diffed against the game's own, mechanically:
+  **5,103 NPC stat fields** across 686 types and **5,488 flag fields** on top of them; the 27
+  projectile types this server flies; both tile-solidity bitsets and the frame-importance table,
+  all 754 entries each; the 345 tile types whose drop the game states as a constant; and all 248
+  unconditional drop rules. What that turned up is in the git log — fourteen NPCs recorded as
+  one-hit props, six tiles players could walk through, sixteen wrong projectile lifetimes, and a
+  loot table missing three quarters of its rules, the Eater of Worlds' ore among them.
+- The `crowd` example joins **twenty-four players**, spreads them across the world and walks them
+  at the rate a real client reports at. They hold with nothing dropped, and the worst tick over
+  the whole run — bestiary, fuzz, crowd and stress against one server — is **520 microseconds
+  against a budget of 16,666**, at 50 MB.
 - The `fuzz` example throws **fifty thousand malformed packets** at a running server — half noise,
   half structurally plausible traffic naming tiles at the extremes of an `i16` — and checks it is
   still answering afterwards, with the world uncorrupted and nothing in the log.
