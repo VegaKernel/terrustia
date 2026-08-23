@@ -66,7 +66,9 @@ Implemented:
   pumps move liquid, refusing to mix water into lava. **Timers** keep a contraption running with
   nobody touching it, and **logic gates** — all six kinds, including the faulty one that rolls a
   die — read their stack of lamps and start a circuit of their own, so a machine built out of
-  gates works rather than just lighting up
+  gates works rather than just lighting up. A timer left running when the world was saved is
+  still running when it is served again — a deliberate divergence, since the game keeps that list
+  only in memory and a restart would otherwise kill every contraption in the world
 - **Tile entities**: placed and remembered, with the training dummy raising and dismissing its NPC
 - **Day/night clock**
 

@@ -2679,3 +2679,86 @@ async fn an_and_gate_only_fires_when_both_its_lamps_are_lit() {
         "both lamps lit should have fired the gate, and the gate the trap"
     );
 }
+
+/// A timer left running when the world was saved is still running when it is served again.
+///
+/// This is a deliberate divergence from the game, which keeps its list of running timers only in
+/// memory: reopening a world there leaves every timer drawn as on and doing nothing. On a server
+/// that would mean every contraption in the world dies silently on a restart.
+#[tokio::test]
+async fn a_running_timer_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("terrustia-timer-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target: PathBuf = dir.join("timed.wld");
+    let _ = std::fs::remove_file(&target);
+
+    let config = Config {
+        save_file: Some(target.clone()),
+        ..Config::default()
+    };
+    let addr = start_with(config, |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        world.set_tile(390, 319, Tile::framed(144, 4 * 18, 0));
+        for x in 390..=410 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        let mut trap = Tile::framed(137, 3 * 18, 4 * 18);
+        trap.flags
+            .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+        world.set_tile(410, 319, trap);
+    })
+    .await;
+
+    let mut client = join(addr, "winder").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.hit_switch(390, 319).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.say("/save").await.unwrap();
+    client
+        .wait_for(
+            "the save",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("World saved")),
+        )
+        .await
+        .unwrap();
+
+    // Serve the save back with nobody touching anything, and the trap should still be firing.
+    let reloaded = wld::load(&target).unwrap();
+    let config = Config {
+        world_file: Some(target.clone()),
+        motd: String::new(),
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), reloaded).run(rx));
+    tokio::spawn(listener::run(listener, config, tx));
+
+    let mut client = join(addr, "returner").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(385.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    let spear = client
+        .try_wait_for(
+            "a spear from the timer that was already running",
+            |e| matches!(e, Event::ProjectileSynced(_)),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        spear.is_some(),
+        "the timer stopped when the world was reloaded"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

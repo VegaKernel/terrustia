@@ -154,6 +154,28 @@ const NPC_SYNC_INTERVAL: u64 = 6;
 /// the same kind firing on the same tick however long they have been running.
 const TIMER_WINDOW: i32 = 18_000;
 
+/// Every timer in the world that is switched on.
+///
+/// Walked once, when the world is loaded. It is the whole world, but only once and only for the
+/// tile type, which costs a few milliseconds even on a large map.
+fn running_timers_in(world: &World) -> HashMap<(i32, i32), i32> {
+    let mut found = HashMap::new();
+    for x in 0..world.width() {
+        for y in 0..world.height() {
+            if crate::world::wiring::timer_is_running(world.tile(x, y)) {
+                found.insert((x, y), TIMER_WINDOW);
+            }
+        }
+    }
+    if !found.is_empty() {
+        info!(
+            timers = found.len(),
+            "picked up timers that were left running"
+        );
+    }
+    found
+}
+
 /// Chat colour for server notices.
 const SERVER_CHAT_COLOUR: [u8; 3] = [255, 240, 20];
 
@@ -247,6 +269,13 @@ impl GameServer {
             );
         }
 
+        // Timers that were left switched on are picked up here rather than waiting to be hit
+        // again. That is a deliberate divergence: the game keeps its list of running timers only
+        // in memory, so reopening a world leaves every one of them drawn as on and doing nothing
+        // until somebody flips it twice. On a single-player world that is a curiosity; on a
+        // server it means every contraption in the world dies silently on a restart.
+        let running_timers = running_timers_in(&world);
+
         // The weather comes off the world it was loaded with, so a reloaded save picks up the
         // shower it was in the middle of rather than starting clear.
         let weather = crate::game::weather::Weather {
@@ -279,7 +308,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
-            running_timers: HashMap::new(),
+            running_timers,
             mech_cooldown: HashMap::new(),
             tile_entities: Vec::new(),
             next_tile_entity: 0,
