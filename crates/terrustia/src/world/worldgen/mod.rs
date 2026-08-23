@@ -5,7 +5,9 @@
 //! types that are neither frame-important nor batching-exempt, which keeps the section encoder on
 //! its simplest path.
 
-use rand::{Rng, SeedableRng, rngs::SmallRng};
+pub mod rand;
+
+use ::rand::{Rng, SeedableRng, rngs::SmallRng};
 use terrustia_proto::Tile;
 
 use super::World;
