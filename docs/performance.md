@@ -77,19 +77,55 @@ afternoon on it.
 
 The cost is split roughly evenly between spotting runs (23 ms) and encoding them (24 ms).
 
-### The fix
+### The fix, and how far it got
 
 Even a threefold faster encoder would still bust the budget, and a bigger world would bust it
 again. So the save moved off the game task entirely:
 
-1. The tick takes a **snapshot** — `World::snapshot()`, a few milliseconds of memcpy.
+1. The tick takes a **snapshot** — `World::snapshot()`.
 2. A blocking task serialises and writes it.
 3. The result comes back down a channel, which the tick polls. It cannot be awaited, because the
    tick is not async and should not become so for this.
 
-The snapshot is not free — sixty megabytes on a large world — but it is an order of magnitude
-cheaper than what it replaces, and it is **atomic with respect to the tick**. A save can never
-catch the world halfway through an edit. A torn save is much worse than a slow one.
+The snapshot is **atomic with respect to the tick**, so a save can never catch the world halfway
+through an edit. A torn save is much worse than a slow one.
+
+Measured on a 4200×1200 world, with players connected:
+
+| | Before | After |
+|---|---:|---:|
+| On the tick | 71 ms | **32 ms** |
+| Off the tick | — | 63 ms |
+| Ticks dropped per save | ~4 | ~2 |
+
+Better, and honestly still over budget. The remaining 32 ms is the copy: eighty megabytes at
+about 2.5 GB/s.
+
+### The buffer experiment, which failed
+
+The obvious next step is to keep the snapshot buffer between saves so its pages stay warm, and
+copy into it rather than allocating. That was built, measured, and **reverted**: successive saves
+went 33 ms, then 41, then 45.
+
+The reason is visible in `ps`: an idle server's RSS is 27 MB even though its tile array is 80 MB,
+because the OS pages a quiet world out. A second eighty-megabyte buffer makes that pressure
+worse, so more of the live world is evicted, so each save faults more of it back in. The buffer
+cost more than it saved and doubled the footprint doing it.
+
+The measurement is the only reason this is known. The hypothesis was reasonable and wrong, which
+is the third one on this page.
+
+### What would actually finish it
+
+Two options, neither small:
+
+- **Shrink `Tile`.** It is fifteen bytes of fields padded to sixteen. Eight would halve the copy
+  to about 16 ms and halve the world's memory with it. `examples/memreport` prints what six and
+  eight bytes would buy.
+- **Snapshot incrementally.** `World` already tracks dirty sections for the network. A persistent
+  shadow copy updated a few sections per tick would make the snapshot at save time nearly free.
+  This is the proper fix and the subtle one: the shadow has to be consistent at the moment the
+  save takes it, not merely up to date on average.
 
 Two rules fall out of that arrangement:
 
@@ -119,4 +155,48 @@ Two rules fall out of that arrangement:
 
 ## Memory
 
-25–85 MB for a large world with players on it. `examples/memreport` reports it.
+`examples/memreport`, on a 4200×1200 world:
+
+```
+baseline RSS          1.8 MB
+size_of::<Tile>()      16 bytes
+tile array           80.6 MB
+process RSS          78.9 MB
+```
+
+The tile array is essentially all of it. A `Tile` is fifteen bytes of fields padded to sixteen;
+memreport also reports what eight or six bytes would save, which is the obvious lever if memory
+ever becomes the constraint.
+
+A save briefly doubles it, since the snapshot is a second copy of the tiles. That copy is freed
+as soon as the writer finishes, which is why the buffer-reuse experiment above — which would have
+made the doubling permanent — was not worth its cost.
+
+Note that RSS on an idle server reads far *below* the tile array's size, because the OS pages a
+quiet world out. That is not a leak and not a saving; it is why a save on a long-idle server is
+slower than one on a busy server.
+
+## AI cost
+
+`examples/profile_ai` runs every routine once and totals them:
+
+```
+685 routines, 108.3 µs if every one of them ran in the same tick
+```
+
+That is 0.65% of a tick for the entire roster acting at once, which cannot happen. The AI has
+never been the constraint and this is the number that says so.
+
+## Panic safety
+
+A server that crashes is worse than one that stalls. Outside tests there are **three**
+`unwrap`/`expect` calls in the whole crate, each on a proven invariant and each carrying a
+message that says which:
+
+- parsing the built-in default listen address
+- a buff-slot search whose loop cannot exit without a slot
+- a boss routine that has just checked its target
+
+Everything else that can fail returns a `Result` and is logged. The fuzzer
+(`examples/fuzz`) throws twenty thousand malformed packets at a running server and checks it is
+still answering afterwards.

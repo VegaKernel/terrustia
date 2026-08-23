@@ -211,10 +211,8 @@ const NO_SPACE_RESCUE: u8 = 4;
 /// How long a finished save took, or that it failed. Sent from the writing thread to the game
 /// task, which is the only one that can say anything to anybody.
 type SaveOutcome = std::result::Result<u64, ()>;
-/// The outcome, and the snapshot buffer coming home so the next save can reuse its pages.
-type SaveResult = (SaveOutcome, World);
-type SaveReport = std::sync::mpsc::Sender<SaveResult>;
-type SaveReports = std::sync::mpsc::Receiver<SaveResult>;
+type SaveReport = std::sync::mpsc::Sender<SaveOutcome>;
+type SaveReports = std::sync::mpsc::Receiver<SaveOutcome>;
 
 /// The most slots a quick stack may offer at once.
 ///
@@ -411,11 +409,6 @@ pub struct GameServer {
     /// A channel rather than the join handle because the tick is not async and polling a handle
     /// for its value needs an executor; a try-receive needs nothing.
     save_results: (SaveReport, SaveReports),
-    /// A world-sized buffer kept between saves.
-    ///
-    /// Not a cache of anything — its contents are overwritten every time. It exists purely so the
-    /// pages stay faulted in, which is what a fresh sixty-megabyte allocation actually costs.
-    save_buffer: Option<World>,
     /// The six cavern enemies this world happens to have.
     ///
     /// Drawn from the world's id rather than from the run's generator, so the same world always
@@ -516,7 +509,6 @@ impl GameServer {
             saving: None,
             save_reason: "",
             save_results: std::sync::mpsc::channel(),
-            save_buffer: None,
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
@@ -591,17 +583,7 @@ impl GameServer {
         }
 
         let began = Instant::now();
-        // The buffer comes back from the last save, with its pages already faulted in. Only the
-        // very first save of a session pays for a fresh sixty megabytes.
-        let mut snapshot = match self.save_buffer.take() {
-            Some(buffer) => {
-                let mut buffer = buffer;
-                self.world.copy_into(&mut buffer);
-                buffer
-            }
-            None => self.world.snapshot(),
-        };
-        snapshot.name.clone_from(&self.world.name);
+        let snapshot = self.world.snapshot();
         let copied = began.elapsed();
 
         let report = self.save_results.0.clone();
@@ -619,8 +601,7 @@ impl GameServer {
                 }
             };
             // A closed channel means the server is already shutting down, which is not an error.
-            // The buffer travels back with the result so the next save can reuse its pages.
-            let _ = report.send((outcome, snapshot));
+            let _ = report.send(outcome);
         }));
         self.save_reason = reason;
         debug!(
@@ -639,12 +620,9 @@ impl GameServer {
     /// Only worth saying out loud for a save somebody asked for: an autosave that works is not
     /// news, and one that fails is already in the log as an error.
     fn note_finished_save(&mut self) {
-        let Ok((result, buffer)) = self.save_results.1.try_recv() else {
+        let Ok(result) = self.save_results.1.try_recv() else {
             return;
         };
-        // Keep the buffer for next time: its pages are already faulted in, which is the whole of
-        // what made a fresh snapshot expensive.
-        self.save_buffer = Some(buffer);
         match result {
             Ok(ms) if self.save_reason == "command" => {
                 self.announce(&format!("World saved ({ms} ms)."));
