@@ -2879,16 +2879,16 @@ async fn an_npc_far_away_is_not_broadcast() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         far.move_to(650.0 * 16.0, 318.0 * 16.0).await.ok();
-        match far
+        if far
             .try_wait_for(
                 "a distant zombie",
                 |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 3),
                 Duration::from_millis(400),
             )
             .await
+            .is_some()
         {
-            Some(_) => count += 1,
-            None => {}
+            count += 1;
         }
     }
     assert!(
