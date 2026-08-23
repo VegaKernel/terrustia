@@ -183,6 +183,28 @@ const SECTION_REACH: i32 = 1;
 /// lets four go by and then sends one anyway.
 const MAX_NPC_SYNC_SKIPS: u8 = 4;
 
+// The projectiles whose debuffs are worth however many of them are stuck in the target. Each is
+// its own debuff — Daybreak, javelins, tentacle spikes, blood butcherer knives, stardust cells —
+// and the count is what decides the rate, so a single spear is a scratch and eight are lethal.
+const DAYBREAK_SPEAR: u16 = 636;
+const JAVELIN: u16 = 598;
+const TENTACLE_SPIKE: u16 = 971;
+const BLOOD_BUTCHERER: u16 = 975;
+const STARDUST_CELL: u16 = 614;
+
+/// A target dummy, whose whole purpose is to be hit without ever dying.
+const TARGET_DUMMY_AI: i32 = 92;
+/// The one other type the game marks immortal outright.
+const IMMORTAL_TYPE: u16 = 690;
+
+/// Whether an NPC cannot lose life at all, however much is done to it. `NPC.immortal`.
+///
+/// Distinct from "takes no damage": a target dummy shows the numbers, which is the entire point
+/// of it, and simply never goes below the life it started with.
+fn is_immortal(npc: &crate::game::npc::Npc) -> bool {
+    npc.stats.ai_style == TARGET_DUMMY_AI || npc.npc_type == IMMORTAL_TYPE
+}
+
 /// The count a running timer is set back to whenever it fires.
 ///
 /// Five minutes of ticks, and a multiple of every timer period, which is what keeps two timers of
@@ -509,6 +531,7 @@ impl GameServer {
         lap(&mut cost, Phase::Sections);
         self.tick_items();
         lap(&mut cost, Phase::Items);
+        self.tick_npc_buffs();
         self.tick_npcs();
         lap(&mut cost, Phase::Npcs);
         self.tick_projectiles();
@@ -911,6 +934,9 @@ impl GameServer {
             id::NET_MODULES => self.on_net_module(slot, &payload),
             id::SYNC_PROJECTILE => self.on_client_projectile(slot, &payload),
             id::KILL_PROJECTILE => self.on_client_projectile_kill(slot, &payload),
+            id::ADD_N_P_C_BUFF => self.on_add_npc_buff(slot, &payload),
+            id::REQUEST_N_P_C_BUFF_REMOVAL => self.on_remove_npc_buff(slot, &payload),
+            id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST => self.on_town_npc_name_request(slot, &payload),
             other => {
                 debug!(slot, id = other, name = id::name(other), "ignoring packet");
                 Ok(())
@@ -2373,6 +2399,183 @@ const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
 
 impl GameServer {
     /// Advance every NPC and tell clients about the ones that changed.
+    /// Run every NPC's buffs: count the timers down, work out what they cost, and tell clients.
+    ///
+    /// Kept apart from [`Self::tick_npcs`] because a debuff can kill, and dying reaches far
+    /// outside the NPC table — loot, coins, invasion counts, boss flags — none of which the AI
+    /// loop can touch while it holds the table borrowed.
+    ///
+    /// The whole pass costs nothing when nothing is burning, which is the ordinary case: an NPC
+    /// with no buffs is skipped before any of the per-tick work.
+    fn tick_npc_buffs(&mut self) {
+        // Nothing anywhere is buffed: the common case, and worth one scan to establish.
+        if !self.npcs.iter().any(|(_, n)| !n.buffs.is_empty()) {
+            return;
+        }
+
+        let dryad = self.dryad_bane_rate();
+        // Five debuffs are worth however many of a projectile are stuck in the target, so the
+        // projectile table is counted once here rather than once per NPC per debuff.
+        let stacks = self.stacked_debuff_projectiles();
+
+        let mut changed: Vec<u8> = Vec::new();
+        let mut hits: Vec<(u8, i16)> = Vec::new();
+        let mut deaths: Vec<(u8, u16, (f32, f32), f32)> = Vec::new();
+
+        for (index, npc) in self.npcs.iter_mut() {
+            if npc.buffs.is_empty() {
+                if std::mem::take(&mut npc.buffs_dirty) {
+                    changed.push(index);
+                }
+                continue;
+            }
+
+            npc.buffs.set_flags(npc.npc_type, npc.ai[1]);
+            if npc.buffs.clear_expired() {
+                npc.buffs_dirty = true;
+            }
+
+            let count = |projectile: u16| {
+                stacks
+                    .get(&(index, projectile))
+                    .copied()
+                    .unwrap_or_default()
+            };
+            let around = crate::game::buffs::Around {
+                npc_type: npc.npc_type,
+                ai1: npc.ai[1],
+                is_segment: npc.follows.is_some() || npc.follows_boss.is_some(),
+                get_good: false,
+                lava_wet: false,
+                daybreaks: count(DAYBREAK_SPEAR),
+                javelins: count(JAVELIN),
+                tentacles: count(TENTACLE_SPIKE),
+                blood_knives: count(BLOOD_BUTCHERER),
+                cells: count(STARDUST_CELL),
+                dryad_bane_dps: dryad,
+            };
+
+            let immortal = is_immortal(npc);
+            let toll = npc
+                .buffs
+                .dots(&around, immortal, npc.stats.dont_take_damage);
+            if toll.healed > 0 && npc.life < npc.life_max {
+                npc.life = (npc.life + toll.healed).min(npc.life_max);
+                npc.dirty = true;
+            }
+            if toll.hurt > 0 && !immortal {
+                // The game reports each crossing separately, so a heavy stack shows as several
+                // numbers rather than one large one.
+                let per_hit = toll.hurt / toll.hits.max(1);
+                for _ in 0..toll.hits {
+                    hits.push((index, i16::try_from(per_hit).unwrap_or(i16::MAX)));
+                }
+                npc.life -= toll.hurt;
+                npc.dirty = true;
+                // A debuff never lands the killing blow itself: the game drops the NPC to one
+                // hit point and then strikes it for everything, which is what makes the death
+                // go through the ordinary path rather than leaving a corpse at zero.
+                if npc.life <= 0 {
+                    npc.life = 0;
+                    deaths.push((
+                        index,
+                        npc.npc_type,
+                        npc.center(),
+                        if npc.from_statue {
+                            0.0
+                        } else {
+                            npc.stats.value
+                        },
+                    ));
+                }
+            }
+            if std::mem::take(&mut npc.buffs_dirty) {
+                changed.push(index);
+            }
+        }
+
+        for (index, amount) in hits {
+            if let Ok(frame) = packets::npc_debuff_damage(index, amount) {
+                self.broadcast(frame, None);
+            }
+        }
+        for index in changed {
+            self.broadcast_npc_buffs(index);
+        }
+        for (index, npc_type, center, value) in deaths {
+            self.npc_died(index, npc_type, center, value);
+        }
+    }
+
+    /// Tell everyone what is currently on an NPC.
+    ///
+    /// Not optional decoration: a client computes its own armour penetration from the buff list
+    /// it believes the target has, so an enemy covered in ichor that nobody was told about takes
+    /// fifteen points less from every hit than it should.
+    fn broadcast_npc_buffs(&mut self, index: u8) {
+        let Some(npc) = self.npcs.get(index) else {
+            return;
+        };
+        let slots: Vec<(u16, i32)> = npc.buffs.active().map(|s| (s.kind, s.time)).collect();
+        let at = npc.position;
+        if let Ok(frame) = packets::npc_buffs(index, slots) {
+            self.broadcast_near(frame, at, index);
+        }
+    }
+
+    /// How much the Dryad's Bane is worth in this world right now.
+    fn dryad_bane_rate(&self) -> i32 {
+        let p = &self.world.progress;
+        crate::game::buffs::dryad_bane_dps(
+            &crate::game::buffs::BossesDowned {
+                eye: p.downed_boss1,
+                evil: p.downed_boss2,
+                skeletron: p.downed_boss3,
+                queen_bee: p.downed_queen_bee,
+                hard_mode: p.hard_mode,
+                queen_slime: p.downed_queen_slime,
+                destroyer: p.downed_mech1,
+                twins: p.downed_mech2,
+                prime: p.downed_mech3,
+                plantera: p.downed_plantera,
+                golem: p.downed_golem,
+                cultist: p.downed_ancient_cultist,
+                empress: p.downed_empress_of_light,
+                fishron: p.downed_fishron,
+                infected_seed: false,
+            },
+            i32::from(self.world.game_mode),
+            false,
+        )
+    }
+
+    /// How many of each stacking debuff's projectile is lodged in each NPC.
+    ///
+    /// The game's own test is `ai[0] == 1 && ai[1] == whoAmI` — the first says the projectile has
+    /// stuck rather than still flying, the second says what it stuck in.
+    fn stacked_debuff_projectiles(&self) -> std::collections::HashMap<(u8, u16), usize> {
+        let mut counts = std::collections::HashMap::new();
+        for (_, projectile) in self.projectiles.iter() {
+            if !matches!(
+                projectile.projectile_type,
+                DAYBREAK_SPEAR | JAVELIN | TENTACLE_SPIKE | BLOOD_BUTCHERER | STARDUST_CELL
+            ) {
+                continue;
+            }
+            if projectile.ai[0] != 1.0 {
+                continue;
+            }
+            let stuck_in = projectile.ai[1];
+            if !(0.0..=255.0).contains(&stuck_in) {
+                continue;
+            }
+            *counts
+                .entry((stuck_in as u8, projectile.projectile_type))
+                .or_insert(0usize) += 1;
+        }
+        counts
+    }
+
     fn tick_npcs(&mut self) {
         let targets: Vec<Target> = self
             .players
@@ -3111,6 +3314,146 @@ impl GameServer {
         Ok(())
     }
 
+    /// Packet 53: a client reporting that it has inflicted something on an NPC.
+    ///
+    /// This is how virtually every weapon debuff in the game arrives. The client works out what
+    /// its weapon inflicts — it knows its own accessories, its own flasks, its own imbues — and
+    /// the server decides only whether the target is immune. Trusting the client for *what* it
+    /// inflicts is the game's own arrangement, not a shortcut: the alternative would be
+    /// reimplementing every weapon's on-hit rules on the server, and the client would still
+    /// disagree.
+    ///
+    /// What the server does *not* trust is the outcome. Immunity is checked here, so no client
+    /// can poison King Slime or set the Wall of Flesh alight by asserting it has.
+    fn on_add_npc_buff(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let request = terrustia_proto::packets::AddNpcBuff::decode(payload)?;
+        // A negative duration would be an eternal buff once it is written into the slot, since
+        // nothing counts it up. The game reads it as a short and lets `AddBuff` compare it, which
+        // means a negative one is refused for already being shorter than what is there.
+        if request.ticks <= 0 {
+            return Ok(());
+        }
+        let Some(npc) = self.npcs.get_mut(request.index) else {
+            return Ok(());
+        };
+        if npc
+            .buffs
+            .add(npc.npc_type, request.buff, i32::from(request.ticks))
+        {
+            npc.buffs_dirty = true;
+            // Sent now rather than on the next tick: the client that landed the hit is about to
+            // work out its next one's armour penetration, and a tick of lag there is a hit at
+            // the wrong damage.
+            self.broadcast_npc_buffs(request.index);
+        }
+        Ok(())
+    }
+
+    /// Packet 137: a client asking that a buff be taken off an NPC.
+    ///
+    /// Every one of these is refused, and that is the correct behaviour rather than a gap. The
+    /// game validates the request against `BuffID.Sets.CanBeRemovedByNetMessage`, which in this
+    /// version is empty — so the message exists, is read, and never does anything. Reading it is
+    /// still necessary: several packets arrive in one batch, and skipping this one's bytes would
+    /// misparse whatever follows it.
+    fn on_remove_npc_buff(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let request = terrustia_proto::packets::RemoveNpcBuff::decode(payload)?;
+        let Some(npc) = self.npcs.get_mut(request.index) else {
+            return Ok(());
+        };
+        if npc.buffs.remove_by_request(npc.npc_type, request.buff) {
+            npc.buffs_dirty = true;
+            self.broadcast_npc_buffs(request.index);
+        }
+        Ok(())
+    }
+
+    /// Packet 56: a client asking what a town NPC is called.
+    ///
+    /// The client sends this with only the slot filled in the moment the NPC comes into view, and
+    /// shows the type's name until it is answered. Left unhandled — as it was — every guide in
+    /// the world is "Guide", nobody has a name, and the Tax Collector never becomes Andrew.
+    ///
+    /// The name is rolled here rather than when the NPC spawns. Nothing can tell the difference:
+    /// the roll is kept once made, so an NPC's name never changes, and until somebody asks there
+    /// is nobody to notice it did not have one.
+    fn on_town_npc_name_request(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = terrustia_proto::PacketReader::new(payload);
+        let index = r.i16()?;
+        let Ok(index) = u8::try_from(index) else {
+            return Ok(());
+        };
+        let Some(npc) = self.npcs.get(index) else {
+            return Ok(());
+        };
+        let npc_type = npc.npc_type;
+        if npc.given_name.is_empty() && terrustia_proto::town_names::has_given_name(npc_type) {
+            let variation = self.roll_town_variation(npc_type);
+            let name = self.roll_town_name(npc_type, variation);
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.town_variation = variation;
+                npc.given_name = name;
+            }
+        }
+        let Some(npc) = self.npcs.get(index) else {
+            return Ok(());
+        };
+        let frame = packets::town_npc_name(index, &npc.given_name, npc.town_variation)?;
+        // Answered to the asker alone, as the game does: another client that has not seen this
+        // NPC yet has no use for its name and will ask when it does.
+        self.send(slot, frame);
+        Ok(())
+    }
+
+    /// Which of a type's looks a newly-arrived one wears.
+    ///
+    /// One for almost everything; a cat, a dog or a bunny rolls one of six breeds, which decides
+    /// both its sprite and which names it can be given.
+    fn roll_town_variation(&mut self, npc_type: u16) -> i32 {
+        let count = terrustia_proto::town_names::variation_count(npc_type);
+        if count <= 1 {
+            return 0;
+        }
+        rand::Rng::random_range(&mut self.rng, 0..count) as i32
+    }
+
+    /// Pick a name, preferring one nobody in the world is already using.
+    ///
+    /// The game does not guarantee uniqueness either, but it does re-roll the duplicates when a
+    /// second of a type arrives, and a town with two Andrews reads as a bug. Falling back to a
+    /// plain roll when every name is taken is what keeps a world with sixty cats working.
+    fn roll_town_name(&mut self, npc_type: u16, variation: i32) -> String {
+        let names = terrustia_proto::town_names::names_for_variation(
+            npc_type,
+            usize::try_from(variation).unwrap_or(0),
+        );
+        if names.is_empty() {
+            return String::new();
+        }
+        let taken: Vec<&str> = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.npc_type == npc_type && !n.given_name.is_empty())
+            .map(|(_, n)| n.given_name.as_str())
+            .collect();
+        let free: Vec<&&str> = names.iter().filter(|n| !taken.contains(n)).collect();
+        if free.is_empty() {
+            let at = rand::Rng::random_range(&mut self.rng, 0..names.len());
+            return names[at].to_string();
+        }
+        let at = rand::Rng::random_range(&mut self.rng, 0..free.len());
+        (*free[at]).to_string()
+    }
+
     /// Move every projectile, and remove the ones that are finished.
     fn tick_projectiles(&mut self) {
         let mut spent = Vec::new();
@@ -3637,21 +3980,30 @@ impl GameServer {
         self.broadcast(hit.encode()?, Some(slot));
 
         if killed {
-            self.npcs.remove(hit.index);
-            self.broadcast_npc_death(hit.index);
-            self.drop_coins(value, center);
-            self.drop_loot(npc_type, center);
-            self.note_invasion_kill(npc_type);
-            self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
-            self.note_army_kill(npc_type);
-            self.note_moon_kill(npc_type);
-            self.lunar.note_kill(npc_type);
-            self.note_boss_kill(npc_type);
+            self.npc_died(hit.index, npc_type, center, value);
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
         }
         Ok(())
+    }
+
+    /// Everything that follows an NPC running out of life.
+    ///
+    /// Shared rather than inlined at the one hit path, because a hit is not the only way to die:
+    /// a debuff can finish something off between two ticks, with no player credited, and every
+    /// one of these still has to happen.
+    fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
+        self.npcs.remove(index);
+        self.broadcast_npc_death(index);
+        self.drop_coins(value, center);
+        self.drop_loot(npc_type, center);
+        self.note_invasion_kill(npc_type);
+        self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
+        self.note_army_kill(npc_type);
+        self.note_moon_kill(npc_type);
+        self.lunar.note_kill(npc_type);
+        self.note_boss_kill(npc_type);
     }
 
     /// Drop whatever an NPC was carrying.

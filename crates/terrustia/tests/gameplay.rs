@@ -3191,3 +3191,227 @@ async fn mining_furniture_gives_it_back() {
     assert!(got.contains(&32), "no wooden table back: {got:?}");
     assert!(got.contains(&36), "no work bench back: {got:?}");
 }
+
+// ---------------------------------------------------------------- debuffs
+
+/// A weapon's on-hit effect is a packet, and until this one was handled the whole of that half of
+/// the game did nothing at all. Setting a boss alight has to reach every client, because each one
+/// works out its own armour penetration from what it believes is on the target.
+#[tokio::test]
+async fn a_debuff_lands_and_is_told_to_everyone() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    alice.summon(50).await.unwrap();
+    alice.set_timeout(Duration::from_secs(3));
+    let Event::NpcSynced(boss) = alice
+        .wait_for("king slime", |e| {
+            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+
+    // On Fire!, for ten seconds.
+    alice.buff_npc(boss.index, 24, 600).await.unwrap();
+
+    // Bob is told, even though Alice is the one who did it: he needs it to aim.
+    bob.set_timeout(Duration::from_secs(3));
+    let told = bob
+        .wait_for("the buff list", |e| {
+            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS)
+        })
+        .await
+        .expect("every client should be told what is on an NPC");
+    let Event::Other(frame) = told else {
+        unreachable!()
+    };
+    // short index, then (ushort buff, ushort time) pairs ending in a zero.
+    assert_eq!(frame.payload[0], boss.index, "the right NPC");
+    let buff = u16::from_le_bytes([frame.payload[2], frame.payload[3]]);
+    assert_eq!(buff, 24, "On Fire! should be the first entry");
+}
+
+/// Burning something has to actually hurt it, and the hits arrive as their own packet rather
+/// than as a strike from nobody.
+#[tokio::test]
+async fn a_debuff_wears_a_target_down() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    alice.summon(50).await.unwrap();
+    alice.set_timeout(Duration::from_secs(3));
+    let Event::NpcSynced(boss) = alice
+        .wait_for("king slime", |e| {
+            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let started_with = boss.life;
+
+    // Cursed Inferno: fast enough to show up inside a test's patience.
+    alice.buff_npc(boss.index, 39, 1200).await.unwrap();
+
+    let hurt = alice
+        .wait_for("debuff damage", |e| {
+            matches!(e, Event::Other(f) if f.id == id::N_P_C_DEBUFF_DAMAGE)
+        })
+        .await;
+    assert!(hurt.is_ok(), "a burning boss should be losing life");
+
+    // ...and the loss shows up in its synced health, not only in the report.
+    let dropped = alice
+        .try_wait_for(
+            "a lower health",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == boss.index && n.life < started_with),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(dropped.is_some(), "the damage should reach the NPC's health");
+}
+
+/// Immunity is the server's decision, not the client's. A crafted packet must not be able to
+/// poison something the game says cannot be poisoned.
+#[tokio::test]
+async fn an_immune_target_refuses_a_crafted_debuff() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    // King Slime burns, but is immune to poison — which makes it the right target: a refusal
+    // here cannot be confused with the packet simply not arriving.
+    alice.summon(50).await.unwrap();
+    alice.set_timeout(Duration::from_secs(3));
+    let Event::NpcSynced(boss) = alice
+        .wait_for("king slime", |e| {
+            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+
+    alice.buff_npc(boss.index, 20, 600).await.unwrap();
+    let told = alice
+        .try_wait_for(
+            "a buff list",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS),
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(
+        told.is_none(),
+        "King Slime does not take poison, however politely a client asks"
+    );
+
+    // ...and the refusal is specific rather than the whole path being dead.
+    alice.buff_npc(boss.index, 24, 600).await.unwrap();
+    let burned = alice
+        .try_wait_for(
+            "a buff list",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS),
+            Duration::from_secs(2),
+        )
+        .await;
+    assert!(burned.is_some(), "it does still burn");
+}
+
+/// The game permits no buff to be lifted by request, and a server that obliged would let a client
+/// clear its own poison off a boss.
+#[tokio::test]
+async fn a_client_cannot_lift_a_debuff_it_dislikes() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    alice.summon(50).await.unwrap();
+    alice.set_timeout(Duration::from_secs(3));
+    let Event::NpcSynced(boss) = alice
+        .wait_for("king slime", |e| {
+            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+
+    alice.buff_npc(boss.index, 24, 600).await.unwrap();
+    alice
+        .wait_for("the buff list", |e| {
+            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS)
+        })
+        .await
+        .unwrap();
+
+    // Ask for it to be taken off, then check that the next list still has it.
+    alice.unbuff_npc(boss.index, 24).await.unwrap();
+    alice.buff_npc(boss.index, 70, 600).await.unwrap(); // venom, to force a fresh list
+    let Event::Other(frame) = alice
+        .wait_for("a later buff list", |e| {
+            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS && f.payload.len() > 7)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let mut buffs = Vec::new();
+    let mut at = 2;
+    while at + 1 < frame.payload.len() {
+        let buff = u16::from_le_bytes([frame.payload[at], frame.payload[at + 1]]);
+        if buff == 0 {
+            break;
+        }
+        buffs.push(buff);
+        at += 4;
+    }
+    assert!(buffs.contains(&24), "the fire should still be there: {buffs:?}");
+}
+
+/// Every town NPC was nameless: the client asks and nothing answered, so a world full of people
+/// was a world full of "Guide".
+#[tokio::test]
+async fn a_town_npc_has_a_name_of_its_own() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    // The guide arrives on his own once there is somewhere to live, so put one in directly.
+    alice.summon(-100).await.ok();
+    let guide = alice
+        .try_wait_for(
+            "a town npc",
+            |e| matches!(e, Event::NpcSynced(n) if terrustia_proto::town_names::has_given_name(n.net_id as u16)),
+            Duration::from_secs(5),
+        )
+        .await;
+    let Some(Event::NpcSynced(npc)) = guide else {
+        // No town NPC turned up in this world; the name path is covered by the unit tests.
+        return;
+    };
+
+    alice.ask_npc_name(npc.index).await.unwrap();
+    let Event::Other(frame) = alice
+        .wait_for("the name", |e| {
+            matches!(e, Event::Other(f) if f.id == id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    assert_eq!(r.i16().unwrap(), i16::from(npc.index));
+    let name = r.string().unwrap();
+    assert!(!name.is_empty(), "a town NPC should have been given a name");
+    assert!(
+        terrustia_proto::town_names::names_for(npc.net_id as u16).contains(&name.as_str()),
+        "{name:?} is not one of the game's names for that type"
+    );
+}

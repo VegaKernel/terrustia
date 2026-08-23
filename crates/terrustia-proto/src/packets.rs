@@ -1035,3 +1035,105 @@ pub fn add_player_buff(player: u8, buff: u16, ticks: i32) -> Result<Vec<u8>> {
     w.u8(player).u16(buff).i32(ticks);
     w.finish()
 }
+
+/// Packet `53`: a client asking that a buff be put on an NPC.
+///
+/// This is how nearly every weapon debuff reaches the server. The client that landed the hit
+/// works out what it inflicts and says so; the server decides whether the target is immune.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddNpcBuff {
+    pub index: u8,
+    pub buff: u16,
+    pub ticks: i16,
+}
+
+impl AddNpcBuff {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = PacketReader::new(payload);
+        // The index is a signed short on the wire but only ever names one of two hundred slots,
+        // so anything outside that is a malformed packet rather than a slot to be found.
+        let index = r.i16()?;
+        Ok(Self {
+            index: u8::try_from(index).map_err(|_| ProtoError::OutOfRange {
+                field: "npc buff index",
+                value: i64::from(index),
+            })?,
+            buff: r.u16()?,
+            ticks: r.i16()?,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut w = PacketWriter::new(id::ADD_N_P_C_BUFF);
+        w.i16(i16::from(self.index)).u16(self.buff).i16(self.ticks);
+        w.finish()
+    }
+}
+
+/// Packet `54`: the whole buff list of one NPC.
+///
+/// Sent whenever the list changes, and it has to be: a client works out its own armour
+/// penetration from what it believes is on the target, so an ichor-covered enemy the client has
+/// not been told about takes fifteen points less damage per hit than it should.
+///
+/// The list is terminated by a zero rather than counted, and holes are skipped rather than sent,
+/// which is why removal compacts the slots.
+pub fn npc_buffs(index: u8, slots: impl IntoIterator<Item = (u16, i32)>) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::N_P_C_BUFFS);
+    w.i16(i16::from(index));
+    for (buff, ticks) in slots {
+        if buff == 0 || ticks <= 0 {
+            continue;
+        }
+        // The wire carries the remaining time as an unsigned short. A buff longer than about
+        // eighteen minutes saturates rather than wrapping round to nearly-expired.
+        w.u16(buff).u16(u16::try_from(ticks).unwrap_or(u16::MAX));
+    }
+    w.u16(0);
+    w.finish()
+}
+
+/// Packet `137`: a client asking that a buff be taken *off* an NPC.
+///
+/// The server refuses every one of these in this version — the permitted set is empty — but the
+/// packet still has to be read, or the bytes after it in the same batch are misparsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveNpcBuff {
+    pub index: u8,
+    pub buff: u16,
+}
+
+impl RemoveNpcBuff {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = PacketReader::new(payload);
+        let index = r.i16()?;
+        Ok(Self {
+            index: u8::try_from(index).map_err(|_| ProtoError::OutOfRange {
+                field: "npc buff index",
+                value: i64::from(index),
+            })?,
+            buff: r.u16()?,
+        })
+    }
+}
+
+/// Packet `153`: damage an NPC took from a debuff rather than from a hit.
+///
+/// It is its own message because it is nobody's hit: no player is credited, no knockback is
+/// applied, and the client shows it in the colour it uses for poison rather than for a strike.
+pub fn npc_debuff_damage(index: u8, amount: i16) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::N_P_C_DEBUFF_DAMAGE);
+    w.u8(index).i16(amount);
+    w.finish()
+}
+
+/// Packet `56`: a town NPC's given name and which of its looks it wears.
+///
+/// A client asks for this by sending the same message with only the slot filled in, and until it
+/// is answered the NPC has no name at all — every guide in the world is "Guide" and none of them
+/// is Andrew.
+pub fn town_npc_name(index: u8, name: &str, variation: i32) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST);
+    w.i16(i16::from(index)).string(name).i32(variation);
+    w.finish()
+}

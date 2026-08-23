@@ -378,6 +378,32 @@ impl Client {
         self.send(&hit.encode()?).await
     }
 
+    /// Report inflicting a buff on an NPC, the way a weapon's on-hit effect does.
+    pub async fn buff_npc(&mut self, index: u8, buff: u16, ticks: i16) -> Result<()> {
+        let request = terrustia_proto::packets::AddNpcBuff {
+            index,
+            buff,
+            ticks,
+        };
+        self.send(&request.encode()?).await
+    }
+
+    /// Ask the server to take a buff off an NPC.
+    pub async fn unbuff_npc(&mut self, index: u8, buff: u16) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::REQUEST_N_P_C_BUFF_REMOVAL);
+        w.i16(i16::from(index)).u16(buff);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
+    /// Ask what a town NPC is called, as a client does the moment one comes into view.
+    pub async fn ask_npc_name(&mut self, index: u8) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST);
+        w.i16(i16::from(index));
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Report picking an item up. Only works for an item the server reserved for us.
     pub async fn pick_up(&mut self, index: i16) -> Result<()> {
         self.send(&terrustia_proto::items::item_despawn(index)?)

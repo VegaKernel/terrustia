@@ -147,6 +147,29 @@ pub struct Npc {
     /// It is worth no coins and takes up no room in the spawn budget, which is the only reason a
     /// statue farm works: without it a wired statue would stop the world spawning anything else.
     pub from_statue: bool,
+    /// What is currently burning, poisoning or cursing it.
+    ///
+    /// Kept on the NPC rather than in a side table because it is read every tick by the routine
+    /// that decides damage and written by any client that lands a hit; a lookup either way round
+    /// would be a scan of the whole roster.
+    pub buffs: super::buffs::Buffs,
+    /// Set when the buff list changed and clients have not been told yet.
+    ///
+    /// Separate from `dirty` because the two go out as different packets: `dirty` sends the
+    /// NPC's position and health, this sends its buff list, and a burning enemy standing still
+    /// needs only the second.
+    pub buffs_dirty: bool,
+    /// The personal name a town NPC, pet or slime carries on top of its type.
+    ///
+    /// Empty for everything else. A client asks for this the moment the NPC comes into view and
+    /// shows the type's name until it is answered, so a server that never answers gives you a
+    /// town full of people called "Guide".
+    pub given_name: String,
+    /// Which of a type's two looks it wears, for the four types that have two.
+    ///
+    /// The Dryad, the Truffle, the Princess and the Guide each have an alternate; the game keeps
+    /// the choice as a number rather than a flag because it is sent alongside the name.
+    pub town_variation: i32,
 }
 
 impl Npc {
@@ -190,6 +213,10 @@ impl Npc {
             follows_boss: None,
             follows: None,
             from_statue: false,
+            buffs: super::buffs::Buffs::new(),
+            buffs_dirty: false,
+            given_name: String::new(),
+            town_variation: 0,
         })
     }
 
