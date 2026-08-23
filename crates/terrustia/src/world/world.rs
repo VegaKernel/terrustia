@@ -16,6 +16,11 @@ pub const NIGHT_LENGTH: i32 = 32_400;
 /// The authoritative world.
 ///
 /// Owned exclusively by the game task, so no interior mutability or locking is needed.
+///
+/// `Clone` exists for exactly one caller — [`World::snapshot`] — and is not cheap: a large world
+/// is sixty megabytes of tiles. Use the named method rather than `.clone()`, so that a copy this
+/// size never happens by accident.
+#[derive(Clone)]
 pub struct World {
     width: i32,
     height: i32,
@@ -284,6 +289,61 @@ impl World {
             signs,
             tile_entities,
         }
+    }
+
+    /// A copy of the whole world, for saving it without holding up the tick.
+    ///
+    /// Serialising a large world takes about fifty-five milliseconds, against a tick budget of
+    /// sixteen and a half. Doing it on the game task means every autosave drops three or four
+    /// ticks, which players feel as a stutter every five minutes. Doing it on another thread
+    /// means having something that thread can own, and this is it.
+    ///
+    /// The copy is atomic with respect to the tick, so the save can never catch the world halfway
+    /// through an edit. A torn save is much worse than a slow one.
+    ///
+    /// Prefer [`World::copy_into`] where a buffer can be kept: a fresh allocation of sixty
+    /// megabytes costs about thirty milliseconds, and almost none of that is the copying.
+    pub fn snapshot(&self) -> Self {
+        let mut copy = self.clone();
+        // The copy is never served to anybody, so section caching is dead weight on it.
+        copy.dirty_sections.clear();
+        copy.track_dirty = false;
+        copy
+    }
+
+    /// Copy this world over an existing one, reusing its tile allocation.
+    ///
+    /// The point is the tiles, and the cost being avoided is not what it looks like. A fresh
+    /// [`World::snapshot`] of a large world measured **31 ms** on the tick — still twice the
+    /// budget — and almost none of that was the copying. It was the operating system faulting in
+    /// sixty megabytes of *new* pages. Copying into a buffer whose pages have already been
+    /// touched skips all of it.
+    ///
+    /// The implementation looks roundabout and is deliberately so. The obvious version would list
+    /// the fields to copy, and the day somebody adds a field and forgets to list it, saves start
+    /// silently losing it — a far worse bug than a slow tick. So the derived `Clone` still does
+    /// the work, and the tiles are simply moved out of the way while it runs: no field can be
+    /// forgotten, because none is named.
+    pub fn copy_into(&mut self, into: &mut Self) {
+        // Set our own tiles aside so cloning us copies only the small fields.
+        let ours = std::mem::take(&mut self.tiles);
+        let mut copy = self.clone();
+        self.tiles = ours;
+
+        // Reuse the buffer's tile allocation rather than the fresh one `clone` would give.
+        let mut buffer = std::mem::take(&mut into.tiles);
+        if buffer.len() == self.tiles.len() {
+            buffer.copy_from_slice(&self.tiles);
+        } else {
+            buffer.clear();
+            buffer.extend_from_slice(&self.tiles);
+        }
+        copy.tiles = buffer;
+
+        // The copy is never served to anybody, so section caching is dead weight on it.
+        copy.dirty_sections.clear();
+        copy.track_dirty = false;
+        *into = copy;
     }
 
     pub fn width(&self) -> i32 {
@@ -824,5 +884,84 @@ mod flag_tests {
         let mut world = crate::world::worldgen::generate(400, 300, "wind", 4);
         world.wind = -0.42;
         assert_eq!(world.world_data().wind_speed_target, -0.42);
+    }
+
+    /// A copy made for saving must serialise to exactly the same bytes as the original.
+    ///
+    /// This is the guard on [`World::copy_into`]. That method reuses a buffer's tile allocation
+    /// to keep a save off the tick, and the tempting way to write it is to list the fields to
+    /// copy — which works right up until somebody adds a field and forgets to list it, at which
+    /// point saves silently start losing it.
+    ///
+    /// Comparing the *saved bytes* rather than the fields is what makes that impossible to miss:
+    /// anything a save records is covered, whether or not this test knows the field exists.
+    #[test]
+    fn a_copy_for_saving_saves_identically() {
+        use crate::world::{Chest, Sign, wld_save};
+        use terrustia_proto::{ItemStack, Tile};
+
+        let mut world = crate::world::worldgen::generate(400, 300, "copies", 11);
+        // Put something in every part of the world a save touches, so a lost field shows up.
+        world.set_tile(100, 100, Tile::block(1));
+        world.set_tile(101, 100, Tile::framed(21, 0, 0));
+        world.chests = vec![Some(Chest {
+            x: 101,
+            y: 100,
+            name: "Loot".into(),
+            items: vec![ItemStack::new(3507, 1, 81), ItemStack::EMPTY],
+        })];
+        world.signs = vec![Some(Sign {
+            x: 50,
+            y: 50,
+            text: "hello".into(),
+        })];
+        world.tile_entities.push(terrustia_proto::tile_entity::TileEntity::new(
+            0,
+            terrustia_proto::tile_entity::EntityKind::TeleportationPylon,
+            60,
+            60,
+        ));
+        world.next_tile_entity = 1;
+        world.time = 12_345;
+        world.day_time = false;
+        world.blood_moon = true;
+        world.wind = 0.375;
+        world.progress.hard_mode = true;
+        world.progress.altar_count = 7;
+        world.progress.downed_plantera = true;
+
+        let original = wld_save::serialize(&world).expect("the original should save");
+
+        // A buffer shaped like some *other* world, to prove the copy replaces everything rather
+        // than merging into what was already there.
+        let mut buffer = crate::world::worldgen::generate(400, 300, "somewhere else", 99);
+        buffer.time = 999;
+        buffer.progress.hard_mode = false;
+        world.copy_into(&mut buffer);
+
+        let copied = wld_save::serialize(&buffer).expect("the copy should save");
+        assert_eq!(
+            original.len(),
+            copied.len(),
+            "a copy for saving produced a different-sized file"
+        );
+        assert!(
+            original == copied,
+            "a copy for saving did not serialise identically; a field is being lost"
+        );
+    }
+
+    /// ...and the buffer is genuinely reused, which is the entire point of the method.
+    #[test]
+    fn copying_reuses_the_buffers_tiles() {
+        let mut world = crate::world::worldgen::generate(400, 300, "reuse", 3);
+        let mut buffer = world.snapshot();
+        let before = buffer.tiles.as_ptr();
+        world.copy_into(&mut buffer);
+        assert_eq!(
+            before,
+            buffer.tiles.as_ptr(),
+            "the tile allocation should be the same one, or nothing has been saved"
+        );
     }
 }

@@ -208,6 +208,14 @@ const DEMON_CONCH: u8 = 2;
 const SHELLPHONE_SPAWN: u8 = 3;
 const NO_SPACE_RESCUE: u8 = 4;
 
+/// How long a finished save took, or that it failed. Sent from the writing thread to the game
+/// task, which is the only one that can say anything to anybody.
+type SaveOutcome = std::result::Result<u64, ()>;
+/// The outcome, and the snapshot buffer coming home so the next save can reuse its pages.
+type SaveResult = (SaveOutcome, World);
+type SaveReport = std::sync::mpsc::Sender<SaveResult>;
+type SaveReports = std::sync::mpsc::Receiver<SaveResult>;
+
 /// The most slots a quick stack may offer at once.
 ///
 /// A player's main inventory is forty slots and the void bag adds another forty. Anything past
@@ -392,6 +400,22 @@ pub struct GameServer {
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
     /// tile up is what it is for.
     mech_cooldown: HashMap<(i32, i32), i32>,
+    /// A save being written on another thread, if one is.
+    ///
+    /// Kept so that shutdown can wait for it and so that two never run at once.
+    saving: Option<tokio::task::JoinHandle<()>>,
+    /// Why the save in flight was started, so the right thing is said when it finishes.
+    save_reason: &'static str,
+    /// How a finished background save reports back to the game task.
+    ///
+    /// A channel rather than the join handle because the tick is not async and polling a handle
+    /// for its value needs an executor; a try-receive needs nothing.
+    save_results: (SaveReport, SaveReports),
+    /// A world-sized buffer kept between saves.
+    ///
+    /// Not a cache of anything — its contents are overwritten every time. It exists purely so the
+    /// pages stay faulted in, which is what a fresh sixty-megabyte allocation actually costs.
+    save_buffer: Option<World>,
     /// The six cavern enemies this world happens to have.
     ///
     /// Drawn from the world's id rather than from the run's generator, so the same world always
@@ -489,6 +513,10 @@ impl GameServer {
             running_timers,
             mech_cooldown: HashMap::new(),
             tile_entity_anchors: HashMap::new(),
+            saving: None,
+            save_reason: "",
+            save_results: std::sync::mpsc::channel(),
+            save_buffer: None,
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
@@ -514,6 +542,10 @@ impl GameServer {
     /// Serialisation runs on the game task because it needs exclusive access to the world; it takes
     /// a fraction of a second even for a full-size world, which is why it is not worth the cost of
     /// snapshotting eighty megabytes of tiles to move it off-thread.
+    /// Write the world to disk, blocking the game task until it is done.
+    ///
+    /// Only for shutdown, where there is no next tick to protect and the process must not exit
+    /// before the bytes are on disk. Everything else wants [`Self::save_world_in_background`].
     fn save_world(&mut self, reason: &str) {
         let Some(path) = self.save_path.clone() else {
             return;
@@ -529,6 +561,96 @@ impl GameServer {
                 error!(path = %path.display(), error = %e, "world save failed");
                 self.announce("World save FAILED; see the server log.");
             }
+        }
+    }
+
+    /// Take a copy of the world and let another thread write it out.
+    ///
+    /// Serialising a large world costs about fifty-five milliseconds against a tick budget of
+    /// sixteen and a half, so an autosave on the game task drops three or four ticks — a visible
+    /// stutter every five minutes, and worse the bigger the world. Measured with
+    /// `examples/savecost.rs`; the cost is in run-detection and encoding rather than in reading
+    /// the tiles, which is why making the reads cache-friendlier did nothing.
+    ///
+    /// The copy costs the tick a few milliseconds of memcpy and nothing else, and it is atomic
+    /// with respect to the tick, so the writer can never catch the world halfway through an edit.
+    ///
+    /// One save at a time. If a previous one is still going the new request is dropped rather
+    /// than queued: two saves racing for the same path is worse than a missed autosave, and a
+    /// server whose disk cannot keep up with its autosave interval should not build a backlog of
+    /// sixty-megabyte snapshots waiting for it.
+    fn save_world_in_background(&mut self, reason: &'static str) {
+        let Some(path) = self.save_path.clone() else {
+            return;
+        };
+        if let Some(running) = &self.saving
+            && !running.is_finished()
+        {
+            warn!(reason, "a save is still running; skipping this one");
+            return;
+        }
+
+        let began = Instant::now();
+        // The buffer comes back from the last save, with its pages already faulted in. Only the
+        // very first save of a session pays for a fresh sixty megabytes.
+        let mut snapshot = match self.save_buffer.take() {
+            Some(buffer) => {
+                let mut buffer = buffer;
+                self.world.copy_into(&mut buffer);
+                buffer
+            }
+            None => self.world.snapshot(),
+        };
+        snapshot.name.clone_from(&self.world.name);
+        let copied = began.elapsed();
+
+        let report = self.save_results.0.clone();
+        self.saving = Some(tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let outcome = match wld_save::save(&snapshot, &path) {
+                Ok(()) => {
+                    let ms = started.elapsed().as_millis() as u64;
+                    info!(path = %path.display(), reason, elapsed_ms = ms, "world saved");
+                    Ok(ms)
+                }
+                Err(e) => {
+                    error!(path = %path.display(), error = %e, "world save failed");
+                    Err(())
+                }
+            };
+            // A closed channel means the server is already shutting down, which is not an error.
+            // The buffer travels back with the result so the next save can reuse its pages.
+            let _ = report.send((outcome, snapshot));
+        }));
+        self.save_reason = reason;
+        debug!(
+            reason,
+            snapshot_us = copied.as_micros() as u64,
+            "world snapshot taken; saving in the background"
+        );
+    }
+
+    /// Announce a background save that has finished since the last tick.
+    ///
+    /// The writer runs on another thread and cannot reach the chat, so it posts its result down a
+    /// channel and the game task collects it. Polled rather than awaited because the tick is not
+    /// async and should not become so for this.
+    ///
+    /// Only worth saying out loud for a save somebody asked for: an autosave that works is not
+    /// news, and one that fails is already in the log as an error.
+    fn note_finished_save(&mut self) {
+        let Ok((result, buffer)) = self.save_results.1.try_recv() else {
+            return;
+        };
+        // Keep the buffer for next time: its pages are already faulted in, which is the whole of
+        // what made a fresh snapshot expensive.
+        self.save_buffer = Some(buffer);
+        match result {
+            Ok(ms) if self.save_reason == "command" => {
+                self.announce(&format!("World saved ({ms} ms)."));
+            }
+            Err(()) => self.announce("World save FAILED; see the server log."),
+            Ok(_) => {}
         }
     }
 
@@ -551,6 +673,14 @@ impl GameServer {
         }
 
         // The channel closing is the shutdown signal, so this is the last chance to persist.
+        //
+        // Let a background save finish first if one is in flight. Both write through a temporary
+        // file and rename, so neither can leave a half-written world — but the shutdown save has
+        // the newer state and must land last, and two renames racing would decide that by
+        // scheduling rather than by which is newer.
+        if let Some(running) = self.saving.take() {
+            let _ = running.await;
+        }
         self.save_world("shutdown");
         info!("game loop stopped");
     }
@@ -641,8 +771,9 @@ impl GameServer {
         if let Some(every) = self.autosave_ticks
             && self.ticks.is_multiple_of(every)
         {
-            self.save_world("autosave");
+            self.save_world_in_background("autosave");
         }
+        self.note_finished_save();
         self.tick_tile_entities();
         self.tick_liquids();
         self.tick_spread();
@@ -3097,7 +3228,7 @@ impl GameServer {
                         "This world has nowhere to be saved: start the server with --save <path>.",
                     );
                 } else {
-                    self.save_world("command");
+                    self.save_world_in_background("command");
                 }
             }
             "spawn" => {
