@@ -2355,3 +2355,67 @@ async fn a_wired_statue_spawns_its_monster() {
         slime.position.0 / 16.0
     );
 }
+
+/// A pair of wired teleporters moves whoever is standing on one to the other.
+#[tokio::test]
+async fn a_teleporter_pair_moves_a_player() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 300..500 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        world.set_tile(320, 319, Tile::framed(136, 0, 0));
+        for x in 320..=460 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        // Two teleporters, three tiles wide each, a long way apart.
+        for (at, _) in [(360i32, 0), (450, 1)] {
+            for dx in 0..3i32 {
+                let mut pad = Tile::framed(235, (dx * 18) as i16, 0);
+                pad.flags
+                    .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+                world.set_tile(at + dx, 319, pad);
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "hopper").await;
+    client.set_timeout(Duration::from_secs(20));
+    // Stand on the first pad.
+    client.move_to(361.0 * 16.0, 316.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    client.hit_switch(320, 319).await.unwrap();
+
+    // The server tells everyone, including the player who moved.
+    let mut landed = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline && landed.is_none() {
+        match client.next_event().await {
+            Ok(Event::Other(frame)) if frame.id == id::TELEPORT_ENTITY => {
+                let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+                let _flags = r.u8().unwrap();
+                let _who = r.i16().unwrap();
+                let x = r.f32().unwrap();
+                let y = r.f32().unwrap();
+                landed = Some((x, y));
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let landed = landed.expect("the lever should have worked the teleporters");
+    assert!(
+        (landed.0 / 16.0 - 451.0).abs() < 4.0,
+        "it should have moved ninety tiles east, to about 451, not {}",
+        landed.0 / 16.0
+    );
+}

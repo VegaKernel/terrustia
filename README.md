@@ -58,8 +58,10 @@ Implemented:
   that saves losslessly, with autosave and a save on shutdown. Progression flags, weather and the
   lunar state survive a save
 - **Wiring**: hitting a switch runs the circuit on the server — the flood over whatever is
-  connected, four colours as four independent circuits — and actuators toggle the block they sit
-  on, which is the one wire effect that changes what the world *is*
+  connected, four colours as four independent circuits. Actuators toggle the block they sit on;
+  traps throw what they are framed to throw, on the game's own cooldowns; statues produce
+  monsters, items or a fetched townsperson, under the game's crowding limits; teleporters swap
+  whoever is on each pad; and pumps move liquid, refusing to mix water into lava
 - **Tile entities**: placed and remembered, with the training dummy raising and dismissing its NPC
 - **Day/night clock**
 
@@ -69,9 +71,6 @@ Not implemented:
   sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
   key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
   handled; verifying the claim is not.
-- **The rest of the wire table.** Traps, statues, teleporters and pumps do not fire server-side:
-  they need projectile spawning from tile frames, the statue spawn tables and a liquid pump model.
-  The current still passes through them, so a circuit is not broken by one.
 - **Player weapons.** Projectiles an NPC throws are flown by the server; a player's own are
   relayed.
 - **Saving a generated world.** Saving requires a world that came from a file; see below.

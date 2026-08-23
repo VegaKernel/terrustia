@@ -9,14 +9,22 @@
 //! something different on each.
 //!
 //! What a tile does when the current reaches it is a table sixty-odd entries long in the game.
-//! Implemented here: an actuator toggles the block it is on between solid and passable, which is
-//! the one wire effect that changes what the world *is* rather than what it looks like, and the
-//! traps — darts, flames, spears, spiky balls and geysers — which are the ones that hurt.
+//! The ones that change what the world *is*, rather than what it looks like, are here:
 //!
-//! A trap is not fired from inside the flood. The flood only notes which trap tiles the current
-//! reached; working out what each one throws needs a die roll and a cooldown, and putting it in
-//! the air needs the projectile store. Both live on the server, so [`trap_shot`] is what it calls
-//! for each tile the flood handed back.
+//! * **Actuators**, which toggle their block between solid and passable.
+//! * **Traps** — darts, flames, spears, spiky balls and geysers — which hurt.
+//! * **Statues**, which produce monsters, items or a fetched townsperson.
+//! * **Teleporters**, which swap whoever is standing on one pad with whoever is on the other.
+//! * **Pumps**, which move liquid from every inlet cell a circuit reaches to every outlet.
+//!
+//! Only the actuator and the pump are done inside the flood, because they are the two that need
+//! nothing but the tiles. The rest are *reported*: firing a trap needs a die roll, a cooldown and
+//! the projectile store; a statue needs the NPC table; a teleporter needs the players. All of
+//! that lives on the server, so the flood hands back which tiles it reached and the server does
+//! the work — [`trap_shot`] is the table it calls for each trap.
+//!
+//! The remaining entries are cosmetic: lamps, candles, chandeliers and the like change a frame
+//! and nothing else, and a client does that for itself from the relayed hit.
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
 //! broken by it.
@@ -99,6 +107,15 @@ pub struct Fired {
     pub traps: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
+    /// The first two distinct teleporters the current reached, which are the pair it joins.
+    ///
+    /// A third makes no difference: the game keeps room for two and ignores the rest, so a
+    /// circuit wired through three teleporters links the first two it happens to walk to.
+    pub teleporters: Vec<(i32, i32)>,
+    /// The cells of every inlet pump the current reached...
+    pub pump_in: Vec<(i32, i32)>,
+    /// ...and of every outlet.
+    pub pump_out: Vec<(i32, i32)>,
     /// How many tiles the current reached, for the record.
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
@@ -187,6 +204,40 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     if tile.is_active() && matches!(tile.block, TRAPS | GEYSER) {
         out.traps.push((x, y));
     }
+    if tile.is_active() && tile.block == TELEPORTER {
+        // A teleporter is three tiles wide and the anchor is its left one. Only the first two
+        // distinct ones matter: they are the pair the circuit joins.
+        let anchor = (x - i32::from(tile.frame_x) / 18, y);
+        if out.teleporters.len() < 2 && !out.teleporters.contains(&anchor) {
+            out.teleporters.push(anchor);
+        }
+    }
+    if tile.is_active() && matches!(tile.block, PUMP_IN | PUMP_OUT) {
+        // A pump is two by two, and all four of its cells take part.
+        let anchor = (
+            x - {
+                let column = i32::from(tile.frame_x) / 18;
+                if column > 1 { column - 2 } else { column }
+            },
+            y - i32::from(tile.frame_y) / 18,
+        );
+        let cells = [
+            (anchor.0, anchor.1 + 1),
+            (anchor.0 + 1, anchor.1 + 1),
+            anchor,
+            (anchor.0 + 1, anchor.1),
+        ];
+        let side = if tile.block == PUMP_IN {
+            &mut out.pump_in
+        } else {
+            &mut out.pump_out
+        };
+        for cell in cells {
+            if side.len() < PUMP_CELLS && !side.contains(&cell) {
+                side.push(cell);
+            }
+        }
+    }
     if tile.is_active() && tile.block == STATUE {
         // A statue is six tiles and the flood reaches all six; what it does belongs to the statue,
         // not to the tile, so it is reported once by its anchor.
@@ -204,6 +255,86 @@ const TRAPS: u16 = 137;
 const GEYSER: u16 = 443;
 /// The tile every statue is a frame of.
 const STATUE: u16 = 105;
+/// The teleporter, which is three wide.
+const TELEPORTER: u16 = 235;
+/// The two pumps, which are two by two.
+const PUMP_IN: u16 = 142;
+const PUMP_OUT: u16 = 143;
+/// The most pump cells one circuit run will pull from or push to.
+///
+/// The game keeps room for twenty and stops at nineteen, so a circuit wired through five pumps
+/// only moves water through the first few it reaches.
+const PUMP_CELLS: usize = 19;
+
+/// How wide and tall a teleporter's catchment is, in pixels.
+///
+/// It reaches three tiles up from the teleporter's own row, which is why standing on one works
+/// and walking past one at head height does not.
+pub const TELEPORTER_BOX: f32 = 48.0;
+
+/// Whether the two ends of a teleporter pair are far enough apart to be worth using.
+///
+/// Two within three tiles of each other would only shuffle whoever is standing on them, so the
+/// game refuses the pair outright.
+pub fn teleport_pair_is_useful(a: (i32, i32), b: (i32, i32)) -> bool {
+    !(a.0 < b.0 + 3 && a.0 > b.0 - 3 && a.1 > b.1 - 3 && a.1 < b.1)
+}
+
+/// Move liquid from a set of inlet cells to a set of outlet cells.
+///
+/// Each inlet is emptied into the outlets in turn, and only into ones holding the same liquid —
+/// an empty outlet takes on whatever arrives. A pump cannot mix water into lava; it simply skips
+/// the outlets that would.
+///
+/// Returns the cells that changed, for the caller to broadcast and re-settle.
+pub fn transfer_liquid(
+    world: &mut impl WiredWorld,
+    inlets: &[(i32, i32)],
+    outlets: &[(i32, i32)],
+) -> Vec<(i32, i32)> {
+    let mut changed = Vec::new();
+    for &(ix, iy) in inlets {
+        let mut source = world.tile(ix, iy);
+        if source.liquid == 0 {
+            continue;
+        }
+        let kind = source.liquid_kind;
+        let mut moved_any = false;
+        for &(ox, oy) in outlets {
+            if source.liquid == 0 {
+                break;
+            }
+            let mut sink = world.tile(ox, oy);
+            if sink.liquid == u8::MAX {
+                continue;
+            }
+            // An empty outlet takes on whatever it is given; a full-enough one only accepts more
+            // of what it already holds.
+            if sink.liquid != 0 && sink.liquid_kind != kind {
+                continue;
+            }
+            let room = u8::MAX - sink.liquid;
+            let amount = source.liquid.min(room);
+            if amount == 0 {
+                continue;
+            }
+            sink.liquid += amount;
+            sink.liquid_kind = kind;
+            source.liquid -= amount;
+            world.set_tile(ox, oy, sink);
+            changed.push((ox, oy));
+            moved_any = true;
+        }
+        if moved_any {
+            if source.liquid == 0 {
+                source.liquid_kind = terrustia_proto::tile::Liquid::Water;
+            }
+            world.set_tile(ix, iy, source);
+            changed.push((ix, iy));
+        }
+    }
+    changed
+}
 
 /// A shot a wired trap wants to take.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -647,5 +778,108 @@ mod tests {
         assert_eq!(fired.traps, vec![(105, 100)]);
         // And the tile is untouched: a trap is not a thing the flood changes.
         assert_eq!(board.tile(105, 100).block, TRAPS);
+    }
+
+    /// A pump moves what the inlet holds into the outlet, up to what the outlet can take.
+    #[test]
+    fn a_pump_moves_liquid_from_inlet_to_outlet() {
+        let mut board = Board(HashMap::new());
+        let mut full = Tile::AIR;
+        full.liquid = 200;
+        full.liquid_kind = terrustia_proto::tile::Liquid::Water;
+        board.set_tile(10, 10, full);
+
+        let changed = transfer_liquid(&mut board, &[(10, 10)], &[(50, 50)]);
+        assert_eq!(board.tile(10, 10).liquid, 0, "the inlet emptied");
+        assert_eq!(board.tile(50, 50).liquid, 200, "and the outlet filled");
+        assert_eq!(
+            board.tile(50, 50).liquid_kind,
+            terrustia_proto::tile::Liquid::Water,
+            "an empty outlet takes on what arrives"
+        );
+        assert!(changed.contains(&(10, 10)) && changed.contains(&(50, 50)));
+    }
+
+    /// A pump will not mix water into lava: it skips the outlets that would and keeps the rest.
+    #[test]
+    fn a_pump_refuses_to_mix_liquids() {
+        let mut board = Board(HashMap::new());
+        let mut water = Tile::AIR;
+        water.liquid = 100;
+        water.liquid_kind = terrustia_proto::tile::Liquid::Water;
+        board.set_tile(10, 10, water);
+        let mut lava = Tile::AIR;
+        lava.liquid = 50;
+        lava.liquid_kind = terrustia_proto::tile::Liquid::Lava;
+        board.set_tile(50, 50, lava);
+
+        transfer_liquid(&mut board, &[(10, 10)], &[(50, 50)]);
+        assert_eq!(board.tile(10, 10).liquid, 100, "nothing moved");
+        assert_eq!(board.tile(50, 50).liquid, 50);
+        assert_eq!(
+            board.tile(50, 50).liquid_kind,
+            terrustia_proto::tile::Liquid::Lava
+        );
+    }
+
+    /// An outlet takes only what it has room for, and the inlet keeps the rest for the next one.
+    #[test]
+    fn a_pump_fills_its_outlets_in_turn() {
+        let mut board = Board(HashMap::new());
+        let mut full = Tile::AIR;
+        full.liquid = 255;
+        board.set_tile(10, 10, full);
+        let mut nearly = Tile::AIR;
+        nearly.liquid = 200;
+        board.set_tile(50, 50, nearly);
+
+        transfer_liquid(&mut board, &[(10, 10)], &[(50, 50), (51, 50)]);
+        assert_eq!(
+            board.tile(50, 50).liquid,
+            255,
+            "the first filled to the brim"
+        );
+        assert_eq!(
+            board.tile(51, 50).liquid,
+            200,
+            "and the rest went to the next"
+        );
+        assert_eq!(board.tile(10, 10).liquid, 0);
+    }
+
+    /// A teleporter pair three tiles apart would only shuffle whoever is standing on it, so the
+    /// game refuses it outright.
+    #[test]
+    fn a_teleporter_pair_has_to_go_somewhere() {
+        assert!(teleport_pair_is_useful((100, 100), (400, 100)));
+        assert!(teleport_pair_is_useful((100, 100), (100, 400)));
+        assert!(!teleport_pair_is_useful((101, 100), (100, 101)));
+    }
+
+    /// The flood reports the first two teleporters it reaches, and only two: a third is ignored
+    /// rather than replacing one of the pair.
+    #[test]
+    fn the_flood_pairs_the_first_two_teleporters() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..140 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        for x in [110i32, 120, 130] {
+            let mut pad = wired(TELEPORTER, Wire::Red);
+            pad.frame_x = 0;
+            board.set_tile(x, 100, pad);
+        }
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.teleporters.len(), 2, "only two make a pair");
+        assert!(
+            fired
+                .teleporters
+                .iter()
+                .all(|p| [110, 120, 130].contains(&p.0))
+        );
     }
 }

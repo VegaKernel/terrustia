@@ -3974,6 +3974,12 @@ impl GameServer {
         for (sx, sy) in fired.statues {
             self.run_statue(sx, sy);
         }
+        if let [a, b] = fired.teleporters[..] {
+            self.run_teleporters(a, b);
+        }
+        if !fired.pump_in.is_empty() && !fired.pump_out.is_empty() {
+            self.run_pumps(&fired.pump_in, &fired.pump_out);
+        }
 
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
         Ok(())
@@ -4131,6 +4137,127 @@ impl GameServer {
                 if let Ok(frame) = square.encode() {
                     self.broadcast(frame, None);
                 }
+            }
+        }
+    }
+
+    /// Swap everything standing on one teleporter with everything standing on the other.
+    ///
+    /// It is a swap rather than a one-way trip: whatever is on each pad moves by the vector to
+    /// the other, so two players on opposite pads change places in one pull.
+    fn run_teleporters(&mut self, a: (i32, i32), b: (i32, i32)) {
+        use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH};
+        use crate::world::wiring::{TELEPORTER_BOX, teleport_pair_is_useful};
+
+        /// Whether a box overlaps a teleporter's catchment.
+        fn overlaps(pad: (f32, f32, f32, f32), at: (f32, f32), size: (f32, f32)) -> bool {
+            at.0 < pad.0 + pad.2
+                && at.0 + size.0 > pad.0
+                && at.1 < pad.1 + pad.3
+                && at.1 + size.1 > pad.1
+        }
+
+        if !teleport_pair_is_useful(a, b) {
+            return;
+        }
+        // The catchment reaches up from the teleporter's own row, which is why standing on one
+        // works and walking past one at head height does not.
+        let box_of = |at: (i32, i32)| {
+            (
+                (at.0 * 16) as f32,
+                (at.1 * 16) as f32 - TELEPORTER_BOX,
+                TELEPORTER_BOX,
+                TELEPORTER_BOX,
+            )
+        };
+        let (pad_a, pad_b) = (box_of(a), box_of(b));
+        let hop = (pad_b.0 - pad_a.0, pad_b.1 - pad_a.1);
+
+        // Both directions are worked out before anything moves, so a player who has just arrived
+        // on the far pad is not sent straight back.
+        let mut moves: Vec<(u8, (f32, f32))> = Vec::new();
+        let mut npc_moves: Vec<(u8, (f32, f32))> = Vec::new();
+        for (pad, shift) in [(pad_a, hop), (pad_b, (-hop.0, -hop.1))] {
+            for slot in 0..self.players.len() {
+                let Some(player) = self.players[slot].as_ref() else {
+                    continue;
+                };
+                if !player.is_playing() || player.life <= 0 {
+                    continue;
+                }
+                let slot = player.slot;
+                if moves.iter().any(|(s, _)| *s == slot) {
+                    continue;
+                }
+                if overlaps(
+                    pad,
+                    player.position,
+                    (PLAYER_WIDTH as f32, PLAYER_HEIGHT as f32),
+                ) {
+                    moves.push((
+                        slot,
+                        (player.position.0 + shift.0, player.position.1 + shift.1),
+                    ));
+                }
+            }
+            let riders: Vec<(u8, (f32, f32))> = self
+                .npcs
+                .iter()
+                .filter(|(index, n)| {
+                    n.is_alive()
+                        && n.life_max > 5
+                        && !n.stats.boss
+                        && !n.no_tile_collide
+                        && !npc_moves.iter().any(|(i, _)| i == index)
+                        && overlaps(pad, n.position, (n.width(), n.height()))
+                })
+                .map(|(index, n)| (index, (n.position.0 + shift.0, n.position.1 + shift.1)))
+                .collect();
+            npc_moves.extend(riders);
+        }
+
+        for (slot, to) in moves {
+            if let Some(player) = self.player_mut(slot) {
+                player.position = to;
+                player.velocity = (0.0, 0.0);
+            }
+            let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
+            // Flags zero: a player, moving to a given place, with no extra field.
+            w.u8(0).i16(i16::from(slot)).f32(to.0).f32(to.1).u8(0);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+        }
+        for (index, to) in npc_moves {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.position = to;
+                npc.velocity = (0.0, 0.0);
+            }
+            self.broadcast_npc(index);
+        }
+    }
+
+    /// Move liquid from the inlet pumps a circuit reached to its outlets.
+    fn run_pumps(&mut self, inlets: &[(i32, i32)], outlets: &[(i32, i32)]) {
+        let changed = {
+            let world = &mut self.world;
+            crate::world::wiring::transfer_liquid(world, inlets, outlets)
+        };
+        for (x, y) in changed {
+            // The moved liquid has to settle from where it landed, or it would sit in a column of
+            // its own until something else disturbed it.
+            self.liquids.disturb(x, y);
+            let tile = self.world.tile(x, y);
+            let square = TileSquare {
+                x: x as i16,
+                y: y as i16,
+                width: 1,
+                height: 1,
+                change_type: 0,
+                tiles: vec![tile],
+            };
+            if let Ok(frame) = square.encode() {
+                self.broadcast(frame, None);
             }
         }
     }
