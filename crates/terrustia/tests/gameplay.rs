@@ -2290,3 +2290,68 @@ async fn a_trap_will_not_fire_faster_than_its_cooldown() {
         born.len()
     );
 }
+
+/// A slime statue wired to a lever produces a slime, and that slime is worth nothing.
+///
+/// The worthlessness is the point: a statue that dropped coins would be a printing press, and a
+/// statue whose monsters counted against the spawn cap would stop the world spawning anything
+/// else. The game zeroes both on the way out of the statue.
+#[tokio::test]
+async fn a_wired_statue_spawns_its_monster() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        world.set_tile(390, 319, Tile::framed(136, 0, 0));
+        for x in 390..=400 {
+            let mut tile = world.tile(x, 319);
+            tile.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            world.set_tile(x, 319, tile);
+        }
+        // A slime statue: style 4, so frame_x is 4 * 36. Two wide and three tall, standing on
+        // the floor with its base at y = 319.
+        for dx in 0..2i16 {
+            for dy in 0..3i16 {
+                let mut tile = Tile::framed(105, 4 * 36 + dx * 18, dy * 18);
+                if dy == 2 {
+                    tile.flags
+                        .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+                }
+                world.set_tile(400 + i32::from(dx), 317 + i32::from(dy), tile);
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "statuewatcher").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(395.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    client.hit_switch(390, 319).await.unwrap();
+
+    let mut slime = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline && slime.is_none() {
+        client.move_to(395.0 * 16.0, 318.0 * 16.0).await.unwrap();
+        match client.next_event().await {
+            // NPC type 1 is a blue slime.
+            Ok(Event::NpcSynced(n)) if n.npc_type() == 1 => slime = Some(n),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let slime = slime.expect("the lever should have run the statue");
+    // It appears at the middle of the statue's base, a tile up.
+    assert!(
+        (slime.position.0 / 16.0 - 401.0).abs() < 3.0,
+        "it should stand on the statue, not at {}",
+        slime.position.0 / 16.0
+    );
+}

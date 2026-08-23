@@ -97,6 +97,8 @@ pub struct Fired {
     pub changed: Vec<(i32, i32)>,
     /// Trap tiles the current reached, for the caller to resolve into shots.
     pub traps: Vec<(i32, i32)>,
+    /// Statues the current reached, by their top-left tile.
+    pub statues: Vec<(i32, i32)>,
     /// How many tiles the current reached, for the record.
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
@@ -185,12 +187,23 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     if tile.is_active() && matches!(tile.block, TRAPS | GEYSER) {
         out.traps.push((x, y));
     }
+    if tile.is_active() && tile.block == STATUE {
+        // A statue is six tiles and the flood reaches all six; what it does belongs to the statue,
+        // not to the tile, so it is reported once by its anchor.
+        let (_, within) = terrustia_proto::statues::style_at(tile.frame_x, tile.frame_y);
+        let anchor = (x - within.0, y - within.1);
+        if !out.statues.contains(&anchor) {
+            out.statues.push(anchor);
+        }
+    }
 }
 
 /// The tile every dart, flame, spear and spiky-ball trap is a frame of.
 const TRAPS: u16 = 137;
 /// The geyser, which is its own tile because it is two wide.
 const GEYSER: u16 = 443;
+/// The tile every statue is a frame of.
+const STATUE: u16 = 105;
 
 /// A shot a wired trap wants to take.
 #[derive(Debug, Clone, Copy, PartialEq)]

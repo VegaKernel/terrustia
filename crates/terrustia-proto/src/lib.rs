@@ -30,6 +30,7 @@ pub mod projectile_data;
 pub mod reader;
 pub mod section;
 pub mod square;
+pub mod statues;
 pub mod tile;
 pub mod tile_drops;
 pub mod tile_entity;

@@ -142,6 +142,11 @@ pub struct Npc {
     /// A worm is a chain of separate NPCs; only the head steers, and every other link keeps a
     /// fixed distance behind the one in front.
     pub follows: Option<u8>,
+    /// Whether a statue made this one.
+    ///
+    /// It is worth no coins and takes up no room in the spawn budget, which is the only reason a
+    /// statue farm works: without it a wired statue would stop the world spawning anything else.
+    pub from_statue: bool,
 }
 
 impl Npc {
@@ -184,6 +189,7 @@ impl Npc {
             passenger: None,
             follows_boss: None,
             follows: None,
+            from_statue: false,
         })
     }
 
@@ -539,7 +545,9 @@ impl NpcStore {
         self.slots
             .iter()
             .flatten()
-            .filter(|npc| !npc.stats.town_npc)
+            // A statue's monster costs nothing against the cap, so a farm does not starve the
+            // rest of the world of spawns.
+            .filter(|npc| !npc.stats.town_npc && !npc.from_statue)
             .map(|npc| npc.stats.npc_slots)
             .sum()
     }

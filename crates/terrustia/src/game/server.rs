@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use rand::{SeedableRng, rngs::SmallRng};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::path::Path;
 use terrustia_proto::{
     ItemStack, NetworkText, Tile, TileFlags, id,
@@ -3393,7 +3393,14 @@ impl GameServer {
         // Live armour, not the type's: a rolling tortoise really is twice as hard to hurt.
         let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
         let mut killed = npc.take_damage(amount, hit.knockback, hit.direction);
-        let (npc_type, value, center) = (npc.npc_type, npc.stats.value, npc.center());
+        // A statue's monster is worth nothing: the game zeroes its value on the way out of the
+        // statue, which is what stops a wired statue being a coin printer.
+        let value = if npc.from_statue {
+            0.0
+        } else {
+            npc.stats.value
+        };
+        let (npc_type, center) = (npc.npc_type, npc.center());
 
         // The Eternia Crystal does not die when it runs out of life — it goes into its losing
         // drama, which is what actually ends the event ten seconds later.
@@ -3964,6 +3971,9 @@ impl GameServer {
         for (tx, ty) in fired.traps {
             self.fire_trap(tx, ty);
         }
+        for (sx, sy) in fired.statues {
+            self.run_statue(sx, sy);
+        }
 
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
         Ok(())
@@ -4013,6 +4023,140 @@ impl GameServer {
         ) {
             self.broadcast_projectile(index);
         }
+    }
+
+    /// Run one statue the current reached.
+    ///
+    /// The spawn point is the middle of the statue's base, which is why a slime statue on a
+    /// platform drops its slime onto the platform rather than into the tile it is standing in.
+    fn run_statue(&mut self, x: i32, y: i32) {
+        use terrustia_proto::statues::{self, Statue};
+
+        let tile = self.world.tile(x, y);
+        let (style, _) = statues::style_at(tile.frame_x, tile.frame_y);
+        let Some(what) = statues::statue(style) else {
+            return;
+        };
+        if self.mech_cooldown.contains_key(&(x, y)) {
+            return;
+        }
+        let base = ((x * 16 + 16) as f32, ((y + 3) * 16) as f32);
+
+        match what {
+            Statue::Npc {
+                types,
+                offset,
+                needs_room,
+            } => {
+                let npc_type = types[self.rng.random_range(0..types.len())];
+                if !self.statue_spawn_allowed(npc_type, base) {
+                    // Still take the cooldown: the statue fired, it simply had nothing to give.
+                    self.mech_cooldown.insert((x, y), what.cooldown());
+                    return;
+                }
+                self.mech_cooldown.insert((x, y), what.cooldown());
+                // Something wide needs the ground around the statue to be clear, or it would
+                // appear inside a wall.
+                if needs_room && self.solid_tiles(x - 2, x + 3, y, y + 2) {
+                    return;
+                }
+                let at = (base.0 + offset.0 as f32, base.1 + offset.1 as f32);
+                if let Some(index) = self.npcs.spawn(npc_type, at) {
+                    // A statue's monster is worth nothing and does not count against the spawn
+                    // budget, which is what makes a farm a farm rather than a way to stop the
+                    // world spawning anything else.
+                    if let Some(npc) = self.npcs.get_mut(index) {
+                        npc.from_statue = true;
+                    }
+                    self.broadcast_npc(index);
+                }
+            }
+            Statue::Item { item, offset_y } => {
+                let at = (base.0, base.1 + offset_y as f32);
+                let crowded = !statues::item_spawn_allowed(
+                    self.items
+                        .iter()
+                        .filter(|(_, w)| w.item.id == item)
+                        .map(|(_, w)| {
+                            ((w.position.0 - at.0).powi(2) + (w.position.1 - at.1).powi(2)).sqrt()
+                        }),
+                );
+                self.mech_cooldown.insert((x, y), what.cooldown());
+                if crowded {
+                    return;
+                }
+                if let Some(index) = self.items.spawn(ItemStack::new(item, 1, 0), at) {
+                    self.broadcast_item(index);
+                }
+            }
+            Statue::Lure { types } => {
+                self.mech_cooldown.insert((x, y), what.cooldown());
+                let candidates: Vec<u8> = self
+                    .npcs
+                    .iter()
+                    .filter(|(_, n)| types.contains(&n.npc_type) && n.is_alive())
+                    .map(|(index, _)| index)
+                    .collect();
+                if candidates.is_empty() {
+                    return;
+                }
+                let index = candidates[self.rng.random_range(0..candidates.len())];
+                if let Some(npc) = self.npcs.get_mut(index) {
+                    npc.position = (base.0 - npc.width() / 2.0, base.1 - npc.height() - 1.0);
+                    npc.velocity = (0.0, 0.0);
+                }
+                self.broadcast_npc(index);
+            }
+            Statue::Becomes { block } => {
+                self.mech_cooldown.insert((x, y), what.cooldown());
+                for dx in 0..2i32 {
+                    for dy in 0..3i32 {
+                        let mut tile = self.world.tile(x + dx, y + dy);
+                        tile.block = block;
+                        tile.frame_x = (dx * 18 + 216) as i16;
+                        tile.frame_y = (dy * 18) as i16;
+                        self.world.set_tile(x + dx, y + dy, tile);
+                    }
+                }
+                let square = TileSquare {
+                    x: x as i16,
+                    y: y as i16,
+                    width: 2,
+                    height: 3,
+                    change_type: 0,
+                    tiles: (0..6)
+                        .map(|i| self.world.tile(x + i % 2, y + i / 2))
+                        .collect(),
+                };
+                if let Ok(frame) = square.encode() {
+                    self.broadcast(frame, None);
+                }
+            }
+        }
+    }
+
+    /// Whether a statue may add another of this type, given how crowded it already is.
+    fn statue_spawn_allowed(&self, npc_type: u16, at: (f32, f32)) -> bool {
+        terrustia_proto::statues::spawn_allowed(
+            self.npcs
+                .iter()
+                .filter(|(_, n)| {
+                    n.is_alive() && terrustia_proto::statues::same_family(npc_type, n.npc_type)
+                })
+                .map(|(_, n)| {
+                    ((n.position.0 - at.0).powi(2) + (n.position.1 - at.1).powi(2)).sqrt()
+                }),
+        )
+    }
+
+    /// Whether any tile in this rectangle is solid.
+    fn solid_tiles(&self, from_x: i32, to_x: i32, from_y: i32, to_y: i32) -> bool {
+        (from_x..=to_x).any(|x| {
+            (from_y..=to_y).any(|y| {
+                let tile = self.world.tile(x, y);
+                tile.is_active() && terrustia_proto::tile_solid::solid(tile.block)
+            })
+        })
     }
 
     /// Count down every trap that has fired recently, and forget the ones that are ready again.
