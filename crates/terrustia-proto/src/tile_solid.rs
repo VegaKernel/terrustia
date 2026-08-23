@@ -1,7 +1,9 @@
 //! Which tile types block movement.
 //!
-//! Transcribed from `Main.tileSolid` and `Main.tileSolidTop` in the 1.4.5.7 build, including the
-//! three loop-driven ranges the game fills in alongside the literal assignments.
+//! Transcribed from `Main.tileSolid` and `Main.tileSolidTop` in the 1.4.5.7 build. Both are
+//! filled by replaying its initialisation in order — the literal assignments *and* the loops that
+//! set whole ranges, which is where the team blocks live and where a hand transcription lost
+//! them.
 
 use crate::tile_sets::TILE_COUNT;
 
@@ -18,7 +20,7 @@ const SOLID: [u64; 12] = [
     0x004C20043BC0003F,
     0x0A1E040000000000,
     0x001FFFFFFD680002,
-    0x00007FFFC044FF90,
+    0x00007FFFDFC4FF90,
 ];
 
 /// Platforms: solid from above only, so an NPC can walk on one but also stand inside it.
