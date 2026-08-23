@@ -159,8 +159,89 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if at.downed_plantera && npc_type == 262 {
         out.push(always(1293));
     }
+    if !at.expert {
+        out.extend(classic_only(npc_type));
+    }
     out.extend(by_mode(npc_type, at));
     out
+}
+
+/// What a boss drops when the world is *not* in expert.
+///
+/// In expert the treasure bag replaces all of this, which is why every one of these rules is
+/// gated the same way: a classic world gets the loot directly, and an expert world gets the bag
+/// that contains it. Most servers run classic, so leaving these out left most bosses dropping
+/// nothing but coins and a trophy.
+fn classic_only(npc_type: u16) -> Vec<Conditional> {
+    match npc_type {
+        4 => vec![
+            a_few(2112, 7, 1, 1),
+            a_few(1299, 40, 1, 1),
+            a_few(47, 1, 20, 50),
+        ],
+        13 => vec![
+            a_few(56, 1, 20, 60),
+            a_few(994, 20, 1, 1),
+            a_few(2111, 7, 1, 1),
+        ],
+        14 => vec![
+            a_few(56, 1, 20, 60),
+            a_few(994, 20, 1, 1),
+            a_few(2111, 7, 1, 1),
+        ],
+        15 => vec![
+            a_few(56, 1, 20, 60),
+            a_few(994, 20, 1, 1),
+            a_few(2111, 7, 1, 1),
+        ],
+        113 => vec![a_few(2105, 7, 1, 1), a_few(367, 1, 1, 1)],
+        127 => vec![
+            a_few(2107, 7, 1, 1),
+            a_few(1225, 1, 15, 30),
+            a_few(547, 1, 25, 40),
+        ],
+        134 => vec![
+            a_few(2113, 7, 1, 1),
+            a_few(1225, 1, 15, 30),
+            a_few(548, 1, 25, 40),
+        ],
+        222 => vec![
+            a_few(2108, 7, 1, 1),
+            a_few(1132, 3, 1, 1),
+            a_few(1170, 15, 1, 1),
+            a_few(2502, 20, 1, 1),
+            a_few(5483, 15, 1, 1),
+            a_few(1130, 4, 10, 30),
+            a_few(2431, 1, 17, 30),
+        ],
+        245 => vec![
+            a_few(2110, 7, 1, 1),
+            a_few(1294, 4, 1, 1),
+            a_few(6158, 6, 1, 1),
+            a_few(2218, 1, 4, 8),
+        ],
+        266 => vec![
+            a_few(880, 1, 40, 90),
+            a_few(2104, 7, 1, 1),
+            a_few(3060, 20, 1, 1),
+        ],
+        370 => vec![a_few(2588, 7, 1, 1), a_few(2609, 15, 1, 1)],
+        398 => vec![
+            a_few(3373, 7, 1, 1),
+            a_few(4469, 10, 1, 1),
+            a_few(3384, 1, 1, 1),
+            a_few(3460, 1, 70, 90),
+        ],
+        551 => vec![a_few(3863, 7, 1, 1), a_few(3883, 4, 1, 1)],
+        668 => vec![
+            a_few(5109, 7, 1, 1),
+            a_few(5098, 3, 1, 1),
+            a_few(5101, 3, 1, 1),
+            a_few(5113, 3, 1, 1),
+            a_few(5385, 14, 1, 1),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 /// The drops the game rolls differently depending on the world's mode.
