@@ -378,6 +378,18 @@ impl Client {
         self.send(&hit.encode()?).await
     }
 
+    /// Offer some of our slots to the nearby chests, as the quick stack button does.
+    pub async fn quick_stack(&mut self, slots: &[u16], smart: bool) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::QUICK_STACK_CHESTS);
+        w.i32(slots.len() as i32);
+        for slot in slots {
+            w.i16(*slot as i16);
+        }
+        w.bool(smart);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Drag a wiring tool from one tile to another.
     pub async fn mass_wire(
         &mut self,

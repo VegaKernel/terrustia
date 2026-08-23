@@ -208,6 +208,13 @@ const DEMON_CONCH: u8 = 2;
 const SHELLPHONE_SPAWN: u8 = 3;
 const NO_SPACE_RESCUE: u8 = 4;
 
+/// The most slots a quick stack may offer at once.
+///
+/// A player's main inventory is forty slots and the void bag adds another forty. Anything past
+/// that is a crafted packet, and reading a claimed count of two billion before checking it is how
+/// a server runs out of memory.
+const MAX_QUICK_STACK_SLOTS: i32 = 200;
+
 /// The Portal Gun's two ends, which are projectiles rather than tiles.
 const PORTAL_PROJECTILE: u16 = 602;
 
@@ -1056,6 +1063,7 @@ impl GameServer {
             | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
             id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
+            id::QUICK_STACK_CHESTS => self.on_quick_stack(slot, &payload),
             id::RELEASE_ITEM_OWNERSHIP => self.on_release_item(slot, &payload),
             id::MURDER_SOMEONE_ELSES_PORTAL => self.on_close_portal(slot, &payload),
             id::TELEPORT_PLAYER_THROUGH_PORTAL => self.on_portal_teleport(slot, &payload),
@@ -2244,6 +2252,142 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = id;
         }
+        Ok(())
+    }
+
+    /// Packet 85: quick stack — emptying an armful of loot into the chests it belongs in.
+    ///
+    /// The client offers a list of its own slots and the server decides where each goes, because
+    /// only the server knows what is in chests nobody has opened and only the server can stop two
+    /// players both being told the same slot was free.
+    ///
+    /// The client's word is taken for *which of its slots are eligible* — favourited items and
+    /// coins are excluded, and that is the client's own bookkeeping — but never for where
+    /// anything lands.
+    fn on_quick_stack(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use crate::world::quick_stack::{self, Destination};
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let count = r.i32()?;
+        if !(0..=MAX_QUICK_STACK_SLOTS).contains(&count) {
+            debug!(slot, count, "refusing an implausible quick stack");
+            return Ok(());
+        }
+        let mut offered = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let which = r.i16()?;
+            let Ok(which) = u16::try_from(which) else {
+                continue;
+            };
+            // What the slot holds is the server's own record, not the client's claim.
+            if let Some(held) = self
+                .player(slot)
+                .and_then(|p| p.inventory.get(&which))
+                .map(|e| e.item)
+                .filter(|i| !i.is_empty())
+            {
+                offered.push((which, held));
+            }
+        }
+        let smart = r.bool().unwrap_or(false);
+        let _ = smart; // the sorting mode; the plain rule is the same either way here
+
+        let Some(from) = self.player(slot).map(|p| p.position) else {
+            return Ok(());
+        };
+        // A chest somebody has open is off limits, which is what stops a quick stack landing in
+        // the middle of somebody else's rummaging.
+        let open: Vec<i16> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.slot != slot)
+            .map(|p| p.open_chest)
+            .filter(|id| *id >= 0)
+            .collect();
+        let mut destinations: Vec<Destination> = self
+            .world
+            .chests
+            .iter()
+            .enumerate()
+            .filter_map(|(id, c)| c.as_ref().map(|c| (id as i16, c)))
+            .map(|(id, c)| Destination {
+                id,
+                position: (
+                    f32::from(c.x) * crate::game::npc::TILE + crate::game::npc::TILE,
+                    f32::from(c.y) * crate::game::npc::TILE + crate::game::npc::TILE,
+                ),
+                items: c.items.clone(),
+                blocked: open.contains(&id),
+            })
+            .collect();
+
+        let outcome = quick_stack::run(from, &offered, &mut destinations);
+        if outcome.moves.is_empty() && outcome.blocked.is_empty() {
+            return Ok(());
+        }
+
+        // Write the results back and tell everybody: the chests to everyone, since anyone may
+        // have one open, and the player's own slots to the player.
+        for movement in &outcome.moves {
+            if let Some(Some(chest)) = self
+                .world
+                .chests
+                .get_mut(usize::try_from(movement.chest).unwrap_or(usize::MAX))
+                && let Some(cell) = chest.items.get_mut(movement.chest_slot)
+            {
+                *cell = movement.chest_now;
+            }
+            let frame = SyncChestItem {
+                chest: movement.chest,
+                slot: movement.chest_slot as u8,
+                item: movement.chest_now,
+            }
+            .encode()?;
+            self.broadcast(frame, None);
+
+            if let Some(player) = self.player_mut(slot)
+                && let Some(held) = player.inventory.get_mut(&movement.from_slot)
+            {
+                held.item = movement.left_behind;
+            }
+        }
+        // One equipment packet per slot that changed, rather than one per move: a stack split
+        // across three chests changed once from the player's point of view.
+        let mut told = std::collections::HashSet::new();
+        for movement in &outcome.moves {
+            if !told.insert(movement.from_slot) {
+                continue;
+            }
+            if let Some(equip) = self
+                .player(slot)
+                .and_then(|p| p.inventory.get(&movement.from_slot))
+                .copied()
+                && let Ok(frame) = equip.encode()
+            {
+                self.broadcast(frame, None);
+            }
+        }
+
+        // Which chests refused, so the client can mark them.
+        if !outcome.blocked.is_empty() {
+            let mut w = terrustia_proto::PacketWriter::new(id::QUICK_STACK_CHESTS);
+            w.i32(outcome.blocked.len() as i32);
+            for chest in &outcome.blocked {
+                w.u16(*chest as u16);
+            }
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
+        debug!(
+            slot,
+            moved = outcome.moves.len(),
+            blocked = outcome.blocked.len(),
+            "quick stack"
+        );
         Ok(())
     }
 

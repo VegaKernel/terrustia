@@ -6,6 +6,7 @@ pub mod mass_wire;
 pub mod meteor;
 pub mod objects;
 pub mod progress;
+pub mod quick_stack;
 pub mod wiring;
 pub mod wld;
 pub mod wld_save;

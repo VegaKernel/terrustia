@@ -3912,3 +3912,109 @@ async fn a_chest_can_be_asked_its_name() {
     assert_eq!((r.i16().unwrap(), r.i16().unwrap()), (400, 320));
     assert_eq!(r.string().unwrap(), "Ore");
 }
+
+/// Quick stack puts loot into the chest that already holds it, and into no other.
+#[tokio::test]
+async fn quick_stack_fills_the_chest_that_already_has_it() {
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![
+            // Has wood already: a destination.
+            Some(Chest {
+                x: 400,
+                y: 320,
+                name: "Wood".into(),
+                items: vec![ItemStack::new(9, 50, 0), ItemStack::EMPTY],
+            }),
+            // Empty: not a destination, however much room it has.
+            Some(Chest {
+                x: 402,
+                y: 320,
+                name: "Empty".into(),
+                items: vec![ItemStack::EMPTY, ItemStack::EMPTY],
+            }),
+        ];
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    // Stand next to the chests, and carry some wood.
+    alice.move_to(400.0 * 16.0, 320.0 * 16.0).await.unwrap();
+    alice
+        .set_equipment(10, ItemStack::new(9, 30, 0))
+        .await
+        .unwrap();
+
+    alice.quick_stack(&[10], false).await.unwrap();
+
+    let Event::Other(frame) = alice
+        .wait_for("the chest filling", |e| {
+            matches!(e, Event::Other(f) if f.id == id::SYNC_CHEST_ITEM)
+        })
+        .await
+        .expect("quick stack should move the wood")
+    else {
+        unreachable!()
+    };
+    let sync = terrustia_proto::objects::SyncChestItem::decode(&frame.payload).unwrap();
+    assert_eq!(sync.chest, 0, "the chest with wood, not the empty one");
+    assert_eq!(sync.item.id, 9);
+    assert_eq!(sync.item.stack, 80, "fifty plus thirty");
+}
+
+/// An empty chest takes nothing, which is what makes the button safe to press without looking.
+#[tokio::test]
+async fn quick_stack_does_not_scatter_into_empty_chests() {
+    let addr = start_with(Config::default(), |world| {
+        world.chests = vec![Some(Chest {
+            x: 400,
+            y: 320,
+            name: "Empty".into(),
+            items: vec![ItemStack::EMPTY, ItemStack::EMPTY],
+        })];
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.move_to(400.0 * 16.0, 320.0 * 16.0).await.unwrap();
+    alice
+        .set_equipment(10, ItemStack::new(9, 30, 0))
+        .await
+        .unwrap();
+
+    alice.quick_stack(&[10], false).await.unwrap();
+    let moved = alice
+        .try_wait_for(
+            "a chest filling",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_CHEST_ITEM),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(
+        moved.is_none(),
+        "an empty chest is not somewhere the button may put things"
+    );
+}
+
+/// A crafted count is refused rather than allocated.
+#[tokio::test]
+async fn an_absurd_quick_stack_is_refused() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    let mut w = terrustia_proto::PacketWriter::new(id::QUICK_STACK_CHESTS);
+    w.i32(i32::MAX);
+    let frame = w.finish().unwrap();
+    alice.send(&frame).await.unwrap();
+
+    // The connection survives, which is the whole assertion.
+    alice.set_timeout(Duration::from_secs(3));
+    alice.say("still here").await.unwrap();
+    let alive = alice
+        .try_wait_for(
+            "our own message",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("still here")),
+            Duration::from_secs(3),
+        )
+        .await;
+    assert!(alive.is_some(), "the server should shrug that off");
+}
