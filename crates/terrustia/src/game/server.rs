@@ -201,6 +201,22 @@ const DOLL_MISC: u8 = 3;
 /// What a client sends to say it has closed whatever tile entity it had open.
 const NO_TILE_ENTITY: i32 = -1;
 
+// The five things packet 73 can ask for, in the order `MessageBuffer` reads them.
+const TELEPORT_POTION: u8 = 0;
+const MAGIC_CONCH: u8 = 1;
+const DEMON_CONCH: u8 = 2;
+const SHELLPHONE_SPAWN: u8 = 3;
+const NO_SPACE_RESCUE: u8 = 4;
+
+/// How far in from either edge the ocean reaches. `WorldGen.beachDistance`.
+const BEACH_DISTANCE: i32 = 380;
+/// ...and how much of that is water rather than sand worth standing on.
+const BEACH_MARGIN: i32 = 50;
+
+/// A player's box, which decides where their top-left corner goes for a given tile.
+const PLAYER_HALF_WIDTH: f32 = 10.0;
+const PLAYER_HEIGHT: f32 = 42.0;
+
 /// The world position of a tile's top-left corner.
 fn tile_corner(x: i16, y: i16) -> (f32, f32) {
     (
@@ -983,6 +999,7 @@ impl GameServer {
             | id::FOOD_PLATTER_TRY_PLACING
             | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
+            id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
             id::T_E_DISPLAY_DOLL_DATA_SYNC => self.on_display_doll_slot(slot, &payload),
             id::T_E_HAT_RACK_ITEM_SYNC => self.on_hat_rack_slot(slot, &payload),
             id::REQUEST_TILE_ENTITY_INTERACTION => {
@@ -1503,6 +1520,135 @@ impl GameServer {
         let frame = w.finish()?;
         self.broadcast(frame, Some(slot));
         debug!(slot, x = at.0, y = at.1, "player teleported");
+        Ok(())
+    }
+
+    /// Packet 73: a client asking the server to move it somewhere.
+    ///
+    /// Five items work this way, and the reason they are the server's business rather than the
+    /// client's is that all five have to *search the world* for somewhere safe to land — which
+    /// means seeing tiles the client may not have loaded. None of them was handled, so a
+    /// Teleportation Potion, a Magic Conch, a Demon Conch and a Shellphone were all inert.
+    ///
+    /// A search that finds nowhere leaves the player where they are. That is the game's own
+    /// behaviour and the right one: a conch that fails is a wasted item, but a conch that drops
+    /// you into a lava lake is a lost character.
+    fn on_server_teleport(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use crate::game::teleport::{self, Gates, Wants};
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let kind = r.u8()?;
+
+        let (width, height) = (self.world.width(), self.world.height());
+        let gates = Gates {
+            downed_plantera: self.world.progress.downed_plantera,
+            downed_skeletron: self.world.progress.downed_boss3,
+            surface: i32::from(self.world.surface),
+            width,
+            height,
+        };
+        let Some(here) = self.player(slot).map(|p| p.position) else {
+            return Ok(());
+        };
+
+        // The underworld begins here. The game keeps it as a fraction of the world's height.
+        let underworld = height - 200;
+
+        let spot = match kind {
+            TELEPORT_POTION => {
+                // Anywhere at all, above the underworld.
+                let tiles = WorldTiles(&self.world);
+                teleport::find_spot(
+                    &tiles,
+                    &mut self.rng,
+                    (100, width - 200),
+                    (100, underworld - 100),
+                    &Wants::default(),
+                    &gates,
+                )
+            }
+            MAGIC_CONCH => {
+                // The ocean on the far side of the world from wherever you are, which is what
+                // makes the conch a way of crossing the map rather than a local shuffle.
+                let far_side_is_left = here.0 / crate::game::npc::TILE >= (width / 2) as f32;
+                let start = if far_side_is_left {
+                    BEACH_MARGIN
+                } else {
+                    width - BEACH_DISTANCE
+                };
+                let tiles = WorldTiles(&self.world);
+                teleport::find_spot(
+                    &tiles,
+                    &mut self.rng,
+                    (start, BEACH_DISTANCE - BEACH_MARGIN),
+                    (100, i32::from(self.world.surface) + 100),
+                    &Wants {
+                        avoid_any_liquid: true,
+                        max_fall: 300,
+                        ..Default::default()
+                    },
+                    &gates,
+                )
+            }
+            DEMON_CONCH => {
+                // The underworld, near the middle first and then further out if that fails.
+                let middle = width / 2;
+                let tiles = WorldTiles(&self.world);
+                let wants = Wants {
+                    avoid_any_liquid: true,
+                    avoid_walls: true,
+                    allow_platform_floor: true,
+                    ..Default::default()
+                };
+                teleport::find_spot(
+                    &tiles,
+                    &mut self.rng,
+                    (middle - 50, 100),
+                    (underworld + 20, 80),
+                    &wants,
+                    &gates,
+                )
+                .or_else(|| {
+                    // Failing the middle, anywhere in the underworld at all.
+                    teleport::find_spot(
+                        &tiles,
+                        &mut self.rng,
+                        (100, width - 200),
+                        (underworld + 20, 80),
+                        &wants,
+                        &gates,
+                    )
+                })
+            }
+            // The Shellphone's spawn setting, and the rescue that fires when a player is crushed
+            // with nowhere to stand. Both go to the world's spawn point, which is always valid.
+            SHELLPHONE_SPAWN | NO_SPACE_RESCUE => Some((
+                f32::from(self.world.spawn_x) * crate::game::npc::TILE - PLAYER_HALF_WIDTH,
+                f32::from(self.world.spawn_y) * crate::game::npc::TILE - PLAYER_HEIGHT,
+            )),
+            _ => return Ok(()),
+        };
+
+        let Some(at) = spot else {
+            debug!(slot, kind, "no safe landing spot; the player stays put");
+            return Ok(());
+        };
+        if let Some(player) = self.player_mut(slot) {
+            player.position = at;
+            player.velocity = (0.0, 0.0);
+        }
+
+        // Style 2 is the potion's swirl, 11 the phone's. They are only an effect, but a client
+        // that is not told which one plays the wrong animation.
+        let style = if kind == TELEPORT_POTION { 2u8 } else { 11u8 };
+        let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
+        w.u8(0).i16(i16::from(slot)).f32(at.0).f32(at.1).u8(style);
+        let frame = w.finish()?;
+        // To everyone including the mover: the client asked to be moved and does not move itself.
+        self.broadcast(frame, None);
+        debug!(slot, kind, x = at.0, y = at.1, "server-side teleport");
         Ok(())
     }
 

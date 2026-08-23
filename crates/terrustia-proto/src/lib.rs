@@ -11,6 +11,7 @@ pub mod conditional_drops;
 pub mod convert;
 pub mod error;
 pub mod housing;
+pub mod hurt_tiles;
 pub mod hurt;
 pub mod id;
 pub mod inventory;

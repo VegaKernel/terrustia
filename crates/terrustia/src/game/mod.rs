@@ -12,6 +12,7 @@ pub mod player;
 pub mod projectile;
 pub mod server;
 pub mod spawn;
+pub mod teleport;
 pub mod weather;
 
 pub use player::{ConnState, Player};

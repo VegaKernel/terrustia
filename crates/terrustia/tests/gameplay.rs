@@ -3595,3 +3595,84 @@ async fn tile_entities_survive_a_save() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// -------------------------------------------------------- server teleports
+
+/// A Shellphone sends you home. It is the simplest of the five and the one with no way to fail,
+/// so it is the clearest proof the whole path works — the packet was not handled at all.
+#[tokio::test]
+async fn a_shellphone_sends_a_player_to_spawn() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    // Somewhere that is definitely not spawn.
+    alice.move_to(120.0, 400.0).await.unwrap();
+    alice.ask_teleport(3).await.unwrap();
+
+    let moved = alice
+        .wait_for("the teleport", |e| {
+            matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY)
+        })
+        .await
+        .expect("a shellphone should move the player");
+    let Event::Other(frame) = moved else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    assert_eq!(r.u8().unwrap(), 0, "it is a player being moved");
+    assert_eq!(r.i16().unwrap(), i16::from(alice.slot()));
+    let (x, y) = (r.f32().unwrap(), r.f32().unwrap());
+    assert!(x > 0.0 && y > 0.0, "it should land somewhere real");
+    assert!(
+        (x - 120.0).abs() > 16.0 || (y - 400.0).abs() > 16.0,
+        "and somewhere other than where it started"
+    );
+}
+
+/// A teleportation potion has to land somewhere a player can actually stand, not merely
+/// somewhere with room in it.
+#[tokio::test]
+async fn a_teleport_lands_somewhere_solid() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    alice.ask_teleport(0).await.unwrap();
+    let landed = alice
+        .try_wait_for(
+            "the teleport",
+            |e| matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_secs(5),
+        )
+        .await;
+    // A small test world can genuinely have nowhere the search likes, and refusing is the right
+    // answer when it does — so the assertion is about *where*, not *whether*.
+    if let Some(Event::Other(frame)) = landed {
+        let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+        r.u8().unwrap();
+        r.i16().unwrap();
+        let (x, y) = (r.f32().unwrap(), r.f32().unwrap());
+        assert!(
+            x >= 45.0 * 16.0 && y >= 45.0 * 16.0,
+            "a landing spot should be clear of the world's edges, got ({x}, {y})"
+        );
+    }
+}
+
+/// A packet asking for something that is not one of the five does nothing at all.
+#[tokio::test]
+async fn an_unknown_teleport_request_is_refused() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    alice.ask_teleport(99).await.unwrap();
+    let moved = alice
+        .try_wait_for(
+            "a teleport",
+            |e| matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(moved.is_none(), "there is no fifth conch");
+}

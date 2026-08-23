@@ -378,6 +378,15 @@ impl Client {
         self.send(&hit.encode()?).await
     }
 
+    /// Ask the server to move us: 0 potion, 1 magic conch, 2 demon conch, 3 shellphone,
+    /// 4 the rescue that fires when there is nowhere to stand.
+    pub async fn ask_teleport(&mut self, kind: u8) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::REQUEST_TELEPORTATION_BY_SERVER);
+        w.u8(kind);
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Place a tile entity: an item frame, a mannequin, a pylon.
     pub async fn place_tile_entity(&mut self, x: i16, y: i16, kind: u8) -> Result<()> {
         let mut w = terrustia_proto::PacketWriter::new(id::TILE_ENTITY_PLACEMENT);
