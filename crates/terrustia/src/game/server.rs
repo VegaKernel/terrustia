@@ -148,6 +148,20 @@ const CHEST_BLOCK: u16 = 21;
 /// Ticks between NPC position broadcasts. Clients interpolate between them.
 const NPC_SYNC_INTERVAL: u64 = 6;
 
+/// Which section a world position falls in.
+fn section_of(at: (f32, f32)) -> (i32, i32) {
+    (
+        (at.0 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_WIDTH,
+        (at.1 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_HEIGHT,
+    )
+}
+
+/// Whether somebody standing here has that section loaded.
+fn near_section(standing: (f32, f32), section: (i32, i32)) -> bool {
+    let theirs = section_of(standing);
+    (theirs.0 - section.0).abs() <= SECTION_REACH && (theirs.1 - section.1).abs() <= SECTION_REACH
+}
+
 /// How many sections either way still count as near enough to be told about.
 ///
 /// One section is 200 by 150 tiles, so this reaches 600 by 450 — comfortably past what anybody
@@ -3350,9 +3364,32 @@ impl GameServer {
             knockback: p.knockback,
             original_damage: p.damage as i16,
         };
+        let at = sync.position;
         if let Ok(frame) = sync.encode() {
-            self.broadcast(frame, None);
+            // Same rule as an NPC's, which is the game's: a projectile is only news to the
+            // players whose part of the world it is flying through. Unlike an NPC it has no skip
+            // cap, because one that has left never needs catching up on — it is gone.
+            self.broadcast_to_nearby(frame, at);
         }
+    }
+
+    /// Send a frame only to the players near a point.
+    fn broadcast_to_nearby(&mut self, frame: Vec<u8>, at: (f32, f32)) {
+        let bytes = Bytes::from(frame);
+        for slot in self.players_near(at) {
+            self.send_bytes(slot, bytes.clone());
+        }
+    }
+
+    /// The players whose loaded part of the world covers a point.
+    fn players_near(&self, at: (f32, f32)) -> Vec<u8> {
+        let section = section_of(at);
+        self.players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing() && near_section(p.position, section))
+            .map(|p| p.slot)
+            .collect()
     }
 
     /// Drop cached sections whose tiles have changed.
@@ -3405,28 +3442,13 @@ impl GameServer {
     /// freezing where it was last seen.
     fn broadcast_near(&mut self, frame: Vec<u8>, at: (f32, f32), index: u8) {
         let bytes = Bytes::from(frame);
-        let section = (
-            (at.0 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_WIDTH,
-            (at.1 / crate::game::npc::TILE) as i32 / terrustia_proto::section::SECTION_HEIGHT,
-        );
+        let section = section_of(at);
         let targets: Vec<(u8, bool)> = self
             .players
             .iter()
             .flatten()
             .filter(|p| p.is_playing())
-            .map(|p| {
-                let theirs = (
-                    (p.position.0 / crate::game::npc::TILE) as i32
-                        / terrustia_proto::section::SECTION_WIDTH,
-                    (p.position.1 / crate::game::npc::TILE) as i32
-                        / terrustia_proto::section::SECTION_HEIGHT,
-                );
-                // A section is near if it is theirs or one of its neighbours, which is the same
-                // reach the game keeps a section active over.
-                let near = (theirs.0 - section.0).abs() <= SECTION_REACH
-                    && (theirs.1 - section.1).abs() <= SECTION_REACH;
-                (p.slot, near)
-            })
+            .map(|p| (p.slot, near_section(p.position, section)))
             .collect();
         for (slot, near) in targets {
             if !near {

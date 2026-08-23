@@ -2830,3 +2830,69 @@ async fn an_eater_of_worlds_drops_its_ore() {
         "no shadow scales from six Eaters of Worlds; saw {seen:?}"
     );
 }
+
+/// A player is only told about the NPCs in their own part of the world.
+///
+/// Sending every NPC to every player is what a server can least afford: the cost grows with
+/// players times NPCs, which are the two things it is meant to scale in.
+#[tokio::test]
+async fn an_npc_far_away_is_not_broadcast() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 100..700 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+    })
+    .await;
+
+    // One player at each end of the corridor, far enough apart to be in different sections.
+    let mut near = join(addr, "near").await;
+    near.set_timeout(Duration::from_secs(20));
+    near.move_to(150.0 * 16.0, 318.0 * 16.0).await.unwrap();
+
+    let mut far = join(addr, "far").await;
+    far.set_timeout(Duration::from_secs(20));
+    far.move_to(650.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Spawn beside the near player. `/spawn` puts it next to whoever asked.
+    near.say("/spawn Zombie").await.unwrap();
+
+    // The player standing on top of it hears about it...
+    let seen = near
+        .try_wait_for(
+            "the zombie",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 3),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(seen.is_some(), "the player next to it was not told");
+
+    // ...and the one five hundred tiles away is not flooded with it. The game lets four syncs go
+    // by and then sends one anyway, so a handful over several seconds is right and a stream is
+    // not: at one sync every six ticks that would be about fifty.
+    let mut count = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        far.move_to(650.0 * 16.0, 318.0 * 16.0).await.ok();
+        match far
+            .try_wait_for(
+                "a distant zombie",
+                |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 3),
+                Duration::from_millis(400),
+            )
+            .await
+        {
+            Some(_) => count += 1,
+            None => {}
+        }
+    }
+    assert!(
+        count < 20,
+        "the distant player was sent the zombie {count} times in five seconds"
+    );
+}
