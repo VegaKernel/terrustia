@@ -12,7 +12,7 @@ written to be read before touching the code it describes.
 | [teleports.md](teleports.md) | The five items that ask the server to move a player, and how a safe landing spot is found |
 | [wiring.md](wiring.md) | Circuits, the Grand Design's L-shaped path, and the limits this server adds that the game does not |
 | [performance.md](performance.md) | The tick budget, where the time goes, and the autosave stall that hid behind a wrong guess |
-| [shimmer.md](shimmer.md) | Transmutation: what turns into what, why it takes a second and a half, and the one branch still missing |
+| [shimmer.md](shimmer.md) | Transmutation and decrafting: what turns into what, why it takes a second and a half, and why a cascade is not a loop |
 | [world-file.md](world-file.md) | The `.wld` format as this server reads and writes it, including what is preserved verbatim |
 | [worldgen-parity.md](worldgen-parity.md) | The plan for vanilla-identical world generation, and the oracle that steers it |
 | [generated-tables.md](generated-tables.md) | Which source files are generated, from what, and how to regenerate them |

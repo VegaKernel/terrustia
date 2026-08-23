@@ -57,18 +57,41 @@ Not transmuted but spent: a stack becomes coin luck and vanishes.
 Platinum is capped at one coin's worth however many go in — the game's own rule, and what stops a
 stack being worth a billion. The arithmetic saturates rather than wrapping.
 
-## The gap: decrafting
+## Decrafting
 
-An item with no transform and no creature falls back, in the game, to being **decrafted** into
-its recipe's ingredients. That needs the whole recipe database — thousands of entries and a
-crafting system this server does not model at all.
+An item with no transform and no creature comes apart into what it was made of.
 
-Such an item simply does not shimmer here. It sinks, reaches the threshold, and is marked as
-having been through so it stops asking the same question every tick.
+This needed a recipe table, which sounded like it needed a crafting system — it does not. Nothing
+here knows about crafting stations, conditions or whether a player can reach a bench. It answers
+one question: *if this were broken apart, what would come out?*
 
-This is a real gap, not a decision, and it is the largest thing still missing from the mechanic.
-It is recorded here rather than papered over with a guess, because a *wrong* decraft — giving back
-the wrong ingredients — would be much worse than giving back none.
+[`recipes.rs`](../crates/terrustia-proto/src/recipes.rs) is generated from `Recipe.SetupRecipes`:
+**2,721 recipes parsed, 2,551 decraftable, 2,536 craftable items, 4,407 ingredient entries.** Two
+of the game's rules are baked in rather than applied at runtime — where several recipes make the
+same item the *last* wins (`UpdateWhichItemsAreCrafted` overwrites as it goes), and recipes marked
+`notDecraftable` are excluded outright.
+
+Three rules govern what comes back:
+
+- **Whole batches only.** A recipe that makes three at a time needs three to decraft. Two torches
+  stay two torches; the remainder of a larger stack stays as it was.
+- **The world's evil can change the answer.** Some recipes have a crimson and a corruption
+  variant, so the same item decrafts differently depending on the world.
+- **Alchemy gives back less.** Each unit of an alchemy recipe's ingredients has a one-in-three
+  chance of being lost, which is what stops potions being a free material duplicator.
+
+The table was checked against the source by a script written from the format rather than from the
+generator: 300 recipes sampled at random, all matching, and 2,536 of 2,536 craftable items
+present.
+
+## A note on chains
+
+Decrafting can cascade, and that is correct. A gold bar breaks into four gold ore, and gold ore
+has a transform of its own — so it shimmers again into platinum ore. Watching one go in and
+several things come back out over a few seconds is the mechanic working, not a loop.
+
+What *cannot* happen is an item going round forever: anything that has been through carries a
+flag, and the things it became are new items with their own one turn each.
 
 ## Packets
 

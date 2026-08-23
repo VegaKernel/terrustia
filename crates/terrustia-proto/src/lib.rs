@@ -33,6 +33,7 @@ pub mod prehardmode;
 pub mod projectile;
 pub mod projectile_data;
 pub mod reader;
+pub mod recipes;
 pub mod section;
 pub mod shimmer;
 pub mod square;

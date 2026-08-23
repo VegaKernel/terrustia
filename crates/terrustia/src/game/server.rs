@@ -265,6 +265,23 @@ const MERCHANT_ROLLS: usize = 50;
 /// How many slots the stock packet carries, whatever he actually has. `Main.TravelShopMaxSlots`.
 const TRAVEL_SHOP_SLOTS: usize = 40;
 
+/// One item that shimmer is about to break apart, and what into.
+struct Decraft {
+    index: i16,
+    at: (f32, f32),
+    recipe: &'static terrustia_proto::recipes::Recipe,
+    /// How many whole batches came apart. A stack only decrafts in whole batches.
+    batches: i32,
+    /// What was left over and stays as it was.
+    kept: i16,
+}
+
+/// The most of one thing a single dropped stack holds.
+///
+/// A stack is a signed short on the wire and nothing in the game stacks higher, so a decraft that
+/// gives back more than this spreads across several piles rather than one impossible one.
+const MAX_ITEM_STACK: i16 = 9_999;
+
 // The two things packet 146 can announce: a transmutation's sparkle, and coins becoming luck.
 const SHIMMER_EFFECT: u8 = 0;
 const SHIMMER_COIN_LUCK: u8 = 1;
@@ -1120,6 +1137,8 @@ impl GameServer {
 
         let mut transmuted: Vec<(i16, ItemStack, (f32, f32))> = Vec::new();
         let mut luck: Vec<((f32, f32), i32)> = Vec::new();
+        let mut decrafted: Vec<Decraft> = Vec::new();
+        let crimson = self.world.crimson;
         {
             let world = &self.world;
             for (index, item) in self.items.iter_mut() {
@@ -1150,9 +1169,26 @@ impl GameServer {
                         prefix: 0,
                     };
                     transmuted.push((index, item.item, at));
+                } else if let Some(recipe) =
+                    terrustia_proto::recipes::decraft_recipe(kind, crimson)
+                    && i32::from(held.stack) >= i32::from(recipe.makes)
+                {
+                    // No transform of its own, so it comes apart into what it was made of. A
+                    // stack only decrafts in whole batches: three torches give back one gel, and
+                    // the two left over stay torches.
+                    let batches = i32::from(held.stack) / i32::from(recipe.makes);
+                    let kept = held.stack - (batches * i32::from(recipe.makes)) as i16;
+                    item.shimmered = true;
+                    item.item.stack = kept;
+                    decrafted.push(Decraft {
+                        index,
+                        at,
+                        recipe,
+                        batches,
+                        kept,
+                    });
                 } else {
-                    // No transform: it would decraft in the game, which this server cannot do.
-                    // Stop it sinking further rather than leaving it stuck at the threshold and
+                    // Nothing to become and nothing to come apart into. Mark it done so it stops
                     // asking the same question every tick.
                     item.shimmered = true;
                 }
@@ -1182,6 +1218,55 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
             debug!(amount, "coins turned into luck");
+        }
+
+        for job in decrafted {
+            // Whatever did not make a whole batch stays where it was; the rest comes apart.
+            if job.kept > 0 {
+                self.broadcast_item(job.index);
+            } else {
+                self.items.remove(job.index);
+                if let Ok(frame) = terrustia_proto::items::item_despawn(job.index) {
+                    self.broadcast(frame, None);
+                }
+            }
+            for &(ingredient, per_batch) in job.recipe.ingredients() {
+                let mut count = job.batches.saturating_mul(i32::from(per_batch));
+                // Alchemy gives back less: each unit has a one-in-three chance of being lost.
+                // Without it, potions would be a free material duplicator.
+                if job.recipe.alchemy {
+                    let mut kept_units = 0;
+                    for _ in 0..count {
+                        if rand::Rng::random_range(&mut self.rng, 0..3) != 0 {
+                            kept_units += 1;
+                        }
+                    }
+                    count = kept_units;
+                }
+                // Spread across stacks rather than one impossible pile.
+                while count > 0 {
+                    let stack = count.min(i32::from(MAX_ITEM_STACK));
+                    count -= stack;
+                    self.spawn_item(
+                        ItemStack {
+                            id: i32::from(ingredient),
+                            stack: stack as i16,
+                            prefix: 0,
+                        },
+                        job.at,
+                    );
+                }
+            }
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_EFFECT).f32(job.at.0).f32(job.at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+            debug!(
+                result = job.recipe.result,
+                batches = job.batches,
+                "decrafted an item in shimmer"
+            );
         }
     }
 

@@ -4233,3 +4233,118 @@ async fn an_item_out_of_shimmer_is_not_transmuted() {
         .await;
     assert!(changed.is_none(), "wood on dry land stays wood");
 }
+
+/// An item with no transmutation of its own comes apart into what it was made of.
+///
+/// This is decrafting, and it is the half of shimmer that needs the recipe table.
+#[tokio::test]
+async fn shimmer_decrafts_a_crafted_item() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 396..406 {
+            for y in 316..322 {
+                let mut tile = Tile::AIR;
+                tile.liquid = 255;
+                tile.liquid_kind = terrustia_proto::Liquid::Shimmer;
+                world.set_tile(x, y, tile);
+            }
+            world.set_tile(x, 322, Tile::block(1));
+        }
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(10));
+
+    // A Gold Bar: one at a time, from four gold ore, and with no transmutation of its own —
+    // which is what makes it take the decraft path rather than the transform one.
+    const GOLD_BAR: i32 = 19;
+    let bar = terrustia_proto::recipes::decraft_recipe(GOLD_BAR as u16, false)
+        .expect("a gold bar is crafted");
+    assert!(
+        terrustia_proto::shimmer::transforms_into(GOLD_BAR as u16).is_none(),
+        "the item must have no transform, or this tests the wrong path"
+    );
+    let wants: Vec<u16> = bar.ingredients().iter().map(|&(i, _)| i).collect();
+
+    alice
+        .drop_item(
+            ItemStack::new(GOLD_BAR, bar.makes as i16, 0),
+            (400.0 * 16.0, 318.0 * 16.0),
+        )
+        .await
+        .unwrap();
+
+    // An item takes about a second and a half to sink, so a short window that times out is not
+    // evidence of anything — keep reading until the deadline rather than giving up on the first.
+    let mut got = std::collections::HashSet::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && got.len() < wants.len() {
+        if let Some(Event::ItemSynced(item)) = alice
+            .try_wait_for(
+                "an ingredient",
+                |e| matches!(e, Event::ItemSynced(i) if i.item.id != GOLD_BAR && i.item.id != 0),
+                Duration::from_millis(500),
+            )
+            .await
+        {
+            got.insert(item.item.id as u16);
+        }
+    }
+    for wanted in &wants {
+        assert!(
+            got.contains(wanted),
+            "a decrafted gold bar should have given back item {wanted}; got {got:?}"
+        );
+    }
+}
+
+/// A stack too small for one batch is left alone — three torches decraft, two do not.
+#[tokio::test]
+async fn a_part_batch_does_not_decraft() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 396..406 {
+            for y in 316..322 {
+                let mut tile = Tile::AIR;
+                tile.liquid = 255;
+                tile.liquid_kind = terrustia_proto::Liquid::Shimmer;
+                world.set_tile(x, y, tile);
+            }
+            world.set_tile(x, 322, Tile::block(1));
+        }
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    // Something whose recipe makes several at a time, dropped one short of a batch.
+    let (item, recipe) = (1..5000u16)
+        .filter(|&i| terrustia_proto::shimmer::transforms_into(i).is_none())
+        .filter(|&i| !terrustia_proto::shimmer::is_coin(i))
+        .find_map(|i| {
+            terrustia_proto::recipes::decraft_recipe(i, false)
+                .filter(|r| r.makes > 1 && !r.alchemy)
+                .map(|r| (i, r))
+        })
+        .expect("some recipe makes more than one at a time");
+    let short = recipe.makes as i16 - 1;
+
+    alice
+        .drop_item(
+            ItemStack::new(i32::from(item), short, 0),
+            (400.0 * 16.0, 318.0 * 16.0),
+        )
+        .await
+        .unwrap();
+
+    let broke = alice
+        .try_wait_for(
+            "an ingredient",
+            |e| matches!(e, Event::ItemSynced(i) if i.item.id != i32::from(item) && i.item.id != 0),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(
+        broke.is_none(),
+        "{short} of item {item} is short of a batch of {} and should not come apart",
+        recipe.makes
+    );
+}

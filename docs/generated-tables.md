@@ -25,8 +25,11 @@ that reads it.
 | `tile_drops.rs` | 395 | `WorldGen.KillTile_GetItemDrops` | — |
 | `conditional_drops.rs` | 490 | drop rules with conditions | — |
 | `statues.rs` | 313 | `Wiring.HitSwitch` statue cases | — |
+| `recipes.rs` | ~3,600 | `Recipe.SetupRecipes` | `gen_recipes.py` |
+| `shimmer.rs` | ~200 | `ItemID.Sets`, `NPCID.Sets` | `gen_shimmer.py` |
 | `hurt_tiles.rs` | ~120 | `TileID.Sets` + `Collision.CanTileHurt` | `gen_hurt_tiles.py` |
 | `angler.rs` | ~120 | `Main.AnglerQuestSwap` | `gen_angler.py` |
+| `travel_shop.rs` | ~90 | `Chest.SetupTravelShop_GetItem` | `gen_travel_shop.py` |
 
 The ones with a generator in [`tools/`](../tools) can be rebuilt:
 
@@ -36,6 +39,9 @@ python3 tools/gen_buffs.py      "$D" crates/terrustia-proto/src/buffs.rs
 python3 tools/gen_town_names.py "$D" crates/terrustia-proto/src/town_names.rs
 python3 tools/gen_hurt_tiles.py "$D" crates/terrustia-proto/src/hurt_tiles.rs
 python3 tools/gen_angler.py     "$D" crates/terrustia-proto/src/angler.rs
+python3 tools/gen_shimmer.py    "$D" crates/terrustia-proto/src/shimmer.rs
+python3 tools/gen_recipes.py    "$D" crates/terrustia-proto/src/recipes.rs
+python3 tools/gen_travel_shop.py "$D" crates/terrustia-proto/src/travel_shop.rs
 ```
 
 Each script fails loudly if the source's shape has changed — a parse that finds too few entries
@@ -58,6 +64,15 @@ condition, and reported 41 disagreements that did not exist. Only the third atte
 
 **Intern repeated data.** 697 NPC types share only 34 distinct debuff-immunity masks. Emitting 697
 bitmaps would be 40× the bytes for the same table.
+
+**Check a big one against the source with a *second* script.** `recipes.rs` holds 2,551 recipes;
+a bug in the generator would be invisible in review and would quietly give back the wrong
+ingredients forever. So a separate checker, written from the format rather than from the
+generator, re-parses a random sample and compares — 300 recipes, all matching. A bug shared by
+both would have to be made twice.
+
+**Use `static`, not `const`, for the large ones.** A `const` array is copied at every use site.
+Clippy catches this; it is worth knowing why rather than just applying the fix.
 
 **Say what is deliberately absent.** `hurt_tiles.rs` omits two tiles the game can make dangerous,
 because it gates them behind world seeds this server does not offer. That is recorded in the
