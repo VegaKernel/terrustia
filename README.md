@@ -73,8 +73,9 @@ Not implemented:
   sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
   key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
   handled; verifying the claim is not.
-- **Player weapons.** Projectiles an NPC throws are flown by the server; a player's own are
-  relayed.
+- **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
+  player's own are simulated by their own client and relayed, which is what a vanilla server does
+  too. The server still refuses any a client claims that would hurt other players.
 
 ## Running
 

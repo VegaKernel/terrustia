@@ -1,7 +1,11 @@
-//! Stats for the projectiles NPCs throw, transcribed from `Projectile.SetDefaults`.
+//! Stats for the projectiles the world throws, transcribed from `Projectile.SetDefaults`.
 //!
-//! Only the types the pre-hardmode roster actually fires are here. The game defines over a
-//! thousand; the rest belong to player weapons, which this server does not yet simulate.
+//! Only the types this server puts in the air itself are here — what an NPC decides to fire and
+//! what a wired trap throws. The game defines over a thousand; the rest belong to player weapons,
+//! which the *client* simulates and syncs, exactly as it does against a vanilla server.
+//!
+//! [`ProjectileStats::hostile`] is what a client's claim is checked against, so this table is a
+//! security boundary as well as a physics one.
 
 /// Everything the server needs to know about a projectile type.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,6 +22,12 @@ pub struct ProjectileStats {
     pub time_left: i32,
     /// Whether terrain stops it.
     pub tile_collide: bool,
+    /// Whether it hurts players.
+    ///
+    /// This is the flag a server checks a client's claim against: a client may sync a projectile
+    /// it fired itself, and vanilla refuses any that would hurt other players. Only one trap
+    /// projectile is not hostile — the flamethrower's head, which does no damage of its own.
+    pub hostile: bool,
     /// Extra movement steps per tick, which is how the fast ones stay accurate.
     pub extra_updates: i32,
     pub knockback: f32,
@@ -34,6 +44,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 6.0,
         },
@@ -45,6 +56,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -56,6 +68,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -67,6 +80,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -78,6 +92,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 3,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 2,
             knockback: 0.0,
         },
@@ -89,6 +104,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -100,6 +116,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 6.0,
         },
@@ -111,6 +128,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 1,
             knockback: 0.0,
         },
@@ -122,6 +140,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -133,6 +152,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -144,6 +164,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 3,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -155,6 +176,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 2,
             knockback: 0.0,
         },
@@ -166,6 +188,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: false,
+            hostile: true,
             extra_updates: 2,
             knockback: 0.0,
         },
@@ -177,6 +200,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -188,6 +212,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 1,
             time_left: 600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -199,6 +224,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 1,
             time_left: 600,
             tile_collide: false,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -210,6 +236,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 1,
             time_left: 220,
             tile_collide: false,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -221,6 +248,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 1,
             time_left: 300,
             tile_collide: false,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -232,6 +260,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 420,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -246,6 +275,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 3600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -257,6 +287,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 3600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -268,6 +299,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 900,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -281,6 +313,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             // A spear is anchored to the trap and slides through whatever it is set into, so it
             // has to ignore terrain rather than die on the block it grew out of.
             tile_collide: false,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -292,6 +325,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: 1,
             time_left: 60,
             tile_collide: false,
+            hostile: false,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -303,6 +337,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 3600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 2,
             knockback: 0.0,
         },
@@ -314,6 +349,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 120,
             tile_collide: false,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },
@@ -325,6 +361,7 @@ pub fn projectile_stats(projectile_type: u16) -> Option<ProjectileStats> {
             penetrate: -1,
             time_left: 3600,
             tile_collide: true,
+            hostile: true,
             extra_updates: 0,
             knockback: 0.0,
         },

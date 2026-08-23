@@ -2918,8 +2918,12 @@ impl GameServer {
             );
             return Ok(());
         }
-        if terrustia_proto::projectile_data::projectile_stats(sync.projectile_type as u16).is_some()
-        {
+        // A client may sync what it fired itself, but never something that would hurt other
+        // players: that is the server's decision, not a claim. Vanilla refuses the same thing.
+        let hostile =
+            terrustia_proto::projectile_data::projectile_stats(sync.projectile_type as u16)
+                .is_some_and(|stats| stats.hostile);
+        if hostile {
             debug!(
                 slot,
                 projectile = sync.projectile_type,
