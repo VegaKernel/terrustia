@@ -627,11 +627,9 @@ impl GameServer {
     }
 
     /// Drop whatever a broken tile yields, if it is a block with a simple drop.
-    fn spawn_tile_drop(&mut self, tile: u16, x: i32, y: i32) {
-        let Some(item_id) = tile_drop(tile) else {
-            // Framed objects choose their drop from a style, which is not modelled; dropping the
-            // wrong item would be worse than dropping none.
-            debug!(tile, "no simple drop for this tile type");
+    fn spawn_tile_drop(&mut self, tile: u16, frame_x: i16, frame_y: i16, x: i32, y: i32) {
+        let Some(item_id) = drop_of(tile, frame_x, frame_y) else {
+            debug!(tile, "nothing known to drop for this tile type");
             return;
         };
         let position = (x as f32 * 16.0, y as f32 * 16.0);
@@ -1719,10 +1717,10 @@ impl GameServer {
                 // clears the tile.
                 if edit.destroyed() {
                     if tile.is_active() && matches!(edit.kind(), TileAction::KillTile) {
-                        // The frame goes with the block: several things that matter on breaking —
-                        // which evil an orb belongs to, which statue a statue is — are only in the
-                        // frame, and it is about to be cleared.
-                        broke = Some((tile.block, tile.frame_x));
+                        // The frames go with the block. Everything that decides what a broken
+                        // object is worth — which evil an orb belongs to, which chair a chair is
+                        // — lives in the frame, and the frame is about to be cleared.
+                        broke = Some((tile.block, tile.frame_x, tile.frame_y));
                     }
                     tile.flags.set(TileFlags::ACTIVE, false);
                     tile.block = 0;
@@ -1791,8 +1789,8 @@ impl GameServer {
             // Mining a block is the commonest way liquid starts moving.
             self.liquids.disturb(x, y);
         }
-        if let Some((block, frame_x)) = broke {
-            self.spawn_tile_drop(block, x, y);
+        if let Some((block, frame_x, frame_y)) = broke {
+            self.spawn_tile_drop(block, frame_x, frame_y, x, y);
             // A demon altar is the only way hardmode ore gets into a world, and it always costs
             // something to break.
             if block == DEMON_ALTAR {
@@ -2274,6 +2272,29 @@ impl GameServer {
 }
 
 /// Look up an NPC by numeric id or by its `NPCID` name, case-insensitively.
+/// What a broken tile gives back.
+///
+/// Two tables, and the order matters. [`tile_drop`] is the game's own statement of what *mining*
+/// a block gives, and it wins wherever it has an answer — mining grass gives dirt even though
+/// grass seeds are what placed it. Only where it deliberately has none, which is every framed
+/// object, does the style get worked out and the placing item looked up.
+fn drop_of(tile: u16, frame_x: i16, frame_y: i16) -> Option<i32> {
+    if let Some(item) = tile_drop(tile) {
+        return Some(item);
+    }
+    let object = terrustia_proto::tile_object::tile_object(tile)?;
+    // The frame given is of whichever cell the player hit; the style is read off the corner.
+    let (dx, dy) = terrustia_proto::tile_object::origin_of(tile, frame_x, frame_y)?;
+    let corner_x = frame_x - (dx * (object.coord_width + object.padding)) as i16;
+    let corner_y = frame_y
+        - object.coord_heights[..dy as usize]
+            .iter()
+            .map(|h| h + object.padding)
+            .sum::<i32>() as i16;
+    let style = object.style_of(corner_x, corner_y);
+    terrustia_proto::placed_items::placed_item(tile, style)
+}
+
 fn resolve_npc(argument: &str) -> Option<u16> {
     if argument.is_empty() {
         return None;

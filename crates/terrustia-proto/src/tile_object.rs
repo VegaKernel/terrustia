@@ -53,6 +53,63 @@ impl TileObject {
             (self.full_width * line, self.full_height * index)
         }
     }
+
+    /// Which style a frame belongs to — the inverse of [`Self::frame_of`].
+    ///
+    /// This is what turns a mined object back into the item that placed it: the frame is all the
+    /// world stores, and every table that says what a chair is worth is indexed by style.
+    ///
+    /// The frame given must be the object's *top-left* one. Any other cell of it is offset by
+    /// where in the object it sits, which is what [`origin_of`] undoes.
+    pub fn style_of(&self, frame_x: i16, frame_y: i16) -> i32 {
+        if self.full_width == 0 || self.full_height == 0 {
+            return 0;
+        }
+        let across = i32::from(frame_x) / self.full_width;
+        let down = i32::from(frame_y) / self.full_height;
+        // One axis carries the style and the other counts lines, and which is which is the
+        // object's own business — a door's styles run down the sheet, a table's across it.
+        let (index, line) = if self.style_horizontal {
+            (across, down)
+        } else {
+            (down, across)
+        };
+        let index = if self.style_wrap > 0 && self.style_line_skip > 0 {
+            index + line / self.style_line_skip * self.style_wrap
+        } else {
+            index
+        };
+        let multiplier = self.style_multiplier.max(1);
+        (index - self.style_base).div_euclid(multiplier)
+    }
+}
+
+/// Walk back from any cell of a multi-tile object to its top-left one.
+///
+/// A player mining a table hits whichever tile the cursor was over; everything that decides what
+/// a table is worth starts from its corner. The frame says how far in the cell sits.
+pub fn origin_of(block: u16, frame_x: i16, frame_y: i16) -> Option<(i32, i32)> {
+    let object = tile_object(block)?;
+    if object.full_width == 0 || object.full_height == 0 {
+        return Some((0, 0));
+    }
+    let coord = object.coord_width + object.padding;
+    let across = if coord > 0 {
+        (i32::from(frame_x) % object.full_width) / coord
+    } else {
+        0
+    };
+    // Rows can differ in height, so walking down them is a subtraction rather than a division.
+    let mut left = i32::from(frame_y) % object.full_height;
+    let mut down = 0;
+    for height in object.coord_heights {
+        if left < height + object.padding {
+            break;
+        }
+        left -= height + object.padding;
+        down += 1;
+    }
+    Some((across.min(object.width - 1), down.min(object.height - 1)))
 }
 
 /// The object a tile type places, or `None` for a type that is not a multi-tile object.
@@ -5965,5 +6022,78 @@ mod tests {
         let (x, y) = door.frame_of(1, -1);
         assert_eq!(x, 0, "a door's second style is on the same column");
         assert!(y > 0, "and further down");
+    }
+
+    use super::*;
+
+    /// Every object's style survives a trip out to a frame and back.
+    ///
+    /// This is the property the drop table depends on: a chair mined is only a frame, and it has
+    /// to name the same style the item that placed it did.
+    #[test]
+    fn a_style_round_trips_through_its_frame() {
+        let mut checked = 0;
+        for block in 0..crate::tile_sets::TILE_COUNT {
+            let Some(object) = tile_object(block) else {
+                continue;
+            };
+            for style in 0..40 {
+                let (fx, fy) = object.frame_of(style, -1);
+                // Frames are i16 in the world; a style past the sheet is not a real style.
+                if fx > i32::from(i16::MAX) || fy > i32::from(i16::MAX) {
+                    break;
+                }
+                let back = object.style_of(fx as i16, fy as i16);
+                assert_eq!(
+                    back, style,
+                    "tile {block} style {style} framed to ({fx}, {fy}) and came back as {back}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 5_000, "only checked {checked} styles");
+    }
+
+    /// Any cell of an object names the corner it belongs to.
+    #[test]
+    fn every_cell_points_back_at_its_corner() {
+        for block in 0..crate::tile_sets::TILE_COUNT {
+            let Some(object) = tile_object(block) else {
+                continue;
+            };
+            let (fx, fy) = object.frame_of(0, -1);
+            if fx > i32::from(i16::MAX) || fy > i32::from(i16::MAX) {
+                continue;
+            }
+            for dx in 0..object.width {
+                for dy in 0..object.height {
+                    let cell_x = fx + dx * (object.coord_width + object.padding);
+                    let cell_y = fy
+                        + object.coord_heights[..dy as usize]
+                            .iter()
+                            .map(|h| h + object.padding)
+                            .sum::<i32>();
+                    if cell_x > i32::from(i16::MAX) || cell_y > i32::from(i16::MAX) {
+                        continue;
+                    }
+                    let at = origin_of(block, cell_x as i16, cell_y as i16);
+                    assert_eq!(
+                        at,
+                        Some((dx, dy)),
+                        "tile {block} cell ({dx}, {dy}) framed to ({cell_x}, {cell_y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A chest is two by two and its styles run across the sheet; a door is one by three and
+    /// its styles run down it. Getting either backwards puts furniture through the floor.
+    #[test]
+    fn the_shapes_are_what_they_should_be() {
+        let chest = tile_object(21).expect("chests are objects");
+        assert_eq!((chest.width, chest.height), (2, 2));
+        let door = tile_object(10).expect("doors are objects");
+        assert_eq!((door.width, door.height), (1, 3));
     }
 }

@@ -30,7 +30,8 @@ Implemented:
 - **Tiles**: break and place blocks and walls, wires, actuators, slopes, half bricks, and
   `TileSquare` rectangles so multi-tile objects work without reimplementing the game's placement
   rules
-- **Items**: blocks drop the right item when mined, drops fall and settle, the server reserves them
+- **Items**: blocks and furniture both drop the right item when mined — the frame names a style,
+  and the style names the item that placed it — drops fall and settle, the server reserves them
   for a nearby player, pickup and player-thrown items both sync
 - **Chests**: open, read and edit contents, with the same one-player-at-a-time rule vanilla uses
 - **Signs**: read and rewrite
@@ -89,11 +90,6 @@ Not implemented:
 - **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
   player's own are simulated by their own client and relayed, which is what a vanilla server does
   too. The server still refuses any a client claims that would hurt other players.
-- **Furniture drops.** Mining a plain block gives the right item — all 345 tile types whose drop
-  the game states as a constant, checked against its own table with no disagreements. A framed
-  object picks its drop from a *style*, which is a second table the game derives from the tile's
-  frame differently for every type. Those are deliberately absent: handing a player the wrong
-  piece of furniture is worse than handing them none.
 
 ## Running
 

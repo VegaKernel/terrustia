@@ -518,11 +518,38 @@ async fn breaking_a_block_drops_the_right_item() {
     assert_eq!(sync.item.stack, 1);
 }
 
+/// A framed object gives back the item that placed it, chosen by the style in its frame.
+///
+/// This used to drop nothing at all, deliberately: the style table did not exist and the wrong
+/// chest is worse than no chest. It exists now.
 #[tokio::test]
-async fn a_framed_object_drops_nothing_rather_than_the_wrong_item() {
+async fn a_framed_object_gives_back_what_placed_it() {
     let addr = start_with(Config::default(), |world| {
-        // Chests pick their drop from a frame style, which is not modelled.
         world.set_tile(410, 300, Tile::framed(21, 0, 0));
+    })
+    .await;
+
+    let mut client = join(addr, "miner").await;
+    client.break_tile(410, 300).await.unwrap();
+
+    client.set_timeout(Duration::from_secs(4));
+    let dropped = client
+        .wait_for("the chest", |e| matches!(e, Event::ItemSynced(_)))
+        .await
+        .expect("a chest should drop a chest");
+    let Event::ItemSynced(sync) = dropped else {
+        unreachable!()
+    };
+    // Chest tile, style zero, is the ordinary wooden Chest — item 48.
+    assert_eq!(sync.item.id, 48, "a chest should give back a chest");
+}
+
+/// A style nothing is known for still drops nothing, rather than guessing at an item.
+#[tokio::test]
+async fn an_unknown_style_still_drops_nothing() {
+    let addr = start_with(Config::default(), |world| {
+        // Far past any real chest style.
+        world.set_tile(410, 300, Tile::framed(21, 30_000, 0));
     })
     .await;
 
@@ -533,10 +560,7 @@ async fn a_framed_object_drops_nothing_rather_than_the_wrong_item() {
     let dropped = client
         .wait_for("an item drop", |e| matches!(e, Event::ItemSynced(_)))
         .await;
-    assert!(
-        dropped.is_err(),
-        "a framed object dropped something it should not have"
-    );
+    assert!(dropped.is_err(), "it guessed at an item it does not know");
 }
 
 #[tokio::test]
@@ -3120,4 +3144,50 @@ async fn the_old_man_becomes_skeletron() {
         )
         .await;
     assert!(skeletron.is_some(), "the old man did not become Skeletron");
+}
+
+/// Mining furniture gives the furniture back.
+///
+/// A framed object stores only a frame; which chair it is lives in the style that frame names.
+/// Until now every mined chair, table, chest and door simply vanished.
+#[tokio::test]
+async fn mining_furniture_gives_it_back() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+        // A wooden chair, a wooden table and a work bench, each at style zero.
+        world.set_tile(400, 319, Tile::framed(15, 0, 0));
+        world.set_tile(404, 319, Tile::framed(14, 0, 0));
+        world.set_tile(408, 319, Tile::framed(18, 0, 0));
+    })
+    .await;
+
+    let mut client = join(addr, "carpenter").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(395.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut got = std::collections::HashSet::new();
+    for x in [400i16, 404, 408] {
+        client.break_tile(x, 319).await.unwrap();
+        while let Some(Event::ItemSynced(item)) = client
+            .try_wait_for(
+                "the furniture",
+                |e| matches!(e, Event::ItemSynced(_)),
+                Duration::from_millis(400),
+            )
+            .await
+        {
+            got.insert(item.item.id);
+        }
+    }
+    assert!(got.contains(&34), "no wooden chair back: {got:?}");
+    assert!(got.contains(&32), "no wooden table back: {got:?}");
+    assert!(got.contains(&36), "no work bench back: {got:?}");
 }
