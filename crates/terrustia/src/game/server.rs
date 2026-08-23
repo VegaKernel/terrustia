@@ -334,6 +334,21 @@ pub struct GameServer {
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
     /// tile up is what it is for.
     mech_cooldown: HashMap<(i32, i32), i32>,
+    /// The last pillar shields, invasion progress and Moon Lord countdown that went out.
+    ///
+    /// All three are recomputed every tick and almost never move, so they are compared before
+    /// they are sent. Broadcasting them unconditionally would be three packets a tick to every
+    /// client for the whole of an event.
+    last_sent_shields: [i32; 4],
+    last_sent_countdown: i32,
+    last_sent_invasion: (i32, i32),
+    /// Which fish the Angler is asking for today, as an index into the quest table.
+    angler_quest: u8,
+    /// Who has already handed one in since dawn.
+    ///
+    /// By name rather than by slot, because that is what the game keys it on and because a player
+    /// who reconnects into a different slot should not get a second go at the reward.
+    angler_finished_today: std::collections::HashSet<String>,
     /// Which tile entity each player currently has open, if any.
     ///
     /// One player per entity, which is the point: without it two people can open the same
@@ -387,7 +402,7 @@ impl GameServer {
             ..Default::default()
         };
 
-        Self {
+        let mut server = Self {
             config,
             world,
             players: (0..slots).map(|_| None).collect(),
@@ -409,13 +424,23 @@ impl GameServer {
             running_timers,
             mech_cooldown: HashMap::new(),
             tile_entity_anchors: HashMap::new(),
+            // Deliberately impossible starting values, so the first tick of each always sends.
+            last_sent_shields: [-1; 4],
+            last_sent_countdown: -1,
+            last_sent_invasion: (-1, -1),
+            angler_quest: 0,
+            angler_finished_today: std::collections::HashSet::new(),
             liquids: crate::world::liquid::Liquids::default(),
             ore_tiers: crate::world::hardmode::OreTiers::default(),
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
             autosave_ticks,
-        }
+        };
+        // The Angler wants something from the moment the world opens, not from the first dawn.
+        // A server that waited would give the first day's players nothing to do for him.
+        server.roll_angler_quest();
+        server
     }
 
     /// Write the world to disk, announcing the outcome in chat.
@@ -1000,6 +1025,8 @@ impl GameServer {
             | id::DEAD_CELLS_DISPLAY_JAR_TRY_PLACING => self.on_display_item(slot, &payload),
             id::T_E_LEASHED_ENTITY_ANCHOR_PLACE_ITEM => self.on_anchor_item(slot, &payload),
             id::REQUEST_TELEPORTATION_BY_SERVER => self.on_server_teleport(slot, &payload),
+            id::ANGLER_QUEST_FINISHED => self.on_angler_finished(slot),
+            id::QUESTS_COUNT_SYNC => self.on_quest_count(slot, &payload),
             id::T_E_DISPLAY_DOLL_DATA_SYNC => self.on_display_doll_slot(slot, &payload),
             id::T_E_HAT_RACK_ITEM_SYNC => self.on_hat_rack_slot(slot, &payload),
             id::REQUEST_TILE_ENTITY_INTERACTION => {
@@ -1316,6 +1343,21 @@ impl GameServer {
         }
 
         self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
+
+        // What the Angler wants today. A client that is never told shows no quest at all, so a
+        // player who joins after dawn would find the Angler had nothing to say until midnight.
+        {
+            let name = self
+                .player(slot)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            let done = self.angler_finished_today.contains(&name);
+            let mut w = terrustia_proto::PacketWriter::new(id::ANGLER_QUEST);
+            w.u8(self.angler_quest).bool(done);
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
 
         let name = self
             .player(slot)
@@ -5717,6 +5759,64 @@ impl GameServer {
                 }
             }
         }
+        self.broadcast_lunar_state();
+    }
+
+    /// Tell clients what the four shields read, and how long is left before the Moon Lord.
+    ///
+    /// Neither was ever sent. The shield is the pillar fight's entire feedback loop — it is what
+    /// tells a player their hits are counting and how close the pillar is to becoming killable —
+    /// and without it the bar over each pillar sits full while the fight is won underneath it.
+    ///
+    /// Only when something changed, since these tick every frame and almost never move.
+    fn broadcast_lunar_state(&mut self) {
+        let shields = self.lunar.shields;
+        let countdown = self.lunar.countdown;
+        if shields != self.last_sent_shields {
+            self.last_sent_shields = shields;
+            let mut w = terrustia_proto::PacketWriter::new(id::UPDATE_TOWER_SHIELD_STRENGTHS);
+            for shield in shields {
+                w.u16(u16::try_from(shield.max(0)).unwrap_or(u16::MAX));
+            }
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+        }
+        if countdown != self.last_sent_countdown {
+            self.last_sent_countdown = countdown;
+            let mut w = terrustia_proto::PacketWriter::new(id::MOONLORD_HORROR);
+            w.i32(crate::game::lunar::MOON_LORD_COUNTDOWN).i32(countdown);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+        }
+    }
+
+    /// Tell clients how far through an invasion is.
+    ///
+    /// This is the progress bar. Without it a player has no way to know whether a goblin army is
+    /// nearly over or has barely started, which turns a paced event into an indefinite one.
+    fn broadcast_invasion_progress(&mut self) {
+        let (progress, target, kind, wave) = match &self.invasion {
+            Some(invasion) => (
+                invasion.started_with - invasion.remaining,
+                invasion.started_with,
+                invasion.kind as i8,
+                0i8,
+            ),
+            // Zero of zero is how the game says "nothing is happening", which is what takes the
+            // bar off the screen.
+            None => (0, 0, 0, 0),
+        };
+        if (progress, target) == self.last_sent_invasion {
+            return;
+        }
+        self.last_sent_invasion = (progress, target);
+        let mut w = terrustia_proto::PacketWriter::new(id::INVASION_PROGRESS_REPORT);
+        w.i32(progress).i32(target).i8(kind).i8(wave);
+        if let Ok(frame) = w.finish() {
+            self.broadcast(frame, None);
+        }
     }
 
     /// Tear the sky open. This is what killing the Lunatic Cultist does.
@@ -5796,6 +5896,103 @@ impl GameServer {
             self.world.progress.spawn_meteor = false;
             self.land_meteor();
         }
+        self.roll_angler_quest();
+    }
+
+    /// Pick the fish the Angler wants today, and let everybody try again.
+    ///
+    /// `Main.AnglerQuestSwap`. It re-rolls until it lands on a fish this world can actually
+    /// produce — asking for a hardmode fish in a fresh world would cost the player the whole
+    /// day's reward — and clears the list of who has already handed one in.
+    fn roll_angler_quest(&mut self) {
+        use terrustia_proto::angler;
+        let p = &self.world.progress;
+        let any_boss = p.downed_boss1
+            || p.downed_boss2
+            || p.downed_boss3
+            || p.hard_mode
+            || p.downed_king_slime
+            || p.downed_queen_bee;
+        let (hardmode, crimson) = (p.hard_mode, self.world.crimson);
+
+        let catchable: Vec<usize> = angler::QUESTS
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| angler::available(q, hardmode, crimson, any_boss))
+            .map(|(index, _)| index)
+            .collect();
+        if catchable.is_empty() {
+            return; // cannot happen with the shipped table, but guessing is worse than doing nothing
+        }
+        let at = rand::Rng::random_range(&mut self.rng, 0..catchable.len());
+        self.angler_quest = catchable[at] as u8;
+        self.angler_finished_today.clear();
+        self.broadcast_angler_quest();
+    }
+
+    /// Tell each player what the Angler wants, and whether *they* have already handed one in.
+    ///
+    /// The second half is per-player, which is why this cannot be one broadcast: the packet
+    /// carries "have you finished today", and every client needs its own answer.
+    fn broadcast_angler_quest(&mut self) {
+        let quest = self.angler_quest;
+        let names: Vec<(u8, String)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| (p.slot, p.name.clone()))
+            .collect();
+        for (slot, name) in names {
+            let done = self.angler_finished_today.contains(&name);
+            let mut w = terrustia_proto::PacketWriter::new(id::ANGLER_QUEST);
+            w.u8(quest).bool(done);
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
+    }
+
+    /// Packet 75: a player reporting that they have handed the Angler today's fish.
+    ///
+    /// One a day each, which the server has to be the judge of — a client that could tell itself
+    /// it had not yet handed one in could farm the reward all day.
+    fn on_angler_finished(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        let Some(name) = self
+            .player(slot)
+            .filter(|p| p.is_playing())
+            .map(|p| p.name.clone())
+        else {
+            return Ok(());
+        };
+        if self.angler_finished_today.insert(name) {
+            debug!(slot, "angler quest handed in");
+        }
+        Ok(())
+    }
+
+    /// Packet 76: how many quests a player has finished, and their golf score.
+    ///
+    /// Both live on the character rather than the world, so the server's job is to remember what
+    /// it is told and pass it on — that is what makes the Angler's reward tiers work at all,
+    /// since they are gated on the count.
+    fn on_quest_count(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed = r.u8()?;
+        let quests = r.i32()?;
+        let golf = r.i32()?;
+        if let Some(player) = self.player_mut(slot) {
+            player.angler_quests = quests;
+            player.golf_score = golf;
+        }
+        let mut w = terrustia_proto::PacketWriter::new(id::QUESTS_COUNT_SYNC);
+        w.u8(slot).i32(quests).i32(golf);
+        let frame = w.finish()?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
     }
 
     /// Bring a meteor down somewhere out of the way, and tell everyone it happened.
@@ -6647,6 +6844,8 @@ impl GameServer {
             "invasion started"
         );
         self.invasion = Some(state);
+        // Put the bar on the screen, full, the moment the event begins.
+        self.broadcast_invasion_progress();
     }
 
     /// Count a kill against whatever invasion is running, and end it when the last one falls.
@@ -6664,6 +6863,8 @@ impl GameServer {
             self.announce(kind.defeat());
             info!(invasion = ?kind, "invasion defeated");
         }
+        // The bar moves on every kill, so it is told on every kill rather than on a timer.
+        self.broadcast_invasion_progress();
     }
 
     /// Try to spawn new NPCs around the players.

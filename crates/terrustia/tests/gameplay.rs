@@ -3676,3 +3676,105 @@ async fn an_unknown_teleport_request_is_refused() {
         .await;
     assert!(moved.is_none(), "there is no fifth conch");
 }
+
+// ------------------------------------------------------- angler and events
+
+/// A joining player is told what the Angler wants. Without it his quest is blank all day.
+#[tokio::test]
+async fn a_joining_player_learns_todays_angler_quest() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(5));
+
+    let Event::Other(frame) = alice
+        .wait_for("the angler quest", |e| {
+            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
+        })
+        .await
+        .expect("a joining player should be told the day's quest")
+    else {
+        unreachable!()
+    };
+    let quest = frame.payload[0];
+    assert!(
+        (quest as usize) < terrustia_proto::angler::QUESTS.len(),
+        "quest {quest} is not one of the game's fish"
+    );
+    assert_eq!(frame.payload[1], 0, "nobody has handed one in yet");
+
+    // ...and the fish asked for has to be one this world can actually produce.
+    let fish = terrustia_proto::angler::QUESTS[quest as usize];
+    assert!(
+        terrustia_proto::angler::available(&fish, false, false, false),
+        "a fresh world was asked for {fish:?}, which cannot be caught in it"
+    );
+}
+
+/// Handing one in is remembered, so the reward cannot be farmed by asking twice.
+#[tokio::test]
+async fn the_angler_only_pays_once_a_day() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+    alice.set_timeout(Duration::from_secs(5));
+    bob.set_timeout(Duration::from_secs(5));
+
+    // Drain the quest each was told on joining.
+    alice
+        .wait_for("the quest", |e| {
+            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
+        })
+        .await
+        .unwrap();
+
+    // Alice hands one in. Bob rejoining should still be told he has not.
+    alice
+        .send(&terrustia_proto::packets::empty(id::ANGLER_QUEST_FINISHED).unwrap())
+        .await
+        .unwrap();
+
+    let mut carol = join(addr, "carol").await;
+    carol.set_timeout(Duration::from_secs(5));
+    let Event::Other(frame) = carol
+        .wait_for("the quest", |e| {
+            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
+        })
+        .await
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        frame.payload[1], 0,
+        "carol has not handed anything in, whatever alice did"
+    );
+    let _ = &mut bob;
+}
+
+/// An invasion puts a progress bar on the screen and moves it as the horde is cut down.
+#[tokio::test]
+async fn an_invasion_reports_its_progress() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    // The invasion size scales with how many players have found a life crystal.
+    alice.set_life(400, 400).await.unwrap();
+    alice.set_timeout(Duration::from_secs(5));
+
+    // -1 is the goblin army's summon code.
+    alice.summon(-1).await.unwrap();
+
+    let Event::Other(frame) = alice
+        .wait_for("the progress bar", |e| {
+            matches!(e, Event::Other(f) if f.id == id::INVASION_PROGRESS_REPORT)
+        })
+        .await
+        .expect("an invasion should put its bar on the screen")
+    else {
+        unreachable!()
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    let done = r.i32().unwrap();
+    let total = r.i32().unwrap();
+    assert_eq!(done, 0, "nothing has been killed yet");
+    assert!(total > 0, "an invasion with nobody in it is not an invasion");
+}

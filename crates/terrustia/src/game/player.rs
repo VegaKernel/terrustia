@@ -57,6 +57,14 @@ pub struct Player {
     pub last_controls: Option<Bytes>,
     /// Which town NPC this player has open, if any. A shop needs to know.
     pub talking_to: Option<u8>,
+    /// How many of the Angler's quests this character has finished.
+    ///
+    /// Character state rather than world state, so the server remembers what it is told and
+    /// passes it on. The Angler's reward tiers are gated on it, which is why it has to reach
+    /// every client rather than staying with the one that owns the character.
+    pub angler_quests: i32,
+    /// ...and their accumulated golf score, which travels in the same message.
+    pub golf_score: i32,
     /// What this player is carrying, by slot.
     ///
     /// Sparse: a client sends a slot only when it holds something or when it has just been
@@ -109,6 +117,8 @@ impl Player {
             appearance: None,
             last_controls: None,
             talking_to: None,
+            angler_quests: 0,
+            golf_score: 0,
             inventory: std::collections::HashMap::new(),
             greeted: false,
             password_ok: false,
