@@ -4,7 +4,12 @@ An async Terraria server written from scratch in Rust, targeting **Terraria 1.4.
 (protocol release **325**).
 
 A real 1.4.5.7 client connects, the world streams in, players walk around, edit tiles, fight
-everything the game has, and chat. It can generate a world or serve an existing `.wld` save.
+everything the game has, and chat.
+
+**Serve a world made in Terraria.** The built-in generator makes terrain, caves and ore and
+nothing else — no biomes, no dungeon, no underworld, no chests, no altars — so a world it made is
+somewhere to stand, not somewhere to play. Everything this server *simulates* needs a world with
+those things in it.
 
 Every one of the game's 691 NPC types runs a routine transcribed from the decompiled source rather
 than an approximation of it, and a test walks the whole roster to prove each one is reachable.
@@ -54,11 +59,10 @@ Implemented:
   the server: a client builds one from the world flags, and those are sent in full
 - **Chat**: player chat plus `/help`, `/players`, `/time`, `/save`, `/where`, `/spawn`, `/npcs`,
   `/butcher`, `/house`
-- **Worlds**: procedural generation, a reader for `.wld` saves (format 279 and newer), and a writer
-  that saves losslessly, with autosave and a save on shutdown. A world loaded from a file keeps its
-  own header byte for byte; a generated one gets a header written from scratch at format 325, so a
-  fresh server keeps the world it made. Progression flags, weather and the lunar state survive a
-  save
+- **Worlds**: a reader for `.wld` saves (format 279 and newer) and a writer that saves losslessly,
+  with autosave and a save on shutdown. A world loaded from a file keeps its own header byte for
+  byte; a generated one gets a header written from scratch at format 325. Progression flags,
+  weather and the lunar state survive a save. World *generation* is terrain only — see below
 - **Wiring**: circuits run on the server — the flood over whatever is connected, four colours as
   four independent circuits. Actuators toggle the block they sit on; traps throw what they are
   framed to throw, on the game's own cooldowns; statues produce monsters, items or a fetched
@@ -78,6 +82,10 @@ Not implemented:
   sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
   key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
   handled; verifying the claim is not.
+- **World generation.** The generator makes a rolling surface, caves and ore veins. It does not
+  make biomes, a dungeon, an underworld, chests, pots, shadow orbs, demon altars, floating islands
+  or a jungle temple — so a world it made cannot be *played through*, whatever the server does on
+  top of it. Generate a world in Terraria and serve that; everything here is built to run one.
 - **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
   player's own are simulated by their own client and relayed, which is what a vanilla server does
   too. The server still refuses any a client claims that would hurt other players.
@@ -90,10 +98,10 @@ Not implemented:
 ## Running
 
 ```sh
-cargo run --release                                  # generate a world, listen on 0.0.0.0:7777
-cargo run --release -- --save world.wld              # generate one, and keep it
-cargo run --release -- --world path/to/World.wld     # serve an existing save
-cargo run --release -- --listen 127.0.0.1:7777 --seed 42
+cargo run --release -- --world path/to/World.wld     # what you want: serve a real world
+cargo run --release -- --listen 127.0.0.1:7777 --world path/to/World.wld
+cargo run --release                                  # bare terrain, for testing
+cargo run --release -- --save world.wld              # generate bare terrain and keep it
 ```
 
 Worlds are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from a file
