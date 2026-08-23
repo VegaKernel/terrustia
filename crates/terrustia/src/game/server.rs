@@ -2011,7 +2011,9 @@ impl GameServer {
     fn run_command(&mut self, slot: u8, command: &str) -> terrustia_proto::Result<()> {
         let mut parts = command.split_whitespace();
         let name = parts.next().unwrap_or("").to_ascii_lowercase();
-        let argument = parts.next().unwrap_or("").to_ascii_lowercase();
+        // The whole rest of the line, not the first word of it: `/spawn Eater of Worlds Head` has
+        // to reach the resolver intact or it looks up "eater" and finds nothing.
+        let argument = parts.collect::<Vec<_>>().join(" ").to_ascii_lowercase();
 
         match name.as_str() {
             "help" => {
@@ -2202,8 +2204,21 @@ fn resolve_npc(argument: &str) -> Option<u16> {
     if let Ok(id) = argument.parse::<u16>() {
         return npc_stats(id).is_some().then_some(id);
     }
+    // The names come from `NPCID`, where they are run together: `EaterofWorldsBody`. Nobody types
+    // that, so spaces and punctuation are ignored on both sides and the answer is the same
+    // whether you write "Eater of Worlds Body", "eaterofworldsbody" or "Eater-of-Worlds-Body".
+    let squashed = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let wanted = squashed(argument);
+    if wanted.is_empty() {
+        return None;
+    }
     (0..terrustia_proto::npc_data::NPC_COUNT)
-        .find(|id| npc_stats(*id).is_some_and(|s| s.name.eq_ignore_ascii_case(argument)))
+        .find(|id| npc_stats(*id).is_some_and(|s| squashed(s.name) == wanted))
 }
 
 /// Compare two byte strings without leaking their contents through timing.
@@ -3496,6 +3511,7 @@ impl GameServer {
         let p = &self.world.progress;
         let at = terrustia_proto::conditional_drops::Conditions {
             expert: self.world.game_mode >= 1,
+            master: self.world.game_mode >= 2,
             hard_mode: p.hard_mode,
             downed_plantera: p.downed_plantera,
             in_hallow: matches!(

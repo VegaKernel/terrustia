@@ -2762,3 +2762,71 @@ async fn a_running_timer_survives_a_restart() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An Eater of Worlds drops demonite and shadow scales, which is the whole point of fighting one.
+///
+/// Without them the shadow armour, the nightmare pickaxe and everything past them are
+/// unreachable, so this is progression rather than flavour.
+#[tokio::test]
+async fn an_eater_of_worlds_drops_its_ore() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "hunter").await;
+    client.set_timeout(Duration::from_secs(30));
+    client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The head brings its whole body with it. Killing segments is what drops the ore, and each
+    // roll is one in two, so a few worms make it all but certain.
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for _ in 0..6 {
+        // By name with spaces: the id table spells it `EaterofWorldsHead`.
+        client.say("/spawn Eater of Worlds Head").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+        while tokio::time::Instant::now() < deadline {
+            let Ok(event) = client.next_event().await else {
+                break;
+            };
+            match event {
+                Event::NpcSynced(n) if (13..=15).contains(&n.npc_type()) && n.life > 0 => {
+                    client
+                        .hit_npc(n.index, n.generation, 999, 0.0, 1)
+                        .await
+                        .ok();
+                }
+                Event::ItemSynced(item) => {
+                    seen.insert(item.item.id);
+                }
+                _ => {}
+            }
+            if seen.contains(&56) && seen.contains(&86) {
+                break;
+            }
+        }
+        if seen.contains(&56) && seen.contains(&86) {
+            break;
+        }
+    }
+    // Demonite ore is item 56, shadow scale 86.
+    assert!(
+        seen.contains(&56),
+        "no demonite ore from six Eaters of Worlds; saw {seen:?}"
+    );
+    assert!(
+        seen.contains(&86),
+        "no shadow scales from six Eaters of Worlds; saw {seen:?}"
+    );
+}

@@ -15,6 +15,8 @@
 pub struct Conditions {
     /// Expert or above, which is what turns a boss's loot into a bag.
     pub expert: bool,
+    /// Master, which is above expert. A handful of drops are rolled three ways rather than two.
+    pub master: bool,
     pub hard_mode: bool,
     pub downed_plantera: bool,
     /// Where it happened, for the drops that only come from one biome.
@@ -157,7 +159,102 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if at.downed_plantera && npc_type == 262 {
         out.push(always(1293));
     }
+    out.extend(by_mode(npc_type, at));
     out
+}
+
+/// The drops the game rolls differently depending on the world's mode.
+///
+/// The game writes these as one rule with two or three branches and picks the branch at the
+/// moment of the kill, so they cannot live in the flat table: the same NPC drops different
+/// amounts at different rates in classic, expert and master.
+///
+/// Only the branches that are plain rolls are here. Several of these rules have a branch that is
+/// a treasure bag, a relic or a "one of these" draw, and those need machinery of their own.
+fn by_mode(npc_type: u16, at: Conditions) -> Vec<Conditional> {
+    /// Pick the branch the world is in: classic, expert, master.
+    fn pick(
+        at: Conditions,
+        classic: Conditional,
+        expert: Conditional,
+        master: Conditional,
+    ) -> Conditional {
+        if at.master {
+            master
+        } else if at.expert {
+            expert
+        } else {
+            classic
+        }
+    }
+
+    match npc_type {
+        // The Eater of Worlds: every segment. Shadow scales and demonite are what the whole
+        // shadow-armour branch of progression is made of, and without them it is unreachable.
+        13..=15 => vec![
+            pick(
+                at,
+                a_few(86, 2, 1, 2),
+                a_few(86, 5, 1, 2),
+                a_few(86, 10, 1, 2),
+            ),
+            pick(
+                at,
+                a_few(56, 2, 2, 5),
+                a_few(56, 2, 1, 3),
+                a_few(56, 3, 1, 2),
+            ),
+        ],
+        // King Slime's gel, and the Blue Slime's.
+        326 => vec![pick(
+            at,
+            a_few(1729, 1, 1, 3),
+            a_few(1729, 1, 1, 4),
+            a_few(1729, 1, 2, 4),
+        )],
+        325 => vec![pick(
+            at,
+            a_few(1729, 1, 15, 30),
+            a_few(1729, 1, 25, 40),
+            a_few(1729, 1, 30, 50),
+        )],
+        // The Brain of Cthulhu: tissue samples and crimtane.
+        266 => vec![
+            pick(
+                at,
+                a_few(1329, 3, 2, 5),
+                a_few(1329, 3, 1, 3),
+                a_few(1329, 4, 1, 2),
+            ),
+            pick(
+                at,
+                a_few(880, 3, 5, 12),
+                a_few(880, 3, 5, 7),
+                a_few(880, 3, 2, 4),
+            ),
+        ],
+        // A wyvern's souls of flight, which are more generous in expert.
+        87 => vec![if at.expert {
+            a_few(575, 1, 10, 20)
+        } else {
+            a_few(575, 1, 5, 10)
+        }],
+        // The Dungeon Guardian's bone key.
+        185 => vec![if at.expert {
+            a_few(5070, 1, 1, 3)
+        } else {
+            a_few(5070, 1, 1, 2)
+        }],
+        // Giant worms and their kin: the whoopie cushion.
+        10 | 11 | 12 | 95 | 96 | 97 => vec![sometimes(215, 50)],
+        // Hornets and their variants: the stinger.
+        42 | 231 | 232 | 233 | 234 | 235 => vec![if at.expert {
+            always(209)
+        } else {
+            sometimes(209, 3)
+        }],
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -278,6 +375,7 @@ mod tests {
     fn most_things_drop_nothing_conditional() {
         let everything = Conditions {
             expert: true,
+            master: false,
             hard_mode: true,
             downed_plantera: true,
             in_hallow: false,
