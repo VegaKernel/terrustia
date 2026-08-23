@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod army;
 pub mod buffs;
+pub mod cavern_monsters;
 pub mod clock;
 pub mod event;
 pub mod housing;

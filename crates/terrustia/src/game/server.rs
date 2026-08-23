@@ -372,6 +372,11 @@ pub struct GameServer {
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
     /// tile up is what it is for.
     mech_cooldown: HashMap<(i32, i32), i32>,
+    /// The six cavern enemies this world happens to have.
+    ///
+    /// Drawn from the world's id rather than from the run's generator, so the same world always
+    /// has the same six. Worked out once when the world is opened.
+    cavern_monsters: crate::game::cavern_monsters::CavernMonsters,
     /// The last pillar shields, invasion progress and Moon Lord countdown that went out.
     ///
     /// All three are recomputed every tick and almost never move, so they are compared before
@@ -440,6 +445,8 @@ impl GameServer {
             ..Default::default()
         };
 
+        // Read before the world is moved into the server, since the monsters are drawn from it.
+        let world_id = world.id;
         let mut server = Self {
             config,
             world,
@@ -462,6 +469,7 @@ impl GameServer {
             running_timers,
             mech_cooldown: HashMap::new(),
             tile_entity_anchors: HashMap::new(),
+            cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
             last_sent_countdown: -1,
@@ -1392,6 +1400,18 @@ impl GameServer {
         }
 
         self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
+
+        // Which six cavern enemies this world has. Fixed for the world's life, so it is sent once
+        // on joining rather than kept up to date.
+        {
+            let mut w = terrustia_proto::PacketWriter::new(id::SYNC_CAVERN_MONSTER_TYPE);
+            for kind in self.cavern_monsters.flat() {
+                w.u16(kind);
+            }
+            if let Ok(frame) = w.finish() {
+                self.send(slot, frame);
+            }
+        }
 
         // What the Angler wants today. A client that is never told shows no quest at all, so a
         // player who joins after dawn would find the Angler had nothing to say until midnight.
@@ -2556,10 +2576,24 @@ impl GameServer {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
-        if self.army.skip_wait() {
+        if let Some(left) = self.army.skip_wait() {
+            self.broadcast_army_wait(left);
             debug!(slot, "the next army wave was called early");
         }
         Ok(())
+    }
+
+    /// Tell clients how long is left before the next wave comes through the gates.
+    ///
+    /// The countdown on screen is this and nothing else. Without it the gap between waves is a
+    /// blank pause of unknown length, which is exactly the part of the event a group needs to
+    /// plan around.
+    fn broadcast_army_wait(&mut self, ticks: i32) {
+        let mut w = terrustia_proto::PacketWriter::new(id::CRYSTAL_INVASION_SEND_WAIT_TIME);
+        w.i32(ticks);
+        if let Ok(frame) = w.finish() {
+            self.broadcast(frame, None);
+        }
     }
 
     /// Packet 144: the Dryad's little animation when a quest is handed in.
@@ -6130,6 +6164,7 @@ impl GameServer {
         self.army_arena = Some((left, right));
         // Three hundred ticks before the first wave, so the arena has a moment to settle.
         self.army.hold = 300;
+        self.broadcast_army_wait(self.army.hold);
 
         let at = (
             origin.0 as f32 * crate::game::npc::TILE + 40.0,
@@ -7268,6 +7303,10 @@ impl GameServer {
                 self.announce("The Old One's Army has been defeated!");
             } else {
                 self.announce(&format!("Old One's Army: wave {} complete!", wave));
+                // The wave ended, so the gap begins: clients need the countdown or the pause
+                // reads as the event having stopped.
+                let left = self.army.hold;
+                self.broadcast_army_wait(left);
             }
         }
     }
@@ -7451,6 +7490,7 @@ impl GameServer {
             // Three of an event's heavies at once is as many as it will put out.
             boss_cap: self.npcs.iter().filter(|(_, n)| n.stats.boss).count() >= 3,
             census: &count,
+            cavern_monsters: self.cavern_monsters,
         };
         let spawned = spawn::try_spawn(
             &self.world,

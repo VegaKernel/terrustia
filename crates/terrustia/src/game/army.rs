@@ -121,6 +121,12 @@ impl Tier {
 /// How many fallen goblins the field remembers at once.
 const CORPSES_REMEMBERED: usize = 300;
 
+/// What calling the next wave early cuts the wait down to, in ticks.
+///
+/// A second, not nothing. The arrival has an animation, and dropping the hold straight to zero
+/// would put enemies through the gates before anybody saw them open.
+const SKIP_TO: i32 = 60;
+
 /// Whether killing this counts toward the wave at all.
 pub fn belongs(npc_type: u16) -> bool {
     (551..=565).contains(&npc_type) || (568..=578).contains(&npc_type)
@@ -179,14 +185,20 @@ impl ArmyState {
     /// Call the next wave early, which is what the crystal's own button does.
     ///
     /// The gap between waves is generous on purpose — it is when you rebuild and re-arm — but a
-    /// group that is ready should not have to stand about. Returns whether there was a wait to
-    /// skip, so a request made mid-wave is refused rather than silently doing nothing.
-    pub fn skip_wait(&mut self) -> bool {
-        if !self.ongoing() || self.hold <= 0 {
-            return false;
+    /// group that is ready should not have to stand about.
+    ///
+    /// It cuts the wait to a second rather than to nothing, which is the game's own figure and
+    /// matters: the arrival has an animation, and dropping the hold straight to zero would put
+    /// enemies through the gates before anyone saw them open. A request with less than a second
+    /// left already is refused, so pressing it twice does not stack.
+    ///
+    /// Returns the new wait if there was one to skip, so the caller can tell clients.
+    pub fn skip_wait(&mut self) -> Option<i32> {
+        if !self.ongoing() || self.hold <= SKIP_TO {
+            return None;
         }
-        self.hold = 0;
-        true
+        self.hold = SKIP_TO;
+        Some(self.hold)
     }
 
     /// Record a kill. Returns the wave that just finished, if one did.

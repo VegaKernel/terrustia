@@ -478,6 +478,12 @@ pub struct EventSpawns<'a> {
     pub downed_mech_any: bool,
     /// How many of a type are alive, for the tables that cap their heavies.
     pub census: &'a dyn Fn(u16) -> usize,
+    /// The six cavern enemies this particular world has.
+    ///
+    /// Not part of the pool tables because they are not the same in every world: each world draws
+    /// six of the thirteen from its own id. Two worlds therefore feel different underground, and
+    /// a player who knows theirs has Salamanders and no Crawdads is right about that permanently.
+    pub cavern_monsters: crate::game::cavern_monsters::CavernMonsters,
 }
 
 impl EventSpawns<'_> {
@@ -585,7 +591,13 @@ pub fn try_spawn(
                     } else {
                         &[]
                     };
-                    let total = ordinary.len() + extra.len() + bloody.len();
+                    // The caverns also draw from the six this world happens to have, which is a
+                    // world-specific list rather than a table. It counts as one entry in the
+                    // draw, as the game counts it — not six — so a world's own monsters are a
+                    // seasoning on the cavern pool rather than most of it.
+                    let world_specific = depth == Depth::Cavern && biome == Biome::Forest;
+                    let total =
+                        ordinary.len() + extra.len() + bloody.len() + usize::from(world_specific);
                     if total == 0 {
                         continue;
                     }
@@ -594,8 +606,10 @@ pub fn try_spawn(
                         ordinary[at]
                     } else if at < ordinary.len() + extra.len() {
                         extra[at - ordinary.len()]
-                    } else {
+                    } else if at < ordinary.len() + extra.len() + bloody.len() {
                         bloody[at - ordinary.len() - extra.len()]
+                    } else {
+                        events.cavern_monsters.pick(rng)
                     }
                 }
             };
@@ -623,6 +637,7 @@ mod tests {
             hard_mode: false,
             downed_mech_any: false,
             census: &|_| 0,
+            cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(7),
         }
     }
     use crate::world::worldgen;
