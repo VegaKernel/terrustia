@@ -3418,28 +3418,35 @@ async fn a_town_npc_has_a_name_of_its_own() {
 
 // ---------------------------------------------------------- tile entities
 
-/// An item frame that is never told to anybody hangs empty for every client in the world. The
-/// sharing packet is what makes a tile entity exist at all, and it was not being sent.
+/// Placing an item frame's *tile* is what brings its tile entity into being — the placement
+/// packet does nothing for this kind, in the game or here. And the entity has to be told to
+/// everyone, or the frame hangs empty for every client in the world.
 #[tokio::test]
-async fn a_placed_tile_entity_is_told_to_everyone() {
-    // Tile 395 is the item frame's own tile; the entity has to stand on one.
+async fn placing_a_frames_tile_creates_and_shares_its_entity() {
+    // An item frame is two tiles square and nothing may be placed over anything already there,
+    // so the spot has to be clear.
     let addr = start_with(Config::default(), |world| {
-        world.set_tile(400, 320, Tile::framed(395, 0, 0));
+        for x in 398..404 {
+            for y in 318..324 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
     })
     .await;
     let mut alice = join(addr, "alice").await;
     let mut bob = join(addr, "bob").await;
-    alice.set_timeout(Duration::from_secs(3));
-    bob.set_timeout(Duration::from_secs(3));
+    alice.set_timeout(Duration::from_secs(5));
+    bob.set_timeout(Duration::from_secs(5));
 
-    alice.place_tile_entity(400, 320, 1).await.unwrap();
+    // Tile 395 is the item frame. Placing it is the whole gesture.
+    alice.place_object(400, 320, 395, 0).await.unwrap();
 
     let Event::Other(frame) = bob
         .wait_for("the entity", |e| {
             matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
         })
         .await
-        .expect("a placed entity should reach every client")
+        .expect("placing the tile should create and share the entity")
     else {
         unreachable!()
     };
@@ -3447,8 +3454,56 @@ async fn a_placed_tile_entity_is_told_to_everyone() {
     let _id = r.i32().unwrap();
     assert!(r.bool().unwrap(), "it should say the entity is present");
     let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
-    assert_eq!((entity.x, entity.y), (400, 320));
     assert_eq!(entity.kind, terrustia_proto::tile_entity::EntityKind::ItemFrame);
+    // The entity anchors on the object's top-left cell, not on the tile the cursor named. The
+    // game's own `ValidTile` insists on it: frameY zero and frameX a multiple of the object's
+    // width. An item frame's origin is one tile down, so the anchor is a row above the click.
+    assert_eq!(entity.x, 400);
+    assert_eq!(entity.y, 319, "the anchor is the frame's top-left cell");
+}
+
+/// Most kinds cannot be asked for by packet at all, and a server that obliges lets a crafted
+/// packet scatter tile entities through a world at coordinates nothing checks.
+///
+/// Found by the fuzzer: a saved world came back with three anchors in it that had never been
+/// placed by anybody.
+#[tokio::test]
+async fn a_tile_entity_cannot_be_conjured_by_asking() {
+    let addr = start_with(Config::default(), |world| {
+        // The right tile in the right place, so only the kind's own rule can refuse it.
+        world.set_tile(400, 320, Tile::framed(395, 0, 0));
+    })
+    .await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(3));
+
+    // An item frame, asked for rather than placed.
+    alice.place_tile_entity(400, 320, 1).await.unwrap();
+    let conjured = alice
+        .try_wait_for(
+            "an entity",
+            |e| matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(
+        conjured.is_none(),
+        "an item frame is not something a client may ask for"
+    );
+
+    // ...and an anchor in mid-air is refused too, which is what the fuzzer got away with.
+    alice.place_tile_entity(500, 200, 9).await.unwrap();
+    let floating = alice
+        .try_wait_for(
+            "an entity",
+            |e| matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING),
+            Duration::from_millis(600),
+        )
+        .await;
+    assert!(
+        floating.is_none(),
+        "a kite anchor needs a kite anchor tile under it"
+    );
 }
 
 /// The whole point of a frame is that it holds something, and the thing it held before comes back
@@ -3456,12 +3511,16 @@ async fn a_placed_tile_entity_is_told_to_everyone() {
 #[tokio::test]
 async fn an_item_frame_holds_what_is_put_in_it() {
     let addr = start_with(Config::default(), |world| {
-        world.set_tile(400, 320, Tile::framed(395, 0, 0));
+        for x in 398..404 {
+            for y in 318..324 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
     })
     .await;
     let mut alice = join(addr, "alice").await;
-    alice.set_timeout(Duration::from_secs(3));
-    alice.place_tile_entity(400, 320, 1).await.unwrap();
+    alice.set_timeout(Duration::from_secs(5));
+    alice.place_object(400, 320, 395, 0).await.unwrap();
     alice
         .wait_for("the entity", |e| {
             matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
@@ -3469,9 +3528,10 @@ async fn an_item_frame_holds_what_is_put_in_it() {
         .await
         .unwrap();
 
-    // A Zenith, for the sake of an item nobody would want eaten.
+    // A Zenith, for the sake of an item nobody would want eaten. Aimed at the frame's anchor,
+    // which is its top-left cell rather than the tile the placement named.
     alice
-        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 320, ItemStack::new(3507, 1, 0))
+        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 319, ItemStack::new(3507, 1, 0))
         .await
         .unwrap();
     let Event::Other(frame) = alice
@@ -3491,7 +3551,7 @@ async fn an_item_frame_holds_what_is_put_in_it() {
 
     // Swapping it should give the first one back rather than destroying it.
     alice
-        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 320, ItemStack::new(3506, 1, 0))
+        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 319, ItemStack::new(3506, 1, 0))
         .await
         .unwrap();
     let dropped = alice
@@ -3511,15 +3571,20 @@ async fn an_item_frame_holds_what_is_put_in_it() {
 #[tokio::test]
 async fn only_one_player_may_hold_a_tile_entity() {
     let addr = start_with(Config::default(), |world| {
-        world.set_tile(400, 320, Tile::framed(470, 0, 0));
+        for x in 396..406 {
+            for y in 316..326 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
     })
     .await;
     let mut alice = join(addr, "alice").await;
     let mut bob = join(addr, "bob").await;
-    alice.set_timeout(Duration::from_secs(3));
-    bob.set_timeout(Duration::from_secs(3));
+    alice.set_timeout(Duration::from_secs(5));
+    bob.set_timeout(Duration::from_secs(5));
 
-    alice.place_tile_entity(400, 320, 3).await.unwrap();
+    // Tile 470 is the mannequin. Placing it is what creates its entity.
+    alice.place_object(400, 320, 470, 0).await.unwrap();
     let Event::Other(frame) = alice
         .wait_for("the mannequin", |e| {
             matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)

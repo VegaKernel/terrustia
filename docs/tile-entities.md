@@ -19,11 +19,15 @@ handlers in [`game/server.rs`](../crates/terrustia/src/game/server.rs).
 | 6 | Food platter | 520 | one item |
 | 7 | Teleportation pylon | 597 | nothing — its network is the tile's own frame |
 | 8 | Dead Cells display jar | 704 | one item |
-| 9 | Kite anchor | — | the item it was let out of |
-| 10 | Critter anchor | — | the item it was let out of |
+| 9 | Kite anchor | 723 | the item it was let out of |
+| 10 | Critter anchor | 724 | the item it was let out of |
 
-The numbering is `TileEntitiesManager.RegisterAll`'s registration order. The two anchors ride
-other tiles and have no home of their own.
+The numbering is `TileEntitiesManager.RegisterAll`'s registration order.
+
+**Every kind has a tile, the two anchors included.** That is easy to get wrong, and this server
+did: the anchors are the only two whose tile appears in `IsTileValidForEntity` rather than
+anywhere obvious, and treating them as homeless skipped the check that stops a crafted packet
+planting them anywhere at all. See below.
 
 Three matter beyond decoration:
 
@@ -32,6 +36,31 @@ Three matter beyond decoration:
 - A **teleportation pylon** is a tile entity, which is why a pylon network is something the server
   has to keep rather than something a client can assert. Pylons are how a 1.4 world is crossed.
 - A **logic sensor** is the only *input* wiring has that is not a lever somebody pulled.
+
+## How one comes into existence
+
+Two ways, and getting this backwards is what let a fuzzer scatter tile entities through a world.
+
+**Placing its tile.** This is how nearly all of them arrive. The server watches for a tile that
+belongs to a kind (`EntityKind::for_tile`) going down and creates the entity there. Without it an
+item frame is scenery: it can be built and will never hold anything.
+
+The entity anchors on the object's **top-left cell**, not on the tile the click named. The game's
+own `ValidTile` insists on it — `frameY == 0` and `frameX` a multiple of the object's width — so
+an item frame placed with the cursor on its lower row anchors a tile above.
+
+**Asking for it (packet 87).** Only four kinds may be, and the rest is not an oversight in the
+game: `TileEntity`'s base `NetPlaceEntityAttempt` **does nothing at all**, so a request naming an
+item frame, a mannequin, a hat rack, a food platter, a logic sensor or a display jar is silently
+dropped.
+
+| May be asked for | Cannot be |
+|---|---|
+| training dummy, weapons rack, teleportation pylon, kite anchor, critter anchor | item frame, logic sensor, display doll, hat rack, food platter, display jar |
+
+This server accepted all eleven, and skipped the tile check for the two anchors on top of that.
+The fuzzer duly placed three anchors in mid-air, and they were saved to the world file. Both
+holes are closed and there is a test for each.
 
 ## Two serialised forms, and the trap between them
 

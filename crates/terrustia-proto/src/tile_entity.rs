@@ -69,9 +69,10 @@ impl EntityKind {
     /// The tile a kind must be standing on to be real.
     ///
     /// A placement naming the wrong tile is a crafted packet, and refusing it is what stops one
-    /// hanging an item frame in mid-air or planting a pylon inside a wall.
-    pub fn tile(self) -> Option<u16> {
-        Some(match self {
+    /// hanging an item frame in mid-air or planting a pylon inside a wall. Every kind has one,
+    /// the two anchors included — their `IsTileValidForEntity` names 723 and 724.
+    pub fn tile(self) -> u16 {
+        match self {
             Self::TrainingDummy => 378,
             Self::ItemFrame => 395,
             Self::LogicSensor => 423,
@@ -81,9 +82,40 @@ impl EntityKind {
             Self::FoodPlatter => 520,
             Self::TeleportationPylon => 597,
             Self::DeadCellsDisplayJar => 704,
-            // The two anchors ride other tiles and have no one home of their own.
-            Self::KiteAnchor | Self::CritterAnchor => return None,
-        })
+            Self::KiteAnchor => 723,
+            Self::CritterAnchor => 724,
+        }
+    }
+
+    /// The kind that belongs on a tile, if any does.
+    ///
+    /// This is the direction that matters most: placing the *tile* is how nearly every one of
+    /// these comes into existence, so the server has to recognise its own furniture going down.
+    pub fn for_tile(tile: u16) -> Option<Self> {
+        (0..=10)
+            .filter_map(Self::from_id)
+            .find(|kind| kind.tile() == tile)
+    }
+
+    /// Whether a client may ask for this kind by packet 87.
+    ///
+    /// Only four may, and the rest is not an oversight in the game: `TileEntity`'s base
+    /// `NetPlaceEntityAttempt` does nothing at all, so a placement request naming an item frame,
+    /// a mannequin, a hat rack, a food platter, a logic sensor or a display jar is silently
+    /// dropped. Those come into being when their *tile* is placed, not by asking.
+    ///
+    /// Accepting all eleven — which this server did — lets a crafted packet scatter tile entities
+    /// through a world at coordinates nothing checks. A fuzzer found three in a saved world that
+    /// had none.
+    pub fn placeable_by_request(self) -> bool {
+        matches!(
+            self,
+            Self::TrainingDummy
+                | Self::WeaponsRack
+                | Self::TeleportationPylon
+                | Self::KiteAnchor
+                | Self::CritterAnchor
+        )
     }
 
     /// The state a freshly placed one of this kind starts with.
@@ -429,9 +461,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for id in 0..11u8 {
             let kind = EntityKind::from_id(id).expect("a kind");
-            let Some(tile) = kind.tile() else {
-                continue;
-            };
+            let tile = kind.tile();
             assert!(
                 tile < crate::tile_sets::TILE_COUNT,
                 "{kind:?} names tile {tile}, past the end of the table"
@@ -440,11 +470,44 @@ mod tests {
         }
     }
 
-    /// The anchors have no tile of their own, and say so rather than guessing one.
+    /// The anchors have tiles of their own, which is easy to get wrong: they are the only two
+    /// whose tile is named in `IsTileValidForEntity` rather than anywhere obvious, and treating
+    /// them as homeless skips the check that stops a crafted packet planting them anywhere.
     #[test]
-    fn the_anchors_have_no_home() {
-        assert_eq!(EntityKind::KiteAnchor.tile(), None);
-        assert_eq!(EntityKind::CritterAnchor.tile(), None);
+    fn the_anchors_have_homes_too() {
+        assert_eq!(EntityKind::KiteAnchor.tile(), 723);
+        assert_eq!(EntityKind::CritterAnchor.tile(), 724);
+        assert_eq!(EntityKind::for_tile(723), Some(EntityKind::KiteAnchor));
+        assert_eq!(EntityKind::for_tile(724), Some(EntityKind::CritterAnchor));
+    }
+
+    /// Placing the tile is how nearly all of these arrive, so the lookup has to go both ways.
+    #[test]
+    fn a_tile_names_its_entity() {
+        for id in 0..11u8 {
+            let kind = EntityKind::from_id(id).unwrap();
+            assert_eq!(
+                EntityKind::for_tile(kind.tile()),
+                Some(kind),
+                "{kind:?} should be findable from its own tile"
+            );
+        }
+        assert_eq!(EntityKind::for_tile(1), None, "stone holds nothing");
+    }
+
+    /// Only four kinds may be asked for over the network. The rest come from their tile.
+    #[test]
+    fn most_kinds_cannot_be_asked_for() {
+        assert!(EntityKind::TeleportationPylon.placeable_by_request());
+        assert!(EntityKind::TrainingDummy.placeable_by_request());
+        assert!(EntityKind::WeaponsRack.placeable_by_request());
+        assert!(EntityKind::KiteAnchor.placeable_by_request());
+        assert!(!EntityKind::ItemFrame.placeable_by_request());
+        assert!(!EntityKind::DisplayDoll.placeable_by_request());
+        assert!(!EntityKind::HatRack.placeable_by_request());
+        assert!(!EntityKind::LogicSensor.placeable_by_request());
+        assert!(!EntityKind::FoodPlatter.placeable_by_request());
+        assert!(!EntityKind::DeadCellsDisplayJar.placeable_by_request());
     }
 
     fn round_trip(entity: &TileEntity, network: bool) -> TileEntity {

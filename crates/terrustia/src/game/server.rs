@@ -1977,6 +1977,14 @@ impl GameServer {
             }
         }
 
+        // Nor is an item frame, a mannequin, a hat rack or a food platter. These are never asked
+        // for by packet — the game's placement request does nothing for them — so placing the
+        // tile is the *only* moment they can come into existence. Without this an item frame is
+        // scenery: it can be built and never holds anything.
+        if let Some(kind) = terrustia_proto::tile_entity::EntityKind::for_tile(block) {
+            self.add_tile_entity(kind, left as i16, top as i16);
+        }
+
         // Everyone else places it themselves from the same packet.
         self.broadcast(
             terrustia_proto::packets::place_object(x, y, block, style, random)?,
@@ -5520,16 +5528,23 @@ impl GameServer {
         if !self.world.in_bounds(i32::from(x), i32::from(y)) {
             return Ok(());
         }
+        // Most kinds cannot be asked for at all. The game's base `NetPlaceEntityAttempt` does
+        // nothing, so a request naming an item frame or a mannequin is silently dropped — those
+        // come into being when their *tile* goes down. Accepting all eleven, which this server
+        // did, lets a crafted packet scatter tile entities through a world; a fuzzer duly found
+        // three in a saved world that should have had none.
+        if !kind.placeable_by_request() {
+            debug!(slot, ?kind, "that kind is not placed by asking");
+            return Ok(());
+        }
         if self.world.tile_entities.iter().any(|e| e.x == x && e.y == y) {
             return Ok(());
         }
         // The tile it claims to stand on has to actually be there.
-        if let Some(wanted) = kind.tile() {
-            let tile = self.world.tile(i32::from(x), i32::from(y));
-            if !tile.is_active() || tile.block != wanted {
-                debug!(slot, x, y, ?kind, "nothing there to place that on");
-                return Ok(());
-            }
+        let tile = self.world.tile(i32::from(x), i32::from(y));
+        if !tile.is_active() || tile.block != kind.tile() {
+            debug!(slot, x, y, ?kind, "nothing there to place that on");
+            return Ok(());
         }
 
         let id = self.world.next_tile_entity;
@@ -5541,6 +5556,24 @@ impl GameServer {
         // to hand out.
         self.share_tile_entity(id);
         Ok(())
+    }
+
+    /// Give a piece of furniture the tile entity that makes it work, and tell everybody.
+    ///
+    /// Called when the tile goes down rather than when a client asks, because for most kinds
+    /// that is the only moment there is: the game's placement request does nothing for an item
+    /// frame, a mannequin, a hat rack, a food platter, a logic sensor or a display jar.
+    fn add_tile_entity(&mut self, kind: terrustia_proto::tile_entity::EntityKind, x: i16, y: i16) {
+        if self.world.tile_entities.iter().any(|e| e.x == x && e.y == y) {
+            return;
+        }
+        let id = self.world.next_tile_entity;
+        self.world.next_tile_entity += 1;
+        self.world
+            .tile_entities
+            .push(terrustia_proto::tile_entity::TileEntity::new(id, kind, x, y));
+        self.share_tile_entity(id);
+        debug!(x, y, ?kind, id, "tile entity created with its tile");
     }
 
     /// Tell everyone nearby what a tile entity now holds.
@@ -5597,11 +5630,8 @@ impl GameServer {
         // spot reserved so nothing can be placed there again, and it goes on being ticked forever.
         let mut orphaned = Vec::new();
         for (at, entity) in self.world.tile_entities.iter().enumerate() {
-            let Some(wanted) = entity.kind.tile() else {
-                continue;
-            };
             let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
-            if !tile.is_active() || tile.block != wanted {
+            if !tile.is_active() || tile.block != entity.kind.tile() {
                 orphaned.push((at, entity.npc(), entity.id));
             }
         }
@@ -5631,7 +5661,7 @@ impl GameServer {
                 .any(|p| (p.0 - here.0).abs() < DUMMY_REACH && (p.1 - here.1).abs() < DUMMY_REACH);
             // A dummy whose own tile has gone takes its NPC with it.
             let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
-            let planted = tile.is_active() && Some(tile.block) == entity.kind.tile();
+            let planted = tile.is_active() && tile.block == entity.kind.tile();
             match entity.npc() {
                 Some(index) if !watched || !planted => lower.push((at, index)),
                 None if watched && planted => raise.push((at, here)),
