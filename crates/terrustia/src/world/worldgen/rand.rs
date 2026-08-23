@@ -91,6 +91,9 @@ impl UnifiedRandom {
     }
 
     /// The next draw, and the one the world file records after every pass.
+    ///
+    /// Named for the game's own `Next`, which is what every transcribed pass calls.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> i32 {
         self.internal_sample()
     }
@@ -210,7 +213,7 @@ mod tests {
         let mut r = UnifiedRandom::new(-7);
         for _ in 0..10_000 {
             let v = r.next();
-            assert!(v >= 0 && v < i32::MAX, "{v} is out of range");
+            assert!((0..i32::MAX).contains(&v), "{v} is out of range");
         }
     }
 
