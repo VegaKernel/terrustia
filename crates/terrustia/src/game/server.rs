@@ -162,6 +162,14 @@ fn near_section(standing: (f32, f32), section: (i32, i32)) -> bool {
     (theirs.0 - section.0).abs() <= SECTION_REACH && (theirs.1 - section.1).abs() <= SECTION_REACH
 }
 
+/// How far around a meteor's centre to push at clients, which is comfortably past the crater.
+const METEOR_REACH: i32 = 40;
+
+/// How often to check that the Old Man is still at his post.
+const OLD_MAN_CHECK_INTERVAL: u64 = 60 * 5;
+/// How near a player has to be, in tiles, before it is worth putting him back.
+const OLD_MAN_NOTICE: f32 = 250.0;
+
 /// How many sections either way still count as near enough to be told about.
 ///
 /// One section is 200 by 150 tiles, so this reaches 600 by 450 — comfortably past what anybody
@@ -510,6 +518,7 @@ impl GameServer {
         self.tick_spawning();
         lap(&mut cost, Phase::Spawning);
         self.tick_town_npcs();
+        self.tick_old_man();
         lap(&mut cost, Phase::Housing);
 
         if self.ticks.is_multiple_of(TIME_SYNC_TICKS)
@@ -853,6 +862,7 @@ impl GameServer {
             id::SYNC_TILE_PAINT_OR_COATING | id::SYNC_WALL_PAINT_OR_COATING => {
                 self.on_paint(slot, frame.id, &payload)
             }
+            id::MISC_DATA_SYNC => self.on_misc_data(slot, &payload),
             id::LOCK_AND_UNLOCK => self.on_lock(slot, &payload),
             id::CHEST_UPDATES => self.on_chest_update(slot, &payload),
             id::TILE_ENTITY_PLACEMENT => self.on_tile_entity_placed(slot, &payload),
@@ -4971,6 +4981,69 @@ impl GameServer {
             self.announce("A solar eclipse is happening!");
             info!("solar eclipse");
         }
+        // A meteor is rolled for every dawn once the evil's boss is down, and again whenever one
+        // is owed from a kill. It is where meteorite bars come from, and with them the first
+        // weapon that does not run out of ammunition.
+        let owed = self.world.progress.spawn_meteor;
+        if owed
+            || (self.world.progress.downed_boss2
+                && rand::Rng::random_range(&mut self.rng, 0..50) == 0)
+        {
+            self.world.progress.spawn_meteor = false;
+            self.land_meteor();
+        }
+    }
+
+    /// Bring a meteor down somewhere out of the way, and tell everyone it happened.
+    fn land_meteor(&mut self) {
+        let landed = {
+            let world = &mut self.world;
+            crate::world::meteor::drop(world, &mut self.rng)
+        };
+        let Some((x, y)) = landed else {
+            debug!("nowhere for a meteor to land");
+            return;
+        };
+        self.announce("A meteorite has landed!");
+        info!(x, y, "meteorite landed");
+        self.push_region(x, y, METEOR_REACH);
+    }
+
+    /// Push a square region of the world at every client.
+    ///
+    /// A client that already holds a section will not ask for it again, so a change this size —
+    /// a crater, a hardmode stripe — has to be *sent* or nobody sees it until they rejoin. It
+    /// goes as a grid of tile squares, because one square carries at most 255 tiles a side.
+    fn push_region(&mut self, x: i32, y: i32, reach: i32) {
+        const CHUNK: i32 = 50;
+        let (from_x, to_x) = ((x - reach).max(0), (x + reach).min(self.world.width() - 1));
+        let (from_y, to_y) = ((y - reach).max(0), (y + reach).min(self.world.height() - 1));
+
+        let mut at_x = from_x;
+        while at_x <= to_x {
+            let width = CHUNK.min(to_x - at_x + 1);
+            let mut at_y = from_y;
+            while at_y <= to_y {
+                let height = CHUNK.min(to_y - at_y + 1);
+                let square = TileSquare {
+                    x: at_x as i16,
+                    y: at_y as i16,
+                    width: width as u8,
+                    height: height as u8,
+                    change_type: 0,
+                    // Column-major: all of one column, then the next.
+                    tiles: (0..width)
+                        .flat_map(|dx| (0..height).map(move |dy| (dx, dy)))
+                        .map(|(dx, dy)| self.world.tile(at_x + dx, at_y + dy))
+                        .collect(),
+                };
+                if let Ok(frame) = square.encode() {
+                    self.broadcast(frame, None);
+                }
+                at_y += height;
+            }
+            at_x += width;
+        }
     }
 
     /// ...and at nightfall: a blood moon, which will not rise on a new moon and will not rise for
@@ -5249,6 +5322,115 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
         }
+    }
+
+    /// Packet 51: the odd-jobs packet, whose first action is the only way to fight Skeletron.
+    ///
+    /// A client sends it when the player takes the Old Man up on his offer. There is no summon
+    /// item for Skeletron and never has been — the dialogue *is* the summon — so without this the
+    /// dungeon stays shut and nothing behind it can be reached.
+    fn on_misc_data(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        // The player the client names is ignored in favour of the connection it came in on.
+        let _claimed = r.u8()?;
+        let action = r.u8()?;
+        match action {
+            1 => self.summon_skeletron(),
+            // A sundial or a moondial skipping to the next morning or evening.
+            3 => self.skip_to(true),
+            6 => self.skip_to(false),
+            other => {
+                debug!(slot, action = other, "ignoring a misc-data action");
+                self.broadcast(packets::verbatim(id::MISC_DATA_SYNC, payload)?, Some(slot));
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the Old Man standing at the dungeon door until Skeletron is beaten.
+    ///
+    /// He is not a town NPC and does not move in anywhere: he is a fixture of the dungeon, and he
+    /// is the only way to start that fight. If he is missing — a fresh server on a world that
+    /// never had him, or one where something killed him — he is put back.
+    fn tick_old_man(&mut self) {
+        const OLD_MAN: u16 = 37;
+        const SKELETRON: u16 = 35;
+
+        if !self.ticks.is_multiple_of(OLD_MAN_CHECK_INTERVAL) {
+            return;
+        }
+        if self.world.progress.downed_boss3 {
+            return;
+        }
+        // Not while the fight is on: he has become it.
+        if self.npcs.iter().any(|(_, n)| n.npc_type == SKELETRON) {
+            return;
+        }
+        if self.npcs.iter().any(|(_, n)| n.npc_type == OLD_MAN) {
+            return;
+        }
+        let (Some(x), Some(y)) = (self.world.dungeon_x, self.world.dungeon_y) else {
+            return;
+        };
+        // Only bother once somebody is near enough to see him arrive.
+        let watched = self.players.iter().flatten().any(|p| {
+            p.is_playing()
+                && (p.position.0 / crate::game::npc::TILE - x as f32).abs() < OLD_MAN_NOTICE
+        });
+        if !watched {
+            return;
+        }
+        let at = (x as f32 * 16.0, (y - 3) as f32 * 16.0);
+        if let Some(index) = self.npcs.spawn(OLD_MAN, at) {
+            self.broadcast_npc(index);
+            debug!(x, y, "the old man is back at the dungeon");
+        }
+    }
+
+    /// Turn the Old Man into Skeletron.
+    ///
+    /// He is not killed and Skeletron is not summoned beside him — he *becomes* it, which is why
+    /// the dungeon has no guardian afterwards. The Clothier will do instead, because he is the
+    /// same man once the curse is off him.
+    fn summon_skeletron(&mut self) {
+        const OLD_MAN: u16 = 37;
+        const CLOTHIER: u16 = 54;
+        const SKELETRON: u16 = 35;
+
+        if self.npcs.iter().any(|(_, n)| n.npc_type == SKELETRON) {
+            return;
+        }
+        let cursed = self
+            .npcs
+            .iter()
+            .find(|(_, n)| matches!(n.npc_type, OLD_MAN | CLOTHIER) && n.is_alive())
+            .map(|(index, n)| (index, n.center()));
+        let Some((index, at)) = cursed else {
+            debug!("nobody at the dungeon to become Skeletron");
+            return;
+        };
+
+        self.npcs.remove(index);
+        self.broadcast_npc_death(index);
+        if let Some(spawned) = self.npcs.spawn(SKELETRON, at) {
+            self.announce("Skeletron has awoken!");
+            self.broadcast_npc(spawned);
+        }
+    }
+
+    /// A sundial or moondial: jump the clock to the next dawn or dusk.
+    fn skip_to(&mut self, dawn: bool) {
+        if dawn {
+            self.world.day_time = true;
+            self.world.time = 0;
+        } else {
+            self.world.day_time = false;
+            self.world.time = 0;
+        }
+        self.broadcast_world_data();
     }
 
     /// Put one Plantera's bulb somewhere in the underground jungle, and tell everyone.

@@ -3072,3 +3072,52 @@ async fn a_plantera_bulb_wakes_her_and_regrows() {
         .await;
     assert!(plantera.is_some(), "breaking a bulb did not wake Plantera");
 }
+
+/// The Old Man waits at the dungeon, and taking his offer turns him into Skeletron.
+///
+/// There is no summon item for Skeletron and never has been — the dialogue is the summon. Without
+/// it the dungeon stays shut, and with it shut nothing behind it can be reached.
+#[tokio::test]
+async fn the_old_man_becomes_skeletron() {
+    let addr = start_with(Config::default(), |world| {
+        world.dungeon_x = Some(400);
+        world.dungeon_y = Some(320);
+        for x in 380..430 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "curious").await;
+    client.set_timeout(Duration::from_secs(20));
+    client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+
+    // He puts himself back at the door once somebody is near.
+    let old_man = client
+        .try_wait_for(
+            "the old man",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 37),
+            Duration::from_secs(10),
+        )
+        .await;
+    assert!(old_man.is_some(), "nobody was waiting at the dungeon");
+
+    // Packet 51 action 1 is what a client sends when the player takes the offer.
+    let mut w = terrustia_proto::PacketWriter::new(id::MISC_DATA_SYNC);
+    w.u8(0).u8(1);
+    client.send(&w.finish().unwrap()).await.unwrap();
+
+    let skeletron = client
+        .try_wait_for(
+            "Skeletron",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 35),
+            Duration::from_secs(6),
+        )
+        .await;
+    assert!(skeletron.is_some(), "the old man did not become Skeletron");
+}

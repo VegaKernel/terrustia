@@ -592,7 +592,7 @@ fn read_world_header(
     let _blood_moon = num(r.bool(), r)?;
     let _eclipse = num(r.bool(), r)?;
     let dungeon_x = num(r.i32(), r)?;
-    let _dungeon_y = num(r.i32(), r)?;
+    let dungeon_y = num(r.i32(), r)?;
     let crimson = num(r.bool(), r)?;
 
     // What the world has already been through. These have to be read in file order, and they are
@@ -679,6 +679,7 @@ fn read_world_header(
     offsets.late = late;
     let mut world = World::empty(width, height, name);
     world.dungeon_x = Some(dungeon_x);
+    world.dungeon_y = Some(dungeon_y);
     world.raining = world_weather.raining;
     world.rain_time = world_weather.rain_time;
     world.max_rain = world_weather.max_rain;

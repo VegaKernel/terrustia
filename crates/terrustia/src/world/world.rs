@@ -50,8 +50,10 @@ pub struct World {
     pub sandstorm_time: i32,
     pub sandstorm_severity: f32,
     pub sandstorm_intended_severity: f32,
-    /// Where the dungeon is, when the world file said. Hardmode's stripes steer around it.
+    /// Where the dungeon is, when the world file said. Hardmode's stripes steer around it, the
+    /// jungle sits opposite it, and the Old Man waits at its door.
     pub dungeon_x: Option<i32>,
+    pub dungeon_y: Option<i32>,
     /// Which moon is up, if either. Kept on the world because the client is told about it.
     pub pumpkin_moon: bool,
     pub snow_moon: bool,
@@ -115,6 +117,7 @@ impl World {
             eclipse: false,
             moon_phase: 0,
             dungeon_x: None,
+            dungeon_y: None,
             pumpkin_moon: false,
             snow_moon: false,
             raining: false,

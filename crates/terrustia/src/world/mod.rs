@@ -2,6 +2,7 @@ pub mod bulbs;
 pub mod hardmode;
 pub mod items;
 pub mod liquid;
+pub mod meteor;
 pub mod objects;
 pub mod progress;
 pub mod wiring;
