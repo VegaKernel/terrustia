@@ -145,11 +145,15 @@ Same 4200×1200 world, same machine, nobody connected.
 | RAM, idle | 641.8 MB | 45.4 MB |
 | Bandwidth over 5 min | 148,874 B | 133,400 B |
 
-A note on the tick, because the claim changed twice. "A verified full 60 Hz tick" originally rested
-on instrumentation that was comparing CPU time against wall time, so it was withdrawn. With that
-fixed, it has been measured again on the same world: a typical tick costs **184–330 µs of a
-16,666 µs budget**, and the autosave — previously the most expensive thing an idle server did, at
-up to 7,656 µs — now costs 43–137 µs because only changed sections are copied.
+A note on the tick, because the claim has changed three times now. "A verified full 60 Hz tick"
+originally rested on instrumentation that was comparing CPU time against wall time, so it was
+withdrawn. With that fixed, it was measured again on the same world: a typical tick costs
+**184–330 µs of a 16,666 µs budget**, and the autosave — previously the most expensive thing an
+idle server did, at up to 7,656 µs — now costs 43–137 µs because only changed sections are copied.
+That third figure had a real gap the other two didn't: it was measured from a server's *second*
+autosave onward. The first one, with no prior buffer to diff against, cost 14,833 µs — 89% of the
+whole budget — until this repository's own first real CI soak run caught it and it was fixed by
+building that buffer during startup instead of inside a counted tick.
 
 The remaining figures above were measured externally, at the process level, and were never affected
 by that instrumentation.
