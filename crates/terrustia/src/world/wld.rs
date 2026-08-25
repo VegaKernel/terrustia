@@ -99,6 +99,15 @@ pub enum WldError {
     #[error("world would serialise to {bytes} bytes, past the format's 2 GiB section offsets")]
     SaveTooLarge { bytes: i64 },
 
+    #[error(
+        "the world was written but could not be read back ({source}); the previous save has been \
+         left in place rather than replaced with something unreadable"
+    )]
+    WroteSomethingUnreadable {
+        #[source]
+        source: Box<WldError>,
+    },
+
     #[error("malformed data at byte {offset}: {source}")]
     Decode {
         offset: usize,

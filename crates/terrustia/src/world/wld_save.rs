@@ -757,15 +757,101 @@ fn write_signs(w: &mut Writer, world: &World) {
 ///
 /// The bytes go to a temporary file next to the target and are renamed into place, so an
 /// interrupted save cannot leave a half-written world where the real one was.
+/// How many previous worlds to keep beside the current one.
+///
+/// Verifying before replacing means a save can refuse rather than destroy; backups are what makes
+/// a world recoverable when the damage came from somewhere else entirely — a bad edit, a griefing
+/// run, or a bug in here that verification cannot see because the file parses perfectly and simply
+/// says the wrong thing.
+pub const BACKUPS_KEPT: usize = 3;
+
+/// Shift the existing world down the backup chain: `.bak1` becomes `.bak2`, and so on.
+///
+/// Failures are logged rather than fatal. A backup that cannot be made is worth knowing about, and
+/// is not a reason to refuse to save the world — that would turn a full disk into data loss
+/// instead of merely a missing safety net.
+fn rotate_backups(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let bak = |n: usize| path.with_extension(format!("wld.bak{n}"));
+
+    // Drop the oldest, then walk upward so nothing is overwritten before it has been moved.
+    let _ = std::fs::remove_file(bak(BACKUPS_KEPT));
+    for n in (1..BACKUPS_KEPT).rev() {
+        if bak(n).exists()
+            && let Err(e) = std::fs::rename(bak(n), bak(n + 1))
+        {
+            tracing::warn!(error = %e, "could not rotate a world backup");
+        }
+    }
+    if let Err(e) = std::fs::copy(path, bak(1)) {
+        tracing::warn!(error = %e, "could not back up the world before saving over it");
+    }
+}
+
 pub fn save(world: &World, path: &Path) -> Result<()> {
     let bytes = serialize(world)?;
     let temp = path.with_extension("wld.tmp");
 
-    std::fs::write(&temp, &bytes).map_err(|e| WldError::Io {
-        path: temp.display().to_string(),
+    // Write, then *verify*, then replace. An atomic rename over a file that turned out to be
+    // corrupt is an atomic loss, so the new world is read back and parsed before it is allowed to
+    // become the real one. We already own a reader; this costs a fraction of the write.
+    let written = write_and_sync(&temp, &bytes);
+    if let Err(e) = written {
+        // Do not leave the half-written attempt lying about. Nothing else will ever clean it up,
+        // and the next save has to be able to use the name.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+    if let Err(e) = super::wld::parse(&bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(WldError::WroteSomethingUnreadable {
+            source: Box::new(e),
+        });
+    }
+
+    // Only once the replacement is known good: rotating first would push a healthy world out of
+    // the chain to make room for one that turned out not to be writable.
+    rotate_backups(path);
+
+    if let Err(e) = std::fs::rename(&temp, path) {
+        // On Windows this fails outright if anything else holds the destination open — Terraria
+        // itself, a backup tool, a virus scanner. The previous world is untouched either way.
+        let _ = std::fs::remove_file(&temp);
+        return Err(WldError::Io {
+            path: path.display().to_string(),
+            source: e,
+        });
+    }
+    // The rename is only durable once the *directory* entry is. Without this the world can be
+    // atomically replaced and still not be there after a power cut.
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Write a file and get it onto the disk, rather than into the page cache.
+///
+/// `std::fs::write` returns as soon as the kernel has the bytes, so a crash of the *machine* — as
+/// opposed to the process — can leave a renamed file whose contents never landed. That is the
+/// classic false durability: atomic with respect to a process crash, and not with respect to a
+/// power cut.
+fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(path).map_err(|e| WldError::Io {
+        path: path.display().to_string(),
         source: e,
     })?;
-    std::fs::rename(&temp, path).map_err(|e| WldError::Io {
+    file.write_all(bytes).map_err(|e| WldError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    file.sync_all().map_err(|e| WldError::Io {
         path: path.display().to_string(),
         source: e,
     })?;
@@ -1045,5 +1131,47 @@ mod tests {
                 "{slots} slots"
             );
         }
+    }
+
+    /// Saving keeps the last few worlds, and refuses rather than replacing with something broken.
+    ///
+    /// The rename was atomic already, which protects against a crash *during* the write. It does
+    /// nothing about the file being atomically replaced with rubbish, and nothing about damage
+    /// that arrives some other way — a bad edit, a griefing run, a bug in here that produces a
+    /// file which parses perfectly and says the wrong thing.
+    #[test]
+    fn saving_rotates_backups_and_keeps_a_bounded_number() {
+        let dir = std::env::temp_dir().join(format!("terrustia-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("world.wld");
+
+        let world = crate::world::worldgen::generate(400, 300, "backups", 1);
+        for _ in 0..BACKUPS_KEPT + 3 {
+            save(&world, &path).expect("saving");
+        }
+
+        assert!(path.exists(), "the world itself");
+        for n in 1..=BACKUPS_KEPT {
+            assert!(
+                path.with_extension(format!("wld.bak{n}")).exists(),
+                "backup {n} should exist after several saves"
+            );
+        }
+        assert!(
+            !path.with_extension(format!("wld.bak{}", BACKUPS_KEPT + 1)).exists(),
+            "the chain must be bounded, or a world eats its own disk"
+        );
+        // And nothing is left half-written.
+        assert!(
+            !path.with_extension("wld.tmp").exists(),
+            "a temporary file was left behind; nothing else will ever clean it up"
+        );
+
+        // Every backup has to be a world, not a truncated one.
+        let bytes = std::fs::read(path.with_extension("wld.bak1")).expect("reading a backup");
+        crate::world::wld::parse(&bytes).expect("a backup must be loadable");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
