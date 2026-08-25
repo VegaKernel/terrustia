@@ -19,13 +19,13 @@ pub struct Cpu(Duration);
 
 impl Cpu {
     /// Read the calling thread's consumed CPU time.
+    #[cfg(unix)]
     pub fn now() -> Self {
         let mut ts = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         // SAFETY: `clock_gettime` writes a `timespec` through the pointer and reads nothing else.
-        // `CLOCK_THREAD_CPUTIME_ID` is available on both platforms this server targets.
         let ok = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0;
         if !ok {
             // A clock that cannot be read must not make every tick look free or infinitely slow;
@@ -35,6 +35,67 @@ impl Cpu {
         Self(Duration::new(
             ts.tv_sec.max(0) as u64,
             ts.tv_nsec.clamp(0, 999_999_999) as u32,
+        ))
+    }
+
+    /// Read the calling thread's consumed CPU time.
+    ///
+    /// Windows has no `clock_gettime` and no `CLOCK_THREAD_CPUTIME_ID` — neither symbol exists in
+    /// libc's Windows module — so the `unix` version above does not merely misbehave here, it
+    /// fails to compile. This was the *only* thing stopping the whole project building on Windows.
+    ///
+    /// `GetThreadTimes` is the equivalent, reporting kernel and user time as 100-nanosecond ticks
+    /// in a pair of `FILETIME`s. Both are wanted: a tick that spends its time in a write syscall
+    /// costs the server just as much as one that spends it in a loop.
+    #[cfg(windows)]
+    pub fn now() -> Self {
+        use std::mem::MaybeUninit;
+
+        // Minimal declarations rather than a dependency on the whole Windows API surface, matching
+        // how the unix side uses `libc` directly. `FILETIME` is two 32-bit halves of a 64-bit
+        // count of 100ns intervals.
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+        unsafe extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn GetThreadTimes(
+                thread: isize,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
+        }
+
+        let mut creation = MaybeUninit::<FileTime>::uninit();
+        let mut exit = MaybeUninit::<FileTime>::uninit();
+        let mut kernel = MaybeUninit::<FileTime>::uninit();
+        let mut user = MaybeUninit::<FileTime>::uninit();
+
+        // SAFETY: `GetThreadTimes` writes four `FILETIME`s through the pointers and reads nothing
+        // else; the handle from `GetCurrentThread` is a pseudo-handle that is always valid and
+        // needs no closing. The values are only read when it reports success.
+        let ok = unsafe {
+            GetThreadTimes(
+                GetCurrentThread(),
+                creation.as_mut_ptr(),
+                exit.as_mut_ptr(),
+                kernel.as_mut_ptr(),
+                user.as_mut_ptr(),
+            ) != 0
+        };
+        if !ok {
+            return Self(Duration::ZERO);
+        }
+        // SAFETY: written by the call above, which reported success.
+        let (kernel, user) = unsafe { (kernel.assume_init(), user.assume_init()) };
+        let ticks = |t: FileTime| (u64::from(t.high) << 32) | u64::from(t.low);
+        Self(Duration::from_nanos(
+            (ticks(kernel) + ticks(user)).saturating_mul(100),
         ))
     }
 

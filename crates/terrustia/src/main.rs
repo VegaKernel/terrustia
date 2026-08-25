@@ -236,7 +236,41 @@ async fn stop_signal() -> &'static str {
             _ = term.recv() => "SIGTERM",
         }
     }
-    #[cfg(not(unix))]
+    // Windows has no signals. It has three separate console control events, and a service or a
+    // container stop sends one of the two that are *not* Ctrl-C — so listening for Ctrl-C alone
+    // meant a managed shutdown skipped the save entirely and lost everything since the last
+    // autosave. `ctrl_close` is the console window closing; `ctrl_shutdown` is the machine going
+    // down. Both are worth catching, and both give only a short grace period, which is why the
+    // shutdown save has to already be quick.
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+
+        let mut close = match windows::ctrl_close() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "cannot listen for the close event; only Ctrl-C stops cleanly");
+                let _ = signal::ctrl_c().await;
+                return "ctrl-c";
+            }
+        };
+        let mut shutdown = match windows::ctrl_shutdown() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "cannot listen for the shutdown event");
+                tokio::select! {
+                    _ = signal::ctrl_c() => return "ctrl-c",
+                    _ = close.recv() => return "console closing",
+                }
+            }
+        };
+        tokio::select! {
+            _ = signal::ctrl_c() => "ctrl-c",
+            _ = close.recv() => "console closing",
+            _ = shutdown.recv() => "system shutting down",
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = signal::ctrl_c().await;
         "ctrl-c"
