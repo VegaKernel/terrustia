@@ -3,7 +3,7 @@
 ## Reporting
 
 Please report anything security-relevant privately, through GitHub's
-[private vulnerability reporting](https://github.com/brooklyn/terrustia/security/advisories/new),
+[private vulnerability reporting](https://github.com/bybrooklyn/terrustia/security/advisories/new),
 rather than as a public issue. I will acknowledge within a few days.
 
 ## What is in scope
@@ -49,7 +49,7 @@ artefact was built by this repository's own release workflow:
 ```sh
 cosign verify-blob \
   --bundle terrustia-<version>-<target>.tar.gz.cosign.bundle \
-  --certificate-identity-regexp 'https://github.com/brooklyn/terrustia/' \
+  --certificate-identity-regexp 'https://github.com/bybrooklyn/terrustia/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   terrustia-<version>-<target>.tar.gz
 ```
