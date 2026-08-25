@@ -2203,6 +2203,7 @@ impl GameServer {
             id::CHEST_UPDATES => self.on_chest_update(slot, &payload),
             id::TILE_ENTITY_PLACEMENT => self.on_tile_entity_placed(slot, &payload),
             id::HIT_SWITCH => self.on_hit_switch(slot, &payload),
+            id::NPC_HOME => self.on_npc_home(slot, &payload),
             id::BUG_CATCHING => self.on_bug_caught(slot, &payload),
             id::BUG_RELEASING => self.on_bug_released(slot, &payload),
             id::LIQUID_UPDATE => self.on_liquid(slot, &payload),
@@ -2910,6 +2911,70 @@ impl GameServer {
             player.team = team;
         }
         self.relay_player_packet(slot, id::TEAM_CHANGE, payload)
+    }
+
+    /// Packet 60 inbound: a player using the housing screen.
+    ///
+    /// This id is sent both ways. The server announces where each town NPC lives, which it already
+    /// did — but the *client* sends the same packet to ask for a change, and that half was falling
+    /// through to the ignore arm. So dragging an NPC into a room, or evicting one, did nothing at
+    /// all on this server while looking like it had worked locally.
+    ///
+    /// Vanilla's server half (`MessageBuffer.cs` case 60, the `netMode != 1` branches) is two
+    /// cases: a status byte of 1 evicts, anything else assigns the room at the given tile. It also
+    /// boots a client whose NPC index is out of range as a cheat attempt; we decline the packet
+    /// instead, since the transport is not the place to decide somebody is cheating.
+    fn on_npc_home(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let index = r.i16()?;
+        let home_x = r.i16()?;
+        let home_y = r.i16()?;
+        let evicting = r.u8()? == 1;
+
+        let Ok(index) = u8::try_from(index) else {
+            debug!(slot, index, "housing request for an npc slot that cannot exist");
+            return Ok(());
+        };
+        // Only town NPCs have homes; anything else is a client asking for something meaningless.
+        let Some(npc) = self.npcs.get(index) else {
+            return Ok(());
+        };
+        if !npc.stats.town_npc || !npc.is_alive() {
+            return Ok(());
+        }
+
+        if evicting {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.home = None;
+            }
+            info!(slot, index, "town npc evicted");
+        } else {
+            // The room has to be one the game would accept, or a client could house a merchant
+            // inside solid rock and the server would agree.
+            match crate::game::housing::check_room(&self.world, i32::from(home_x), i32::from(home_y))
+            {
+                Ok(_) => {
+                    if let Some(npc) = self.npcs.get_mut(index) {
+                        npc.home = Some((i32::from(home_x), i32::from(home_y)));
+                    }
+                    info!(slot, index, home_x, home_y, "town npc moved in");
+                }
+                Err(why) => {
+                    debug!(slot, index, ?why, "housing request refused");
+                    // Tell the asker what it actually is, so their screen stops showing the move.
+                    if let Some(frame) = self.npc_home_frame(index) {
+                        self.send(slot, frame);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        // Everyone's housing screen has to agree, including the one that asked.
+        self.broadcast_npc_home(index);
+        Ok(())
     }
 
     fn on_pvp(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {

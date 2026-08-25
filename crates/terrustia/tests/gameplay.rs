@@ -34,7 +34,7 @@ async fn start_with<F: FnOnce(&mut World)>(mut config: Config, prepare: F) -> So
 
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), world).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
     addr
 }
 
@@ -434,7 +434,7 @@ async fn a_generated_world_saves_and_reloads() {
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), reloaded).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
 
     let mut client = join(addr, "returner").await;
     client.set_timeout(Duration::from_secs(20));
@@ -482,7 +482,7 @@ async fn edits_survive_a_save_and_reload() {
     let (spawn_x, spawn_y) = (world.spawn_x, world.spawn_y);
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), world).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
 
     let mut client = join(addr, "digger").await;
     let dig_x = i32::from(spawn_x) + 20;
@@ -813,14 +813,29 @@ async fn a_password_cannot_be_used_to_skip_the_version_check() {
     assert!(granted.is_err(), "the version check was bypassed");
 }
 
-/// Ask the server to spawn an NPC beside us and wait for it to arrive.
+/// Ask the server to spawn an NPC beside us and wait for **that one** to arrive.
+///
+/// Waiting for the next NPC sync of any kind is a race, and one that actually bites: a world is
+/// spawning its own creatures the whole time, so a sync arriving just after `/spawn` is as likely
+/// to be a passing bat as the thing that was asked for. It stayed hidden while the server sent NPC
+/// state ten times a second — the wanted one usually won — and surfaced the moment that rate came
+/// down to the game's.
+///
+/// So the roster is photographed first and the wait is for a slot that is not in it, keyed by slot
+/// *and* generation because a spawn may take the slot of something that has just died.
 async fn spawn_npc(client: &mut Client, name: &str) -> terrustia_proto::npc::SyncNpc {
+    let before: std::collections::HashSet<(u8, u8)> = client
+        .world()
+        .npcs()
+        .map(|npc| (npc.index, npc.generation))
+        .collect();
+
     client.say(&format!("/spawn {name}")).await.unwrap();
     let event = client
-        .wait_for(
-            "the spawned npc",
-            |e| matches!(e, Event::NpcSynced(n) if n.life != 0),
-        )
+        .wait_for("the spawned npc", |e| {
+            matches!(e, Event::NpcSynced(n)
+                if n.life != 0 && !before.contains(&(n.index, n.generation)))
+        })
         .await
         .expect("npc never arrived");
     match event {
@@ -873,6 +888,41 @@ async fn an_unknown_npc_name_is_refused() {
         )
         .await
         .unwrap();
+}
+
+/// A blow smaller than half an NPC's armour still takes a point off.
+///
+/// The game's rule is `Math.Max(1, damage - defense/2)` — there is no such thing as a hit that
+/// lands and does nothing. The Guide has 250 life and 30 defence, so one damage against him is the
+/// smallest possible real hit, and a real 1.4.5.8 server takes him from 250 to 249 for it.
+///
+/// Written because a probe against both servers disagreed here and it took a while to establish
+/// which of the three candidates was at fault: the damage floor, the sync, or the probe.
+#[tokio::test]
+async fn a_blow_smaller_than_half_the_armour_still_lands() {
+    let addr = start().await;
+    let mut client = join(addr, "prodder").await;
+
+    let guide = spawn_npc(&mut client, "Guide").await;
+    assert_eq!(guide.life_max, 250, "the Guide's health");
+
+    client
+        .hit_npc(guide.index, guide.generation, 1, 0.0, 1)
+        .await
+        .unwrap();
+
+    let event = client
+        .wait_for("the wounded guide", |e| {
+            matches!(e, Event::NpcSynced(n) if n.index == guide.index && n.life < 250)
+        })
+        .await
+        .expect("the hit was never reported");
+    if let Event::NpcSynced(hurt) = event {
+        assert_eq!(
+            hurt.life, 249,
+            "one damage against thirty defence is still one damage"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1082,6 +1132,80 @@ async fn a_house_gets_a_guide() {
     );
 }
 
+/// The housing screen has to actually do something.
+///
+/// Packet 60 travels both ways: the server announces where each town NPC lives, and a client sends
+/// the same id to ask for a change — dragging an NPC into a room, or evicting one. Only the
+/// outbound half existed, so the inbound one fell through to the ignore arm and every use of the
+/// housing UI silently did nothing on this server while appearing to have worked locally.
+#[tokio::test]
+async fn a_player_can_evict_and_rehouse_a_town_npc() {
+    use terrustia_proto::packets::{HouseholdStatus, npc_home};
+
+    let inside = std::cell::Cell::new((0, 0));
+    let addr = start_with(Config::default(), |world| {
+        inside.set(build_house(world, 300, 300));
+    })
+    .await;
+    let mut client = join(addr, "landlord").await;
+    let (hx, hy) = inside.get();
+    client
+        .move_to(hx as f32 * 16.0, hy as f32 * 16.0)
+        .await
+        .unwrap();
+
+    client.set_timeout(Duration::from_secs(20));
+    let guide = client
+        .wait_for(
+            "the Guide moving in",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 22),
+        )
+        .await
+        .expect("a Guide should have moved into a finished house");
+    let Event::NpcSynced(guide) = guide else {
+        unreachable!("matched on it")
+    };
+
+    // The packet a client sends is the same shape the server sends back, so the encoder is shared.
+    // Status 1 is the eviction, exactly as vanilla's own client sends it.
+    let evict = npc_home(u16::from(guide.index), 0, 0, HouseholdStatus::Homeless).unwrap();
+    client.send(&evict).await.unwrap();
+
+    let announced = client
+        .wait_for("the eviction announced back", |e| {
+            matches!(e, Event::Other(f)
+                if f.id == terrustia_proto::id::NPC_HOME
+                    && f.payload.last() == Some(&(HouseholdStatus::Homeless as u8)))
+        })
+        .await;
+    assert!(
+        announced.is_ok(),
+        "an eviction has to reach everyone's housing screen, including the asker's"
+    );
+
+    // And move him back in, to a room the server agrees is habitable.
+    let rehouse = npc_home(
+        u16::from(guide.index),
+        hx as i16,
+        hy as i16,
+        HouseholdStatus::Settled,
+    )
+    .unwrap();
+    client.send(&rehouse).await.unwrap();
+
+    let settled = client
+        .wait_for("the rehousing announced back", |e| {
+            matches!(e, Event::Other(f)
+                if f.id == terrustia_proto::id::NPC_HOME
+                    && f.payload.last() != Some(&(HouseholdStatus::Homeless as u8)))
+        })
+        .await;
+    assert!(
+        settled.is_ok(),
+        "a valid room should be accepted and announced"
+    );
+}
+
 #[tokio::test]
 async fn the_house_command_explains_why_a_room_is_rejected() {
     let addr = start_with(Config::default(), |world| {
@@ -1185,6 +1309,141 @@ async fn the_guide_moves_into_a_finished_house() {
         "the Guide moved in at ({tx:.0}, {ty:.0}), which is not the house"
     );
     assert!(announced, "nobody announced the arrival");
+}
+
+/// Somebody other than the Guide moves in once the world has earned them.
+///
+/// This is the one that never happened. `tick_town_npcs` housed a homeless resident or spawned the
+/// Guide, and that was the whole arrival system — so a town was one house and one Guide forever,
+/// and the Mechanic, who sells the only wire in the game, could never come.
+#[tokio::test]
+async fn a_second_resident_arrives_once_the_world_earns_them() {
+    let config = Config {
+        max_players: 4,
+        ..Default::default()
+    };
+    let addr = start_with(config, |world| {
+        // Two houses, so the Guide takes one and the next arrival has somewhere to go.
+        build_house(world, 300, 300);
+        build_house(world, 330, 300);
+        // A boss is down, which is what the Dryad waits for.
+        world.progress.downed_boss1 = true;
+    })
+    .await;
+
+    let mut client = join(addr, "host").await;
+    client.move_to(305.0 * 16.0, 303.0 * 16.0).await.unwrap();
+    client.set_timeout(Duration::from_secs(40));
+
+    const DRYAD: u16 = 20;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let mut seen = Vec::new();
+    while tokio::time::Instant::now() < deadline && !seen.contains(&DRYAD) {
+        match client.next_event().await {
+            Ok(Event::NpcSynced(n)) => {
+                let kind = n.npc_type();
+                if !seen.contains(&kind) {
+                    seen.push(kind);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        seen.contains(&DRYAD),
+        "no second resident arrived; saw {seen:?}. Only the Guide could ever move in before \
+         arrivals were implemented",
+    );
+}
+
+/// Talking to somebody tied up frees them, and they can then move in.
+///
+/// Six residents are found rather than earned, and nothing set the flag their arrival waits on —
+/// so the Mechanic could never appear, and she sells the only wire in the game. An entire ported,
+/// documented subsystem sat unreachable behind this one missing interaction.
+#[tokio::test]
+async fn a_bound_townsperson_can_be_freed() {
+    const BOUND_MECHANIC: u16 = 123;
+    const MECHANIC: u16 = 124;
+
+    let addr = start().await;
+    let mut client = join(addr, "rescuer").await;
+    client.set_timeout(Duration::from_secs(15));
+
+    // Put one in the world where the player is standing.
+    client.say(&format!("/spawn {BOUND_MECHANIC}")).await.unwrap();
+    let bound = client
+        .wait_for(
+            "a bound mechanic",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == BOUND_MECHANIC),
+        )
+        .await
+        .expect("the bound mechanic should spawn");
+    let Event::NpcSynced(npc) = bound else {
+        panic!("expected an npc")
+    };
+
+    // Talk to her.
+    client.talk_to_npc(npc.index).await.unwrap();
+
+    let freed = client
+        .wait_for(
+            "the freed mechanic",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == MECHANIC),
+        )
+        .await;
+    assert!(
+        freed.is_ok(),
+        "talking to a bound mechanic must free her, or there is no wire in the game",
+    );
+}
+
+/// Registering an account claims the server, and a stranger loses the dangerous commands.
+///
+/// Before this, the comment above the command dispatcher said "there is no permission model: this
+/// is aimed at a server among friends" — and any connected player could set the world to night,
+/// summon a boss beside somebody, or delete every NPC in the world with `/butcher`.
+///
+/// An unclaimed server stays open on purpose: locking the commands away before anybody could have
+/// an account is how a security feature becomes a thing people disable.
+#[tokio::test]
+async fn claiming_the_server_locks_down_its_commands() {
+    let addr = start().await;
+    let mut client = join(addr, "stranger").await;
+    client.set_timeout(Duration::from_secs(10));
+
+    // Unclaimed: butcher is allowed and says nothing about permissions.
+    client.say("/butcher").await.unwrap();
+    let refused = client
+        .wait_for("a refusal", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("permission"))
+        })
+        .await;
+    assert!(refused.is_err(), "an unclaimed server should not refuse");
+
+    // Claim it.
+    client.say("/register owner hunter2hunter2").await.unwrap();
+    client
+        .wait_for("the account", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("account"))
+        })
+        .await
+        .expect("registering should say something");
+
+    // Now log out and try again: the gate is closed.
+    client.say("/logout").await.unwrap();
+    client.say("/butcher").await.unwrap();
+    let refused = client
+        .wait_for("a refusal", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("permission"))
+        })
+        .await;
+    assert!(
+        refused.is_ok(),
+        "once claimed, a signed-out player must not be able to butcher the world",
+    );
 }
 
 #[tokio::test]
@@ -1319,8 +1578,13 @@ async fn a_zombie_works_at_a_door_and_opens_it() {
             }
         }
         // A door standing in the corridor at x = 405.
-        for y in 317..320 {
-            world.set_tile(405, y, Tile::framed(10, 0, 0));
+        //
+        // The frames matter and are not decoration: a door's three tiles carry `frameY` 0, 18 and
+        // 36, and that is how both the game and this server find which of them is the top when
+        // somebody pushes on the middle one. Building all three at zero makes something no world
+        // contains, and a door that cannot be opened because it has no discernible top.
+        for (offset, y) in (317..320).enumerate() {
+            world.set_tile(405, y, Tile::framed(10, 0, offset as i16 * 18));
         }
     })
     .await;
@@ -1764,6 +2028,83 @@ async fn a_net_only_catches_critters() {
     assert!(
         fresh.world().tile(402, 330).is_some(),
         "the server survived"
+    );
+}
+
+/// A client already in the world watches the water move.
+///
+/// The other liquid test joins a *fresh* client afterwards, which reads the pool out of a section
+/// it loads from scratch — so it would pass even if the server told nobody anything while the
+/// water was falling. This one stays connected throughout, which is the case that actually matters
+/// and the one that broke when liquid moved from tile squares to net module 0.
+#[tokio::test]
+async fn a_connected_client_is_told_when_water_moves() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 400..410 {
+            world.set_tile(x, 340, Tile::block(1));
+            for y in 330..340 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        for y in 330..341 {
+            world.set_tile(400, y, Tile::block(1));
+            world.set_tile(409, y, Tile::block(1));
+        }
+    })
+    .await;
+
+    let mut watcher = join(addr, "watcher").await;
+    // The basin is far from spawn, so the section holding it has to be asked for before anything
+    // in it can be watched.
+    watcher.walk_to_tile(405, 335).await.unwrap();
+    watcher
+        .wait_for("the basin's section", |event| {
+            matches!(event, terrustia_client::Event::SectionLoaded { .. })
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        watcher.world().tile(405, 339).map(|t| t.liquid),
+        Some(0),
+        "the basin should start dry"
+    );
+
+    let mut pourer = join(addr, "pourer").await;
+    let mut pour = Vec::new();
+    pour.extend_from_slice(&405i16.to_le_bytes());
+    pour.extend_from_slice(&331i16.to_le_bytes());
+    pour.push(255);
+    pour.push(0);
+    pourer.send(&frame(id::LIQUID_UPDATE, &pour)).await.unwrap();
+
+    // Watch until the bottom of the basin has water in it, without ever reloading the section.
+    let filled = watcher
+        .try_wait_for(
+            "water at the bottom",
+            |event| matches!(event, terrustia_client::Event::LiquidChanged(_)),
+            Duration::from_secs(5),
+        )
+        .await;
+    assert!(filled.is_some(), "no liquid update ever reached the client");
+
+    // Drain whatever else is in flight so the pool has settled in this client's own view.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if watcher.world().tile(405, 339).map(|t| t.liquid).unwrap_or(0) > 0 {
+            break;
+        }
+        if watcher
+            .try_wait_for("more liquid", |_| false, Duration::from_millis(300))
+            .await
+            .is_none()
+        {
+            continue;
+        }
+    }
+
+    assert!(
+        watcher.world().tile(405, 339).map(|t| t.liquid).unwrap_or(0) > 0,
+        "the client never saw the water reach the bottom of the basin"
     );
 }
 
@@ -2792,7 +3133,7 @@ async fn a_running_timer_survives_a_restart() {
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), reloaded).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
 
     let mut client = join(addr, "returner").await;
     client.set_timeout(Duration::from_secs(20));
@@ -3647,6 +3988,215 @@ async fn only_one_player_may_hold_a_tile_entity() {
     assert!(
         stolen.is_none(),
         "a mannequin somebody else has open should not be handed over"
+    );
+}
+
+/// Put a pylon of one network into a world, tile and entity both.
+fn plant_pylon(world: &mut World, x: i16, y: i16, kind: u8) {
+    use terrustia_proto::tile_entity::{EntityKind, TileEntity};
+
+    // A pylon is three tiles wide and four tall, and its network lives in the frame: fifty-four
+    // pixels of frameX per style.
+    for dx in 0..3i16 {
+        for dy in 0..4i16 {
+            world.set_tile(
+                i32::from(x + dx),
+                i32::from(y + dy),
+                Tile::framed(597, i16::from(kind) * 54 + dx * 18, dy * 18),
+            );
+        }
+    }
+    let id = world.next_tile_entity;
+    world.next_tile_entity += 1;
+    world
+        .tile_entities
+        .push(TileEntity::new(id, EntityKind::TeleportationPylon, x, y));
+}
+
+/// A joining client is told about every pylon in the world.
+///
+/// The client keeps its own travel list and draws the pylon map from it; nothing else on the wire
+/// carries one. Tile entities were being announced and pylons saved and loaded, so the network
+/// looked implemented from inside — but a player standing at a pylon opened a map with nowhere to
+/// go, which is how the real server's join sequence gave it away.
+#[tokio::test]
+async fn a_joining_client_is_told_about_every_pylon() {
+    const JUNGLE: u8 = 1;
+    let addr = start_with(Config::default(), |world| {
+        plant_pylon(world, 300, 300, JUNGLE);
+    })
+    .await;
+
+    let mut client = Client::connect(addr, "traveller").await.unwrap();
+    client.set_timeout(Duration::from_secs(10));
+    client.handshake().await.unwrap();
+
+    // The announcement arrives during the handshake, so it has to be read out of a capture rather
+    // than waited for afterwards. Simplest: reconnect with the tap on.
+    let mut recorded = Client::connect(addr, "recorder").await.unwrap();
+    let dir = std::env::temp_dir().join(format!("terrustia-pylon-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let capture = dir.join("join.trcap");
+    recorded.record_to(&capture).unwrap();
+    recorded.set_timeout(Duration::from_secs(10));
+    recorded.handshake().await.unwrap();
+    recorded.flush_recording();
+    drop(recorded);
+
+    let raw = std::fs::read(&capture).unwrap();
+    let found = find_pylon_announcement(&raw);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(
+        found,
+        Some((300, 300, JUNGLE)),
+        "the join should have announced the jungle pylon"
+    );
+}
+
+/// Scan a TRCAP1 capture's server-to-client half for a module-8 "pylon was added".
+fn find_pylon_announcement(raw: &[u8]) -> Option<(i16, i16, u8)> {
+    let magic = terrustia_client::tap::MAGIC;
+    let mut inbound = Vec::new();
+    let mut at = magic.len();
+    while at + 10 <= raw.len() {
+        let direction = raw[at];
+        let len = u32::from_le_bytes(raw[at + 6..at + 10].try_into().unwrap()) as usize;
+        at += 10;
+        if direction == 1 {
+            inbound.extend_from_slice(raw.get(at..at + len)?);
+        }
+        at += len;
+    }
+
+    let mut cursor = 0usize;
+    while cursor + 3 <= inbound.len() {
+        let len = u16::from_le_bytes([inbound[cursor], inbound[cursor + 1]]) as usize;
+        if len < 3 || cursor + len > inbound.len() {
+            return None;
+        }
+        if inbound[cursor + 2] == id::NET_MODULES
+            && let Ok(Some((message, pylon))) =
+                terrustia_proto::net_module::decode_pylon_message(&inbound[cursor + 3..cursor + len])
+            && message == terrustia_proto::net_module::PylonMessage::Added
+        {
+            return Some((pylon.x, pylon.y, pylon.kind));
+        }
+        cursor += len;
+    }
+    None
+}
+
+/// A pylon with nobody living near it refuses to carry anyone.
+///
+/// Two housed townsfolk within the pylon's scan box, which is the game's rule and the one thing
+/// that stops the network being a free teleport from the moment a world opens.
+#[tokio::test]
+async fn a_lonely_pylon_will_not_carry_anybody() {
+    const JUNGLE: u8 = 1;
+    let addr = start_with(Config::default(), |world| {
+        plant_pylon(world, 300, 300, JUNGLE);
+        plant_pylon(world, 500, 300, JUNGLE);
+    })
+    .await;
+
+    let mut client = join(addr, "hopeful").await;
+    let start = client.position();
+
+    let mut request = Vec::new();
+    request.extend_from_slice(&terrustia_proto::net_module::MODULE_PYLON.to_le_bytes());
+    request.push(2); // PlayerRequestsTeleport
+    request.extend_from_slice(&300i16.to_le_bytes());
+    request.extend_from_slice(&300i16.to_le_bytes());
+    request.push(JUNGLE);
+    client
+        .send(&frame(id::NET_MODULES, &request))
+        .await
+        .unwrap();
+
+    // Nothing should move: the player is not near a pylon, and no one lives by the destination.
+    let moved = client
+        .try_wait_for(
+            "a teleport",
+            |event| matches!(event, terrustia_client::Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(moved.is_none(), "an empty pylon carried a player anyway");
+    assert_eq!(client.position(), start);
+}
+
+/// A pylon with a town around it carries a player standing at another one.
+///
+/// The gate is only half the feature; this is the half a player notices. Two housed residents by
+/// the destination, the traveller within reach of a pylon of their own, and the server moves them
+/// and tells everybody.
+#[tokio::test]
+async fn a_pylon_with_a_town_around_it_carries_a_player() {
+    const JUNGLE: u8 = 1;
+    const GUIDE: i32 = 22;
+    const MERCHANT: i32 = 17;
+    let addr = start_with(Config::default(), |world| {
+        // Where the traveller starts, near spawn, and where they are going.
+        plant_pylon(world, 400, 320, JUNGLE);
+        plant_pylon(world, 300, 300, JUNGLE);
+        // Two residents living beside the destination pylon.
+        for (net_id, dx) in [(GUIDE, 0), (MERCHANT, 6)] {
+            world.town_npcs.push(terrustia::world::objects::TownNpc {
+                net_id,
+                name: String::from("Somebody"),
+                position: ((300 + dx) as f32 * 16.0, 300.0 * 16.0),
+                homeless: false,
+                home: (300 + dx, 300),
+                variation: 0,
+                homeless_despawn: false,
+            });
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "traveller").await;
+    // Stand at the pylon nearest spawn. The reach is sixty tiles, so the exact spot does not
+    // matter, but being in the world's other half would.
+    client.walk_to_tile(400, 316).await.unwrap();
+
+    let mut request = Vec::new();
+    request.extend_from_slice(&terrustia_proto::net_module::MODULE_PYLON.to_le_bytes());
+    request.push(2);
+    request.extend_from_slice(&300i16.to_le_bytes());
+    request.extend_from_slice(&300i16.to_le_bytes());
+    request.push(JUNGLE);
+    client
+        .send(&frame(id::NET_MODULES, &request))
+        .await
+        .unwrap();
+
+    let moved = client
+        .try_wait_for(
+            "a teleport",
+            |event| matches!(event, terrustia_client::Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_secs(5),
+        )
+        .await;
+
+    let Some(terrustia_client::Event::Other(frame)) = moved else {
+        panic!("the pylon never carried the player");
+    };
+    let mut r = terrustia_proto::PacketReader::new(&frame.payload);
+    let flags = r.u8().unwrap();
+    let who = r.i16().unwrap();
+    let x = r.f32().unwrap();
+    let y = r.f32().unwrap();
+    let style = r.u8().unwrap();
+
+    assert_eq!(who, i16::from(client.slot()));
+    assert_eq!((x / 16.0, y / 16.0), (300.0, 300.0), "landed on the pylon");
+    assert_eq!(style, 9, "style 9 is the pylon's own animation");
+    assert_eq!(flags & 0x08, 0x08, "the network id should follow");
+    assert_eq!(
+        r.i32().unwrap(),
+        i32::from(JUNGLE),
+        "the client colours the effect by network"
     );
 }
 

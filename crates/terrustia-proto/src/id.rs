@@ -3,11 +3,21 @@
 //! Kept complete rather than trimmed to the ids we handle, so that logging an unexpected packet
 //! can name it. See `docs/protocol-notes.md`.
 
-/// The protocol release number this server speaks: the client sends `"Terraria325"`.
-pub const CUR_RELEASE: u32 = 325;
+/// The protocol release this server speaks.
+///
+/// 1.4.5.8 bumped this to 326 without changing the wire format — determined by asking a real
+/// Terraria server, which rejected every other number and accepted this one. The decompiled tree
+/// this project is written against is 1.4.5.7, release 325.
+pub const CUR_RELEASE: u32 = 326;
 
-/// The exact handshake string a 1.4.5.7 client opens with.
-pub const VERSION_STRING: &str = "Terraria325";
+/// The exact handshake string a current client opens with.
+pub const VERSION_STRING: &str = "Terraria326";
+
+/// Releases this server will talk to.
+///
+/// A range rather than one number, because the last two releases are the same protocol and
+/// refusing the older one strands anybody who has not updated for no reason at all.
+pub const SUPPORTED_RELEASES: &[u32] = &[325, 326];
 
 pub const HELLO: u8 = 1;
 pub const KICK: u8 = 2;
@@ -74,7 +84,11 @@ pub const UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST: u8 = 56;
 pub const UNKNOWN57: u8 = 57;
 pub const INSTRUMENT_SOUND: u8 = 58;
 pub const HIT_SWITCH: u8 = 59;
-pub const UNKNOWN60: u8 = 60;
+/// Where a town NPC lives. Sent both ways: the server announces it, and a client asks for a
+/// change through the housing screen — dragging an NPC into a room, or evicting one.
+pub const NPC_HOME: u8 = 60;
+/// The name this id has in `MessageID.cs`, kept so the transcription stays greppable.
+pub const UNKNOWN60: u8 = NPC_HOME;
 pub const SPAWN_BOSS_USE_LICENSE_START_EVENT: u8 = 61;
 pub const SYNC_DODGE: u8 = 62;
 pub const SYNC_TILE_PAINT_OR_COATING: u8 = 63;
