@@ -8,8 +8,10 @@ rather than as a public issue. I will acknowledge within a few days.
 
 ## What is in scope
 
-This is a game server that strangers connect to over the open internet. The things worth reporting
-are the ones that let somebody on the other end of a socket do something they should not:
+This is a game server that strangers connect to over the open internet. **[`AUDIT.md`](AUDIT.md)**
+lists what's already been found and fixed, so you can see the actual track record rather than take
+this document's word for it. The things worth reporting here are the ones not already in it — the
+ones that let somebody on the other end of a socket do something they should not:
 
 - Crashing or hanging the server, or making it use unbounded memory or CPU
 - Corrupting or destroying a world file

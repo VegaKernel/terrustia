@@ -36,7 +36,9 @@ of the game to play; this replaces the server, not the game.
 The honest answer, feature by feature. Built from audits run against the code rather than against
 these notes — the two documents this section replaces (a separate `README.md` status list and
 `FEATURES.md`) had drifted far enough apart to disagree with each other about whether cacti grow.
-This is the one place that answer lives now.
+This is the one place that answer lives now. **[`AUDIT.md`](AUDIT.md)** has the findings behind it:
+what was wrong, what it would have done to a real save or a real server, and how each fix was
+verified rather than assumed.
 
 | | Meaning |
 |---|---|
