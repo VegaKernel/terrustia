@@ -51,6 +51,13 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **Lakes** | 4 on a 4200×1200 world; surface water 5,764 → 6,069. Reimplemented, not transcribed — vanilla's siting filter reads `GenVars` this generator never writes |
 | ✓ | **Fixed a bug in my own CI** | `cargo build --workspace --examples` builds examples and *not* the server, so the soak job would have failed on its first run |
 | ✓ | **Doors build frame-important tiles correctly** | `Tile::block` on a framed type trips a debug assertion and ships -1 frames; six tests were failing on it |
+| ✓ | **Blood moon / eclipse resume from a save** | Was read and thrown away on load; the bytes on disk were always correct, only the session forgot. Test verified failing on the unfixed code |
+| ✓ | **Jungle and underground-desert chests carry vanilla's real items** | Transcribed signature-item lists from `AddBuriedChest`, wired ahead of the existing depth-tiered fallback. Tests assert the exact vanilla item ids |
+| ✓ | **Settled water at generation** | Lakes, oceans and underworld lava all reach a stable rest state before a world ships. Reuses the runtime liquid simulator rather than porting vanilla's separate algorithm. Real world: 19.5ms, 38 rounds, converged |
+| ✓ | **Flowers, mushrooms, alchemy herbs, sunflowers at generation** | The rest of Tier 1's Wave A. Zero frame-sentinel bugs across all four |
+| ✓ | **`place_object` + pots, statues, piles, fallen logs at generation** | 4,032 pots, 143 statues, 35+8 piles measured on a real world. Two real bugs caught before landing: a floor check that read an inactive tile's leftover block id as solid ground, and a dropped step-back in statue placement that made every attempt overlap its own floor |
+| ✓ | **The Lihzahrd Altar is placed in the jungle temple** — was silently making Golem unreachable in every generated world | A real client refuses the Power Cell interaction without an altar tile nearby — no server-side workaround exists for its absence. Found by a worldgen sizing pass reading vanilla's source, not by anyone playing the game. Tested across 40 seeds and the full range of rolled temple sizes; verified failing on the unfixed code |
+| ✓ | **Persistent scratch directory** | `/private/tmp` gets reaped by the OS after a few days and took the decompiled Terraria source tree with it mid-session, out from under several running agents. `.scratch/` lives inside the repo instead |
 
 ## Audit findings, ranked
 
@@ -113,17 +120,59 @@ real-world round trip      faithful; every field survives
 | — | Section encoding off the tick; parallel worldgen |
 | — | Packaging: Homebrew, winget, AUR, systemd unit, container `HEALTHCHECK` |
 | — | `terrustia update` with signature verification |
-| — | Sticky console, new commands, startup panel alignment |
+| ~ | Sticky console, new commands, startup panel alignment | in progress |
 
 ### Block D — make it complete
 
+**Worldgen Tier 1**: trees, jungle grass/vines, cacti, lakes, settled water, flowers/mushrooms/
+herbs/sunflowers, pots/statues/piles/fallen logs, and the Lihzahrd Altar are all done and wired
+into `build()` — see Done, above. What's left of Tier 1:
+
 | | Item |
 |---|---|
-| — | `place_object` helper (unblocks 8 worldgen passes) |
-| — | Worldgen Tier 1: Wave A (7 easy), Wave B (6 middle), then the four big rocks |
-| — | A bot that starts with nothing and kills Moon Lord |
-| — | Town NPCs (shops, combat, happiness) · Journey mode · 3 missing events · ~123 drops · pets/mounts/rails |
-| — | Worldgen Tiers 2 and 3 |
+| — | Traps (`placeTrap` + `PlaceSandTrap`, ~900 lines) — needs a wire model on top of object placement |
+| — | `SmoothWorld` (14 local slope/pound rules) — not attempted; source access was unavailable when this wave landed rather than guessed at |
+
+**Worldgen Tiers 2 and 3**: sized for real this session (line-by-line against the decompiled
+source, the same way Tier 1 was). Full detail in the sizing report; headline numbers:
+
+| | Tier 2 (10 items) | Tier 3 (36 items) |
+|---|---|---|
+| Closures only | 1,560 lines | 3,128 lines |
+| + first-order helpers | ~7,773 lines (reuse-adjusted — see below) | 4,792 lines (**floor**; ~20 helpers unmeasured before source access was lost) |
+| Estimated effort | 2–3 weeks | 1–2 weeks |
+
+Notes that change the schedule, not just the numbers:
+- **Tier 2 has no easy wave at all.** Every item is at least moderate; four (floating islands,
+  living trees, pyramids, micro-biomes) are individually harder than Tier 1's *entire* 18-pass
+  closure total on their own, and most need a shared shape/structure framework
+  (`Terraria.WorldBuilding` — `WorldUtils`/`Actions`/`Modifiers`/`StructureMap`, ~5,253 lines,
+  none of it built) that has to exist before the first line of `MicroBiomes`, `Marble` or
+  `Granite` can even compile. Build a minimal subset of that first, the same way `place_object`
+  had to exist before this wave's middle-tier passes could start.
+- **Don't port `AddBuriedChest`'s 1,692 lines a second time.** Terrustia's own ~90-line chest
+  pattern already does the job (see the chest-loot commit above) — reusing it for jungle shrines'
+  and underground cabins' chests removes ~3,300 lines from the Tier 2 estimate on its own.
+- **Tier 3 is mostly Tier-1-Wave-A shaped** — ~25 of 36 items are 15–130-line single-purpose tile
+  scans with no exotic dependency. Three outliers (`TileCleanup` 431 lines, `FinalCleanup` 355,
+  `MossAndMossCaves` 236 + unmeasured helpers) and one DSL-gated item (`CaveWallVariety`) are the
+  exceptions.
+- **`GlowingMushroomPatches` (219 lines) was never read** before source access was lost — its
+  difficulty is genuinely unknown, not "moderate by line count."
+- Tier 1's `CactusPalmTreesAndCoral` and Tier 3's "coral and palms" are the *same* gap under two
+  names — cacti are done, palms and coral are not, and it's one item, not two.
+
+| | Item |
+|---|---|
+| — | Build a minimal `Terraria.WorldBuilding` subset (gates half of Tier 2 plus `Marble`/`Granite`/`CaveWallVariety`) |
+| — | Worldgen Tier 2, item by item, once the framework above exists |
+| — | Worldgen Tier 3, item by item — the ~25 easy items first |
+| — | A bot that starts with nothing and kills Moon Lord — Tier 1's own acceptance test, once traps and `SmoothWorld` land |
+| — | Town NPCs (shops, combat, happiness) |
+| — | Journey mode |
+| — | 3 missing events (Slime Rain, Party, Lantern Night) |
+| — | ~123 enemy drop tables |
+| — | Pets, mounts, minecart tracks |
 
 ## Corrections to earlier claims
 

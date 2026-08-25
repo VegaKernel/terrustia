@@ -13,9 +13,10 @@ disagree with each other about whether cacti grow.
 
 **The short version:** point it at a `.wld` you already have and it serves it well —
 same clients, same file, and measurably lighter than the official server. Point it at nothing and
-it generates a world that is playable and now has forests, a green jungle, cacti and lakes — but
-still no settled water in its caves, and no smoothed terrain. Generation is the largest remaining
-gap and is being worked pass by pass.
+it generates a world that is playable, decorated, and settled — forests, a green jungle, cacti,
+lakes, settled water, pots, statues, piles and fallen logs are all there now. What's left of Tier 1
+is smoothed terrain and Tier 2/3's biome set pieces (floating islands, spider caves, gem caves,
+pyramids and the rest); those are sized and tracked in `plan.md`.
 
 ---
 
@@ -44,21 +45,28 @@ gap and is being worked pass by pass.
 
 ## World generation
 
-The largest gap. ~27 of Terraria's 106 passes have any counterpart.
+~35 of Terraria's 106 passes have a counterpart. Tier 1 (the passes that make a world stop looking
+like a prototype) is nearly done; Tier 2 and 3 (biome set pieces, and the cosmetic/cleanup tail)
+are sized in `plan.md` but not yet started.
 
 | | Feature | Notes |
 |---|---|---|
 | ✅ | Terrain, caves, ore veins | |
-| ✅ | Dungeon, temple, hive, underworld, evil chasms | Our own algorithms, not vanilla's |
-| ✅ | Chests, altars, life crystals, shadow orbs | Enough to be beatable |
-| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree` — trunk, branches, roots, canopy. 349 on a 4200×1200 world |
-| ✅ | Vines and jungle grass | The underground jungle's mud is lined with grass, which is what vines hang from: 2,415 vine tiles |
+| ✅ | Dungeon, hive, underworld, evil chasms | Our own algorithms, not vanilla's |
+| ✅ | Jungle temple, **including the Lihzahrd Altar** | The altar was missing for a while without anyone noticing — a real client refuses to let a player even attempt the Power Cell interaction without one nearby, so its absence made Golem unreachable in every world this generator ever produced. Found by a sizing pass, fixed, tested across 40 seeds |
+| ✅ | Demon/crimson altars, life crystals, shadow orbs | Enough to be beatable |
+| ✅ | Chests | Depth-tiered everywhere; vanilla's own jungle and underground-desert item lists where the biome matches |
+| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree` — trunk, branches, roots, canopy |
+| ✅ | Vines and jungle grass | The underground jungle's mud is lined with grass, which is what vines hang from |
 | ✅ | Cacti | |
-| 🟡 | Lakes | Carved and filled — 4 on a 4200×1200 world. Sited on level ground with a solid floor, because there is no generation-time settler to rescue a lake that leaks |
-| 🔴 | Settled water in caves | `SettleLiquids` needs a generation-only settler we do not have; the runtime one is a different algorithm |
-| 🔴 | Flowers, mushrooms and herbs at generation | Surface plants exist; the taller decoration does not |
-| 🔴 | Pots, statues, traps, piles, fallen logs | |
-| 🔴 | Smoothed terrain | Everything is blocky |
+| ✅ | Lakes | Sited on level ground with a solid floor |
+| ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
+| ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
+| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is carried over from sizing notes rather than independently re-verified against source — flagged for a follow-up pass |
+| 🔴 | Traps | Needs a wire model on top of the object placement; not started |
+| 🔴 | Smoothed terrain (`SmoothWorld`) | Everything is still blocky. Not attempted rather than guessed — the source access needed to transcribe its 14 rules correctly wasn't available when this wave landed |
+| 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes (Tier 2) | Sized in `plan.md`; needs a shared shape/structure framework terrustia doesn't have yet, in addition to the passes themselves |
+| 🔴 | Moss, wall variety, waterfalls, thin ice, cleanup passes (Tier 3) | Sized in `plan.md`; mostly small single-purpose tile scans |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
 
 ## NPCs, bosses and events
