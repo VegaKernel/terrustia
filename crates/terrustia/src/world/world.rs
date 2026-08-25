@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use terrustia_proto::{
     SectionBounds, SectionExtras, Tile,
     packets::{WorldData, WorldFlags},
@@ -12,6 +10,63 @@ use super::progress::Progress;
 /// Ticks of daylight, then of night, matching the vanilla clock.
 pub const DAY_LENGTH: i32 = 54_000;
 pub const NIGHT_LENGTH: i32 = 32_400;
+
+/// A flag per section of the world.
+///
+/// Deliberately a flat array rather than a set. A world has a few hundred sections at most, so
+/// this is under a kilobyte and every operation is an index — where the `HashSet<(i32, i32)>` it
+/// replaced hashed a coordinate pair on every single tile write, overwhelmingly to re-mark a
+/// section that was already marked.
+#[derive(Clone, Default)]
+struct SectionFlags {
+    /// Row-major, `wide` sections across.
+    flags: Vec<bool>,
+    wide: usize,
+    /// How many are set, so "did anything change" costs nothing.
+    marked: usize,
+}
+
+impl SectionFlags {
+    fn new(wide: usize, tall: usize) -> Self {
+        Self {
+            flags: vec![false; wide * tall],
+            wide,
+            marked: 0,
+        }
+    }
+
+    fn mark(&mut self, section_x: i32, section_y: i32) {
+        let at = section_y as usize * self.wide + section_x as usize;
+        if let Some(flag) = self.flags.get_mut(at)
+            && !*flag
+        {
+            *flag = true;
+            self.marked += 1;
+        }
+    }
+
+    /// The marked sections, clearing them as it goes.
+    fn drain(&mut self) -> Vec<(i32, i32)> {
+        let mut out = Vec::with_capacity(self.marked);
+        if self.marked > 0 {
+            for (at, flag) in self.flags.iter_mut().enumerate() {
+                if *flag {
+                    *flag = false;
+                    out.push(((at % self.wide) as i32, (at / self.wide) as i32));
+                }
+            }
+            self.marked = 0;
+        }
+        out
+    }
+
+    fn clear(&mut self) {
+        if self.marked > 0 {
+            self.flags.fill(false);
+            self.marked = 0;
+        }
+    }
+}
 
 /// The authoritative world.
 ///
@@ -149,7 +204,19 @@ pub struct World {
     /// Encoded sections are cached, so something has to say when one goes stale. Tracking is off
     /// during generation and loading, where every tile is written once and the whole world is new
     /// anyway; five million set inserts there would cost more than the cache saves.
-    dirty_sections: HashSet<(i32, i32)>,
+    /// One flag per section, rather than a set of coordinates.
+    ///
+    /// This used to be a `HashSet<(i32, i32)>`, which meant SipHashing a pair of `i32`s on *every*
+    /// tile write — up to tens of thousands a tick under liquid load, nearly all of them
+    /// re-inserting a key that was already there. A world has only a few hundred sections
+    /// (21 x 8 on a small one, 42 x 16 on a large), so a flag each is well under a kilobyte and
+    /// costs one indexed byte write instead of a hash.
+    dirty_sections: SectionFlags,
+    /// Sections changed since the last snapshot was taken, so the next one can copy only those.
+    ///
+    /// Kept apart from `dirty_sections` because the two are drained on completely different
+    /// rhythms: section streaming clears its set every tick, a snapshot happens every few minutes.
+    changed_since_snapshot: SectionFlags,
     track_dirty: bool,
 }
 
@@ -212,7 +279,16 @@ impl World {
             tile_entities: Vec::new(),
             next_tile_entity: 0,
             preserved: None,
-            dirty_sections: HashSet::new(),
+            // Section counts truncate exactly as the client's do; +1 keeps a world whose size is
+            // not an exact multiple from marking past the end.
+            dirty_sections: SectionFlags::new(
+                (width / SECTION_WIDTH).max(0) as usize + 1,
+                (height / SECTION_HEIGHT).max(0) as usize + 1,
+            ),
+            changed_since_snapshot: SectionFlags::new(
+                (width / SECTION_WIDTH).max(0) as usize + 1,
+                (height / SECTION_HEIGHT).max(0) as usize + 1,
+            ),
             track_dirty: false,
         }
     }
@@ -354,6 +430,135 @@ impl World {
         copy
     }
 
+    /// Overwrite `self` with another world's state, reusing the allocations already here.
+    ///
+    /// Used to take a snapshot into a buffer the server already owns. A fresh `snapshot()` asks
+    /// for a new forty-megabyte mapping and faults in every page as it copies; writing into pages
+    /// that are already mapped costs the memcpy alone. On the game task that is the difference
+    /// between one number and a much worse, much more variable one.
+    ///
+    /// Deliberately exhaustive, and deliberately not `Clone::clone_from`: the derived one is
+    /// `*self = source.clone()`, which allocates exactly as much as it was meant to avoid.
+    /// Bring a snapshot buffer up to date, copying only the tiles that changed.
+    ///
+    /// The expensive part of a snapshot is copying forty megabytes of tiles, and on a server that
+    /// is not being actively dug through, almost none of them have changed since the last one.
+    /// `changed_since_snapshot` says which sections have, so this copies those and leaves the rest
+    /// alone.
+    ///
+    /// Returns how many sections it copied, which the caller logs — a number that suddenly equals
+    /// every section in the world means the incremental path has silently stopped working.
+    ///
+    /// **The buffer must already hold this world's state as of the last call**, or the sections it
+    /// skips will be stale. `snapshot_into` is the only way to get one, and it takes the flags with
+    /// it, so the two cannot drift apart.
+    pub fn refresh_snapshot(&mut self, buffer: &mut Self) -> usize {
+        let sections = self.changed_since_snapshot.drain();
+        for &(sx, sy) in &sections {
+            let x0 = sx * SECTION_WIDTH;
+            let y0 = sy * SECTION_HEIGHT;
+            buffer
+                .tiles
+                .copy_rect_from(&self.tiles, x0, y0, x0 + SECTION_WIDTH, y0 + SECTION_HEIGHT);
+        }
+        buffer.tiles.copy_side_tables_from(&self.tiles);
+        buffer.copy_everything_but_tiles_from(self);
+        sections.len()
+    }
+
+    /// Whether a buffer can be refreshed rather than rebuilt.
+    pub fn snapshot_is_incremental(&self) -> bool {
+        self.track_dirty
+    }
+
+    pub fn copy_state_from(&mut self, source: &Self) {
+        self.tiles.copy_from(&source.tiles);
+        self.copy_everything_but_tiles_from(source);
+    }
+
+    /// Everything a snapshot needs except the tile array.
+    ///
+    /// Split out because the incremental path copies only some tiles but always all of this —
+    /// chests, signs, residents and the header state are thousands of bytes, not tens of
+    /// megabytes, so there is nothing to gain by being clever about them.
+    fn copy_everything_but_tiles_from(&mut self, source: &Self) {
+        self.chests.clone_from(&source.chests);
+        self.signs.clone_from(&source.signs);
+        self.town_npcs.clone_from(&source.town_npcs);
+        self.shimmered_town_npcs.clone_from(&source.shimmered_town_npcs);
+        self.banner_kills.clone_from(&source.banner_kills);
+        self.tile_entities.clone_from(&source.tile_entities);
+        self.preserved.clone_from(&source.preserved);
+        self.name.clone_from(&source.name);
+        self.seed_text.clone_from(&source.seed_text);
+
+        // Everything else is plain scalars and small arrays; copying them wholesale keeps this in
+        // step with the struct without listing each one twice.
+        self.width = source.width;
+        self.height = source.height;
+        self.spawn_x = source.spawn_x;
+        self.spawn_y = source.spawn_y;
+        self.surface = source.surface;
+        self.rock_layer = source.rock_layer;
+        self.id = source.id;
+        self.unique_id = source.unique_id;
+        self.time = source.time;
+        self.day_time = source.day_time;
+        self.blood_moon = source.blood_moon;
+        self.eclipse = source.eclipse;
+        self.moon_phase = source.moon_phase;
+        self.raining = source.raining;
+        self.rain_time = source.rain_time;
+        self.max_rain = source.max_rain;
+        self.sandstorm = source.sandstorm;
+        self.sandstorm_time = source.sandstorm_time;
+        self.sandstorm_severity = source.sandstorm_severity;
+        self.sandstorm_intended_severity = source.sandstorm_intended_severity;
+        self.dungeon_x = source.dungeon_x;
+        self.dungeon_y = source.dungeon_y;
+        self.pumpkin_moon = source.pumpkin_moon;
+        self.snow_moon = source.snow_moon;
+        self.wind = source.wind;
+        self.crimson = source.crimson;
+        self.ore_tiers = source.ore_tiers;
+        self.progress = source.progress;
+        self.game_mode = source.game_mode;
+        self.world_gen_version = source.world_gen_version;
+        self.moon_type = source.moon_type;
+        self.tree_x = source.tree_x;
+        self.tree_style = source.tree_style;
+        self.cave_back_x = source.cave_back_x;
+        self.cave_back_style = source.cave_back_style;
+        self.ice_back_style = source.ice_back_style;
+        self.jungle_back_style = source.jungle_back_style;
+        self.hell_back_style = source.hell_back_style;
+        self.backgrounds = source.backgrounds;
+        self.tree_tops = source.tree_tops;
+        self.num_clouds = source.num_clouds;
+        self.next_tile_entity = source.next_tile_entity;
+
+        // A copy is never served to anybody, so section caching is dead weight on it.
+        self.dirty_sections.clear();
+        self.track_dirty = false;
+    }
+
+    /// Drop the caches a copy has no use for.
+    ///
+    /// A snapshot exists to be written to disk and nothing else, so the dirty-section set is dead
+    /// weight on it — and a reused buffer would otherwise carry the previous save's set around.
+    pub fn shrink_caches(&mut self) {
+        self.dirty_sections.clear();
+        self.track_dirty = false;
+    }
+
+    /// The tile store, for measuring what copying it costs.
+    ///
+    /// Exposed only so `examples/snapcost` can weigh the parts of a snapshot against each other.
+    /// Nothing in the server reads tiles this way.
+    pub fn tiles_for_measurement(&self) -> &super::packed::TileStore {
+        &self.tiles
+    }
+
     pub fn width(&self) -> i32 {
         self.width
     }
@@ -385,7 +590,9 @@ impl World {
         }
         self.tiles.set(x, y, tile);
         if self.track_dirty {
-            self.dirty_sections.insert(self.section_of(x, y));
+            let (sx, sy) = self.section_of(x, y);
+            self.dirty_sections.mark(sx, sy);
+            self.changed_since_snapshot.mark(sx, sy);
         }
         true
     }
@@ -403,7 +610,7 @@ impl World {
 
     /// Take the set of sections that changed since the last call.
     pub fn take_dirty_sections(&mut self) -> Vec<(i32, i32)> {
-        self.dirty_sections.drain().collect()
+        self.dirty_sections.drain()
     }
 
     /// How many sections wide the world is, counted the way the client counts.
@@ -652,6 +859,7 @@ mod persistence {
             next_tile_entity,
             preserved,
             dirty_sections,
+            changed_since_snapshot,
             track_dirty,
         } = &world;
 
@@ -722,7 +930,12 @@ mod persistence {
             ("pumpkin_moon", Fate::Session, pumpkin_moon),
             ("snow_moon", Fate::Session, snow_moon),
             ("preserved", Fate::Session, &preserved.is_some()),
-            ("dirty_sections", Fate::Session, &dirty_sections.len()),
+            ("dirty_sections", Fate::Session, &dirty_sections.marked),
+            (
+                "changed_since_snapshot",
+                Fate::Session,
+                &changed_since_snapshot.marked,
+            ),
             ("track_dirty", Fate::Session, track_dirty),
         ];
 
@@ -1208,4 +1421,109 @@ mod flag_tests {
         );
     }
 
+}
+
+/// Is an incrementally-refreshed snapshot identical to a freshly-copied one?
+///
+/// It has to be, exactly. The snapshot is what gets written to disk, so a section this skips
+/// because it thinks nothing changed there is a section of somebody's world silently rolled back
+/// to whatever it held at the last save. That is a worse failure than the cost it is avoiding, so
+/// it is checked against a full copy tile by tile rather than trusted.
+#[cfg(test)]
+mod incremental_snapshot {
+    use super::*;
+
+    fn world_with_some_terrain() -> World {
+        let mut w = World::empty(600, 450, "incremental");
+        for x in 0..600 {
+            for y in 200..210 {
+                w.set_tile(x, y, Tile::block(1));
+            }
+        }
+        w.start_tracking_changes();
+        w
+    }
+
+    /// Every tile, after edits scattered across several sections.
+    #[test]
+    fn a_refreshed_snapshot_matches_a_full_copy() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+
+        // Edits in a few sections, including the corners of one and a run spanning a boundary.
+        world.set_tile(0, 0, Tile::block(25));
+        world.set_tile(199, 149, Tile::block(30));
+        world.set_tile(200, 150, Tile::block(39));
+        world.set_tile(599, 449, Tile::block(38));
+        for x in 190..215 {
+            world.set_tile(x, 300, Tile::block(37));
+        }
+        world.time = 4321;
+        world.progress.hard_mode = true;
+
+        let copied = world.refresh_snapshot(&mut buffer);
+        assert!(copied > 0, "edits were made, so something should have been copied");
+
+        let full = world.snapshot();
+        for y in 0..world.height() {
+            for x in 0..world.width() {
+                assert_eq!(
+                    buffer.tile(x, y),
+                    full.tile(x, y),
+                    "tile {x},{y} differs between an incremental snapshot and a full one"
+                );
+            }
+        }
+        assert_eq!(buffer.time, 4321, "header state comes across too");
+        assert!(buffer.progress.hard_mode);
+    }
+
+    /// Nothing changed means nothing copied — the case that makes this worth doing at all.
+    #[test]
+    fn an_untouched_world_copies_no_sections() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+        world.refresh_snapshot(&mut buffer);
+
+        assert_eq!(
+            world.refresh_snapshot(&mut buffer),
+            0,
+            "a world nobody touched should cost no tile copying at all"
+        );
+    }
+
+    /// Two refreshes in a row, with edits between, must not lose the first round's changes.
+    #[test]
+    fn successive_refreshes_accumulate() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+
+        world.set_tile(10, 10, Tile::block(40));
+        world.refresh_snapshot(&mut buffer);
+        world.set_tile(400, 400, Tile::block(41));
+        world.refresh_snapshot(&mut buffer);
+
+        assert_eq!(buffer.tile(10, 10).block, 40, "the first edit must still be there");
+        assert_eq!(buffer.tile(400, 400).block, 41, "and so must the second");
+    }
+
+    /// An edit that only changes a side table — paint, or a frame — still has to come across.
+    #[test]
+    fn side_table_changes_survive() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+
+        let mut painted = Tile::block(1);
+        painted.color = 12;
+        world.set_tile(50, 205, painted);
+        let mut framed = Tile::framed(21, 36, 0);
+        framed.color = 3;
+        world.set_tile(300, 205, framed);
+
+        world.refresh_snapshot(&mut buffer);
+
+        assert_eq!(buffer.tile(50, 205).color, 12, "paint");
+        assert_eq!(buffer.tile(300, 205).frame_x, 36, "frames");
+        assert_eq!(buffer.tile(300, 205).color, 3);
+    }
 }

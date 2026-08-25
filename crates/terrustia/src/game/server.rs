@@ -638,6 +638,16 @@ pub struct GameServer {
     auth_results: (AuthReport, AuthReports),
     /// Slots with a hash already running. One at a time, so nobody can queue up work.
     auth_in_flight: std::collections::HashSet<u8>,
+    /// A world-sized buffer to copy the next snapshot into, once a save has given one back.
+    ///
+    /// Held so the copy writes into pages that are already mapped. Empty while a save is running,
+    /// and empty on the first save of a session, which is the one that pays for the mapping.
+    spare_world: Option<crate::world::World>,
+    /// Finished saves handing their buffer back.
+    world_returns: (
+        std::sync::mpsc::Sender<crate::world::World>,
+        std::sync::mpsc::Receiver<crate::world::World>,
+    ),
     /// The six cavern enemies this world happens to have.
     ///
     /// Drawn from the world's id rather than from the run's generator, so the same world always
@@ -752,6 +762,8 @@ impl GameServer {
             save_results: std::sync::mpsc::channel(),
             auth_results: std::sync::mpsc::channel(),
             auth_in_flight: std::collections::HashSet::new(),
+            spare_world: None,
+            world_returns: std::sync::mpsc::channel(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
@@ -1034,11 +1046,37 @@ impl GameServer {
         // disk holds whoever lived here when it was loaded rather than who lives here now.
         self.record_town_npcs();
 
+        // Copy into a buffer we already own where we have one. A fresh `snapshot()` asks the
+        // allocator for a new forty-megabyte mapping and then faults in every page of it as it
+        // writes: measured on a 4200x1200 world, 2.600 ms against 0.989 ms for copying into a
+        // buffer whose pages are already mapped. That is the difference between roughly a sixth
+        // of the tick budget and a sixteenth, four times worse again on a large world, and it is
+        // the single most expensive thing an idle server does.
+        // Copying forty megabytes of tiles is the most expensive thing an idle server does, and on
+        // a world nobody is digging through, almost none of those tiles have changed since the last
+        // save. The buffer a finished save hands back already holds that state, so only the
+        // sections that have changed since need copying into it.
         let began = Instant::now();
-        let snapshot = self.world.snapshot();
+        let (mut snapshot, sections) = match self.spare_world.take() {
+            Some(mut spare) if self.world.snapshot_is_incremental() => {
+                let sections = self.world.refresh_snapshot(&mut spare);
+                (spare, Some(sections))
+            }
+            // Either the first save of the session, or a world still being generated or loaded,
+            // where nothing has been tracking changes.
+            Some(mut spare) => {
+                spare.copy_state_from(&self.world);
+                (spare, None)
+            }
+            None => (self.world.snapshot(), None),
+        };
+        snapshot.shrink_caches();
         let copied = began.elapsed();
 
         let report = self.save_results.0.clone();
+        // The writer hands the buffer back when it is finished with it, so the next save can
+        // reuse it instead of asking for another mapping.
+        let returned = self.world_returns.0.clone();
         self.saving = Some(tokio::task::spawn_blocking(move || {
             let started = Instant::now();
             let outcome = match wld_save::save(&snapshot, &path) {
@@ -1054,11 +1092,17 @@ impl GameServer {
             };
             // A closed channel means the server is already shutting down, which is not an error.
             let _ = report.send(outcome);
+            // Hand the buffer back for the next save to write into. If nobody is listening the
+            // server is stopping and it simply drops here.
+            let _ = returned.send(snapshot);
         }));
         self.save_reason = reason;
         debug!(
             reason,
             snapshot_us = copied.as_micros() as u64,
+            // `None` means the whole world was copied. A number suddenly equal to every section in
+            // the world means the incremental path has quietly stopped working.
+            sections_copied = sections,
             "world snapshot taken; saving in the background"
         );
     }
@@ -1086,6 +1130,13 @@ impl GameServer {
     ///
     /// Polled rather than awaited, for the same reason the save report is: the tick is not async
     /// and should not become so for this.
+    /// Reclaim the snapshot buffer from a save that has finished with it.
+    fn reclaim_snapshot_buffer(&mut self) {
+        if let Ok(spare) = self.world_returns.1.try_recv() {
+            self.spare_world = Some(spare);
+        }
+    }
+
     fn note_finished_auth(&mut self) {
         while let Ok(outcome) = self.auth_results.1.try_recv() {
             match outcome {
@@ -1327,6 +1378,7 @@ impl GameServer {
         lap(&mut cost, Phase::Snapshot);
         self.note_finished_save();
         self.note_finished_auth();
+        self.reclaim_snapshot_buffer();
         // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
         // keeping it here means no spawn site has to remember to scale.
         let difficulty = terrustia_proto::difficulty::of_game_mode(self.world.game_mode);
