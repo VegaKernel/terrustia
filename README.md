@@ -1,18 +1,45 @@
 # terrustia
 
-An async Terraria server written from scratch in Rust, targeting **Terraria 1.4.5.7**
-(protocol release **325**).
+A Terraria **1.4.5.8** server, written from scratch in Rust. Real clients connect to it, real
+worlds load in it, and the game that gets played is the game.
 
-A real 1.4.5.7 client connects, the world streams in, players walk around, edit tiles, fight
-everything the game has, and chat.
+## Point it at a world you already have
 
-**Serve a world made in Terraria.** The built-in generator makes terrain, caves and ore and
-nothing else — no biomes, no dungeon, no underworld, no chests, no altars — so a world it made is
-somewhere to stand, not somewhere to play. Everything this server *simulates* needs a world with
-those things in it.
+That is what it does best today, and it does it well:
 
-Every one of the game's 691 NPC types runs a routine transcribed from the decompiled source rather
-than an approximation of it, and a test walks the whole roster to prove each one is reachable.
+```sh
+terrustia --world ~/Library/Application\ Support/Terraria/Worlds/MyWorld.wld
+```
+
+Your world file, your clients, nothing else to install. Measured against the official server on the
+same 4200×1200 world with nobody connected:
+
+| | vanilla 1.4.5.8 | terrustia |
+|---|---|---|
+| Startup | 2.26 s | **0.41 s** |
+| CPU, idle | 104% of a core | **0.7%** |
+| RAM, idle | 641.8 MB | **45.4 MB** |
+| Bandwidth over 5 minutes | 148,874 B | **133,400 B** |
+
+Saves are verified before they replace anything, fsynced, and rotated through three backups. The
+header is preserved byte-for-byte and patched, so everything this server does not model — Journey
+research, the bestiary, pylon rooms — survives untouched.
+
+## World generation is experimental
+
+Generate a world instead and you get somewhere playable but visibly unfinished. **There are no
+trees.** No lakes, no settled water, no smoothed terrain. About 22 of Terraria's 106 generation
+passes have a counterpart so far; the rest are being worked through pass by pass.
+
+**[FEATURES.md](FEATURES.md) is the honest, feature-by-feature answer** to what works, what is
+partial and why, and what is deliberately out of scope. It is kept in step with the code rather
+than written once — read it before deciding whether this suits you.
+
+## Not affiliated with Re-Logic
+
+Terraria is a trademark of Re-Logic. This project is an independent reimplementation of the
+dedicated server and is not affiliated with, endorsed by, or supported by Re-Logic. You need a copy
+of the game to play; this replaces the server, not the game.
 
 ## Status
 
@@ -75,6 +102,14 @@ Implemented:
   still running when it is served again — a deliberate divergence, since the game keeps that list
   only in memory and a restart would otherwise kill every contraption in the world
 - **Tile entities**: placed and remembered, with the training dummy raising and dismissing its NPC
+- **Pylon travel**: every pylon is announced as a player joins and as one is planted or mined, and
+  a travel request is served — refused unless the traveller is near a pylon of their own and two
+  townsfolk live within the destination's scan box, which is the game's rule. The biome
+  requirement is not enforced, so a pylon planted in the wrong biome still works here
+- **Banners and the bestiary**: kills are counted per banner, survive a restart, and are sent to
+  every client, so the counters fill in as they should and the banner drops on the threshold
+- **The Dryad's report**: how much of the world is hallow, corruption and crimson, counted one
+  column per tick the way the game counts it — surface weighted five times over
 - **Day/night clock**
 
 Not implemented:
@@ -83,10 +118,11 @@ Not implemented:
   sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
   key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
   handled; verifying the claim is not.
-- **World generation.** The generator makes a rolling surface, caves and ore veins. It does not
-  make biomes, a dungeon, an underworld, chests, pots, shadow orbs, demon altars, floating islands
-  or a jungle temple — so a world it made cannot be *played through*, whatever the server does on
-  top of it. Generate a world in Terraria and serve that; everything here is built to run one.
+- **Seed-identical world generation.** The generator builds a complete, finishable world — biomes,
+  a dungeon, the underworld, chests, shadow orbs, demon altars, the jungle temple — verified by
+  `cargo run --release -p terrustia --example playable`. What it does *not* do is reproduce
+  Terraria's own world for a given seed, which is a far larger job sized in `docs/worldgen-parity.md`.
+  So a seed shared with another player will not give you their world.
 - **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
   player's own are simulated by their own client and relayed, which is what a vanilla server does
   too. The server still refuses any a client claims that would hurt other players.
@@ -96,8 +132,9 @@ Not implemented:
 ```sh
 cargo run --release -- --world path/to/World.wld     # what you want: serve a real world
 cargo run --release -- --listen 127.0.0.1:7777 --world path/to/World.wld
-cargo run --release                                  # bare terrain, for testing
-cargo run --release -- --save world.wld              # generate bare terrain and keep it
+cargo run --release                                  # generate a world; playable, but ephemeral
+cargo run --release -- --save world.wld              # generate one and keep it
+cargo run --release -- --record capture.trcap        # record every byte, for docs/real-client.md
 ```
 
 Worlds are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from a file
@@ -205,13 +242,19 @@ cargo run --release --example bot -- 127.0.0.1:7778   # vanilla
 cargo run --release --example bot -- 127.0.0.1:7777   # terrustia
 ```
 
-Results at the time of writing, against Terraria 1.4.5.7:
+Results at the time of writing, against Terraria 1.4.5.8:
 
 - All 15 tile sections captured from the real server decode and **re-encode byte-identically**.
 - Serving the *same* `.wld` file from both servers produces **byte-identical section streams** for
   all 15 sections, trailers included.
-- The handshake packet sequence and sizes match vanilla's, including `WorldData` at exactly 159
+- The handshake packet sequence and sizes match vanilla's, including `WorldData` at exactly 163
   bytes plus the encoded world name.
+- A real server's `WorldData` payload, captured verbatim, decodes and **re-encodes to the identical
+  bytes** — every field, in order, at the right width. This is what turned up the two `dungeonX`/
+  `dungeonY` shorts release 326 appends, which are in no version of the decompiled source this
+  project was written against.
+- Both servers serving the *same* world file agree on **45 of 47 packet 7 fields**; the two that
+  differ are the clock and the wind, which both servers simulate as they run.
 - The same headless client, run against both servers, reports **identical** world data, section
   counts, terrain under spawn, and tiles 420 blocks east — including the sections each server
   streams in response to a walk.
@@ -224,6 +267,11 @@ Results at the time of writing, against Terraria 1.4.5.7:
   7, 167, 9 and 169, which are copper, lead, silver and platinum.
 - A world edited through this server, saved, and then handed to the real `TerrariaServer` **loads
   and serves correctly**, with the edits in place.
+- A world this server **generated from scratch** — no header copied from anywhere — survives the
+  full round trip `our writer → Re-Logic's reader → Re-Logic's writer → our reader`: **46 of 47
+  packet 7 fields identical** afterwards (the other is the clock), and all **308 chests with their
+  1224 item stacks intact**. The game deleting orphaned chest records on its first save is the
+  failure that fix was written for, and this is the check that confirms it against the game.
 - A world this server **generated** — with no header to copy from — is written at format 325, and
   every section boundary lands exactly on its own pointer when walked by a decoder written from
   the game's source independently of this reader. It reloads with zero differing tiles out of
@@ -252,4 +300,14 @@ Results at the time of writing, against Terraria 1.4.5.7:
 
 ## Licence
 
-GNU Affero General Public License v3.0 or later. See `LICENSE`.
+The server and the client are under the **GNU Affero General Public License v3.0 or later**; see
+`LICENSE`.
+
+`terrustia-proto` is **MIT**, on purpose — see `crates/terrustia-proto/LICENSE`. It is a
+description of Terraria's wire format with no I/O and no game logic in it, and anyone writing a
+Terraria tool in Rust should be able to use that without taking on the server's licence.
+
+The generated tables in that crate were produced *from* a decompiled copy of the game by the
+scripts in `tools/`, each of which takes the decompiled tree as an argument. No decompiled source,
+no game assets and no game text ship in this repository — the one exception being the town-NPC name
+pools in `town_names.rs`, whose provenance is documented in `docs/generated-tables.md`.
