@@ -1452,6 +1452,93 @@ async fn a_town_npc_can_be_talked_to_and_it_is_visible_to_everyone() {
     .expect("packet 40 should be relayed to other connected players");
 }
 
+/// A settled town NPC fights back against a hostile nearby, and the shot is visible over the wire
+/// to every connected player — not just applied silently on the server.
+///
+/// Before this, FEATURES.md's own words: "the first Blood Moon after anyone moves in, the town
+/// stands still and dies." A Merchant (npc type 17) is one of four representative town NPCs this
+/// pass covers (see `game::ai::town_combat`'s module doc) — real vanilla numbers (projectile 48,
+/// `NPC.cs:54969`), reimplemented cadence.
+#[tokio::test]
+async fn a_town_npc_fights_back_against_a_nearby_hostile() {
+    const MERCHANT: u16 = 17;
+
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    // `/spawn` always drops an NPC at (player position + (64, -32)) — spawning both from the same
+    // player in quick succession, before either moves, lands them within a few dozen pixels of
+    // each other, well inside the Merchant's 320px `DangerDetectRange`.
+    let merchant = spawn_npc(&mut alice, "Merchant").await;
+    assert_eq!(merchant.npc_type(), MERCHANT);
+    spawn_npc(&mut alice, "Zombie").await;
+
+    // Wait for the merchant to land — the same client-visible gate the shop test above uses:
+    // `NPC.CanBeTalkedTo`/vanilla's own attack branches both require `velocity.Y == 0f`.
+    alice
+        .wait_for("the merchant to land", |e| {
+            matches!(e, Event::NpcSynced(n) if n.index == merchant.index && n.velocity.1 == 0.0)
+        })
+        .await
+        .expect("a town NPC should come to rest almost immediately after spawning");
+
+    let shot = alice
+        .wait_for(
+            "the merchant to open fire",
+            |e| matches!(e, Event::ProjectileSynced(p) if p.projectile_type == 48),
+        )
+        .await
+        .expect("a merchant with a zombie beside it should fire its pistol");
+    let Event::ProjectileSynced(shot) = shot else {
+        unreachable!("matched on it")
+    };
+    assert!(shot.damage > 0);
+
+    // Bob sees it too — a shot fired server-side that never reaches other clients would leave
+    // the town's own defence invisible to everyone who is not the one being rescued.
+    bob.wait_for(
+        "the merchant's shot relayed to a second player",
+        |e| matches!(e, Event::ProjectileSynced(p) if p.projectile_type == 48),
+    )
+    .await
+    .expect("the merchant's shot should be broadcast, not applied silently");
+}
+
+/// The shot a town NPC fires is not just broadcast — it actually lands. This is the concrete claim
+/// FEATURES.md's row named: a town does not merely animate a fight, a hostile beside it takes real
+/// damage from it, the same as it would from a player's own gunfire.
+#[tokio::test]
+async fn a_town_npcs_shot_actually_damages_the_hostile_it_targeted() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+
+    let merchant = spawn_npc(&mut alice, "Merchant").await;
+    let zombie = spawn_npc(&mut alice, "Zombie").await;
+
+    alice
+        .wait_for("the merchant to land", |e| {
+            matches!(e, Event::NpcSynced(n) if n.index == merchant.index && n.velocity.1 == 0.0)
+        })
+        .await
+        .expect("a town NPC should come to rest almost immediately after spawning");
+
+    let hurt = alice
+        .wait_for(
+            "the zombie to take damage",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == zombie.index && n.life < zombie.life),
+        )
+        .await
+        .expect("the merchant's shot should collide with and damage the zombie it was fired at");
+    let Event::NpcSynced(hurt) = hurt else {
+        unreachable!("matched on it")
+    };
+    assert!(
+        hurt.life < zombie.life,
+        "life should have gone down, not merely changed"
+    );
+}
+
 /// Registering an account claims the server, and a stranger loses the dangerous commands.
 ///
 /// Before this, the comment above the command dispatcher said "there is no permission model: this

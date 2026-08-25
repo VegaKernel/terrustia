@@ -140,6 +140,7 @@ mod tests {
             conditions: Conditions::default(),
             was_hurt: false,
             target_velocity: (0.0, 0.0),
+            hostile: None,
             census: &[],
             parent: None,
             parent_state: 0.0,

@@ -39,6 +39,7 @@ pub mod snail;
 pub mod spore;
 pub mod swimmer;
 pub mod town;
+pub mod town_combat;
 pub mod track;
 pub mod tumbleweed;
 pub mod worm;
@@ -269,9 +270,8 @@ pub fn rise_out_of_water(npc: &mut Npc) {
 
 /// A projectile a routine wants launched.
 ///
-/// The projectile subsystem does not exist yet, so these are collected and counted rather than
-/// flown. Emitting them from the routine keeps the decision — cadence, aim, scatter, reload — in
-/// the port rather than waiting on the entity that carries it.
+/// The routine only decides — cadence, aim, scatter, reload; `server.rs` turns this into a real
+/// entity via `self.projectiles.launch(..)` and broadcasts it, the same as a player's own shot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shot {
     pub projectile: u16,
@@ -279,6 +279,17 @@ pub struct Shot {
     pub position: (f32, f32),
     pub velocity: (f32, f32),
     pub time_left: u16,
+}
+
+/// A melee hit a routine wants applied directly to another NPC — no projectile entity involved,
+/// the way vanilla's own `StrikeNPCNoInteraction` isn't one either. `target` is an NPC table
+/// index, from whatever gave the routine its [`World::hostile`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeleeHit {
+    pub target: u8,
+    pub damage: i32,
+    pub knockback: f32,
+    pub direction: i8,
 }
 
 /// What Plantera can see of its own fight.
@@ -364,6 +375,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         conditions: Conditions::default(),
         was_hurt: false,
         target_velocity: (0.0, 0.0),
+        hostile: None,
         census: &[],
         parent: None,
         parent_state: 0.0,
@@ -466,6 +478,10 @@ pub struct World<'a, T: TileView> {
     /// The routines that read this cannot see other NPCs, so the caller averages the directions
     /// away from anything dangerous close by and hands the result in. Zero means all clear.
     pub crowding: (f32, f32),
+    /// The nearest hostile NPC a town resident might fight, if this style reads
+    /// [`town_combat`](town_combat::town_combat). `slot` is an NPC table index here, not a player
+    /// slot — the caller builds this from the NPC table, not from `targets`.
+    pub hostile: Option<Target>,
 }
 
 /// What the Old One's Army's fixtures need to know about the event around them.
@@ -493,6 +509,8 @@ pub struct Effects {
     /// Doors a town NPC opened or pulled shut behind itself.
     pub town_doors: Vec<town::DoorAction>,
     pub shots: Vec<Shot>,
+    /// A town NPC's melee attack landing on a nearby hostile — see [`MeleeHit`].
+    pub melee_hits: Vec<MeleeHit>,
     /// Set when the routine wants its NPC gone.
     pub expired: bool,
     /// Set when the routine killed its NPC outright, as a spore does when it bursts.
@@ -554,9 +572,15 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 tile_x,
                 floor_y: town::floor_under(world.tiles, tile_x, tile_y, i32::MAX / 2),
             });
-            let action = town::update(npc, world, home, rng);
-            if action != town::DoorAction::None {
-                effects.town_doors.push(action);
+            let result = town::update(npc, world, home, rng);
+            if result.door != town::DoorAction::None {
+                effects.town_doors.push(result.door);
+            }
+            if let Some(shot) = result.shot {
+                effects.shots.push(shot);
+            }
+            if let Some(hit) = result.melee {
+                effects.melee_hits.push(hit);
             }
         }
         5 => {
@@ -1168,6 +1192,7 @@ mod tests {
                 conditions: Conditions::default(),
                 was_hurt: false,
                 target_velocity: (0.0, 0.0),
+                hostile: None,
                 census: &[],
                 parent: None,
                 parent_state: 0.0,

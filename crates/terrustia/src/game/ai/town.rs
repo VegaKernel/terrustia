@@ -4,9 +4,11 @@
 //! run the same 2,614-line routine as the Guide and the Merchant; what separates them is a handful
 //! of table lookups, not a different code path.
 //!
-//! The shape is a two-state machine on `ai[0]`. In **state 0** it stands still and counts down; in
-//! **state 1** it walks and counts down faster. Which way it walks, and what it does when the
-//! ground runs out, is the whole of the routine.
+//! The shape is a state machine on `ai[0]`. In **state 0** it stands still and counts down; in
+//! **state 1** it walks and counts down faster; in the combat states — vanilla's own 10/12/14/15,
+//! kept as-is so a real client's animation prediction recognises them — it is fighting back, see
+//! [`super::town_combat`]. Which way it walks, and what it does when the ground runs out, is the
+//! whole of the walking half of the routine.
 //!
 //! Three behaviours carry the character:
 //!
@@ -20,8 +22,8 @@
 //!   onto: a drop, deep water or lava turns it round, a one-, two- or three-tile step gets one of
 //!   three jump impulses, and a closed door gets opened and then closed behind it.
 //!
-//! Not modelled here, and deliberately: shops, dialogue, the attack states, sitting and pet idle
-//! animations. The user scoped this style to movement and housing.
+//! Not modelled here, and deliberately: shops, dialogue, sitting and pet idle animations — this
+//! style was originally scoped to movement, housing and (now) combat only.
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
@@ -32,7 +34,8 @@ use terrustia_proto::npc_params::{
 use terrustia_proto::tile::TileFlags;
 use terrustia_proto::tile_solid::{solid, solid_top};
 
-use super::{Conditions, World};
+use super::town_combat::{self, AttackKind};
+use super::{Conditions, MeleeHit, Shot, World};
 use crate::game::npc::{Npc, TILE, TileView};
 
 /// Door and tall-gate tile types.
@@ -43,20 +46,14 @@ const TALL_GATE: u16 = 388;
 const PROBE_REACH: f32 = 15.0;
 
 /// What the routine wants done to a door it has reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DoorAction {
+    #[default]
     None,
     /// Swing it open and walk through.
-    Open {
-        x: i32,
-        y: i32,
-        direction: i8,
-    },
+    Open { x: i32, y: i32, direction: i8 },
     /// Pull it shut again on the way past.
-    Close {
-        x: i32,
-        y: i32,
-    },
+    Close { x: i32, y: i32 },
 }
 
 /// Where a resident lives and where the floor of that home is.
@@ -440,12 +437,29 @@ fn walk<T: TileView>(
 }
 
 /// Drive one town NPC or critter for a tick.
+/// What a tick of the town routine did, beyond moving the NPC itself.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TownUpdate {
+    pub door: DoorAction,
+    pub shot: Option<Shot>,
+    pub melee: Option<MeleeHit>,
+}
+
+impl From<DoorAction> for TownUpdate {
+    fn from(door: DoorAction) -> Self {
+        Self {
+            door,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn update<T: TileView>(
     npc: &mut Npc,
     world: &World<'_, T>,
     home: Option<Home>,
     rng: &mut SmallRng,
-) -> DoorAction {
+) -> TownUpdate {
     npc.direction_y = -1;
     if npc.direction == 0 {
         npc.direction = 1;
@@ -465,15 +479,103 @@ pub fn update<T: TileView>(
         npc.velocity.1 *= 0.5;
     }
 
+    if let Some(fought) = try_combat(npc, world, rng) {
+        return fought;
+    }
+
     if npc.ai[0] == 1.0 {
-        walk(npc, world, home, rng)
+        walk(npc, world, home, rng).into()
     } else {
-        // Every other state is a rest, an attack or an animation; the ones this port does not
-        // model fall back to standing, which is what the game does between them anyway.
+        // Every other state is a rest or an animation; the ones this port does not model fall
+        // back to standing, which is what the game does between them anyway.
         npc.ai[0] = 0.0;
         stand(npc, world, home, rng);
-        DoorAction::None
+        TownUpdate::default()
     }
+}
+
+/// Fight back, if this NPC has a combat profile and a hostile is worth answering.
+///
+/// `Some` means combat owned this tick — either just opened fire, is mid-cooldown, or just
+/// finished a swing — and `update` should not also try to walk or stand it this tick. `None` means
+/// there is nothing to fight (no profile, no target in range, or airborne — vanilla's own attack
+/// branches all gate on `velocity.Y == 0f` too) and the ordinary dispatch should run instead.
+fn try_combat<T: TileView>(
+    npc: &mut Npc,
+    world: &World<'_, T>,
+    rng: &mut SmallRng,
+) -> Option<TownUpdate> {
+    let combat = town_combat::town_combat(npc.npc_type)?;
+    let hostile = world.hostile.filter(|h| h.alive)?;
+
+    let already_fighting = npc.ai[0] == combat.state;
+    if !already_fighting {
+        if npc.velocity.1 != 0.0 {
+            return None;
+        }
+        let (dx, dy) = (
+            hostile.center.0 - npc.center().0,
+            hostile.center.1 - npc.center().1,
+        );
+        if (dx * dx + dy * dy).sqrt() > combat.range {
+            return None;
+        }
+        npc.ai[0] = combat.state;
+        npc.ai[1] = 0.0;
+    }
+
+    if npc.ai[1] > 0.0 {
+        npc.ai[1] -= 1.0;
+        return Some(TownUpdate::default());
+    }
+    // A little jitter so a row of the same NPC type does not fire in lockstep.
+    npc.ai[1] = combat.cooldown as f32 + rng.random_range(0..combat.cooldown.max(1)) as f32;
+
+    let (dx, dy) = (
+        hostile.center.0 - npc.center().0,
+        hostile.center.1 - npc.center().1,
+    );
+    let distance = (dx * dx + dy * dy).sqrt().max(1.0);
+    npc.direction = if dx < 0.0 { -1 } else { 1 };
+
+    Some(match combat.kind {
+        AttackKind::Ranged {
+            projectile,
+            damage,
+            speed,
+            ..
+        } => TownUpdate {
+            shot: Some(Shot {
+                projectile,
+                damage: town_combat::town_npc_damage(damage, world.conditions.expert),
+                position: npc.center(),
+                velocity: (dx / distance * speed, dy / distance * speed),
+                time_left: 300,
+            }),
+            ..TownUpdate::default()
+        },
+        AttackKind::Melee {
+            damage,
+            knockback,
+            reach,
+        } => {
+            if dx.abs() > reach.0 || dy.abs() > reach.1 {
+                // In range to have opened the fight, out of swinging reach on this exact tick —
+                // vanilla's own hitbox check misses the same way.
+                TownUpdate::default()
+            } else {
+                TownUpdate {
+                    melee: Some(MeleeHit {
+                        target: hostile.slot,
+                        damage: town_combat::town_npc_damage(damage, world.conditions.expert),
+                        knockback,
+                        direction: npc.direction,
+                    }),
+                    ..TownUpdate::default()
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -527,6 +629,7 @@ mod tests {
             },
             was_hurt: false,
             target_velocity: (0.0, 0.0),
+            hostile: None,
             census: &[],
             parent: None,
             parent_state: 0.0,
@@ -541,6 +644,125 @@ mod tests {
             treasure: None,
             mage: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_merchant_fights_back_against_a_nearby_hostile() {
+        // Before this pass, `World` had no `hostile` field and `town_combat` did not exist — a
+        // settled town NPC never fired regardless of what was nearby. FEATURES.md's own words for
+        // the gap this closes: "the town stands still and dies."
+        let tiles = flat(0, 400);
+        let mut merchant = stand_on(17, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 9,
+            center: (merchant.center().0 + 100.0, merchant.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut merchant, &w, None, &mut rng());
+        let shot = result
+            .shot
+            .expect("a merchant with a hostile in range should open fire");
+        assert_eq!(
+            shot.projectile, 48,
+            "the merchant's own pistol shot, NPC.cs:54969"
+        );
+        assert!(shot.damage > 0);
+        assert!(
+            shot.velocity.0 > 0.0,
+            "the hostile is to the right; the shot should aim there"
+        );
+    }
+
+    #[test]
+    fn nothing_fires_with_no_hostile_nearby() {
+        let tiles = flat(0, 400);
+        let mut merchant = stand_on(17, 200);
+        let result = update(&mut merchant, &day(&tiles), None, &mut rng());
+        assert!(result.shot.is_none());
+        assert!(result.melee.is_none());
+    }
+
+    #[test]
+    fn a_hostile_out_of_range_is_not_engaged() {
+        let tiles = flat(0, 400);
+        let mut merchant = stand_on(17, 200);
+        let mut w = day(&tiles);
+        // Merchant's DangerDetectRange is 320; put the hostile well past it.
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 9,
+            center: (merchant.center().0 + 2000.0, merchant.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut merchant, &w, None, &mut rng());
+        assert!(result.shot.is_none());
+    }
+
+    #[test]
+    fn a_dye_trader_swings_at_a_hostile_within_reach() {
+        // The one representative attack type that is melee rather than a projectile — vanilla's
+        // own state 15 has no `Projectile.NewProjectile` call at all; it strikes directly via
+        // `StrikeNPCNoInteraction` (NPC.cs:55637).
+        let tiles = flat(0, 400);
+        let mut trader = stand_on(207, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 5,
+            center: (trader.center().0 + 10.0, trader.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut trader, &w, None, &mut rng());
+        let hit = result
+            .melee
+            .expect("a hostile 10px away is well within the 32px reach");
+        assert_eq!(hit.target, 5);
+        assert!(hit.damage > 0);
+        assert!(
+            result.shot.is_none(),
+            "the melee type never fires a projectile"
+        );
+    }
+
+    #[test]
+    fn a_town_npc_with_no_combat_profile_still_does_not_fight() {
+        // The Guide (22) is a real vanilla AttackType-1 NPC; this pass covers four representative
+        // types, not all ~27, so he should keep standing still exactly as before.
+        let tiles = flat(0, 400);
+        let mut guide = stand_on(22, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 9,
+            center: (guide.center().0 + 10.0, guide.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut guide, &w, None, &mut rng());
+        assert!(result.shot.is_none());
+        assert!(result.melee.is_none());
+    }
+
+    #[test]
+    fn a_shot_just_fired_does_not_fire_again_until_its_cooldown_elapses() {
+        let tiles = flat(0, 400);
+        let mut merchant = stand_on(17, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 9,
+            center: (merchant.center().0 + 100.0, merchant.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let mut r = rng();
+        let first = update(&mut merchant, &w, None, &mut r);
+        assert!(first.shot.is_some());
+        let second = update(&mut merchant, &w, None, &mut r);
+        assert!(
+            second.shot.is_none(),
+            "a fresh shot every single tick would be a machine gun"
+        );
     }
 
     #[test]
@@ -714,7 +936,7 @@ mod tests {
             &mut rng(),
         );
         assert!(
-            matches!(action, DoorAction::Open { .. }),
+            matches!(action.door, DoorAction::Open { .. }),
             "expected a door to be opened, got {action:?}"
         );
     }
@@ -732,7 +954,7 @@ mod tests {
             tiles.0.insert((probe.0, y), Tile::framed(DOOR, 0, 0));
         }
         let action = update(&mut bunny, &day(&tiles), None, &mut rng());
-        assert_eq!(action, DoorAction::None, "a bunny has no hands");
+        assert_eq!(action.door, DoorAction::None, "a bunny has no hands");
     }
 
     #[test]

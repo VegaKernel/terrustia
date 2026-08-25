@@ -39,6 +39,9 @@ pub struct Surroundings<'a> {
     pub hazards: &'a [Hazard],
     /// Centres of whatever the crowded styles keep away from; see [`avoidance`].
     pub avoid: &'a [(f32, f32)],
+    /// The nearest hostile NPC a town resident might fight — `slot` is an NPC table index, built
+    /// by the caller from the NPC table rather than from `targets` (which is players only).
+    pub hostile: Option<Target>,
     /// Whether a nebula headcrab is already latched onto the target.
     pub target_taken: bool,
     /// Where Plantera's hooks have bitten, averaged.
@@ -156,12 +159,11 @@ pub struct AiOutput {
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
     pub town_doors: Vec<super::ai::town::DoorAction>,
-    /// Projectiles a routine decided to throw.
-    ///
-    /// Nothing flies them yet — the projectile entity is its own phase — so the server counts them
-    /// and drops them. The decision to shoot, and the aim, cadence and reload behind it, are the
-    /// ported ones.
+    /// Projectiles a routine decided to throw. `server.rs` turns each into a real entity via
+    /// `self.projectiles.launch(..)` and broadcasts it.
     pub shots: Vec<super::ai::Shot>,
+    /// A town NPC's melee attack landing on a nearby hostile.
+    pub melee_hits: Vec<super::ai::MeleeHit>,
 }
 
 /// Move a worm segment to trail the one in front of it.
@@ -240,6 +242,7 @@ pub fn update_with(
                 &[]
             },
             target_taken: around.target_taken,
+            hostile: around.hostile,
             hooks: around.hooks,
             kin_moving: around.kin_moving,
             sockets_open: around.sockets_open,
@@ -257,6 +260,7 @@ pub fn update_with(
         out.doors.extend(effects.doors);
         out.town_doors.extend(effects.town_doors);
         out.shots.extend(effects.shots);
+        out.melee_hits.extend(effects.melee_hits);
         if effects.died {
             npc.life = 0;
         }

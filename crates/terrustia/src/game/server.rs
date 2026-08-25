@@ -5731,6 +5731,21 @@ impl GameServer {
             } else {
                 Vec::new()
             };
+            // Where hostile NPCs are, for town residents fighting back — built once here rather
+            // than scanning the whole table per resident, the same reasoning `hurt` above uses
+            // for the Dark Mage. (slot, center, velocity).
+            type Hostile = (u8, (f32, f32), (f32, f32));
+            let hostiles: Vec<Hostile> = if self.npcs.iter().any(|(_, n)| {
+                n.stats.town_npc && crate::game::ai::town_combat::town_combat(n.npc_type).is_some()
+            }) {
+                self.npcs
+                    .iter()
+                    .filter(|(_, n)| !n.stats.friendly && !n.stats.town_npc && n.is_alive())
+                    .map(|(slot, n)| (slot, n.center(), n.velocity))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             raisable = std::mem::take(&mut self.army.corpses);
             // The event as its own fixtures see it. The arena is surveyed once, when the crystal
             // first asks for its gates, and kept: re-walking it every tick would let a player
@@ -5857,6 +5872,25 @@ impl GameServer {
                                 *ty == npc.npc_type
                                     && Some(*slot) == targets.first().map(|t| t.slot)
                             }),
+                        // The nearest hostile a resident might fight back against.
+                        hostile: if npc.stats.town_npc {
+                            let here = npc.center();
+                            hostiles
+                                .iter()
+                                .min_by(|a, b| {
+                                    let da = (a.1.0 - here.0).powi(2) + (a.1.1 - here.1).powi(2);
+                                    let db = (b.1.0 - here.0).powi(2) + (b.1.1 - here.1).powi(2);
+                                    da.total_cmp(&db)
+                                })
+                                .map(|&(slot, center, velocity)| npc_ai::Target {
+                                    slot,
+                                    center,
+                                    velocity,
+                                    alive: true,
+                                })
+                        } else {
+                            None
+                        },
                         census: &census,
                         army,
                         // A fairy hunting for something to show you is the one routine that
@@ -6150,6 +6184,27 @@ impl GameServer {
                 i32::from(shot.time_left),
             ) {
                 self.broadcast_projectile(index);
+            }
+        }
+
+        // A town resident's melee attack landing on a nearby hostile. Mirrors `on_damage_npc`'s
+        // death handling, minus the parts that only make sense for a player-originated hit (an
+        // ack, a stale-generation check against a client's own aim, a crit roll).
+        for hit in std::mem::take(&mut ai_out.melee_hits) {
+            let Some(npc) = self.npcs.get_mut(hit.target) else {
+                continue;
+            };
+            let killed = npc.take_damage(hit.damage, hit.knockback, hit.direction);
+            let (npc_type, center) = (npc.npc_type, npc.center());
+            let value = if npc.from_statue {
+                0.0
+            } else {
+                npc.stats.value
+            };
+            if killed {
+                self.npc_died(hit.target, npc_type, center, value);
+            } else {
+                self.broadcast_npc(hit.target);
             }
         }
 
