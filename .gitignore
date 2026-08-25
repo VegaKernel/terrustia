@@ -32,3 +32,4 @@ flamegraph.svg
 *.cs
 /Terraria*/
 /decompiled/
+.scratch/
