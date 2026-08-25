@@ -112,6 +112,9 @@ pub fn trophy(npc_type: u16) -> Option<u16> {
         370 => 2589,
         439 => 3357,
         395 => 3358,
+        398 => 3595, // Moon Lord
+        636 => 4783, // Empress of Light
+        668 => 5108, // Deerclops
         _ => return None,
     })
 }
@@ -228,6 +231,8 @@ pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
         551 => &[&[3827, 3859, 3870, 3858]],
         // Deerclops.
         668 => &[&[5117, 5118, 5119, 5095]],
+        // The Martian Saucer's weapon: one of six.
+        395 => &[&[2797, 2749, 2795, 2796, 2880, 2769]],
         _ => &[],
     }
 }
@@ -495,7 +500,13 @@ mod tests {
             }
         }
         assert_eq!(bags.len(), 15, "fifteen bosses have bags: {bags:?}");
-        assert_eq!(trophies.len(), 16, "and sixteen have trophies");
+        // Moon Lord, Empress of Light and Deerclops added: their trophies (3595, 4783, 5108) were
+        // simply absent from this table before, found by tools/check_drops.py against source.
+        assert_eq!(
+            trophies.len(),
+            19,
+            "and nineteen have trophies: {trophies:?}"
+        );
         // The Twins are the one boss whose halves have different trophies.
         assert_ne!(trophy(125), trophy(126));
         // ...but they share a bag.

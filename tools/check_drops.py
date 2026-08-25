@@ -28,6 +28,44 @@ BOSSES = {
 }
 
 
+# A bare integer, but never one that is actually the tail of an identifier — `condition2` and
+# `npcNetIds18` both end in digits that are not numbers in this text, and matching them as though
+# they were is how Eye of Cthulhu ended up "owing" the player items 2, 3 and 282 that were really
+# `condition2`, `condition3` and an unrelated `npcNetIds18` array's own name. Three separate bugs
+# of this shape were found by hand-tracing every line that (mis)attributed something to npc 4 —
+# see the git history of this fix for the trace.
+NUM = re.compile(r"(?<![A-Za-z0-9_])-?\d+")
+
+
+def _split_top_level(s: str) -> list[str]:
+    """Split on commas at paren depth 0 only, so `Foo(1, 2), 3, 4` splits into two arguments —
+    `Foo(1, 2)` and `3, 4` joined back — not four."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(s):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return parts
+
+
+def _find_matching_paren(s: str, open_at: int) -> int:
+    """Index of the `)` that closes the `(` at `open_at`."""
+    depth = 0
+    for i in range(open_at, len(s)):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
 def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     """Every (npc type -> item ids) pair the drop database registers.
 
@@ -36,11 +74,24 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     text = (root / "Terraria.GameContent.ItemDropRules" / "ItemDropDatabase.cs").read_text(
         errors="replace"
     )
+    # `int[] npcNetIds = new int[N] { ... };` is declared fresh, under the *same* name, in nearly
+    # every one of these register-methods — it is a local, not a file-scoped constant. Collapsing
+    # its (possibly multi-line) literal onto the declaration line lets the sequential scan below
+    # resolve each `RegisterToMultipleNPCs(..., npcNetIds)` against whichever declaration of that
+    # name most recently preceded it, the same way `current_type` already tracks `short type = N`.
+    # Treating the name as globally unique — this file's previous shape — resolved every one of
+    # them to whatever the *last* `npcNetIds` in the whole file happened to be: one real Zombie
+    # drop list ended up attributed to hundreds of unrelated lines across a dozen functions.
+    def _collapse(m: re.Match[str]) -> str:
+        return m.group(0).replace("\n", " ")
+
+    text = re.sub(r"int\[\]\s+\w+\s*=\s*new int\[\d+\]\s*\{[^}]*\}", _collapse, text, flags=re.S)
 
     drops: dict[int, set[int]] = {}
     mode_only: dict[int, set[int]] = {}
     # Track `short type = N;` so the many `RegisterToNPC(type, ...)` calls resolve.
     current_type: int | None = None
+    arrays: dict[str, set[int]] = {}
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -48,9 +99,9 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         if m := re.match(r"short type = (\d+);", line):
             current_type = int(m.group(1))
             continue
-        # A few register blocks name the type inline in a local.
-        if m := re.match(r"int (?:num|type\d*) = (\d+);", line):
-            pass
+        if m := re.match(r"int\[\]\s+(\w+)\s*=\s*new int\[\d+\]\s*\{([^}]*)\}", line):
+            arrays[m.group(1)] = {int(n) for n in NUM.findall(m.group(2)) if int(n) >= 0}
+            continue
 
         if "RegisterToNPC(" not in line and "RegisterToMultipleNPCs(" not in line:
             continue
@@ -59,12 +110,26 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         targets: set[int] = set()
         if m := re.search(r"RegisterToNPC\((\d+)\s*,", line):
             targets.add(int(m.group(1)))
-        elif "RegisterToNPC(type" in line and current_type is not None:
+        # Exact variable name `type` only — `type2`, `type18` and friends are different locals
+        # entirely, and a bare substring check here silently reused a stale, unrelated npc id.
+        elif re.search(r"RegisterToNPC\(type\s*,", line) and current_type is not None:
             targets.add(current_type)
-        elif m := re.search(r"RegisterToMultipleNPCs\(.*?\)\s*;?\s*$", line):
-            # Trailing ids after the rule argument: `..., 126, 125);`
-            tail = re.findall(r",\s*(-?\d+)", line)
-            targets.update(int(t) for t in tail if int(t) > 0)
+        elif "RegisterToMultipleNPCs(" in line:
+            open_at = line.index("RegisterToMultipleNPCs(") + len("RegisterToMultipleNPCs")
+            close_at = _find_matching_paren(line, open_at)
+            if close_at != -1:
+                inner = line[open_at + 1 : close_at]
+                # The first top-level argument is the rule expression; everything after it is the
+                # id list — a bare integer literal, or a named `int[]` declared earlier.
+                args = _split_top_level(inner)
+                for tok in args[1:]:
+                    tok = tok.strip()
+                    if re.fullmatch(r"-?\d+", tok):
+                        targets.add(int(tok))
+                    elif tok in arrays:
+                        targets.update(arrays[tok])
+                    # Anything else (a method call, an unrecognised variable) is left unresolved
+                    # rather than guessed at — silence here is a missed check, not a wrong one.
 
         if not targets:
             continue
@@ -77,25 +142,39 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
         skipped: set[int] = set()
         for name, call in re.findall(r"ItemDropRule\.(\w+)\(([^)]*)\)", line):
             if name.startswith("MasterMode") or name == "BossBag":
-                for n in re.findall(r"-?\d+", call):
+                for n in NUM.findall(call):
                     if int(n) > 0:
                         skipped.add(int(n))
                     break
         for name, call in re.findall(r"ItemDropRule\.(\w+)\(([^)]*)\)", line):
             if name.startswith("MasterMode") or name == "BossBag":
                 continue
-            # `OneFromOptions` leads with the chance, not an item — taking its first number as an
-            # item is what made every boss look as though it owed the player an Iron Pickaxe.
-            if name.startswith("OneFromOptions"):
+            # Every `*OneFromOptions*` variant leads with one or two chance denominators, not an
+            # item — taking the first number as the item is what made every boss look as though
+            # it owed the player an Iron Pickaxe. `Gel` is a different shape of the same problem:
+            # its own signature is `(chanceDenominator, min, max)` with no item argument at all —
+            # the item is implicitly Gel (23) every time — so treating its first number as an item
+            # id invented a phantom drop out of a chance value on every slime-family enemy.
+            if "OneFromOptions" in name or name == "Gel":
                 continue
-            for n in re.findall(r"-?\d+", call):
+            for n in NUM.findall(call):
                 value = int(n)
                 if value > 0:
                     items.add(value)
                 break  # only the first argument is the item
-        for call in re.findall(r"OneFromOptions\w*\(([^)]*)\)", line):
-            numbers = [int(n) for n in re.findall(r"-?\d+", call)]
-            items.update(n for n in numbers[1:] if n > 0)  # first is the chance
+        # How many leading arguments are chance denominators rather than items, per constructor.
+        # Unlisted variants fall back to 1, the shape every `OneFromOptions*` overload the game
+        # actually uses shares except the `NormalvsExpert*` pair.
+        LEADING_CHANCES = {
+            "NormalvsExpertOneFromOptions": 2,
+            "NormalvsExpertOneFromOptionsNotScalingWithLuck": 2,
+            "OneFromOptionsWithNumerator": 2,
+            "OneFromOptionsNotScalingWithLuckWithX": 2,
+        }
+        for name, call in re.findall(r"ItemDropRule\.(\w*OneFromOptions\w*)\(([^)]*)\)", line):
+            numbers = [int(n) for n in NUM.findall(call)]
+            skip = LEADING_CHANCES.get(name, 1)
+            items.update(n for n in numbers[skip:] if n > 0)
 
         for npc in targets:
             if items:
@@ -104,6 +183,19 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
                 mode_only.setdefault(npc, set()).update(skipped)
 
     return drops, mode_only
+
+
+def _expand_npcs(label: str) -> list[int]:
+    """`13..=15 | 20` -> `[13, 14, 15, 20]`. A match-arm label's range is inclusive on both ends,
+    and taking only the two digit tokens the old code did (`13`, `15`) silently dropped every id
+    in between — 14 was never checked against anything for exactly that reason."""
+    npcs: list[int] = []
+    for part in re.split(r"\s*\|\s*", label.strip()):
+        if m := re.fullmatch(r"(\d+)\.\.=(\d+)", part):
+            npcs.extend(range(int(m.group(1)), int(m.group(2)) + 1))
+        elif part.isdigit():
+            npcs.append(int(part))
+    return npcs
 
 
 def parse_ours(root: Path) -> dict[int, set[int]]:
@@ -120,15 +212,34 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         end = starts[nth + 1][0] if nth + 1 < len(starts) else len(flat)
         body = flat[body_at:end]
         items = {int(i) for i in re.findall(r"item: (\d+)", body)}
-        for npc in (int(n) for n in re.findall(r"\d+", label)):
+        for npc in _expand_npcs(label):
             ours.setdefault(npc, set()).update(items)
 
     cond = (root / "crates" / "terrustia-proto" / "src" / "conditional_drops.rs").read_text()
-    for m in re.finditer(r"^        (\d+(?:\s*\|\s*\d+)*) => vec!\[(.*?)\],\n", cond, re.S | re.M):
-        npcs = [int(n) for n in re.findall(r"\d+", m.group(1))]
+    for m in re.finditer(
+        r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => vec!\[(.*?)\],\n", cond, re.S | re.M
+    ):
+        npcs = _expand_npcs(m.group(1))
         items = {int(i) for i in re.findall(r"(?:always|sometimes|a_few)\((\d+)", m.group(2))}
         for npc in npcs:
             ours.setdefault(npc, set()).update(items)
+    # A handful of drops in `conditional()` are gated by an `if npc_type == N { ... }` guard
+    # instead of living in that npc's own match arm — the Eye of Cthulhu's world-evil ore is one,
+    # correctly implemented and tested, but invisible to the scan above since it is not a `vec!`
+    # arm at all. Brace-matched by hand because the block can nest (an `if/else` inside it, in
+    # EoC's case) and a regex cannot balance that reliably.
+    for m in re.finditer(r"if npc_type == (\d+)[^{]*\{", cond):
+        npc = int(m.group(1))
+        depth, i = 1, m.end()
+        while depth > 0 and i < len(cond):
+            if cond[i] == "{":
+                depth += 1
+            elif cond[i] == "}":
+                depth -= 1
+            i += 1
+        body = cond[m.end() : i]
+        items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", body)}
+        ours.setdefault(npc, set()).update(items)
     # The bag, trophy and mask maps, and the one-from pools.
     for pattern in (
         r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => (\d+),",
@@ -136,7 +247,7 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         r"^        (\d+) => &\[((?:&\[[\d, ]+\],?\s*)+)\],",
     ):
         for m in re.finditer(pattern, cond, re.M):
-            npcs = [int(n) for n in re.findall(r"\d+", m.group(1))]
+            npcs = _expand_npcs(m.group(1))
             items = {int(n) for n in re.findall(r"\d+", m.group(2))}
             for npc in npcs:
                 ours.setdefault(npc, set()).update(items)
