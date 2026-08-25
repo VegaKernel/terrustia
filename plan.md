@@ -68,6 +68,7 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **FEATURES.md merged into README.md, FEATURES.md deleted** | One canonical document instead of two describing the same thing — every cross-reference (SECURITY.md, CONTRIBUTING.md, three source doc-comments, the release workflow) repointed |
 | ✓ | **`AUDIT.md`** | Public-facing track record — data safety, availability, correctness, two corrected sizing estimates, the four CI/release bugs. Every claim spot-checked against `git log` before publishing, not just transcribed from this file |
 | ✓ | **A real played-in world's preserved bytes verified surviving a round trip (GAPS §31)** | The earlier round-trip check only ever used a freshly generated world, which has no real Journey research/bestiary/pressure-plate state to lose. `roundtrip_wld` now diffs every trailing preserved section byte-for-byte against a real, actually-played world (a copy of it) — all 5 sections identical. Cross-checked further: the re-saved file loaded in a real `TerrariaServer` and served a real connecting client correctly |
+| ✓ | **`gen_drops.py` had the same variable-collision bug `check_drops.py` was fixed for, never got the fix; recovered 45 of 111 drop-table gaps** | Fixed the generator's `npcNetIds` collision, an over-broad exclusion that dropped a chain's flat prefix along with its conditional tail, and the checker's blindness to `match { N => { ... } }` block arms. A real bug found along the way: `one_from()`'s blanket expert-mode guard was emptying Mimics' loot pool in expert mode — Mimics aren't bosses and gate on hardmode, not difficulty. 66 gaps remain, each individually traced and left for a stated reason (a chance-gated pool neither table represents yet, or an untracked `Conditions` dimension) |
 
 ## Audit findings, ranked
 
@@ -204,7 +205,7 @@ Two more things this pass turned up, checked immediately rather than left as fla
 | — | Town NPCs: the remaining ~23 combat-capable types (mechanical — see `town_combat.rs`'s module doc), then happiness |
 | — | Journey mode |
 | — | 3 missing events (Slime Rain, Party, Lantern Night) |
-| — | ~111 enemy drop tables (down from the checker's noisy original 123 — see Done) |
+| — | ~66 remaining enemy drop tables (down from 111, then the checker's noisy original 123 — see Done). Needs two real architectural pieces neither `npc_drops.rs` nor `conditional_drops.rs` support yet: a chance-gated `OneFromOptions` roll (needs `rng` threaded from the `server.rs` call site into a new drop-resolution shape), and new `Conditions` fields for things this project doesn't track yet — `BeatAnyMechBoss`, the Pumpkin Moon's wave-scaled drop chance, a Blood Moon statue-spawn exclusion flag |
 | — | Pets, mounts, minecart tracks |
 | — | Skeletron's `RedHatSkeletron` vanity-set condition — needs player equipment state, which lives in `server.rs`, not `conditional_drops.rs`. Found while fixing drop tables, correctly left for whoever's in `server.rs` next |
 | — | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) — in scope, deprioritized behind ordinary-world parity |
