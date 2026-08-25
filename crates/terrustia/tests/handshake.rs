@@ -46,6 +46,32 @@ async fn start_server() -> SocketAddr {
     start_server_with(|_| {}).await
 }
 
+/// The same, with the connection limits set for the test rather than the defaults.
+async fn start_server_limited(max_connections: usize, per_address: usize) -> SocketAddr {
+    init_logs();
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        seed: 12345,
+        motd: String::new(),
+        max_connections,
+        max_connections_per_address: per_address,
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let world = worldgen::generate(
+        config.world_width,
+        config.world_height,
+        config.world_name.clone(),
+        config.seed,
+    );
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    tokio::spawn(listener::run(listener, config, tx, None));
+    addr
+}
+
 /// The same, letting a test shape the world first.
 ///
 /// A test that needs a particular tile has to put it there. Relying on the generator happening to
@@ -75,7 +101,7 @@ async fn start_server_with<F: FnOnce(&mut World)>(prepare: F) -> SocketAddr {
 
     let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
     tokio::spawn(GameServer::new(config.clone(), world).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
     addr
 }
 
@@ -128,7 +154,17 @@ impl FakeClient {
             if found {
                 return frames;
             }
-            assert!(frames.len() < 500, "never saw packet {id}");
+            // Generous, because a section now brings the full contents of every chest in it —
+            // forty frames per chest, as the game sends them — so the spawn burst of a world with
+            // a well-stocked dungeon nearby runs to thousands of frames before packet 49.
+            if frames.len() >= 20_000 {
+                let mut census: std::collections::BTreeMap<u8, usize> =
+                    std::collections::BTreeMap::new();
+                for frame in &frames {
+                    *census.entry(frame.id).or_default() += 1;
+                }
+                panic!("never saw packet {id}; got instead: {census:?}");
+            }
         }
     }
 
@@ -421,10 +457,18 @@ async fn two_players_see_each_other_join_move_and_chat() {
         }
     }
     let (author, text) = chat.expect("chat never reached alice");
-    assert_eq!(author, bob_slot);
-    assert!(
-        text.contains("bob"),
-        "chat should carry the sender's name: {text}"
+    // The *author byte* carries who said it, and the text carries only what they said. The client
+    // puts the two together itself — `ChatHelper.DisplayMessage` prefixes
+    // `Main.player[author].name` whenever the author is a real slot — so a server that also writes
+    // the name into the text has every line rendered with the speaker's name twice, and the tag
+    // inside the speech bubble over their head.
+    //
+    // This assertion used to be `text.contains("bob")`, which is the bug written down as a
+    // requirement. A real server was asked to relay the same line and sent the bare text.
+    assert_eq!(author, bob_slot, "the author byte says who spoke");
+    assert_eq!(
+        text, "hi alice",
+        "the text should be exactly what was said, with no name in it"
     );
 }
 
@@ -473,7 +517,7 @@ async fn the_server_refuses_more_players_than_configured() {
     let world = worldgen::generate(800, 600, "t", 1);
     let (tx, rx) = mpsc::channel::<ServerEvent>(64);
     tokio::spawn(GameServer::new(config.clone(), world).run(rx));
-    tokio::spawn(listener::run(listener, config, tx));
+    tokio::spawn(listener::run(listener, config, tx, None));
 
     let mut first = FakeClient::connect(addr).await;
     first.join("first").await;
@@ -548,6 +592,84 @@ async fn a_section_is_streamed_on_request_and_not_repeated() {
             "a section the client already has was sent again"
         );
     }
+}
+
+/// A section brings the contents of the chests inside it.
+///
+/// The section itself carries only each chest's id, position and name. The client needs the items
+/// too, for everything it does with a chest without opening one — crafting from what is nearby,
+/// quick-stacking into it, and the item search — and the game sends them alongside every section
+/// for exactly that reason. Found missing by capturing a real 1.4.5.8 server's join, which sent
+/// 280 of these where this server sent none.
+#[tokio::test]
+async fn a_section_brings_the_contents_of_its_chests() {
+    const CHEST_X: i16 = 610;
+    const CHEST_Y: i16 = 460;
+    // Section (3, 3) covers x 600..800, y 450..600, and is outside the spawn burst.
+    const SECTION: (u16, u16) = (3, 3);
+
+    let addr = start_server_with(|world| {
+        world.chests.clear();
+        let mut chest = terrustia::world::objects::Chest {
+            x: CHEST_X,
+            y: CHEST_Y,
+            name: String::new(),
+            items: vec![terrustia_proto::ItemStack::default(); 40],
+        };
+        chest.items[0] = terrustia_proto::ItemStack {
+            id: 3507,
+            stack: 7,
+            prefix: 0,
+        };
+        world.chests.push(Some(chest));
+    })
+    .await;
+
+    let mut client = FakeClient::connect(addr).await;
+    client.join("shopper").await;
+    client.recv_until(id::FINISHED_CONNECTING_TO_SERVER).await;
+
+    let mut w = PacketWriter::new(id::REQUEST_SECTION);
+    w.u16(SECTION.0).u16(SECTION.1);
+    client.send(w.finish().unwrap()).await;
+
+    let mut size = None;
+    let mut first_slot = None;
+    for _ in 0..200 {
+        let Some(frame) = client.try_recv(Duration::from_secs(2)).await else {
+            break;
+        };
+        match frame.id {
+            id::SYNC_CHEST_SIZE => {
+                let mut r = PacketReader::new(&frame.payload);
+                size = Some((r.i16().unwrap(), r.i16().unwrap()));
+            }
+            id::SYNC_CHEST_ITEM if first_slot.is_none() => {
+                let mut r = PacketReader::new(&frame.payload);
+                let chest = r.i16().unwrap();
+                let slot = r.u8().unwrap();
+                let stack = r.i16().unwrap();
+                let _prefix = r.u8().unwrap();
+                let item = r.i16().unwrap();
+                first_slot = Some((chest, slot, stack, item));
+            }
+            _ => {}
+        }
+        if size.is_some() && first_slot.is_some() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        size,
+        Some((0, 40)),
+        "the section should have announced chest 0 as holding forty slots"
+    );
+    assert_eq!(
+        first_slot,
+        Some((0, 0, 7, 3507)),
+        "the chest's first slot should have arrived with the section"
+    );
 }
 
 #[tokio::test]
@@ -688,4 +810,71 @@ async fn a_partially_damaged_block_is_not_removed() {
         .tile_from_handshake(401, 401)
         .expect("never received the section containing the tile");
     assert!(tile.is_active(), "a merely damaged block was deleted");
+}
+
+/// A machine cannot open sockets until this one runs out of them.
+///
+/// The accept loop was unconditional: every socket got two tasks, a 16 KiB read buffer and an
+/// outbound queue before the other end had spoken a word of the protocol. Opening sockets is
+/// cheap, so that was a way to exhaust the server's memory and descriptors without handshaking.
+#[tokio::test]
+async fn connections_past_the_limit_are_refused() {
+    let addr = start_server_limited(3, 3).await;
+
+    // Hold the limit open. These never handshake — which is the point.
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(TcpStream::connect(addr).await.expect("within the limit"));
+    }
+
+    // The next one is accepted by the OS and then dropped by us, so the read comes back empty.
+    let mut refused = TcpStream::connect(addr).await.expect("the OS accepts it");
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), refused.read(&mut byte)).await;
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "a connection past the limit should be closed, not served: {read:?}"
+    );
+
+    // And once one goes away, there is room again.
+    held.pop();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut allowed = TcpStream::connect(addr).await.expect("space freed up");
+    let read = tokio::time::timeout(Duration::from_millis(500), allowed.read(&mut byte)).await;
+    assert!(
+        read.is_err(),
+        "a connection within the limit should be held open waiting for a handshake, not closed"
+    );
+}
+
+/// A connection that never says who it is does not hold its place for ever.
+///
+/// `idle_timeout_secs` wraps each individual read, so its timer resets on any byte — a connection
+/// trickling one byte a minute would sit there indefinitely. The handshake deadline is what makes
+/// the place finite.
+#[tokio::test]
+async fn a_connection_that_never_handshakes_is_dropped() {
+    init_logs();
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        seed: 12345,
+        motd: String::new(),
+        handshake_timeout_secs: 1,
+        ..Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let world = worldgen::generate(800, 600, config.world_name.clone(), 12345);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    tokio::spawn(listener::run(listener, config, tx, None));
+
+    let mut silent = TcpStream::connect(addr).await.expect("connecting");
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(10), silent.read(&mut byte)).await;
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "a connection that never handshakes must be dropped once its deadline passes: {read:?}"
+    );
 }

@@ -14,30 +14,81 @@ use tracing::{debug, warn};
 use crate::{
     game::ServerEvent,
     net::codec::{CodecError, TerrariaCodec},
+    net::record,
 };
 
-/// Frames queued for one client before it is considered too slow to keep.
+/// Frames queued for one client before it is considered too slow to keep, ignoring other players.
 ///
-/// The initial world burst is around forty section packets, so this leaves a wide margin while
-/// still bounding memory for a client that has stopped reading.
-const OUTBOUND_QUEUE: usize = 512;
+/// The burst a joining client is sent is much larger than it looks. Around forty section packets,
+/// yes — but also one frame per item on the ground (up to 400), one per live NPC (up to 200), and
+/// the world and progress packets. A flat 512 covered the sections and nothing else.
+///
+/// Chest contents are what makes it big. Every section carries the full inventory of every chest
+/// inside it — forty frames per chest, as the game sends them — so one storage room in view of
+/// spawn is worth more frames than the entire rest of the join put together. Fifty chests in a
+/// section is two thousand frames from that section alone, and a player dropped for a full queue
+/// is dropped silently, mid-load, with no message. The cost of being generous here is a queue of
+/// pointers that is only ever that deep for the second or two a join takes.
+const OUTBOUND_BASE: usize = 8192;
+
+/// Extra room per player slot the server is configured for.
+///
+/// Every other player already in the world costs the newcomer their presence frames *and* one
+/// frame per relayed inventory slot, because equipment sent before they arrived is replayed for
+/// them — around two hundred frames each. Sizing the queue off `max_players` is what keeps a busy
+/// server from silently dropping people as they join: a full queue removes the player outright,
+/// mid-load, with no message.
+const OUTBOUND_PER_PLAYER: usize = 256;
+
+/// The queue depth to give one connection on a server configured for `max_players`.
+pub fn outbound_queue(max_players: usize) -> usize {
+    OUTBOUND_BASE + max_players * OUTBOUND_PER_PLAYER
+}
 
 /// Starting read buffer. Section packets are large, so a bigger buffer avoids repeated growth.
 const READ_BUFFER: usize = 16 * 1024;
 
+/// How many frames a connection may send before it counts as having handshaked.
+///
+/// The real sequence is a version, a UUID, a player, an inventory and a spawn request — a couple
+/// of dozen frames with the inventory slots. Past that it is an ordinary session and the idle
+/// timeout is the right rule; before it, the connection is on a deadline.
+const HANDSHAKE_FRAMES: u32 = 64;
+
 /// Serve one accepted connection until it closes.
+/// The limits a connection is served under.
+///
+/// Grouped because they travel together and are set once from the config; passing them
+/// individually made `serve` a list of bare `Duration`s that were easy to swap by accident.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// How long a single read may block before the connection is considered idle.
+    pub idle: Duration,
+    /// How long the whole handshake has, regardless of how often bytes trickle in.
+    pub handshake: Duration,
+    /// Capacity of this connection's outbound queue.
+    pub outbound_queue: usize,
+}
+
 pub async fn serve(
     stream: TcpStream,
     addr: SocketAddr,
     events: mpsc::Sender<ServerEvent>,
-    idle_timeout: Duration,
+    limits: Limits,
+    recorder: Option<record::Recorder>,
+    // Held for the life of the connection, releasing its place on every exit path including a
+    // panic. Never read — its whole job is to be dropped.
+    _slot_held: crate::net::listener::ConnectionSlot,
 ) {
+    let idle_timeout = limits.idle;
+    let outbound_queue = limits.outbound_queue;
+    let handshake_deadline = std::time::Instant::now() + limits.handshake;
     // Terraria is latency-sensitive and its packets are small; batching them hurts responsiveness.
     if let Err(e) = stream.set_nodelay(true) {
         debug!(%addr, error = %e, "could not disable Nagle");
     }
 
-    let (out_tx, out_rx) = mpsc::channel::<Bytes>(OUTBOUND_QUEUE);
+    let (out_tx, out_rx) = mpsc::channel::<Bytes>(outbound_queue);
     let (slot_tx, slot_rx) = oneshot::channel();
 
     if events
@@ -67,8 +118,16 @@ pub async fn serve(
         }
     };
 
-    let writer = tokio::spawn(write_loop(out_rx, write_half));
-    let reason = read_loop(&mut read_half, slot, &events, idle_timeout).await;
+    let writer = tokio::spawn(write_loop(out_rx, write_half, slot, recorder.clone()));
+    let reason = read_loop(
+        &mut read_half,
+        slot,
+        &events,
+        idle_timeout,
+        handshake_deadline,
+        recorder.as_ref(),
+    )
+    .await;
     debug!(%addr, slot, %reason, "connection closed");
 
     // Dropping the player closes the outbound channel, which ends the write task.
@@ -88,7 +147,12 @@ pub async fn serve(
 /// one write costs nothing and is what stops that.
 const WRITE_BATCH: usize = 64 * 1024;
 
-async fn write_loop(mut out: mpsc::Receiver<Bytes>, mut sink: tokio::net::tcp::OwnedWriteHalf) {
+async fn write_loop(
+    mut out: mpsc::Receiver<Bytes>,
+    mut sink: tokio::net::tcp::OwnedWriteHalf,
+    slot: u8,
+    recorder: Option<record::Recorder>,
+) {
     let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH);
     while let Some(frame) = out.recv().await {
         batch.clear();
@@ -100,6 +164,11 @@ async fn write_loop(mut out: mpsc::Receiver<Bytes>, mut sink: tokio::net::tcp::O
                 Ok(next) => batch.extend_from_slice(&next),
                 Err(_) => break,
             }
+        }
+        // Recorded before the write, so a batch that fails to go out is still visible as the last
+        // thing this server tried to say.
+        if let Some(recorder) = &recorder {
+            recorder.chunk(record::Direction::Outbound, slot, &batch);
         }
         if sink.write_all(&batch).await.is_err() {
             break;
@@ -114,15 +183,28 @@ async fn read_loop(
     slot: u8,
     events: &mpsc::Sender<ServerEvent>,
     idle_timeout: Duration,
+    handshake_deadline: std::time::Instant,
+    recorder: Option<&record::Recorder>,
 ) -> &'static str {
     let mut codec = TerrariaCodec;
     let mut buf = BytesMut::with_capacity(READ_BUFFER);
+    // Cleared once the connection has said anything at all beyond the first frame. Until then it
+    // is on a clock: `idle_timeout` wraps each individual *read*, so its timer resets on any byte
+    // and a connection trickling one byte a minute would hold its place for ever.
+    let mut still_handshaking = true;
+    let mut frames_seen = 0u32;
 
     loop {
         // Drain everything already buffered before waiting on the socket again.
         loop {
             match codec.decode(&mut buf) {
                 Ok(Some(frame)) => {
+                    // A handful of frames is the whole handshake; past that it is a real session
+                    // and the ordinary idle timeout is the right rule.
+                    frames_seen = frames_seen.saturating_add(1);
+                    if frames_seen > HANDSHAKE_FRAMES {
+                        still_handshaking = false;
+                    }
                     if events
                         .send(ServerEvent::Packet { slot, frame })
                         .await
@@ -143,13 +225,40 @@ async fn read_loop(
             }
         }
 
-        match timeout(idle_timeout, read.read_buf(&mut buf)).await {
+        // Whichever runs out first: the per-read idle timer, or the one-shot deadline for
+        // getting through the handshake at all.
+        let wait = if still_handshaking {
+            idle_timeout.min(
+                handshake_deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(1)),
+            )
+        } else {
+            idle_timeout
+        };
+        if still_handshaking && std::time::Instant::now() >= handshake_deadline {
+            return "took too long to say who it was";
+        }
+
+        let before = buf.len();
+        match timeout(wait, read.read_buf(&mut buf)).await {
             Ok(Ok(0)) => return "client closed",
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => {
+                // Exactly the bytes that arrived, before anything here has looked at them. This
+                // is the whole value of a capture: ground truth that owes nothing to our own
+                // idea of what the client should have sent.
+                if let Some(recorder) = recorder {
+                    recorder.chunk(record::Direction::Inbound, slot, &buf[before..]);
+                }
+            }
             Ok(Err(e)) => {
                 debug!(slot, error = %e, "socket read failed");
                 return "read error";
             }
+            Err(_) if still_handshaking && std::time::Instant::now() >= handshake_deadline => {
+                return "took too long to say who it was";
+            }
+            Err(_) if still_handshaking => continue,
             Err(_) => return "idle timeout",
         }
     }

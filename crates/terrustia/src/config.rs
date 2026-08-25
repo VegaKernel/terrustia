@@ -4,6 +4,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use terrustia_proto::section::{SECTION_HEIGHT, SECTION_WIDTH};
 
 /// Terraria addresses players by a byte slot, and slot 255 is reserved for "the server" in chat.
 pub const MAX_PLAYERS: usize = 255;
@@ -33,6 +34,24 @@ pub struct Config {
     /// A playing client sends control updates continuously, so this only catches dead sockets and
     /// connections that stall mid-handshake.
     pub idle_timeout_secs: u64,
+    /// How many sockets may be open at once, before anyone has said who they are.
+    ///
+    /// Separate from `max_players`, and necessarily larger: a connection is accepted long before
+    /// it has a slot, so the two count different things. Without a ceiling the accept loop is
+    /// unconditional — every socket immediately gets two tasks, a read buffer and an outbound
+    /// queue, none of which requires the other end to have spoken the protocol at all.
+    pub max_connections: usize,
+    /// How many sockets one address may hold open at once.
+    ///
+    /// The common case for hitting this is not an attack but a mistake — a script reconnecting in
+    /// a loop — and either way the answer is the same.
+    pub max_connections_per_address: usize,
+    /// How long a connection has to finish the handshake before it is dropped.
+    ///
+    /// `idle_timeout_secs` wraps each individual read, so its timer resets on any byte: a
+    /// connection trickling one byte a minute stays open for ever and costs a slot the whole time.
+    /// This is the backstop that makes the slot finite.
+    pub handshake_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -51,6 +70,11 @@ impl Default for Config {
             password: String::new(),
             max_chat_len: 500,
             idle_timeout_secs: 60,
+            // Generous next to any real player count, and still a ceiling. The point is that one
+            // machine cannot open sockets until this one runs out of descriptors.
+            max_connections: 512,
+            max_connections_per_address: 8,
+            handshake_timeout_secs: 30,
         }
     }
 }
@@ -103,6 +127,23 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "world dimensions must fit in an i16".into(),
             ));
+        }
+        // The client sizes its section grid with `maxTilesX / 200` and `maxTilesY / 150`, which
+        // truncate. A world that is not a whole number of sections therefore has a strip along
+        // its far edge that the client has nowhere to put and will never ask for — so refuse it
+        // here rather than generate ground nobody can reach. Every size Terraria itself makes is
+        // already a multiple of both.
+        let ragged_x = self.world_width % SECTION_WIDTH;
+        let ragged_y = self.world_height % SECTION_HEIGHT;
+        if ragged_x != 0 || ragged_y != 0 {
+            return Err(ConfigError::Invalid(format!(
+                "world size must be a whole number of {SECTION_WIDTH}x{SECTION_HEIGHT} sections, \
+                 got {}x{}; try {}x{}",
+                self.world_width,
+                self.world_height,
+                self.world_width - ragged_x,
+                self.world_height - ragged_y,
+            )));
         }
         Ok(())
     }
