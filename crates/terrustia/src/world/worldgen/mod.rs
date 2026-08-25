@@ -52,6 +52,8 @@ pub const SMALL_HEIGHT: i32 = 1200;
 /// than merely non-empty. Every count here gates something; see [`structures`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Built {
+    /// How many trees the forest pass grew.
+    pub trees: usize,
     pub orbs: usize,
     pub altars: usize,
     pub life_crystals: usize,
@@ -114,6 +116,23 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     structures::greenery(&mut world, &plan, &heights, &mut rand);
     structures::cobwebs(&mut world, &plan, &mut rand);
 
+    // A forest, last of the surface passes so it grows on grass that has stopped moving.
+    //
+    // Generated worlds had no trees whatsoever until this — not fewer than vanilla, none — which
+    // is the first thing anyone notices and the hardest to work around, since wood is the first
+    // material in the game.
+    //
+    // Its own generator, seeded from the world's, because the tree pass draws a different number
+    // of values than anything before it and threading it through `rand` would move every later
+    // pass's numbers for no benefit while parity is not the goal.
+    // `::rand` rather than `rand`: this module has its own `rand` submodule, holding the game's
+    // generator, and it wins the name.
+    let mut forest_rng = {
+        use ::rand::SeedableRng;
+        ::rand::rngs::SmallRng::seed_from_u64(seed ^ 0x7265_6573)
+    };
+    let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
+
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
     world.spawn_x = plan.spawn_x as i16;
@@ -124,6 +143,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let chests = chests.saturating_sub(drop_orphaned_chests(&mut world));
 
     let built = Built {
+        trees,
         orbs,
         altars,
         life_crystals,
