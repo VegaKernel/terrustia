@@ -2555,13 +2555,22 @@ impl GameServer {
 
         let hello = Hello::decode(payload)?;
         if !hello.is_supported() {
+            // Name both sides. A refusal that says only what the server speaks leaves the person
+            // on the other end guessing which of the two needs updating — and this exact check
+            // once refused *every* current client, because it matched the string "Terraria325"
+            // while the installed game announced 326.
             info!(slot, version = %hello.version, "rejecting unsupported client");
             self.kick(
                 slot,
                 &format!(
-                    "This server runs Terraria {} (protocol {}).",
-                    "1.4.5.7",
-                    id::CUR_RELEASE
+                    "Your client speaks {}; this server speaks {}. \
+                     Whichever is older needs updating.",
+                    hello.version,
+                    id::SUPPORTED_RELEASES
+                        .iter()
+                        .map(|r| format!("Terraria{r}"))
+                        .collect::<Vec<_>>()
+                        .join(" and "),
                 ),
             );
             return Ok(());

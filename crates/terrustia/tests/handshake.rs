@@ -360,11 +360,21 @@ async fn an_outdated_client_is_kicked_with_a_reason() {
 
     let mut r = PacketReader::new(&frame.payload);
     let text = terrustia_proto::NetworkText::read(&mut r).unwrap();
+    // Both sides, not just ours. A refusal naming only the server leaves the person on the other
+    // end guessing which of the two needs updating — and it used to name a version we do not even
+    // speak, because the string was hardcoded to 1.4.5.7 while the server announced release 326.
     assert!(
-        text.text.contains("1.4.5.7"),
-        "kick should name the expected version, got {:?}",
+        text.text.contains("Terraria279"),
+        "the refusal should say what the client speaks, got {:?}",
         text.text
     );
+    for release in id::SUPPORTED_RELEASES {
+        assert!(
+            text.text.contains(&format!("Terraria{release}")),
+            "the refusal should say what this server speaks ({release}), got {:?}",
+            text.text
+        );
+    }
 }
 
 #[tokio::test]

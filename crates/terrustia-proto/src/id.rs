@@ -370,3 +370,38 @@ pub const PLAYER_MANA: u8 = UNKNOWN42;
 /// Packet 68 is `Unknown68` in the shipped enum and the client reads a string it then discards.
 /// It was `ClientUUID` in 1.4.4 and clients still send their UUID here.
 pub const CLIENT_UUID: u8 = UNKNOWN68;
+
+#[cfg(test)]
+mod version_policy {
+    use super::*;
+
+    /// Fires when Terraria moves, so it is found here rather than by a user being turned away.
+    ///
+    /// **When this fails**, a new release exists and three things need checking, in this order:
+    ///
+    /// 1. `SUPPORTED_RELEASES` and `CUR_RELEASE` here.
+    /// 2. Whether packet 7 changed. 325 -> 326 appended `dungeonX`/`dungeonY` as two `i16`s, which
+    ///    is the entire wire difference between them; `WORLD_DATA_FIXED_LEN` and the pinned
+    ///    `REAL_SERVER_PACKET_7` capture in `packets.rs` both encode that.
+    /// 3. `wld::MAX_VERSION`, if the *save* format moved too. It did not between 325 and 326.
+    ///
+    /// The point is that the next release should be a morning's work for somebody who has never
+    /// seen this code, rather than an archaeology project.
+    #[test]
+    fn the_supported_releases_are_the_ones_we_think() {
+        assert_eq!(
+            SUPPORTED_RELEASES,
+            &[325, 326],
+            "the set of releases this server speaks has changed; see this test's comment"
+        );
+        assert_eq!(CUR_RELEASE, 326, "the release we announce as our own");
+        assert!(
+            SUPPORTED_RELEASES.contains(&CUR_RELEASE),
+            "we must accept the release we claim to be"
+        );
+        assert!(
+            SUPPORTED_RELEASES.windows(2).all(|w| w[0] < w[1]),
+            "kept in order, so the newest is always last"
+        );
+    }
+}
