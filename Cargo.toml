@@ -58,6 +58,10 @@ tracing = "0.1"
 # `Targets` gives the same `terrustia=debug` filtering as `env-filter` without pulling in
 # a regex engine.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "registry"] }
+# Raw mode and key decoding for the sticky console prompt. Line editing, history and completion
+# are hand-rolled on top of it — this crate is used only for what a terminal genuinely cannot be
+# driven without: entering/leaving raw mode portably and turning bytes into key events.
+crossterm = { version = "0.28", default-features = false, features = ["events"] }
 
 [profile.dev]
 opt-level = 1

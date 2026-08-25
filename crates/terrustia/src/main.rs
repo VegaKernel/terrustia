@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::ExitCode, time::Instant};
 
 use terrustia::{
     config::Config,
+    console,
     game::{GameServer, ServerEvent, Stopped},
     net::listener,
     term::{self, Palette},
@@ -73,11 +74,9 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let started = Instant::now();
+    let loaded_from = config.world_file.clone();
     let world = match &config.world_file {
-        Some(path) => {
-            info!(path = %path.display(), "loading world file");
-            wld::load(path)?
-        }
+        Some(path) => wld::load(path)?,
         None => worldgen::generate(
             config.world_width,
             config.world_height,
@@ -85,45 +84,56 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             config.seed,
         ),
     };
-    let ready = term::panel(
-        palette,
-        "world",
-        &[
-            ("name", world.name.clone()),
-            ("size", format!("{} x {}", world.width(), world.height())),
-            ("spawn", format!("{}, {}", world.spawn_x, world.spawn_y)),
-            (
-                "evil",
-                if world.crimson {
-                    "crimson"
-                } else {
-                    "corruption"
-                }
-                .to_string(),
-            ),
-            ("chests", world.chests.len().to_string()),
-            ("loaded in", format!("{} ms", started.elapsed().as_millis())),
-        ],
-    );
-    print!("{ready}");
+    let world_rows = [
+        ("name", world.name.clone()),
+        ("size", format!("{} x {}", world.width(), world.height())),
+        ("spawn", format!("{}, {}", world.spawn_x, world.spawn_y)),
+        (
+            "evil",
+            if world.crimson {
+                "crimson"
+            } else {
+                "corruption"
+            }
+            .to_string(),
+        ),
+        ("chests", world.chests.len().to_string()),
+        ("loaded in", format!("{} ms", started.elapsed().as_millis())),
+    ];
 
     // Bind before starting the game task so a port clash fails fast.
     let listener = TcpListener::bind(config.listen).await?;
-    print!(
-        "{}",
-        term::panel(
-            palette,
-            "server",
-            &[
-                ("listening", config.listen.to_string()),
-                ("players", format!("up to {}", config.max_players)),
-                (
-                    "log filter",
-                    std::env::var("TERRUSTIA_LOG").unwrap_or_else(|_| "info".into())
-                ),
-            ],
-        )
+    let save_destination = config.save_target().map_or_else(
+        || "none — this world will not be saved".to_string(),
+        |p| p.display().to_string(),
     );
+    let autosave_interval = if config.save_target().is_none() {
+        "disabled (no save destination)".to_string()
+    } else if config.autosave_secs == 0 {
+        "disabled".to_string()
+    } else {
+        format!("every {}s", config.autosave_secs)
+    };
+    let server_rows = [
+        ("listening", config.listen.to_string()),
+        ("players", format!("up to {}", config.max_players)),
+        (
+            "log filter",
+            std::env::var("TERRUSTIA_LOG").unwrap_or_else(|_| "info".into()),
+        ),
+        ("save destination", save_destination),
+        ("autosave interval", autosave_interval),
+    ];
+
+    // Both panels are sized off the wider of the two, so they line up to the same gutter the log
+    // lines below them use rather than each hugging its own content.
+    let width =
+        term::panel_width("world", &world_rows).max(term::panel_width("server", &server_rows));
+    print!("{}", term::panel(palette, "world", &world_rows, width));
+    if let Some(path) = &loaded_from {
+        info!(path = %path.display(), "loading world file");
+    }
+    print!("{}", term::panel(palette, "server", &server_rows, width));
     println!();
 
     let recorder = match &args.record {
@@ -136,17 +146,25 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
 
     // Whoever has the terminal already has the world file, so the console is not gated. Reading
-    // stdin has to be its own task: the blocking read would otherwise hold up the accept loop, and
-    // a closed stdin (a service with no terminal) simply ends the task rather than the server.
-    let console = tokio::spawn(read_console(events_tx.clone()));
+    // stdin has to be its own task: a blocking read would otherwise hold up the accept loop, and a
+    // closed stdin (a service with no terminal) simply ends the task rather than the server.
+    let console = console::spawn(events_tx.clone());
 
     // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
     // than moved so it is still here afterwards to be waited on.
     // A crash and a clean stop used to be indistinguishable from out here, so a server that had
     // panicked still exited 0 and no supervisor restarted it.
     let mut crashed = false;
-    tokio::select! {
-        reason = stop_signal() => info!(reason, "shutting down"),
+    // `ended = &mut game` already resolves `game`'s `JoinHandle` when the game task stops on its
+    // own (a console `stop`, among other things) — awaiting it again below would poll a
+    // `JoinHandle` a second time after it already completed, which panics. This flag is `true`
+    // only when the signal branch fired instead, which is the one case where `game` is still
+    // pending and genuinely needs waiting on.
+    let still_running = tokio::select! {
+        reason = stop_signal() => {
+            info!(reason, "shutting down");
+            true
+        }
         ended = &mut game => {
             match ended {
                 Ok(Stopped::Cleanly) => info!("game task ended"),
@@ -160,8 +178,9 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
                     crashed = true;
                 }
             }
+            false
         }
-    }
+    };
 
     accept.abort();
     console.abort();
@@ -169,13 +188,15 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // Wait for the game task to finish. It saves the world on its way out, and returning here
     // without waiting would drop the runtime mid-write — which is a shutdown that quietly loses
     // everything since the last autosave.
-    match game.await {
-        Ok(Stopped::Panicked) => crashed = true,
-        Ok(Stopped::Cleanly) => {}
-        Err(e) if e.is_cancelled() => {}
-        Err(e) => {
-            error!(error = %e, "the game task did not shut down cleanly");
-            crashed = true;
+    if still_running {
+        match game.await {
+            Ok(Stopped::Panicked) => crashed = true,
+            Ok(Stopped::Cleanly) => {}
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => {
+                error!(error = %e, "the game task did not shut down cleanly");
+                crashed = true;
+            }
         }
     }
     if crashed {
@@ -183,33 +204,6 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         return Err("the server stopped because of a crash".into());
     }
     Ok(())
-}
-
-/// Forward lines typed at the terminal to the game task.
-///
-/// Stdin was completely unused before this. A dedicated server with no way to say anything to its
-/// own players — or to ban somebody without editing a file and restarting — is missing the half of
-/// administration that happens while it is running.
-async fn read_console(events: mpsc::Sender<ServerEvent>) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if events.send(ServerEvent::Console { line }).await.is_err() {
-                    return; // the game task has gone
-                }
-            }
-            // End of input: a service started without a terminal. Not an error, and not a reason
-            // to stop the server — just nothing more to read.
-            Ok(None) => return,
-            Err(e) => {
-                warn!(error = %e, "console input closed");
-                return;
-            }
-        }
-    }
 }
 
 /// List the worlds Terraria has on this machine.

@@ -552,6 +552,21 @@ pub enum ServerEvent {
     Console {
         line: String,
     },
+    /// The console asking who could be tab-completed, without typing a command.
+    ///
+    /// Names only — a snapshot for a completion popup, not something that should ever gate on the
+    /// game task being free. The console times its own wait out and falls back to no suggestions
+    /// rather than stall a keypress on a busy tick.
+    ConsoleContext {
+        reply: oneshot::Sender<ConsoleContext>,
+    },
+}
+
+/// What the console can offer to complete a command's second argument with.
+#[derive(Debug, Default, Clone)]
+pub struct ConsoleContext {
+    pub players: Vec<String>,
+    pub groups: Vec<String>,
 }
 
 /// How the game loop ended.
@@ -2153,6 +2168,17 @@ impl GameServer {
             ServerEvent::Packet { slot, frame } => self.handle_packet(slot, frame),
             ServerEvent::Leave { slot } => self.remove_player(slot),
             ServerEvent::Console { line } => self.run_console(&line),
+            ServerEvent::ConsoleContext { reply } => {
+                let players = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.is_playing())
+                    .map(|p| p.name.clone())
+                    .collect();
+                let groups = self.admin.groups.iter().map(|g| g.name.clone()).collect();
+                let _ = reply.send(ConsoleContext { players, groups });
+            }
         }
     }
 
@@ -2162,6 +2188,14 @@ impl GameServer {
     /// permission could protect them from. Output goes to the log rather than to chat, because the
     /// person who typed it is looking at the log.
     fn run_console(&mut self, line: &str) {
+        // Every `info!` inside this function that names `target: CONSOLE_REPLY` is a command's
+        // own reply, not an ordinary log line — `TermLayer` prints those the way a REPL prints
+        // its own output: no timestamp, no level tag, no target column. Only the replies
+        // textually inside this function are tagged; `save`, `backups`, `rollback` and the admin
+        // commands delegate to shared functions used by other call paths too, and keep the
+        // ordinary log formatting rather than risk retagging something a non-console caller
+        // also relies on.
+        use crate::term::CONSOLE_REPLY_TARGET as CONSOLE_REPLY;
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -2181,27 +2215,28 @@ impl GameServer {
                 match (words.next(), words.next(), words.next()) {
                     (Some(name), Some(password), None) => {
                         if !self.admin.unclaimed() {
-                            info!("this server already has an owner; use /register or /group");
+                            info!(target: CONSOLE_REPLY, "this server already has an owner; use /register or /group");
                         } else if password.len() < 6 {
-                            info!("that password is too short; use at least six characters");
+                            info!(target: CONSOLE_REPLY, "that password is too short; use at least six characters");
                         } else {
                             match crate::admin::Account::new(name, password, "owner") {
                                 Ok(account) => match self.admin.insert_account(account) {
                                     Ok(()) => {
                                         let _ = self.admin.save();
                                         self.claim_token = None;
-                                        info!(account = name, "server claimed from the console");
+                                        info!(target: CONSOLE_REPLY, account = name, "server claimed from the console");
                                     }
-                                    Err(e) => info!("{e}"),
+                                    Err(e) => info!(target: CONSOLE_REPLY, "{e}"),
                                 },
-                                Err(e) => info!("{e}"),
+                                Err(e) => info!(target: CONSOLE_REPLY, "{e}"),
                             }
                         }
                     }
-                    _ => info!("usage: claim <name> <password>"),
+                    _ => info!(target: CONSOLE_REPLY, "usage: claim <name> <password>"),
                 }
             }
             "help" => info!(
+                target: CONSOLE_REPLY,
                 "console: say <text> | players | save | backups | rollback <n> | \
                  whitelist add|remove|list [name] | \
                  claim <name> <password> | kick <name> [reason] | \
@@ -2219,7 +2254,7 @@ impl GameServer {
                     .filter(|p| p.is_playing())
                     .map(|p| p.name.as_str())
                     .collect();
-                info!(online = names.len(), "{}", names.join(", "));
+                info!(target: CONSOLE_REPLY, online = names.len(), "{}", names.join(", "));
             }
             "save" => self.save_world_in_background("console"),
             "backups" => self.list_backups(),
@@ -2229,37 +2264,39 @@ impl GameServer {
                     (Some("add"), Some(name)) => {
                         if self.admin.add_to_whitelist(name) {
                             let _ = self.admin.save();
-                            info!(name, "added to the guest list");
+                            info!(target: CONSOLE_REPLY, name, "added to the guest list");
                         } else {
-                            info!(name, "already on the guest list");
+                            info!(target: CONSOLE_REPLY, name, "already on the guest list");
                         }
                     }
                     (Some("remove"), Some(name)) => {
                         if self.admin.remove_from_whitelist(name) {
                             let _ = self.admin.save();
-                            info!(name, "removed from the guest list");
+                            info!(target: CONSOLE_REPLY, name, "removed from the guest list");
                             // Take effect now rather than at their next join.
                             if let Some(slot) = self.slot_named(name) {
                                 self.kick(slot, "You are no longer on this server's guest list.");
                             }
                         } else {
-                            info!(name, "was not on the guest list");
+                            info!(target: CONSOLE_REPLY, name, "was not on the guest list");
                         }
                     }
                     (Some("list"), _) | (None, _) => {
                         if self.admin.whitelist_on() {
                             info!(
+                                target: CONSOLE_REPLY,
                                 names = %self.admin.whitelist.join(", "),
                                 "the guest list is on"
                             );
                         } else {
                             info!(
+                                target: CONSOLE_REPLY,
                                 "the guest list is empty, so anyone may join. \
                                  `whitelist add <name>` turns it on."
                             );
                         }
                     }
-                    _ => info!("usage: whitelist add|remove|list [name]"),
+                    _ => info!(target: CONSOLE_REPLY, "usage: whitelist add|remove|list [name]"),
                 }
             }
             "rollback" => {
@@ -2275,7 +2312,9 @@ impl GameServer {
             "kick" | "ban" | "unban" | "group" => {
                 let _ = self.run_admin_command(net_module::SERVER_AUTHOR, name, argument);
             }
-            other => info!("console: unknown command {other:?} (try 'help')"),
+            other => {
+                info!(target: CONSOLE_REPLY, "console: unknown command {other:?} (try 'help')")
+            }
         }
     }
 

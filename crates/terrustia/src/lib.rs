@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod config;
+pub mod console;
 pub mod game;
 pub mod net;
 pub mod term;

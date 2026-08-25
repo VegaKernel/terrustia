@@ -8,6 +8,7 @@
 use std::{
     fmt::{self, Write as _},
     io::{IsTerminal, Write},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
@@ -210,6 +211,113 @@ impl TermLayer {
         }
         line
     }
+
+    /// Render a console command's own reply: no timestamp, no level tag, no target column — the
+    /// furniture that makes sense for a stream of log events reads as noise around the one line
+    /// somebody just asked for by typing a command. A REPL prints its own output plainly; this is
+    /// that output, tagged by `run_console` with `target: "console_reply"` rather than routed
+    /// through a second, parallel print path.
+    fn render_reply(&self, parts: &Parts) -> String {
+        let p = self.palette;
+        let mut line = String::with_capacity(64);
+        line.push_str(&parts.message);
+        for (name, value) in &parts.fields {
+            line.push(' ');
+            line.push_str(p.on(sgr::DIM));
+            line.push_str(name);
+            line.push('=');
+            line.push_str(p.off());
+            line.push_str(p.on(sgr::CYAN));
+            line.push_str(value);
+            line.push_str(p.off());
+        }
+        line
+    }
+}
+
+/// The tag `run_console` gives its own replies, so they can be told apart from ordinary log
+/// events. Public so `game::server` can reuse the exact string rather than retyping it.
+pub const CONSOLE_REPLY_TARGET: &str = "console_reply";
+
+/// Coordination between the sticky console prompt (`console.rs`) and ordinary log lines, so a log
+/// line can never land in the middle of a half-typed command.
+///
+/// The console owns raw mode and knows what it has drawn; `TermLayer::on_event` can run on
+/// whichever thread `tracing`'s dispatch happens to use, which is not necessarily the console's
+/// own. Both go through this one lock before touching stdout — the console updates it on every
+/// keystroke, `on_event` erases-and-redraws around it for every line it writes.
+///
+/// An empty string means no prompt is currently shown, which is the state a non-interactive
+/// console (piped stdin, no TTY) never leaves — so log lines there fall straight through to a
+/// plain `writeln!`, exactly today's behaviour.
+static PROMPT: OnceLock<Mutex<String>> = OnceLock::new();
+
+fn prompt_lock() -> &'static Mutex<String> {
+    PROMPT.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// Tell the shared state what the console currently has drawn. Called by `console.rs` after every
+/// keystroke, immediately after it draws the same text to the terminal itself — this function does
+/// not draw anything on its own, it only updates what a concurrent log write should redraw.
+pub fn set_prompt_drawn(current: &str) {
+    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
+    guard.clear();
+    guard.push_str(current);
+}
+
+/// Erase whatever is currently drawn, return the cursor to column 0. Pulled out as a constant
+/// rather than inlined so the composition logic below is one string operation, not several.
+const ERASE: &str = "\r\x1b[2K";
+
+/// Build the exact bytes a log write should emit: the erase sequence and a trailing redraw of the
+/// prompt when one is shown, nothing extra when it is not. Split out from the actual stdout write
+/// so it can be tested without a terminal — this is the entire concurrency contract, and it is
+/// worth being able to check it as a pure function.
+fn compose_log_write(prompt: &str, line: &str) -> String {
+    if prompt.is_empty() {
+        format!("{line}\n")
+    } else {
+        format!("{ERASE}{line}\r\n{prompt}")
+    }
+}
+
+/// Write one already-rendered line, erasing and redrawing the console prompt around it under one
+/// lock so a second writer — another log line, or the console's own next keystroke — can never
+/// interleave with this one.
+fn write_line_coordinated(line: &str) {
+    let guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let composed = compose_log_write(&guard, line);
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(composed.as_bytes());
+    let _ = out.flush();
+}
+
+/// Print a line under the same coordination as a log write, for output that has nothing to do
+/// with `tracing` at all — Tab completion's candidate list, for one. Public so `console.rs` can
+/// print without going back through the game task for something the console already knows.
+pub fn print_notice(line: &str) {
+    write_line_coordinated(line);
+}
+
+/// Redraw the console's own prompt line, under the same lock `write_line_coordinated` uses, so a
+/// concurrent log write can never land in the middle of it. `console.rs` calls this instead of
+/// writing to stdout directly and calling `set_prompt_drawn` separately — doing both under one
+/// lock is what makes the two writers safe together.
+///
+/// `cursor_back` moves the terminal cursor left that many columns after drawing, for when the
+/// edit point is not at the end of the line (arrowed left, then typed). Done under the same write
+/// as the redraw itself, not a second one — a separate call here would open a window where a log
+/// line could land between the text landing and the cursor settling on it.
+pub fn redraw_prompt(current: &str, cursor_back: usize) {
+    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
+    guard.clear();
+    guard.push_str(current);
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{ERASE}{current}");
+    if cursor_back > 0 {
+        let _ = write!(out, "\x1b[{cursor_back}D");
+    }
+    let _ = out.flush();
 }
 
 impl<S> Layer<S> for TermLayer
@@ -220,9 +328,12 @@ where
         let mut parts = Parts::default();
         event.record(&mut parts);
         let meta = event.metadata();
-        let line = self.render(*meta.level(), meta.target(), &parts, self.started.elapsed());
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}");
+        let line = if meta.target() == CONSOLE_REPLY_TARGET {
+            self.render_reply(&parts)
+        } else {
+            self.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
+        };
+        write_line_coordinated(&line);
     }
 }
 
@@ -265,9 +376,11 @@ pub fn banner(palette: Palette, version: &str, game: &str, protocol: u32) -> Str
     out
 }
 
-/// A titled box of `label: value` rows, used for the summaries a server prints once.
-pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)]) -> String {
-    let p = palette;
+/// The width `panel` would draw these rows at on their own, before alignment with a sibling
+/// panel. A caller with two panels to print side by side in spirit (if not in fact, since they
+/// print one above the other) computes this for both and passes the larger back in as `panel`'s
+/// `min_inner`, so neither panel decides its width without knowing about the other.
+pub fn panel_width(title: &str, rows: &[(&str, String)]) -> usize {
     let widest_label = rows
         .iter()
         .map(|(l, _)| l.chars().count())
@@ -279,7 +392,31 @@ pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)]) -> String {
         .max()
         .unwrap_or(0);
     // Two spaces of padding either side, plus the gap between the columns.
-    let inner = (widest_label + widest_value + 3).max(title.chars().count() + 2);
+    (widest_label + widest_value + 3).max(title.chars().count() + 2)
+}
+
+/// A titled box of `label: value` rows, used for the summaries a server prints once.
+///
+/// `min_inner` widens the panel beyond what its own rows need, so a caller can line up two panels
+/// to the same width — pass `0` for a panel with no sibling to match.
+pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)], min_inner: usize) -> String {
+    let p = palette;
+    let widest_label = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let widest_value = rows
+        .iter()
+        .map(|(_, v)| v.chars().count())
+        .max()
+        .unwrap_or(0);
+    let natural = panel_width(title, rows);
+    let inner = natural.max(min_inner);
+    // Any width forced on top of what the rows need goes entirely to the value column, so a
+    // panel widened to match a sibling stays rectangular instead of opening a gap before its
+    // right border.
+    let value_width = widest_value + (inner - natural);
 
     let mut out = String::new();
     let _ = writeln!(
@@ -295,7 +432,7 @@ pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)]) -> String {
     for (label, value) in rows {
         let _ = writeln!(
             out,
-            "{}│{} {}{label:<widest_label$}{}  {}{value:<widest_value$}{} {}│{}",
+            "{}│{} {}{label:<widest_label$}{}  {}{value:<value_width$}{} {}│{}",
             p.on(sgr::DIM),
             p.off(),
             p.on(sgr::DIM),
@@ -396,11 +533,101 @@ mod tests {
             Palette::PLAIN,
             "world",
             &[("name", "Test".into()), ("size", "4200 x 1200".into())],
+            0,
         );
         let widths: Vec<usize> = text.lines().map(|l| l.chars().count()).collect();
         assert!(
             widths.windows(2).all(|w| w[0] == w[1]),
             "ragged panel: {widths:?}\n{text}"
+        );
+    }
+
+    /// The mechanism `main.rs` relies on to make the world and server panels the same width: ask
+    /// each its natural width, pass the larger to both as `min_inner`, and the narrower one still
+    /// comes out rectangular — not just as wide, but without a ragged gap before its border.
+    #[test]
+    fn a_panel_widened_to_match_a_sibling_stays_rectangular() {
+        let narrow_rows = [("name", "Test".into())];
+        let wide_rows = [
+            ("listening", "0.0.0.0:7777".into()),
+            (
+                "save destination",
+                "/home/brooklyn/.local/share/terrustia/worlds/my great big world name.wld".into(),
+            ),
+        ];
+        let width = panel_width("world", &narrow_rows).max(panel_width("server", &wide_rows));
+
+        let narrow = panel(Palette::PLAIN, "world", &narrow_rows, width);
+        let wide = panel(Palette::PLAIN, "server", &wide_rows, width);
+
+        let narrow_widths: Vec<usize> = narrow.lines().map(|l| l.chars().count()).collect();
+        assert!(
+            narrow_widths.windows(2).all(|w| w[0] == w[1]),
+            "ragged narrow panel: {narrow_widths:?}\n{narrow}"
+        );
+        assert_eq!(
+            narrow_widths[0],
+            wide.lines().next().unwrap().chars().count(),
+            "panels do not match: {narrow_widths:?} vs {wide}"
+        );
+    }
+
+    /// The whole concurrency contract, as a pure function: what should a log write actually send
+    /// to the terminal, given what the console currently has drawn? This is the piece that matters
+    /// most and the one a real terminal cannot easily prove — get this string right and the actual
+    /// `write_all` call underneath it is not where a bug could hide.
+    #[test]
+    fn a_log_line_with_no_prompt_showing_is_written_plainly() {
+        assert_eq!(compose_log_write("", "world ready"), "world ready\n");
+    }
+
+    #[test]
+    fn a_log_line_erases_and_redraws_a_shown_prompt() {
+        let composed = compose_log_write("> kick bri", "a player joined");
+        // Erased first, or the old prompt bleeds into the new line.
+        assert!(
+            composed.starts_with(ERASE),
+            "must erase before writing: {composed:?}"
+        );
+        // The log line itself is in there, terminated so the redrawn prompt starts a fresh line.
+        assert!(composed.contains("a player joined\r\n"));
+        // And the prompt is redrawn afterward, verbatim — nothing typed should be lost.
+        assert!(
+            composed.ends_with("> kick bri"),
+            "the typed line must survive the write: {composed:?}"
+        );
+    }
+
+    /// `set_prompt_drawn` and `write_line_coordinated` share one lock; a log write must pick up
+    /// whatever the console most recently drew, not a stale value from before it typed.
+    #[test]
+    fn a_log_write_sees_the_most_recently_drawn_prompt() {
+        set_prompt_drawn("> first");
+        set_prompt_drawn("> first draft");
+        let guard = prompt_lock().lock().unwrap();
+        assert_eq!(
+            compose_log_write(&guard, "x"),
+            "\r\x1b[2Kx\r\n> first draft"
+        );
+        drop(guard);
+        // Leave the shared state clean for any test that runs after this one.
+        set_prompt_drawn("");
+    }
+
+    /// A `console_reply`-tagged event is rendered without the timestamp/level/target furniture
+    /// ordinary log lines carry — it is meant to look like a REPL printing its own output.
+    #[test]
+    fn a_console_reply_carries_no_log_furniture() {
+        let layer = TermLayer::new(Palette::PLAIN);
+        let parts = Parts {
+            message: "1 player connected.".into(),
+            fields: vec![("online", "1".into())],
+        };
+        let line = layer.render_reply(&parts);
+        assert_eq!(line, "1 player connected. online=1");
+        assert!(
+            !line.contains("INFO"),
+            "a reply must not look like a log line: {line:?}"
         );
     }
 }
