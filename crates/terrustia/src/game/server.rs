@@ -326,6 +326,19 @@ type SaveReports = std::sync::mpsc::Receiver<SaveOutcome>;
 /// cost bounded no matter how many people ask at once.
 const MAX_AUTH_IN_FLIGHT: usize = 4;
 
+/// Vanilla's tile-edit spam ceilings and decay rates, from `RemoteClient`.
+///
+/// Transcribed rather than chosen: these decide how long a burst is tolerated, and picking our own
+/// numbers would mean a client vanilla is happy with gets booted here, or the reverse. Placing is
+/// the tight one — 100 with 0.3 a tick back means about eighteen a second sustained. Breaking is
+/// deliberately loose, because mining legitimately produces a lot of packets very quickly.
+const SPAM_PLACE_MAX: f32 = 100.0;
+const SPAM_PLACE_DECAY: f32 = 0.3;
+const SPAM_BREAK_MAX: f32 = 500.0;
+const SPAM_BREAK_DECAY: f32 = 5.0;
+const SPAM_LIQUID_MAX: f32 = 50.0;
+const SPAM_LIQUID_DECAY: f32 = 0.2;
+
 /// A finished password hash, on its way back to the game task to be applied.
 ///
 /// The work — hashing a new password, or verifying one against a stored hash — happens on a
@@ -1379,6 +1392,7 @@ impl GameServer {
         self.note_finished_save();
         self.note_finished_auth();
         self.reclaim_snapshot_buffer();
+        self.tick_tile_spam();
         // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
         // keeping it here means no spawn site has to remember to scale.
         let difficulty = terrustia_proto::difficulty::of_game_mode(self.world.game_mode);
@@ -3519,12 +3533,59 @@ impl GameServer {
         self.kick(slot, &format!("You are banned: {reason}"));
     }
 
+    /// Count one tile edit against this player's spam budget, and say whether to stop.
+    ///
+    /// Vanilla's, transcribed from `RemoteClient`: a counter per kind, bumped once per edit
+    /// packet, decayed every tick, and the connection booted past a ceiling. Placing is the
+    /// tightest (100, decaying 0.3 a tick, so ~18 a second sustained); breaking is deliberately
+    /// loose (500, decaying 5 a tick) because mining is fast and legitimate.
+    ///
+    /// Not having this at all was a regression *from* vanilla rather than a place where we simply
+    /// match how trusting vanilla is — which is why it sits inside "match vanilla's trust model"
+    /// rather than being the TShock-style validation that stays deferred.
+    fn note_tile_spam(&mut self, slot: u8, kind: TileAction) -> bool {
+        let (counter, ceiling, why): (fn(&mut Player) -> &mut f32, f32, &str) = match kind {
+            TileAction::KillTile | TileAction::KillTileNoItem | TileAction::KillWall => {
+                (|p| &mut p.spam_break, SPAM_BREAK_MAX, "breaking tiles too fast")
+            }
+            _ => (|p| &mut p.spam_place, SPAM_PLACE_MAX, "placing tiles too fast"),
+        };
+        let Some(player) = self.player_mut(slot) else {
+            return true;
+        };
+        let count = counter(player);
+        *count += 1.0;
+        if *count <= ceiling {
+            return false;
+        }
+        // Vanilla boots with `Net.CheatingTileSpam`; the reason travels as our own text because
+        // it is the server talking, not the game.
+        info!(slot, why, "disconnecting a client for edit spam");
+        self.kick(slot, why);
+        true
+    }
+
+    /// Let every player's spam budget recover, once a tick.
+    fn tick_tile_spam(&mut self) {
+        for player in self.players.iter_mut().flatten() {
+            player.spam_place = (player.spam_place - SPAM_PLACE_DECAY).max(0.0);
+            player.spam_break = (player.spam_break - SPAM_BREAK_DECAY).max(0.0);
+            player.spam_liquid = (player.spam_liquid - SPAM_LIQUID_DECAY).max(0.0);
+        }
+    }
+
     fn on_tile_manipulation(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
 
         let edit = TileManipulation::decode(payload)?;
+        // Counted before anything else, so an edit that is refused still costs its budget. A
+        // client hammering out-of-bounds coordinates is spamming just as hard as one hammering
+        // valid ones.
+        if self.note_tile_spam(slot, edit.kind()) {
+            return Ok(());
+        }
         let (x, y) = (i32::from(edit.x), i32::from(edit.y));
         if !self.world.in_bounds(x, y) {
             return Ok(());
@@ -8289,6 +8350,16 @@ impl GameServer {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
+        // Vanilla's third spam counter, and the tightest of the three: 50 with 0.2 a tick back.
+        // Liquid is the cheapest thing to spam and the most expensive to simulate.
+        if let Some(player) = self.player_mut(slot) {
+            player.spam_liquid += 1.0;
+            if player.spam_liquid > SPAM_LIQUID_MAX {
+                info!(slot, "disconnecting a client for liquid spam");
+                self.kick(slot, "moving liquid too fast");
+                return Ok(());
+            }
+        }
         let mut r = PacketReader::new(payload);
         let (x, y) = (i32::from(r.i16()?), i32::from(r.i16()?));
         let amount = r.u8()?;
@@ -10303,4 +10374,75 @@ mod announcements {
         assert_eq!(line.substitutions[0].mode, TextMode::LocalizationKey);
         assert_eq!(line.substitutions[0].text, "NPCName.MoonLord");
     }
+}
+
+/// Does a client hammering tile edits get stopped, the way vanilla stops one?
+///
+/// Vanilla has this and we did not, which makes it a regression *from* the game rather than a
+/// place where we are merely as trusting as it is. `RemoteClient` keeps a counter per kind, bumps
+/// it per edit packet, decays it each tick and boots past a ceiling. The numbers are transcribed
+/// rather than chosen, so a client vanilla tolerates is tolerated here and vice versa.
+#[cfg(test)]
+mod tile_spam {
+    use super::*;
+
+    /// Placing is the tight one: 100, recovering 0.3 a tick.
+    #[test]
+    fn the_ceilings_and_decay_match_the_game() {
+        assert_eq!(SPAM_PLACE_MAX, 100.0);
+        assert_eq!(SPAM_PLACE_DECAY, 0.3);
+        assert_eq!(SPAM_BREAK_MAX, 500.0);
+        assert_eq!(SPAM_BREAK_DECAY, 5.0);
+        assert_eq!(SPAM_LIQUID_MAX, 50.0);
+        assert_eq!(SPAM_LIQUID_DECAY, 0.2);
+    }
+
+    /// Sustained placing above the decay rate eventually trips; ordinary building does not.
+    ///
+    /// At 60 ticks a second, 0.3 a tick is eighteen placements a second recovered. A player
+    /// building fast is well under that; a script is not.
+    #[test]
+    fn a_realistic_building_rate_never_trips_the_limit() {
+        // Ten placements a second for a solid minute, decaying each tick.
+        let mut budget = 0.0f32;
+        let mut worst = 0.0f32;
+        for tick in 0..3600 {
+            if tick % 6 == 0 {
+                budget += 1.0;
+            }
+            budget = (budget - SPAM_PLACE_DECAY).max(0.0);
+            worst = worst.max(budget);
+        }
+        assert!(
+            worst < SPAM_PLACE_MAX,
+            "ten placements a second reached {worst}, which would boot a player who is just \
+             building quickly"
+        );
+    }
+
+    /// And a client placing as fast as it can trips within a few seconds.
+    #[test]
+    fn a_flood_of_placements_trips_the_limit() {
+        let mut budget = 0.0f32;
+        let mut tripped = None;
+        for tick in 0..600 {
+            // Twenty a tick — a script, not a person.
+            budget += 20.0;
+            budget = (budget - SPAM_PLACE_DECAY).max(0.0);
+            if budget > SPAM_PLACE_MAX && tripped.is_none() {
+                tripped = Some(tick);
+            }
+        }
+        let tripped = tripped.expect("a flood has to trip the limit");
+        assert!(
+            tripped < 60,
+            "a flood took {tripped} ticks to be noticed; that is a second of free vandalism"
+        );
+    }
+
+    /// Breaking is deliberately looser, because mining legitimately produces packets very fast.
+    ///
+    /// A `const` block, so swapping the two by accident fails the build rather than a test run.
+    const _: () = assert!(SPAM_BREAK_MAX > SPAM_PLACE_MAX);
+    const _: () = assert!(SPAM_BREAK_DECAY > SPAM_PLACE_DECAY);
 }

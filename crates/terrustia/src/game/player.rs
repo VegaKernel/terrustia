@@ -87,6 +87,19 @@ pub struct Player {
     pub password_ok: bool,
     /// Whether this player has PvP enabled.
     pub pvp: bool,
+    /// Vanilla's tile-edit spam counters, which this server was missing entirely.
+    ///
+    /// `RemoteClient` keeps a float per kind, bumps it on every edit packet, decays it each tick,
+    /// and boots the connection past a ceiling — 100 for placing, 500 for breaking, 50 for
+    /// liquid. Not having them was a *regression from vanilla*, not merely a place where we are
+    /// as trusting as vanilla is, which is why it belongs inside "match vanilla's trust model"
+    /// rather than outside it.
+    ///
+    /// Floats because the decay rates are fractional (0.3 a tick for placing) and rounding them
+    /// to integers would change how long a burst is tolerated.
+    pub spam_place: f32,
+    pub spam_break: f32,
+    pub spam_liquid: f32,
     /// The client's own buff packet, replayed so others see the same buff icons.
     pub buffs: Option<Bytes>,
     /// The client's last biome-zone packet.
@@ -104,6 +117,16 @@ pub struct Player {
 }
 
 impl Player {
+    /// Whether this player is on the same machine as the server.
+    ///
+    /// The game's whole test for who counts as the host, in `NetMessage.
+    /// DoesPlayerSlotCountAsAHost`, is whether the socket's far end is the loopback address. It
+    /// gates packet 139, and through it a handful of things the client treats as the host's to
+    /// decide.
+    pub fn is_local(&self) -> bool {
+        self.addr.ip().is_loopback()
+    }
+
     pub fn new(slot: u8, addr: SocketAddr, out: mpsc::Sender<Bytes>) -> Self {
         Self {
             slot,
@@ -130,6 +153,9 @@ impl Player {
             greeted: false,
             password_ok: false,
             pvp: false,
+            spam_place: 0.0,
+            spam_break: 0.0,
+            spam_liquid: 0.0,
             buffs: None,
             zone: None,
             open_chest: -1,
