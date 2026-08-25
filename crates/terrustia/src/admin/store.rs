@@ -25,6 +25,17 @@ pub struct Admin {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub bans: Vec<Ban>,
+    /// Who is allowed in, when the list is not empty.
+    ///
+    /// Bans are reactive: they keep out somebody who has already been and done something. A
+    /// whitelist is the thing that actually keeps a private server private, and it was the one
+    /// piece of moderation this server had no version of at all.
+    ///
+    /// Empty means off, deliberately. A whitelist that defaults to on would lock the operator out
+    /// of their own server the first time they enabled it, which is how people end up leaving it
+    /// off for good.
+    #[serde(default)]
+    pub whitelist: Vec<String>,
 
     /// Where this came from, so it can be written back.
     #[serde(skip)]
@@ -207,6 +218,35 @@ impl Admin {
         Ok(())
     }
 
+    /// Whether the whitelist is in use at all.
+    pub fn whitelist_on(&self) -> bool {
+        !self.whitelist.is_empty()
+    }
+
+    /// Whether this name is allowed in.
+    ///
+    /// Case-insensitive, because a name is typed by a person and "Brooklyn" and "brooklyn" are
+    /// the same guest.
+    pub fn welcome(&self, name: &str) -> bool {
+        !self.whitelist_on() || self.whitelist.iter().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// Add somebody to the guest list. Returns whether they were not already on it.
+    pub fn add_to_whitelist(&mut self, name: &str) -> bool {
+        if self.whitelist.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            return false;
+        }
+        self.whitelist.push(name.to_string());
+        true
+    }
+
+    /// Take somebody off it. Returns whether they were on it.
+    pub fn remove_from_whitelist(&mut self, name: &str) -> bool {
+        let before = self.whitelist.len();
+        self.whitelist.retain(|n| !n.eq_ignore_ascii_case(name));
+        self.whitelist.len() != before
+    }
+
     /// The ban that keeps this person out, if one does.
     pub fn ban_for(&self, name: &str, address: &str, uuid: Option<&str>) -> Option<&Ban> {
         let when = now();
@@ -360,5 +400,49 @@ mod tests {
             "the hash has to survive the round trip or nobody can log in again",
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty guest list lets everyone in; a non-empty one lets only those on it in.
+    ///
+    /// Empty-means-off is deliberate. A whitelist that defaulted to on would lock the operator out
+    /// of their own server the moment the feature landed, which is how people end up leaving it
+    /// off permanently.
+    #[test]
+    fn an_empty_guest_list_is_no_guest_list() {
+        let mut admin = Admin::in_memory();
+        assert!(!admin.whitelist_on());
+        assert!(admin.welcome("anybody at all"));
+
+        assert!(admin.add_to_whitelist("Brooklyn"));
+        assert!(admin.whitelist_on());
+        assert!(admin.welcome("Brooklyn"));
+        assert!(!admin.welcome("somebody else"));
+    }
+
+    /// A name is typed by a person, so case is not part of who they are.
+    #[test]
+    fn the_guest_list_does_not_care_about_case() {
+        let mut admin = Admin::in_memory();
+        admin.add_to_whitelist("Brooklyn");
+        assert!(admin.welcome("brooklyn"));
+        assert!(admin.welcome("BROOKLYN"));
+        assert!(!admin.add_to_whitelist("bRoOkLyN"), "no duplicate entries");
+        assert_eq!(admin.whitelist.len(), 1);
+    }
+
+    #[test]
+    fn removing_the_last_guest_turns_the_list_off_again() {
+        let mut admin = Admin::in_memory();
+        admin.add_to_whitelist("Brooklyn");
+        assert!(admin.remove_from_whitelist("brooklyn"));
+        assert!(
+            !admin.whitelist_on(),
+            "an emptied list stops shutting people out"
+        );
+        assert!(admin.welcome("anybody"));
+        assert!(
+            !admin.remove_from_whitelist("nobody"),
+            "and says when it did nothing"
+        );
     }
 }

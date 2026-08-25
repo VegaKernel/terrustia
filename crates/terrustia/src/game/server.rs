@@ -2203,6 +2203,7 @@ impl GameServer {
             }
             "help" => info!(
                 "console: say <text> | players | save | backups | rollback <n> | \
+                 whitelist add|remove|list [name] | \
                  claim <name> <password> | kick <name> [reason] | \
                  ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
                  stop"
@@ -2222,6 +2223,45 @@ impl GameServer {
             }
             "save" => self.save_world_in_background("console"),
             "backups" => self.list_backups(),
+            "whitelist" => {
+                let mut words = argument.split_whitespace();
+                match (words.next(), words.next()) {
+                    (Some("add"), Some(name)) => {
+                        if self.admin.add_to_whitelist(name) {
+                            let _ = self.admin.save();
+                            info!(name, "added to the guest list");
+                        } else {
+                            info!(name, "already on the guest list");
+                        }
+                    }
+                    (Some("remove"), Some(name)) => {
+                        if self.admin.remove_from_whitelist(name) {
+                            let _ = self.admin.save();
+                            info!(name, "removed from the guest list");
+                            // Take effect now rather than at their next join.
+                            if let Some(slot) = self.slot_named(name) {
+                                self.kick(slot, "You are no longer on this server's guest list.");
+                            }
+                        } else {
+                            info!(name, "was not on the guest list");
+                        }
+                    }
+                    (Some("list"), _) | (None, _) => {
+                        if self.admin.whitelist_on() {
+                            info!(
+                                names = %self.admin.whitelist.join(", "),
+                                "the guest list is on"
+                            );
+                        } else {
+                            info!(
+                                "the guest list is empty, so anyone may join. \
+                                 `whitelist add <name>` turns it on."
+                            );
+                        }
+                    }
+                    _ => info!("usage: whitelist add|remove|list [name]"),
+                }
+            }
             "rollback" => {
                 let which: usize = argument.trim().parse().unwrap_or(1);
                 self.roll_back(which);
@@ -3757,6 +3797,15 @@ impl GameServer {
         };
         let (name, address) = (player.name.clone(), player.addr.ip().to_string());
         let uuid = player.uuid.clone();
+
+        // The guest list first, when there is one. Checked here rather than earlier because it is
+        // keyed by name, and the name only arrives with the player's appearance.
+        if !self.admin.welcome(&name) {
+            info!(slot, %name, %address, "refusing somebody not on the guest list");
+            self.kick(slot, "You are not on this server's guest list.");
+            return;
+        }
+
         let Some(ban) = self.admin.ban_for(&name, &address, uuid.as_deref()) else {
             return;
         };
