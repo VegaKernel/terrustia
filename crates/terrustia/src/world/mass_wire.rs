@@ -402,7 +402,10 @@ mod tests {
             },
             true,
         );
-        assert!(out.ran_out, "twenty-one tiles cannot be done with five wire");
+        assert!(
+            out.ran_out,
+            "twenty-one tiles cannot be done with five wire"
+        );
         assert_eq!(out.wire_spent, 5, "and exactly five is what it spent");
         for x in 10..15 {
             assert!(grid.tile(x, 20).flags.has(TileFlags::WIRE_RED));
@@ -434,7 +437,10 @@ mod tests {
             true,
         );
         assert_eq!(again.wire_spent, 0);
-        assert!(again.changes.is_empty(), "nothing changed, so nothing is sent");
+        assert!(
+            again.changes.is_empty(),
+            "nothing changed, so nothing is sent"
+        );
     }
 
     /// Four colours at once costs four wire a tile.

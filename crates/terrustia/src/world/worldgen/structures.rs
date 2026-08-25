@@ -82,7 +82,8 @@ fn find_ledge(
     let mut y = from_y;
     while y < to_y {
         let floored = (0..width).all(|dx| world.tile(x + dx, y + 1).is_active());
-        let clear = (0..width).all(|dx| (0..height).all(|dy| !world.tile(x + dx, y - dy).is_active()));
+        let clear =
+            (0..width).all(|dx| (0..height).all(|dy| !world.tile(x + dx, y - dy).is_active()));
         if floored && clear {
             return Some(y);
         }
@@ -248,11 +249,7 @@ pub fn evil_chasms(
         // which boss to wake. Getting it wrong gives a corruption world crimson hearts.
         let frame_x: i16 = if layout.evil == Evil::Crimson { 36 } else { 0 };
         for (dx, dy) in [(0i32, 0i32), (1, 0), (0, 1), (1, 1)] {
-            let mut tile = Tile::framed(
-                orb_tile,
-                frame_x + (dx as i16) * 18,
-                (dy as i16) * 18,
-            );
+            let mut tile = Tile::framed(orb_tile, frame_x + (dx as i16) * 18, (dy as i16) * 18);
             tile.wall = walls::EBONSTONE;
             world.set_tile(cx + dx, orb_y + dy, tile);
         }
@@ -483,7 +480,10 @@ pub fn underworld(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) 
 /// A bee hive in the jungle, with the larva that wakes the Queen.
 pub fn hive(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> bool {
     for _ in 0..80 {
-        let x = rand.next_range(layout.jungle.from + 30, (layout.jungle.to - 30).max(layout.jungle.from + 31));
+        let x = rand.next_range(
+            layout.jungle.from + 30,
+            (layout.jungle.to - 30).max(layout.jungle.from + 31),
+        );
         let from = layout.rock + 40;
         let to = (layout.rock + 200)
             .min(layout.underworld - 40)
@@ -499,11 +499,7 @@ pub fn hive(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> boo
         let floor = y + radius - 4;
         for dx in 0..2i32 {
             for dy in 0..2i32 {
-                let mut tile = Tile::framed(
-                    tiles::LARVA,
-                    (dx as i16) * 18,
-                    (dy as i16) * 18,
-                );
+                let mut tile = Tile::framed(tiles::LARVA, (dx as i16) * 18, (dy as i16) * 18);
                 tile.wall = walls::JUNGLE;
                 world.set_tile(x + dx, floor + dy, tile);
             }
@@ -581,12 +577,12 @@ fn cavern_loot(
     use terrustia_proto::ItemStack;
     // The signature item, which is what a player opens a chest hoping for.
     let shallow = [
-        49,   // Blue Phaseblade... a placeholder tier
-        965,  // Shoe Spikes
-        930,  // Cloud in a Bottle
-        158,  // Hermes Boots
-        963,  // Bandage
-        997,  // Magic Mirror
+        49,  // Blue Phaseblade... a placeholder tier
+        965, // Shoe Spikes
+        930, // Cloud in a Bottle
+        158, // Hermes Boots
+        963, // Bandage
+        997, // Magic Mirror
     ];
     let deep = [
         119,  // Band of Regeneration
@@ -596,7 +592,11 @@ fn cavern_loot(
         281,  // Aqua Scepter
         3068, // Extractinator-adjacent tier
     ];
-    let pool: &[i32] = if y > layout.rock + 120 { &deep } else { &shallow };
+    let pool: &[i32] = if y > layout.rock + 120 {
+        &deep
+    } else {
+        &shallow
+    };
     let signature = pool[rand.next_max(pool.len() as i32) as usize];
 
     let mut items = vec![ItemStack::new(signature, 1, 0)];

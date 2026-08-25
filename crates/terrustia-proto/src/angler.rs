@@ -31,47 +31,252 @@ pub struct Quest {
 
 /// Every fish, in the order the daily roll indexes them.
 pub const QUESTS: [Quest; 41] = [
-    Quest { item: 2450, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2451, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2452, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2453, hardmode: false, evil: Evil::Either, any_boss: true },
-    Quest { item: 2454, hardmode: true, evil: Evil::Corruption, any_boss: false },
-    Quest { item: 2455, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2456, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2457, hardmode: false, evil: Evil::Corruption, any_boss: false },
-    Quest { item: 2458, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2459, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2460, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2461, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2462, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2463, hardmode: true, evil: Evil::Crimson, any_boss: false },
-    Quest { item: 2464, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2465, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2466, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2467, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2468, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2469, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2470, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2471, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2472, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2473, hardmode: true, evil: Evil::Either, any_boss: true },
-    Quest { item: 2474, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2475, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2476, hardmode: false, evil: Evil::Either, any_boss: true },
-    Quest { item: 2477, hardmode: false, evil: Evil::Crimson, any_boss: false },
-    Quest { item: 2478, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2479, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2480, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2481, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2482, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2483, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2484, hardmode: true, evil: Evil::Either, any_boss: false },
-    Quest { item: 2485, hardmode: false, evil: Evil::Corruption, any_boss: false },
-    Quest { item: 2486, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2487, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 2488, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 4393, hardmode: false, evil: Evil::Either, any_boss: false },
-    Quest { item: 4394, hardmode: false, evil: Evil::Either, any_boss: false },
+    Quest {
+        item: 2450,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2451,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2452,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2453,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: true,
+    },
+    Quest {
+        item: 2454,
+        hardmode: true,
+        evil: Evil::Corruption,
+        any_boss: false,
+    },
+    Quest {
+        item: 2455,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2456,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2457,
+        hardmode: false,
+        evil: Evil::Corruption,
+        any_boss: false,
+    },
+    Quest {
+        item: 2458,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2459,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2460,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2461,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2462,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2463,
+        hardmode: true,
+        evil: Evil::Crimson,
+        any_boss: false,
+    },
+    Quest {
+        item: 2464,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2465,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2466,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2467,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2468,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2469,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2470,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2471,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2472,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2473,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: true,
+    },
+    Quest {
+        item: 2474,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2475,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2476,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: true,
+    },
+    Quest {
+        item: 2477,
+        hardmode: false,
+        evil: Evil::Crimson,
+        any_boss: false,
+    },
+    Quest {
+        item: 2478,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2479,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2480,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2481,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2482,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2483,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2484,
+        hardmode: true,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2485,
+        hardmode: false,
+        evil: Evil::Corruption,
+        any_boss: false,
+    },
+    Quest {
+        item: 2486,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2487,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 2488,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 4393,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
+    Quest {
+        item: 4394,
+        hardmode: false,
+        evil: Evil::Either,
+        any_boss: false,
+    },
 ];
 
 /// Whether a fish can be asked for in a world in this state.
@@ -116,7 +321,10 @@ mod tests {
             .iter()
             .filter(|q| available(q, true, false, true))
             .count();
-        assert!(after > before, "{after} in hardmode against {before} before");
+        assert!(
+            after > before,
+            "{after} in hardmode against {before} before"
+        );
     }
 
     /// The two evils each lock some fish and open others, and neither locks everything.
@@ -147,4 +355,3 @@ mod tests {
         }
     }
 }
-

@@ -912,9 +912,10 @@ async fn a_blow_smaller_than_half_the_armour_still_lands() {
         .unwrap();
 
     let event = client
-        .wait_for("the wounded guide", |e| {
-            matches!(e, Event::NpcSynced(n) if n.index == guide.index && n.life < 250)
-        })
+        .wait_for(
+            "the wounded guide",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == guide.index && n.life < 250),
+        )
         .await
         .expect("the hit was never reported");
     if let Event::NpcSynced(hurt) = event {
@@ -1373,7 +1374,10 @@ async fn a_bound_townsperson_can_be_freed() {
     client.set_timeout(Duration::from_secs(15));
 
     // Put one in the world where the player is standing.
-    client.say(&format!("/spawn {BOUND_MECHANIC}")).await.unwrap();
+    client
+        .say(&format!("/spawn {BOUND_MECHANIC}"))
+        .await
+        .unwrap();
     let bound = client
         .wait_for(
             "a bound mechanic",
@@ -1417,9 +1421,10 @@ async fn a_stranger_cannot_claim_an_unclaimed_server() {
     // Unclaimed: every permission passes, which is fine among friends and a gift to a stranger.
     client.say("/butcher").await.unwrap();
     let refused = client
-        .wait_for("a refusal", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("permission"))
-        })
+        .wait_for(
+            "a refusal",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("permission")),
+        )
         .await;
     assert!(refused.is_err(), "an unclaimed server should not refuse");
 
@@ -1427,9 +1432,10 @@ async fn a_stranger_cannot_claim_an_unclaimed_server() {
     // person to connect to a fresh public server would simply become its owner.
     client.say("/register owner hunter2hunter2").await.unwrap();
     let told = client
-        .wait_for("an explanation", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("claim token"))
-        })
+        .wait_for(
+            "an explanation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("claim token")),
+        )
         .await;
     assert!(
         told.is_ok(),
@@ -1442,18 +1448,20 @@ async fn a_stranger_cannot_claim_an_unclaimed_server() {
         .await
         .unwrap();
     let told = client
-        .wait_for("a refusal", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("not the claim token"))
-        })
+        .wait_for(
+            "a refusal",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("not the claim token")),
+        )
         .await;
     assert!(told.is_ok(), "a wrong token must not claim the server");
 
     // And the server is still unclaimed, so nothing was half-created on the way through.
     client.say("/whoami").await.unwrap();
     let who = client
-        .wait_for("whoami", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("nobody"))
-        })
+        .wait_for(
+            "whoami",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("nobody")),
+        )
         .await;
     assert!(who.is_ok(), "no account should have been made");
 }
@@ -2102,7 +2110,13 @@ async fn a_connected_client_is_told_when_water_moves() {
     // Drain whatever else is in flight so the pool has settled in this client's own view.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        if watcher.world().tile(405, 339).map(|t| t.liquid).unwrap_or(0) > 0 {
+        if watcher
+            .world()
+            .tile(405, 339)
+            .map(|t| t.liquid)
+            .unwrap_or(0)
+            > 0
+        {
             break;
         }
         if watcher
@@ -2115,7 +2129,12 @@ async fn a_connected_client_is_told_when_water_moves() {
     }
 
     assert!(
-        watcher.world().tile(405, 339).map(|t| t.liquid).unwrap_or(0) > 0,
+        watcher
+            .world()
+            .tile(405, 339)
+            .map(|t| t.liquid)
+            .unwrap_or(0)
+            > 0,
         "the client never saw the water reach the bottom of the basin"
     );
 }
@@ -3584,9 +3603,10 @@ async fn a_debuff_lands_and_is_told_to_everyone() {
     alice.summon(50).await.unwrap();
     alice.set_timeout(Duration::from_secs(3));
     let Event::NpcSynced(boss) = alice
-        .wait_for("king slime", |e| {
-            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
-        })
+        .wait_for(
+            "king slime",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 50),
+        )
         .await
         .unwrap()
     else {
@@ -3599,9 +3619,10 @@ async fn a_debuff_lands_and_is_told_to_everyone() {
     // Bob is told, even though Alice is the one who did it: he needs it to aim.
     bob.set_timeout(Duration::from_secs(3));
     let told = bob
-        .wait_for("the buff list", |e| {
-            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS)
-        })
+        .wait_for(
+            "the buff list",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS),
+        )
         .await
         .expect("every client should be told what is on an NPC");
     let Event::Other(frame) = told else {
@@ -3623,9 +3644,10 @@ async fn a_debuff_wears_a_target_down() {
     alice.summon(50).await.unwrap();
     alice.set_timeout(Duration::from_secs(3));
     let Event::NpcSynced(boss) = alice
-        .wait_for("king slime", |e| {
-            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
-        })
+        .wait_for(
+            "king slime",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 50),
+        )
         .await
         .unwrap()
     else {
@@ -3637,9 +3659,10 @@ async fn a_debuff_wears_a_target_down() {
     alice.buff_npc(boss.index, 39, 1200).await.unwrap();
 
     let hurt = alice
-        .wait_for("debuff damage", |e| {
-            matches!(e, Event::Other(f) if f.id == id::N_P_C_DEBUFF_DAMAGE)
-        })
+        .wait_for(
+            "debuff damage",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_DEBUFF_DAMAGE),
+        )
         .await;
     assert!(hurt.is_ok(), "a burning boss should be losing life");
 
@@ -3651,7 +3674,10 @@ async fn a_debuff_wears_a_target_down() {
             Duration::from_secs(5),
         )
         .await;
-    assert!(dropped.is_some(), "the damage should reach the NPC's health");
+    assert!(
+        dropped.is_some(),
+        "the damage should reach the NPC's health"
+    );
 }
 
 /// Immunity is the server's decision, not the client's. A crafted packet must not be able to
@@ -3666,9 +3692,10 @@ async fn an_immune_target_refuses_a_crafted_debuff() {
     alice.summon(50).await.unwrap();
     alice.set_timeout(Duration::from_secs(3));
     let Event::NpcSynced(boss) = alice
-        .wait_for("king slime", |e| {
-            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
-        })
+        .wait_for(
+            "king slime",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 50),
+        )
         .await
         .unwrap()
     else {
@@ -3710,9 +3737,10 @@ async fn a_client_cannot_lift_a_debuff_it_dislikes() {
     alice.summon(50).await.unwrap();
     alice.set_timeout(Duration::from_secs(3));
     let Event::NpcSynced(boss) = alice
-        .wait_for("king slime", |e| {
-            matches!(e, Event::NpcSynced(n) if n.net_id == 50)
-        })
+        .wait_for(
+            "king slime",
+            |e| matches!(e, Event::NpcSynced(n) if n.net_id == 50),
+        )
         .await
         .unwrap()
     else {
@@ -3721,9 +3749,10 @@ async fn a_client_cannot_lift_a_debuff_it_dislikes() {
 
     alice.buff_npc(boss.index, 24, 600).await.unwrap();
     alice
-        .wait_for("the buff list", |e| {
-            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS)
-        })
+        .wait_for(
+            "the buff list",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS),
+        )
         .await
         .unwrap();
 
@@ -3731,9 +3760,10 @@ async fn a_client_cannot_lift_a_debuff_it_dislikes() {
     alice.unbuff_npc(boss.index, 24).await.unwrap();
     alice.buff_npc(boss.index, 70, 600).await.unwrap(); // venom, to force a fresh list
     let Event::Other(frame) = alice
-        .wait_for("a later buff list", |e| {
-            matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS && f.payload.len() > 7)
-        })
+        .wait_for(
+            "a later buff list",
+            |e| matches!(e, Event::Other(f) if f.id == id::N_P_C_BUFFS && f.payload.len() > 7),
+        )
         .await
         .unwrap()
     else {
@@ -3749,7 +3779,10 @@ async fn a_client_cannot_lift_a_debuff_it_dislikes() {
         buffs.push(buff);
         at += 4;
     }
-    assert!(buffs.contains(&24), "the fire should still be there: {buffs:?}");
+    assert!(
+        buffs.contains(&24),
+        "the fire should still be there: {buffs:?}"
+    );
 }
 
 /// Every town NPC was nameless: the client asks and nothing answered, so a world full of people
@@ -3776,9 +3809,10 @@ async fn a_town_npc_has_a_name_of_its_own() {
 
     alice.ask_npc_name(npc.index).await.unwrap();
     let Event::Other(frame) = alice
-        .wait_for("the name", |e| {
-            matches!(e, Event::Other(f) if f.id == id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST)
-        })
+        .wait_for(
+            "the name",
+            |e| matches!(e, Event::Other(f) if f.id == id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST),
+        )
         .await
         .unwrap()
     else {
@@ -3820,9 +3854,10 @@ async fn placing_a_frames_tile_creates_and_shares_its_entity() {
     alice.place_object(400, 320, 395, 0).await.unwrap();
 
     let Event::Other(frame) = bob
-        .wait_for("the entity", |e| {
-            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
-        })
+        .wait_for(
+            "the entity",
+            |e| matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING),
+        )
         .await
         .expect("placing the tile should create and share the entity")
     else {
@@ -3832,7 +3867,10 @@ async fn placing_a_frames_tile_creates_and_shares_its_entity() {
     let _id = r.i32().unwrap();
     assert!(r.bool().unwrap(), "it should say the entity is present");
     let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
-    assert_eq!(entity.kind, terrustia_proto::tile_entity::EntityKind::ItemFrame);
+    assert_eq!(
+        entity.kind,
+        terrustia_proto::tile_entity::EntityKind::ItemFrame
+    );
     // The entity anchors on the object's top-left cell, not on the tile the cursor named. The
     // game's own `ValidTile` insists on it: frameY zero and frameX a multiple of the object's
     // width. An item frame's origin is one tile down, so the anchor is a row above the click.
@@ -3900,16 +3938,22 @@ async fn an_item_frame_holds_what_is_put_in_it() {
     alice.set_timeout(Duration::from_secs(5));
     alice.place_object(400, 320, 395, 0).await.unwrap();
     alice
-        .wait_for("the entity", |e| {
-            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
-        })
+        .wait_for(
+            "the entity",
+            |e| matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING),
+        )
         .await
         .unwrap();
 
     // A Zenith, for the sake of an item nobody would want eaten. Aimed at the frame's anchor,
     // which is its top-left cell rather than the tile the placement named.
     alice
-        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 319, ItemStack::new(3507, 1, 0))
+        .display_item(
+            id::ITEM_FRAME_TRY_PLACING,
+            400,
+            319,
+            ItemStack::new(3507, 1, 0),
+        )
         .await
         .unwrap();
     let Event::Other(frame) = alice
@@ -3929,7 +3973,12 @@ async fn an_item_frame_holds_what_is_put_in_it() {
 
     // Swapping it should give the first one back rather than destroying it.
     alice
-        .display_item(id::ITEM_FRAME_TRY_PLACING, 400, 319, ItemStack::new(3506, 1, 0))
+        .display_item(
+            id::ITEM_FRAME_TRY_PLACING,
+            400,
+            319,
+            ItemStack::new(3506, 1, 0),
+        )
         .await
         .unwrap();
     let dropped = alice
@@ -3964,9 +4013,10 @@ async fn only_one_player_may_hold_a_tile_entity() {
     // Tile 470 is the mannequin. Placing it is what creates its entity.
     alice.place_object(400, 320, 470, 0).await.unwrap();
     let Event::Other(frame) = alice
-        .wait_for("the mannequin", |e| {
-            matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING)
-        })
+        .wait_for(
+            "the mannequin",
+            |e| matches!(e, Event::Other(f) if f.id == id::TILE_ENTITY_SHARING),
+        )
         .await
         .unwrap()
     else {
@@ -3981,9 +4031,10 @@ async fn only_one_player_may_hold_a_tile_entity() {
 
     alice.claim_tile_entity(entity_id).await.unwrap();
     let claimed = alice
-        .wait_for("alice's claim", |e| {
-            matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION)
-        })
+        .wait_for(
+            "alice's claim",
+            |e| matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION),
+        )
         .await;
     assert!(claimed.is_ok(), "the first claim should be granted");
 
@@ -3992,8 +4043,10 @@ async fn only_one_player_may_hold_a_tile_entity() {
     let stolen = bob
         .try_wait_for(
             "bob's claim",
-            |e| matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION
-                && f.payload[4] == 1),
+            |e| {
+                matches!(e, Event::Other(f) if f.id == id::REQUEST_TILE_ENTITY_INTERACTION
+                && f.payload[4] == 1)
+            },
             Duration::from_millis(600),
         )
         .await;
@@ -4088,8 +4141,9 @@ fn find_pylon_announcement(raw: &[u8]) -> Option<(i16, i16, u8)> {
             return None;
         }
         if inbound[cursor + 2] == id::NET_MODULES
-            && let Ok(Some((message, pylon))) =
-                terrustia_proto::net_module::decode_pylon_message(&inbound[cursor + 3..cursor + len])
+            && let Ok(Some((message, pylon))) = terrustia_proto::net_module::decode_pylon_message(
+                &inbound[cursor + 3..cursor + len],
+            )
             && message == terrustia_proto::net_module::PylonMessage::Added
         {
             return Some((pylon.x, pylon.y, pylon.kind));
@@ -4236,7 +4290,11 @@ async fn tile_entities_survive_a_save() {
     std::fs::write(&path, wld_save::serialize(&world).unwrap()).unwrap();
     let back = wld::parse(&std::fs::read(&path).unwrap()).unwrap();
 
-    assert_eq!(back.tile_entities.len(), 1, "the frame should have survived");
+    assert_eq!(
+        back.tile_entities.len(),
+        1,
+        "the frame should have survived"
+    );
     let survivor = &back.tile_entities[0];
     assert_eq!((survivor.x, survivor.y), (400, 320));
     assert_eq!(survivor.held().map(|i| i.id), Some(3507));
@@ -4263,9 +4321,10 @@ async fn a_shellphone_sends_a_player_to_spawn() {
     alice.ask_teleport(3).await.unwrap();
 
     let moved = alice
-        .wait_for("the teleport", |e| {
-            matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY)
-        })
+        .wait_for(
+            "the teleport",
+            |e| matches!(e, Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+        )
         .await
         .expect("a shellphone should move the player");
     let Event::Other(frame) = moved else {
@@ -4339,9 +4398,10 @@ async fn a_joining_player_learns_todays_angler_quest() {
     alice.set_timeout(Duration::from_secs(5));
 
     let Event::Other(frame) = alice
-        .wait_for("the angler quest", |e| {
-            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
-        })
+        .wait_for(
+            "the angler quest",
+            |e| matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST),
+        )
         .await
         .expect("a joining player should be told the day's quest")
     else {
@@ -4373,9 +4433,10 @@ async fn the_angler_only_pays_once_a_day() {
 
     // Drain the quest each was told on joining.
     alice
-        .wait_for("the quest", |e| {
-            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
-        })
+        .wait_for(
+            "the quest",
+            |e| matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST),
+        )
         .await
         .unwrap();
 
@@ -4388,9 +4449,10 @@ async fn the_angler_only_pays_once_a_day() {
     let mut carol = join(addr, "carol").await;
     carol.set_timeout(Duration::from_secs(5));
     let Event::Other(frame) = carol
-        .wait_for("the quest", |e| {
-            matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST)
-        })
+        .wait_for(
+            "the quest",
+            |e| matches!(e, Event::Other(f) if f.id == id::ANGLER_QUEST),
+        )
         .await
         .unwrap()
     else {
@@ -4416,9 +4478,10 @@ async fn an_invasion_reports_its_progress() {
     alice.summon(-1).await.unwrap();
 
     let Event::Other(frame) = alice
-        .wait_for("the progress bar", |e| {
-            matches!(e, Event::Other(f) if f.id == id::INVASION_PROGRESS_REPORT)
-        })
+        .wait_for(
+            "the progress bar",
+            |e| matches!(e, Event::Other(f) if f.id == id::INVASION_PROGRESS_REPORT),
+        )
         .await
         .expect("an invasion should put its bar on the screen")
     else {
@@ -4428,7 +4491,10 @@ async fn an_invasion_reports_its_progress() {
     let done = r.i32().unwrap();
     let total = r.i32().unwrap();
     assert_eq!(done, 0, "nothing has been killed yet");
-    assert!(total > 0, "an invasion with nobody in it is not an invasion");
+    assert!(
+        total > 0,
+        "an invasion with nobody in it is not an invasion"
+    );
 }
 
 // ------------------------------------------------------- the wiring tools
@@ -4479,8 +4545,10 @@ async fn the_grand_design_lays_a_line_of_wire() {
     let paid = alice
         .try_wait_for(
             "the bill",
-            |e| matches!(e, Event::Other(f) if f.id == id::MASS_WIRE_OPERATION_PAY
-                && i16::from_le_bytes([f.payload[0], f.payload[1]]) == 530),
+            |e| {
+                matches!(e, Event::Other(f) if f.id == id::MASS_WIRE_OPERATION_PAY
+                && i16::from_le_bytes([f.payload[0], f.payload[1]]) == 530)
+            },
             Duration::from_secs(3),
         )
         .await;
@@ -4551,9 +4619,10 @@ async fn a_chest_can_be_asked_its_name() {
 
     alice.ask_chest_name(400, 320).await.unwrap();
     let Event::Other(frame) = alice
-        .wait_for("the chest's name", |e| {
-            matches!(e, Event::Other(f) if f.id == id::CHEST_NAME)
-        })
+        .wait_for(
+            "the chest's name",
+            |e| matches!(e, Event::Other(f) if f.id == id::CHEST_NAME),
+        )
         .await
         .expect("the map should be able to ask")
     else {
@@ -4600,9 +4669,10 @@ async fn quick_stack_fills_the_chest_that_already_has_it() {
     alice.quick_stack(&[10], false).await.unwrap();
 
     let Event::Other(frame) = alice
-        .wait_for("the chest filling", |e| {
-            matches!(e, Event::Other(f) if f.id == id::SYNC_CHEST_ITEM)
-        })
+        .wait_for(
+            "the chest filling",
+            |e| matches!(e, Event::Other(f) if f.id == id::SYNC_CHEST_ITEM),
+        )
         .await
         .expect("quick stack should move the wood")
     else {
@@ -4774,11 +4844,7 @@ async fn coins_dropped_into_shimmer_become_luck() {
     alice.set_timeout(Duration::from_secs(10));
 
     // A stack of silver, which is a hundred coppers each.
-    let silver = ItemStack::new(
-        i32::from(terrustia_proto::shimmer::COPPER_COIN + 1),
-        5,
-        0,
-    );
+    let silver = ItemStack::new(i32::from(terrustia_proto::shimmer::COPPER_COIN + 1), 5, 0);
     alice
         .drop_item(silver, (400.0 * 16.0, 318.0 * 16.0))
         .await

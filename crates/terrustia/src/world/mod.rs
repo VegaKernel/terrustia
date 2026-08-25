@@ -1,10 +1,14 @@
 pub mod bulbs;
+pub mod census;
+pub mod doors;
+pub mod growth;
 pub mod hardmode;
 pub mod items;
 pub mod liquid;
 pub mod mass_wire;
 pub mod meteor;
 pub mod objects;
+pub mod packed;
 pub mod progress;
 pub mod quick_stack;
 pub mod wiring;

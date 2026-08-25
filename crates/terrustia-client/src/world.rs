@@ -27,6 +27,13 @@ pub struct ClientWorld {
     /// has to remember them as they arrive.
     chests: HashMap<i16, ChestInfo>,
     signs: HashMap<i16, SignInfo>,
+    /// Every NPC this client has been told about and not yet seen die.
+    ///
+    /// Kept because an NPC's state arrives once and then only when it changes, so anything wanting
+    /// to know what is alive — a bot picking a target, a probe checking that a hit landed — cannot
+    /// find out by waiting: it has to have been listening. The generation is part of what is kept,
+    /// since it has to go back with any hit for the server to accept it.
+    npcs: HashMap<u8, terrustia_proto::npc::SyncNpc>,
 }
 
 impl ClientWorld {
@@ -41,6 +48,24 @@ impl ClientWorld {
 
     pub fn has_section(&self, sx: i32, sy: i32) -> bool {
         self.sections.contains_key(&(sx, sy))
+    }
+
+    /// Every tile this client has been sent, with where it is.
+    ///
+    /// For looking something up by what it is rather than where it is — finding a door to open, or
+    /// a wall to knock through — which otherwise means guessing at coordinates.
+    pub fn known_tiles(&self) -> impl Iterator<Item = (i32, i32, Tile)> + '_ {
+        self.sections.iter().flat_map(move |(&(sx, sy), tiles)| {
+            let origin_x = sx * SECTION_WIDTH;
+            let origin_y = sy * SECTION_HEIGHT;
+            // Sections at the world edge are narrower, so the stride comes from the section rather
+            // than from the constant.
+            let width = (self.width - origin_x).clamp(0, SECTION_WIDTH).max(1);
+            tiles.iter().enumerate().map(move |(at, tile)| {
+                let at = at as i32;
+                (origin_x + at % width, origin_y + at / width, *tile)
+            })
+        })
     }
 
     /// Absorb a `TileSection` payload.
@@ -61,6 +86,27 @@ impl ClientWorld {
     /// Every chest this client has been told about.
     pub fn chests(&self) -> impl Iterator<Item = &ChestInfo> {
         self.chests.values()
+    }
+
+    /// Every NPC known to be alive.
+    pub fn npcs(&self) -> impl Iterator<Item = &terrustia_proto::npc::SyncNpc> {
+        self.npcs.values()
+    }
+
+    pub fn npc(&self, index: u8) -> Option<&terrustia_proto::npc::SyncNpc> {
+        self.npcs.get(&index)
+    }
+
+    /// Fold an NPC state update into the roster.
+    ///
+    /// A sync carrying no life is how the game says an NPC is gone, so that is a removal rather
+    /// than a record of something dead.
+    pub fn apply_npc(&mut self, sync: &terrustia_proto::npc::SyncNpc) {
+        if sync.life <= 0 {
+            self.npcs.remove(&sync.index);
+        } else {
+            self.npcs.insert(sync.index, *sync);
+        }
     }
 
     /// Every sign this client has been told about.
@@ -118,6 +164,24 @@ impl ClientWorld {
             }
             None => false,
         }
+    }
+
+    /// Change only the liquid on a tile, leaving the block and wall alone.
+    ///
+    /// Net module 0 carries an amount and a kind and nothing else, so applying it as a whole tile
+    /// would wipe whatever block the client already knows is there.
+    pub fn set_liquid(&mut self, x: i32, y: i32, amount: u8, kind: u8) -> bool {
+        let Some(mut tile) = self.tile(x, y) else {
+            return false;
+        };
+        tile.liquid = amount;
+        tile.liquid_kind = match kind {
+            1 => terrustia_proto::Liquid::Lava,
+            2 => terrustia_proto::Liquid::Honey,
+            3 => terrustia_proto::Liquid::Shimmer,
+            _ => terrustia_proto::Liquid::Water,
+        };
+        self.set_tile(x, y, tile)
     }
 }
 

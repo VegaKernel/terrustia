@@ -1,8 +1,8 @@
-# Terraria 1.4.5.7 protocol notes
+# Terraria 1.4.5.7 / 1.4.5.8 protocol notes
 
 Derived from the shipped `TerrariaServer.exe` (Steam appid 105600, macOS/Mono/FNA build,
-version string `1.4.5.7`) on 2026-08-21. These are our own notes; no decompiled game code is
-checked in.
+version string `1.4.5.7`) on 2026-08-21, and from talking to the installed **1.4.5.8** server on
+2026-08-24. These are our own notes; no decompiled game code is checked in.
 
 Authoritative sources inside the assembly:
 
@@ -16,14 +16,26 @@ Authoritative sources inside the assembly:
 
 ## Version
 
-**`curRelease` = 325**, so the handshake string is exactly **`"Terraria325"`**.
+**`curRelease` = 326** for 1.4.5.8, so the handshake string is exactly **`"Terraria326"`**.
+1.4.5.7 announced **325**; this server accepts both, because they differ on the wire only in that
+number and in four bytes at the end of packet 7.
+
+The release number was not read out of the assembly — it was **asked for**. Connecting to the
+running server with one candidate string after another and watching whether the reply was packet 2
+(refused) or packet 3 (accepted) settles it in seconds and cannot be wrong about the build actually
+installed, which reading a decompiled tree of a *different* build can:
+
+```
+Terraria325: rejected
+Terraria326: ACCEPTED
+```
 
 This is *not* guessable from the marketing version. Prior releases: 1.4.4.9 was 279. If the client
 is updated, re-derive this before anything else — a mismatch makes the server reply with `Kick` and
 is the first thing to check when a client bounces.
 
-The world save format uses the same counter: the user's existing world is header version 319
-(1.4.5.6), so a 1.4.5.7 client writes 325.
+The world save format uses the same counter: a world last opened in 1.4.5.6 carries header version
+319, and a 1.4.5.7 client rewrites it as 325.
 
 ## Framing
 
@@ -107,7 +119,17 @@ i8    invasionType
 u64   lobbyId
 f32   sandstormIntendedSeverity
 u8    extra spawn point count, then that many (i16 x, i16 y)
+i16   dungeonX                    -- release 326 only
+i16   dungeonY                    -- release 326 only
 ```
+
+The two dungeon shorts are **new in release 326** and appear in no version of 1.4.5.7's
+`NetMessage.SendData`, whose case 7 ends at `ExtraSpawnPointManager.Write`. They were found by
+capturing a real 1.4.5.8 server's packet 7 and finding four bytes that no known field accounted
+for, then matching them against two different worlds' own `.wld` files — both agreed exactly.
+
+The order matters and is settled, not assumed: read the other way round, a world whose dungeon sits
+at x 3413 comes out at 21760. They come *after* the spawn-point list.
 
 There are **eleven** flag bytes, verified by tallying every `reader.Read*` call in the client's
 case-7 branch (36 `ReadByte`, 17 `ReadInt16`/`ReadInt32`, 3 `ReadSingle`, 2 `ReadUInt64`, 1 each of
@@ -123,7 +145,8 @@ goblins / sandstorm / DD2 state, (6) combat book / lanterns / pillars / forced h
 (noTraps, zenith, truffle, vampire, infected, teamBasedSpawns, skyblock, dualDungeons), and
 (11) skyblock low tiles / forced holidays / lightning seeds.
 
-Excluding the world name and any extra spawn points, the payload is exactly **159 bytes**.
+Excluding the world name and any extra spawn points, the payload is exactly **163 bytes** at
+release 326 (159 at 325, before the dungeon pair).
 
 `crimson` (byte 2, bit 5) is worth setting deliberately — it selects the evil biome the client
 renders.
@@ -246,7 +269,7 @@ differences are that the file walks the world **column by column** rather than r
 it carries its own frame-importance table.
 
 ```
-i32   version                     (325 for 1.4.5.7, 319 for 1.4.5.6)
+i32   version                     (326 for 1.4.5.8, 325 for 1.4.5.7, 319 for 1.4.5.6)
 [7]   "relogic"
 u8    file type                   (2 = world)
 u32   revision
@@ -305,9 +328,10 @@ The claims above were checked against Terraria 1.4.5.7 rather than assumed, usin
 `verify_sections` examples:
 
 - A probe client completed a real handshake with the shipped `TerrariaServer`, confirming the
-  framing, the `Terraria325` string, the 2-byte packet `3`, and the packet `4` field order.
-- `WorldData` arrived at 170 bytes for a 10-character world name, matching the 159-byte fixed size
-  derived here.
+  framing, the version string, the 2-byte packet `3`, and the packet `4` field order.
+- `WorldData` arrived at 173 bytes for the 9-character world name `ProbeTiny`, matching the
+  163-byte fixed size derived here. That payload is checked in verbatim as
+  `REAL_SERVER_PACKET_7` and **re-encodes byte-for-byte**.
 - All 15 tile sections captured from the real server decode with this implementation and
   **re-encode byte-identically**.
 - Serving the same `.wld` file from both the real server and this one produces **byte-identical
@@ -543,6 +567,42 @@ which is easy to misread as an unused bit and shift everything after it.
 gates on exactly twenty-two of these flags plus `bloodMoon` and `eclipse`. A server that sends the
 flag block correctly has implemented shops; one that does not cannot fix them by sending anything
 else.
+
+Which is exactly how five of them came to be missing. The bits were laid out correctly and the
+values were sitting on `Progress`, parsed out of the world file — the three Old One's Army tiers,
+both combat books — and `world_data()` simply never put them in the block. Nothing failed, because
+the flags a server does not send are indistinguishable from flags that are false. A world that had
+beaten the Army to tier three still traded like a fresh one. `the_flag_block_carries_what_the_shops_read`
+now pins them.
+
+Byte 7 bit 7 (`peddlersSatchel`) and bytes 8 to 10 have no names in this build. They are seed
+flags and slime unlocks this server does not model — unreachable, but not a layout error: all
+eleven bytes are written, so everything after them lands correctly regardless.
+
+## The ore tiers, in packet `7` and in the file
+
+Seven `i16` near the end of packet 7: copper, iron, silver, gold, cobalt, mythril, adamantite.
+Terraria picks one of a pair for each — copper *or* tin, cobalt *or* palladium — so these say which
+one this particular world settled on, and `-1` means a tier has not been decided yet.
+
+Three separate things went wrong here at once, which is worth recording because each hid the next.
+
+- The packet's default read `[7, 6, 9, 8, 108, 111, 112]`. The first four are right; the last three
+  are each shifted one slot along — 108 is mythril's id sitting in cobalt's place, and 112 is not
+  an ore at all. Cobalt, mythril and adamantite are **107, 108, 111**.
+- `world_data()` never overrode that default, so every client was told the same seven values
+  whatever the world actually held.
+- The parser read all seven out of the file and threw them away, and the server kept its own
+  separate copy that started empty. So a real world that had already rolled palladium was not
+  known to have done so, and the next altar broken re-rolled from scratch — putting both ore sets
+  in one world, which vanilla never does.
+
+All three are the same underlying mistake: the world is the only thing that knows, and it was not
+being asked. `World::ore_tiers` is now the single copy; the server reads and writes it through
+`OreTiers::load`/`store` rather than keeping one of its own.
+
+Worth knowing when reading a real save: a world with *tungsten* has `168` in the silver slot, not
+`9`. That is not a bug, and mistaking it for one costs an afternoon.
 
 ## Tile entities
 

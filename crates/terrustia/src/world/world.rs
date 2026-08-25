@@ -457,9 +457,13 @@ impl World {
         for &(sx, sy) in &sections {
             let x0 = sx * SECTION_WIDTH;
             let y0 = sy * SECTION_HEIGHT;
-            buffer
-                .tiles
-                .copy_rect_from(&self.tiles, x0, y0, x0 + SECTION_WIDTH, y0 + SECTION_HEIGHT);
+            buffer.tiles.copy_rect_from(
+                &self.tiles,
+                x0,
+                y0,
+                x0 + SECTION_WIDTH,
+                y0 + SECTION_HEIGHT,
+            );
         }
         buffer.tiles.copy_side_tables_from(&self.tiles);
         buffer.copy_everything_but_tiles_from(self);
@@ -485,7 +489,8 @@ impl World {
         self.chests.clone_from(&source.chests);
         self.signs.clone_from(&source.signs);
         self.town_npcs.clone_from(&source.town_npcs);
-        self.shimmered_town_npcs.clone_from(&source.shimmered_town_npcs);
+        self.shimmered_town_npcs
+            .clone_from(&source.shimmered_town_npcs);
         self.banner_kills.clone_from(&source.banner_kills);
         self.tile_entities.clone_from(&source.tile_entities);
         self.preserved.clone_from(&source.preserved);
@@ -1391,12 +1396,14 @@ mod flag_tests {
             y: 50,
             text: "hello".into(),
         })];
-        world.tile_entities.push(terrustia_proto::tile_entity::TileEntity::new(
-            0,
-            terrustia_proto::tile_entity::EntityKind::TeleportationPylon,
-            60,
-            60,
-        ));
+        world
+            .tile_entities
+            .push(terrustia_proto::tile_entity::TileEntity::new(
+                0,
+                terrustia_proto::tile_entity::EntityKind::TeleportationPylon,
+                60,
+                60,
+            ));
         world.next_tile_entity = 1;
         world.time = 12_345;
         world.day_time = false;
@@ -1420,7 +1427,6 @@ mod flag_tests {
             "a copy for saving did not serialise identically; a field is being lost"
         );
     }
-
 }
 
 /// Is an incrementally-refreshed snapshot identical to a freshly-copied one?
@@ -1462,7 +1468,10 @@ mod incremental_snapshot {
         world.progress.hard_mode = true;
 
         let copied = world.refresh_snapshot(&mut buffer);
-        assert!(copied > 0, "edits were made, so something should have been copied");
+        assert!(
+            copied > 0,
+            "edits were made, so something should have been copied"
+        );
 
         let full = world.snapshot();
         for y in 0..world.height() {
@@ -1503,7 +1512,11 @@ mod incremental_snapshot {
         world.set_tile(400, 400, Tile::block(41));
         world.refresh_snapshot(&mut buffer);
 
-        assert_eq!(buffer.tile(10, 10).block, 40, "the first edit must still be there");
+        assert_eq!(
+            buffer.tile(10, 10).block,
+            40,
+            "the first edit must still be there"
+        );
         assert_eq!(buffer.tile(400, 400).block, 41, "and so must the second");
     }
 

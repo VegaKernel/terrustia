@@ -10,52 +10,154 @@
 
 /// `MerchantNames`, for NPC type 17.
 const MERCHANTNAMES: [&str; 23] = [
-    "Alfred", "Barney", "Calvin", "Edmund", "Edwin", "Eugene", "Frank", "Frederick", "Gilbert",
-    "Gus", "Wilbur", "Seymour", "Louis", "Humphrey", "Harold", "Milton", "Mortimer", "Howard",
-    "Walter", "Isaac", "Joseph", "Kristian", "Ralph",
+    "Alfred",
+    "Barney",
+    "Calvin",
+    "Edmund",
+    "Edwin",
+    "Eugene",
+    "Frank",
+    "Frederick",
+    "Gilbert",
+    "Gus",
+    "Wilbur",
+    "Seymour",
+    "Louis",
+    "Humphrey",
+    "Harold",
+    "Milton",
+    "Mortimer",
+    "Howard",
+    "Walter",
+    "Isaac",
+    "Joseph",
+    "Kristian",
+    "Ralph",
 ];
 
 /// `NurseNames`, for NPC type 18.
 const NURSENAMES: [&str; 24] = [
-    "Molly", "Amy", "Claire", "Emily", "Katie", "Madeline", "Katelyn", "Emma", "Abigail", "Carly",
-    "Jenna", "Heather", "Katherine", "Caitlin", "Kaitlin", "Holly", "Kaitlyn", "Hannah", "Kathryn",
-    "Lorraine", "Helen", "Kayla", "Lisa", "Allison",
+    "Molly",
+    "Amy",
+    "Claire",
+    "Emily",
+    "Katie",
+    "Madeline",
+    "Katelyn",
+    "Emma",
+    "Abigail",
+    "Carly",
+    "Jenna",
+    "Heather",
+    "Katherine",
+    "Caitlin",
+    "Kaitlin",
+    "Holly",
+    "Kaitlyn",
+    "Hannah",
+    "Kathryn",
+    "Lorraine",
+    "Helen",
+    "Kayla",
+    "Lisa",
+    "Allison",
 ];
 
 /// `ArmsDealerNames`, for NPC type 19.
 const ARMSDEALERNAMES: [&str; 24] = [
-    "DeShawn", "DeAndre", "Marquis", "Darnell", "Terrell", "Malik", "Trevon", "Tyrone", "Willie",
-    "Dominique", "Demetrius", "Reginald", "Jamal", "Maurice", "Jalen", "Darius", "Xavier", "Terrance",
-    "Andre", "Dante", "Brimst", "Bronson", "Tony", "Darryl",
+    "DeShawn",
+    "DeAndre",
+    "Marquis",
+    "Darnell",
+    "Terrell",
+    "Malik",
+    "Trevon",
+    "Tyrone",
+    "Willie",
+    "Dominique",
+    "Demetrius",
+    "Reginald",
+    "Jamal",
+    "Maurice",
+    "Jalen",
+    "Darius",
+    "Xavier",
+    "Terrance",
+    "Andre",
+    "Dante",
+    "Brimst",
+    "Bronson",
+    "Tony",
+    "Darryl",
 ];
 
 /// `DryadNames`, for NPC type 20.
 const DRYADNAMES: [&str; 21] = [
-    "Alalia", "Alura", "Ariella", "Caelia", "Calista", "Chryseis", "Emerenta", "Elysia", "Evvie",
-    "Faye", "Felicitae", "Lunette", "Nata", "Nissa", "Tatiana", "Rosalva", "Shea", "Tania", "Isis",
-    "Celestia", "Xylia",
+    "Alalia",
+    "Alura",
+    "Ariella",
+    "Caelia",
+    "Calista",
+    "Chryseis",
+    "Emerenta",
+    "Elysia",
+    "Evvie",
+    "Faye",
+    "Felicitae",
+    "Lunette",
+    "Nata",
+    "Nissa",
+    "Tatiana",
+    "Rosalva",
+    "Shea",
+    "Tania",
+    "Isis",
+    "Celestia",
+    "Xylia",
 ];
 
 /// `GuideNames`, for NPC type 22.
 const GUIDENAMES: [&str; 36] = [
     "Joe", "Connor", "Tanner", "Wyatt", "Cody", "Levi", "Luke", "Jack", "Scott", "Logan", "Cole",
-    "Asher", "Bradley", "Jacob", "Garrett", "Dylan", "Maxwell", "Steve", "Brett", "Andrew", "Harley",
-    "Kyle", "Jake", "Ryan", "Jeffrey", "Seth", "Marty", "Brandon", "Zach", "Jeff", "Daniel", "Trent",
-    "Kevin", "Brian", "Colin", "Jan",
+    "Asher", "Bradley", "Jacob", "Garrett", "Dylan", "Maxwell", "Steve", "Brett", "Andrew",
+    "Harley", "Kyle", "Jake", "Ryan", "Jeffrey", "Seth", "Marty", "Brandon", "Zach", "Jeff",
+    "Daniel", "Trent", "Kevin", "Brian", "Colin", "Jan",
 ];
 
 /// `DemolitionistNames`, for NPC type 38.
 const DEMOLITIONISTNAMES: [&str; 22] = [
-    "Dolbere", "Bazdin", "Durim", "Tordak", "Garval", "Morthal", "Oten", "Dolgen", "Gimli", "Gimut",
-    "Duerthen", "Beldin", "Jarut", "Ovbere", "Norkas", "Dolgrim", "Boften", "Norsun", "Dias",
-    "Fikod", "Urist", "Darur",
+    "Dolbere", "Bazdin", "Durim", "Tordak", "Garval", "Morthal", "Oten", "Dolgen", "Gimli",
+    "Gimut", "Duerthen", "Beldin", "Jarut", "Ovbere", "Norkas", "Dolgrim", "Boften", "Norsun",
+    "Dias", "Fikod", "Urist", "Darur",
 ];
 
 /// `ClothierNames`, for NPC type 54.
 const CLOTHIERNAMES: [&str; 25] = [
-    "Sebastian", "Rupert", "Clive", "Nigel", "Mervyn", "Cedric", "Pip", "Cyril", "Fitz", "Lloyd",
-    "Arthur", "Rodney", "Graham", "Edward", "Alfred", "Edmund", "Henry", "Herald", "Roland", "Lincoln",
-    "Edgar", "Eustace", "Benjamin", "James", "Rodrick",
+    "Sebastian",
+    "Rupert",
+    "Clive",
+    "Nigel",
+    "Mervyn",
+    "Cedric",
+    "Pip",
+    "Cyril",
+    "Fitz",
+    "Lloyd",
+    "Arthur",
+    "Rodney",
+    "Graham",
+    "Edward",
+    "Alfred",
+    "Edmund",
+    "Henry",
+    "Herald",
+    "Roland",
+    "Lincoln",
+    "Edgar",
+    "Eustace",
+    "Benjamin",
+    "James",
+    "Rodrick",
 ];
 
 /// `GoblinTinkererNames`, for NPC type 107.
@@ -67,22 +169,73 @@ const GOBLINTINKERERNAMES: [&str; 25] = [
 
 /// `WizardNames`, for NPC type 108.
 const WIZARDNAMES: [&str; 22] = [
-    "Dalamar", "Dulais", "Elric", "Arddun", "Maelor", "Leomund", "Hirael", "Gwentor", "Greum",
-    "Gearroid", "Fizban", "Ningauble", "Seonag", "Sargon", "Merlyn", "Magius", "Berwyn", "Arwyn",
-    "Alasdair", "Tagar", "Abram", "Xanadu",
+    "Dalamar",
+    "Dulais",
+    "Elric",
+    "Arddun",
+    "Maelor",
+    "Leomund",
+    "Hirael",
+    "Gwentor",
+    "Greum",
+    "Gearroid",
+    "Fizban",
+    "Ningauble",
+    "Seonag",
+    "Sargon",
+    "Merlyn",
+    "Magius",
+    "Berwyn",
+    "Arwyn",
+    "Alasdair",
+    "Tagar",
+    "Abram",
+    "Xanadu",
 ];
 
 /// `MechanicNames`, for NPC type 124.
 const MECHANICNAMES: [&str; 24] = [
-    "Shayna", "Korrie", "Ginger", "Brooke", "Jenny", "Autumn", "Nancy", "Ella", "Kayla", "Selah",
-    "Sophia", "Marshanna", "Lauren", "Trisha", "Shirlena", "Sheena", "Ellen", "Amy", "Dawn", "Susana",
-    "Meredith", "Selene", "Terra", "Sally",
+    "Shayna",
+    "Korrie",
+    "Ginger",
+    "Brooke",
+    "Jenny",
+    "Autumn",
+    "Nancy",
+    "Ella",
+    "Kayla",
+    "Selah",
+    "Sophia",
+    "Marshanna",
+    "Lauren",
+    "Trisha",
+    "Shirlena",
+    "Sheena",
+    "Ellen",
+    "Amy",
+    "Dawn",
+    "Susana",
+    "Meredith",
+    "Selene",
+    "Terra",
+    "Sally",
 ];
 
 /// `TruffleNames`, for NPC type 160.
 const TRUFFLENAMES: [&str; 13] = [
-    "Reishi", "Maitake", "Chanterelle", "Porcini", "Shimeji", "Amanita", "Muscaria", "Agaric",
-    "Cremini", "Morel", "Enoki", "Shiitake", "Leinspores",
+    "Reishi",
+    "Maitake",
+    "Chanterelle",
+    "Porcini",
+    "Shimeji",
+    "Amanita",
+    "Muscaria",
+    "Agaric",
+    "Cremini",
+    "Morel",
+    "Enoki",
+    "Shiitake",
+    "Leinspores",
 ];
 
 /// `SteampunkerNames`, for NPC type 178.
@@ -94,8 +247,22 @@ const STEAMPUNKERNAMES: [&str; 20] = [
 
 /// `DyeTraderNames`, for NPC type 207.
 const DYETRADERNAMES: [&str; 16] = [
-    "Abdosir", "Akbar", "Bodashtart", "Danel", "Hanno", "Hiram", "Kanmi", "Philosir", "Tabnit",
-    "Yutpan", "Ahirom", "Batnoam", "Sikarbaal", "Hannibal", "Yehomilk", "Ahinadab",
+    "Abdosir",
+    "Akbar",
+    "Bodashtart",
+    "Danel",
+    "Hanno",
+    "Hiram",
+    "Kanmi",
+    "Philosir",
+    "Tabnit",
+    "Yutpan",
+    "Ahirom",
+    "Batnoam",
+    "Sikarbaal",
+    "Hannibal",
+    "Yehomilk",
+    "Ahinadab",
 ];
 
 /// `PartyGirlNames`, for NPC type 208.
@@ -119,62 +286,165 @@ const PAINTERNAMES: [&str; 19] = [
 
 /// `WitchDoctorNames`, for NPC type 228.
 const WITCHDOCTORNAMES: [&str; 10] = [
-    "Abibe", "Jamundi", "U'wa", "Tairona", "Xirigua", "Zop'a", "Opuni", "Kogi-ghi", "Konah", "Gboto",
+    "Abibe", "Jamundi", "U'wa", "Tairona", "Xirigua", "Zop'a", "Opuni", "Kogi-ghi", "Konah",
+    "Gboto",
 ];
 
 /// `PirateNames`, for NPC type 229.
 const PIRATENAMES: [&str; 11] = [
-    "David", "Red Beard", "Jack", "Black Beard", "Captain Morgan", "Wet Beard", "James T. Beard",
-    "Gunpowder Garry", "Captain Stoney Dirt", "Jake", "Captain Bullywort",
+    "David",
+    "Red Beard",
+    "Jack",
+    "Black Beard",
+    "Captain Morgan",
+    "Wet Beard",
+    "James T. Beard",
+    "Gunpowder Garry",
+    "Captain Stoney Dirt",
+    "Jake",
+    "Captain Bullywort",
 ];
 
 /// `StylistNames`, for NPC type 353.
 const STYLISTNAMES: [&str; 20] = [
-    "Bri", "Brianne", "Flora", "Iris", "Scarlett", "Lola", "Hazel", "Stella", "Pearl", "Tallulah",
-    "Ruby", "Esmeralda", "Kylie", "Kati", "Biah", "Meliyah", "Petra", "Rox", "Roxanne", "Annabel",
+    "Bri",
+    "Brianne",
+    "Flora",
+    "Iris",
+    "Scarlett",
+    "Lola",
+    "Hazel",
+    "Stella",
+    "Pearl",
+    "Tallulah",
+    "Ruby",
+    "Esmeralda",
+    "Kylie",
+    "Kati",
+    "Biah",
+    "Meliyah",
+    "Petra",
+    "Rox",
+    "Roxanne",
+    "Annabel",
 ];
 
 /// `TravelingMerchantNames`, for NPC type 368.
 const TRAVELINGMERCHANTNAMES: [&str; 13] = [
-    "Abraham", "Bohemas", "Eladon", "Aphraim", "Gallius", "Llewellyn", "Riley", "Rawleigh", "Shipton",
-    "Romeo", "Aedan", "Mercer", "Willy",
+    "Abraham",
+    "Bohemas",
+    "Eladon",
+    "Aphraim",
+    "Gallius",
+    "Llewellyn",
+    "Riley",
+    "Rawleigh",
+    "Shipton",
+    "Romeo",
+    "Aedan",
+    "Mercer",
+    "Willy",
 ];
 
 /// `AnglerNames`, for NPC type 369.
 const ANGLERNAMES: [&str; 21] = [
-    "Bobby", "Sammy", "Jimmy", "Danny", "Timmy", "Simon", "Johnny", "Billy", "Matty", "Bart", "Phillip",
-    "Spencer", "Nathan", "Grayson", "Miles", "Charles", "Adam", "Tyler", "Jey", "Ivan", "Izzy",
+    "Bobby", "Sammy", "Jimmy", "Danny", "Timmy", "Simon", "Johnny", "Billy", "Matty", "Bart",
+    "Phillip", "Spencer", "Nathan", "Grayson", "Miles", "Charles", "Adam", "Tyler", "Jey", "Ivan",
+    "Izzy",
 ];
 
 /// `TaxCollectorNames`, for NPC type 441.
 const TAXCOLLECTORNAMES: [&str; 19] = [
-    "McKinly", "Millard", "Fillmore", "Rutherford", "Chester", "Grover", "Cleveland", "Theodore",
-    "Herbert", "Warren", "Lyndon", "Ronald", "Harrison", "Woodrow", "Tweed", "Blanton", "Dwyer",
-    "Carroll", "Agnew",
+    "McKinly",
+    "Millard",
+    "Fillmore",
+    "Rutherford",
+    "Chester",
+    "Grover",
+    "Cleveland",
+    "Theodore",
+    "Herbert",
+    "Warren",
+    "Lyndon",
+    "Ronald",
+    "Harrison",
+    "Woodrow",
+    "Tweed",
+    "Blanton",
+    "Dwyer",
+    "Carroll",
+    "Agnew",
 ];
 
 /// `SkeletonMerchantNames`, for NPC type 453.
 const SKELETONMERCHANTNAMES: [&str; 11] = [
-    "Skellington", "Bones McGee", "Gloomy Mays", "Jack Sellington", "Billy Marrows", "Tom",
-    "Rattles Magoo", "Mandible Calavera", "Mika", "No-Eyed Wiley", "Victor",
+    "Skellington",
+    "Bones McGee",
+    "Gloomy Mays",
+    "Jack Sellington",
+    "Billy Marrows",
+    "Tom",
+    "Rattles Magoo",
+    "Mandible Calavera",
+    "Mika",
+    "No-Eyed Wiley",
+    "Victor",
 ];
 
 /// `BartenderNames`, for NPC type 550.
 const BARTENDERNAMES: [&str; 16] = [
-    "Ted", "Barkeep", "Jerry", "Bill", "Ernest", "William", "Dale", "Bruce", "Moe", "Javahawk",
-    "Elandrian", "Driscan", "Iamisom", "Blacksmith", "Dani Moo", "Paddy",
+    "Ted",
+    "Barkeep",
+    "Jerry",
+    "Bill",
+    "Ernest",
+    "William",
+    "Dale",
+    "Bruce",
+    "Moe",
+    "Javahawk",
+    "Elandrian",
+    "Driscan",
+    "Iamisom",
+    "Blacksmith",
+    "Dani Moo",
+    "Paddy",
 ];
 
 /// `GolferNames`, for NPC type 588.
 const GOLFERNAMES: [&str; 8] = [
-    "Lion Pines", "Gunner McLovin", "Harry Madison", "Arnie Palmfrond", "Jake Nicklelisp",
-    "William", "Billy Bones", "Jim Mulligan",
+    "Lion Pines",
+    "Gunner McLovin",
+    "Harry Madison",
+    "Arnie Palmfrond",
+    "Jake Nicklelisp",
+    "William",
+    "Billy Bones",
+    "Jim Mulligan",
 ];
 
 /// `BestiaryGirlNames`, for NPC type 633.
 const BESTIARYGIRLNAMES: [&str; 21] = [
-    "Maria", "MacKenzie", "Azaria", "Juanita", "Astra", "Hayley", "Becca", "Veronica", "Tia",
-    "Robyn", "Arien", "Jane", "Bindi", "Dian", "Lori", "Mardy", "Mollie", "Lizzy", "Daphne", "Ellen",
+    "Maria",
+    "MacKenzie",
+    "Azaria",
+    "Juanita",
+    "Astra",
+    "Hayley",
+    "Becca",
+    "Veronica",
+    "Tia",
+    "Robyn",
+    "Arien",
+    "Jane",
+    "Bindi",
+    "Dian",
+    "Lori",
+    "Mardy",
+    "Mollie",
+    "Lizzy",
+    "Daphne",
+    "Ellen",
     "Lilith",
 ];
 
@@ -186,65 +456,237 @@ const CATNAMES_SIAMESE: [&str; 12] = [
 
 /// `DogNames_Labrador`, for NPC type 638.
 const DOGNAMES_LABRADOR: [&str; 19] = [
-    "Penny", "Pebbles", "Puppy", "Monroe", "Kittie", "Buddy", "Charlie", "Trulte", "Daisy", "Calvin",
-    "Willow", "Arthur", "John", "Bitsy", "Mike", "Sparky", "Lucky", "Bubbles", "Tank",
+    "Penny", "Pebbles", "Puppy", "Monroe", "Kittie", "Buddy", "Charlie", "Trulte", "Daisy",
+    "Calvin", "Willow", "Arthur", "John", "Bitsy", "Mike", "Sparky", "Lucky", "Bubbles", "Tank",
 ];
 
 /// `BunnyNames_White`, for NPC type 656.
 const BUNNYNAMES_WHITE: [&str; 15] = [
-    "Bunnicula", "Ben", "Roger", "Skippy", "Donnie", "Alice", "Presto", "Shion", "Lisette", "Lily",
-    "Inaba", "Shirayuki", "Lilia", "Ears", "Jimothy",
+    "Bunnicula",
+    "Ben",
+    "Roger",
+    "Skippy",
+    "Donnie",
+    "Alice",
+    "Presto",
+    "Shion",
+    "Lisette",
+    "Lily",
+    "Inaba",
+    "Shirayuki",
+    "Lilia",
+    "Ears",
+    "Jimothy",
 ];
 
 /// `PrincessNames`, for NPC type 663.
 const PRINCESSNAMES: [&str; 22] = [
-    "Ai", "Hime", "Emilia", "Alice", "Belle", "Sophia", "Hikari", "Faye", "Christina", "Flora",
-    "Liselotte", "Aria", "Yuuki", "Theresa", "Elitia", "Lucia", "Ariel", "Momo", "Charlotte",
-    "Tiara", "Yorai", "Rosetta",
+    "Ai",
+    "Hime",
+    "Emilia",
+    "Alice",
+    "Belle",
+    "Sophia",
+    "Hikari",
+    "Faye",
+    "Christina",
+    "Flora",
+    "Liselotte",
+    "Aria",
+    "Yuuki",
+    "Theresa",
+    "Elitia",
+    "Lucia",
+    "Ariel",
+    "Momo",
+    "Charlotte",
+    "Tiara",
+    "Yorai",
+    "Rosetta",
 ];
 
 /// `SlimeNames_Blue`, for NPC type 670.
 const SLIMENAMES_BLUE: [&str; 27] = [
-    "Steve", "Seymour", "Simon", "Sheldon", "Sam", "Samson", "Sid", "Sigvard", "Stein", "Sean",
-    "Samwise", "Snoot", "Swotty", "Stuart", "Stratford", "Saliva", "Sherman", "Stiltskin", "Shibboleet",
-    "Sine", "Spock", "Smarty", "Sonic", "Sputnik", "Smoof", "Spetch", "Stevenson",
+    "Steve",
+    "Seymour",
+    "Simon",
+    "Sheldon",
+    "Sam",
+    "Samson",
+    "Sid",
+    "Sigvard",
+    "Stein",
+    "Sean",
+    "Samwise",
+    "Snoot",
+    "Swotty",
+    "Stuart",
+    "Stratford",
+    "Saliva",
+    "Sherman",
+    "Stiltskin",
+    "Shibboleet",
+    "Sine",
+    "Spock",
+    "Smarty",
+    "Sonic",
+    "Sputnik",
+    "Smoof",
+    "Spetch",
+    "Stevenson",
 ];
 
 /// `SlimeNames_Green`, for NPC type 678.
 const SLIMENAMES_GREEN: [&str; 25] = [
-    "Sylvester", "Slimer", "Seth", "Shane", "Sully", "Scooter", "Scotty", "Spike", "Slachi", "Spinach",
-    "Slick", "Slippy", "Speedy", "Slurm", "School", "Swag", "Swiggity Swooty", "Slackin", "Switch",
-    "Sport", "Squash", "Skeeter", "Scutiger", "Softball", "Spazzy",
+    "Sylvester",
+    "Slimer",
+    "Seth",
+    "Shane",
+    "Sully",
+    "Scooter",
+    "Scotty",
+    "Spike",
+    "Slachi",
+    "Spinach",
+    "Slick",
+    "Slippy",
+    "Speedy",
+    "Slurm",
+    "School",
+    "Swag",
+    "Swiggity Swooty",
+    "Slackin",
+    "Switch",
+    "Sport",
+    "Squash",
+    "Skeeter",
+    "Scutiger",
+    "Softball",
+    "Spazzy",
 ];
 
 /// `SlimeNames_Old`, for NPC type 679.
 const SLIMENAMES_OLD: [&str; 27] = [
-    "Stooge", "Sir Slushington III", "Santiago", "Sebastian", "Samuel", "Seamus", "Sage", "Sinclair",
-    "Stanford", "Septimus", "Stinky", "Spiffy", "Spruce", "Swanky", "Soggy", "Scooby", "Sigmund",
-    "Smithers", "Sassafras", "Slumbledore", "Slimdalf", "Schartzmugel", "Scion", "Scrooge",
-    "Stonks", "Swanson", "Spinkerton",
+    "Stooge",
+    "Sir Slushington III",
+    "Santiago",
+    "Sebastian",
+    "Samuel",
+    "Seamus",
+    "Sage",
+    "Sinclair",
+    "Stanford",
+    "Septimus",
+    "Stinky",
+    "Spiffy",
+    "Spruce",
+    "Swanky",
+    "Soggy",
+    "Scooby",
+    "Sigmund",
+    "Smithers",
+    "Sassafras",
+    "Slumbledore",
+    "Slimdalf",
+    "Schartzmugel",
+    "Scion",
+    "Scrooge",
+    "Stonks",
+    "Swanson",
+    "Spinkerton",
 ];
 
 /// `SlimeNames_Purple`, for NPC type 680.
 const SLIMENAMES_PURPLE: [&str; 25] = [
-    "Stewy", "Sue", "Spencer", "Sidney", "Stefan", "Sonnie", "Sacco", "Sunset", "Snafu", "Stumble",
-    "Spaghetti", "Shoggy", "Slimefors", "Shirley", "Sara", "Sharon", "Sludge", "Snuggle", "Sloppy",
-    "Slimeora", "Sylph", "Spew", "Shemp", "Spanky", "Spork",
+    "Stewy",
+    "Sue",
+    "Spencer",
+    "Sidney",
+    "Stefan",
+    "Sonnie",
+    "Sacco",
+    "Sunset",
+    "Snafu",
+    "Stumble",
+    "Spaghetti",
+    "Shoggy",
+    "Slimefors",
+    "Shirley",
+    "Sara",
+    "Sharon",
+    "Sludge",
+    "Snuggle",
+    "Sloppy",
+    "Slimeora",
+    "Sylph",
+    "Spew",
+    "Shemp",
+    "Spanky",
+    "Spork",
 ];
 
 /// `SlimeNames_Rainbow`, for NPC type 681.
 const SLIMENAMES_RAINBOW: [&str; 29] = [
-    "Sylvia", "Skye", "Stephanie", "Sophia", "Shanna", "Serenity", "Shian", "Slimestar", "Shimmer",
-    "Surai", "Stella", "Sasha", "Sweety", "Sparkle", "Sapphire", "Seraph", "Starry", "Sprinkes",
-    "Sherbet", "Sugar", "Stardew", "Sheena", "Sveta", "Shampoo", "Sproink", "Secreta", "Sponsa",
-    "Skyler", "Sorai",
+    "Sylvia",
+    "Skye",
+    "Stephanie",
+    "Sophia",
+    "Shanna",
+    "Serenity",
+    "Shian",
+    "Slimestar",
+    "Shimmer",
+    "Surai",
+    "Stella",
+    "Sasha",
+    "Sweety",
+    "Sparkle",
+    "Sapphire",
+    "Seraph",
+    "Starry",
+    "Sprinkes",
+    "Sherbet",
+    "Sugar",
+    "Stardew",
+    "Sheena",
+    "Sveta",
+    "Shampoo",
+    "Sproink",
+    "Secreta",
+    "Sponsa",
+    "Skyler",
+    "Sorai",
 ];
 
 /// `SlimeNames_Red`, for NPC type 682.
 const SLIMENAMES_RED: [&str; 27] = [
-    "Sparky", "Sourpuss", "Steamer", "Sizzle", "Shaka", "Slippery Sal", "Sirius", "Sven", "Sly",
-    "Smeagol", "Scuff", "Shifty", "Sassy", "Scorpius", "Snotty", "Sleepy", "Stressball", "Slurpee",
-    "Squeezo", "Sapo", "Snart", "Skiprat", "Sully", "Sharkey", "Scarface", "Slickfather", "Slimeballa",
+    "Sparky",
+    "Sourpuss",
+    "Steamer",
+    "Sizzle",
+    "Shaka",
+    "Slippery Sal",
+    "Sirius",
+    "Sven",
+    "Sly",
+    "Smeagol",
+    "Scuff",
+    "Shifty",
+    "Sassy",
+    "Scorpius",
+    "Snotty",
+    "Sleepy",
+    "Stressball",
+    "Slurpee",
+    "Squeezo",
+    "Sapo",
+    "Snart",
+    "Skiprat",
+    "Sully",
+    "Sharkey",
+    "Scarface",
+    "Slickfather",
+    "Slimeballa",
 ];
 
 /// `SlimeNames_Yellow`, for NPC type 683.
@@ -256,10 +698,32 @@ const SLIMENAMES_YELLOW: [&str; 27] = [
 
 /// `SlimeNames_Copper`, for NPC type 684.
 const SLIMENAMES_COPPER: [&str; 26] = [
-    "Solomon", "Shortsword Saxon", "Steele", "Sigfried", "Sterling", "Seniore Slash", "Stabby",
-    "Spunky", "Sharpie", "Scout", "Scrappy", "Slade", "Samsara", "Six-Swing Serge", "Scorch",
-    "Sabin", "Stryker", "Slayer", "Slival", "Sting", "Sabaton", "Semper Serus", "Scrimshank",
-    "Scavager", "Selmy", "Shortie",
+    "Solomon",
+    "Shortsword Saxon",
+    "Steele",
+    "Sigfried",
+    "Sterling",
+    "Seniore Slash",
+    "Stabby",
+    "Spunky",
+    "Sharpie",
+    "Scout",
+    "Scrappy",
+    "Slade",
+    "Samsara",
+    "Six-Swing Serge",
+    "Scorch",
+    "Sabin",
+    "Stryker",
+    "Slayer",
+    "Slival",
+    "Sting",
+    "Sabaton",
+    "Semper Serus",
+    "Scrimshank",
+    "Scavager",
+    "Selmy",
+    "Shortie",
 ];
 
 /// Which list a type draws its name from, in type order.
@@ -313,14 +777,46 @@ const CATNAMES_BLACK: [&str; 23] = [
 
 /// `CatNames_OrangeTabby`.
 const CATNAMES_ORANGETABBY: [&str; 19] = [
-    "Linkle", "Remy", "Lux", "Sunny", "Tigger", "Callie", "Sassy", "Bob", "Leo", "Tiger", "Caramel",
-    "Tony", "Garfield", "Hobbes", "Charlie", "Rascal", "Critter", "Adol", "Lawnmower",
+    "Linkle",
+    "Remy",
+    "Lux",
+    "Sunny",
+    "Tigger",
+    "Callie",
+    "Sassy",
+    "Bob",
+    "Leo",
+    "Tiger",
+    "Caramel",
+    "Tony",
+    "Garfield",
+    "Hobbes",
+    "Charlie",
+    "Rascal",
+    "Critter",
+    "Adol",
+    "Lawnmower",
 ];
 
 /// `CatNames_RussianBlue`.
 const CATNAMES_RUSSIANBLUE: [&str; 17] = [
-    "Alexi", "Ruby", "Bubbles", "Lexi", "Prissy", "Valery", "Lucy", "Pete", "Jocelyn", "Light",
-    "Lily", "Starlight", "Cobalt", "Tilly", "Rion", "Momo", "Tarzan",
+    "Alexi",
+    "Ruby",
+    "Bubbles",
+    "Lexi",
+    "Prissy",
+    "Valery",
+    "Lucy",
+    "Pete",
+    "Jocelyn",
+    "Light",
+    "Lily",
+    "Starlight",
+    "Cobalt",
+    "Tilly",
+    "Rion",
+    "Momo",
+    "Tarzan",
 ];
 
 /// `CatNames_Silver`.
@@ -343,14 +839,39 @@ const DOGNAMES_PITBULL: [&str; 14] = [
 
 /// `DogNames_Beagle`.
 const DOGNAMES_BEAGLE: [&str; 13] = [
-    "Zelda", "Navi", "Ali", "Fred", "Roxie", "Milo", "Copper", "Darwin", "Lieselotte", "Wilma",
-    "Odie", "Feena", "Pete",
+    "Zelda",
+    "Navi",
+    "Ali",
+    "Fred",
+    "Roxie",
+    "Milo",
+    "Copper",
+    "Darwin",
+    "Lieselotte",
+    "Wilma",
+    "Odie",
+    "Feena",
+    "Pete",
 ];
 
 /// `DogNames_Corgi`.
 const DOGNAMES_CORGI: [&str; 16] = [
-    "Bella", "Ellie", "Baxter", "Oliver", "Maya", "Titus", "Shino", "Elizabeth", "Victoria", "Yona",
-    "Ammy", "Charles", "Estelle", "Astro", "Kilo", "AK",
+    "Bella",
+    "Ellie",
+    "Baxter",
+    "Oliver",
+    "Maya",
+    "Titus",
+    "Shino",
+    "Elizabeth",
+    "Victoria",
+    "Yona",
+    "Ammy",
+    "Charles",
+    "Estelle",
+    "Astro",
+    "Kilo",
+    "AK",
 ];
 
 /// `DogNames_Dalmation`.
@@ -367,7 +888,16 @@ const DOGNAMES_HUSKY: [&str; 16] = [
 
 /// `BunnyNames_Angora`.
 const BUNNYNAMES_ANGORA: [&str; 10] = [
-    "Breadbuns", "Loaf", "Babs", "Big B", "Greg", "Fluffy", "Pom", "Muffin", "Maximus", "Donald",
+    "Breadbuns",
+    "Loaf",
+    "Babs",
+    "Big B",
+    "Greg",
+    "Fluffy",
+    "Pom",
+    "Muffin",
+    "Maximus",
+    "Donald",
 ];
 
 /// `BunnyNames_Dutch`.
@@ -377,20 +907,52 @@ const BUNNYNAMES_DUTCH: [&str; 11] = [
 
 /// `BunnyNames_Flemish`.
 const BUNNYNAMES_FLEMISH: [&str; 12] = [
-    "Thumper", "Cinnabun", "Peter", "Hazel", "Loki", "Sunflower", "Toby", "Daisy", "Dusty", "Jazz",
-    "Russell", "Honeycomb",
+    "Thumper",
+    "Cinnabun",
+    "Peter",
+    "Hazel",
+    "Loki",
+    "Sunflower",
+    "Toby",
+    "Daisy",
+    "Dusty",
+    "Jazz",
+    "Russell",
+    "Honeycomb",
 ];
 
 /// `BunnyNames_Lop`.
 const BUNNYNAMES_LOP: [&str; 13] = [
-    "Bunbun", "Lola", "Max", "Tyler", "Flops", "Flappie", "Caerbannog", "Mochi", "Dandy", "Puff",
-    "Youp", "Boof", "Veidra",
+    "Bunbun",
+    "Lola",
+    "Max",
+    "Tyler",
+    "Flops",
+    "Flappie",
+    "Caerbannog",
+    "Mochi",
+    "Dandy",
+    "Puff",
+    "Youp",
+    "Boof",
+    "Veidra",
 ];
 
 /// `BunnyNames_Silver`.
 const BUNNYNAMES_SILVER: [&str; 13] = [
-    "Bugz", "Buster", "Silvine", "Bunstar", "Lord", "Bunnykins", "Crystal", "Chrome", "Vincent",
-    "Zach", "Joshua", "Dustbunny", "Dusty",
+    "Bugz",
+    "Buster",
+    "Silvine",
+    "Bunstar",
+    "Lord",
+    "Bunnykins",
+    "Crystal",
+    "Chrome",
+    "Vincent",
+    "Zach",
+    "Joshua",
+    "Dustbunny",
+    "Dusty",
 ];
 
 /// The types that are not one creature but several, and the name list each breed uses.
@@ -398,9 +960,39 @@ const BUNNYNAMES_SILVER: [&str; 13] = [
 /// A cat, a dog and a bunny each roll a breed on arrival; the breed decides how it looks and
 /// which names it can have, which is why the two cannot be chosen independently.
 const BREEDS: [(u16, &[&[&str]]); 3] = [
-    (637, &[&CATNAMES_SIAMESE, &CATNAMES_BLACK, &CATNAMES_ORANGETABBY, &CATNAMES_RUSSIANBLUE, &CATNAMES_SILVER, &CATNAMES_WHITE]),
-    (638, &[&DOGNAMES_LABRADOR, &DOGNAMES_PITBULL, &DOGNAMES_BEAGLE, &DOGNAMES_CORGI, &DOGNAMES_DALMATION, &DOGNAMES_HUSKY]),
-    (656, &[&BUNNYNAMES_WHITE, &BUNNYNAMES_ANGORA, &BUNNYNAMES_DUTCH, &BUNNYNAMES_FLEMISH, &BUNNYNAMES_LOP, &BUNNYNAMES_SILVER]),
+    (
+        637,
+        &[
+            &CATNAMES_SIAMESE,
+            &CATNAMES_BLACK,
+            &CATNAMES_ORANGETABBY,
+            &CATNAMES_RUSSIANBLUE,
+            &CATNAMES_SILVER,
+            &CATNAMES_WHITE,
+        ],
+    ),
+    (
+        638,
+        &[
+            &DOGNAMES_LABRADOR,
+            &DOGNAMES_PITBULL,
+            &DOGNAMES_BEAGLE,
+            &DOGNAMES_CORGI,
+            &DOGNAMES_DALMATION,
+            &DOGNAMES_HUSKY,
+        ],
+    ),
+    (
+        656,
+        &[
+            &BUNNYNAMES_WHITE,
+            &BUNNYNAMES_ANGORA,
+            &BUNNYNAMES_DUTCH,
+            &BUNNYNAMES_FLEMISH,
+            &BUNNYNAMES_LOP,
+            &BUNNYNAMES_SILVER,
+        ],
+    ),
 ];
 
 /// The names a type may be given, or an empty slice if it is not the kind of NPC that has one.
@@ -514,4 +1106,3 @@ mod tests {
         );
     }
 }
-

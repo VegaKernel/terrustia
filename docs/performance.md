@@ -153,6 +153,44 @@ Two rules fall out of that arrangement:
 - **Progress packets.** Pillar shields, invasion progress and the Moon Lord countdown are
   recomputed every tick and almost never change, so each is compared against what went out last.
 
+## The outbound queue, which was a tenth of the size it needed to be
+
+Each connection has a bounded queue of frames waiting to be written, and a client whose queue
+fills is removed — the assumption being that anything that far behind has stopped reading.
+
+It was a flat 512, chosen against "the initial world burst is around forty section packets". That
+counted the sections and nothing else. The burst a joining player is actually sent is:
+
+- around 39 sections,
+- one frame per item on the ground, up to 400,
+- one per live NPC, up to 200,
+- for every *other* player already in the world: their presence frames, **and one frame per
+  relayed inventory slot**, because equipment sent before the newcomer arrived has to be replayed
+  for them. That is roughly two hundred frames per player.
+
+So the burst scales with how busy the server is, and on a populated world it passes 512 easily.
+The failure is not a slow client: it is the *newcomer* being dropped, mid-load, with no message,
+intermittently, and looking exactly like a network problem at their end.
+
+The depth is now `1024 + 256 × max_players`, sized from the config rather than guessed. The real
+bound is memory rather than count — the sections dominate at tens of kilobytes each while the rest
+are tens of bytes — but a count is what a channel takes.
+
+## A section that failed to encode was lost for good
+
+`send_section` recorded a section as delivered *before* encoding it, using the return of
+`sent_sections.insert`. If the encode then failed, the section was marked sent anyway, and every
+re-request the client made was dropped by that same dedupe.
+
+The symptom is a 200×150 hole of untextured sky that never fills in however many times the player
+walks back through it, and the only trace is one `debug!` line. It is reachable: a compressed
+section over 65535 bytes cannot be framed, and because this server batches runs more strictly than
+the game does, its sections are systematically larger than vanilla's for the same world.
+
+Membership is now checked first and claimed only once the bytes exist, so a failure retries. The
+log line was also raised to `warn!`, since the symptom is missing world rather than anything that
+looks like an error.
+
 ## Memory
 
 `examples/memreport`, on a 4200×1200 world:
@@ -189,14 +227,20 @@ never been the constraint and this is the number that says so.
 
 ## Panic safety
 
-A server that crashes is worse than one that stalls. Outside tests there are **three**
-`unwrap`/`expect` calls in the whole crate, each on a proven invariant and each carrying a
-message that says which:
+A server that crashes is worse than one that stalls — and worse here than elsewhere, because the
+game is a single actor task with no `catch_unwind` and the shutdown save runs *inside* it. A panic
+does not degrade this server; it loses the world back to the last autosave.
 
-- parsing the built-in default listen address
-- a buff-slot search whose loop cannot exit without a slot
-- a boss routine that has just checked its target
+Outside tests there are a small number of `unwrap`/`expect` calls, each on a proven invariant and
+each carrying a message saying which: parsing the built-in default listen address, a buff-slot
+search whose loop cannot exit without a slot, a boss routine that has just checked its target,
+reading a fixed-width field out of a slice already length-checked, and the worldgen layout's
+best-candidate search.
 
-Everything else that can fail returns a `Result` and is logged. The fuzzer
-(`examples/fuzz`) throws twenty thousand malformed packets at a running server and checks it is
-still answering afterwards.
+**The count is pinned by `tests/panic_budget.rs` rather than stated here.** This paragraph used to
+say "three", and named three, when there were seven — nobody had lied, the sentence was simply
+written once and never revisited. A number in prose has nothing keeping it true; a failing test
+does. Adding a panic site is now a deliberate act with a test to update.
+
+Everything else that can fail returns a `Result` and is logged. The fuzzer (`examples/fuzz`) throws
+twenty thousand malformed packets at a running server and checks it is still answering afterwards.

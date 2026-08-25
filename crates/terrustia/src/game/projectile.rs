@@ -318,8 +318,24 @@ fn spear(projectile: &mut Projectile, tiles: &impl TileView) -> Outcome {
 #[derive(Debug)]
 pub struct ProjectileStore {
     slots: Vec<Option<Projectile>>,
-    /// Incremented per launch, so a reused slot carries a fresh generation.
-    next_generation: u16,
+    /// The generation the projectile most recently in each slot carried.
+    ///
+    /// Per slot, as the game keeps it: `Projectile.NewProjectile` builds its key from
+    /// `++slotGenerations[num]`, indexed by the slot being taken. One counter shared by every slot
+    /// — which this used to be — repeats a value after 16384 launches *anywhere*, where per slot it
+    /// takes 16384 reuses *of that slot*. On a busy server with a thousand slots in play that is
+    /// three orders of magnitude sooner, and the whole point of the generation is that a kill
+    /// packet arriving a moment late fails to match rather than destroying a bystander.
+    ///
+    /// No guard against zero here, unlike the NPC store: the game does not have one either, and
+    /// nothing asserts on a projectile generation of nought.
+    slot_generations: Vec<u16>,
+    /// What the world's difficulty multiplies a hostile shot's damage by.
+    ///
+    /// Held here for the same reason the NPC store holds its scaling: one choke point that no
+    /// call site can forget. The game keeps it on the projectile itself, set from
+    /// `HostileProjectileDamageMultiplier` when it is created.
+    hostile_damage_scale: f32,
 }
 
 impl Default for ProjectileStore {
@@ -332,8 +348,14 @@ impl ProjectileStore {
     pub fn new() -> Self {
         Self {
             slots: (0..MAX_PROJECTILES).map(|_| None).collect(),
-            next_generation: 1,
+            slot_generations: vec![0; MAX_PROJECTILES],
+            hostile_damage_scale: 1.0,
         }
+    }
+
+    /// Tell the store how hard the world hits. Applied to everything launched afterwards.
+    pub fn set_hostile_damage_scale(&mut self, scale: f32) {
+        self.hostile_damage_scale = scale;
     }
 
     /// Launch one, returning its slot.
@@ -345,14 +367,31 @@ impl ProjectileStore {
         damage: i32,
         time_left: i32,
     ) -> Option<u16> {
-        let stats = projectile_stats(projectile_type)?;
+        // Loud, because the symptom of a silent miss here is a boss that fights with no attacks
+        // and reports nothing wrong. Thirty-two types were absent from the stats table and every
+        // shot of theirs was dropped on this line without a word.
+        let Some(stats) = projectile_stats(projectile_type) else {
+            tracing::warn!(
+                projectile_type,
+                "no stats for this projectile; the shot was not fired"
+            );
+            return None;
+        };
         let index = self.slots.iter().position(Option::is_none)?;
-        self.next_generation = self.next_generation.wrapping_add(1) & 0x3FFF;
+        // Fourteen bits on the wire, so the counter is kept inside them rather than truncated at
+        // the point of packing.
+        let generation = match self.slot_generations.get_mut(index) {
+            Some(slot) => {
+                *slot = slot.wrapping_add(1) & 0x3FFF;
+                *slot
+            }
+            None => 1,
+        };
         let projectile = Projectile {
             key: ProjectileKey {
                 owner: SERVER_OWNER,
                 index: index as u16,
-                generation: self.next_generation,
+                generation,
             },
             projectile_type,
             // The aim point is the centre; the entity is placed by its corner.
@@ -361,7 +400,13 @@ impl ProjectileStore {
                 position.1 - stats.height as f32 / 2.0,
             ),
             velocity,
-            damage,
+            // Only what hurts players scales; a trap's harmless flame head and anything friendly
+            // keep the number they were given.
+            damage: if stats.hostile {
+                (damage as f32 * self.hostile_damage_scale) as i32
+            } else {
+                damage
+            },
             knockback: stats.knockback,
             ai: [0.0; 3],
             local_ai: [0.0; 2],
@@ -450,6 +495,57 @@ mod tests {
             a.generation, b.generation,
             "but a stale kill packet must not match it"
         );
+    }
+
+    /// The generation counts reuses of a slot, not launches anywhere.
+    ///
+    /// The game builds its key from `++slotGenerations[num]`, indexed by the slot. One counter for
+    /// the whole store repeats a value after 16384 launches *anywhere*, where per slot it takes
+    /// 16384 reuses *of that slot* — and the generation exists precisely so that a late kill packet
+    /// fails to match rather than destroying whatever took the slot since.
+    #[test]
+    fn projectile_generation_counts_reuses_of_a_slot() {
+        let mut store = ProjectileStore::new();
+        let first = store.launch(38, (0.0, 0.0), (6.0, 0.0), 15, 0).unwrap();
+        let second = store.launch(38, (0.0, 0.0), (6.0, 0.0), 15, 0).unwrap();
+        assert_ne!(first, second, "two slots");
+        assert_eq!(store.get(first).unwrap().key.generation, 1);
+        assert_eq!(
+            store.get(second).unwrap().key.generation,
+            1,
+            "a second slot's first occupant is still its first"
+        );
+
+        store.remove(first);
+        let again = store.launch(38, (0.0, 0.0), (6.0, 0.0), 15, 0).unwrap();
+        assert_eq!(again, first, "the freed slot is taken back");
+        assert_eq!(store.get(again).unwrap().key.generation, 2);
+        assert_eq!(
+            store.get(second).unwrap().key.generation,
+            1,
+            "the untouched slot should not have moved"
+        );
+    }
+
+    /// The generation stays inside the fourteen bits the wire gives it.
+    ///
+    /// Packing masks with `0x3FFF`, so a counter allowed past that silently starts repeating early
+    /// — the value 16385 packs identically to 1, and a stale kill packet matches a live projectile.
+    #[test]
+    fn projectile_generation_stays_inside_its_fourteen_bits() {
+        let mut store = ProjectileStore::new();
+        for _ in 0..40_000 {
+            let index = store.launch(38, (0.0, 0.0), (6.0, 0.0), 15, 0).unwrap();
+            let key = store.get(index).unwrap().key;
+            assert!(
+                key.generation <= 0x3FFF,
+                "generation {} does not fit the wire",
+                key.generation
+            );
+            // What is packed is what comes back.
+            assert_eq!(ProjectileKey::unpack(key.pack()), key);
+            store.remove(index);
+        }
     }
 
     #[test]

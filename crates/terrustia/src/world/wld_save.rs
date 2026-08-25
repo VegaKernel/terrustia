@@ -20,7 +20,10 @@ use std::path::Path;
 
 use terrustia_proto::{Tile, Writer, section::write_tile_with, tile_sets::allows_batching};
 
-use super::{World, wld::{Scenery, WldError}};
+use super::{
+    World,
+    wld::{Scenery, WldError},
+};
 
 type Result<T> = std::result::Result<T, WldError>;
 
@@ -120,8 +123,9 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     // Because that section can change length, the pointers cannot be a single shift any more —
     // each is taken from where its section actually lands.
     for (index, section) in preserved.trailing_sections.iter().enumerate() {
-        pointers[4 + index] =
-            i32::try_from(w.len()).map_err(|_| WldError::SaveTooLarge { bytes: w.len() as i64 })?;
+        pointers[4 + index] = i32::try_from(w.len()).map_err(|_| WldError::SaveTooLarge {
+            bytes: w.len() as i64,
+        })?;
         match index {
             // Rewritten only when the load understood the whole section. Rewriting one we read
             // partially would write back what we managed to decode and silently drop the rest —
@@ -1159,7 +1163,9 @@ mod tests {
             );
         }
         assert!(
-            !path.with_extension(format!("wld.bak{}", BACKUPS_KEPT + 1)).exists(),
+            !path
+                .with_extension(format!("wld.bak{}", BACKUPS_KEPT + 1))
+                .exists(),
             "the chain must be bounded, or a world eats its own disk"
         );
         // And nothing is left half-written.

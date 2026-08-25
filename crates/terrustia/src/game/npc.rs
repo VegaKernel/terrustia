@@ -20,7 +20,31 @@ pub const MAX_FALL_SPEED: f32 = 10.0;
 pub const TILE: f32 = 16.0;
 
 /// Ticks an ordinary enemy survives with no player nearby before it despawns.
-pub const DEFAULT_TIME_LEFT: i32 = 60 * 60 * 12;
+///
+/// The game's `NPC.activeTime`, which is 750 — twelve and a half seconds. This was `60 * 60 * 12`,
+/// a twelve-minute grace that is fifty-seven times too long, and it showed: a five-minute capture
+/// caught a flying enemy that had left through the top of the world and was still being simulated
+/// and broadcast eight thousand pixels above it, because nothing was going to reap it for another
+/// seven minutes. The everyday cost is subtler and larger — every creature that wanders away from
+/// a player holds its slot and its share of the sync budget for twelve minutes instead of twelve
+/// seconds.
+pub const DEFAULT_TIME_LEFT: i32 = 750;
+
+/// What one full NPC sync costs the rate-limiting bucket, from `NPC.netSpamTicksPerPacket`.
+///
+/// The bucket drains by one a tick, so thirty is one packet every half second, sustained.
+pub const NET_SPAM_PER_PACKET: i32 = 30;
+
+/// The same for a boss, from `NPC.netSpamTicksPerPacketForBosses` — six times as often, because a
+/// boss fight is the one place a client cannot afford to be guessing where something is.
+pub const NET_SPAM_PER_PACKET_BOSS: i32 = 5;
+
+/// How many packets may be sent back to back before the bucket runs dry, from
+/// `NPC.netSpamPacketLimit`.
+pub const NET_SPAM_PACKET_LIMIT: i32 = 3;
+
+/// Ticks between rounds of proximity streaming, from `Main.npcStreamSpeed`.
+pub const NPC_STREAM_SPEED: u8 = 30;
 
 /// Anything the movement code needs to know about the world.
 ///
@@ -117,6 +141,20 @@ pub struct Npc {
     pub was_hurt: bool,
     /// Set whenever the state changed enough to be worth telling clients about.
     pub dirty: bool,
+    /// The game's `netSpam`: a token bucket that decides how often this NPC may be sent in full.
+    ///
+    /// A sync costs [`NET_SPAM_PER_PACKET`] (or [`NET_SPAM_PER_PACKET_BOSS`]) and the bucket drains
+    /// by one a tick, so the sustained rate is one packet per thirty ticks — twice a second for a
+    /// boss, once every half second for anything else — with a burst of three allowed on top.
+    ///
+    /// Without it every NPC that moves is sent at whatever rate the sync loop runs, which for this
+    /// server was ten a second: twenty times the game's sustained rate, and measured at seven times
+    /// its bandwidth over a five-minute capture.
+    pub net_spam: i32,
+    /// Ticks counted towards the next round of proximity streaming.
+    pub net_stream: u8,
+    /// What this one was scaled by, kept so a transform can be scaled the same way.
+    scaling: Scaling,
     /// Tile a town NPC calls home, if it has been given a house.
     pub home: Option<(i32, i32)>,
     /// Whether gravity is off this tick.
@@ -212,6 +250,7 @@ impl Npc {
             rotation: 0.0,
             was_hurt: false,
             dirty: true,
+            scaling: Scaling::default(),
             no_gravity: stats.no_gravity,
             no_tile_collide: stats.no_tile_collide,
             home: None,
@@ -221,6 +260,8 @@ impl Npc {
             from_statue: false,
             buffs: super::buffs::Buffs::new(),
             buffs_dirty: false,
+            net_spam: 0,
+            net_stream: 0,
             given_name: String::new(),
             extra_value: 0,
             town_variation: 0,
@@ -280,6 +321,44 @@ impl Npc {
         self.local_ai = [0.0; 4];
         self.was_hurt = false;
         self.dirty = true;
+        // The table's raw values have just been written back over the scaled ones, so the world's
+        // difficulty has to be applied again. `NPC.Transform` goes through `SetDefaults`, which
+        // calls `ScaleStats` for exactly this reason — without it a slime that changes form on an
+        // expert world quietly reverts to classic strength.
+        self.scale_stats(self.scaling);
+    }
+
+    /// Apply the world's difficulty and player count, the way `NPC.ScaleStats` does.
+    ///
+    /// Called at spawn and again on any transform, because [`Self::become_type`] writes the raw
+    /// table values back over the scaled ones. Without it an expert world fielded classic enemies
+    /// and a crowded server fought the same boss a lone player would.
+    pub fn scale_stats(&mut self, scaling: Scaling) {
+        self.scaling = scaling;
+        use terrustia_proto::difficulty;
+
+        let life = difficulty::life_multiplier(scaling.difficulty);
+        let damage = difficulty::damage_multiplier(scaling.difficulty);
+        let money = difficulty::money_multiplier(scaling.difficulty);
+
+        self.life_max = (self.life_max as f32 * life) as i32;
+        self.stats.damage = (self.stats.damage as f32 * damage) as i32;
+        self.stats.value *= money;
+
+        // Bosses, and only bosses, also scale with how many people are fighting them. The game
+        // lists them out rather than deriving it from a `boss` flag, because several boss *parts*
+        // scale and a few flagged types do not.
+        if BOSS_SCALES_WITH_PLAYERS
+            .iter()
+            .any(|range| range.contains(&self.npc_type))
+        {
+            let balance = difficulty::balance(scaling.players);
+            self.life_max = (f64::from(self.life_max) * f64::from(balance)).round() as i32;
+        }
+
+        // The game's own floor, so nothing ends up unkillably cheap on journey.
+        self.life_max = self.life_max.max(6);
+        self.life = self.life_max;
     }
 
     pub fn is_alive(&self) -> bool {
@@ -483,12 +562,77 @@ pub fn step_physics(npc: &mut Npc, tiles: &impl TileView) {
     move_vertical(npc, tiles);
 }
 
+/// The types whose life grows with the number of players, from `NPC.ScaleStats_ByPlayerCount`.
+///
+/// Written as ranges because that is how the game writes it, and because the boss *parts* — the
+/// Destroyer's body, Golem's fists, the lunar pillars — have to scale with their head or a fight
+/// ends up with a healthy boss and paper limbs.
+const BOSS_SCALES_WITH_PLAYERS: &[std::ops::RangeInclusive<u16>] = &[
+    4..=4,     // Eye of Cthulhu
+    13..=15,   // Eater of Worlds, all segments
+    35..=36,   // Skeletron and its hands
+    50..=50,   // King Slime
+    113..=116, // Wall of Flesh and its eyes
+    125..=126, // The Twins
+    127..=131, // Skeletron Prime and its limbs
+    134..=136, // The Destroyer
+    139..=139,
+    222..=222, // Queen Bee
+    245..=249, // Golem
+    262..=264, // Plantera
+    266..=267, // Brain of Cthulhu and its creepers
+    370..=370, // Duke Fishron
+    396..=398, // Moon Lord
+    439..=440, // Lunatic Cultist
+    454..=459, // the lunar pillars
+    471..=472, // Martian Saucer
+    523..=523,
+    551..=551, // Betsy
+    636..=636, // Empress of Light
+    657..=660, // Queen Slime
+    668..=668, // Deerclops
+];
+
 /// The fixed table of NPC slots.
 #[derive(Debug)]
 pub struct NpcStore {
     slots: Vec<Option<Npc>>,
-    /// Incremented per spawn so reused slots get a fresh generation.
-    next_generation: u8,
+    /// The generation the NPC most recently in each slot carried.
+    ///
+    /// Per slot, not one counter for the whole store, because that is what the game does:
+    /// `NewNPCInstanceInSlot` reads `Main.npc[slot].generation`, adds one, and skips zero. The
+    /// number exists so a client can tell "slot 5, the one I was told about" from "slot 5, someone
+    /// else now" — `NPC.Equals` compares slot *and* generation — so what matters is how long it
+    /// takes to come back around to a value a client still remembers.
+    ///
+    /// A single global counter, which this used to be, wraps after 256 spawns *anywhere*: minutes
+    /// on a busy server, and every stale reference in play becomes ambiguous at once. Per slot it
+    /// takes 256 reuses *of that slot*.
+    last_generation: Vec<u8>,
+    /// The world's difficulty and how many people are in it.
+    ///
+    /// Kept here rather than passed to every `spawn` call because there are eighteen of those and
+    /// one of them forgetting is exactly how enemies came to be unscaled in the first place. One
+    /// choke point cannot be half-applied.
+    scaling: Scaling,
+}
+
+/// What every newly spawned NPC is scaled by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scaling {
+    /// `Main.Difficulty`: 1 classic, 2 expert, 3 master, 0.5 journey.
+    pub difficulty: f32,
+    /// Players currently in the world, for the boss life curve.
+    pub players: u32,
+}
+
+impl Default for Scaling {
+    fn default() -> Self {
+        Self {
+            difficulty: 1.0,
+            players: 1,
+        }
+    }
 }
 
 impl Default for NpcStore {
@@ -501,8 +645,14 @@ impl NpcStore {
     pub fn new() -> Self {
         Self {
             slots: (0..MAX_NPCS).map(|_| None).collect(),
-            next_generation: 0,
+            last_generation: vec![0; MAX_NPCS],
+            scaling: Scaling::default(),
         }
+    }
+
+    /// Tell the store what the world is like. Applied to everything spawned afterwards.
+    pub fn set_scaling(&mut self, scaling: Scaling) {
+        self.scaling = scaling;
     }
 
     /// Spawn a worm: a head, a run of body segments and a tail, each linked to the one ahead.
@@ -534,10 +684,28 @@ impl NpcStore {
 
     pub fn spawn(&mut self, npc_type: u16, position: (f32, f32)) -> Option<u8> {
         let index = self.slots.iter().position(Option::is_none)?;
-        self.next_generation = self.next_generation.wrapping_add(1);
-        let npc = Npc::new(npc_type, position, self.next_generation)?;
+        let generation = self.next_generation_for(index);
+        let mut npc = Npc::new(npc_type, position, generation)?;
+        npc.scale_stats(self.scaling);
         self.slots[index] = Some(npc);
         u8::try_from(index).ok()
+    }
+
+    /// The generation for the next NPC to occupy a slot.
+    ///
+    /// One more than whatever was there before, skipping zero on the way round. Zero is the game's
+    /// "no generation": a real client asserts on receiving it
+    /// (`Invariant.Assert(generation != 0)`), so a server that ever hands one out is a server that
+    /// eventually breaks a client outright rather than merely confusing it.
+    fn next_generation_for(&mut self, index: usize) -> u8 {
+        let Some(slot) = self.last_generation.get_mut(index) else {
+            return 1;
+        };
+        *slot = slot.wrapping_add(1);
+        if *slot == 0 {
+            *slot = 1;
+        }
+        *slot
     }
 
     pub fn get(&self, index: u8) -> Option<&Npc> {
@@ -588,6 +756,95 @@ impl NpcStore {
 }
 
 #[cfg(test)]
+mod scaling_tests {
+    use super::*;
+
+    /// A zombie is tougher in expert than in classic, and tougher again in master.
+    ///
+    /// Nothing scaled anything before this: `life_max` came straight off the type table, so an
+    /// expert world fielded classic enemies. The store applies it at spawn so no call site can
+    /// forget.
+    #[test]
+    fn difficulty_reaches_a_spawned_enemy() {
+        const ZOMBIE: u16 = 3;
+
+        let life_at = |game_mode: u8| {
+            let mut store = NpcStore::new();
+            store.set_scaling(Scaling {
+                difficulty: terrustia_proto::difficulty::of_game_mode(game_mode),
+                players: 1,
+            });
+            let index = store.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
+            store.get(index).expect("the zombie").life_max
+        };
+
+        let classic = life_at(0);
+        assert!(classic > 0);
+        assert_eq!(life_at(1), classic * 2, "expert doubles it");
+        assert_eq!(life_at(2), classic * 3, "master triples it");
+        assert!(life_at(3) < classic, "journey is gentler");
+    }
+
+    /// An NPC that changes form keeps the world's difficulty.
+    ///
+    /// Found by auditing the scaling change rather than by a failure: `become_type` writes the raw
+    /// table stats back over the scaled ones, so a transform silently reverted an enemy to classic
+    /// strength on an expert world. The game avoids it by routing `Transform` through
+    /// `SetDefaults`, which scales.
+    #[test]
+    fn a_transformed_npc_keeps_its_scaling() {
+        const ZOMBIE: u16 = 3;
+        const SKELETON: u16 = 21;
+
+        let mut store = NpcStore::new();
+        store.set_scaling(Scaling {
+            difficulty: 3.0, // master
+            players: 1,
+        });
+        let index = store.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
+
+        let plain_skeleton = terrustia_proto::npc_data::npc_stats(SKELETON)
+            .expect("skeleton stats")
+            .life_max;
+        let npc = store.get_mut(index).expect("the zombie");
+        npc.become_type(SKELETON);
+
+        assert_eq!(
+            npc.life_max,
+            plain_skeleton * 3,
+            "a transform must not drop back to classic strength",
+        );
+    }
+
+    /// A boss grows with the crowd; an ordinary enemy does not.
+    #[test]
+    fn only_bosses_scale_with_player_count() {
+        const ZOMBIE: u16 = 3;
+        const EYE_OF_CTHULHU: u16 = 4;
+
+        let life_at = |npc_type: u16, players: u32| {
+            let mut store = NpcStore::new();
+            store.set_scaling(Scaling {
+                difficulty: 1.0,
+                players,
+            });
+            let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+            store.get(index).expect("the npc").life_max
+        };
+
+        assert_eq!(
+            life_at(ZOMBIE, 1),
+            life_at(ZOMBIE, 8),
+            "a zombie is a zombie however many people are watching",
+        );
+        assert!(
+            life_at(EYE_OF_CTHULHU, 8) > life_at(EYE_OF_CTHULHU, 1),
+            "a boss has to grow, or a full server trivialises every fight",
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -615,6 +872,65 @@ mod tests {
 
     fn zombie_at(x: f32, y: f32) -> Npc {
         Npc::new(3, (x, y), 1).expect("zombie stats")
+    }
+
+    /// An NPC's generation counts reuses of *its slot*, not spawns anywhere.
+    ///
+    /// The number is how a client tells "slot 5, the one I was told about" from "slot 5, somebody
+    /// else now" — `NPC.Equals` compares slot and generation together. A single counter shared by
+    /// every slot, which this store used to keep, comes back around after 256 spawns anywhere on
+    /// the server; per slot it takes 256 reuses of that one slot. Found by watching a real server
+    /// send generation 0 for two fresh NPCs where this one sent 1 and 2.
+    #[test]
+    fn generation_counts_reuses_of_a_slot_rather_than_spawns_anywhere() {
+        let mut store = NpcStore::new();
+
+        // Two different slots, both used for the first time, both generation 1.
+        let a = store.spawn(3, (100.0, 100.0)).unwrap();
+        let b = store.spawn(3, (200.0, 100.0)).unwrap();
+        assert_ne!(a, b, "they should be in different slots");
+        assert_eq!(store.get(a).unwrap().generation, 1);
+        assert_eq!(
+            store.get(b).unwrap().generation,
+            1,
+            "a second slot's first occupant is still its first"
+        );
+
+        // Reuse the first slot: that one advances, and only that one.
+        store.remove(a);
+        let again = store.spawn(3, (100.0, 100.0)).unwrap();
+        assert_eq!(again, a, "the freed slot should be taken first");
+        assert_eq!(store.get(again).unwrap().generation, 2);
+        assert_eq!(
+            store.get(b).unwrap().generation,
+            1,
+            "the untouched slot should not have moved"
+        );
+    }
+
+    /// Generation never comes out as zero, however many times a slot turns over.
+    ///
+    /// Zero is the game's "no generation", and a real client asserts outright on receiving one
+    /// (`Invariant.Assert(generation != 0, ...)`). Wrapping straight through it — which
+    /// `wrapping_add` alone does — is a server that works perfectly for 255 reuses and then breaks
+    /// a client.
+    #[test]
+    fn generation_skips_zero_on_the_way_round() {
+        let mut store = NpcStore::new();
+        let mut seen_wrap = false;
+        for turn in 0..600 {
+            let index = store.spawn(3, (100.0, 100.0)).expect("a slot");
+            let generation = store.get(index).unwrap().generation;
+            assert_ne!(generation, 0, "generation went to zero on turn {turn}");
+            if turn > 0 && generation == 1 {
+                seen_wrap = true;
+            }
+            store.remove(index);
+        }
+        assert!(
+            seen_wrap,
+            "600 reuses of one slot should have wrapped at least once"
+        );
     }
 
     #[test]

@@ -129,7 +129,10 @@ fn main() -> ExitCode {
 
     println!("file        {} bytes", bytes_len);
     println!();
-    println!("serialise   {:>8} µs   (needs the world; must stay on the tick)", s);
+    println!(
+        "serialise   {:>8} µs   (needs the world; must stay on the tick)",
+        s
+    );
     println!("write       {:>8} µs   (can move off the tick)", w);
     println!("total       {:>8} µs", s + w);
     println!();

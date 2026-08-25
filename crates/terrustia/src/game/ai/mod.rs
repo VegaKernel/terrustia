@@ -982,7 +982,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let open = (3usize.saturating_sub(parts) + world.sockets_open).min(3);
             let out = boss::moon_lord::core(npc, world, parts, open);
             effects.spawn.extend(out.spawn);
-            effects.expired = out.spent;
+            // A *death*, not an expiry. The core cannot be killed by damage — it comes apart over
+            // ten seconds once its three eyes are broken, and that ending is the kill. Routing it
+            // through `expired` removed it quietly: no luminite, and `downed_moon_lord` never set,
+            // so the world did not record that the game had been finished.
+            effects.died = out.spent;
         }
         78 | 79 => {
             let out = boss::moon_lord::eye_socket(npc, world, world.parent, rng);

@@ -405,7 +405,10 @@ mod tests {
         let l = layout(1);
         assert!(l.surface < l.rock, "dirt is above stone");
         assert!(l.rock < l.underworld, "stone is above the underworld");
-        assert!(l.underworld < l.height, "the underworld is inside the world");
+        assert!(
+            l.underworld < l.height,
+            "the underworld is inside the world"
+        );
     }
 
     /// The temple sits under the jungle and above the underworld.

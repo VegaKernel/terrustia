@@ -6,6 +6,7 @@
 //! Copyright (C) 2026 Brooklyn Halmstad.
 //! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
 
+pub mod admin;
 pub mod config;
 pub mod game;
 pub mod net;

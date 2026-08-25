@@ -29,6 +29,7 @@ pub mod layout;
 pub mod manifest;
 pub mod passes;
 pub mod rand;
+pub mod scenery;
 pub mod structures;
 pub mod terrain;
 pub mod tiles;
@@ -37,6 +38,7 @@ pub use passes::compare_against;
 
 use layout::{Evil, Layout};
 use rand::UnifiedRandom;
+use tiles::{COPPER, GOLD, IRON, SILVER};
 
 use super::World;
 
@@ -74,7 +76,21 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         *byte = rand.next_max(256) as u8;
     }
     world.crimson = plan.evil == Evil::Crimson;
+    // What `structures::ores` actually lays down. The hardmode three stay unchosen at -1 until
+    // the first three altars are broken.
+    world.ore_tiers = [
+        COPPER as i16,
+        IRON as i16,
+        SILVER as i16,
+        GOLD as i16,
+        -1,
+        -1,
+        -1,
+    ];
     world.seed_text = seed.to_string();
+    // The sky and the treetops. Rolled here, before the terrain passes, because the tree tops are
+    // derived from the backdrops and both go out in packet 7 whatever the tiles turn out like.
+    scenery::choose(&mut world, &mut rand);
     world.surface = plan.surface as i16;
     world.rock_layer = plan.rock as i16;
     world.dungeon_x = Some(plan.dungeon_x);
@@ -105,6 +121,8 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     terrain::clear_spawn(&mut world, plan.spawn_x, spawn_y);
     world.dungeon_y = Some(heights[plan.dungeon_x.clamp(0, width - 1) as usize]);
 
+    let chests = chests.saturating_sub(drop_orphaned_chests(&mut world));
+
     let built = Built {
         orbs,
         altars,
@@ -113,6 +131,38 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         hive,
     };
     (world, built)
+}
+
+/// Drop chest records whose tiles are no longer there, and say how many went.
+///
+/// Chests are placed part-way through generation and several later passes — greenery, cobwebs and
+/// the spawn pocket — write tiles over the top of them. A record left pointing at cleared ground
+/// is not harmless: Terraria loads it, then deletes it and its contents on its own first save, so
+/// the loot disappears some time after the world was handed over rather than here.
+///
+/// This is the same footprint check the game runs when it saves (`WorldFile.cs:1620`): all four
+/// tiles in bounds, active, and a container.
+fn drop_orphaned_chests(world: &mut World) -> usize {
+    let mut dropped = 0;
+    for slot in 0..world.chests.len() {
+        let Some(chest) = world.chests[slot].as_ref() else {
+            continue;
+        };
+        let (x, y) = (i32::from(chest.x), i32::from(chest.y));
+        let whole = (0..2).all(|dx| {
+            (0..2).all(|dy| {
+                world.in_bounds(x + dx, y + dy) && {
+                    let tile = world.tile(x + dx, y + dy);
+                    tile.is_active() && tile.block == tiles::CHEST
+                }
+            })
+        });
+        if !whole {
+            world.chests[slot] = None;
+            dropped += 1;
+        }
+    }
+    dropped
 }
 
 #[cfg(test)]
@@ -153,7 +203,9 @@ mod tests {
 
         let has = |block: u16| {
             (0..world.width()).step_by(3).any(|x| {
-                (0..world.height()).step_by(3).any(|y| world.tile(x, y).block == block)
+                (0..world.height())
+                    .step_by(3)
+                    .any(|y| world.tile(x, y).block == block)
             })
         };
         assert!(has(tiles::HELLSTONE), "no hellstone: no Wall of Flesh");
@@ -253,6 +305,211 @@ mod tests {
         assert_eq!(differing, 0, "{differing} tiles changed across a save");
     }
 
+    /// Every header field survives a save.
+    ///
+    /// The tile comparison above cannot see a header field the writer drops, and several were
+    /// being dropped in silence — the dungeon's y, the seed text, the hardmode ore tiers — because
+    /// nothing ever compared them. Each piece was already in place: the generator recorded them,
+    /// the parser read them back, and only the writer threw them away.
+    ///
+    /// This compares the whole header at once and reports every difference in one run, rather than
+    /// stopping at the first, so the next field to go missing fails a test instead of a
+    /// playthrough.
+    #[test]
+    fn every_header_field_survives_a_save() {
+        for &(width, height) in &[(1200i32, 600i32), (4200, 1200)] {
+            check_header_round_trip(width, height);
+        }
+    }
+
+    /// One world's worth of the check above.
+    ///
+    /// Split out and run at more than one size deliberately: the header holds variable-length runs
+    /// whose lengths depend on the world, so a writer and reader that disagree about one of them
+    /// can still agree at one size and not another.
+    fn check_header_round_trip(width: i32, height: i32) {
+        use crate::world::{wld, wld_save};
+        let (world, _) = build(width, height, "header roundtrip", 9);
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+
+        let mut wrong: Vec<String> = Vec::new();
+        macro_rules! same {
+            ($($field:ident),+ $(,)?) => {$(
+                if world.$field != back.$field {
+                    wrong.push(format!(
+                        "{}: wrote {:?}, read back {:?}",
+                        stringify!($field),
+                        world.$field,
+                        back.$field,
+                    ));
+                }
+            )+};
+        }
+
+        same!(
+            spawn_x,
+            spawn_y,
+            surface,
+            rock_layer,
+            name,
+            id,
+            unique_id,
+            time,
+            day_time,
+            blood_moon,
+            eclipse,
+            moon_phase,
+            raining,
+            rain_time,
+            max_rain,
+            sandstorm,
+            sandstorm_time,
+            sandstorm_severity,
+            sandstorm_intended_severity,
+            dungeon_x,
+            dungeon_y,
+            pumpkin_moon,
+            snow_moon,
+            wind,
+            crimson,
+            ore_tiers,
+            progress,
+            game_mode,
+            world_gen_version,
+            seed_text,
+            moon_type,
+            tree_x,
+            tree_style,
+            cave_back_x,
+            cave_back_style,
+            ice_back_style,
+            jungle_back_style,
+            hell_back_style,
+            backgrounds,
+            tree_tops,
+            num_clouds,
+        );
+
+        assert!(
+            wrong.is_empty(),
+            "{width}x{height}: {} header field(s) changed across a save:\n  {}",
+            wrong.len(),
+            wrong.join("\n  "),
+        );
+    }
+
+    /// Every chest record has a chest under it.
+    ///
+    /// A record whose tiles were carved away by a later pass survives generation, a save and a
+    /// load, and is only deleted when Terraria next saves the world — taking the loot with it,
+    /// long after the world looked fine.
+    ///
+    /// This sweeps several sizes and seeds deliberately. A single world is not enough: of the
+    /// twenty-one checked when this was written, seventeen had between one and four orphans and
+    /// four had none, so one unlucky choice of seed makes the check pass while the bug is
+    /// untouched.
+    #[test]
+    fn every_chest_record_has_tiles_under_it() {
+        for &(width, height) in &[(1200i32, 600i32), (4200, 1200)] {
+            for seed in 1..6u64 {
+                let (world, _) = build(width, height, "chest footprints", seed);
+                let orphans: Vec<_> = world
+                    .chests
+                    .iter()
+                    .flatten()
+                    .filter(|chest| {
+                        let (x, y) = (i32::from(chest.x), i32::from(chest.y));
+                        !(0..2).all(|dx| {
+                            (0..2).all(|dy| {
+                                world.in_bounds(x + dx, y + dy) && {
+                                    let tile = world.tile(x + dx, y + dy);
+                                    tile.is_active() && tile.block == tiles::CHEST
+                                }
+                            })
+                        })
+                    })
+                    .map(|chest| (chest.x, chest.y))
+                    .collect();
+                assert!(
+                    orphans.is_empty(),
+                    "{width}x{height} seed {seed}: {} chest record(s) point at ground with no \
+                     chest on it: {orphans:?}",
+                    orphans.len(),
+                );
+                assert!(
+                    world.chests.iter().flatten().count() > 0,
+                    "{width}x{height} seed {seed}: the sweep took every chest",
+                );
+            }
+        }
+    }
+
+    /// The townsfolk survive a save, with their names and their houses.
+    ///
+    /// The world file's NPC section was carried through as an opaque blob in both directions, so a
+    /// resident was a session-long guest: nobody who moved in was ever written down, and a real
+    /// Terraria world's existing residents were invisible to the server entirely.
+    #[test]
+    fn the_townsfolk_survive_a_save() {
+        use crate::world::{objects::TownNpc, wld, wld_save};
+
+        let (mut world, _) = build(1200, 600, "townsfolk", 3);
+        world.town_npcs = vec![
+            TownNpc {
+                net_id: 22,
+                name: "Andrew".into(),
+                position: (1234.0, 567.0),
+                homeless: false,
+                home: (77, 88),
+                variation: 1,
+                homeless_despawn: false,
+            },
+            TownNpc {
+                net_id: 17,
+                name: "Wilhelmina".into(),
+                position: (99.5, 12.25),
+                homeless: true,
+                home: (0, 0),
+                variation: 0,
+                homeless_despawn: true,
+            },
+        ];
+        world.shimmered_town_npcs = vec![22];
+
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+
+        assert_eq!(back.town_npcs, world.town_npcs, "the residents changed");
+        assert_eq!(back.shimmered_town_npcs, world.shimmered_town_npcs);
+    }
+
+    /// Banner kill counts survive a save.
+    ///
+    /// Nothing counted kills at all before this, and the save wrote two zeroes with a comment
+    /// saying so — meaning a hundred zombies killed before a restart counted for nothing after it.
+    #[test]
+    fn banner_kills_survive_a_save() {
+        use crate::world::{wld, wld_save};
+
+        let (mut world, _) = build(1200, 600, "banners", 4);
+        world.banner_kills.insert(7, 49);
+        world.banner_kills.insert(120, 1);
+        world.banner_kills.insert(292, 1234);
+
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+
+        assert_eq!(back.banner_kills.get(&7), Some(&49));
+        assert_eq!(back.banner_kills.get(&120), Some(&1));
+        assert_eq!(back.banner_kills.get(&292), Some(&1234));
+        assert_eq!(
+            back.banner_kills.get(&8),
+            None,
+            "untouched banners stay absent"
+        );
+    }
+
     /// Chests hold something. An empty chest is worse than no chest.
     #[test]
     fn chests_are_not_empty() {
@@ -265,7 +522,12 @@ mod tests {
             .count();
         let total = world.chests.iter().flatten().count();
         assert!(total > 0);
-        assert_eq!(filled, total, "{} of {total} chests are empty", total - filled);
+        assert_eq!(
+            filled,
+            total,
+            "{} of {total} chests are empty",
+            total - filled
+        );
     }
 
     /// The world's own flags agree with what was built, since clients and saves read those

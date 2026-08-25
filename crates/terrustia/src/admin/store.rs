@@ -14,7 +14,7 @@ use std::{
 
 use tracing::{info, warn};
 
-use super::{Account, ban::now, group::defaults, Ban, BanKind, Group, Permission};
+use super::{Account, Ban, BanKind, Group, Permission, ban::now, group::defaults};
 
 /// Everything the server knows about who may do what.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -268,7 +268,9 @@ mod tests {
     #[test]
     fn registering_claims_the_server() {
         let mut admin = Admin::load(&temp("claim.toml"));
-        admin.register("brook", "a good password", "owner").expect("register");
+        admin
+            .register("brook", "a good password", "owner")
+            .expect("register");
 
         assert!(!admin.unclaimed());
         assert!(admin.may(0, Permission::Look), "looking is always allowed");
@@ -283,10 +285,15 @@ mod tests {
     #[test]
     fn signing_in_grants_the_group() {
         let mut admin = Admin::load(&temp("signin.toml"));
-        admin.register("brook", "a good password", "owner").expect("register");
+        admin
+            .register("brook", "a good password", "owner")
+            .expect("register");
 
         assert!(!admin.may(3, Permission::Admin), "not until signed in");
-        assert!(!admin.sign_in(3, "brook", "wrong"), "a wrong password fails");
+        assert!(
+            !admin.sign_in(3, "brook", "wrong"),
+            "a wrong password fails"
+        );
         assert!(!admin.may(3, Permission::Admin), "and grants nothing");
 
         assert!(admin.sign_in(3, "brook", "a good password"));
@@ -301,7 +308,9 @@ mod tests {
     #[test]
     fn registration_is_fussy() {
         let mut admin = Admin::load(&temp("register.toml"));
-        admin.register("brook", "long enough", "default").expect("first");
+        admin
+            .register("brook", "long enough", "default")
+            .expect("first");
         assert!(admin.register("BROOK", "long enough", "owner").is_err());
         assert!(admin.register("other", "short", "default").is_err());
     }
@@ -312,13 +321,21 @@ mod tests {
         let mut admin = Admin::load(&temp("bans.toml"));
         admin.ban(BanKind::Uuid, "abc-123", "griefing");
 
-        assert!(admin.ban_for("anyone", "1.2.3.4", Some("abc-123")).is_some());
+        assert!(
+            admin
+                .ban_for("anyone", "1.2.3.4", Some("abc-123"))
+                .is_some()
+        );
         assert!(
             admin.ban_for("anyone", "1.2.3.4", Some("other")).is_none(),
             "a different uuid is a different person",
         );
         assert_eq!(admin.unban("abc-123"), 1);
-        assert!(admin.ban_for("anyone", "1.2.3.4", Some("abc-123")).is_none());
+        assert!(
+            admin
+                .ban_for("anyone", "1.2.3.4", Some("abc-123"))
+                .is_none()
+        );
     }
 
     /// It survives a write and a read, which is the whole point of having a file.
@@ -328,7 +345,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let mut admin = Admin::load(&path);
-            admin.register("brook", "a good password", "owner").expect("register");
+            admin
+                .register("brook", "a good password", "owner")
+                .expect("register");
             admin.ban(BanKind::Name, "griefer", "wrecked spawn");
             admin.save().expect("save");
         }

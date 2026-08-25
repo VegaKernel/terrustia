@@ -162,7 +162,10 @@ pub fn decode_liquid_changes(payload: &[u8]) -> Result<Option<Vec<LiquidChange>>
 /// collected the banner yet. This server drops the banner as an item on the spot instead, so it
 /// has nothing to claim later and sends zeroes; the counts, which are what the bestiary actually
 /// displays, are real.
-pub fn banners_full_state(kills: &[u32; BANNER_SLOTS], claimable: &[u16; BANNER_SLOTS]) -> Result<Vec<u8>> {
+pub fn banners_full_state(
+    kills: &[u32; BANNER_SLOTS],
+    claimable: &[u16; BANNER_SLOTS],
+) -> Result<Vec<u8>> {
     let mut w = PacketWriter::new(id::NET_MODULES);
     w.u16(MODULE_BANNERS).u8(0).i16(BANNER_SLOTS as i16);
     for count in kills {

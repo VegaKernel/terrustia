@@ -414,12 +414,7 @@ impl Client {
     }
 
     /// Drag a wiring tool from one tile to another.
-    pub async fn mass_wire(
-        &mut self,
-        from: (i16, i16),
-        to: (i16, i16),
-        mode: u8,
-    ) -> Result<()> {
+    pub async fn mass_wire(&mut self, from: (i16, i16), to: (i16, i16), mode: u8) -> Result<()> {
         let mut w = terrustia_proto::PacketWriter::new(id::MASS_WIRE_OPERATION);
         w.i16(from.0).i16(from.1).i16(to.0).i16(to.1).u8(mode);
         let frame = w.finish()?;
@@ -479,11 +474,7 @@ impl Client {
 
     /// Report inflicting a buff on an NPC, the way a weapon's on-hit effect does.
     pub async fn buff_npc(&mut self, index: u8, buff: u16, ticks: i16) -> Result<()> {
-        let request = terrustia_proto::packets::AddNpcBuff {
-            index,
-            buff,
-            ticks,
-        };
+        let request = terrustia_proto::packets::AddNpcBuff { index, buff, ticks };
         self.send(&request.encode()?).await
     }
 
@@ -748,12 +739,8 @@ impl Client {
                 // squares watches a flooding room stay dry.
                 if let Some(changes) = net_module::decode_liquid_changes(&frame.payload)? {
                     for change in &changes {
-                        self.world.set_liquid(
-                            change.x,
-                            change.y,
-                            change.amount,
-                            change.kind,
-                        );
+                        self.world
+                            .set_liquid(change.x, change.y, change.amount, change.kind);
                     }
                     return Ok(Event::LiquidChanged(changes));
                 }

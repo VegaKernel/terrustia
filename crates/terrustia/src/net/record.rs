@@ -106,7 +106,9 @@ impl Recorder {
                 header[1] = chunk.slot;
                 header[2..6].copy_from_slice(&chunk.micros.to_le_bytes());
                 header[6..10].copy_from_slice(&(chunk.bytes.len() as u32).to_le_bytes());
-                if let Err(e) = file.write_all(&header).and_then(|()| file.write_all(&chunk.bytes))
+                if let Err(e) = file
+                    .write_all(&header)
+                    .and_then(|()| file.write_all(&chunk.bytes))
                 {
                     error!(error = %e, "could not write to the capture; recording stops here");
                     return;

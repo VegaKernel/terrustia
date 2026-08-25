@@ -35,157 +35,123 @@ pub const RULES: usize = 707;
 /// What a type drops.
 pub fn drops(npc_type: u16) -> &'static [DropChain] {
     match npc_type {
-        1 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        2 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        1 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
+        2 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
         3 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         6 => &[
-            &[
-                Drop {
-                    item: 4015,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 68,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4015,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 68,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
         ],
         7 => &[
-            &[
-                Drop {
-                    item: 68,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 69,
-                    one_in: 1,
-                    min: 3,
-                    max: 8,
-                },
-            ],
+            &[Drop {
+                item: 68,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 69,
+                one_in: 1,
+                min: 3,
+                max: 8,
+            }],
         ],
         8 => &[
-            &[
-                Drop {
-                    item: 68,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 69,
-                    one_in: 1,
-                    min: 3,
-                    max: 8,
-                },
-            ],
+            &[Drop {
+                item: 68,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 69,
+                one_in: 1,
+                min: 3,
+                max: 8,
+            }],
         ],
         9 => &[
-            &[
-                Drop {
-                    item: 68,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 69,
-                    one_in: 1,
-                    min: 3,
-                    max: 8,
-                },
-            ],
+            &[Drop {
+                item: 68,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 69,
+                one_in: 1,
+                min: 3,
+                max: 8,
+            }],
         ],
         16 => &[
-            &[
-                Drop {
-                    item: 393,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 393,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         21 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -212,366 +178,272 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         23 => &[
-            &[
-                Drop {
-                    item: 116,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5486,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 116,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5486,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         24 => &[
-            &[
-                Drop {
-                    item: 1323,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 244,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1323,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 244,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
         ],
-        26 => &[
-            &[
-                Drop {
-                    item: 160,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 161,
-                    one_in: 2,
-                    min: 1,
-                    max: 5,
-                },
-            ],
-        ],
-        27 => &[
-            &[
-                Drop {
-                    item: 160,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 161,
-                    one_in: 2,
-                    min: 1,
-                    max: 5,
-                },
-            ],
-        ],
-        28 => &[
-            &[
-                Drop {
-                    item: 160,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 161,
-                    one_in: 2,
-                    min: 1,
-                    max: 5,
-                },
-            ],
-        ],
-        29 => &[
-            &[
-                Drop {
-                    item: 160,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 161,
-                    one_in: 2,
-                    min: 1,
-                    max: 5,
-                },
-            ],
-        ],
+        26 => &[&[
+            Drop {
+                item: 160,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 161,
+                one_in: 2,
+                min: 1,
+                max: 5,
+            },
+        ]],
+        27 => &[&[
+            Drop {
+                item: 160,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 161,
+                one_in: 2,
+                min: 1,
+                max: 5,
+            },
+        ]],
+        28 => &[&[
+            Drop {
+                item: 160,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 161,
+                one_in: 2,
+                min: 1,
+                max: 5,
+            },
+        ]],
+        29 => &[&[
+            Drop {
+                item: 160,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 161,
+                one_in: 2,
+                min: 1,
+                max: 5,
+            },
+        ]],
         31 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
         ],
         32 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5632,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5632,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
         ],
         34 => &[
-            &[
-                Drop {
-                    item: 4018,
-                    one_in: 70,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 891,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4018,
+                one_in: 70,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 891,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
-        35 => &[
-            &[
-                Drop {
-                    item: 4993,
-                    one_in: 7,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        39 => &[
-            &[
-                Drop {
-                    item: 4025,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        42 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        35 => &[&[Drop {
+            item: 4993,
+            one_in: 7,
+            min: 1,
+            max: 1,
+        }]],
+        39 => &[&[Drop {
+            item: 4025,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
+        42 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
         43 => &[
-            &[
-                Drop {
-                    item: 5042,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 210,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5042,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 210,
+                one_in: 2,
+                min: 1,
+                max: 1,
+            }],
         ],
         44 => &[
-            &[
-                Drop {
-                    item: 4037,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1320,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 88,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4037,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1320,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 88,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
         ],
-        45 => &[
-            &[
-                Drop {
-                    item: 238,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        47 => &[
-            &[
-                Drop {
-                    item: 243,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        45 => &[&[Drop {
+            item: 238,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        47 => &[&[Drop {
+            item: 243,
+            one_in: 75,
+            min: 1,
+            max: 1,
+        }]],
         48 => &[
-            &[
-                Drop {
-                    item: 4016,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1516,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 320,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4016,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1516,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 320,
+                one_in: 2,
+                min: 1,
+                max: 1,
+            }],
         ],
-        49 => &[
-            &[
-                Drop {
-                    item: 18,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        51 => &[
-            &[
-                Drop {
-                    item: 18,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        52 => &[
-            &[
-                Drop {
-                    item: 251,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        53 => &[
-            &[
-                Drop {
-                    item: 239,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        54 => &[
-            &[
-                Drop {
-                    item: 260,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        56 => &[
-            &[
-                Drop {
-                    item: 5042,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        49 => &[&[Drop {
+            item: 18,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        51 => &[&[Drop {
+            item: 18,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        52 => &[&[Drop {
+            item: 251,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        53 => &[&[Drop {
+            item: 239,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        54 => &[&[Drop {
+            item: 260,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        56 => &[&[Drop {
+            item: 5042,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
         58 => &[
-            &[
-                Drop {
-                    item: 393,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 393,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 263,
@@ -587,71 +459,53 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 },
             ],
         ],
-        60 => &[
-            &[
-                Drop {
-                    item: 1322,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        62 => &[
-            &[
-                Drop {
-                    item: 272,
-                    one_in: 35,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        60 => &[&[Drop {
+            item: 1322,
+            one_in: 150,
+            min: 1,
+            max: 1,
+        }]],
+        62 => &[&[Drop {
+            item: 272,
+            one_in: 35,
+            min: 1,
+            max: 1,
+        }]],
         63 => &[
-            &[
-                Drop {
-                    item: 1303,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 282,
-                    one_in: 1,
-                    min: 1,
-                    max: 4,
-                },
-            ],
+            &[Drop {
+                item: 1303,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 282,
+                one_in: 1,
+                min: 1,
+                max: 4,
+            }],
         ],
         64 => &[
-            &[
-                Drop {
-                    item: 1303,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 282,
-                    one_in: 1,
-                    min: 1,
-                    max: 4,
-                },
-            ],
+            &[Drop {
+                item: 1303,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 282,
+                one_in: 1,
+                min: 1,
+                max: 4,
+            }],
         ],
         65 => &[
-            &[
-                Drop {
-                    item: 4035,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4035,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 268,
@@ -668,2102 +522,1582 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         66 => &[
-            &[
-                Drop {
-                    item: 267,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 272,
-                    one_in: 35,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 267,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 272,
+                one_in: 35,
+                min: 1,
+                max: 1,
+            }],
         ],
-        67 => &[
-            &[
-                Drop {
-                    item: 4035,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        68 => &[
-            &[
-                Drop {
-                    item: 1169,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        67 => &[&[Drop {
+            item: 4035,
+            one_in: 50,
+            min: 1,
+            max: 1,
+        }]],
+        68 => &[&[Drop {
+            item: 1169,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
         69 => &[
-            &[
-                Drop {
-                    item: 4012,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
+            &[Drop {
+                item: 4012,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 323,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
         ],
-        71 => &[
-            &[
-                Drop {
-                    item: 327,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        73 => &[
-            &[
-                Drop {
-                    item: 362,
-                    one_in: 1,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-        ],
+        71 => &[&[Drop {
+            item: 327,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        73 => &[&[Drop {
+            item: 362,
+            one_in: 1,
+            min: 1,
+            max: 2,
+        }]],
         75 => &[
-            &[
-                Drop {
-                    item: 889,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 890,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 501,
-                    one_in: 1,
-                    min: 1,
-                    max: 3,
-                },
-            ],
+            &[Drop {
+                item: 889,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 890,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 501,
+                one_in: 1,
+                min: 1,
+                max: 3,
+            }],
         ],
         77 => &[
-            &[
-                Drop {
-                    item: 886,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 723,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 886,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 723,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
         ],
         78 => &[
-            &[
-                Drop {
-                    item: 889,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2803,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2804,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2805,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 870,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 871,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 872,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 889,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2803,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2804,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2805,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 870,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 871,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 872,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
         ],
         79 => &[
-            &[
-                Drop {
-                    item: 888,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 890,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2803,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2804,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2805,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 870,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 871,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 872,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 888,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 890,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2803,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2804,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2805,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 870,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 871,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 872,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         80 => &[
-            &[
-                Drop {
-                    item: 893,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2803,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2804,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2805,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 870,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 871,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 872,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 528,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 893,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2803,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2804,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2805,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 870,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 871,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 872,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 528,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         81 => &[
-            &[
-                Drop {
-                    item: 888,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 888,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
         ],
-        82 => &[
-            &[
-                Drop {
-                    item: 889,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        82 => &[&[Drop {
+            item: 889,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
         83 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 891,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6159,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 891,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 6159,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         84 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 891,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 891,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         86 => &[
-            &[
-                Drop {
-                    item: 3260,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 526,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 856,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3260,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 526,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 856,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         93 => &[
-            &[
-                Drop {
-                    item: 893,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 18,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 893,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 18,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         94 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 892,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 68,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 892,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 68,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
         ],
         98 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 522,
-                    one_in: 1,
-                    min: 2,
-                    max: 5,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 522,
+                one_in: 1,
+                min: 2,
+                max: 5,
+            }],
         ],
         101 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 522,
-                    one_in: 1,
-                    min: 2,
-                    max: 5,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 522,
+                one_in: 1,
+                min: 2,
+                max: 5,
+            }],
         ],
         102 => &[
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 263,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 263,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
         ],
         103 => &[
-            &[
-                Drop {
-                    item: 890,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1303,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 282,
-                    one_in: 1,
-                    min: 1,
-                    max: 4,
-                },
-            ],
+            &[Drop {
+                item: 890,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1303,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 282,
+                one_in: 1,
+                min: 1,
+                max: 4,
+            }],
         ],
         104 => &[
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 485,
-                    one_in: 60,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 485,
+                one_in: 60,
+                min: 1,
+                max: 1,
+            }],
         ],
         109 => &[
-            &[
-                Drop {
-                    item: 893,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1324,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4271,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 893,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1324,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4271,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         110 => &[
-            &[
-                Drop {
-                    item: 682,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1321,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 682,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1321,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
-        111 => &[
-            &[
-                Drop {
-                    item: 160,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 161,
-                    one_in: 2,
-                    min: 1,
-                    max: 5,
-                },
-            ],
-        ],
+        111 => &[&[
+            Drop {
+                item: 160,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 161,
+                one_in: 2,
+                min: 1,
+                max: 5,
+            },
+        ]],
         120 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4011,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4011,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
         ],
-        122 => &[
-            &[
-                Drop {
-                    item: 4017,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        124 => &[
-            &[
-                Drop {
-                    item: 4818,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        125 => &[
-            &[
-                Drop {
-                    item: 1368,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        126 => &[
-            &[
-                Drop {
-                    item: 1369,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        122 => &[&[Drop {
+            item: 4017,
+            one_in: 75,
+            min: 1,
+            max: 1,
+        }]],
+        124 => &[&[Drop {
+            item: 4818,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
+        125 => &[&[Drop {
+            item: 1368,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
+        126 => &[&[Drop {
+            item: 1369,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
         132 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
-        133 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        133 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
         137 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4011,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4011,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
         ],
         138 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4011,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4011,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         141 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 887,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
-        143 => &[
-            &[
-                Drop {
-                    item: 593,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-        ],
-        144 => &[
-            &[
-                Drop {
-                    item: 593,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-        ],
-        145 => &[
-            &[
-                Drop {
-                    item: 593,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-        ],
+        143 => &[&[Drop {
+            item: 593,
+            one_in: 1,
+            min: 5,
+            max: 10,
+        }]],
+        144 => &[&[Drop {
+            item: 593,
+            one_in: 1,
+            min: 5,
+            max: 10,
+        }]],
+        145 => &[&[Drop {
+            item: 593,
+            one_in: 1,
+            min: 5,
+            max: 10,
+        }]],
         147 => &[
-            &[
-                Drop {
-                    item: 4026,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4026,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         150 => &[
-            &[
-                Drop {
-                    item: 4026,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 18,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4026,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 18,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
-        151 => &[
-            &[
-                Drop {
-                    item: 1322,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        152 => &[
-            &[
-                Drop {
-                    item: 4023,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        153 => &[
-            &[
-                Drop {
-                    item: 1328,
-                    one_in: 12,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        151 => &[&[Drop {
+            item: 1322,
+            one_in: 50,
+            min: 1,
+            max: 1,
+        }]],
+        152 => &[&[Drop {
+            item: 4023,
+            one_in: 40,
+            min: 1,
+            max: 1,
+        }]],
+        153 => &[&[Drop {
+            item: 1328,
+            one_in: 12,
+            min: 1,
+            max: 1,
+        }]],
         154 => &[
-            &[
-                Drop {
-                    item: 4027,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1306,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1253,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4027,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1306,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1253,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
-        155 => &[
-            &[
-                Drop {
-                    item: 5130,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        155 => &[&[Drop {
+            item: 5130,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
         156 => &[
-            &[
-                Drop {
-                    item: 4025,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1518,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4025,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1518,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         158 => &[
-            &[
-                Drop {
-                    item: 5597,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1520,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5597,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1520,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
         159 => &[
-            &[
-                Drop {
-                    item: 5597,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1520,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5597,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1520,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
         161 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
-        162 => &[
-            &[
-                Drop {
-                    item: 5261,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        162 => &[&[Drop {
+            item: 5261,
+            one_in: 450,
+            min: 1,
+            max: 1,
+        }]],
         163 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 905,
-                    one_in: 4000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 855,
-                    one_in: 2000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 854,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2584,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3033,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 672,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5460,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1277,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1278,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1279,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1280,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1704,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1705,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1710,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1716,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1720,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2379,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2389,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2405,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2843,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3885,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2663,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3904,
-                    one_in: 150,
-                    min: 80,
-                    max: 130,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3910,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2238,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2133,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2137,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2143,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2147,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2151,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2155,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3263,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3264,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3265,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2798,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2800,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2882,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1308,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4020,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 905,
+                one_in: 4000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 855,
+                one_in: 2000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 854,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2584,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3033,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 672,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5460,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1277,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1278,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1279,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1280,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1704,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1705,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1710,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1716,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1720,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2379,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2389,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2405,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2843,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3885,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2663,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3904,
+                one_in: 150,
+                min: 80,
+                max: 130,
+            }],
+            &[Drop {
+                item: 3910,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2238,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2133,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2137,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2143,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2147,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2151,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2155,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3263,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3264,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3265,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2798,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2800,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2882,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1308,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
-        164 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        165 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        166 => &[
-            &[
-                Drop {
-                    item: 5261,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        164 => &[&[Drop {
+            item: 4020,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
+        165 => &[&[Drop {
+            item: 4020,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
+        166 => &[&[Drop {
+            item: 5261,
+            one_in: 450,
+            min: 1,
+            max: 1,
+        }]],
         167 => &[
-            &[
-                Drop {
-                    item: 879,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 393,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 879,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 393,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         169 => &[
-            &[
-                Drop {
-                    item: 1306,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 726,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1306,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 726,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         170 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3532,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4428,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3532,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4428,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         171 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3532,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4428,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3532,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4428,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         172 => &[
-            &[
-                Drop {
-                    item: 754,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 755,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 754,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 755,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
         ],
         173 => &[
-            &[
-                Drop {
-                    item: 4015,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1330,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4015,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1330,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
         ],
-        174 => &[
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        174 => &[&[Drop {
+            item: 996,
+            one_in: 200,
+            min: 1,
+            max: 1,
+        }]],
         175 => &[
-            &[
-                Drop {
-                    item: 5042,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1265,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5042,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1265,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         176 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 209,
-                    one_in: 6,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 887,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 209,
+                one_in: 6,
+                min: 1,
+                max: 1,
+            }],
         ],
-        177 => &[
-            &[
-                Drop {
-                    item: 4023,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        177 => &[&[Drop {
+            item: 4023,
+            one_in: 40,
+            min: 1,
+            max: 1,
+        }]],
         179 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 891,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6159,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 891,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 6159,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         180 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3532,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4428,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3532,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4428,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
-        181 => &[
-            &[
-                Drop {
-                    item: 1330,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        181 => &[&[Drop {
+            item: 1330,
+            one_in: 3,
+            min: 1,
+            max: 1,
+        }]],
         182 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 892,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1330,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 892,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1330,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
         ],
         183 => &[
-            &[
-                Drop {
-                    item: 888,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 996,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 888,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 996,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
         ],
         184 => &[
-            &[
-                Drop {
-                    item: 4026,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4026,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         185 => &[
-            &[
-                Drop {
-                    item: 951,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 393,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 951,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 393,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         186 => &[
-            &[
-                Drop {
-                    item: 40,
-                    one_in: 1,
-                    min: 1,
-                    max: 9,
-                },
-            ],
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 40,
+                one_in: 1,
+                min: 1,
+                max: 9,
+            }],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         187 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         188 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         189 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
-        190 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        191 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        192 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        193 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        194 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        195 => &[
-            &[
-                Drop {
-                    item: 3102,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        196 => &[
-            &[
-                Drop {
-                    item: 3102,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        190 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        191 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        192 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        193 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        194 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        195 => &[&[Drop {
+            item: 3102,
+            one_in: 2,
+            min: 1,
+            max: 1,
+        }]],
+        196 => &[&[Drop {
+            item: 3102,
+            one_in: 2,
+            min: 1,
+            max: 1,
+        }]],
         197 => &[
-            &[
-                Drop {
-                    item: 1306,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 393,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1306,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 393,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         198 => &[
-            &[
-                Drop {
-                    item: 2806,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2807,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2808,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1172,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1293,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2766,
-                    one_in: 7,
-                    min: 1,
-                    max: 2,
-                },
-            ],
+            &[Drop {
+                item: 2806,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2807,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2808,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1172,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1293,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2766,
+                one_in: 7,
+                min: 1,
+                max: 2,
+            }],
         ],
         199 => &[
-            &[
-                Drop {
-                    item: 2806,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2807,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2808,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1172,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1293,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2766,
-                    one_in: 7,
-                    min: 1,
-                    max: 2,
-                },
-            ],
+            &[Drop {
+                item: 2806,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2807,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2808,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1172,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1293,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2766,
+                one_in: 7,
+                min: 1,
+                max: 2,
+            }],
         ],
         200 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         201 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -2790,24 +2124,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         202 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -2834,24 +2164,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         203 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -2878,1240 +2204,902 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         204 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 209,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 209,
+                one_in: 2,
+                min: 1,
+                max: 1,
+            }],
         ],
         206 => &[
-            &[
-                Drop {
-                    item: 4027,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1306,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 726,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4027,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1306,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 726,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
-        207 => &[
-            &[
-                Drop {
-                    item: 3349,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        208 => &[
-            &[
-                Drop {
-                    item: 3548,
-                    one_in: 4,
-                    min: 30,
-                    max: 60,
-                },
-            ],
-        ],
+        207 => &[&[Drop {
+            item: 3349,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
+        208 => &[&[Drop {
+            item: 3548,
+            one_in: 4,
+            min: 30,
+            max: 60,
+        }]],
         216 => &[
-            &[
-                Drop {
-                    item: 905,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 855,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 854,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2584,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3033,
-                    one_in: 125,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 672,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5460,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 905,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 855,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 854,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2584,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3033,
+                one_in: 125,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 672,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5460,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
-        217 => &[
-            &[
-                Drop {
-                    item: 1115,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        218 => &[
-            &[
-                Drop {
-                    item: 1116,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        219 => &[
-            &[
-                Drop {
-                    item: 1117,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        220 => &[
-            &[
-                Drop {
-                    item: 1118,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        221 => &[
-            &[
-                Drop {
-                    item: 1119,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        217 => &[&[Drop {
+            item: 1115,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        218 => &[&[Drop {
+            item: 1116,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        219 => &[&[Drop {
+            item: 1117,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        220 => &[&[Drop {
+            item: 1118,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        221 => &[&[Drop {
+            item: 1119,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
         223 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 282,
-                    one_in: 1,
-                    min: 1,
-                    max: 4,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 282,
+                one_in: 1,
+                min: 1,
+                max: 4,
+            }],
         ],
         224 => &[
-            &[
-                Drop {
-                    item: 4021,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4057,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 282,
-                    one_in: 1,
-                    min: 1,
-                    max: 4,
-                },
-            ],
+            &[Drop {
+                item: 4021,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4057,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 282,
+                one_in: 1,
+                min: 1,
+                max: 4,
+            }],
         ],
-        225 => &[
-            &[
-                Drop {
-                    item: 1243,
-                    one_in: 45,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        225 => &[&[Drop {
+            item: 1243,
+            one_in: 45,
+            min: 1,
+            max: 1,
+        }]],
         226 => &[
-            &[
-                Drop {
-                    item: 2806,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2807,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2808,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1172,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1293,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2766,
-                    one_in: 7,
-                    min: 1,
-                    max: 2,
-                },
-            ],
+            &[Drop {
+                item: 2806,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2807,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2808,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1172,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1293,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2766,
+                one_in: 7,
+                min: 1,
+                max: 2,
+            }],
         ],
-        227 => &[
-            &[
-                Drop {
-                    item: 3350,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        231 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        232 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        233 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        234 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        235 => &[
-            &[
-                Drop {
-                    item: 887,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        227 => &[&[Drop {
+            item: 3350,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
+        231 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        232 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        233 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        234 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
+        235 => &[&[Drop {
+            item: 887,
+            one_in: 100,
+            min: 1,
+            max: 1,
+        }]],
         238 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 905,
-                    one_in: 4000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 855,
-                    one_in: 2000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 854,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2584,
-                    one_in: 1000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3033,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 672,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5460,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1277,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1278,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1279,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1280,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1704,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1705,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1710,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1716,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1720,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2379,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2389,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2405,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2843,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3885,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2663,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3904,
-                    one_in: 150,
-                    min: 80,
-                    max: 130,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3910,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2238,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2133,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2137,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2143,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2147,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2151,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2155,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3263,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3264,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3265,
-                    one_in: 500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2798,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2800,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2882,
-                    one_in: 800,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1308,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4020,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 905,
+                one_in: 4000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 855,
+                one_in: 2000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 854,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2584,
+                one_in: 1000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3033,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 672,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5460,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1277,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1278,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1279,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1280,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1704,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1705,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1710,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1716,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1720,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2379,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2389,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2405,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2843,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3885,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2663,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3904,
+                one_in: 150,
+                min: 80,
+                max: 130,
+            }],
+            &[Drop {
+                item: 3910,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2238,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2133,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2137,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2143,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2147,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2151,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2155,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3263,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3264,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3265,
+                one_in: 500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2798,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2800,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2882,
+                one_in: 800,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1308,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
-        239 => &[
-            &[
-                Drop {
-                    item: 1330,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        240 => &[
-            &[
-                Drop {
-                    item: 1330,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        239 => &[&[Drop {
+            item: 1330,
+            one_in: 3,
+            min: 1,
+            max: 1,
+        }]],
+        240 => &[&[Drop {
+            item: 1330,
+            one_in: 3,
+            min: 1,
+            max: 1,
+        }]],
         243 => &[
-            &[
-                Drop {
-                    item: 1519,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2161,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1519,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2161,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
         ],
-        244 => &[
-            &[
-                Drop {
-                    item: 662,
-                    one_in: 1,
-                    min: 30,
-                    max: 60,
-                },
-            ],
-        ],
-        250 => &[
-            &[
-                Drop {
-                    item: 1244,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        244 => &[&[Drop {
+            item: 662,
+            one_in: 1,
+            min: 30,
+            max: 60,
+        }]],
+        250 => &[&[Drop {
+            item: 1244,
+            one_in: 15,
+            min: 1,
+            max: 1,
+        }]],
         251 => &[
-            &[
-                Drop {
-                    item: 5239,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5236,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5239,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5236,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
-        253 => &[
-            &[
-                Drop {
-                    item: 5223,
-                    one_in: 60,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        253 => &[&[Drop {
+            item: 5223,
+            one_in: 60,
+            min: 1,
+            max: 1,
+        }]],
         268 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1332,
-                    one_in: 1,
-                    min: 2,
-                    max: 5,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1332,
+                one_in: 1,
+                min: 2,
+                max: 5,
+            }],
         ],
         269 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         270 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         271 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         272 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 885,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 885,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         273 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 886,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 886,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         274 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 886,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 886,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         275 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 886,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 886,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         276 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 886,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1517,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 886,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
-        277 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        278 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        279 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        280 => &[
-            &[
-                Drop {
-                    item: 1517,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        287 => &[
-            &[
-                Drop {
-                    item: 5042,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        288 => &[
-            &[
-                Drop {
-                    item: 1508,
-                    one_in: 1,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-        ],
+        277 => &[&[Drop {
+            item: 1517,
+            one_in: 300,
+            min: 1,
+            max: 1,
+        }]],
+        278 => &[&[Drop {
+            item: 1517,
+            one_in: 300,
+            min: 1,
+            max: 1,
+        }]],
+        279 => &[&[Drop {
+            item: 1517,
+            one_in: 300,
+            min: 1,
+            max: 1,
+        }]],
+        280 => &[&[Drop {
+            item: 1517,
+            one_in: 300,
+            min: 1,
+            max: 1,
+        }]],
+        287 => &[&[Drop {
+            item: 5042,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
+        288 => &[&[Drop {
+            item: 1508,
+            one_in: 1,
+            min: 1,
+            max: 2,
+        }]],
         289 => &[
-            &[
-                Drop {
-                    item: 4018,
-                    one_in: 35,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 891,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4018,
+                one_in: 35,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 891,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
-        290 => &[
-            &[
-                Drop {
-                    item: 4013,
-                    one_in: 7,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        291 => &[
-            &[
-                Drop {
-                    item: 4013,
-                    one_in: 21,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        292 => &[
-            &[
-                Drop {
-                    item: 4013,
-                    one_in: 21,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        293 => &[
-            &[
-                Drop {
-                    item: 4013,
-                    one_in: 21,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        290 => &[&[Drop {
+            item: 4013,
+            one_in: 7,
+            min: 1,
+            max: 1,
+        }]],
+        291 => &[&[Drop {
+            item: 4013,
+            one_in: 21,
+            min: 1,
+            max: 1,
+        }]],
+        292 => &[&[Drop {
+            item: 4013,
+            one_in: 21,
+            min: 1,
+            max: 1,
+        }]],
+        293 => &[&[Drop {
+            item: 4013,
+            one_in: 21,
+            min: 1,
+            max: 1,
+        }]],
         294 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
         ],
         295 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
         ],
         296 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
         ],
-        301 => &[
-            &[
-                Drop {
-                    item: 5576,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        302 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        317 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        318 => &[
-            &[
-                Drop {
-                    item: 236,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-                Drop {
-                    item: 38,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        301 => &[&[Drop {
+            item: 5576,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
+        302 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
+        317 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
+        318 => &[&[
+            Drop {
+                item: 236,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 38,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            },
+        ]],
         319 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         320 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         321 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         322 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4138,24 +3126,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         323 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4182,24 +3166,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         324 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4226,482 +3206,356 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         331 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         332 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         333 => &[
-            &[
-                Drop {
-                    item: 1906,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1906,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         334 => &[
-            &[
-                Drop {
-                    item: 1906,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1906,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         335 => &[
-            &[
-                Drop {
-                    item: 1906,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1906,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
         336 => &[
-            &[
-                Drop {
-                    item: 1906,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1906,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
         ],
-        353 => &[
-            &[
-                Drop {
-                    item: 3352,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        368 => &[
-            &[
-                Drop {
-                    item: 2222,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        381 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        382 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        383 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        385 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        386 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        389 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
+        353 => &[&[Drop {
+            item: 3352,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
+        368 => &[&[Drop {
+            item: 2222,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        381 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        382 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        383 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        385 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        386 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        389 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
         390 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2771,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 2860,
+                one_in: 8,
+                min: 8,
+                max: 20,
+            }],
+            &[Drop {
+                item: 2771,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
         ],
-        395 => &[
-            &[
-                Drop {
-                    item: 6173,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        395 => &[&[Drop {
+            item: 6173,
+            one_in: 50,
+            min: 1,
+            max: 1,
+        }]],
         430 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         431 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         432 => &[
-            &[
-                Drop {
-                    item: 40,
-                    one_in: 1,
-                    min: 1,
-                    max: 9,
-                },
-            ],
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 40,
+                one_in: 1,
+                min: 1,
+                max: 9,
+            }],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         433 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         434 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         435 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         436 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
         ],
         439 => &[
-            &[
-                Drop {
-                    item: 3372,
-                    one_in: 7,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3549,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3372,
+                one_in: 7,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3549,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
         ],
-        441 => &[
-            &[
-                Drop {
-                    item: 3351,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        441 => &[&[Drop {
+            item: 3351,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
         449 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4728,24 +3582,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         450 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4772,24 +3622,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         451 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4816,24 +3662,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         452 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -4860,504 +3702,380 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                     max: 1,
                 },
             ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
-        460 => &[
-            &[
-                Drop {
-                    item: 5227,
-                    one_in: 60,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        462 => &[
-            &[
-                Drop {
-                    item: 5262,
-                    one_in: 60,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        464 => &[
-            &[
-                Drop {
-                    item: 243,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        460 => &[&[Drop {
+            item: 5227,
+            one_in: 60,
+            min: 1,
+            max: 1,
+        }]],
+        462 => &[&[Drop {
+            item: 5262,
+            one_in: 60,
+            min: 1,
+            max: 1,
+        }]],
+        464 => &[&[Drop {
+            item: 243,
+            one_in: 75,
+            min: 1,
+            max: 1,
+        }]],
         469 => &[
-            &[
-                Drop {
-                    item: 5260,
-                    one_in: 60,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4037,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5260,
+                one_in: 60,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4037,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         473 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 499,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 500,
-                    one_in: 1,
-                    min: 5,
-                    max: 15,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 499,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 500,
+                one_in: 1,
+                min: 5,
+                max: 15,
+            }],
         ],
         474 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 499,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 500,
-                    one_in: 1,
-                    min: 5,
-                    max: 15,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 499,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 500,
+                one_in: 1,
+                min: 5,
+                max: 15,
+            }],
         ],
         475 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 499,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 500,
-                    one_in: 1,
-                    min: 5,
-                    max: 15,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 499,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 500,
+                one_in: 1,
+                min: 5,
+                max: 15,
+            }],
         ],
         476 => &[
-            &[
-                Drop {
-                    item: 52,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1724,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2353,
-                    one_in: 3,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1922,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 678,
-                    one_in: 3,
-                    min: 3,
-                    max: 5,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1336,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2676,
-                    one_in: 3,
-                    min: 2,
-                    max: 4,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2272,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5395,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4986,
-                    one_in: 3,
-                    min: 69,
-                    max: 69,
-                },
-            ],
+            &[Drop {
+                item: 52,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1724,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2353,
+                one_in: 3,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 1922,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 678,
+                one_in: 3,
+                min: 3,
+                max: 5,
+            }],
+            &[Drop {
+                item: 1336,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2676,
+                one_in: 3,
+                min: 2,
+                max: 4,
+            }],
+            &[Drop {
+                item: 2272,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5395,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4986,
+                one_in: 3,
+                min: 69,
+                max: 69,
+            }],
         ],
-        477 => &[
-            &[
-                Drop {
-                    item: 5237,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        477 => &[&[Drop {
+            item: 5237,
+            one_in: 15,
+            min: 1,
+            max: 1,
+        }]],
         480 => &[
-            &[
-                Drop {
-                    item: 4029,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3269,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3781,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4029,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3269,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3781,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
         481 => &[
-            &[
-                Drop {
-                    item: 4029,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3094,
-                    one_in: 2,
-                    min: 40,
-                    max: 80,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4463,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5543,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 118,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4029,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3094,
+                one_in: 2,
+                min: 40,
+                max: 80,
+            }],
+            &[Drop {
+                item: 4463,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5543,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 118,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         482 => &[
-            &[
-                Drop {
-                    item: 4036,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3086,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6167,
-                    one_in: 80,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3109,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4400,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4036,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3086,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 6167,
+                one_in: 80,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3109,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4400,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
         ],
         483 => &[
-            &[
-                Drop {
-                    item: 4036,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3086,
-                    one_in: 1,
-                    min: 5,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6167,
-                    one_in: 80,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3109,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4400,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4036,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3086,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+            &[Drop {
+                item: 6167,
+                one_in: 80,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3109,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4400,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
         ],
         489 => &[
-            &[
-                Drop {
-                    item: 3212,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3213,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3212,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3213,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
         ],
         490 => &[
-            &[
-                Drop {
-                    item: 3212,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3213,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3212,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3213,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
         ],
         491 => &[
-            &[
-                Drop {
-                    item: 905,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 855,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 854,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2584,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3033,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4471,
-                    one_in: 20,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 672,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5460,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3359,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 905,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 855,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 854,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2584,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3033,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4471,
+                one_in: 20,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 672,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5460,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3359,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         494 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5380,14 +4098,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         495 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5410,14 +4126,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         496 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5440,14 +4154,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         497 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5470,14 +4182,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         498 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5500,14 +4210,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         499 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5530,14 +4238,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         500 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5560,14 +4266,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         501 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5590,14 +4294,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         502 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5620,14 +4322,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         503 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5650,14 +4350,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         504 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5680,14 +4378,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         505 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5710,14 +4406,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         506 => &[
-            &[
-                Drop {
-                    item: 4030,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4030,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 18,
@@ -5740,272 +4434,202 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         508 => &[
-            &[
-                Drop {
-                    item: 4012,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3772,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4012,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 323,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 3772,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         509 => &[
-            &[
-                Drop {
-                    item: 4012,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3772,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4012,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 323,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 3772,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
-        513 => &[
-            &[
-                Drop {
-                    item: 3380,
-                    one_in: 2,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-        ],
-        520 => &[
-            &[
-                Drop {
-                    item: 2860,
-                    one_in: 8,
-                    min: 8,
-                    max: 20,
-                },
-            ],
-        ],
-        524 => &[
-            &[
-                Drop {
-                    item: 3794,
-                    one_in: 10,
-                    min: 1,
-                    max: 3,
-                },
-            ],
-        ],
+        513 => &[&[Drop {
+            item: 3380,
+            one_in: 2,
+            min: 1,
+            max: 2,
+        }]],
+        520 => &[&[Drop {
+            item: 2860,
+            one_in: 8,
+            min: 8,
+            max: 20,
+        }]],
+        524 => &[&[Drop {
+            item: 3794,
+            one_in: 10,
+            min: 1,
+            max: 3,
+        }]],
         525 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3794,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 522,
-                    one_in: 3,
-                    min: 1,
-                    max: 3,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3794,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 522,
+                one_in: 3,
+                min: 1,
+                max: 3,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
         526 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3794,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1332,
-                    one_in: 3,
-                    min: 1,
-                    max: 3,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3794,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1332,
+                one_in: 3,
+                min: 1,
+                max: 3,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
         527 => &[
-            &[
-                Drop {
-                    item: 5488,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3794,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 528,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5488,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3794,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 528,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
         528 => &[
-            &[
-                Drop {
-                    item: 2802,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6157,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 2802,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 6157,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
         529 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2801,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 6157,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2801,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 6157,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
         ],
-        530 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        531 => &[
-            &[
-                Drop {
-                    item: 4020,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        530 => &[&[Drop {
+            item: 4020,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
+        531 => &[&[Drop {
+            item: 4020,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
         532 => &[
-            &[
-                Drop {
-                    item: 3380,
-                    one_in: 1,
-                    min: 1,
-                    max: 3,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3771,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3380,
+                one_in: 1,
+                min: 1,
+                max: 3,
+            }],
+            &[Drop {
+                item: 3771,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         533 => &[
-            &[
-                Drop {
-                    item: 5489,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5489,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 3795,
@@ -6021,625 +4645,467 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 },
             ],
         ],
-        535 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        535 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
         536 => &[
-            &[
-                Drop {
-                    item: 3478,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3479,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3478,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3479,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
         ],
-        537 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 8000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        541 => &[
-            &[
-                Drop {
-                    item: 3783,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        537 => &[&[Drop {
+            item: 1309,
+            one_in: 8000,
+            min: 1,
+            max: 1,
+        }]],
+        541 => &[&[Drop {
+            item: 3783,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
         542 => &[
-            &[
-                Drop {
-                    item: 4028,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 319,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4028,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 319,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
         ],
         543 => &[
-            &[
-                Drop {
-                    item: 4028,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 319,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4028,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 319,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         544 => &[
-            &[
-                Drop {
-                    item: 4028,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 319,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4028,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 319,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
         545 => &[
-            &[
-                Drop {
-                    item: 4028,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 319,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 528,
-                    one_in: 25,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4028,
+                one_in: 30,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 319,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 528,
+                one_in: 25,
+                min: 1,
+                max: 1,
+            }],
         ],
-        546 => &[
-            &[
-                Drop {
-                    item: 4028,
-                    one_in: 30,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        550 => &[
-            &[
-                Drop {
-                    item: 3821,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        551 => &[
-            &[
-                Drop {
-                    item: 3866,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        546 => &[&[Drop {
+            item: 4028,
+            one_in: 30,
+            min: 1,
+            max: 1,
+        }]],
+        550 => &[&[Drop {
+            item: 3821,
+            one_in: 8,
+            min: 1,
+            max: 1,
+        }]],
+        551 => &[&[Drop {
+            item: 3866,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
         564 => &[
-            &[
-                Drop {
-                    item: 3864,
-                    one_in: 7,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3867,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3864,
+                one_in: 7,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3867,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         565 => &[
-            &[
-                Drop {
-                    item: 3864,
-                    one_in: 14,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3867,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3864,
+                one_in: 14,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3867,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
-        576 => &[
-            &[
-                Drop {
-                    item: 3868,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        576 => &[&[Drop {
+            item: 3868,
+            one_in: 10,
+            min: 1,
+            max: 1,
+        }]],
         577 => &[
-            &[
-                Drop {
-                    item: 3856,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3868,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3856,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3868,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         580 => &[
-            &[
-                Drop {
-                    item: 4012,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3772,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4012,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 323,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 3772,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
         581 => &[
-            &[
-                Drop {
-                    item: 4012,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 3,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3772,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4012,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 323,
+                one_in: 3,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 3772,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
         ],
-        582 => &[
-            &[
-                Drop {
-                    item: 323,
-                    one_in: 6,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        582 => &[&[Drop {
+            item: 323,
+            one_in: 6,
+            min: 1,
+            max: 1,
+        }]],
         586 => &[
-            &[
-                Drop {
-                    item: 4608,
-                    one_in: 2,
-                    min: 4,
-                    max: 6,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3213,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4608,
+                one_in: 2,
+                min: 4,
+                max: 6,
+            }],
+            &[Drop {
+                item: 3213,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
         587 => &[
-            &[
-                Drop {
-                    item: 4608,
-                    one_in: 2,
-                    min: 4,
-                    max: 6,
-                },
-            ],
-            &[
-                Drop {
-                    item: 3213,
-                    one_in: 15,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4608,
+                one_in: 2,
+                min: 4,
+                max: 6,
+            }],
+            &[Drop {
+                item: 3213,
+                one_in: 15,
+                min: 1,
+                max: 1,
+            }],
         ],
         590 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 8,
-                    one_in: 1,
-                    min: 5,
-                    max: 20,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 8,
+                one_in: 1,
+                min: 5,
+                max: 20,
+            }],
         ],
         591 => &[
-            &[
-                Drop {
-                    item: 216,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1304,
-                    one_in: 250,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 5332,
-                    one_in: 1500,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 8,
-                    one_in: 1,
-                    min: 5,
-                    max: 20,
-                },
-            ],
+            &[Drop {
+                item: 216,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1304,
+                one_in: 250,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 5332,
+                one_in: 1500,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 8,
+                one_in: 1,
+                min: 5,
+                max: 20,
+            }],
         ],
         618 => &[
-            &[
-                Drop {
-                    item: 4608,
-                    one_in: 2,
-                    min: 7,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4269,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4054,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4271,
-                    one_in: 2,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4608,
+                one_in: 2,
+                min: 7,
+                max: 10,
+            }],
+            &[Drop {
+                item: 4269,
+                one_in: 2,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4054,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4271,
+                one_in: 2,
+                min: 1,
+                max: 1,
+            }],
         ],
         620 => &[
-            &[
-                Drop {
-                    item: 4608,
-                    one_in: 2,
-                    min: 7,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4270,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4317,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4608,
+                one_in: 2,
+                min: 7,
+                max: 10,
+            }],
+            &[Drop {
+                item: 4270,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4317,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
         ],
         621 => &[
-            &[
-                Drop {
-                    item: 4608,
-                    one_in: 2,
-                    min: 7,
-                    max: 10,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4272,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4317,
-                    one_in: 8,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4608,
+                one_in: 2,
+                min: 7,
+                max: 10,
+            }],
+            &[Drop {
+                item: 4272,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 4317,
+                one_in: 8,
+                min: 1,
+                max: 1,
+            }],
         ],
-        628 => &[
-            &[
-                Drop {
-                    item: 313,
-                    one_in: 2,
-                    min: 1,
-                    max: 2,
-                },
-            ],
-        ],
+        628 => &[&[Drop {
+            item: 313,
+            one_in: 2,
+            min: 1,
+            max: 2,
+        }]],
         630 => &[
-            &[
-                Drop {
-                    item: 888,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 890,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2803,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2804,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 2805,
-                    one_in: 200,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 870,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 871,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 872,
-                    one_in: 75,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 527,
-                    one_in: 10,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 888,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 890,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2803,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2804,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 2805,
+                one_in: 200,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 870,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 871,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 872,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 527,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
         ],
         631 => &[
-            &[
-                Drop {
-                    item: 3,
-                    one_in: 1,
-                    min: 10,
-                    max: 20,
-                },
-            ],
-            &[
-                Drop {
-                    item: 4761,
-                    one_in: 3,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 3,
+                one_in: 1,
+                min: 10,
+                max: 20,
+            }],
+            &[Drop {
+                item: 4761,
+                one_in: 3,
+                min: 1,
+                max: 1,
+            }],
         ],
         634 => &[
-            &[
-                Drop {
-                    item: 4764,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 18,
-                    one_in: 100,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4764,
+                one_in: 40,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 18,
+                one_in: 100,
+                min: 1,
+                max: 1,
+            }],
         ],
         635 => &[
-            &[
-                Drop {
-                    item: 5041,
-                    one_in: 150,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 5041,
+                one_in: 150,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 954,
@@ -6667,65 +5133,43 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 },
             ],
         ],
-        636 => &[
-            &[
-                Drop {
-                    item: 5005,
-                    one_in: 1,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        658 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        659 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        660 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
-        676 => &[
-            &[
-                Drop {
-                    item: 1309,
-                    one_in: 10000,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        636 => &[&[Drop {
+            item: 5005,
+            one_in: 1,
+            min: 1,
+            max: 1,
+        }]],
+        658 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
+        659 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
+        660 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
+        676 => &[&[Drop {
+            item: 1309,
+            one_in: 10000,
+            min: 1,
+            max: 1,
+        }]],
         692 => &[
-            &[
-                Drop {
-                    item: 4035,
-                    one_in: 50,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 4035,
+                one_in: 50,
+                min: 1,
+                max: 1,
+            }],
             &[
                 Drop {
                     item: 268,
@@ -6742,33 +5186,25 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             ],
         ],
         693 => &[
-            &[
-                Drop {
-                    item: 959,
-                    one_in: 450,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-            &[
-                Drop {
-                    item: 1307,
-                    one_in: 300,
-                    min: 1,
-                    max: 1,
-                },
-            ],
+            &[Drop {
+                item: 959,
+                one_in: 450,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 1307,
+                one_in: 300,
+                min: 1,
+                max: 1,
+            }],
         ],
-        694 => &[
-            &[
-                Drop {
-                    item: 165,
-                    one_in: 40,
-                    min: 1,
-                    max: 1,
-                },
-            ],
-        ],
+        694 => &[&[Drop {
+            item: 165,
+            one_in: 40,
+            min: 1,
+            max: 1,
+        }]],
         _ => &[],
     }
 }

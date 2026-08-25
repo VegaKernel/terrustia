@@ -68,11 +68,7 @@ const MAX_STACK: i16 = 9_999;
 /// not take that on trust for *what* moves — every destination is its own — but it does take the
 /// client's word for which of its own slots are eligible, because favourited and coin slots are
 /// the client's own bookkeeping and it is the only one that knows them.
-pub fn run(
-    from: (f32, f32),
-    offered: &[(u16, ItemStack)],
-    chests: &mut [Destination],
-) -> Outcome {
+pub fn run(from: (f32, f32), offered: &[(u16, ItemStack)], chests: &mut [Destination]) -> Outcome {
     let mut out = Outcome::default();
 
     // Nearest first, so a player standing between two chests fills the one they are looking at.
@@ -119,9 +115,7 @@ pub fn run(
                     held.id == carrying.id && held.stack < MAX_STACK
                 })
                 .collect();
-            targets.extend(
-                (0..chests[at].items.len()).filter(|&i| chests[at].items[i].is_empty()),
-            );
+            targets.extend((0..chests[at].items.len()).filter(|&i| chests[at].items[i].is_empty()));
 
             for target in targets {
                 if carrying.is_empty() {

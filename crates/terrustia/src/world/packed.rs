@@ -75,13 +75,6 @@ pub struct TileStore {
 }
 
 impl TileStore {
-    /// Overwrite this store from another, reusing the allocation already here.
-    ///
-    /// `clone()` asks the allocator for a fresh forty-megabyte mapping and then faults in every
-    /// page of it as it writes. Copying into a buffer we already own touches pages that are
-    /// already mapped, which is the difference between a memcpy and a memcpy plus ten thousand
-    /// page faults. `Vec::clone_from` keeps the existing capacity when it is large enough, which
-    /// for a fixed-size world it always is.
     /// Copy one rectangle of tiles from another store of the same size.
     ///
     /// Row by row, because the array is row-major: a rectangle is a run of contiguous slices, one
@@ -116,6 +109,13 @@ impl TileStore {
         self.paint.clone_from(&other.paint);
     }
 
+    /// Overwrite this store from another, reusing the allocation already here.
+    ///
+    /// `clone()` asks the allocator for a fresh forty-megabyte mapping and then faults in every
+    /// page of it as it writes. Copying into a buffer we already own touches pages that are
+    /// already mapped, which is the difference between a memcpy and a memcpy plus ten thousand
+    /// page faults. `Vec::clone_from` keeps the existing capacity when it is large enough, which
+    /// for a fixed-size world it always is.
     pub fn copy_from(&mut self, other: &Self) {
         self.width = other.width;
         self.tiles.clone_from(&other.tiles);
@@ -216,8 +216,8 @@ impl TileStore {
             Liquid::Honey => 2,
             Liquid::Shimmer => 3,
         };
-        let mut extra = (tile.slope & PackedTile::SLOPE)
-            | (liquid_kind << PackedTile::LIQUID_KIND_SHIFT);
+        let mut extra =
+            (tile.slope & PackedTile::SLOPE) | (liquid_kind << PackedTile::LIQUID_KIND_SHIFT);
         if has_frame {
             extra |= PackedTile::HAS_FRAME;
         }
@@ -358,7 +358,13 @@ mod tests {
                 ..Tile::AIR
             },
         );
-        assert_eq!((store.get(1, 0).frame_x, store.get(1, 0).frame_y), (100, 200));
-        assert_eq!((store.get(2, 0).frame_x, store.get(2, 0).frame_y), (300, 400));
+        assert_eq!(
+            (store.get(1, 0).frame_x, store.get(1, 0).frame_y),
+            (100, 200)
+        );
+        assert_eq!(
+            (store.get(2, 0).frame_x, store.get(2, 0).frame_y),
+            (300, 400)
+        );
     }
 }

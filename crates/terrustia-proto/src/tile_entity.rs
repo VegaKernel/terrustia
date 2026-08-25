@@ -125,11 +125,13 @@ impl EntityKind {
     pub fn fresh(self) -> EntityData {
         match self {
             Self::TrainingDummy => EntityData::TrainingDummy { npc: -1 },
-            Self::ItemFrame
-            | Self::WeaponsRack
-            | Self::FoodPlatter
-            | Self::DeadCellsDisplayJar => EntityData::Held(ItemStack::EMPTY),
-            Self::LogicSensor => EntityData::LogicSensor { check: 0, on: false },
+            Self::ItemFrame | Self::WeaponsRack | Self::FoodPlatter | Self::DeadCellsDisplayJar => {
+                EntityData::Held(ItemStack::EMPTY)
+            }
+            Self::LogicSensor => EntityData::LogicSensor {
+                check: 0,
+                on: false,
+            },
             Self::DisplayDoll => EntityData::DisplayDoll(Box::default()),
             Self::HatRack => EntityData::HatRack(Box::default()),
             Self::TeleportationPylon => EntityData::Pylon,
@@ -183,13 +185,18 @@ impl Default for RackContents {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityData {
     /// The slot of the NPC this dummy has put out, or -1 for none.
-    TrainingDummy { npc: i16 },
+    TrainingDummy {
+        npc: i16,
+    },
     /// One item, on show. Frames, weapon racks, food platters and display jars all work this way.
     Held(ItemStack),
     /// Which condition the sensor watches, and whether it is currently satisfied.
     ///
     /// Never sent to a client: what a client sees of a sensor is whatever its circuit did.
-    LogicSensor { check: u8, on: bool },
+    LogicSensor {
+        check: u8,
+        on: bool,
+    },
     /// A mannequin. Boxed because it is by far the largest and every other kind would otherwise
     /// pay for its size.
     DisplayDoll(Box<DollContents>),
@@ -197,7 +204,9 @@ pub enum EntityData {
     /// A pylon keeps nothing of its own: which network it belongs to is the tile's own frame.
     Pylon,
     /// A kite or a critter on a leash, remembered as the item it was let out of.
-    Anchor { item: i16 },
+    Anchor {
+        item: i16,
+    },
 }
 
 /// One tile entity as the world keeps it.
@@ -363,7 +372,10 @@ impl TileEntity {
             | EntityKind::DeadCellsDisplayJar => EntityData::Held(item(r)?),
             EntityKind::LogicSensor => {
                 if network {
-                    EntityData::LogicSensor { check: 0, on: false }
+                    EntityData::LogicSensor {
+                        check: 0,
+                        on: false,
+                    }
                 } else {
                     EntityData::LogicSensor {
                         check: r.u8()?,
@@ -613,7 +625,10 @@ mod tests {
         let over_the_wire = round_trip(&sensor, true);
         assert_eq!(
             over_the_wire.data,
-            EntityData::LogicSensor { check: 0, on: false },
+            EntityData::LogicSensor {
+                check: 0,
+                on: false
+            },
             "the network form carries neither, so it reads back as the default"
         );
     }

@@ -506,8 +506,7 @@ impl Buffs {
         let mut tally = Tally {
             accelerating: f.accelerate_poisons,
             dripping_slime: f.dripping_slime,
-            relighting_slime: around.npc_type == BLUE_SLIME
-                && around.ai1 == SWALLOWED_RELIGHTER,
+            relighting_slime: around.npc_type == BLUE_SLIME && around.ai1 == SWALLOWED_RELIGHTER,
             ..Tally::default()
         };
 
@@ -522,9 +521,7 @@ impl Buffs {
         }
         // A slime that swallowed a torch does not burn in a Ravaged world; everything else does.
         if f.on_fire
-            && !(around.npc_type == BLUE_SLIME
-                && around.ai1 == SWALLOWED_TORCH
-                && around.get_good)
+            && !(around.npc_type == BLUE_SLIME && around.ai1 == SWALLOWED_TORCH && around.get_good)
         {
             tally.flammable(8, 0);
         }
@@ -554,7 +551,11 @@ impl Buffs {
         }
         // Oil is worth nothing on its own and a great deal on something already alight.
         if f.oiled
-            && (f.on_fire || f.on_fire2 || f.on_fire3 || f.on_frostburn || f.on_frostburn2
+            && (f.on_fire
+                || f.on_fire2
+                || f.on_fire3
+                || f.on_frostburn
+                || f.on_frostburn2
                 || f.shadow_flame)
         {
             tally.add(50, 10);
@@ -585,10 +586,7 @@ impl Buffs {
             tally.add(50, 5);
         }
         // Two cases heal rather than hurt, and both are a slime digesting what it swallowed.
-        if around.npc_type == LAVA_SLIME
-            && around.ai1 == SWALLOWED_LAVA_HEALER
-            && around.lava_wet
-        {
+        if around.npc_type == LAVA_SLIME && around.ai1 == SWALLOWED_LAVA_HEALER && around.lava_wet {
             tally.supernatural += 32;
         }
         if around.npc_type == BLUE_SLIME {

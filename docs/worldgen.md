@@ -130,5 +130,47 @@ topmost section therefore received one fewer section beneath them than intended 
 fifty tiles of world simply absent below their feet. It had never shown up because the old
 generator always put the surface low enough to be in section one.
 
+## Three more, found by emulating Terraria's loader
+
+A later audit re-implemented `LoadWorld_Version2` and ran it against a world this generator had
+made. The framing was right — all eleven section pointers validated exactly, with nothing left
+over — but three things inside it were not.
+
+**The hardmode ore tiers must be `-1`, not `0`.** This is the one that ended a playthrough.
+Terraria's sentinel for "this tier has not been chosen yet" is `-1`, set by `WorldGen.clearWorld`.
+`SmashAltar` only rolls an ore *when it reads that sentinel*; given `0` it skips the roll and
+hands `OreRunner` tile type 0, which is dirt. And `CheckSavedOreTiers` repairs the four
+pre-hardmode tiers on load but never these three, so the wrong value sticks for the world's life.
+The result: no cobalt, no mythril, no adamantite, and therefore no mechanical boss, in any world
+this server generated.
+
+**Chest records outlive their chests.** Chests are placed part-way through generation, and
+`greenery`, `cobwebs` and the spawn pocket all write tiles afterwards — sometimes straight through
+a chest's footprint. The record survives, pointing at cleared ground. Terraria loads it happily
+and then deletes it, and its contents, on its own first save, so the loot vanishes some time after
+the world changed hands rather than when the damage was done. Seventeen of twenty-one worlds
+checked had between one and four of these. There is now a footprint sweep at the end of `build`,
+which is the same check the game runs when it saves.
+
+**Two header fields were simply never written.** `dungeon_y` went out as the surface height, and
+the seed text as an empty string — both of them recorded correctly by the generator, read back
+correctly by the parser, and dropped only by the writer. The consequence of the first is that
+`CultistRitual` puts the Lunatic Cultist in the wrong place after Golem.
+
+### Why the tests did not see any of it
+
+The round-trip test compared width, height, chest count and tiles. Header fields were never
+looked at, so a writer that dropped one had nothing to fail. The fix is not the three patches but
+`every_header_field_survives_a_save`, which compares the whole header and reports every difference
+in one run.
+
+Two things that test had to learn the hard way, both worth keeping in mind for any check here:
+
+- **One world is not a sample.** The first version of the chest sweep's test used a single seed,
+  which happened to be one of the four clean ones in twenty-one, and passed against the untouched
+  bug. Both tests now run several sizes and seeds.
+- **Size changes the header.** The header holds variable-length runs, so a writer and reader that
+  disagree about one of them can agree at 1200x600 and not at 4200x1200. Both are checked.
+
 [`layout`]: ../crates/terrustia/src/world/worldgen/layout.rs
 [`terrain`]: ../crates/terrustia/src/world/worldgen/terrain.rs

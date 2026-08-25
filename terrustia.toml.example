@@ -16,10 +16,12 @@ password = ""
 # Where saves go. Defaults to world_file; set it to leave the original untouched.
 # save_file = "/path/to/Saved.wld"
 
-# Seconds between automatic saves, or 0 to disable them. Saving a full-size world takes about
-# 30 ms and briefly pauses the game loop.
+# Seconds between automatic saves, or 0 to disable them. The disk write happens off the game task;
+# what the tick pays is a copy of the tile array, about 30 ms on a full-size world.
 autosave_secs = 300
 
+# Both must be a whole number of 200x150 sections: the client sizes its own grid with
+# `maxTilesX / 200`, truncating, so a ragged edge is world it can never ask for.
 world_name = "Terrustia"
 world_width = 4200
 world_height = 1200

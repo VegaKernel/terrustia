@@ -75,7 +75,11 @@ pub fn heightmap(layout: &Layout, rand: &mut UnifiedRandom) -> Vec<i32> {
 fn carve_oceans(layout: &Layout, heights: &mut [i32]) {
     for (band, shore_x, edge_x) in [
         (layout.ocean_left, layout.ocean_left.to, 0),
-        (layout.ocean_right, layout.ocean_right.from, layout.width - 1),
+        (
+            layout.ocean_right,
+            layout.ocean_right.from,
+            layout.width - 1,
+        ),
     ] {
         let shore_height = heights
             .get(shore_x.clamp(0, layout.width - 1) as usize)
@@ -395,11 +399,13 @@ mod tests {
         fill(&mut world, &layout, &heights, &mut rand);
         let wet = (0..40)
             .filter(|&x| {
-                (layout.surface..layout.surface + OCEAN_DEPTH)
-                    .any(|y| world.tile(x, y).liquid > 0)
+                (layout.surface..layout.surface + OCEAN_DEPTH).any(|y| world.tile(x, y).liquid > 0)
             })
             .count();
-        assert!(wet > 20, "only {wet} of the first forty ocean columns are wet");
+        assert!(
+            wet > 20,
+            "only {wet} of the first forty ocean columns are wet"
+        );
     }
 
     /// Spawn is cleared, so a player never arrives inside rock.

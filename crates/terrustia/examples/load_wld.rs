@@ -28,6 +28,15 @@ fn main() -> ExitCode {
     println!("size        {} x {}", world.width(), world.height());
     println!("spawn       ({}, {})", world.spawn_x, world.spawn_y);
     println!("surface     {}", world.surface);
+    println!(
+        "dungeon     ({}, {})",
+        world
+            .dungeon_x
+            .map_or_else(|| "?".into(), |x| x.to_string()),
+        world
+            .dungeon_y
+            .map_or_else(|| "?".into(), |y| y.to_string()),
+    );
     let p = world.progress;
     println!(
         "progress    hardmode={} altars={} orbs={} eye={} evil_boss={} skeletron={} queen_bee={}",

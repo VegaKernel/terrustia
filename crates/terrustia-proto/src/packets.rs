@@ -1031,9 +1031,7 @@ mod tests {
             world_id: 1_234_567,
             world_name: "Round Trip".into(),
             game_mode: 2,
-            unique_id: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            ],
+            unique_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             world_gen_version: 0x0102_0304_0506_0708,
             moon_type: 5,
             backgrounds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],

@@ -82,8 +82,18 @@ pub struct Target {
 /// How far an enemy will look for someone to chase, in pixels.
 pub const AGGRO_RANGE: f32 = 1000.0;
 
-/// Beyond this, an enemy stops counting as "near a player" and begins to expire.
-pub const DESPAWN_RANGE: f32 = 2000.0;
+/// Half the box, in pixels, within which a player keeps an enemy from expiring.
+///
+/// The game's `CheckActive` refreshes `timeLeft` for any player whose hitbox intersects a rectangle
+/// of `sWidth + width * 2` by `sHeight + height * 2` centred on the NPC — a screen's worth either
+/// side, plus the creature's own size. A screen is 1920 by 1200, so the half-extents are 960 and
+/// 600.
+///
+/// A rectangle rather than the 2000-pixel radius this used to be. The radius was more than three
+/// times too generous vertically, which kept creatures alive far above and below anyone who could
+/// possibly see them — and every one of those holds a slot and its share of the sync budget.
+pub const DESPAWN_HALF_WIDTH: f32 = 960.0;
+pub const DESPAWN_HALF_HEIGHT: f32 = 600.0;
 
 fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
     let (dx, dy) = (a.0 - b.0, a.1 - b.1);
@@ -183,7 +193,7 @@ pub fn update_with(
 ) {
     out.transform = None;
     out.carry = None;
-    let before = (npc.position, npc.velocity, npc.direction);
+    let before = (npc.position, npc.velocity, npc.direction, npc.target);
 
     // `NPC.TargetClosest` has no range limit: enemies do not lose interest when you outrun them,
     // and the despawn timer is what removes them instead. Ported routines get those semantics.
@@ -276,7 +286,7 @@ pub fn update_with(
 
         step_physics(npc, tiles);
         tick_life(npc, targets);
-        if npc.position != before.0 || npc.velocity != before.1 || npc.direction != before.2 {
+        if worth_telling_clients(npc, before) {
             npc.dirty = true;
         }
         return;
@@ -300,10 +310,38 @@ pub fn update_with(
     step_physics(npc, tiles);
     tick_life(npc, targets);
 
-    // Only tell clients about an NPC that actually did something.
-    if npc.position != before.0 || npc.velocity != before.1 || npc.direction != before.2 {
+    if worth_telling_clients(npc, before) {
         npc.dirty = true;
     }
+}
+
+/// Whether this tick changed anything a client could not have worked out for itself.
+///
+/// The distinction is the whole of the game's network budget. A client runs the same routines and
+/// extrapolates between updates, so an NPC walking in a straight line at a steady speed needs no
+/// packets at all — its position a moment from now follows from the last one it was told. What a
+/// client *cannot* guess is a decision: turning round, picking a new target, being shoved, landing.
+///
+/// Marking every tick that moved an NPC by any amount — which this used to do — makes every walking
+/// creature a continuous stream, and measured at 1.4 syncs a second each against the real server's
+/// 0.7. The rate limiter in `server.rs` bounded that but could not make it unnecessary.
+fn worth_telling_clients(npc: &Npc, before: ((f32, f32), (f32, f32), i8, u16)) -> bool {
+    let (_, old_velocity, old_direction, old_target) = before;
+
+    // A decision, in every case.
+    if npc.direction != old_direction || npc.target != old_target {
+        return true;
+    }
+
+    // A change of speed the client cannot extrapolate through. Steady walking and the smooth part
+    // of a fall both stay under this; a bounce, a landing, a knock and a turn do not.
+    //
+    // Gravity alone changes downward speed by 0.3 a tick, so the threshold sits above that: a body
+    // in free fall follows a curve the client is already drawing, and telling it sixty times a
+    // second says nothing it did not know.
+    const MEANINGFUL: f32 = 0.5;
+    (npc.velocity.0 - old_velocity.0).abs() > MEANINGFUL
+        || (npc.velocity.1 - old_velocity.1).abs() > MEANINGFUL
 }
 
 /// Somewhere nearby that a timid critter would rather not be.
@@ -377,9 +415,17 @@ fn tick_life(npc: &mut Npc, targets: &[Target]) {
     if npc.stats.town_npc || npc.stats.boss {
         return;
     }
-    let near = targets
-        .iter()
-        .any(|t| t.alive && distance(npc.center(), t.center) < DESPAWN_RANGE);
+    // The game's box, not a radius: a screen either side of the creature, widened by its own size.
+    let (half_w, half_h) = (
+        DESPAWN_HALF_WIDTH + npc.width(),
+        DESPAWN_HALF_HEIGHT + npc.height(),
+    );
+    let centre = npc.center();
+    let near = targets.iter().any(|t| {
+        t.alive
+            && (t.center.0 - centre.0).abs() <= half_w
+            && (t.center.1 - centre.1).abs() <= half_h
+    });
     if near {
         npc.time_left = super::npc::DEFAULT_TIME_LEFT;
     } else {

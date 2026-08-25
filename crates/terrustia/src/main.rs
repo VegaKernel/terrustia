@@ -129,12 +129,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
     let mut game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
-    let accept = tokio::spawn(listener::run(
-        listener,
-        config,
-        events_tx.clone(),
-        recorder,
-    ));
+    let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
 
     // Whoever has the terminal already has the world file, so the console is not gated. Reading
     // stdin has to be its own task: the blocking read would otherwise hold up the accept loop, and

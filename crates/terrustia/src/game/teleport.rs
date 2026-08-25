@@ -314,9 +314,7 @@ fn scan(
 fn is_walled_in(tiles: &impl TileView, at: (f32, f32), size: (i32, i32)) -> bool {
     [(TILE, 0.0), (-TILE, 0.0), (0.0, -TILE)]
         .into_iter()
-        .all(|(dx, dy)| {
-            super::ai::sight::solid_collision(tiles, (at.0 + dx, at.1 + dy), size)
-        })
+        .all(|(dx, dy)| super::ai::sight::solid_collision(tiles, (at.0 + dx, at.1 + dy), size))
 }
 
 /// Whether a tile can be stood on at all.
@@ -409,7 +407,10 @@ mod tests {
             (feet - 300.0).abs() < 1.5,
             "should land on the floor, not at {feet}"
         );
-        assert!((500.0..=760.0).contains(&(x / TILE)), "inside the rectangle");
+        assert!(
+            (500.0..=760.0).contains(&(x / TILE)),
+            "inside the rectangle"
+        );
     }
 
     /// Solid rock offers nowhere to stand, and the search says so rather than inventing one.

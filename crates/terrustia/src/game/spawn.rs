@@ -11,7 +11,228 @@ use terrustia_proto::tile_solid::solid;
 use super::{npc::NpcStore, player::Player};
 use crate::world::World;
 
-/// One in this many ticks, per player, a spawn is attempted.
+/// Everything about the world that changes how fast things spawn.
+///
+/// The player-carried modifiers — water and peace candles, battle and calming potions, invisibility,
+/// the sunflower, the angler set — are deliberately absent: the server does not model a player's
+/// inventory or buffs, so it cannot know them. Everything here is world state the server owns.
+#[derive(Debug, Clone, Copy)]
+pub struct Conditions {
+    pub depth: Depth,
+    pub hard_mode: bool,
+    pub day_time: bool,
+    pub blood_moon: bool,
+    pub eclipse: bool,
+    /// A pumpkin or frost moon, which only matters above ground.
+    pub event_moon: bool,
+    /// Townsfolk living near the player.
+    ///
+    /// This is what makes a base safe, and it is the single most player-visible spawn rule in the
+    /// game: with nobody home the wilderness comes to your door, and with three residents it stops.
+    /// The game suppresses only when nothing else is going on — an invasion, a blood moon, an
+    /// eclipse or a moon all overrule it, because an event that a town could turn off would not be
+    /// much of an event.
+    pub town_npcs: u32,
+}
+
+/// The spawn rate and cap for a set of conditions, after `NPC.GetSpawnRate`.
+///
+/// A flat 600/5 — the game's *surface daytime default* — was being used everywhere, so caverns
+/// were about two and a half times too quiet, the underworld half as busy as it should be, and
+/// neither hardmode nor a blood moon made any difference at all.
+///
+/// Returns `(one_in_n_per_tick, cap)`. A *lower* rate means more spawning, which is the game's
+/// own convention and reads backwards until you know it.
+pub fn rates(at: Conditions) -> (u32, f32) {
+    let mut rate = SPAWN_RATE as f32;
+    let mut max = MAX_SPAWNS;
+
+    if at.hard_mode {
+        rate *= 0.9;
+        max += 1.0;
+    }
+
+    match at.depth {
+        Depth::Underworld => max *= 2.0,
+        Depth::Cavern => {
+            rate *= 0.4;
+            max *= 1.9;
+        }
+        Depth::Underground => {
+            let (r, m) = if at.hard_mode {
+                (0.45, 1.8)
+            } else {
+                (0.5, 1.7)
+            };
+            rate *= r;
+            max *= m;
+        }
+        Depth::Surface => {
+            if !at.day_time {
+                rate *= 0.6;
+                max *= 1.3;
+                if at.blood_moon {
+                    rate *= 0.3;
+                    max *= 1.8;
+                }
+                if at.event_moon {
+                    rate *= 0.2;
+                    max *= 2.0;
+                }
+            } else if at.eclipse {
+                rate *= 0.2;
+                max *= 1.9;
+            }
+        }
+    }
+
+    // Townsfolk quiet the place down, but only when nothing else is happening: an event overrules
+    // them, so a blood moon still comes to a full town. The multipliers escalate steeply — three
+    // residents is three times the interval and roughly half the cap, which is the difference
+    // between a base and a field.
+    let event = at.blood_moon || at.eclipse || at.event_moon;
+    if !event {
+        let (slower, fewer) = match at.town_npcs {
+            0 => (1.0, 1.0),
+            1 => (2.0, 0.6),
+            2 => (3.0, 0.6),
+            _ => (3.0, 0.6),
+        };
+        rate *= slower;
+        max *= fewer;
+    }
+
+    // The game's own floor and ceiling, which stop a stack of modifiers running away.
+    rate = rate.max(SPAWN_RATE as f32 * 0.1);
+    max = max.min(MAX_SPAWNS * 3.0);
+    (rate as u32, max.max(1.0))
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    fn plain() -> Conditions {
+        Conditions {
+            depth: Depth::Surface,
+            hard_mode: false,
+            day_time: true,
+            blood_moon: false,
+            eclipse: false,
+            event_moon: false,
+            town_npcs: 0,
+        }
+    }
+
+    /// Going down makes the world busier, which is most of what depth is for.
+    #[test]
+    fn caverns_are_busier_than_the_surface() {
+        let (surface, surface_cap) = rates(plain());
+        let (cavern, cavern_cap) = rates(Conditions {
+            depth: Depth::Cavern,
+            ..plain()
+        });
+        assert!(
+            cavern < surface,
+            "a lower rate means more spawning: {cavern} vs {surface}",
+        );
+        assert!(cavern_cap > surface_cap);
+        // The game's figure is 0.4x the rate. A flat 600 everywhere made caves this much too quiet.
+        assert_eq!(cavern, (surface as f32 * 0.4) as u32);
+    }
+
+    /// Night, a blood moon and an eclipse each raise the surface's rate.
+    #[test]
+    fn events_make_the_surface_dangerous() {
+        let (day, _) = rates(plain());
+        let (night, _) = rates(Conditions {
+            day_time: false,
+            ..plain()
+        });
+        let (blood, blood_cap) = rates(Conditions {
+            day_time: false,
+            blood_moon: true,
+            ..plain()
+        });
+        let (eclipse, _) = rates(Conditions {
+            eclipse: true,
+            ..plain()
+        });
+
+        assert!(night < day, "night is busier than day");
+        assert!(
+            blood < night,
+            "a blood moon is busier than an ordinary night"
+        );
+        assert!(eclipse < day, "an eclipse is busier than a plain day");
+        assert!(blood_cap > rates(plain()).1);
+    }
+
+    /// A town with residents is quieter than open ground, and more of them is quieter still.
+    ///
+    /// This is what makes a base a base. Without it a house full of townsfolk was exactly as
+    /// dangerous as the middle of a forest.
+    #[test]
+    fn townsfolk_quiet_the_place_down() {
+        let (wild, wild_cap) = rates(plain());
+        let (one, one_cap) = rates(Conditions {
+            town_npcs: 1,
+            ..plain()
+        });
+        let (three, _) = rates(Conditions {
+            town_npcs: 3,
+            ..plain()
+        });
+
+        assert!(
+            one > wild,
+            "one resident should slow spawns: {one} vs {wild}"
+        );
+        assert!(
+            three > one,
+            "three should slow them further: {three} vs {one}"
+        );
+        assert!(one_cap < wild_cap, "and hold fewer at once");
+    }
+
+    /// An event overrules the town: a blood moon still comes to a full street.
+    #[test]
+    fn an_event_ignores_the_town() {
+        let quiet_night = rates(Conditions {
+            day_time: false,
+            town_npcs: 3,
+            ..plain()
+        });
+        let blood_night = rates(Conditions {
+            day_time: false,
+            blood_moon: true,
+            town_npcs: 3,
+            ..plain()
+        });
+        assert!(
+            blood_night.0 < quiet_night.0,
+            "a town that could switch off a blood moon would not be much of an event",
+        );
+    }
+
+    /// However the modifiers stack, they stay inside the game's own floor and ceiling.
+    #[test]
+    fn the_rate_is_bounded() {
+        let worst = rates(Conditions {
+            depth: Depth::Underworld,
+            hard_mode: true,
+            day_time: false,
+            blood_moon: true,
+            eclipse: false,
+            event_moon: true,
+            town_npcs: 0,
+        });
+        assert!(worst.0 >= (SPAWN_RATE as f32 * 0.1) as u32, "{worst:?}");
+        assert!(worst.1 <= MAX_SPAWNS * 3.0, "{worst:?}");
+    }
+}
+
+/// The baseline: `NPC.defaultSpawnRate`, before anything modifies it.
 pub const SPAWN_RATE: u32 = 600;
 
 /// Spawn slots a single player supports.
@@ -493,6 +714,50 @@ impl EventSpawns<'_> {
     }
 }
 
+/// How many townsfolk are close enough to a point to quiet it down.
+///
+/// The game counts them through `SceneMetrics`, which is roughly what is on screen. This uses a
+/// radius in the same neighbourhood: far enough that a house nearby counts, close enough that a
+/// town on the other side of the world does not make the whole map safe.
+fn town_npcs_near(npcs: &NpcStore, at: (f32, f32)) -> u32 {
+    /// Tiles, converted to pixels below.
+    const REACH: f32 = 100.0 * 16.0;
+
+    npcs.iter()
+        .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+        .filter(|(_, npc)| {
+            (npc.position.0 - at.0).abs() < REACH && (npc.position.1 - at.1).abs() < REACH
+        })
+        .count() as u32
+}
+
+/// One spawn attempt in this many considers a bound townsperson instead of an enemy.
+///
+/// Deliberately steep. Six of them exist in a world's whole lifetime and each is a resident you
+/// cannot otherwise have, so they want to be a find rather than a fixture.
+const BOUND_RARITY: u32 = 120;
+
+/// Somebody still tied up somewhere in this world, if any are left to find.
+///
+/// Refuses anyone already rescued *and* anyone already standing about waiting to be talked to, so
+/// a world cannot end up with two Mechanics or a corridor full of bound wizards.
+fn pick_bound(world: &World, npcs: &NpcStore, rng: &mut SmallRng) -> Option<u16> {
+    let waiting: Vec<u16> = crate::game::rescues::RESCUES
+        .iter()
+        .map(|r| r.bound)
+        .filter(|bound| crate::game::rescues::still_bound(&world.progress, *bound))
+        .filter(|bound| {
+            !npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == *bound && n.is_alive())
+        })
+        .collect();
+    if waiting.is_empty() {
+        return None;
+    }
+    Some(waiting[rng.random_range(0..waiting.len())])
+}
+
 pub fn try_spawn(
     world: &World,
     npcs: &NpcStore,
@@ -510,21 +775,60 @@ pub fn try_spawn(
         return Vec::new();
     }
 
-    // The cap grows with the number of players, as it does in the game.
-    let cap = MAX_SPAWNS * (1.0 + 0.3 * active.len() as f32);
+    // The cap grows with the number of players, as it does in the game, and with wherever the
+    // deepest of them is standing: a cavern holds far more at once than a forest.
+    let deepest = active
+        .iter()
+        .map(|p| depth_at(world, (p.position.1 / 16.0) as i32))
+        .max_by_key(|d| match d {
+            Depth::Surface => 0,
+            Depth::Underground => 1,
+            Depth::Cavern => 2,
+            Depth::Underworld => 3,
+        })
+        .unwrap_or(Depth::Surface);
+    // The cap uses the *least* protected player, so one person out in the wild is not sheltered
+    // by everybody else standing in town.
+    let loneliest = active
+        .iter()
+        .map(|p| town_npcs_near(npcs, p.position))
+        .min()
+        .unwrap_or(0);
+    let (_, band) = rates(Conditions {
+        depth: deepest,
+        hard_mode: world.progress.hard_mode,
+        day_time: world.day_time,
+        blood_moon: world.blood_moon,
+        eclipse: world.eclipse,
+        event_moon: world.pumpkin_moon || world.snow_moon,
+        town_npcs: loneliest,
+    });
+    let cap = band * (1.0 + 0.3 * active.len() as f32);
     if npcs.used_slots() >= cap {
         return Vec::new();
     }
 
     let mut out = Vec::new();
     for player in active {
-        if rng.random_range(0..SPAWN_RATE) != 0 {
-            continue;
-        }
         let (px, py) = (
             (player.position.0 / 16.0) as i32,
             (player.position.1 / 16.0) as i32,
         );
+
+        // The rate is the player's own, not one number for the world: two people in the same
+        // world can be standing in a quiet forest and a busy cavern at the same moment.
+        let (rate, _) = rates(Conditions {
+            depth: depth_at(world, py),
+            hard_mode: world.progress.hard_mode,
+            day_time: world.day_time,
+            blood_moon: world.blood_moon,
+            eclipse: world.eclipse,
+            event_moon: world.pumpkin_moon || world.snow_moon,
+            town_npcs: town_npcs_near(npcs, player.position),
+        });
+        if rng.random_range(0..rate.max(1)) != 0 {
+            continue;
+        }
 
         // Try a handful of candidate tiles rather than scanning the whole area.
         for _ in 0..20 {
@@ -570,6 +874,19 @@ pub fn try_spawn(
             } else {
                 None
             };
+            // Somebody tied up, once in a long while, deep enough down to be worth finding.
+            //
+            // Rare and unique on purpose: these six are the *only* way their residents ever
+            // arrive, so one of them failing to appear is a whole townsperson missing — the
+            // Mechanic, and with her every piece of wire in the game.
+            if matches!(depth, Depth::Underground | Depth::Cavern)
+                && rng.random_range(0..BOUND_RARITY) == 0
+                && let Some(bound) = pick_bound(world, npcs, rng)
+            {
+                out.push((bound, (x as f32 * 16.0, y as f32 * 16.0)));
+                break;
+            }
+
             let npc_type = match event_type {
                 Some(npc_type) => npc_type,
                 None => {

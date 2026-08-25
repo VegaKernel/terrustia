@@ -6,6 +6,7 @@ written to be read before touching the code it describes.
 | File | What it covers |
 |---|---|
 | [protocol-notes.md](protocol-notes.md) | The wire format: frame layout, the handshake, and the packets whose shape is easy to get wrong |
+| [real-client.md](real-client.md) | Why no test here can prove protocol correctness, and the capture-and-replay that can |
 | [packet-coverage.md](packet-coverage.md) | Which of Terraria's 148 live messages this server handles, which it does not, and why |
 | [buffs.md](buffs.md) | Debuffs on NPCs: the twenty slots, damage-over-time, and why armour penetration is the client's job |
 | [tile-entities.md](tile-entities.md) | The furniture that remembers something — pylons, item frames, mannequins — and its two serialised forms |
@@ -45,7 +46,15 @@ cargo run --release -p terrustia --example roundtrip_wld -- in.wld out.wld
 cargo run --release -p terrustia --example genparity -- reference.wld
 cargo run --release -p terrustia --example playable  -- world.wld    # can it be finished?
 python3 tools/packet_audit.py <decompiled-tree>   # what is still unhandled
+
+cargo run --release -- --record capture.trcap                        # then connect real Terraria
+cargo run --release -p terrustia --example replay -- capture.trcap   # and check what it sent
 ```
+
+The last two are the only ones on this list that check this server against something it did not
+write. Everything above them compares `terrustia-proto` with `terrustia-client`, which is built on
+`terrustia-proto` — so a field read at the wrong width passes both. See
+[real-client.md](real-client.md).
 
 A tick has 16,666 µs to spend. Anything approaching that is a bug, not a tuning problem.
 

@@ -48,7 +48,10 @@ impl OreTiers {
 
     /// Write the three back into a world's seven saved tiers.
     pub fn store(&self, saved: &mut [i16; 7]) {
-        for (slot, tier) in [self.cobalt, self.mythril, self.adamantite].into_iter().enumerate() {
+        for (slot, tier) in [self.cobalt, self.mythril, self.adamantite]
+            .into_iter()
+            .enumerate()
+        {
             saved[4 + slot] = tier.map_or(-1, |v| v as i16);
         }
     }

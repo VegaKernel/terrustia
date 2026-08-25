@@ -18,7 +18,9 @@ that reads it.
 | `npc_data.rs` | 13,323 | `NPC.SetDefaults` | — |
 | `tile_object.rs` | 6,099 | `TileObjectData.Initialize` | — |
 | `npc_params.rs` | 4,721 | `NPCID.Sets`, `NPC.SetDefaults` | — |
-| `npc_drops.rs` | 2,644 | `NPCLoot` / `ItemDropRules` | — |
+| `npc_drops.rs` | ~6,800 | `ItemDropDatabase` | `gen_drops.py` |
+| `projectile_data.rs` | ~10,000 | `Projectile.SetDefaults` | `gen_projectiles.py` |
+| `banners.rs` | ~520 | `BannerSystem` / `ItemID.Sets.KillsToBanner` | `gen_banners.py` |
 | `placed_items.rs` | 2,550 | `Item.SetDefaults` | — |
 | `town_names.rs` | 517 | localisation + `NPC.getNewNPCNameInner` | `gen_town_names.py` |
 | `buffs.rs` | ~450 | `Main.debuff`, `BuffID.Sets`, `NPCID.Sets.DebuffImmunitySets` | `gen_buffs.py` |
@@ -42,6 +44,16 @@ python3 tools/gen_angler.py     "$D" crates/terrustia-proto/src/angler.rs
 python3 tools/gen_shimmer.py    "$D" crates/terrustia-proto/src/shimmer.rs
 python3 tools/gen_recipes.py    "$D" crates/terrustia-proto/src/recipes.rs
 python3 tools/gen_travel_shop.py "$D" crates/terrustia-proto/src/travel_shop.rs
+python3 tools/gen_drops.py      "$D" crates/terrustia-proto/src/npc_drops.rs
+python3 tools/gen_projectiles.py "$D" crates/terrustia-proto/src/projectile_data.rs
+python3 tools/gen_banners.py    "$D" crates/terrustia-proto/src/banners.rs
+```
+
+And two checkers, which report rather than emit:
+
+```sh
+python3 tools/check_recipes.py "$D"   # a sample of recipes, re-parsed independently
+python3 tools/check_drops.py   "$D"   # loot the game gives that we do not
 ```
 
 Each script fails loudly if the source's shape has changed — a parse that finds too few entries
@@ -64,6 +76,21 @@ condition, and reported 41 disagreements that did not exist. Only the third atte
 
 **Intern repeated data.** 697 NPC types share only 34 distinct debuff-immunity masks. Emitting 697
 bitmaps would be 40× the bytes for the same table.
+
+**Validate a new generator against the table it replaces.** `npc_drops.rs` and
+`projectile_data.rs` were both hand-written and both hand-verified, which made them the ideal test
+for the generators that replaced them: anything the generator *loses* is a parsing bug. That check
+caught four in the drop generator — multi-line id arrays, chained `RegisterToMultipleNPCs` calls,
+calls assigned to a local first, and `NormalvsExpert` — each of which would otherwise have silently
+deleted working loot. It also found a bug in the *old* table: `npcNetIds12` is `{-6, -7, -8, -9}`,
+negative variant ids, and the transcription had read them as NPC types 6 and 7, giving the Slime
+Staff to the Eater of Souls and the Devourer.
+
+**Generate only what is genuinely flat.** The drop database is a tree of condition chains and
+option pools. `gen_drops.py` takes the unconditional subset and refuses the rest, which stays
+hand-written in `conditional_drops.rs` under `check_drops.py`'s eye. A generator that flattened a
+condition would hand out the wrong loot forever while looking authoritative — worse than the gap it
+closed.
 
 **Check a big one against the source with a *second* script.** `recipes.rs` holds 2,551 recipes;
 a bug in the generator would be invisible in review and would quietly give back the wrong

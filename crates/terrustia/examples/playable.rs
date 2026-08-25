@@ -13,13 +13,25 @@ use terrustia::world::wld;
 
 /// Each thing a world must contain, and what it gates.
 const NEEDED: &[(u16, &str, &str)] = &[
-    (31, "shadow orbs / crimson hearts", "Eater of Worlds or Brain of Cthulhu"),
-    (26, "demon altars", "hardmode ores, so every mechanical boss"),
+    (
+        31,
+        "shadow orbs / crimson hearts",
+        "Eater of Worlds or Brain of Cthulhu",
+    ),
+    (
+        26,
+        "demon altars",
+        "hardmode ores, so every mechanical boss",
+    ),
     (12, "life crystals", "more than a hundred hit points"),
     (21, "chests", "starter weapons, hooks and boots"),
     (58, "hellstone", "the Wall of Flesh, so hardmode"),
     (226, "lihzahrd brick", "the Golem"),
-    (60, "jungle grass", "the jungle, so Plantera and the Queen Bee"),
+    (
+        60,
+        "jungle grass",
+        "the jungle, so Plantera and the Queen Bee",
+    ),
     (231, "larva", "the Queen Bee without a summon"),
 ];
 
@@ -61,11 +73,31 @@ fn main() -> ExitCode {
     println!("{} ({}x{})", world.name, world.width(), world.height());
     println!(
         "  {} · spawn {},{} · surface {} · rock {}",
-        if world.crimson { "crimson" } else { "corruption" },
+        if world.crimson {
+            "crimson"
+        } else {
+            "corruption"
+        },
         world.spawn_x,
         world.spawn_y,
         world.surface,
         world.rock_layer
+    );
+    // Which ore each tier settled on. The hardmode three read "unchosen" until the first three
+    // altars are broken; a 0 there is the bug that makes an altar spray dirt instead of ore.
+    let ore = |v: i16| match v {
+        -1 => "unchosen".to_string(),
+        other => other.to_string(),
+    };
+    println!(
+        "  ore: copper {} iron {} silver {} gold {} | cobalt {} mythril {} adamantite {}",
+        ore(world.ore_tiers[0]),
+        ore(world.ore_tiers[1]),
+        ore(world.ore_tiers[2]),
+        ore(world.ore_tiers[3]),
+        ore(world.ore_tiers[4]),
+        ore(world.ore_tiers[5]),
+        ore(world.ore_tiers[6]),
     );
     println!();
 
@@ -86,7 +118,11 @@ fn main() -> ExitCode {
         .iter()
         .map(|t| census.get(t).copied().unwrap_or(0))
         .sum();
-    missing += report(dungeon, "dungeon brick", "Skeletron, and everything behind him");
+    missing += report(
+        dungeon,
+        "dungeon brick",
+        "Skeletron, and everything behind him",
+    );
     let evil: usize = EVIL_STONE
         .iter()
         .map(|t| census.get(t).copied().unwrap_or(0))

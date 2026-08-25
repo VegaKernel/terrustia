@@ -69,7 +69,10 @@ pub fn hostile_projectile_multiplier(difficulty: f32) -> f32 {
 
 /// `GameDifficultyData.EnemyMoneyDropMultiplier`.
 pub fn money_multiplier(difficulty: f32) -> f32 {
-    sample(&[(1.0, 1.0), (2.0, 2.5), (3.0, 2.5), (4.0, 3.5)], difficulty)
+    sample(
+        &[(1.0, 1.0), (2.0, 2.5), (3.0, 2.5), (4.0, 3.5)],
+        difficulty,
+    )
 }
 
 /// The boss life multiplier for a given number of players, from `NPC.GetStatScalingFactors`.
@@ -154,7 +157,10 @@ mod tests {
             balance
         };
         let actual = balance(30);
-        assert!(actual < unbent, "thirty players must be bent down: {actual} vs {unbent}");
+        assert!(
+            actual < unbent,
+            "thirty players must be bent down: {actual} vs {unbent}"
+        );
         assert!((actual - (unbent * 2.0 + 8.0) / 3.0).abs() < 1e-3);
     }
 }

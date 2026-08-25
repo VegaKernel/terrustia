@@ -770,9 +770,7 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
-            census: crate::world::census::Census::new(
-                terrustia_proto::tile_sets::TILE_COUNT,
-            ),
+            census: crate::world::census::Census::new(terrustia_proto::tile_sets::TILE_COUNT),
             pylon_kinds: HashMap::new(),
             npc_skips: HashMap::new(),
             npc_stream: HashMap::new(),
@@ -878,10 +876,7 @@ impl GameServer {
             return Ok(());
         }
         let known = self.pylons();
-        let Some(&destination) = known
-            .iter()
-            .find(|p| p.x == pylon.x && p.y == pylon.y)
-        else {
+        let Some(&destination) = known.iter().find(|p| p.x == pylon.x && p.y == pylon.y) else {
             debug!(slot, x = pylon.x, y = pylon.y, "no pylon there");
             return Ok(());
         };
@@ -891,7 +886,8 @@ impl GameServer {
         };
         let at = (player.position.0 / 16.0, player.position.1 / 16.0);
         if !known.iter().any(|p| {
-            (f32::from(p.x) - at.0).abs() <= PYLON_REACH && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
+            (f32::from(p.x) - at.0).abs() <= PYLON_REACH
+                && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
         }) {
             self.tell(slot, "You need to be near a pylon to travel.");
             return Ok(());
@@ -908,7 +904,10 @@ impl GameServer {
         }
 
         // Land on the pylon's own tile, as the game does.
-        let to = (f32::from(destination.x) * 16.0, f32::from(destination.y) * 16.0);
+        let to = (
+            f32::from(destination.x) * 16.0,
+            f32::from(destination.y) * 16.0,
+        );
         if let Some(player) = self.player_mut(slot) {
             player.position = to;
             player.velocity = (0.0, 0.0);
@@ -1139,11 +1138,17 @@ impl GameServer {
     fn begin_registration(&mut self, slot: u8, account: &str, password: &str, owner: bool) {
         // Everything decidable without hashing is decided first, so a bad request costs nothing.
         if self.admin.name_taken(account) {
-            self.tell(slot, &format!("there is already an account called {account}"));
+            self.tell(
+                slot,
+                &format!("there is already an account called {account}"),
+            );
             return;
         }
         if password.len() < 6 {
-            self.tell(slot, "that password is too short; use at least six characters");
+            self.tell(
+                slot,
+                "that password is too short; use at least six characters",
+            );
             return;
         }
         if !self.start_auth(slot) {
@@ -1206,7 +1211,10 @@ impl GameServer {
             return false;
         }
         if self.auth_in_flight.len() >= MAX_AUTH_IN_FLIGHT {
-            self.tell(slot, "the server is busy checking passwords; try again shortly.");
+            self.tell(
+                slot,
+                "the server is busy checking passwords; try again shortly.",
+            );
             return false;
         }
         self.auth_in_flight.insert(slot);
@@ -1758,7 +1766,10 @@ impl GameServer {
                 self.travel_shop.push(item);
             }
         }
-        debug!(stock = self.travel_shop.len(), "travelling merchant's stock");
+        debug!(
+            stock = self.travel_shop.len(),
+            "travelling merchant's stock"
+        );
     }
 
     /// Tell everyone what he is carrying.
@@ -1848,7 +1859,10 @@ impl GameServer {
 
                 if terrustia_proto::shimmer::is_coin(kind) {
                     // Coins are not transmuted but spent: they become luck, and are gone.
-                    luck.push((at, terrustia_proto::shimmer::coin_luck(kind, i32::from(held.stack))));
+                    luck.push((
+                        at,
+                        terrustia_proto::shimmer::coin_luck(kind, i32::from(held.stack)),
+                    ));
                     transmuted.push((index, ItemStack::EMPTY, at));
                 } else if let Some(into) = terrustia_proto::shimmer::transforms_into(kind) {
                     item.shimmered = true;
@@ -1858,8 +1872,7 @@ impl GameServer {
                         prefix: 0,
                     };
                     transmuted.push((index, item.item, at));
-                } else if let Some(recipe) =
-                    terrustia_proto::recipes::decraft_recipe(kind, crimson)
+                } else if let Some(recipe) = terrustia_proto::recipes::decraft_recipe(kind, crimson)
                     && i32::from(held.stack) >= i32::from(recipe.makes)
                 {
                     // No transform of its own, so it comes apart into what it was made of. A
@@ -2054,9 +2067,7 @@ impl GameServer {
         if line.is_empty() {
             return;
         }
-        let (name, argument) = line
-            .split_once(char::is_whitespace)
-            .unwrap_or((line, ""));
+        let (name, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
 
         match name.to_ascii_lowercase().as_str() {
             // Only exists in a test build. There has to be *some* way to make the packet path
@@ -3053,7 +3064,10 @@ impl GameServer {
         let evicting = r.u8()? == 1;
 
         let Ok(index) = u8::try_from(index) else {
-            debug!(slot, index, "housing request for an npc slot that cannot exist");
+            debug!(
+                slot,
+                index, "housing request for an npc slot that cannot exist"
+            );
             return Ok(());
         };
         // Only town NPCs have homes; anything else is a client asking for something meaningless.
@@ -3072,8 +3086,11 @@ impl GameServer {
         } else {
             // The room has to be one the game would accept, or a client could house a merchant
             // inside solid rock and the server would agree.
-            match crate::game::housing::check_room(&self.world, i32::from(home_x), i32::from(home_y))
-            {
+            match crate::game::housing::check_room(
+                &self.world,
+                i32::from(home_x),
+                i32::from(home_y),
+            ) {
                 Ok(_) => {
                     if let Some(npc) = self.npcs.get_mut(index) {
                         npc.home = Some((i32::from(home_x), i32::from(home_y)));
@@ -3626,10 +3643,7 @@ impl GameServer {
         };
         let (name, address) = (player.name.clone(), player.addr.ip().to_string());
         let uuid = player.uuid.clone();
-        let Some(ban) = self
-            .admin
-            .ban_for(&name, &address, uuid.as_deref())
-        else {
+        let Some(ban) = self.admin.ban_for(&name, &address, uuid.as_deref()) else {
             return;
         };
         let reason = ban.reason.clone();
@@ -3649,10 +3663,16 @@ impl GameServer {
     /// rather than being the TShock-style validation that stays deferred.
     fn note_tile_spam(&mut self, slot: u8, kind: TileAction) -> bool {
         let (counter, ceiling, why): (fn(&mut Player) -> &mut f32, f32, &str) = match kind {
-            TileAction::KillTile | TileAction::KillTileNoItem | TileAction::KillWall => {
-                (|p| &mut p.spam_break, SPAM_BREAK_MAX, "breaking tiles too fast")
-            }
-            _ => (|p| &mut p.spam_place, SPAM_PLACE_MAX, "placing tiles too fast"),
+            TileAction::KillTile | TileAction::KillTileNoItem | TileAction::KillWall => (
+                |p| &mut p.spam_break,
+                SPAM_BREAK_MAX,
+                "breaking tiles too fast",
+            ),
+            _ => (
+                |p| &mut p.spam_place,
+                SPAM_PLACE_MAX,
+                "placing tiles too fast",
+            ),
         };
         let Some(player) = self.player_mut(slot) else {
             return true;
@@ -4199,9 +4219,7 @@ impl GameServer {
             .projectiles
             .iter()
             .find(|(_, p)| {
-                p.projectile_type == PORTAL_PROJECTILE
-                    && p.key.owner == slot
-                    && p.ai[1] == which
+                p.projectile_type == PORTAL_PROJECTILE && p.key.owner == slot && p.ai[1] == which
             })
             .map(|(index, p)| (index, p.key, p.position));
         let Some((index, key, position)) = found else {
@@ -4478,7 +4496,10 @@ impl GameServer {
         if tile.frame_y == wanted {
             return Ok(());
         }
-        let (ox, oy) = (x - i32::from(tile.frame_x % 54) / 18, y - i32::from(origin_y) / 18);
+        let (ox, oy) = (
+            x - i32::from(tile.frame_x % 54) / 18,
+            y - i32::from(origin_y) / 18,
+        );
         for dx in 0..3 {
             for dy in 0..3 {
                 let (tx, ty) = (ox + dx, oy + dy);
@@ -4670,7 +4691,10 @@ impl GameServer {
             "register" if self.admin.unclaimed() => match words.as_slice() {
                 [account, password, token] => {
                     if self.claim_token.as_deref() != Some(*token) {
-                        self.tell(slot, "that is not the claim token from the server's console.");
+                        self.tell(
+                            slot,
+                            "that is not the claim token from the server's console.",
+                        );
                         info!(slot, "refused a claim with the wrong token");
                         return Ok(());
                     }
@@ -4698,9 +4722,7 @@ impl GameServer {
                         let report = self.auth_results.0.clone();
                         tokio::task::spawn_blocking(move || {
                             let correct = match &stored {
-                                Some(hash) => {
-                                    crate::admin::Account::verify_hash(hash, &password)
-                                }
+                                Some(hash) => crate::admin::Account::verify_hash(hash, &password),
                                 // No account: hash against a throwaway anyway, so the two cases
                                 // take the same time.
                                 None => {
@@ -6092,8 +6114,7 @@ impl GameServer {
                 .map(|p| (p.slot, p.position))
                 .collect();
             for (slot, position) in watchers {
-                let distance =
-                    ((position.0 - at.0).powi(2) + (position.1 - at.1).powi(2)).sqrt();
+                let distance = ((position.0 - at.0).powi(2) + (position.1 - at.1).powi(2)).sqrt();
                 let weight = stream_weight(distance);
                 if weight == 0 {
                     continue;
@@ -6292,7 +6313,11 @@ impl GameServer {
     /// The name is rolled here rather than when the NPC spawns. Nothing can tell the difference:
     /// the roll is kept once made, so an NPC's name never changes, and until somebody asks there
     /// is nobody to notice it did not have one.
-    fn on_town_npc_name_request(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+    fn on_town_npc_name_request(
+        &mut self,
+        slot: u8,
+        payload: &[u8],
+    ) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
@@ -7486,7 +7511,10 @@ impl GameServer {
         }
         // Relayed rather than re-serialised: the payload is exactly what every other client
         // needs, and the sender already has it.
-        self.broadcast(packets::rewrite_owner(id::T_E_DISPLAY_DOLL_DATA_SYNC, payload, slot)?, Some(slot));
+        self.broadcast(
+            packets::rewrite_owner(id::T_E_DISPLAY_DOLL_DATA_SYNC, payload, slot)?,
+            Some(slot),
+        );
         Ok(())
     }
 
@@ -7603,7 +7631,12 @@ impl GameServer {
             debug!(slot, ?kind, "that kind is not placed by asking");
             return Ok(());
         }
-        if self.world.tile_entities.iter().any(|e| e.x == x && e.y == y) {
+        if self
+            .world
+            .tile_entities
+            .iter()
+            .any(|e| e.x == x && e.y == y)
+        {
             return Ok(());
         }
         // The tile it claims to stand on has to actually be there.
@@ -7615,7 +7648,9 @@ impl GameServer {
 
         let id = self.world.next_tile_entity;
         self.world.next_tile_entity += 1;
-        self.world.tile_entities.push(TileEntity::new(id, kind, x, y));
+        self.world
+            .tile_entities
+            .push(TileEntity::new(id, kind, x, y));
         debug!(slot, x, y, ?kind, id, "tile entity placed");
         // Everyone has to be told, the placer included: the client sends the placement but does
         // not create the entity itself, and the id it will refer to from now on is the server's
@@ -7630,14 +7665,21 @@ impl GameServer {
     /// that is the only moment there is: the game's placement request does nothing for an item
     /// frame, a mannequin, a hat rack, a food platter, a logic sensor or a display jar.
     fn add_tile_entity(&mut self, kind: terrustia_proto::tile_entity::EntityKind, x: i16, y: i16) {
-        if self.world.tile_entities.iter().any(|e| e.x == x && e.y == y) {
+        if self
+            .world
+            .tile_entities
+            .iter()
+            .any(|e| e.x == x && e.y == y)
+        {
             return;
         }
         let id = self.world.next_tile_entity;
         self.world.next_tile_entity += 1;
         self.world
             .tile_entities
-            .push(terrustia_proto::tile_entity::TileEntity::new(id, kind, x, y));
+            .push(terrustia_proto::tile_entity::TileEntity::new(
+                id, kind, x, y,
+            ));
         self.share_tile_entity(id);
         debug!(x, y, ?kind, id, "tile entity created with its tile");
     }
@@ -7686,8 +7728,7 @@ impl GameServer {
             .tile_entities
             .iter()
             .find(|e| {
-                e.id == id
-                    && e.kind == terrustia_proto::tile_entity::EntityKind::TeleportationPylon
+                e.id == id && e.kind == terrustia_proto::tile_entity::EntityKind::TeleportationPylon
             })
             .map(|e| (e.x, e.y));
         if let Ok(frame) = terrustia_proto::tile_entity::unshare(id) {
@@ -8708,7 +8749,8 @@ impl GameServer {
         if countdown != self.last_sent_countdown {
             self.last_sent_countdown = countdown;
             let mut w = terrustia_proto::PacketWriter::new(id::MOONLORD_HORROR);
-            w.i32(crate::game::lunar::MOON_LORD_COUNTDOWN).i32(countdown);
+            w.i32(crate::game::lunar::MOON_LORD_COUNTDOWN)
+                .i32(countdown);
             if let Ok(frame) = w.finish() {
                 self.broadcast(frame, None);
             }
@@ -9093,10 +9135,7 @@ impl GameServer {
 
         let name = terrustia_proto::npc_data::npc_stats(npc_type).map_or("them", |s| s.name);
         self.announce(&format!("{total} {name} defeated!"));
-        if let Some(index) = self
-            .items
-            .spawn(ItemStack::new(i32::from(item), 1, 0), at)
-        {
+        if let Some(index) = self.items.spawn(ItemStack::new(i32::from(item), 1, 0), at) {
             self.broadcast_item(index);
         }
     }
@@ -10389,8 +10428,8 @@ mod tick_accounting {
 /// repository. So the thing worth pinning is the *mode*, not the words.
 #[cfg(test)]
 mod announcements {
-    use terrustia_proto::net_text::TextMode;
     use terrustia_proto::NetworkText;
+    use terrustia_proto::net_text::TextMode;
 
     /// Keys used for the game's own lines, each verified against the decompiled localization
     /// files rather than guessed. A wrong key renders as nothing on the client, which is worse

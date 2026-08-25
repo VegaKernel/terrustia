@@ -247,7 +247,11 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
         ],
         // Skeletron. The three weapons are one chain in the game — each tried at one in seven and
         // stopping at the first that lands — which is why they are not three separate rolls.
-        35 | 36 => vec![a_few(1281, 7, 1, 1), a_few(1273, 7, 1, 1), a_few(1313, 7, 1, 1)],
+        35 | 36 => vec![
+            a_few(1281, 7, 1, 1),
+            a_few(1273, 7, 1, 1),
+            a_few(1313, 7, 1, 1),
+        ],
         50 => vec![
             a_few(2430, 4, 1, 1),
             a_few(2493, 7, 1, 1),
@@ -583,7 +587,11 @@ mod tests {
             expert: true,
             ..first
         };
-        assert!(!conditional(262, expert).iter().any(|d| d.item == TEMPLE_KEY));
+        assert!(
+            !conditional(262, expert)
+                .iter()
+                .any(|d| d.item == TEMPLE_KEY)
+        );
     }
 
     /// The Twins' loot lands once, when the second of them dies.
@@ -597,7 +605,9 @@ mod tests {
         };
         for twin in [125u16, 126] {
             assert!(
-                conditional(twin, alone).iter().all(|d| d.item != SOUL_OF_SIGHT),
+                conditional(twin, alone)
+                    .iter()
+                    .all(|d| d.item != SOUL_OF_SIGHT),
                 "killing one twin while the other lives must give nothing",
             );
         }
@@ -629,7 +639,11 @@ mod tests {
             (4, 56, "Eye of Cthulhu -> demonite, in a corruption world"),
             (13, 56, "Eater of Worlds -> demonite"),
             (266, 880, "Brain of Cthulhu -> crimtane"),
-            (113, 367, "Wall of Flesh -> the Pwnhammer, so altars can be broken"),
+            (
+                113,
+                367,
+                "Wall of Flesh -> the Pwnhammer, so altars can be broken",
+            ),
             (134, 548, "The Destroyer -> Soul of Might"),
             (125, 549, "The Twins -> Soul of Sight"),
             (127, 547, "Skeletron Prime -> Soul of Fright"),
