@@ -25,13 +25,20 @@
 //! Ordering is load-bearing rather than tidy. Ore seeded before the caves would be hollowed back
 //! out; chests placed before the caves would have nowhere to stand.
 
+pub mod fallen_logs;
 pub mod lakes;
 pub mod layout;
+pub mod liquid_settle;
 pub mod manifest;
 pub mod passes;
+pub mod piles;
+pub mod place_object;
+pub mod pots;
 pub mod rand;
 pub mod scenery;
+pub mod statue_gen;
 pub mod structures;
+pub mod surface_plants;
 pub mod terrain;
 pub mod tiles;
 
@@ -65,6 +72,18 @@ pub struct Built {
     pub life_crystals: usize,
     pub chests: usize,
     pub hive: bool,
+    pub pots: usize,
+    pub statues: usize,
+    pub piles: usize,
+    pub small_piles: usize,
+    pub fallen_logs: usize,
+    pub flowers: usize,
+    pub mushrooms: usize,
+    pub herbs: usize,
+    pub sunflowers: usize,
+    /// Whether the lakes, oceans and underworld lava all reached a stable rest state. Always
+    /// `true` outside a bug in the reused liquid simulator — see [`liquid_settle::Report`].
+    pub liquids_converged: bool,
 }
 
 /// Generate a world of the given size.
@@ -141,12 +160,41 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // which refuse to grow where there is water.
     let lakes = lakes::carve(&mut world, &plan, &heights, &mut rand);
 
+    // Settle every lake, ocean edge and underworld lava pool before anything checks "is this tile
+    // wet" — trees refuse to grow into water, and until the water they're checking against has
+    // actually come to rest, that check is answering a question about a world that no longer
+    // exists a moment later. Reuses the runtime liquid simulator rather than vanilla's own
+    // generation-time algorithm (see `liquid_settle`'s own doc comment for why); measured at
+    // 19.5ms on a real 4200x1200 world, so it costs nothing worth noticing at generation time.
+    let liquids = liquid_settle::settle(&mut world);
+    debug_assert!(
+        liquids.converged,
+        "liquid settling did not converge; a generated world would ship with moving water"
+    );
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
     // Vines and cacti reuse the runtime growers, which already know the rules. A jungle without
     // vines reads as a green cave.
     let (vines, cacti) = crate::world::trees::plant_undergrowth(&mut world, &mut forest_rng);
+
+    // Pots, statues, piles and fallen logs: the small object-placement passes built on
+    // `place_object`. Ground-truth loot and decoration that makes a cave look excavated rather
+    // than merely hollow.
+    let pots = pots::scatter(&mut world, &plan, &mut forest_rng);
+    let statues = statue_gen::scatter(&mut world, &plan, &mut forest_rng);
+    let (piles, small_piles) = piles::scatter(&mut world, &plan, &mut forest_rng);
+    let fallen_logs = fallen_logs::scatter(&mut world, &plan, &mut forest_rng);
+
+    // The surface decoration passes: flowers upgrading existing plants, mushroom-cap frames near
+    // that biome, alchemy herbs, and sunflowers. All four use the game's own shared generator
+    // (`rand`), same as the terrain and structure passes above them, rather than `forest_rng` —
+    // matching the convention `structures::greenery` already established for surface plant work.
+    let flowers = surface_plants::flowers(&mut world, &mut rand);
+    let mushrooms = surface_plants::mushrooms(&mut world, &mut rand);
+    let herbs = surface_plants::herbs(&mut world, &mut rand);
+    let sunflowers = surface_plants::sunflowers(&mut world, &mut rand);
 
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
@@ -167,6 +215,16 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         life_crystals,
         chests,
         hive,
+        pots,
+        statues,
+        piles,
+        small_piles,
+        fallen_logs: fallen_logs.placed,
+        flowers,
+        mushrooms,
+        herbs,
+        sunflowers,
+        liquids_converged: liquids.converged,
     };
     (world, built)
 }
