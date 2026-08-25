@@ -60,6 +60,8 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **Persistent scratch directory** | `/private/tmp` gets reaped by the OS after a few days and took the decompiled Terraria source tree with it mid-session, out from under several running agents. `.scratch/` lives inside the repo instead |
 | ✓ | **Piles' ground→style table, transcribed from source** | Replaces the version carried over from sizing notes. Caught two real bugs along the way: `BOULDER` was defined as tile id 26 (Demon Altar) instead of 138, and the small-pile floor check was missing vanilla's slope/half-brick exclusion |
 | ✓ | **Worldgen Tier 1 is done: traps and smoothed terrain** | `traps.rs` (dart traps, mines, boulder traps, geysers, sand traps) and `smooth.rs` (`SmoothWorld`, reordered to run last — see its module doc). Real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser, 30,107 tiles smoothed. `wiring.rs` gained a real fix alongside traps: a land mine is tile 141, not a variant of the dart trap's tile 137 |
+| ✓ | **Town NPC shops confirmed already working — the 🔴 row was stale, not the feature** | Traced vanilla source: opening/using a shop is 100% client-side, no packet involved. The one server-owned piece, packet 40, was already correct; proved for the ordinary (non-bound) case with a new two-client integration test, previously only covered for the bound-NPC rescue path |
+| ✓ | **`check_drops.py` had seven real parsing bugs, found and fixed** | It initially "proved" Eye of Cthulhu owed the player an Iron Pickaxe. Traced every false positive against `ItemDropDatabase.cs` by hand rather than trusting the summary. With it actually trustworthy: 3 real trophy gaps (Moon Lord, Empress of Light, Deerclops) and the Martian Saucer's weapon pool were genuinely missing and are now fixed; boss loot has zero remaining unjustified gaps |
 
 ## Audit findings, ranked
 
@@ -195,11 +197,12 @@ Two more things this pass turned up, checked immediately rather than left as fla
 | — | Worldgen Tier 2, item by item, once the tracker above exists |
 | — | Worldgen Tier 3, item by item — the ~25 easy items first |
 | — | A bot that starts with nothing and kills Moon Lord — Tier 1's own acceptance test, now that traps and `SmoothWorld` have landed |
-| — | Town NPCs (shops, combat, happiness) |
+| — | Town NPCs: combat (shops turned out to already work — see Done), then happiness |
 | — | Journey mode |
 | — | 3 missing events (Slime Rain, Party, Lantern Night) |
-| — | ~123 enemy drop tables |
+| — | ~111 enemy drop tables (down from the checker's noisy original 123 — see Done) |
 | — | Pets, mounts, minecart tracks |
+| — | Skeletron's `RedHatSkeletron` vanity-set condition — needs player equipment state, which lives in `server.rs`, not `conditional_drops.rs`. Found while fixing drop tables, correctly left for whoever's in `server.rs` next |
 | — | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) — in scope, deprioritized behind ordinary-world parity |
 
 ## Corrections to earlier claims
