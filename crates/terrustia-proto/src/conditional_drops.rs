@@ -194,6 +194,75 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
             }
         }
     }
+    // `ItemDropRule.ExpertGetsRerolls(item, chanceDenominator, expertRerolls)` — a classic-mode
+    // roll of 1/chanceDenominator, plus `expertRerolls` extra independent attempts at the same
+    // odds in expert-or-above (`ItemDropRule.cs:20`, `DropBasedOnExpertMode`). Every use in the
+    // decompiled table has `expertRerolls == 1`, so expert mode's real rate is
+    // `1 - (1 - 1/N)^2`, not `1/N` again. Modelled here as the flat classic rate in every mode —
+    // the same documented simplification `tools/gen_drops.py`'s own `NormalvsExpert` handling
+    // already uses elsewhere in this project ("an expert world under-rolls these... slightly").
+    // `ItemDropDatabase.cs:258-274`, the dungeon-guardian family's shared registration block.
+    match npc_type {
+        290 => {
+            out.push(sometimes(1513, 15)); // Paladin: Paladin's Hammer
+            out.push(sometimes(938, 10)); // Paladin's Shield
+        }
+        287 => {
+            out.push(sometimes(977, 12)); // Bone Lee: Black Belt
+            out.push(sometimes(963, 12)); // Feral Claws
+        }
+        291 => {
+            out.push(sometimes(1300, 12)); // Skeleton Sniper: Sniper Rifle
+            out.push(sometimes(1254, 12)); // Steel Axe
+        }
+        292 => {
+            out.push(sometimes(1514, 12)); // Tactical Skeleton: Tactical Shotgun
+            out.push(sometimes(679, 12)); // Flak Jacket
+        }
+        293 => out.push(sometimes(759, 18)), // Skeleton Commando: Rocket Launcher
+        289 => out.push(sometimes(4789, 25)), // Giant Cursed Skull: Cursed Skull vanity mask
+        281 | 282 => out.push(sometimes(1446, 20)), // Ragged Caster (both): Ragged Casterhood
+        283 | 284 => out.push(sometimes(1444, 20)), // Necromancer (both): Nercomantic Hood[sic]
+        285 | 286 => out.push(sometimes(1445, 20)), // Diabolist (both): Diabolist Hood
+        // The dungeon guardians proper — Rusty/Blue Armored/Hell Armored Bones, every variant.
+        269..=280 => {
+            out.push(sometimes(1183, 400)); // Golden Key
+            out.push(sometimes(1266, 300)); // Muramasa
+            out.push(sometimes(671, 200)); // Cobalt Shield
+            out.push(sometimes(4679, 200)); // Ice Skates
+        }
+        // `ItemDropRule.ScalingWithOnlyBadLuck(4271, 5)` (`ItemDropDatabase.cs:179`) — bad luck
+        // raises the effective chance, good luck never lowers it below 1/5. This project has no
+        // player-luck state in scope for drop rolls; modelled as the unscaled 1/5 floor, the same
+        // documented-simplification precedent `NormalvsExpert` already sets elsewhere.
+        53 | 536 => out.push(sometimes(4271, 5)), // The Groom / The Bride: Silver Locket
+        // `LeadingConditionRule(NotRemixSeed()/RemixSeed())` (`ItemDropDatabase.cs:941-944`) picks
+        // which of two items an ordinary vs. remix-seed world gives — not the same item at two
+        // rates, two *different* items. Only the ordinary-world (`NotRemix`) branch is in scope;
+        // remix seed is secret-seed content, tracked separately. The mapping is not symmetric
+        // between these two NPCs — verified against source rather than assumed.
+        49 => out.push(sometimes(1325, 250)), // Cave Bat: Vampire Frog Staff (ordinary-world item)
+        109 => out.push(sometimes(1314, 5)), // Clown: Bombs (ordinary-world item; Clown's own rate)
+        // Mimic's two flat pre-hardmode drops (`Conditions.Easymode` = `!Main.hardMode`,
+        // `ItemDropDatabase.cs:228-229`) — the matching pool lives in `one_from`, not here.
+        85 if !at.hard_mode => {
+            out.push(sometimes(930, 20)); // Cloud in a Balloon
+            out.push(sometimes(997, 20)); // Blindfold
+        }
+        // Ice Mimic's own flat pre-hardmode drop (`ItemDropDatabase.cs:238`), same shape as the
+        // ordinary Mimic's. Its `OneFromOptions` pool chain is far more deeply nested (chained
+        // `OnFailedRoll`s across remix/hardmode/easymode branches via a helper method) and is not
+        // attempted here — out of scope for the same reason 44's mid-chain pool is.
+        629 if !at.hard_mode => out.push(sometimes(997, 20)), // Blindfold
+        // `RegisterToNPC(44, Common(118, 25))` (`ItemDropDatabase.cs:1157`) — only the chain's
+        // flat first link. The rest of that chain (`.OnFailedRoll(OneFromOptions(4, 410, 411))
+        // .OnFailedRoll(Common(166, 1, 1, 3))`) is a pool nested inside a fallback chain, a shape
+        // neither this function (independent per-item rolls, no fallback ordering) nor
+        // `npc_drops.rs` (flat chains, no pool inside one) can represent — left out rather than
+        // approximated; item 118 itself is already covered by `npc_drops.rs`.
+        _ => {}
+    }
+
     out.extend(by_mode(npc_type, at));
     out
 }
@@ -206,6 +275,22 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
 ///
 /// Empty for anything with no such rule, which is nearly everything.
 pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
+    // The Mimic (85) is not a boss and has no expert-mode treasure bag replacing this pool — its
+    // own gate is `Main.hardMode` (`Conditions.cs:1264`, confusingly named `Easymode` for the
+    // *pre*-hardmode branch), a different axis entirely from player difficulty. Handled below,
+    // ahead of the expert-mode guard everything else here is subject to.
+    if npc_type == 85 {
+        return if at.hard_mode {
+            // `NotRemixSeedHardmode` pool (`ItemDropDatabase.cs:225`) — the remix variant
+            // (item 3069 in place of 517) is excluded, tracked under the secret-seeds backlog.
+            &[&[437, 517, 535, 536, 532, 554]]
+        } else {
+            // `Easymode` pool (`ItemDropDatabase.cs:227`). The two flat `Easymode`-gated drops
+            // (930, 997, both 1/20) belong in `conditional()`, not here — a pool and a flat rule
+            // are different shapes even when they share the same gate.
+            &[&[49, 50, 53, 54, 5011, 975]]
+        };
+    }
     if at.expert {
         // Expert replaces the lot with a treasure bag.
         return &[];

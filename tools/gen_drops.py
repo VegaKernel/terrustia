@@ -65,16 +65,28 @@ def parse(root: Path) -> dict[int, list[list[tuple[int, int, int, int]]]]:
         r"ItemDropRule\.(" + "|".join(FLAT) + r")\(\s*(\d+)\s*(?:,\s*(\d+))?\s*(?:,\s*(\d+))?\s*(?:,\s*(\d+))?\s*\)"
     )
 
+    # `int[] npcNetIds = new int[N] {...}` is declared fresh, under the *same* name, in ~15
+    # different functions in this file (7 uses of the bare name "npcNetIds" alone) — it is a
+    # local, not a file-scoped constant. A single whole-file dict keyed by name resolves every
+    # `RegisterToMultipleNPCs(rule, npcNetIds)` call anywhere in the file to whichever declaration
+    # was scanned *last*, silently misattributing every earlier group's items to the last one's
+    # NPCs and dropping the rest entirely — this is exactly the bug `tools/check_drops.py` found
+    # and fixed in its own array resolution; this generator had the identical bug and, until this
+    # fix, produced a table that looked complete (no error, no warning) while silently losing every
+    # `RegisterToMultipleNPCs` group that used a reused array name. Fixed the same way: collapse
+    # each (possibly multi-line) declaration onto its own line, then resolve sequentially as the
+    # scan reaches each use, so a call resolves against whichever declaration of that name most
+    # recently preceded it — never a name resolved by declaration order that ignores its usage.
+    text = re.sub(
+        r"int\[\]\s+\w+\s*=\s*new int\[\d*\]\s*\{[^}]*\}",
+        lambda m: m.group(0).replace("\n", " "),
+        text,
+        flags=re.S,
+    )
+
     out: dict[int, list[list[tuple[int, int, int, int]]]] = {}
     current_type: int | None = None
-    # `RegisterToMultipleNPCs` is usually handed a named array of ids. Read them from the whole
-    # file rather than line by line: the longer ones are written across several lines, and a
-    # single-line pattern silently dropped every group that used one — which validating against the
-    # old table is the only reason I noticed.
-    arrays: dict[str, list[int]] = {
-        m.group(1): [int(n) for n in re.findall(r"-?\d+", m.group(2))]
-        for m in re.finditer(r"int\[\] (\w+) = new int\[\d*\]\s*\{([^}]*)\}", text, re.S)
-    }
+    arrays: dict[str, list[int]] = {}
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -83,16 +95,35 @@ def parse(root: Path) -> dict[int, list[list[tuple[int, int, int, int]]]]:
             current_type = int(m.group(1))
             continue
 
+        if m := re.match(r"int\[\]\s+(\w+)\s*=\s*new int\[\d*\]\s*\{([^}]*)\}", line):
+            arrays[m.group(1)] = [int(n) for n in re.findall(r"-?\d+", m.group(2))]
+            continue
+
         if "RegisterToNPC(" not in line and "RegisterToMultipleNPCs(" not in line:
             continue
         # Anything with a condition, a pool, a bag or a mode branch is not ours to flatten.
-        if re.search(
+        #
+        # A chain can *end* in one of these without the chain's own leading links needing it —
+        # `Common(932).OnFailedRoll(Common(3095)).OnFailedRoll(Common(327)).OnFailedRoll(
+        # ByCondition(NotExpert(), 154))` is a real, entirely-flat three-item chain with one
+        # conditional fallback tacked on the end, and excluding the whole line on sight of
+        # "ByCondition" anywhere in it silently dropped all three flat links too — for every NPC
+        # that chain applied to. Truncate at the *first* excluded keyword instead, so a chain's
+        # genuinely-flat prefix survives even when its tail does not; the conditional remainder
+        # (here, item 154 for classic-mode kills) is left to `conditional_drops.rs`, same as any
+        # other condition-gated drop.
+        excluded = re.search(
             r"ByCondition|BossBag|MasterMode|OneFromOptions|ExpertGetsRerolls"
             r"|LeadingConditionRule|DropBasedOn|OneFromRules|DropNothing|Coins|WithRerolls"
             r"|RemixSeed",
             line,
-        ):
-            continue
+        )
+        if excluded:
+            line = line[: excluded.start()]
+            if not line or (
+                "RegisterToNPC(" not in line and "RegisterToMultipleNPCs(" not in line
+            ):
+                continue
 
         # Which NPCs.
         targets: list[int] = []

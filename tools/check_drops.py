@@ -240,6 +240,35 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         body = cond[m.end() : i]
         items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", body)}
         ours.setdefault(npc, set()).update(items)
+    # `conditional()`'s own dominant style is neither of the above: `match npc_type { N =>
+    # out.push(...), N2 => { out.push(...); out.push(...); } ... }`, imperative pushes into `out`
+    # rather than a returned `vec![]`. The two scans above only ever saw a match block's *first*
+    # arm's contents (a bare `=> vec![...]` scan doesn't apply here at all, and there is no
+    # single `if npc_type ==` guard around the whole thing) — every arm of every such block was
+    # invisible to this checker, including the hardmode-materials block and any match added since.
+    # Brace-matched the same way as the `if npc_type ==` scan above: find each `match npc_type {`,
+    # balance to its closing brace, then split the block on arm markers (reusing the same
+    # `NUM (| NUM)*` / `NUM..=NUM` marker shape gen_drops.py's own npc_drops.rs scan uses) so each
+    # arm's items are attributed only to that arm's own NPCs, not smeared across the whole match.
+    arm_marker = re.compile(r"(?:^|\n)\s*(\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*)\s*=>", re.M)
+    for m in re.finditer(r"match npc_type \{", cond):
+        depth, i = 1, m.end()
+        while depth > 0 and i < len(cond):
+            if cond[i] == "{":
+                depth += 1
+            elif cond[i] == "}":
+                depth -= 1
+            i += 1
+        block = cond[m.end() : i - 1]
+        arm_starts = [(am.start(), am.end(), am.group(1)) for am in arm_marker.finditer(block)]
+        for nth, (_, body_at, label) in enumerate(arm_starts):
+            arm_end = arm_starts[nth + 1][0] if nth + 1 < len(arm_starts) else len(block)
+            arm_body = block[body_at:arm_end]
+            items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", arm_body)}
+            if not items:
+                continue
+            for npc in _expand_npcs(label):
+                ours.setdefault(npc, set()).update(items)
     # The bag, trophy and mask maps, and the one-from pools.
     for pattern in (
         r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => (\d+),",

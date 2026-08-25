@@ -117,7 +117,7 @@ in `plan.md` but not yet started.
 | 🟡 | **Town NPCs fighting back** | Four representative types across all of vanilla's attack classes — Merchant (ranged), Arms Dealer (ranged), Wizard (ranged), Dye Trader (melee) — target and damage nearby hostiles, verified end to end over a real socket including the shot actually landing. The other ~23 vanilla combat-capable town NPCs are mechanical to add from here but not yet done, so a town with only those types still stands still |
 | 🔴 | NPC happiness, price effects, moving out | |
 | 🔴 | Slime Rain, Party, Lantern Night | |
-| 🟡 | Enemy drops | `tools/check_drops.py` had real parsing bugs producing false positives; fixed, and boss loot is now genuinely complete — every trophy, every unique weapon pool. ~111 ordinary enemies are still short at least one drop |
+| 🟡 | Enemy drops | Boss loot is genuinely complete. `tools/check_drops.py` and `tools/gen_drops.py` each had real bugs of their own (parsing false positives, a variable-name collision silently misattributing whole registration blocks, an over-broad exclusion that discarded a chain's genuinely-flat prefix); fixed, which recovered 45 of 111 ordinary-enemy gaps outright. ~66 remain, all individually traced against source and left for a real reason — most need either a chance-gated item *pool* (a shape neither table can represent yet) or a `Conditions` dimension this project doesn't track (an active seasonal event's wave count, a world-progression flag), not a guess |
 
 ### Items and mechanics
 
