@@ -1167,6 +1167,105 @@ impl GameServer {
         });
     }
 
+    /// List the world backups on disk, newest first.
+    fn list_backups(&mut self) {
+        let Some(path) = self.save_path.clone() else {
+            info!("this world is not being saved, so there is nothing to roll back to");
+            return;
+        };
+        let mut found = 0;
+        for n in 1..=crate::world::wld_save::BACKUPS_KEPT {
+            let bak = path.with_extension(format!("wld.bak{n}"));
+            let Ok(meta) = std::fs::metadata(&bak) else {
+                continue;
+            };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map_or_else(
+                    || "unknown".to_string(),
+                    |d| format!("{}m ago", d.as_secs() / 60),
+                );
+            info!(
+                backup = n,
+                size_mb = meta.len() / 1_048_576,
+                age,
+                path = %bak.display(),
+                "backup"
+            );
+            found += 1;
+        }
+        if found == 0 {
+            info!("no backups yet; one is made each time the world is saved");
+        } else {
+            info!("roll one back with:  rollback <n>   (the server stops afterwards)");
+        }
+    }
+
+    /// Put a backup back, and stop so it is loaded cleanly on the next start.
+    ///
+    /// Deliberately *not* a hot swap. Replacing the world under a running server would leave every
+    /// connected client holding tiles that no longer exist, the NPC roster pointing at houses that
+    /// moved, and the next autosave writing the in-memory world straight back over the backup that
+    /// was just restored — undoing the rollback within five minutes. Stopping is honest and takes
+    /// one restart.
+    fn roll_back(&mut self, which: usize) {
+        let Some(path) = self.save_path.clone() else {
+            info!("this world is not being saved, so there is nothing to roll back to");
+            return;
+        };
+        if which == 0 || which > crate::world::wld_save::BACKUPS_KEPT {
+            info!(
+                "there are only {} backups; use `rollback 1` for the most recent",
+                crate::world::wld_save::BACKUPS_KEPT
+            );
+            return;
+        }
+        let bak = path.with_extension(format!("wld.bak{which}"));
+        if !bak.exists() {
+            info!(path = %bak.display(), "no such backup");
+            return;
+        }
+        // Check it before trusting it. Restoring an unreadable file over a readable one would turn
+        // a rollback into the very thing it exists to undo.
+        match std::fs::read(&bak)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                crate::world::wld::parse(&bytes)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(()) => {}
+            Err(e) => {
+                error!(path = %bak.display(), error = %e, "that backup will not load; refusing");
+                return;
+            }
+        }
+        // Keep what is being replaced, so a rollback is itself reversible.
+        let aside = path.with_extension("wld.before-rollback");
+        if path.exists()
+            && let Err(e) = std::fs::rename(&path, &aside)
+        {
+            error!(error = %e, "could not move the current world aside; refusing to roll back");
+            return;
+        }
+        if let Err(e) = std::fs::copy(&bak, &path) {
+            error!(error = %e, "could not restore the backup");
+            let _ = std::fs::rename(&aside, &path);
+            return;
+        }
+        self.announce("The world is being rolled back; the server is stopping.");
+        info!(
+            backup = which,
+            replaced = %aside.display(),
+            "world rolled back; stopping so it loads cleanly on the next start"
+        );
+        // The in-memory world must not be written over what was just restored.
+        self.save_path = None;
+        self.stopping = true;
+    }
+
     /// Print the one-time claim token, if this server has not been claimed yet.
     ///
     /// Only ever to the log, which means the terminal or the service journal — never to a player.
@@ -2103,7 +2202,8 @@ impl GameServer {
                 }
             }
             "help" => info!(
-                "console: say <text> | players | save | kick <name> [reason] | \
+                "console: say <text> | players | save | backups | rollback <n> | \
+                 claim <name> <password> | kick <name> [reason] | \
                  ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
                  stop"
             ),
@@ -2121,6 +2221,11 @@ impl GameServer {
                 info!(online = names.len(), "{}", names.join(", "));
             }
             "save" => self.save_world_in_background("console"),
+            "backups" => self.list_backups(),
+            "rollback" => {
+                let which: usize = argument.trim().parse().unwrap_or(1);
+                self.roll_back(which);
+            }
             "stop" => {
                 info!("stopping on console request");
                 self.stopping = true;
