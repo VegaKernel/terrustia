@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failing build should say why once, not scroll.
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, lints and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # `[workspace.lints]` already denies warnings, so this needs no `-D` of its own.
+      - name: Lints
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+  # Every release target, on every push. This project was developed entirely on macOS and had a
+  # Windows compile error sitting in it for months — `clock_gettime` does not exist there — which
+  # nothing would have caught until somebody tried to build a release.
+  targets:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Nothing in the dependency graph has a build script or wants a C compiler, so musl needs
+      # only a linker rather than `cross` and a container.
+      - name: Use rust-lld for musl
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        run: |
+          echo "CARGO_TARGET_$(echo ${{ matrix.target }} | tr 'a-z-' 'A-Z_')_LINKER=rust-lld" >> "$GITHUB_ENV"
+
+      - run: cargo check --workspace --target ${{ matrix.target }}
+
+  supply-chain:
+    name: Licences and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # The job most likely to earn its keep. Unit tests are self-consistent by construction: this
+  # server once sent 18,165 door packets in five minutes — 48% of all its traffic — behind a
+  # completely green suite, and it was found months later by a person watching a log. A minute of
+  # a real server with real clients catches that class of bug on the commit that introduces it.
+  soak:
+    name: Sixty-second soak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --workspace --examples
+      - name: Soak
+        run: ./tools/soak_ci.sh

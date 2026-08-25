@@ -3,7 +3,9 @@ members = ["crates/terrustia-proto", "crates/terrustia-client", "crates/terrusti
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+# 0.0.1 deliberately, not 0.1.0. World generation is visibly unfinished and the first release
+# should not imply otherwise by its number.
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-or-later"

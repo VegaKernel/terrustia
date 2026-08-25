@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "terrustia"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "argon2",
  "bytes",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "terrustia-client"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "flate2",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "terrustia-proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "flate2",
  "thiserror",

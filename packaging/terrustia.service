@@ -1,0 +1,54 @@
+[Unit]
+Description=terrustia, a Terraria server
+Documentation=https://github.com/brooklyn/terrustia
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=terrustia
+Group=terrustia
+WorkingDirectory=/var/lib/terrustia
+ExecStart=/usr/local/bin/terrustia --config /etc/terrustia/terrustia.toml
+
+# The server exits non-zero when it crashes and zero when it is asked to stop, so this restarts
+# after a fault and stays down after `systemctl stop`. That distinction only started working when
+# the panic path was fixed — before it, a crashed server exited 0 and was never restarted.
+Restart=on-failure
+RestartSec=5s
+
+# The shutdown save has to finish. SIGTERM is what the server listens for; the default 90 seconds
+# is far longer than a save needs even on a large world, and cutting it short loses the difference
+# between the last autosave and now.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# Logs go to the journal. The server writes plain lines to stdout, so `journalctl -u terrustia`
+# reads the way the terminal does.
+StandardOutput=journal
+StandardError=journal
+
+# It needs a network socket and one directory. Everything else is closed off.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+ReadWritePaths=/var/lib/terrustia
+StateDirectory=terrustia
+
+[Install]
+WantedBy=multi-user.target
