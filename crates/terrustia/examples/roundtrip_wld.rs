@@ -107,6 +107,52 @@ fn main() -> ExitCode {
         problems += 1;
     }
 
+    // The trailing sections this server never parses into fields at all — pressure plates, the
+    // town manager, the bestiary, and Journey mode's research/creative-powers state (file section
+    // index 6 onward; 0 and 1 above are the townsfolk/tile-entity *fallback* bytes, only used if
+    // that section failed to decode, which is a different path from this one). These are carried
+    // through as opaque bytes on every save regardless of whether this server understands them,
+    // which is the entire point — but nothing before this checked a *real, played-in* world's
+    // actual trailing bytes, only a freshly generated world's mostly-empty ones. A generated world
+    // has no real Journey research or bestiary kills to lose; only a real save does.
+    if let (Some(orig_p), Some(reload_p)) = (&original.preserved, &reloaded.preserved) {
+        if orig_p.trailing_sections.len() != reload_p.trailing_sections.len() {
+            println!(
+                "  MISMATCH: trailing section count {} -> {}",
+                orig_p.trailing_sections.len(),
+                reload_p.trailing_sections.len()
+            );
+            problems += 1;
+        }
+        for (i, (a, b)) in orig_p
+            .trailing_sections
+            .iter()
+            .zip(reload_p.trailing_sections.iter())
+            .enumerate()
+        {
+            let file_section = i + 4;
+            let label = match i {
+                0 => "townsfolk fallback".to_string(),
+                1 => "tile-entity fallback".to_string(),
+                _ => format!(
+                    "preserved section {file_section} (pressure plates/town manager/bestiary/Journey research)"
+                ),
+            };
+            if a != b {
+                println!(
+                    "  MISMATCH: {label} ({} bytes) differs after a save",
+                    a.len()
+                );
+                problems += 1;
+            } else {
+                println!("  ok    {label}: {} bytes, byte-identical", a.len());
+            }
+        }
+    } else {
+        println!("  MISMATCH: preserved header state missing after load or reload");
+        problems += 1;
+    }
+
     // The header is preserved verbatim and patched in place, so the only way to know a flag
     // really survives a save is to change one and read it back off the disk.
     {
