@@ -2052,7 +2052,9 @@ impl GameServer {
             if let Ok(frame) = packets::player_active(slot, false) {
                 self.broadcast(frame, Some(slot));
             }
-            self.announce(&format!("{} has left.", player.name));
+            // `LegacyMultiplayer.20` is `"{0} has left."`, with the name as its one argument.
+            let who = NetworkText::literal(&player.name);
+            self.announce_key("LegacyMultiplayer.20", vec![who]);
         }
     }
 
@@ -2113,6 +2115,30 @@ impl GameServer {
         if let Ok(frame) = net_module::chat_broadcast(
             net_module::SERVER_AUTHOR,
             &NetworkText::literal(text),
+            SERVER_CHAT_COLOUR,
+        ) {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Announce something the *game* says, by its localization key.
+    ///
+    /// Vanilla does not send these as text. It sends a key and its arguments — `NPC.cs:81383` is
+    /// `NetworkText.FromKey("Announcement.HasAwoken", ...)` against
+    /// `"HasAwoken": "{0} has awoken!"` — and the client renders it in whatever language that
+    /// player is playing in. Sending the English instead was wrong three times over: different
+    /// bytes on the wire than the real server, English for every non-English player, and verbatim
+    /// game text compiled into this repository.
+    ///
+    /// Only for lines the game itself has a key for. Anything this server says on its own behalf —
+    /// save reports, kick reasons, console replies — stays [`Self::announce`], because there is no
+    /// key for it and inventing one would render as nothing at all.
+    fn announce_key(&mut self, key: &str, args: Vec<NetworkText>) {
+        // The log is for whoever is running the server, so it stays readable English.
+        info!(key, "announcing");
+        if let Ok(frame) = net_module::chat_broadcast(
+            net_module::SERVER_AUTHOR,
+            &NetworkText::key(key, args),
             SERVER_CHAT_COLOUR,
         ) {
             self.broadcast(frame, None);
@@ -2757,7 +2783,9 @@ impl GameServer {
             .player(slot)
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        self.announce(&format!("{name} has joined."));
+        // `LegacyMultiplayer.19` is `"{0} has joined."`.
+        let who = NetworkText::literal(&name);
+        self.announce_key("LegacyMultiplayer.19", vec![who]);
 
         let motd = self.config.motd.clone();
         if !motd.is_empty()
@@ -3265,7 +3293,7 @@ impl GameServer {
             -6 => {
                 if self.world.day_time && !self.world.eclipse {
                     self.world.eclipse = true;
-                    self.announce("A solar eclipse is happening!");
+                    self.announce_key("LegacyMisc.20", Vec::new());
                     self.broadcast_world_data();
                 }
             }
@@ -3274,7 +3302,7 @@ impl GameServer {
             -10 => {
                 if !self.world.day_time && !self.world.blood_moon {
                     self.world.blood_moon = true;
-                    self.announce("The blood moon is rising...");
+                    self.announce_key("LegacyMisc.8", Vec::new());
                     self.broadcast_world_data();
                 }
             }
@@ -3335,7 +3363,12 @@ impl GameServer {
                 .get(index)
                 .map(|n| n.stats.name)
                 .unwrap_or("Something");
-            self.announce(&format!("{name} has awoken!"));
+            // `Announcement.HasAwoken` is `"{0} has awoken!"`, and its argument is itself a
+            // keyed text — the NPC's name. Our internal names are exactly the game's `NPCName.*`
+            // keys (`npc_data.rs` calls it "the NPCID constant name"), so the two line up without
+            // a translation table.
+            let who = NetworkText::key(format!("NPCName.{name}"), Vec::new());
+            self.announce_key("Announcement.HasAwoken", vec![who]);
             self.broadcast_npc(index);
             info!(slot, npc_type, name, "boss summoned");
         }
@@ -6302,7 +6335,10 @@ impl GameServer {
             if killed {
                 self.npcs.remove(index);
                 self.broadcast_npc_death(index);
-                self.announce(&format!("{name} was slain..."));
+                // `LegacyMisc.19` is `"{0} was slain..."`. Vanilla carries a structured
+                // `PlayerDeathReason` for the richer forms; this is the plain one.
+                let who = NetworkText::literal(name);
+                self.announce_key("LegacyMisc.19", vec![who]);
                 info!(name, "a townsperson was killed");
             } else {
                 self.broadcast_npc(index);
@@ -8524,7 +8560,7 @@ impl GameServer {
             return;
         };
         self.summon_on_player(slot, crate::game::lunar::MOON_LORD);
-        self.announce("The Moon Lord has awoken!");
+        self.announce_key("LegacyMisc.47", Vec::new());
         info!(slot, "moon lord");
     }
 
@@ -8536,7 +8572,7 @@ impl GameServer {
             && rand::Rng::random_range(&mut self.rng, 0..20) == 0
         {
             self.world.eclipse = true;
-            self.announce("A solar eclipse is happening!");
+            self.announce_key("LegacyMisc.20", Vec::new());
             info!("solar eclipse");
         }
         // A meteor is rolled for every dawn once the evil's boss is down, and again whenever one
@@ -8714,7 +8750,7 @@ impl GameServer {
             .any(|p| p.is_playing() && p.life_max > 120);
         if worth_it && rand::Rng::random_range(&mut self.rng, 0..9) == 0 {
             self.world.blood_moon = true;
-            self.announce("The blood moon is rising...");
+            self.announce_key("LegacyMisc.8", Vec::new());
             info!("blood moon");
             self.broadcast_world_data();
         }
@@ -8739,10 +8775,13 @@ impl GameServer {
         self.moon.start(moon);
         self.world.pumpkin_moon = moon == Moon::Pumpkin;
         self.world.snow_moon = moon == Moon::Frost;
-        self.announce(match moon {
-            Moon::Pumpkin => "The pumpkin moon is rising...",
-            Moon::Frost => "The frost moon is rising...",
-        });
+        self.announce_key(
+            match moon {
+                Moon::Pumpkin => "LegacyMisc.31",
+                Moon::Frost => "LegacyMisc.34",
+            },
+            Vec::new(),
+        );
         self.broadcast_world_data();
         info!(slot, ?moon, "moon started");
     }
@@ -8897,7 +8936,8 @@ impl GameServer {
                 let p = &mut self.world.progress;
                 p.downed_moon_lord = true;
                 p.lunar_apocalypse_up = false;
-                self.announce("The Moon Lord has been defeated!");
+                let who = NetworkText::key("NPCName.MoonLord", Vec::new());
+                self.announce_key("Announcement.HasBeenDefeated_Single", vec![who]);
                 self.broadcast_world_data();
                 return;
             }
@@ -8949,7 +8989,7 @@ impl GameServer {
             };
             converted += changed.len();
         }
-        self.announce("The ancient spirits of light and dark have been released!");
+        self.announce_key("LegacyMisc.15", Vec::new());
         info!(
             converted,
             took_ms = began.elapsed().as_millis(),
@@ -9313,7 +9353,7 @@ impl GameServer {
             self.liquids.wake(*dx, *dy);
         }
 
-        self.announce(smashed.announcement);
+        self.announce_key(smashed.announcement, Vec::new());
         info!(
             x,
             y,
@@ -10103,5 +10143,99 @@ mod tick_accounting {
             clock.lap() > Duration::ZERO,
             "four million multiplies cost nothing?"
         );
+    }
+}
+
+/// Does the server announce the game's own lines the way the game does?
+///
+/// Vanilla sends a localization key and its arguments — `NPC.cs:81383` is
+/// `NetworkText.FromKey("Announcement.HasAwoken", ...)` against `"HasAwoken": "{0} has awoken!"` —
+/// and the client renders it in whatever language that player is using. Sending the English
+/// sentence instead was wrong three ways at once: different bytes on the wire than the real
+/// server, English for every non-English player, and the game's own text compiled into this
+/// repository. So the thing worth pinning is the *mode*, not the words.
+#[cfg(test)]
+mod announcements {
+    use terrustia_proto::net_text::TextMode;
+    use terrustia_proto::NetworkText;
+
+    /// Keys used for the game's own lines, each verified against the decompiled localization
+    /// files rather than guessed. A wrong key renders as nothing on the client, which is worse
+    /// than English — so anything unverified deliberately stays a literal.
+    #[test]
+    fn the_keys_we_send_are_the_ones_the_game_defines() {
+        for key in [
+            // Terraria.Localization.Content.en-US.Legacy.json, "LegacyMisc"
+            "LegacyMisc.8",  // The Blood Moon is rising...
+            "LegacyMisc.9",  // You feel an evil presence watching you...
+            "LegacyMisc.15", // The ancient spirits of light and dark have been released.
+            "LegacyMisc.19", // {0} was slain...
+            "LegacyMisc.20", // A solar eclipse is happening!
+            "LegacyMisc.31", // The Pumpkin Moon is rising...
+            "LegacyMisc.34", // The Frost Moon is rising...
+            "LegacyMisc.47", // The Moon Lord has awoken!
+            // The six hardmode ores
+            "LegacyMisc.12",
+            "LegacyMisc.13",
+            "LegacyMisc.14",
+            "LegacyMisc.21",
+            "LegacyMisc.22",
+            "LegacyMisc.23",
+            // "LegacyMultiplayer"
+            "LegacyMultiplayer.19", // {0} has joined.
+            "LegacyMultiplayer.20", // {0} has left.
+            // Terraria.Localization.Content.en-US.Game.json, "Announcement"
+            "Announcement.HasAwoken",
+            "Announcement.HasBeenDefeated_Single",
+        ] {
+            let text = NetworkText::key(key, Vec::new());
+            assert_eq!(text.mode, TextMode::LocalizationKey);
+            assert!(
+                key.contains('.') && !key.ends_with('.'),
+                "{key} is not a section-qualified key"
+            );
+        }
+    }
+
+    /// The ore announcements carry keys, not sentences.
+    ///
+    /// `hardmode.rs` holds them in a `&'static str` that used to be English, so this is the field
+    /// most likely to quietly revert.
+    #[test]
+    fn the_ore_announcements_are_keys() {
+        use crate::world::hardmode::{OreTiers, WorldShape, smash};
+        use rand::{SeedableRng, rngs::SmallRng};
+
+        let mut tiers = OreTiers::default();
+        let mut rng = SmallRng::seed_from_u64(7);
+        let shape = WorldShape {
+            width: 4200,
+            height: 1200,
+            surface: 400,
+            rock_layer: 600,
+        };
+
+        let mut seen = 0;
+        for altars in 1..=3 {
+            if let Some(smashed) = smash(altars, true, &mut tiers, shape, &mut rng) {
+                let key = smashed.announcement;
+                assert!(
+                    key.starts_with("LegacyMisc."),
+                    "the ore announcement is {key:?}, a sentence rather than a key"
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no altar smash produced an announcement to check");
+    }
+
+    /// A key with an argument nests, which is how "{0} has awoken!" gets its boss.
+    #[test]
+    fn an_announcement_can_carry_a_name() {
+        let who = NetworkText::key("NPCName.MoonLord", Vec::new());
+        let line = NetworkText::key("Announcement.HasAwoken", vec![who]);
+        assert_eq!(line.substitutions.len(), 1);
+        assert_eq!(line.substitutions[0].mode, TextMode::LocalizationKey);
+        assert_eq!(line.substitutions[0].text, "NPCName.MoonLord");
     }
 }

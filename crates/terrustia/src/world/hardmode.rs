@@ -31,10 +31,39 @@ pub struct OreTiers {
     pub adamantite: Option<u16>,
 }
 
+impl OreTiers {
+    /// Read the three out of a world's seven saved tiers, where they occupy the last slots and
+    /// `-1` means unchosen.
+    ///
+    /// The world owns these, not the server: keeping a second copy alongside is what let the two
+    /// disagree, so this converts on the way in and [`Self::store`] converts on the way back out.
+    pub fn load(saved: &[i16; 7]) -> Self {
+        let pick = |v: i16| (v >= 0).then_some(v as u16);
+        Self {
+            cobalt: pick(saved[4]),
+            mythril: pick(saved[5]),
+            adamantite: pick(saved[6]),
+        }
+    }
+
+    /// Write the three back into a world's seven saved tiers.
+    pub fn store(&self, saved: &mut [i16; 7]) {
+        for (slot, tier) in [self.cobalt, self.mythril, self.adamantite].into_iter().enumerate() {
+            saved[4 + slot] = tier.map_or(-1, |v| v as i16);
+        }
+    }
+}
+
 /// What smashing an altar does.
 #[derive(Debug)]
 pub struct Smashed {
     /// What the world should say about it.
+    /// The game's own localization key for this ore's announcement, not the English.
+    ///
+    /// Vanilla sends a key and lets each client render it in its own language; sending the
+    /// sentence meant a French player read English, our bytes differed from the real server's,
+    /// and the game's text was compiled into this repository. Keys verified against
+    /// `Terraria.Localization.Content.en-US.Legacy.json`.
     pub announcement: &'static str,
     /// The ore that was seeded, and where each vein wants to go.
     pub ore: u16,
@@ -103,9 +132,9 @@ pub fn smash(
             (
                 ore,
                 if ore == PALLADIUM {
-                    "Your world has been blessed with Palladium!"
+                    "LegacyMisc.21"
                 } else {
-                    "Your world has been blessed with Cobalt!"
+                    "LegacyMisc.12"
                 },
             )
         }
@@ -124,9 +153,9 @@ pub fn smash(
             (
                 ore,
                 if ore == ORICHALCUM {
-                    "Your world has been blessed with Orichalcum!"
+                    "LegacyMisc.22"
                 } else {
-                    "Your world has been blessed with Mythril!"
+                    "LegacyMisc.13"
                 },
             )
         }
@@ -145,9 +174,9 @@ pub fn smash(
             (
                 ore,
                 if ore == TITANIUM {
-                    "Your world has been blessed with Titanium!"
+                    "LegacyMisc.23"
                 } else {
-                    "Your world has been blessed with Adamantite!"
+                    "LegacyMisc.14"
                 },
             )
         }
