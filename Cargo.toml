@@ -61,7 +61,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # Raw mode and key decoding for the sticky console prompt. Line editing, history and completion
 # are hand-rolled on top of it — this crate is used only for what a terminal genuinely cannot be
 # driven without: entering/leaving raw mode portably and turning bytes into key events.
-crossterm = { version = "0.28", default-features = false, features = ["events"] }
+#
+# "windows" is not an optional extra here despite the name: it gates crossterm's own `dep:winapi`/
+# `dep:crossterm_winapi`, which its `cfg(windows)` source files need to compile *at all* on that
+# platform. Missing until this project's first real Windows CI run — untestable from a macOS/Linux
+# session, and there was no CI running against a real repository until now.
+crossterm = { version = "0.28", default-features = false, features = ["events", "windows"] }
 
 [profile.dev]
 opt-level = 1
