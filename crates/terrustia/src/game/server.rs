@@ -89,8 +89,21 @@ const TIME_SYNC_TICKS: u64 = 60 * 60;
 const TICK_REPORT_EVERY: u64 = 600;
 
 /// The parts of a tick, in the order they run.
+///
+/// What used to be one `World` phase was thirteen separate systems sharing a lap, so a warning
+/// saying `phase=world` narrowed the cause down to "somewhere in most of the tick". A two-hour
+/// idle run reported that phase eating half the budget with two NPCs and nobody connected; the
+/// cause turned out to be the autosave's world copy, which is now its own entry and would have
+/// been obvious from the first warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// Copying the world for the background save. Runs on the tick, once every autosave.
+    Snapshot,
+    Liquids,
+    Growth,
+    Spread,
+    Weather,
+    /// The clock, tile entities, wiring timers, lunar events and the biome census.
     World,
     Sections,
     Items,
@@ -103,7 +116,12 @@ enum Phase {
 }
 
 impl Phase {
-    const NAMES: [&'static str; 9] = [
+    const NAMES: [&'static str; 14] = [
+        "snapshot",
+        "liquids",
+        "growth",
+        "spread",
+        "weather",
         "world",
         "sections",
         "items",
@@ -114,6 +132,34 @@ impl Phase {
         "housing",
         "sync",
     ];
+}
+
+/// Times one phase of a tick, on the same clock the tick's own total uses.
+///
+/// A named type rather than two lines inline, because those two lines were wrong for months and
+/// nothing could see it: phases were timed with `Instant` while the tick total came from
+/// `clock::Cpu`, so the warning line compared wall microseconds against CPU microseconds and could
+/// report a phase costing more than the whole tick containing it. Every phase figure ever logged
+/// was inflated by however long that phase spent descheduled.
+///
+/// Wrapping it makes the mistake unavailable — there is nowhere here to put an `Instant` — and it
+/// makes the property that matters testable on its own, which is the part that counts. Asserting
+/// "no phase exceeds its tick" does *not* catch this: on an idle machine the two clocks agree, so
+/// that assertion passes against the broken code, which is exactly how it survived so long.
+struct PhaseClock(clock::Cpu);
+
+impl PhaseClock {
+    fn start() -> Self {
+        Self(clock::Cpu::now())
+    }
+
+    /// Processor time since the last lap.
+    fn lap(&mut self) -> Duration {
+        let now = clock::Cpu::now();
+        let elapsed = now.since(self.0);
+        self.0 = now;
+        elapsed
+    }
 }
 
 /// Where one tick's time went.
@@ -1238,11 +1284,16 @@ impl GameServer {
         let mut cost = TickCost::default();
         let began = Instant::now();
         let cpu_began = clock::Cpu::now();
-        let mut clock = Instant::now();
+        // Phases are timed on the *same* clock as the tick total, which they were not: the total
+        // came from `clock::Cpu` and the laps from `Instant`, so the warning line compared CPU
+        // microseconds against wall microseconds and could report a phase costing more than the
+        // whole tick that contained it. Every phase figure ever logged was inflated by however
+        // long that phase spent descheduled. Nine extra thread-clock reads a tick is nothing —
+        // it is a vDSO call — and it makes the phases add up to the total, which is the only way
+        // the breakdown means anything.
+        let mut clock = PhaseClock::start();
         let mut lap = |cost: &mut TickCost, phase: Phase| {
-            let now = Instant::now();
-            cost.phases[phase as usize] += now - clock;
-            clock = now;
+            cost.phases[phase as usize] += clock.lap();
         };
 
         self.ticks += 1;
@@ -1271,6 +1322,9 @@ impl GameServer {
         {
             self.save_world_in_background("autosave");
         }
+        // Its own phase because it is the single most expensive thing the tick does, and it was
+        // hidden inside a bucket of thirteen systems.
+        lap(&mut cost, Phase::Snapshot);
         self.note_finished_save();
         self.note_finished_auth();
         // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
@@ -1289,11 +1343,18 @@ impl GameServer {
             terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty),
         );
 
-        self.tick_tile_entities();
         self.tick_liquids();
+        lap(&mut cost, Phase::Liquids);
         self.tick_growth();
+        lap(&mut cost, Phase::Growth);
         self.tick_spread();
+        lap(&mut cost, Phase::Spread);
         self.tick_weather();
+        lap(&mut cost, Phase::Weather);
+        // Whatever is left: the tile entities, the mech cooldowns, the wiring timers, the lunar
+        // event and the biome census. Individually small; kept together so the breakdown does not
+        // become a wall of near-zero lines.
+        self.tick_tile_entities();
         self.tick_mech_cooldowns();
         self.tick_timers();
         self.tick_lunar();
@@ -9898,6 +9959,97 @@ mod auth_cost {
         assert!(
             server.start_auth(5),
             "a slot freed by a disconnect must be usable again, or repeated joins exhaust the pool"
+        );
+    }
+}
+
+/// Do the tick's phases and its total actually describe the same thing?
+///
+/// They did not. `worst_us` came from `clock::Cpu` and `phase_us` from `Instant`, so the warning
+/// line compared CPU microseconds against wall microseconds. A real two-hour run logged three
+/// ticks where the phase cost *more than the whole tick containing it* — which is impossible, and
+/// meant every phase figure was inflated by however long that phase spent descheduled. All of
+/// Stage 2's measurement rests on these numbers, so the invariant is pinned here.
+#[cfg(test)]
+mod tick_accounting {
+    use super::*;
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn no_phase_can_cost_more_than_its_own_tick() {
+        let mut server = GameServer::new(Config::default(), World::empty(600, 400, "accounting"));
+
+        for _ in 0..20 {
+            let cost = server.tick();
+            let (name, worst) = cost.worst_phase();
+            assert!(
+                worst <= cost.cpu,
+                "phase {name} cost {worst:?} of a tick that cost {:?} — the two are being \
+                 measured on different clocks again",
+                cost.cpu
+            );
+
+            // And the parts must add up to the whole, not merely each be smaller than it.
+            let summed: Duration = cost.phases.iter().sum();
+            assert!(
+                summed <= cost.cpu,
+                "the phases sum to {summed:?} but the tick cost {:?}",
+                cost.cpu
+            );
+        }
+    }
+
+    /// Wall clock is still recorded separately, because telling "we are slow" from "the machine
+    /// is busy" is the reason this instrumentation exists at all.
+    #[tokio::test]
+    async fn wall_clock_is_still_measured_apart_from_processor_time() {
+        let mut server = GameServer::new(Config::default(), World::empty(300, 200, "accounting"));
+        let cost = server.tick();
+        assert!(
+            cost.wall >= cost.cpu,
+            "a tick cannot use more processor than it took: cpu {:?}, wall {:?}",
+            cost.cpu,
+            cost.wall
+        );
+    }
+
+    /// Every phase has a name, so a breakdown can never print an index.
+    #[test]
+    fn every_phase_is_named() {
+        assert_eq!(Phase::NAMES.len(), Phase::Sync as usize + 1);
+    }
+
+    /// The property the fix actually turns on: time spent off the processor is not phase time.
+    ///
+    /// This is the test that catches the bug, and the reason the two above do not. On an idle
+    /// machine wall clock and CPU clock agree, so "no phase exceeds its tick" passes happily
+    /// against the broken code — verified by reverting the fix and watching it stay green.
+    /// Sleeping forces the two clocks apart on purpose, which is the only reliable way to tell
+    /// them apart without a loaded machine.
+    #[test]
+    fn a_phase_does_not_charge_for_time_spent_descheduled() {
+        let mut clock = PhaseClock::start();
+        std::thread::sleep(Duration::from_millis(40));
+        let charged = clock.lap();
+        assert!(
+            charged < Duration::from_millis(5),
+            "a phase that slept for 40ms was charged {charged:?}; phases are on the wall clock \
+             again, which inflates every figure the breakdown prints"
+        );
+    }
+
+    /// And it does still charge for work, so the clock is not simply stuck at zero.
+    #[test]
+    fn a_phase_does_charge_for_work() {
+        let mut clock = PhaseClock::start();
+        let mut total = 0u64;
+        for i in 0..4_000_000u64 {
+            total = total.wrapping_add(i * i);
+        }
+        std::hint::black_box(total);
+        assert!(
+            clock.lap() > Duration::ZERO,
+            "four million multiplies cost nothing?"
         );
     }
 }
