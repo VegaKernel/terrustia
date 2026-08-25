@@ -30,6 +30,13 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **Tick phases are measured on the same clock as the tick** | `worst_us` was CPU, `phase_us` was wall — so a phase could out-cost its own tick, and every phase figure ever logged was inflated. The `world` phase was also 13 systems in one lap; now split |
 | ✓ | **The autosave no longer costs the tick** | **5,606 µs → 43–137 µs.** Only changed sections are copied into a buffer the previous save hands back. Verified live on the real world |
 | ✓ | **`set_tile` no longer hashes** | The section `HashSet` was SipHashing a coordinate pair on every tile write — tens of thousands a tick under liquid load. Now one flag per section, under a kilobyte |
+| ✓ | **Saving verifies before replacing, fsyncs, and keeps 3 backups** | An atomic rename over a corrupt file is an atomic loss. Live-verified: 5 saves, exactly 3 backups, no stray `.tmp`, oldest backup loads |
+| ✓ | **Connection ceiling, per-address cap, handshake deadline** | The accept loop was unconditional. `idle_timeout` resets on any byte, so a trickle held a place for ever. Both verified failing with the guard removed |
+| ✓ | **The whole workspace builds on Windows** | `clock.rs` used `clock_gettime`/`CLOCK_THREAD_CPUTIME_ID`, neither of which exists there — the sole compile blocker. Plus `ctrl_close`/`ctrl_shutdown`, without which a service stop skipped the save. **All five release targets checked** |
+| ✓ | **Tile-edit spam limiter** | A regression *from* vanilla, not parity with it. All six numbers transcribed from `RemoteClient`. Tested at both ends: normal building never trips, a flood trips inside a second |
+| ✓ | **A stranger cannot claim a fresh server** | Everyone had every permission until the first `/register`, and first-come won. Now needs a one-time token printed to the console |
+| ✓ | **Announcements send localization keys** | Parity bug + localization bug + verbatim game text, fixed at once. Four kept as English deliberately, where I could not verify the key |
+| ✓ | **The housing screen works** | Packet 60 inbound fell through to the ignore arm, so dragging an NPC into a room did nothing. Driven over a real socket; verified failing without the dispatch arm |
 | ✓ | **Doors build frame-important tiles correctly** | `Tile::block` on a framed type trips a debug assertion and ships -1 frames; six tests were failing on it |
 
 ## Audit findings, ranked
@@ -43,11 +50,11 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | 🔴 | `catch_unwind` wraps `tick()` but not `handle_event()`; a panic on the packet path kills the server, skips the shutdown save, and exits `SUCCESS` so `Restart=on-failure` never fires | **fixed** |
 | 🟠 | `phase_us` is wall time, `worst_us` is CPU time — every phase cost ever logged is inflated | **fixed** |
 | 🟠 | Autosave copies the whole world on the game task: 8–13 ms of a 16.67 ms budget on a *small* world | **fixed** |
-| 🟠 | Announcements send literal English where vanilla sends localization keys — parity bug + localization bug + verbatim game text in source | open |
+| 🟠 | Announcements send literal English where vanilla sends localization keys — parity bug + localization bug + verbatim game text in source | **fixed** |
 | 🟠 | Town NPCs are all-or-nothing on parse failure; tile entities truncate silently from the first failure | **fixed** |
 | 🟡 | No upper `.wld` version bound — a future format would be misparsed and corrupted on save | **fixed** |
 | 🟡 | `set_tile` SipHashes a section key on every tile write | **fixed** |
-| 🟡 | Packet 60 inbound dropped: the in-game housing UI (drag NPC to a room, evict) does nothing | open |
+| 🟡 | Packet 60 inbound dropped: the in-game housing UI (drag NPC to a room, evict) does nothing | **fixed** |
 | 🟡 | Worldgen oracle verifies nothing — `passes.rs:54` is `PASSES: &[Pass] = &[]` | open |
 | 🟢 | Journey research and Bestiary data **are** preserved (verified by section index) | no action |
 | 🟢 | 59 dependencies, all permissive, zero GPL; `cargo audit` clean; one `unsafe` block, justified | no action |
@@ -59,9 +66,7 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | | Item |
 |---|---|
 | — | Round-trip a real *played-in* world through real Terraria (GAPS §31 never exercised the preserved path) |
-| — | Rotating backups, verify-before-replace, `world rollback` / `world backups` |
-| — | Windows: `clock.rs` thread CPU, `ctrl_close`/`ctrl_shutdown`, `.tmp` cleanup, `fsync` before rename |
-| — | Announcements as localization keys |
+| — | `world rollback` / `world backups` console commands |
 | — | Commit backlog (~8 topical commits), `cargo fmt`, version → 0.0.1 |
 | — | Licence split: AGPL root, MIT for `terrustia-proto` (currently inherits AGPL) |
 | — | `[workspace.lints]`, `#![forbid(unsafe_code)]` on proto+client, `deny.toml`, `*.cs` ignored |
@@ -75,9 +80,7 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | | Item |
 |---|---|
 | — | `AUDIT.md` + question round |
-| — | `max_connections`, per-IP cap, handshake deadline |
-| — | Tile-edit spam limiter + section-ownership check (vanilla parity) |
-| — | First-registration bootstrap that is not a race |
+| — | Section-ownership check on tile edits (vanilla parity) |
 | — | `cargo-fuzz` over the decoder; commit `.trcap` fixtures and replay in CI |
 | — | **Tag v0.0.1** |
 
