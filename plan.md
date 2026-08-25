@@ -46,6 +46,8 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **Version refusals name both sides** | The message named 1.4.5.7 while the server spoke 326. Plus a test that fires when the game moves |
 | ✓ | **Whitelist** | Empty means off, so it cannot lock the operator out on the day it lands |
 | ✓ | **`cargo fmt` across the tree** | 46 files, its own commit |
+| ✓ | **Trees, jungle grass, vines, cacti at generation** | 349 trees, 2,415 vine tiles, jungle grass 700→3,198. Frames transcribed from `WorldGen.GrowTree`. Found three bugs by measuring: wrong argument to `grow_cactus`, a vine scan that could never match, and a latent frame-sentinel bug that broke the save round trip for 1,987 tiles |
+| ✓ | **Whitelist, SECURITY.md, CONTRIBUTING.md** | |
 | ✓ | **Doors build frame-important tiles correctly** | `Tile::block` on a framed type trips a debug assertion and ships -1 frames; six tests were failing on it |
 
 ## Audit findings, ranked
@@ -67,6 +69,18 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | 🟡 | Worldgen oracle verifies nothing — `passes.rs:54` is `PASSES: &[Pass] = &[]` | open |
 | 🟢 | Journey research and Bestiary data **are** preserved (verified by section index) | no action |
 | 🟢 | 59 dependencies, all permissive, zero GPL; `cargo audit` clean; one `unsafe` block, justified | no action |
+
+## Verified at the end of the session
+
+```
+cargo fmt --check          clean
+cargo clippy               0 warnings (warnings denied workspace-wide)
+cargo deny check           advisories ok, bans ok, licenses ok, sources ok
+cargo test --workspace     1,486 passing, 0 failing
+five release targets       all ok
+tools/soak_ci.sh           passed
+real-world round trip      faithful; every field survives
+```
 
 ## Next
 
