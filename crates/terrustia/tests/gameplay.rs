@@ -1404,6 +1404,54 @@ async fn a_bound_townsperson_can_be_freed() {
     );
 }
 
+/// An ordinary (un-bound) town NPC can be talked to, and the interaction is visible to everyone
+/// else on the server.
+///
+/// This is the interaction a real client's shop UI actually rides on. Opening a shop in vanilla
+/// is entirely client-side (`Main.npcShop = index; shop[npcShop].SetupShop(npcShop);`,
+/// `Main.cs:41174`) — no packet populates it — and the click-to-talk gate the client evaluates
+/// locally (`nPC.townNPC`, derived from `type` alone, plus `velocity.Y == 0f`, `Main.cs:43781`) is
+/// satisfied by an ordinary NPC sync with no extra server work at all. The one thing the server
+/// does own is packet 40 itself (`SYNC_TALK_N_P_C`), which `a_bound_townsperson_can_be_freed`
+/// already proves end to end for the *bound* case; this proves the same path for the ordinary
+/// case that path does not cover, and that it reaches other players rather than being swallowed.
+#[tokio::test]
+async fn a_town_npc_can_be_talked_to_and_it_is_visible_to_everyone() {
+    const MERCHANT: u16 = 17;
+
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    let npc = spawn_npc(&mut alice, "Merchant").await;
+    assert_eq!(npc.npc_type(), MERCHANT);
+
+    // Wait for it to come to rest — a real client refuses to let a player interact with a town
+    // NPC that is still falling (`NPC.CanBeTalkedTo` requires `velocity.Y == 0f`).
+    let settled = alice
+        .wait_for(
+            "the merchant to land",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == npc.index && n.velocity.1 == 0.0),
+        )
+        .await
+        .expect("a town NPC should come to rest almost immediately after spawning");
+    let Event::NpcSynced(settled) = settled else {
+        unreachable!("matched on it")
+    };
+    assert_eq!(settled.velocity.1, 0.0);
+    assert_eq!(settled.npc_type(), MERCHANT);
+
+    alice.talk_to_npc(npc.index).await.unwrap();
+
+    // Bob sees the interaction too — packet 40 is relayed, not swallowed.
+    bob.wait_for(
+        "alice's talk packet relayed",
+        |e| matches!(e, Event::Other(frame) if frame.id == terrustia_proto::id::SYNC_TALK_N_P_C),
+    )
+    .await
+    .expect("packet 40 should be relayed to other connected players");
+}
+
 /// Registering an account claims the server, and a stranger loses the dangerous commands.
 ///
 /// Before this, the comment above the command dispatcher said "there is no permission model: this

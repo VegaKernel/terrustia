@@ -79,11 +79,11 @@ in `plan.md` but not yet started.
 | ✅ | Both moons, all four invasions, Old One's Army with Betsy, eclipse with Mothron | |
 | ✅ | Rain, wind, sandstorms | |
 | ✅ | Town NPC arrival and housing | Including the in-game housing screen |
-| 🔴 | **Town NPC shops** | The merchant economy is unreachable |
+| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla — no packet populates it, and the click gate (`townNPC`, derived from `type` alone, plus `velocity.Y == 0`) is satisfied by an ordinary NPC sync. The one thing the server owns, packet 40, was already correct (proven for the bound-NPC case by the rescue mechanic); a new test proves it for an ordinary town NPC too, relayed to other players. No happiness-driven pricing or shop overrides yet — tracked separately below and as packet 104 |
 | 🔴 | **Town NPCs fighting back** | The first Blood Moon after anyone moves in, the town stands still and dies |
 | 🔴 | NPC happiness, price effects, moving out | |
 | 🔴 | Slime Rain, Party, Lantern Night | |
-| 🟡 | Enemy drops | ~123 ordinary enemies drop nothing yet. Boss and progression drops are complete and walked end to end |
+| 🟡 | Enemy drops | `tools/check_drops.py` itself was found to have real parsing bugs producing false positives (it briefly "proved" Eye of Cthulhu owed the player an Iron Pickaxe); fixed, and boss loot is now genuinely complete — 3 real missing trophies (Moon Lord, Empress of Light, Deerclops) and the Martian Saucer's weapon pool were found and added this way. ~111 ordinary enemies are still short at least one drop, a real and lower number than previously measured now that the checker's own noise is gone, but not yet individually fixed |
 
 ## Items and mechanics
 
