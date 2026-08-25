@@ -13,8 +13,9 @@ disagree with each other about whether cacti grow.
 
 **The short version:** point it at a `.wld` you already have and it serves it well —
 same clients, same file, and measurably lighter than the official server. Point it at nothing and
-it generates a world that is playable but visibly unfinished: **no trees**, no lakes, no settled
-water. That is the largest gap and it is being worked pass by pass.
+it generates a world that is playable and now has forests, a green jungle and cacti — but still no
+lakes and no settled water. Generation is the largest remaining gap and is being worked pass by
+pass.
 
 ---
 
@@ -43,16 +44,18 @@ water. That is the largest gap and it is being worked pass by pass.
 
 ## World generation
 
-The largest gap. ~22 of Terraria's 106 passes have any counterpart.
+The largest gap. ~26 of Terraria's 106 passes have any counterpart.
 
 | | Feature | Notes |
 |---|---|---|
 | ✅ | Terrain, caves, ore veins | |
 | ✅ | Dungeon, temple, hive, underworld, evil chasms | Our own algorithms, not vanilla's |
 | ✅ | Chests, altars, life crystals, shadow orbs | Enough to be beatable |
-| 🔴 | **Trees** | None at all. The first thing anyone notices |
+| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree` — trunk, branches, roots, canopy. 349 on a 4200×1200 world |
+| ✅ | Vines and jungle grass | The underground jungle's mud is lined with grass, which is what vines hang from: 2,415 vine tiles |
+| ✅ | Cacti | |
 | 🔴 | Lakes, settled water | `SettleLiquids` needs a generation-only settler we do not have |
-| 🔴 | Cacti, vines, flowers, mushrooms, herbs at generation | |
+| 🔴 | Flowers, mushrooms and herbs at generation | Surface plants exist; the taller decoration does not |
 | 🔴 | Pots, statues, traps, piles, fallen logs | |
 | 🔴 | Smoothed terrain | Everything is blocky |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |

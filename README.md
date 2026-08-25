@@ -27,9 +27,9 @@ research, the bestiary, pylon rooms — survives untouched.
 
 ## World generation is experimental
 
-Generate a world instead and you get somewhere playable but visibly unfinished. **There are no
-trees.** No lakes, no settled water, no smoothed terrain. About 22 of Terraria's 106 generation
-passes have a counterpart so far; the rest are being worked through pass by pass.
+Generate a world instead and you get somewhere playable, with forests, a green jungle and cacti —
+but **no lakes and no settled water**, and no smoothed terrain. About 26 of Terraria's 106
+generation passes have a counterpart so far; the rest are being worked through pass by pass.
 
 **[FEATURES.md](FEATURES.md) is the honest, feature-by-feature answer** to what works, what is
 partial and why, and what is deliberately out of scope. It is kept in step with the code rather
