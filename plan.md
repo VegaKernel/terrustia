@@ -64,6 +64,7 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **`check_drops.py` had seven real parsing bugs, found and fixed** | It initially "proved" Eye of Cthulhu owed the player an Iron Pickaxe. Traced every false positive against `ItemDropDatabase.cs` by hand rather than trusting the summary. With it actually trustworthy: 3 real trophy gaps (Moon Lord, Empress of Light, Deerclops) and the Martian Saucer's weapon pool were genuinely missing and are now fixed; boss loot has zero remaining unjustified gaps |
 | ✓ | **`StructureMap`/`ShapeData`, the real Tier 2 foundation** | Corrects the earlier blind sizing pass's ~5,253-line DSL estimate: nothing in Tier 2/3 actually calls that pipeline, only these two small types (208 real lines total). Not wired into `build()` yet — nothing calls it until the first real Tier 2 pass exists |
 | ✓ | **Town NPCs fight back** | One representative of each of vanilla's four `AttackType` classes (Merchant ranged, Arms Dealer ranged, Wizard ranged, Dye Trader melee) — proves the mechanism end to end rather than porting all ~27 combat-capable town NPCs at once. Verified over a real two-client socket: a Merchant's shot is broadcast to both clients and the target's synced health actually drops. 4.70 µs/tick for 12 town NPCs × 60 hostiles |
+| ✓ | **`github.com/bybrooklyn/terrustia` created and pushed — real CI, for the first time ever** | "Written and validated, never run" turned out to be hiding two genuine, independent bugs neither `cargo check` locally nor any human review had caught, because nothing had ever actually run these workflows against a real runner: (1) `ci.yml`/`docker.yml` triggered on a `main` branch that has never existed here — every commit in this repo's history is on `master` — so ordinary pushes would never have run CI at all; (2) `rust-toolchain.toml` pins Rust 1.97.1, but the workflows installed cross-compile targets into the unrelated "stable" (1.98.0) toolchain, so `cargo build --target` inside the repo — which always resolves to the pinned 1.97.1 — found the target missing. Fixed by declaring `targets` in `rust-toolchain.toml` itself, the same self-declaring pattern it already used for `components`. A *third* bug turned up once CI actually ran for real: `crossterm`'s `default-features = false` dropped its `"windows"` feature, which gates the `winapi`/`crossterm_winapi` deps its own Windows backend source needs to compile at all — untestable from this session's macOS/Linux environment, only catchable by an actual Windows runner. Container image built, pushed, cosign-signed, and smoke-tested with no configuration — genuinely working, not just written |
 
 ## Audit findings, ranked
 
@@ -104,7 +105,6 @@ real-world round trip      faithful; every field survives
 | | Item |
 |---|---|
 | — | Round-trip a real *played-in* world through real Terraria (GAPS §31 never exercised the preserved path) |
-| — | **Create the GitHub repo and push** (workflows written, never run) |
 | — | Tile action log + `world undo <player> <duration>` |
 | — | `--new <name>` to generate into the world directory |
 

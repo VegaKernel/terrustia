@@ -130,7 +130,7 @@ in `plan.md` but not yet started.
 | | | Notes |
 |---|---|---|
 | ✅ | Linux x86_64 / aarch64, macOS arm64 / x86_64, Windows x86_64 | All five pass `cargo check` |
-| 🟡 | Container image, signed releases, packaging | Written and validated; the repository now exists (`github.com/bybrooklyn/terrustia`), but no tagged release has been cut yet, so the release/container workflows still haven't executed for real. CI itself has (see below) |
+| 🟡 | Container image, signed releases, packaging | The repository exists now (`github.com/bybrooklyn/terrustia`) and the container workflow has actually run: multi-arch image built, pushed, cosign-signed, and smoke-tested serving with no configuration. Getting there for real found and fixed three bugs invisible to local `cargo check` — CI targeting a branch (`main`) that never existed here, cross-compile targets landing in the wrong toolchain, and `crossterm` missing the Cargo feature its own Windows backend needs to compile. Signed releases still untested — no tagged release has been cut yet, and that workflow only triggers on a `v*` tag |
 
 ---
 
