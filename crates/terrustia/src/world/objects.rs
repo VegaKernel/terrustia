@@ -57,6 +57,27 @@ impl Sign {
     }
 }
 
+/// A townsperson as the world file remembers them.
+///
+/// Town NPCs were the largest thing the save carried that this server never read *or* wrote: the
+/// section was sliced out as an opaque blob and handed back untouched. A real Terraria world's
+/// residents were therefore invisible to the server, and anyone who moved in during a session was
+/// gone at the next restart along with their name and their house.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TownNpc {
+    /// `netID`, which is the type for everything except the few NPCs with negative variants.
+    pub net_id: i32,
+    /// The name they were given when they arrived, which is what players know them by.
+    pub name: String,
+    pub position: (f32, f32),
+    pub homeless: bool,
+    pub home: (i32, i32),
+    /// Which of a townsperson's appearances this one wears.
+    pub variation: i32,
+    /// Whether they are on their way out because their house was destroyed.
+    pub homeless_despawn: bool,
+}
+
 /// Byte ranges of a loaded save that this server does not model.
 ///
 /// Saving re-serialises only the header prefix, tiles, chests and signs. Everything else — NPCs,
@@ -105,6 +126,18 @@ pub struct PreservedWorld {
     pub combat_book_offset: Option<usize>,
     pub late_downed_run_offset: Option<usize>,
     pub combat_book_two_offset: Option<usize>,
+    /// The three hardmode ore tiers, chosen when altars are smashed.
+    pub hardmode_ores_offset: Option<usize>,
+    /// Where the banner kill counts start, and how many the file has room for.
+    pub banner_kills_offset: Option<(usize, usize)>,
+    /// Whether the townsfolk section decoded in full.
+    ///
+    /// Both of these gate *rewriting* the section on save. A section we only partly understood is
+    /// carried through as the bytes it arrived as, because rewriting it from a partial read is how
+    /// a world loses every resident — or every pylon — to one unrecognised entry.
+    pub town_npcs_understood: bool,
+    /// Whether every tile entity the section claimed decoded.
+    pub tile_entities_understood: bool,
     /// Sections 4 onwards, one blob each, in order.
     ///
     /// Kept separately rather than as one run of bytes so that a section this server *does* model

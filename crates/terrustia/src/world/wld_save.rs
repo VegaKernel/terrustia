@@ -20,7 +20,7 @@ use std::path::Path;
 
 use terrustia_proto::{Tile, Writer, section::write_tile_with, tile_sets::allows_batching};
 
-use super::{World, wld::WldError};
+use super::{World, wld::{Scenery, WldError}};
 
 type Result<T> = std::result::Result<T, WldError>;
 
@@ -122,10 +122,17 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     for (index, section) in preserved.trailing_sections.iter().enumerate() {
         pointers[4 + index] =
             i32::try_from(w.len()).map_err(|_| WldError::SaveTooLarge { bytes: w.len() as i64 })?;
-        if index == TILE_ENTITY_SECTION {
-            write_tile_entities(&mut w, world);
-        } else {
-            w.bytes(section);
+        match index {
+            // Rewritten only when the load understood the whole section. Rewriting one we read
+            // partially would write back what we managed to decode and silently drop the rest —
+            // which for these two sections means a world's residents or its pylons.
+            TOWN_NPC_SECTION if preserved.town_npcs_understood => write_town_npcs(&mut w, world),
+            TILE_ENTITY_SECTION if preserved.tile_entities_understood => {
+                write_tile_entities(&mut w, world)
+            }
+            _ => {
+                w.bytes(section);
+            }
         }
     }
 
@@ -266,6 +273,25 @@ fn patch_clock(header: &mut [u8], preserved: &super::objects::PreservedWorld, wo
             &world.sandstorm_intended_severity.to_le_bytes(),
         );
     }
+    // The hardmode ores an altar chose. Left unwritten this is not a lost setting but a corrupted
+    // world: the header keeps saying -1 for "not chosen", so after a restart the next altar rolls a
+    // second tier and the world ends up with two different ores sprayed through it.
+    if let Some(at) = preserved.hardmode_ores_offset {
+        for (i, tier) in world.ore_tiers[4..7].iter().enumerate() {
+            write(header, at + i * 4, &i32::from(*tier).to_le_bytes());
+        }
+    }
+    // Banner kill counts. The run's length belongs to the file — the count was written ahead of it
+    // and every field after depends on it — so a banner beyond that length is dropped rather than
+    // written, which would shift the rest of the header and take the Moon Lord with it.
+    if let Some((at, kinds)) = preserved.banner_kills_offset {
+        for (banner, count) in &world.banner_kills {
+            let i = usize::from(*banner);
+            if i < kinds {
+                write(header, at + i * 4, &(*count as i32).to_le_bytes());
+            }
+        }
+    }
     write(
         header,
         preserved.time_offset,
@@ -366,9 +392,7 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
     // that has just been made has none of them, and one this server has been running keeps them
     // elsewhere, so each is written empty in the shape its loader expects.
     pointers[4] = w.len() as i32;
-    w.i32(0); // no shimmered townsfolk
-    w.bool(false); // no town NPCs
-    w.bool(false); // and none of the few enemies that persist
+    write_town_npcs(&mut w, world);
     pointers[5] = w.len() as i32;
     write_tile_entities(&mut w, world);
     pointers[6] = w.len() as i32;
@@ -395,6 +419,38 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
 ///
 /// Section 5 overall, which is index 1 of the run this server carries through.
 const TILE_ENTITY_SECTION: usize = 1;
+
+/// Index of the townsfolk among the trailing sections. Section 4 of the file.
+const TOWN_NPC_SECTION: usize = 0;
+
+/// Write the townsfolk, matching `WorldFile.SaveNPCs`.
+///
+/// Two lists, each led by a boolean per entry and closed by a bare `false`. The second holds the
+/// non-town NPCs the game persists; this server does not model those, so it writes an empty list —
+/// which is valid, and means they respawn rather than being carried.
+fn write_town_npcs(w: &mut Writer, world: &World) {
+    w.i32(world.shimmered_town_npcs.len() as i32);
+    for kind in &world.shimmered_town_npcs {
+        w.i32(*kind);
+    }
+
+    for npc in &world.town_npcs {
+        w.bool(true)
+            .i32(npc.net_id)
+            .string(&npc.name)
+            .f32(npc.position.0)
+            .f32(npc.position.1)
+            .bool(npc.homeless)
+            .i32(npc.home.0)
+            .i32(npc.home.1)
+            // Bit zero says a variation index follows, which it always does for a townsperson.
+            .u8(1)
+            .i32(npc.variation)
+            .bool(npc.homeless_despawn);
+    }
+    w.bool(false);
+    w.bool(false);
+}
 
 /// Write section 5: the furniture that remembers something.
 ///
@@ -439,7 +495,9 @@ fn write_importance(w: &mut Writer, importance: &[bool]) {
 fn write_fresh_header(w: &mut Writer, world: &World) {
     let p = &world.progress;
     w.string(&world.name)
-        .string("") // the seed text, which this server does not keep
+        // The seed as it was typed. Terraria shows it in the world-select list, and it is the
+        // other half of the parity oracle, so dropping it makes a world's seed unrecoverable.
+        .string(&world.seed_text)
         .u64(world.world_gen_version)
         .bytes(&world.unique_id)
         .i32(world.id);
@@ -485,8 +543,11 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
         .i32(i32::from(world.moon_phase))
         .bool(world.blood_moon)
         .bool(world.eclipse);
+    // The dungeon's door, which is where the Old Man waits and where the Lunatic Cultist appears
+    // once Golem is down. Writing the surface here instead put both in the wrong place.
     let dungeon_x = world.dungeon_x.unwrap_or(world.width() / 2);
-    w.i32(dungeon_x).i32(i32::from(world.surface));
+    let dungeon_y = world.dungeon_y.unwrap_or(i32::from(world.surface));
+    w.i32(dungeon_x).i32(dungeon_y);
     w.bool(world.crimson);
 
     for flag in [
@@ -523,15 +584,31 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
     w.bool(world.raining)
         .i32(world.rain_time)
         .f32(world.max_rain);
-    // The three hardmode ore tiers, which are rolled when the wall falls.
-    for _ in 0..3 {
-        w.i32(0);
+    // The three hardmode ore tiers, which the first three altars roll.
+    //
+    // `-1` is the game's "not chosen yet" sentinel and it has to survive: `SmashAltar` only picks
+    // a tier when it reads `-1`, and `CheckSavedOreTiers` repairs the *other* four on load but
+    // never these. A `0` here therefore sticks, and the altar sprays tile type 0 — dirt — leaving
+    // the world with no hardmode ore and every mechanical boss out of reach.
+    for slot in 4..7 {
+        w.i32(i32::from(world.ore_tiers[slot]));
     }
-    // Eight background styles, then the clouds and the wind.
-    for _ in 0..8 {
-        w.u8(0);
+    // Eight of the thirteen background styles, in the file's order rather than packet 7's — the
+    // other five are written further down, where the format put them.
+    for slot in [
+        Scenery::TREE_1,
+        Scenery::CORRUPT,
+        Scenery::JUNGLE,
+        Scenery::SNOW,
+        Scenery::HALLOW,
+        Scenery::CRIMSON,
+        Scenery::DESERT,
+        Scenery::OCEAN,
+    ] {
+        w.u8(world.backgrounds[slot]);
     }
-    w.i32(0).i16(0).f32(world.wind);
+    // Whether the cloud backdrop is drawn, how many clouds, and the wind that moves them.
+    w.i32(0).i16(i16::from(world.num_clouds)).f32(world.wind);
 
     w.i32(0); // nobody has handed in an angler quest today
     w.bool(p.saved_angler)
@@ -541,7 +618,15 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
         .bool(p.saved_golfer);
     w.i32(0).i32(0); // invasion size at the start, cultist delay
 
-    w.i16(0).i16(0); // no banner kill counts, no claimable banners
+    // The banner kill counts, written as the dense array the loader expects. `BannerSystem.Load`
+    // guards each index against its own array length, so a count that does not match the game's
+    // 293 is read safely either way.
+    const BANNERS: u16 = 293;
+    w.i16(BANNERS as i16);
+    for banner in 0..BANNERS {
+        w.i32(world.banner_kills.get(&banner).copied().unwrap_or(0) as i32);
+    }
+    w.i16(0); // nothing waiting to be claimed: banners are handed over as they are earned
     w.bool(false); // not fast-forwarding to dawn
     for flag in [
         p.downed_fishron,
@@ -575,21 +660,30 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
         .bool(p.downed_army_t1)
         .bool(p.downed_army_t2)
         .bool(p.downed_army_t3);
-    for _ in 0..5 {
-        w.u8(0); // five more background styles
+    // The remaining five background styles.
+    for slot in [
+        Scenery::MUSHROOM,
+        Scenery::UNDERWORLD,
+        Scenery::TREE_2,
+        Scenery::TREE_3,
+        Scenery::TREE_4,
+    ] {
+        w.u8(world.backgrounds[slot]);
     }
     w.bool(p.combat_book);
     w.i32(0).bool(false).bool(false).bool(false); // lantern night
 
-    // One tree-top variation per biome.
-    w.i32(13);
-    for _ in 0..13 {
-        w.i32(0);
+    // One tree-top variation per biome area. The file widens each to an int; the packet narrows
+    // it back to a byte.
+    w.i32(world.tree_tops.len() as i32);
+    for variation in world.tree_tops {
+        w.i32(i32::from(variation));
     }
     w.bool(false).bool(false); // no forced holiday today
-    // The four ore tiers the wall hands out, which a fresh world has not chosen.
-    for _ in 0..4 {
-        w.i32(-1);
+    // The four ore tiers the world was generated with. `CheckSavedOreTiers` repairs these on load
+    // if they are still `-1`, so an unchosen set is safe here in a way the hardmode three are not.
+    for slot in 0..4 {
+        w.i32(i32::from(world.ore_tiers[slot]));
     }
     for _ in 0..3 {
         w.bool(false); // no pets bought
@@ -711,6 +805,10 @@ mod tests {
             combat_book_offset: Some(810),
             late_downed_run_offset: Some(820),
             combat_book_two_offset: Some(830),
+            hardmode_ores_offset: Some(900),
+            banner_kills_offset: Some((1000, 293)),
+            town_npcs_understood: true,
+            tile_entities_understood: true,
             trailing_sections: Vec::new(),
             importance: Vec::new(),
         }
@@ -742,6 +840,13 @@ mod tests {
         world.progress.combat_book = true;
         world.progress.downed_deerclops = true;
         world.progress.combat_book_two = true;
+        world.ore_tiers[4] = 107;
+        world.ore_tiers[5] = 108;
+        world.ore_tiers[6] = 111;
+        world.banner_kills.insert(0, 50);
+        world.banner_kills.insert(17, 250);
+        // Past the end of the run this file has room for, so it has nowhere to go.
+        world.banner_kills.insert(400, 9);
 
         patch_clock(&mut header, &keep, &world);
 
@@ -807,6 +912,76 @@ mod tests {
         assert_eq!(header[820], 0, "the empress, still alive");
         assert_eq!(header[820 + 2], 1, "deerclops");
         assert_eq!(header[830], 1, "the second combat book");
+        // The hardmode ores an altar chose: three i32s, cobalt first.
+        assert_eq!(
+            i32::from_le_bytes(header[900..904].try_into().unwrap()),
+            107,
+            "cobalt"
+        );
+        assert_eq!(
+            i32::from_le_bytes(header[904..908].try_into().unwrap()),
+            108,
+            "mythril"
+        );
+        assert_eq!(
+            i32::from_le_bytes(header[908..912].try_into().unwrap()),
+            111,
+            "adamantite"
+        );
+        // Banner kills land at their own index, and one past the end goes nowhere at all.
+        assert_eq!(
+            i32::from_le_bytes(header[1000..1004].try_into().unwrap()),
+            50,
+            "banner 0"
+        );
+        assert_eq!(
+            i32::from_le_bytes(header[1000 + 17 * 4..1000 + 17 * 4 + 4].try_into().unwrap()),
+            250,
+            "banner 17"
+        );
+        assert_eq!(
+            header[1000 + 400 * 4],
+            0xAA,
+            "a banner past the file's run must not be written, or every field after it shifts"
+        );
+    }
+
+    /// The bug this file existed with: a field the server changes with nowhere to write it.
+    ///
+    /// Smashing an altar picks the hardmode ore tier. Before this, the choice never reached disk on
+    /// a loaded world, so the header still read -1 for "not chosen" next launch and the following
+    /// altar rolled a *second* tier — leaving two different ores sprayed through one world.
+    #[test]
+    fn an_altars_ore_choice_survives_a_save() {
+        let (mut header, keep) = header_with(preserved());
+        let mut world = crate::world::worldgen::generate(400, 300, "ores", 1);
+        world.ore_tiers[4] = 221;
+
+        patch_clock(&mut header, &keep, &world);
+
+        assert_eq!(
+            i32::from_le_bytes(header[900..904].try_into().unwrap()),
+            221,
+            "the tier an altar chose has to reach the file, or the next altar rolls a second one"
+        );
+    }
+
+    /// The same bug, in the field our own comments claimed was already safe.
+    ///
+    /// `note_banner_kill` says "the count lives on the world, so it survives a restart". It did
+    /// not, for any world loaded from a file.
+    #[test]
+    fn banner_kills_survive_a_save() {
+        let (mut header, keep) = header_with(preserved());
+        let mut world = crate::world::worldgen::generate(400, 300, "banners", 1);
+        world.banner_kills.insert(3, 42);
+
+        patch_clock(&mut header, &keep, &world);
+
+        assert_eq!(
+            i32::from_le_bytes(header[1012..1016].try_into().unwrap()),
+            42,
+        );
     }
 
     /// A world whose header never reached a field simply does not write it, rather than writing

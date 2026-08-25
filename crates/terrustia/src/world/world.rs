@@ -24,7 +24,7 @@ pub const NIGHT_LENGTH: i32 = 32_400;
 pub struct World {
     width: i32,
     height: i32,
-    tiles: Vec<Tile>,
+    tiles: super::packed::TileStore,
     pub spawn_x: i16,
     pub spawn_y: i16,
     pub surface: i16,
@@ -67,6 +67,15 @@ pub struct World {
     /// Several ported routines read it and have been reading nothing but calm until now.
     pub wind: f32,
     pub crimson: bool,
+    /// Which ore each tier settled on: copper, iron, silver, gold, cobalt, mythril, adamantite,
+    /// in the order the file and packet 7 both use. `-1` means that tier has not been chosen.
+    ///
+    /// A world picks one of a pair for each tier — copper or tin, cobalt or palladium — and the
+    /// choice has to be remembered, because the world is already full of the one it picked. The
+    /// hardmode three are decided by the first three altars broken, and until then they are `-1`:
+    /// that sentinel is load-bearing, since `SmashAltar` only rolls a tier when it sees it, and a
+    /// `0` there makes the game spray tile type 0 — dirt — instead of ore.
+    pub ore_tiers: [i16; 7],
     /// What the world has already been through.
     ///
     /// These are not bookkeeping: routines read them. A wall creeper behaves one way before the
@@ -88,6 +97,18 @@ pub struct World {
     pub ice_back_style: u8,
     pub jungle_back_style: u8,
     pub hell_back_style: u8,
+    /// One backdrop style per biome, in packet 7's order: the four forest variants, then corrupt,
+    /// jungle, snow, hallow, crimson, desert, ocean, mushroom and underworld.
+    ///
+    /// The world file keeps these in two separate runs and this parser used to skip both, so every
+    /// loaded world served its players the biome-zero backdrop everywhere. Purely what the player
+    /// sees — no routine reads them — but "the sky is wrong in every biome" is not nothing, and it
+    /// was found by diffing our packet 7 against a real server's on the same world file.
+    pub backgrounds: [u8; 13],
+    /// One tree-top variation per biome area, likewise dropped on load until now.
+    pub tree_tops: [u8; 13],
+    /// How many clouds are in the sky. The file stores it as a short; the packet sends a byte.
+    pub num_clouds: u8,
     /// Chests and signs are announced in the trailer of whichever section contains them, so a
     /// loaded world has to keep them alongside the tiles.
     ///
@@ -95,6 +116,19 @@ pub struct World {
     /// a hole rather than renumbering everything after it.
     pub chests: Vec<Option<Chest>>,
     pub signs: Vec<Option<Sign>>,
+    /// The townsfolk who live here, and which of them have been through shimmer.
+    ///
+    /// Kept on the world because the save owns them: the server's live roster is rebuilt from
+    /// this at startup and written back into it before each save, so a Guide who moved into a
+    /// house is still there — with the same name — after a restart.
+    pub town_npcs: Vec<super::objects::TownNpc>,
+    pub shimmered_town_npcs: Vec<i32>,
+    /// How many of each banner's enemy have been killed, by banner index.
+    ///
+    /// On the world rather than the server because the save carries it: a hundred zombies killed
+    /// before a restart still count towards the banner afterwards. Sparse, because most of the
+    /// four hundred banners are never touched in one world.
+    pub banner_kills: std::collections::HashMap<u16, u32>,
     /// The furniture that remembers something: item frames, mannequins, logic sensors, pylons.
     ///
     /// World state rather than server state, for two reasons that both bite. They are written to
@@ -126,7 +160,7 @@ impl World {
         Self {
             width,
             height,
-            tiles: vec![Tile::AIR; (width * height) as usize],
+            tiles: super::packed::TileStore::new(width, height),
             spawn_x: (width / 2) as i16,
             spawn_y: (height / 3) as i16,
             surface: (height / 3) as i16,
@@ -152,6 +186,7 @@ impl World {
             sandstorm_intended_severity: 0.0,
             wind: 0.0,
             crimson: false,
+            ore_tiers: [-1; 7],
             progress: Progress::default(),
             game_mode: 0,
             world_gen_version: 0,
@@ -166,8 +201,14 @@ impl World {
             ice_back_style: 0,
             jungle_back_style: 0,
             hell_back_style: 0,
+            backgrounds: [0; 13],
+            tree_tops: [0; 13],
+            num_clouds: 0,
             chests: Vec::new(),
             signs: Vec::new(),
+            town_npcs: Vec::new(),
+            shimmered_town_npcs: Vec::new(),
+            banner_kills: std::collections::HashMap::new(),
             tile_entities: Vec::new(),
             next_tile_entity: 0,
             preserved: None,
@@ -331,7 +372,7 @@ impl World {
     /// world only approximately, and a client may request a position near the edge.
     pub fn tile(&self, x: i32, y: i32) -> Tile {
         if self.in_bounds(x, y) {
-            self.tiles[(y * self.width + x) as usize]
+            self.tiles.get(x, y)
         } else {
             Tile::AIR
         }
@@ -342,11 +383,16 @@ impl World {
         if !self.in_bounds(x, y) {
             return false;
         }
-        self.tiles[(y * self.width + x) as usize] = tile;
+        self.tiles.set(x, y, tile);
         if self.track_dirty {
             self.dirty_sections.insert(self.section_of(x, y));
         }
         true
+    }
+
+    /// What the tiles cost in memory: the array, then each side table.
+    pub fn tile_footprint(&self) -> (usize, usize, usize) {
+        self.tiles.footprint()
     }
 
     /// Begin recording which sections change, once the world is fully built.
@@ -360,13 +406,18 @@ impl World {
         self.dirty_sections.drain().collect()
     }
 
+    /// How many sections wide the world is, counted the way the client counts.
+    ///
+    /// `Main.maxSectionsX = Main.maxTilesX / 200` truncates, so rounding up here would invent a
+    /// section the client has no array slot for and would never ask about. Terraria's own sizes
+    /// are all exact multiples, and [`crate::config::Config::validate`] keeps generated ones that
+    /// way too, so this only ever discards a remainder that should not exist.
     pub fn sections_x(&self) -> i32 {
-        // `i32::div_ceil` is still unstable, and both operands are known positive here.
-        (self.width + SECTION_WIDTH - 1) / SECTION_WIDTH
+        self.width / SECTION_WIDTH
     }
 
     pub fn sections_y(&self) -> i32 {
-        (self.height + SECTION_HEIGHT - 1) / SECTION_HEIGHT
+        self.height / SECTION_HEIGHT
     }
 
     /// The section grid coordinates containing a tile position.
@@ -448,6 +499,16 @@ impl World {
             (F::DownedQueenSlime, p.downed_queen_slime),
             (F::PumpkinMoon, self.pumpkin_moon),
             (F::SnowMoon, self.snow_moon),
+            // The Old One's Army is three separate victories and the Tavernkeep's stock turns on
+            // which have happened. These were parsed out of the world file and then never told to
+            // anyone, so a world that had beaten tier three still shopped like a fresh one.
+            (F::DownedArmyTier1, p.downed_army_t1),
+            (F::DownedArmyTier2, p.downed_army_t2),
+            (F::DownedArmyTier3, p.downed_army_t3),
+            // Advanced Combat Techniques, both volumes, which permanently toughen the townsfolk.
+            (F::CombatBookUsed, p.combat_book),
+            (F::CombatBookTwoUsed, p.combat_book_two),
+            (F::Sandstorm, self.sandstorm),
         ] {
             flags.set_flag(flag, on);
         }
@@ -482,7 +543,208 @@ impl World {
             ice_back_style: self.ice_back_style,
             jungle_back_style: self.jungle_back_style,
             hell_back_style: self.hell_back_style,
+            backgrounds: self.backgrounds,
+            tree_tops: self.tree_tops,
+            num_clouds: self.num_clouds,
+            // The client reads these for the Guide's hardmode ore hint, so a world that settled on
+            // palladium has to say so rather than reporting whatever the default happened to be.
+            ore_tiers: self.ore_tiers,
+            // Release 326 sends the dungeon entrance here. A world loaded from a file that predates
+            // the field, or one still being generated, has no position to give — nought is what the
+            // game itself writes for an unplaced dungeon, and it is only ever a cosmetic loss
+            // (the client uses it for the map's dungeon marker), unlike leaving the field out.
+            dungeon_x: self.dungeon_x.unwrap_or(0) as i16,
+            dungeon_y: self.dungeon_y.unwrap_or(0) as i16,
             ..WorldData::default()
+        }
+    }
+}
+
+/// Does every field of [`World`] have a decided route back to disk?
+///
+/// This module exists because two did not, and nobody noticed for months. `ore_tiers` was chosen
+/// when an altar broke and then dropped on every save of a loaded world — which is worse than
+/// forgetting a setting, because the header kept reading `-1` for "not chosen" and the *next*
+/// altar rolled a second tier, leaving one world with two different ores sprayed through it.
+/// `banner_kills` went the same way, while a comment three lines from the code that lost it
+/// claimed it survived a restart.
+///
+/// Both were found by reading. Reading is the wrong instrument: it finds the fields you happen to
+/// look at. So the check is mechanical instead — the destructure below has no `..`, which means
+/// **adding a field to `World` will not compile until someone says here what happens to it when
+/// the world is saved**. That forced decision is the entire point of this module.
+#[cfg(test)]
+mod persistence {
+    use super::*;
+
+    /// Where a field's value goes when a loaded world is written back.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Fate {
+        /// Lives in the world header, and so needs an offset in `PreservedWorld` and a write in
+        /// `patch_clock`. Getting this wrong is silent data loss.
+        Header,
+        /// Written as its own section of the file, from our own model.
+        Section,
+        /// Not stored: rebuilt from the tiles or from another field on load.
+        Derived,
+        /// Deliberately not saved. Lives only for as long as the server is up.
+        Session,
+    }
+
+    #[test]
+    fn every_world_field_has_a_decided_fate() {
+        let world = World::empty(80, 60, "audit");
+
+        // No `..` here, on purpose. A new field breaks this line, and the person who added it has
+        // to choose one of the four fates below rather than discovering months later that their
+        // field never reached the disk.
+        let World {
+            width,
+            height,
+            tiles,
+            spawn_x,
+            spawn_y,
+            surface,
+            rock_layer,
+            name,
+            id,
+            unique_id,
+            time,
+            day_time,
+            blood_moon,
+            eclipse,
+            moon_phase,
+            raining,
+            rain_time,
+            max_rain,
+            sandstorm,
+            sandstorm_time,
+            sandstorm_severity,
+            sandstorm_intended_severity,
+            dungeon_x,
+            dungeon_y,
+            pumpkin_moon,
+            snow_moon,
+            wind,
+            crimson,
+            ore_tiers,
+            progress,
+            game_mode,
+            world_gen_version,
+            seed_text,
+            moon_type,
+            tree_x,
+            tree_style,
+            cave_back_x,
+            cave_back_style,
+            ice_back_style,
+            jungle_back_style,
+            hell_back_style,
+            backgrounds,
+            tree_tops,
+            num_clouds,
+            chests,
+            signs,
+            town_npcs,
+            shimmered_town_npcs,
+            banner_kills,
+            tile_entities,
+            next_tile_entity,
+            preserved,
+            dirty_sections,
+            track_dirty,
+        } = &world;
+
+        let fates: &[(&str, Fate, &dyn std::fmt::Debug)] = &[
+            // --- the header ------------------------------------------------------------------
+            ("time", Fate::Header, time),
+            ("day_time", Fate::Header, day_time),
+            ("moon_phase", Fate::Header, moon_phase),
+            ("raining", Fate::Header, raining),
+            ("rain_time", Fate::Header, rain_time),
+            ("max_rain", Fate::Header, max_rain),
+            ("sandstorm", Fate::Header, sandstorm),
+            ("sandstorm_time", Fate::Header, sandstorm_time),
+            ("sandstorm_severity", Fate::Header, sandstorm_severity),
+            (
+                "sandstorm_intended_severity",
+                Fate::Header,
+                sandstorm_intended_severity,
+            ),
+            ("wind", Fate::Header, wind),
+            ("ore_tiers", Fate::Header, ore_tiers),
+            ("banner_kills", Fate::Header, banner_kills),
+            ("progress", Fate::Header, progress),
+            // --- sections of their own -------------------------------------------------------
+            ("tiles", Fate::Section, &std::ptr::from_ref(tiles)),
+            ("chests", Fate::Section, chests),
+            ("signs", Fate::Section, signs),
+            ("town_npcs", Fate::Section, town_npcs),
+            ("shimmered_town_npcs", Fate::Section, shimmered_town_npcs),
+            ("tile_entities", Fate::Section, tile_entities),
+            // --- carried in the header, but never changed while the server runs ---------------
+            //
+            // These ride through in the preserved bytes untouched. They need no offset precisely
+            // because nothing mutates them; if that ever stops being true they become `Header`.
+            ("width", Fate::Derived, width),
+            ("height", Fate::Derived, height),
+            ("spawn_x", Fate::Derived, spawn_x),
+            ("spawn_y", Fate::Derived, spawn_y),
+            ("surface", Fate::Derived, surface),
+            ("rock_layer", Fate::Derived, rock_layer),
+            ("name", Fate::Derived, name),
+            ("id", Fate::Derived, id),
+            ("unique_id", Fate::Derived, unique_id),
+            ("crimson", Fate::Derived, crimson),
+            ("game_mode", Fate::Derived, game_mode),
+            ("world_gen_version", Fate::Derived, world_gen_version),
+            ("seed_text", Fate::Derived, seed_text),
+            ("moon_type", Fate::Derived, moon_type),
+            ("tree_x", Fate::Derived, tree_x),
+            ("tree_style", Fate::Derived, tree_style),
+            ("cave_back_x", Fate::Derived, cave_back_x),
+            ("cave_back_style", Fate::Derived, cave_back_style),
+            ("ice_back_style", Fate::Derived, ice_back_style),
+            ("jungle_back_style", Fate::Derived, jungle_back_style),
+            ("hell_back_style", Fate::Derived, hell_back_style),
+            ("backgrounds", Fate::Derived, backgrounds),
+            ("tree_tops", Fate::Derived, tree_tops),
+            ("num_clouds", Fate::Derived, num_clouds),
+            ("dungeon_x", Fate::Derived, dungeon_x),
+            ("dungeon_y", Fate::Derived, dungeon_y),
+            ("next_tile_entity", Fate::Derived, next_tile_entity),
+            // --- this session only -----------------------------------------------------------
+            //
+            // `blood_moon`, `eclipse` and the two moons are events in progress. Vanilla does keep
+            // them in the header; we deliberately do not resume one, so they are session state.
+            ("blood_moon", Fate::Session, blood_moon),
+            ("eclipse", Fate::Session, eclipse),
+            ("pumpkin_moon", Fate::Session, pumpkin_moon),
+            ("snow_moon", Fate::Session, snow_moon),
+            ("preserved", Fate::Session, &preserved.is_some()),
+            ("dirty_sections", Fate::Session, &dirty_sections.len()),
+            ("track_dirty", Fate::Session, track_dirty),
+        ];
+
+        // Every field, exactly once. The destructure guarantees none is missing; this guarantees
+        // none was listed twice under two different fates.
+        let mut seen: Vec<&str> = fates.iter().map(|(name, _, _)| *name).collect();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "a field is classified twice");
+
+        // Whatever else changes, these two must stay `Header`: they are the ones that were lost.
+        for field in ["ore_tiers", "banner_kills"] {
+            let (_, fate, _) = fates
+                .iter()
+                .find(|(name, _, _)| *name == field)
+                .unwrap_or_else(|| panic!("{field} is no longer classified at all"));
+            assert_eq!(
+                *fate,
+                Fate::Header,
+                "{field} must reach the header, or an altar's choice is lost again"
+            );
         }
     }
 }
@@ -502,12 +764,21 @@ mod tests {
     }
 
     #[test]
-    fn section_bounds_are_clamped_to_the_world_edge() {
-        // A world that is not a whole number of sections wide must not describe tiles past its end.
+    fn a_ragged_world_is_counted_the_way_the_client_counts() {
+        // The client sizes its grid with `maxTilesX / 200`, which truncates, so a partial section
+        // along the far edge does not exist as far as it is concerned. Counting it here would
+        // offer a section the client has no slot for and will never request. Config refuses these
+        // sizes outright, so this only pins the arithmetic.
         let w = World::empty(250, 200, "t");
-        assert_eq!(w.sections_x(), 2);
-        assert_eq!(w.sections_y(), 2);
+        assert_eq!(w.sections_x(), 1);
+        assert_eq!(w.sections_y(), 1);
+    }
 
+    #[test]
+    fn section_bounds_are_clamped_to_the_world_edge() {
+        // Asked directly for the ragged section anyway, the bounds still stop at the world's edge
+        // rather than describing tiles past its end.
+        let w = World::empty(250, 200, "t");
         let last = w.section_bounds(1, 1);
         assert_eq!(last.x, 200);
         assert_eq!(last.y, 150);
@@ -748,6 +1019,34 @@ mod flag_tests {
             F::DownedTowerSolar,
         ] {
             assert!(!bit(&data, flag), "{flag:?} was set and should not be");
+        }
+    }
+
+    /// The flags a shop reads reach the client.
+    ///
+    /// These were parsed out of the world file, kept on `Progress`, and then never sent: the
+    /// client decides what the Tavernkeep stocks and how tough the townsfolk are from this block,
+    /// so a world that had beaten the Old One's Army to tier three still traded like a fresh one.
+    #[test]
+    fn the_flag_block_carries_what_the_shops_read() {
+        let mut world = crate::world::worldgen::generate(400, 300, "shops", 3);
+        world.progress.downed_army_t1 = true;
+        world.progress.downed_army_t2 = true;
+        world.progress.downed_army_t3 = true;
+        world.progress.combat_book = true;
+        world.progress.combat_book_two = true;
+        world.sandstorm = true;
+
+        let data = world.world_data();
+        for flag in [
+            F::DownedArmyTier1,
+            F::DownedArmyTier2,
+            F::DownedArmyTier3,
+            F::CombatBookUsed,
+            F::CombatBookTwoUsed,
+            F::Sandstorm,
+        ] {
+            assert!(bit(&data, flag), "{flag:?} did not reach the client");
         }
     }
 

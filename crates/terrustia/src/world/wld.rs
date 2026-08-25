@@ -12,7 +12,7 @@ use std::path::Path;
 
 use terrustia_proto::{ItemStack, PacketReader, section::read_tile_with};
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::progress::Progress;
 use super::{
@@ -26,6 +26,15 @@ use super::{
 /// never exercise, only versions from the 1.4.4 era onward are accepted and anything older is
 /// refused with a clear message.
 pub const MIN_VERSION: i32 = 279;
+
+/// Newest save version this reader has been transcribed against.
+///
+/// There is a ceiling as well as a floor, and it matters more than it looks. The header is copied
+/// verbatim and patched at *byte offsets we walked to*, so a future format that inserts one field
+/// ahead of those offsets does not fail to load — it loads, and then the next save writes the
+/// clock over whatever now lives at those bytes. Vanilla refuses a world newer than it knows
+/// (`StatusID.LaterVersion`) for exactly this reason, and so do we.
+pub const MAX_VERSION: i32 = 325;
 
 /// `"relogic"`, followed by a file-type byte.
 const MAGIC: &[u8; 7] = b"relogic";
@@ -51,6 +60,13 @@ pub enum WldError {
          (open and re-save the world in Terraria to upgrade it)"
     )]
     TooOld { found: i32 },
+
+    #[error(
+        "world format version {found} is newer than this build knows ({MAX_VERSION}); refusing \
+         rather than risk corrupting it, because saving patches the header at fixed offsets and a \
+         format that moved them would write the clock over something else"
+    )]
+    TooNew { found: i32 },
 
     #[error("world claims implausible dimensions {width}x{height}")]
     BadDimensions { width: i32, height: i32 },
@@ -158,12 +174,42 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         }
     }
 
+    // Section 4 is the townsfolk. Read rather than carried, because a world's residents are the
+    // most visible thing in it: carrying the section through meant a real Terraria world's Guide
+    // and Merchant were invisible to the server, and anyone who moved in during a session was
+    // gone by the next restart along with their name and their house.
+    let mut town_npcs_understood = true;
+    if let Some(section) = trailing_sections.first() {
+        let mut r = PacketReader::new(section);
+        let read = read_town_npcs(&mut r);
+        town_npcs_understood = read.complete;
+        if !read.complete {
+            warn!(
+                residents = read.npcs.len(),
+                "the townsfolk section did not fully decode; it will be carried through on save \
+                 rather than rewritten, so nothing in it is lost"
+            );
+        }
+        world.shimmered_town_npcs = read.shimmered;
+        world.town_npcs = read.npcs;
+    }
+
     // Section 5 is the tile entities: pylons, item frames, mannequins, logic sensors. Read rather
     // than carried, because a pylon a client cannot be told about is a pylon nobody can use, and
     // because carrying them through means a pylon placed on this server is lost on the next save.
+    let mut tile_entities_understood = true;
     if let Some(section) = trailing_sections.get(1) {
         let mut r = PacketReader::new(section);
-        world.tile_entities = read_tile_entities(&mut r).unwrap_or_default();
+        let (entities, complete) = read_tile_entities(&mut r);
+        tile_entities_understood = complete;
+        if !complete {
+            warn!(
+                decoded = entities.len(),
+                "the tile-entity section did not fully decode; it will be carried through on save \
+                 rather than rewritten, so no pylon or item frame is lost"
+            );
+        }
+        world.tile_entities = entities;
         world.next_tile_entity = world
             .tile_entities
             .iter()
@@ -194,6 +240,10 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         combat_book_offset: offsets.late.combat_book,
         late_downed_run_offset: offsets.late.late_downed_run,
         combat_book_two_offset: offsets.late.combat_book_two,
+        hardmode_ores_offset: offsets.late.hardmode_ores,
+        banner_kills_offset: offsets.late.banner_kills,
+        town_npcs_understood,
+        tile_entities_understood,
         trailing_sections,
         importance: file.importance,
     });
@@ -234,6 +284,9 @@ fn read_file_header(r: &mut PacketReader<'_>, len: usize) -> Result<FileHeader> 
     let version = num(r.i32(), r)?;
     if version < MIN_VERSION {
         return Err(WldError::TooOld { found: version });
+    }
+    if version > MAX_VERSION {
+        return Err(WldError::TooNew { found: version });
     }
 
     let magic = num(r.bytes(7), r)?;
@@ -309,6 +362,39 @@ struct HeaderOffsets {
     late: LateOffsets,
 }
 
+/// What the world looks like, as opposed to how it behaves.
+///
+/// Gathered on the way through the header because the file scatters it: eight backdrop styles in
+/// one place, five more two hundred lines later, the tree tops later still, and the cloud count
+/// between them. None of it changes a single rule of play — no routine reads any of it — but all
+/// of it is sent in packet 7, and a server that reports nought for the lot serves every biome the
+/// wrong sky.
+///
+/// The slot constants are packet 7's order rather than the file's, so the mapping is stated once
+/// here instead of at each of the three places the file happens to write these out.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Scenery {
+    pub backgrounds: [u8; 13],
+    pub tree_tops: [u8; 13],
+    pub num_clouds: u8,
+}
+
+impl Scenery {
+    pub const TREE_1: usize = 0;
+    pub const TREE_2: usize = 1;
+    pub const TREE_3: usize = 2;
+    pub const TREE_4: usize = 3;
+    pub const CORRUPT: usize = 4;
+    pub const JUNGLE: usize = 5;
+    pub const SNOW: usize = 6;
+    pub const HALLOW: usize = 7;
+    pub const CRIMSON: usize = 8;
+    pub const DESERT: usize = 9;
+    pub const OCEAN: usize = 10;
+    pub const MUSHROOM: usize = 11;
+    pub const UNDERWORLD: usize = 12;
+}
+
 /// Where in the header the flags past the invasion block live.
 ///
 /// They are recorded rather than re-derived because saving preserves the header verbatim and
@@ -334,6 +420,18 @@ pub struct LateOffsets {
     pub late_downed_run: Option<usize>,
     /// The second combat book, after the run of unlocked town-NPC spawns.
     pub combat_book_two: Option<usize>,
+    /// The three hardmode ore tiers — cobalt, mythril, adamantite — as `i32`s.
+    ///
+    /// Recorded because smashing an altar picks these, and a choice that never reaches the file is
+    /// worse than one that was never made: the header still reads `-1` next launch, so the next
+    /// altar rolls a *different* ore than the one already sprayed through the world.
+    pub hardmode_ores: Option<usize>,
+    /// The banner kill counts: where the run of `i32`s starts, and how many the file has room for.
+    ///
+    /// The length is fixed by the file — the count was written before them and everything after
+    /// depends on it — so a count for a banner this world never allocated has nowhere to go and is
+    /// dropped rather than shifting the header.
+    pub banner_kills: Option<(usize, usize)>,
 }
 
 /// What the late header says about the weather.
@@ -354,11 +452,20 @@ struct Weather {
 /// Everything here is positional: there is no framing, so a field read at the wrong width puts
 /// every flag after it in the wrong place. The two variable-length lists in the middle are why it
 /// cannot simply be seeked into.
+// Eight out-parameters rather than a struct, deliberately. This is a positional walk through a
+// header with no framing, where a field read at the wrong width puts every field after it in the
+// wrong place — the exact bug that misplaced the Moon Lord on pre-1.4.4.9 worlds. Restructuring it
+// to satisfy an argument-count lint would mean editing two hundred lines of the most fragile code
+// in the project to gain nothing a reader can see.
+#[allow(clippy::too_many_arguments)]
 fn read_late_header(
     r: &mut PacketReader<'_>,
     version: i32,
     progress: &mut Progress,
     weather: &mut Weather,
+    ore_tiers: &mut [i16; 7],
+    banner_kills: &mut std::collections::HashMap<u16, u32>,
+    scenery: &mut Scenery,
     offsets: &mut LateOffsets,
     section_start: usize,
 ) -> Result<()> {
@@ -370,16 +477,31 @@ fn read_late_header(
     weather.rain_time = num(r.i32(), r)?;
     weather.max_rain = num(r.f32(), r)?;
 
-    // The hardmode ore tiers the world rolled when the wall fell.
-    for _ in 0..3 {
-        num(r.i32(), r)?;
+    // The hardmode ore tiers the world rolled when the wall fell: cobalt, mythril, adamantite.
+    // These sit apart from the other four in the file but belong beside them everywhere else.
+    offsets.hardmode_ores = Some(r.position() - section_start);
+    for tier in &mut ore_tiers[4..7] {
+        *tier = num(r.i32(), r)? as i16;
     }
-    // Eight background styles.
-    for _ in 0..8 {
-        num(r.u8(), r)?;
+    // Eight of the thirteen background styles. The file writes them in its own order, which is not
+    // the packet's, so each is read straight into the slot packet 7 will send it from. The other
+    // five are two hundred lines further down, past the Old One's Army flags.
+    for slot in [
+        Scenery::TREE_1,
+        Scenery::CORRUPT,
+        Scenery::JUNGLE,
+        Scenery::SNOW,
+        Scenery::HALLOW,
+        Scenery::CRIMSON,
+        Scenery::DESERT,
+        Scenery::OCEAN,
+    ] {
+        scenery.backgrounds[slot] = num(r.u8(), r)?;
     }
     let _cloud_bg_active = num(r.i32(), r)?;
-    let _num_clouds = num(r.i16(), r)?;
+    // The file keeps a short, the packet sends a byte; a sky with more than 255 clouds in it is
+    // not a thing the game produces, but saturating beats wrapping to nearly none.
+    scenery.num_clouds = num(r.i16(), r)?.clamp(0, i16::from(u8::MAX)) as u8;
     offsets.wind = Some(r.position() - section_start);
     weather.wind = num(r.f32(), r)?;
 
@@ -416,8 +538,15 @@ fn read_late_header(
             count: i64::from(kinds),
         });
     }
-    for _ in 0..kinds {
-        num(r.i32(), r)?;
+    // Read rather than skipped: a hundred zombies killed before a restart should still count
+    // towards the banner afterwards. Stored sparsely, because most of the two hundred and
+    // ninety-three banners are never touched in one world.
+    offsets.banner_kills = Some((r.position() - section_start, kinds as usize));
+    for banner in 0..kinds {
+        let count = num(r.i32(), r)?;
+        if count > 0 {
+            banner_kills.insert(banner as u16, count as u32);
+        }
     }
     if version >= 289 {
         let claimable = num(r.i16(), r)?;
@@ -494,9 +623,16 @@ fn read_late_header(
         *flag = num(r.bool(), r)?;
     }
 
-    // Five more background styles.
-    for _ in 0..5 {
-        num(r.u8(), r)?;
+    // The other five background styles, stranded here rather than beside the first eight because
+    // they were added to the format later.
+    for slot in [
+        Scenery::MUSHROOM,
+        Scenery::UNDERWORLD,
+        Scenery::TREE_2,
+        Scenery::TREE_3,
+        Scenery::TREE_4,
+    ] {
+        scenery.backgrounds[slot] = num(r.u8(), r)?;
     }
     offsets.combat_book = Some(r.position() - section_start);
     progress.combat_book = num(r.bool(), r)?;
@@ -515,16 +651,23 @@ fn read_late_header(
             count: i64::from(tree_tops),
         });
     }
-    for _ in 0..tree_tops {
-        num(r.i32(), r)?;
+    for area in 0..tree_tops {
+        // The file stores an int per area and the packet sends a byte; the values are small style
+        // indices, so the narrowing is the game's own (`TreeTopsInfo.SyncSend` casts to byte).
+        // A file with more areas than the packet carries is read past rather than refused, which
+        // is what the game does too.
+        let variation = num(r.i32(), r)?;
+        if let Some(slot) = scenery.tree_tops.get_mut(area as usize) {
+            *slot = variation as u8;
+        }
     }
 
-    // Forced holidays for today, the four ore tiers the wall handed out, and the three pets.
+    // Forced holidays for today, the four ore tiers the world was generated with, and the pets.
     for _ in 0..2 {
         num(r.bool(), r)?;
     }
-    for _ in 0..4 {
-        num(r.i32(), r)?;
+    for tier in &mut ore_tiers[0..4] {
+        *tier = num(r.i32(), r)? as i16;
     }
     for _ in 0..3 {
         num(r.bool(), r)?;
@@ -693,11 +836,17 @@ fn read_world_header(
     // The rest of the header is read for the flags that matter and skipped for the rest. It has
     // to be walked rather than seeked because two of the runs are variable-length lists.
     let mut late = LateOffsets::default();
+    let mut ore_tiers = [-1i16; 7];
+    let mut banner_kills = std::collections::HashMap::new();
+    let mut scenery = Scenery::default();
     if let Err(error) = read_late_header(
         r,
         version,
         &mut progress,
         &mut world_weather,
+        &mut ore_tiers,
+        &mut banner_kills,
+        &mut scenery,
         &mut late,
         section_start,
     ) {
@@ -726,6 +875,9 @@ fn read_world_header(
     world.unique_id = unique_id;
     world.world_gen_version = world_gen_version;
     world.seed_text = seed_text;
+    world.backgrounds = scenery.backgrounds;
+    world.tree_tops = scenery.tree_tops;
+    world.num_clouds = scenery.num_clouds;
     world.game_mode = game_mode.clamp(0, 3) as u8;
     world.spawn_x = spawn_x.clamp(0, width - 1) as i16;
     world.spawn_y = spawn_y.clamp(0, height - 1) as i16;
@@ -735,6 +887,8 @@ fn read_world_header(
     world.day_time = day_time;
     world.moon_phase = (moon_phase.rem_euclid(8)) as u8;
     world.crimson = crimson;
+    world.ore_tiers = ore_tiers;
+    world.banner_kills = banner_kills;
     world.progress = progress;
     world.moon_type = moon_type;
     world.tree_x = tree_x;
@@ -852,18 +1006,111 @@ fn read_signs(r: &mut PacketReader<'_>) -> Result<Vec<Option<Sign>>> {
 /// A truncated or unrecognised section gives up rather than failing the whole load. It is the
 /// difference between "this world has an item frame this build does not know about" and "this
 /// world will not open", and the first is much the better answer.
+/// Read the townsfolk section: which types have been shimmered, then the residents themselves.
+///
+/// The entry loop is led by its own boolean rather than counted — `SaveNPCs` writes `active` before
+/// each and a bare `false` to finish — which is why this cannot be seeked into.
+///
+/// A second list follows, of the non-town NPCs the game persists. This server does not model those
+/// (they respawn), so it stops at the terminator and lets the rest go.
+/// The townsfolk section, and whether all of it was understood.
+///
+/// `complete` is the important field. This section is *rewritten* on save rather than carried
+/// through, so a parse that gave up halfway used to mean the save wrote back only the residents it
+/// managed to read — or, when the failure came before the commit, an **empty list**, permanently
+/// deleting every resident, their names and their houses. Keeping what decoded is only half the
+/// answer; the other half is refusing to rewrite a section we did not fully understand.
+pub(crate) struct TownNpcSection {
+    pub shimmered: Vec<i32>,
+    pub npcs: Vec<super::objects::TownNpc>,
+    pub complete: bool,
+}
+
+fn read_town_npcs(r: &mut PacketReader<'_>) -> TownNpcSection {
+    let mut section = TownNpcSection {
+        shimmered: Vec::new(),
+        npcs: Vec::new(),
+        complete: false,
+    };
+
+    let Ok(shimmered_count) = r.i32() else {
+        return section;
+    };
+    for _ in 0..shimmered_count.clamp(0, 1 << 12) {
+        let Ok(id) = r.i32() else {
+            return section;
+        };
+        section.shimmered.push(id);
+    }
+
+    // Each entry is led by its own boolean and the list ends with a bare `false`, so running out
+    // of bytes mid-entry is a truncated section, not the end of one.
+    loop {
+        match r.bool() {
+            Ok(true) => {}
+            // The terminator: everything was read.
+            Ok(false) => {
+                section.complete = true;
+                return section;
+            }
+            Err(_) => return section,
+        }
+        let entry = (|| {
+            let net_id = r.i32().ok()?;
+            let name = r.string().ok()?;
+            let x = r.f32().ok()?;
+            let y = r.f32().ok()?;
+            let homeless = r.bool().ok()?;
+            let home_x = r.i32().ok()?;
+            let home_y = r.i32().ok()?;
+            // A flag byte whose first bit says a variation index follows.
+            let flags = r.u8().ok()?;
+            let variation = if flags & 1 != 0 { r.i32().ok()? } else { 0 };
+            let homeless_despawn = r.bool().ok()?;
+            Some(super::objects::TownNpc {
+                net_id,
+                name,
+                position: (x, y),
+                homeless,
+                home: (home_x, home_y),
+                variation,
+                homeless_despawn,
+            })
+        })();
+        let Some(npc) = entry else {
+            return section;
+        };
+        section.npcs.push(npc);
+        if section.npcs.len() > 1_000 {
+            // A malformed section rather than a world with a thousand residents. Deliberately not
+            // `complete`: whatever follows was never read, so the section is carried through.
+            return section;
+        }
+    }
+}
+
+/// Read the tile entities, reporting whether every one of them was understood.
+///
+/// The count is stated up front, so "complete" means exactly that many decoded. One that does not
+/// — an entity kind from a newer build, say — used to end the loop and take **every entity after
+/// it in the file** with it: pylons, item frames, weapon racks, mannequin contents, all silently
+/// gone on the next save. Now the tail is kept as bytes instead, by not rewriting the section.
 fn read_tile_entities(
     r: &mut PacketReader<'_>,
-) -> Result<Vec<terrustia_proto::tile_entity::TileEntity>> {
-    let count = num(r.i32(), r)?;
+) -> (Vec<terrustia_proto::tile_entity::TileEntity>, bool) {
+    let Ok(count) = r.i32() else {
+        return (Vec::new(), false);
+    };
+    let wanted = count.max(0) as usize;
     let mut entities = Vec::with_capacity(count.clamp(0, 1 << 16) as usize);
-    for _ in 0..count.max(0) {
+    for _ in 0..wanted {
         match terrustia_proto::tile_entity::TileEntity::read(r, false) {
             Ok(entity) => entities.push(entity),
             Err(_) => break,
         }
     }
-    Ok(entities)
+    let complete = entities.len() == wanted;
+    (entities, complete)
 }
 
 /// Jump to a section pointer, checking it lies inside the file.
@@ -973,11 +1220,15 @@ mod tests {
         let mut progress = Progress::default();
         let mut weather = Weather::default();
         let mut offsets = LateOffsets::default();
+        let mut ore_tiers = [-1i16; 7];
         read_late_header(
             &mut r,
             version,
             &mut progress,
             &mut weather,
+            &mut ore_tiers,
+            &mut std::collections::HashMap::new(),
+            &mut Scenery::default(),
             &mut offsets,
             0,
         )
@@ -1017,4 +1268,118 @@ mod tests {
             assert!(!p.downed_deerclops, "{version}: deerclops");
         }
     }
+
+    /// A townsfolk section that stops mid-entry keeps what it read and says it is incomplete.
+    ///
+    /// This is the bug that could have deleted a whole town. The old reader committed the section
+    /// with `if let Ok(..)`, so *any* error — including one after several residents had decoded —
+    /// threw the lot away, and the save then wrote back an empty list. Every resident, their name
+    /// and their house, gone on the first autosave.
+    #[test]
+    fn a_truncated_townsfolk_section_is_not_silently_emptied() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(64);
+        w.i32(0); // no shimmered types
+        // One complete resident.
+        w.bool(true)
+            .i32(22)
+            .string("Andrew")
+            .f32(100.0)
+            .f32(200.0)
+            .bool(false)
+            .i32(10)
+            .i32(20)
+            .u8(0)
+            .bool(false);
+        // A second that runs out of bytes halfway through its name.
+        w.bool(true).i32(17);
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new(&bytes);
+        let read = read_town_npcs(&mut r);
+
+        assert_eq!(read.npcs.len(), 1, "the resident that did decode is kept");
+        assert_eq!(read.npcs[0].name, "Andrew");
+        assert!(
+            !read.complete,
+            "a section that ran out of bytes must not claim to be complete, or the save \
+             rewrites it from a partial read and loses the rest"
+        );
+    }
+
+    /// A whole, well-formed section reports itself complete, so it is still rewritten normally.
+    #[test]
+    fn a_whole_townsfolk_section_is_complete() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(64);
+        w.i32(1);
+        w.i32(5); // one shimmered type
+        w.bool(true)
+            .i32(22)
+            .string("Andrew")
+            .f32(1.0)
+            .f32(2.0)
+            .bool(true)
+            .i32(0)
+            .i32(0)
+            .u8(0)
+            .bool(false);
+        w.bool(false); // the terminator
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new(&bytes);
+        let read = read_town_npcs(&mut r);
+
+        assert_eq!(read.shimmered, vec![5]);
+        assert_eq!(read.npcs.len(), 1);
+        assert!(read.complete, "a section ending in its terminator is whole");
+    }
+
+    /// Tile entities: fewer decoded than the count promised means the tail was not understood.
+    #[test]
+    fn a_short_tile_entity_section_reports_itself_incomplete() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(32);
+        w.i32(3); // claims three
+        let bytes = w.into_bytes(); // supplies none
+
+        let mut r = PacketReader::new(&bytes);
+        let (entities, complete) = read_tile_entities(&mut r);
+
+        assert!(entities.is_empty());
+        assert!(
+            !complete,
+            "three promised and none delivered must not be reported as understood"
+        );
+    }
+
+    /// A world from a future Terraria is refused, not guessed at.
+    ///
+    /// This is the quiet one. A newer format does not fail to parse — it parses *positionally*,
+    /// lands the clock offsets wherever the old layout put them, and then the first autosave
+    /// writes the time over whatever field now occupies those bytes. Failing closed is the only
+    /// safe answer, and it is what vanilla does too.
+    #[test]
+    fn a_world_newer_than_this_build_is_refused() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(32);
+        w.i32(MAX_VERSION + 1).bytes(MAGIC).u8(FILE_TYPE_WORLD);
+        let bytes = w.into_bytes();
+
+        match parse(&bytes) {
+            Err(WldError::TooNew { found }) => assert_eq!(found, MAX_VERSION + 1),
+            Err(other) => panic!("expected TooNew, got {other}"),
+            Ok(_) => panic!("a future version must not be accepted"),
+        }
+    }
+
+    /// The ceiling must not shut out the version we ourselves write.
+    ///
+    /// A `const` block rather than an assertion, so raising `SAVE_VERSION` past `MAX_VERSION`
+    /// fails the build instead of a test run — the reader has to accept what the writer emits.
+    const _: () = assert!(MAX_VERSION >= super::super::wld_save::SAVE_VERSION);
 }

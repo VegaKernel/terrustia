@@ -125,6 +125,13 @@ fn main() -> ExitCode {
         changed.wind = 0.375;
         changed.raining = !changed.raining;
         changed.rain_time = 4321;
+        // The two fields that were silently lost on every save of a loaded world. The ore tier is
+        // the dangerous one: dropped, the header keeps reading -1 for "not chosen", so the next
+        // altar smashed after a restart rolls a *second* tier and the world ends up with two.
+        changed.ore_tiers[4] = 221;
+        changed.ore_tiers[5] = 223;
+        changed.ore_tiers[6] = 227;
+        changed.banner_kills.insert(3, 4242);
         let probe = output.with_extension("flags.wld");
         if let Err(e) = wld_save::save(&changed, &probe) {
             eprintln!("probe save failed: {e}");
@@ -143,10 +150,12 @@ fn main() -> ExitCode {
             && back.progress.altar_count == changed.progress.altar_count
             && (back.wind - 0.375).abs() < 1e-6
             && back.raining == changed.raining
-            && back.rain_time == 4321;
+            && back.rain_time == 4321
+            && back.ore_tiers[4..7] == [221, 223, 227]
+            && back.banner_kills.get(&3) == Some(&4242);
         println!(
             "flags       {} (moon lord {} -> {}, cultist {} -> {}, solar tower {} -> {}, \
-             altars {} -> {}, wind {:.3}, rain {}/{})",
+             altars {} -> {}, wind {:.3}, rain {}/{}, ores {:?}, banner 3 = {:?})",
             if ok {
                 "survive a save"
             } else {
@@ -163,6 +172,8 @@ fn main() -> ExitCode {
             back.wind,
             back.raining,
             back.rain_time,
+            &back.ore_tiers[4..7],
+            back.banner_kills.get(&3),
         );
         std::fs::remove_file(&probe).ok();
         if !ok {
