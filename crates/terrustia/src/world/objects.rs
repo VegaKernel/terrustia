@@ -109,6 +109,10 @@ pub struct PreservedWorld {
     pub time_offset: usize,
     pub day_time_offset: usize,
     pub moon_phase_offset: usize,
+    /// Whether a blood moon or an eclipse is in progress, so loading a world mid-event does not
+    /// silently end it.
+    pub blood_moon_offset: usize,
+    pub eclipse_offset: usize,
     /// Offsets of the progression flags, which the server also changes.
     ///
     /// `None` where a world's header did not reach that far, in which case the flag is kept in

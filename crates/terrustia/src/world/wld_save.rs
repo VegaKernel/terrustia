@@ -311,6 +311,14 @@ fn patch_clock(header: &mut [u8], preserved: &super::objects::PreservedWorld, wo
         preserved.moon_phase_offset,
         &i32::from(world.moon_phase).to_le_bytes(),
     );
+    // A blood moon or eclipse in progress, so a save taken mid-event and reloaded resumes it
+    // rather than silently ending it.
+    write(
+        header,
+        preserved.blood_moon_offset,
+        &[u8::from(world.blood_moon)],
+    );
+    write(header, preserved.eclipse_offset, &[u8::from(world.eclipse)]);
 }
 
 /// Tiles are stored column by column, with the same run-length encoding the network uses.
@@ -882,6 +890,8 @@ mod tests {
             time_offset: 0,
             day_time_offset: 8,
             moon_phase_offset: 9,
+            blood_moon_offset: 13,
+            eclipse_offset: 14,
             progress_offset: Some(100),
             hard_mode_offset: Some(200),
             altar_offset: Some(210),
@@ -1072,6 +1082,25 @@ mod tests {
             i32::from_le_bytes(header[1012..1016].try_into().unwrap()),
             42,
         );
+    }
+
+    /// A blood moon or eclipse in progress used to be read from the file and thrown away, so
+    /// loading a world mid-event silently ended it — the bytes on disk were always untouched,
+    /// only the in-memory session forgot what they said.
+    #[test]
+    fn a_blood_moon_and_eclipse_survive_a_save() {
+        let (mut header, keep) = header_with(preserved());
+        let mut world = crate::world::worldgen::generate(400, 300, "storms", 1);
+        world.blood_moon = true;
+        world.eclipse = true;
+
+        patch_clock(&mut header, &keep, &world);
+
+        assert_eq!(
+            header[13], 1,
+            "a blood moon in progress must reach the file"
+        );
+        assert_eq!(header[14], 1, "an eclipse in progress must reach the file");
     }
 
     /// A world whose header never reached a field simply does not write it, rather than writing

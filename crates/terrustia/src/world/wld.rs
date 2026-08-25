@@ -236,6 +236,8 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         time_offset: offsets.time,
         day_time_offset: offsets.day_time,
         moon_phase_offset: offsets.moon_phase,
+        blood_moon_offset: offsets.blood_moon,
+        eclipse_offset: offsets.eclipse,
         progress_offset: offsets.progress,
         hard_mode_offset: offsets.hard_mode,
         altar_offset: offsets.altar,
@@ -363,6 +365,11 @@ struct HeaderOffsets {
     time: usize,
     day_time: usize,
     moon_phase: usize,
+    /// Whether a blood moon or eclipse is in progress. Always present at a fixed position right
+    /// after the moon phase, unlike the flags further down — those move depending on which of
+    /// several variable-length lists came before them, these do not.
+    blood_moon: usize,
+    eclipse: usize,
     /// The run of twenty booleans beginning at `downedBoss1`.
     progress: Option<usize>,
     hard_mode: Option<usize>,
@@ -766,6 +773,12 @@ fn read_world_header(
         time: r.position() - section_start,
         day_time: r.position() - section_start + 8,
         moon_phase: r.position() - section_start + 9,
+        // Filled in immediately below, once the reader has actually walked to them — a moon
+        // phase is a fixed 4 bytes so the offset can be computed in advance, but writing it this
+        // way for the next two keeps every offset here computed the same way: from where the
+        // reader actually is, not from an assumed width.
+        blood_moon: 0,
+        eclipse: 0,
         progress: None,
         hard_mode: None,
         altar: None,
@@ -775,8 +788,10 @@ fn read_world_header(
     let time = num(r.f64(), r)?;
     let day_time = num(r.bool(), r)?;
     let moon_phase = num(r.i32(), r)?;
-    let _blood_moon = num(r.bool(), r)?;
-    let _eclipse = num(r.bool(), r)?;
+    offsets.blood_moon = r.position() - section_start;
+    let blood_moon = num(r.bool(), r)?;
+    offsets.eclipse = r.position() - section_start;
+    let eclipse = num(r.bool(), r)?;
     let dungeon_x = num(r.i32(), r)?;
     let dungeon_y = num(r.i32(), r)?;
     let crimson = num(r.bool(), r)?;
@@ -895,6 +910,12 @@ fn read_world_header(
     world.time = time as i32;
     world.day_time = day_time;
     world.moon_phase = (moon_phase.rem_euclid(8)) as u8;
+    // A blood moon or eclipse in progress used to be read and thrown away, so loading a world
+    // mid-event silently ended it — the file said one was happening and the live session simply
+    // never knew. The bytes themselves were always untouched on disk; only the in-memory session
+    // forgot.
+    world.blood_moon = blood_moon;
+    world.eclipse = eclipse;
     world.crimson = crimson;
     world.ore_tiers = ore_tiers;
     world.banner_kills = banner_kills;

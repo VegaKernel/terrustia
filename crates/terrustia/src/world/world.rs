@@ -926,12 +926,13 @@ mod persistence {
             ("dungeon_x", Fate::Derived, dungeon_x),
             ("dungeon_y", Fate::Derived, dungeon_y),
             ("next_tile_entity", Fate::Derived, next_tile_entity),
+            ("blood_moon", Fate::Header, blood_moon),
+            ("eclipse", Fate::Header, eclipse),
             // --- this session only -----------------------------------------------------------
             //
-            // `blood_moon`, `eclipse` and the two moons are events in progress. Vanilla does keep
-            // them in the header; we deliberately do not resume one, so they are session state.
-            ("blood_moon", Fate::Session, blood_moon),
-            ("eclipse", Fate::Session, eclipse),
+            // The two seasonal moons, unlike blood_moon/eclipse above, are not resumed on purpose:
+            // vanilla does keep them in its header too, but the seasonal-event branch that reads
+            // them is not implemented here, so there is nothing meaningful to resume into yet.
             ("pumpkin_moon", Fate::Session, pumpkin_moon),
             ("snow_moon", Fate::Session, snow_moon),
             ("preserved", Fate::Session, &preserved.is_some()),
@@ -952,8 +953,8 @@ mod persistence {
         seen.dedup();
         assert_eq!(before, seen.len(), "a field is classified twice");
 
-        // Whatever else changes, these two must stay `Header`: they are the ones that were lost.
-        for field in ["ore_tiers", "banner_kills"] {
+        // Whatever else changes, these must stay `Header`: they are the ones that were lost.
+        for field in ["ore_tiers", "banner_kills", "blood_moon", "eclipse"] {
             let (_, fate, _) = fates
                 .iter()
                 .find(|(name, _, _)| *name == field)
