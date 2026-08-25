@@ -1409,12 +1409,12 @@ async fn a_bound_townsperson_can_be_freed() {
 /// An unclaimed server stays open on purpose: locking the commands away before anybody could have
 /// an account is how a security feature becomes a thing people disable.
 #[tokio::test]
-async fn claiming_the_server_locks_down_its_commands() {
+async fn a_stranger_cannot_claim_an_unclaimed_server() {
     let addr = start().await;
     let mut client = join(addr, "stranger").await;
     client.set_timeout(Duration::from_secs(10));
 
-    // Unclaimed: butcher is allowed and says nothing about permissions.
+    // Unclaimed: every permission passes, which is fine among friends and a gift to a stranger.
     client.say("/butcher").await.unwrap();
     let refused = client
         .wait_for("a refusal", |e| {
@@ -1423,27 +1423,39 @@ async fn claiming_the_server_locks_down_its_commands() {
         .await;
     assert!(refused.is_err(), "an unclaimed server should not refuse");
 
-    // Claim it.
+    // So claiming it takes the token printed in the server's own console. Without it, the first
+    // person to connect to a fresh public server would simply become its owner.
     client.say("/register owner hunter2hunter2").await.unwrap();
-    client
-        .wait_for("the account", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("account"))
-        })
-        .await
-        .expect("registering should say something");
-
-    // Now log out and try again: the gate is closed.
-    client.say("/logout").await.unwrap();
-    client.say("/butcher").await.unwrap();
-    let refused = client
-        .wait_for("a refusal", |e| {
-            matches!(e, Event::Chat { text, .. } if text.contains("permission"))
+    let told = client
+        .wait_for("an explanation", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("claim token"))
         })
         .await;
     assert!(
-        refused.is_ok(),
-        "once claimed, a signed-out player must not be able to butcher the world",
+        told.is_ok(),
+        "a claim with no token has to be refused, and say what is missing"
     );
+
+    // A wrong token is refused too, rather than being ignored into a success.
+    client
+        .say("/register owner hunter2hunter2 notthetoken")
+        .await
+        .unwrap();
+    let told = client
+        .wait_for("a refusal", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("not the claim token"))
+        })
+        .await;
+    assert!(told.is_ok(), "a wrong token must not claim the server");
+
+    // And the server is still unclaimed, so nothing was half-created on the way through.
+    client.say("/whoami").await.unwrap();
+    let who = client
+        .wait_for("whoami", |e| {
+            matches!(e, Event::Chat { text, .. } if text.contains("nobody"))
+        })
+        .await;
+    assert!(who.is_ok(), "no account should have been made");
 }
 
 #[tokio::test]

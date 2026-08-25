@@ -651,6 +651,16 @@ pub struct GameServer {
     auth_results: (AuthReport, AuthReports),
     /// Slots with a hash already running. One at a time, so nobody can queue up work.
     auth_in_flight: std::collections::HashSet<u8>,
+    /// A one-time secret for claiming an unclaimed server, printed to the console at startup.
+    ///
+    /// Without this, the first account made owns the server — so on a fresh public server whoever
+    /// connected first became the owner, and *everyone* had every permission until they did.
+    /// That is fine among friends and a gift to a stranger.
+    ///
+    /// Requiring the token means claiming needs someone who can read the server's own terminal,
+    /// which is the same trust boundary the console already sits behind: whoever has the terminal
+    /// already has the world file. Cleared once the server is claimed.
+    claim_token: Option<String>,
     /// A world-sized buffer to copy the next snapshot into, once a save has given one back.
     ///
     /// Held so the copy writes into pages that are already mapped. Empty while a save is running,
@@ -775,6 +785,7 @@ impl GameServer {
             save_results: std::sync::mpsc::channel(),
             auth_results: std::sync::mpsc::channel(),
             auth_in_flight: std::collections::HashSet::new(),
+            claim_token: None,
             spare_world: None,
             world_returns: std::sync::mpsc::channel(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
@@ -1120,6 +1131,69 @@ impl GameServer {
         );
     }
 
+    /// Start hashing a new account's password, once everything cheap has been checked.
+    ///
+    /// `owner` says this account claims the server. It is decided by the caller rather than
+    /// re-derived here, because the two callers disagree about what earns it: from chat it takes
+    /// the console's claim token, and from the console it takes nothing at all.
+    fn begin_registration(&mut self, slot: u8, account: &str, password: &str, owner: bool) {
+        // Everything decidable without hashing is decided first, so a bad request costs nothing.
+        if self.admin.name_taken(account) {
+            self.tell(slot, &format!("there is already an account called {account}"));
+            return;
+        }
+        if password.len() < 6 {
+            self.tell(slot, "that password is too short; use at least six characters");
+            return;
+        }
+        if !self.start_auth(slot) {
+            return;
+        }
+        let group = if owner { "owner" } else { "default" }.to_string();
+        let (account, password) = (account.to_string(), password.to_string());
+        let report = self.auth_results.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let made = crate::admin::Account::new(&account, &password, &group);
+            let _ = report.send(AuthOutcome::Registered {
+                slot,
+                account: Box::new(made),
+                first: owner,
+            });
+        });
+    }
+
+    /// Print the one-time claim token, if this server has not been claimed yet.
+    ///
+    /// Only ever to the log, which means the terminal or the service journal — never to a player.
+    /// The whole point is that claiming requires someone who can see the server's own output.
+    fn announce_claim_token(&mut self) {
+        if !self.admin.unclaimed() {
+            return;
+        }
+        // Not a password: a short one-time secret that lives for one process. Derived from the
+        // clock rather than a CSPRNG dependency, mixed so it is not simply readable back as a
+        // timestamp. It only has to be unguessable by someone who cannot see this line.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let mut state = now ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let mut token = String::new();
+        for _ in 0..12 {
+            // xorshift64*, which is plenty for a value that is printed and then used once.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let alphabet = b"abcdefghjkmnpqrstuvwxyz23456789";
+            token.push(alphabet[(state % alphabet.len() as u64) as usize] as char);
+        }
+        warn!(
+            "this server has no accounts yet, so everyone connecting has every permission. \
+             claim it with:  /register <name> <password> {token}   (or `claim <name> <password>` \
+             here at the console)"
+        );
+        self.claim_token = Some(token);
+    }
+
     /// Claim a slot's one allowed password hash, or explain why not.
     ///
     /// Two limits, and both are needed. Per-slot exclusivity stops one client queueing thousands
@@ -1167,6 +1241,8 @@ impl GameServer {
                                     let _ = self.admin.save();
                                     self.tell(slot, &format!("account '{name}' made ({group})."));
                                     if first {
+                                        // Spent. A second claim must not be possible.
+                                        self.claim_token = None;
                                         self.tell(
                                             slot,
                                             "you are the first account here, so you own it.",
@@ -1225,6 +1301,7 @@ impl GameServer {
     pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) -> Stopped {
         // Whoever lived here when the world was last saved lives here again.
         self.restore_town_npcs();
+        self.announce_claim_token();
 
         let mut ticker = interval(TICK);
         // Catching up on missed ticks would fast-forward the world clock after any stall.
@@ -1987,6 +2064,33 @@ impl GameServer {
             // and "we catch panics" is exactly the sort of claim that is never true until tried.
             #[cfg(test)]
             "__panic_probe" => panic!("deliberate panic, to prove the packet path is guarded"),
+            // Claiming from the console needs no token: whoever can type here can already read
+            // the world file, so there is nothing left to prove.
+            "claim" => {
+                let mut words = argument.split_whitespace();
+                match (words.next(), words.next(), words.next()) {
+                    (Some(name), Some(password), None) => {
+                        if !self.admin.unclaimed() {
+                            info!("this server already has an owner; use /register or /group");
+                        } else if password.len() < 6 {
+                            info!("that password is too short; use at least six characters");
+                        } else {
+                            match crate::admin::Account::new(name, password, "owner") {
+                                Ok(account) => match self.admin.insert_account(account) {
+                                    Ok(()) => {
+                                        let _ = self.admin.save();
+                                        self.claim_token = None;
+                                        info!(account = name, "server claimed from the console");
+                                    }
+                                    Err(e) => info!("{e}"),
+                                },
+                                Err(e) => info!("{e}"),
+                            }
+                        }
+                    }
+                    _ => info!("usage: claim <name> <password>"),
+                }
+            }
             "help" => info!(
                 "console: say <text> | players | save | kick <name> [reason] | \
                  ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
@@ -4560,34 +4664,27 @@ impl GameServer {
 
         let words: Vec<&str> = argument.split_whitespace().collect();
         match name {
-            "register" => match words.as_slice() {
-                [account, password] => {
-                    // Everything that can be decided without hashing is decided first, so a bad
-                    // request costs nothing at all.
-                    if self.admin.name_taken(account) {
-                        self.tell(slot, &format!("there is already an account called {account}"));
-                    } else if password.len() < 6 {
-                        self.tell(slot, "that password is too short; use at least six characters");
-                    } else if self.start_auth(slot) {
-                        // The first account made on a fresh server owns it; every one after that
-                        // is ordinary. Otherwise nobody could ever grant themselves anything and
-                        // the admin file would have to be edited by hand before the server was
-                        // useful.
-                        let first = self.admin.accounts.is_empty();
-                        let group = if first { "owner" } else { "default" };
-                        let (account, password) = (account.to_string(), password.to_string());
-                        let group = group.to_string();
-                        let report = self.auth_results.0.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let made = crate::admin::Account::new(&account, &password, &group);
-                            let _ = report.send(AuthOutcome::Registered {
-                                slot,
-                                account: Box::new(made),
-                                first,
-                            });
-                        });
+            // The first account owns the server, so making it needs the token printed at
+            // startup — otherwise, on a fresh public server, whoever connected first became the
+            // owner. Every account after that is ordinary and needs nothing.
+            "register" if self.admin.unclaimed() => match words.as_slice() {
+                [account, password, token] => {
+                    if self.claim_token.as_deref() != Some(*token) {
+                        self.tell(slot, "that is not the claim token from the server's console.");
+                        info!(slot, "refused a claim with the wrong token");
+                        return Ok(());
                     }
+                    self.begin_registration(slot, account, password, true);
                 }
+                [_, _] => self.tell(
+                    slot,
+                    "this server has not been claimed yet, and claiming it needs the claim token \
+                     printed in the server's own console: /register <name> <password> <token>",
+                ),
+                _ => self.tell(slot, "usage: /register <name> <password> <token>"),
+            },
+            "register" => match words.as_slice() {
+                [account, password] => self.begin_registration(slot, account, password, false),
                 _ => self.tell(slot, "usage: /register <name> <password>"),
             },
             "login" => match words.as_slice() {
