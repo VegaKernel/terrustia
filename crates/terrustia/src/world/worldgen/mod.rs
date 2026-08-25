@@ -25,6 +25,7 @@
 //! Ordering is load-bearing rather than tidy. Ore seeded before the caves would be hollowed back
 //! out; chests placed before the caves would have nowhere to stand.
 
+pub mod lakes;
 pub mod layout;
 pub mod manifest;
 pub mod passes;
@@ -52,6 +53,8 @@ pub const SMALL_HEIGHT: i32 = 1200;
 /// than merely non-empty. Every count here gates something; see [`structures`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Built {
+    /// How many surface lakes were carved.
+    pub lakes: usize,
     /// How many trees the forest pass grew.
     pub trees: usize,
     /// Vine tiles hung, and cacti grown.
@@ -134,6 +137,10 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         use ::rand::SeedableRng;
         ::rand::rngs::SmallRng::seed_from_u64(seed ^ 0x7265_6573)
     };
+    // Lakes before the greenery that would otherwise be drowned by them, and before the trees,
+    // which refuse to grow where there is water.
+    let lakes = lakes::carve(&mut world, &plan, &heights, &mut rand);
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
@@ -151,6 +158,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let chests = chests.saturating_sub(drop_orphaned_chests(&mut world));
 
     let built = Built {
+        lakes,
         trees,
         vines,
         cacti,
