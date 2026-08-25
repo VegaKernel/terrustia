@@ -731,6 +731,13 @@ impl GameServer {
     pub fn new(config: Config, mut world: World) -> Self {
         // From here on, tile edits invalidate cached sections.
         world.start_tracking_changes();
+        // A full snapshot now, while startup has no tick budget to blow, so the *first* real
+        // autosave has a baseline to diff against instead of paying for a full copy inside a
+        // counted tick. Measured on a real CI soak run before this existed: 14,833 µs — 89% of a
+        // single tick's 16,666 µs budget, on the very first save after the server came up. Every
+        // save after it was already 150–200 µs, because `refresh_snapshot` had something to
+        // compare against; this just moves that same first comparison off the clock entirely.
+        let spare_world = Some(world.snapshot());
         let slots = config.max_players;
         let save_path = config.save_target().map(Path::to_path_buf);
         let autosave_ticks = match (save_path.is_some(), config.autosave_secs) {
@@ -799,7 +806,7 @@ impl GameServer {
             auth_results: std::sync::mpsc::channel(),
             auth_in_flight: std::collections::HashSet::new(),
             claim_token: None,
-            spare_world: None,
+            spare_world,
             world_returns: std::sync::mpsc::channel(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
@@ -10671,6 +10678,53 @@ mod tick_accounting {
         assert!(
             clock.lap() > Duration::ZERO,
             "four million multiplies cost nothing?"
+        );
+    }
+}
+
+/// The first autosave used to cost a whole extra world-copy inside a counted tick, because
+/// `spare_world` started life empty and had nothing to diff the incremental path against.
+///
+/// Caught by a real CI soak run, not a unit test: `save_world_in_background`'s incremental path
+/// (`refresh_snapshot`) requires a buffer that already holds the world's state as of the moment
+/// change-tracking began, and there was no such buffer until the first save built one the
+/// expensive way. Measured on that run — 14,833 µs, 89% of a single tick's budget — against every
+/// later save's 150–200 µs once a buffer existed to refresh instead of rebuild.
+#[cfg(test)]
+mod snapshot_baseline {
+    use super::*;
+    use crate::config::Config;
+
+    /// The property the fix turns on: a buffer exists before any save is ever requested, so the
+    /// first one has something to diff against instead of paying for a full copy on the clock.
+    #[test]
+    fn a_spare_snapshot_buffer_exists_before_the_first_save_is_ever_requested() {
+        let server = GameServer::new(Config::default(), World::empty(300, 200, "presnapshot"));
+        assert!(
+            server.spare_world.is_some(),
+            "the first autosave has nothing to refresh against, and pays for a full world copy \
+             inside a counted tick instead of the ~150µs an incremental refresh costs"
+        );
+    }
+
+    /// And it is a genuine, independent copy — not the live world under a second name — or the
+    /// "incremental" path would be diffing a buffer against itself.
+    #[test]
+    fn the_spare_buffer_is_a_real_copy_not_an_alias_of_the_live_world() {
+        use crate::world::worldgen::tiles;
+
+        let mut server = GameServer::new(Config::default(), World::empty(300, 200, "alias probe"));
+        server
+            .world
+            .set_tile(10, 10, Tile::framed(tiles::CHEST, 0, 0));
+        let spare = server
+            .spare_world
+            .as_ref()
+            .expect("pre-warmed at construction");
+        assert!(
+            !spare.tile(10, 10).is_active(),
+            "editing the live world after construction must not be visible through the spare \
+             buffer, or it is an alias rather than a snapshot"
         );
     }
 }
