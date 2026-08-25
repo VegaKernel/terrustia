@@ -43,6 +43,10 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         print_usage(palette);
         return Ok(());
     }
+    if args.list_worlds {
+        print_worlds();
+        return Ok(());
+    }
 
     print!(
         "{}",
@@ -208,6 +212,36 @@ async fn read_console(events: mpsc::Sender<ServerEvent>) {
     }
 }
 
+/// List the worlds Terraria has on this machine.
+///
+/// Enough to pick one by name without opening a file manager: the size the header claims, and how
+/// recently it was played. Reading each header is a few hundred bytes and worth it — a list of
+/// bare filenames does not tell you which of three saves is the one you want.
+fn print_worlds() {
+    let Some(dir) = terrustia::worlds::directory() else {
+        println!("no world directory on this platform, or no home directory set");
+        return;
+    };
+    let worlds = terrustia::worlds::list();
+    if worlds.is_empty() {
+        println!("no worlds in {}", dir.display());
+        return;
+    }
+    println!("{}\n", dir.display());
+    for path in worlds {
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        // The dimensions come from the header, which is cheap to read and the only way to tell a
+        // small world from a large one without opening it in the game.
+        let dims = match wld::load(&path) {
+            Ok(w) => format!("{} x {}", w.width(), w.height()),
+            Err(_) => "unreadable".to_string(),
+        };
+        println!("  {name:<32} {dims:>12}   {:>6} MB", size / 1_048_576);
+    }
+    println!("\nserve one with:  terrustia --world <name>");
+}
+
 /// Wait for whichever signal asks the server to stop, and say which it was.
 ///
 /// A process manager sends `SIGTERM`, not `SIGINT`: systemd, Docker and Kubernetes all stop a
@@ -281,6 +315,8 @@ struct Args {
     save: Option<PathBuf>,
     /// Where to record every byte of every connection, for checking against a real client.
     record: Option<PathBuf>,
+    /// List the worlds Terraria has on this machine, and stop.
+    list_worlds: bool,
     help: bool,
 }
 
@@ -293,6 +329,7 @@ impl Args {
             world: None,
             save: None,
             record: None,
+            list_worlds: false,
             help: false,
         };
         let mut args = args.peekable();
@@ -312,8 +349,10 @@ impl Args {
                     );
                 }
                 "-w" | "--world" => {
-                    parsed.world = Some(args.next().ok_or("--world needs a path")?.into());
+                    let given = args.next().ok_or("--world needs a name or a path")?;
+                    parsed.world = Some(terrustia::worlds::resolve(&given));
                 }
+                "--worlds" => parsed.list_worlds = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
@@ -350,8 +389,13 @@ fn print_usage(palette: Palette) {
         ("-c, --config <PATH>", "Config file", "terrustia.toml"),
         ("-l, --listen <ADDR>", "Address to bind", "0.0.0.0:7777"),
         (
-            "-w, --world <PATH>",
-            "Serve an existing .wld instead of generating",
+            "-w, --world <NAME|PATH>",
+            "Serve an existing world, by name or by path",
+            "",
+        ),
+        (
+            "    --worlds",
+            "List the worlds Terraria has on this machine",
             "",
         ),
         (

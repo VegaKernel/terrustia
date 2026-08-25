@@ -12,3 +12,4 @@ pub mod game;
 pub mod net;
 pub mod term;
 pub mod world;
+pub mod worlds;
