@@ -295,7 +295,11 @@ where
     let mut stream = Writer::with_capacity(bounds.tile_count() / 2 + 64);
     write_section_stream(&mut stream, bounds, extras, get);
 
-    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    // Best, not default. A section is encoded once and then cached, so the extra work is paid a
+    // single time per section per world and the smaller result is paid out on every join for the
+    // life of the server. Sections are far and away the largest thing this server sends — about
+    // 45% of a session's bytes — so a few per cent off them is worth more than it looks.
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(stream.as_slice())
         .and_then(|()| encoder.finish())

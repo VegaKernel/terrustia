@@ -1,5 +1,7 @@
 [package]
 name = "terrustia-client"
+# A headless client for testing and bots. Useful, but shaped for this repository's own probes rather than as a public API to keep stable.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,3 +20,6 @@ tracing.workspace = true
 [dev-dependencies]
 flate2.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

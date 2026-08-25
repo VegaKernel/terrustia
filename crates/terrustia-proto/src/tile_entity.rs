@@ -81,7 +81,10 @@ impl EntityKind {
             Self::HatRack => 475,
             Self::FoodPlatter => 520,
             Self::TeleportationPylon => 597,
-            Self::DeadCellsDisplayJar => 704,
+            // 698, not 704: 704 is the fallen-log echo tile. With the wrong id a placed jar got
+            // no entity and so could never hold anything, while placing an echo log invented a
+            // jar that was then shipped out in the section trailer.
+            Self::DeadCellsDisplayJar => 698,
             Self::KiteAnchor => 723,
             Self::CritterAnchor => 724,
         }

@@ -81,7 +81,9 @@ impl SyncNpc {
         // it rather than the corner of a box that keeps changing size.
         let position = self.anchored_position();
 
-        let at_full_health = self.life >= self.life_max;
+        // Equality, not `>=`, because that is what the game writes. An overhealed NPC is the only
+        // case that differs, and it should send its real life rather than claim to be at full.
+        let at_full_health = self.life == self.life_max;
         let mut flags1 = 0u8;
         if self.direction > 0 {
             flags1 |= 0x01;

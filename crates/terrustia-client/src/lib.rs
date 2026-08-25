@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! A headless Terraria client.
 //!
 //! It speaks the same protocol a real client does — handshake, world streaming, movement, chat,
@@ -10,6 +11,7 @@
 
 pub mod codec;
 pub mod error;
+pub mod tap;
 pub mod world;
 
 use std::{net::SocketAddr, time::Duration};
@@ -33,6 +35,7 @@ use tracing::debug;
 
 pub use codec::Frame;
 pub use error::{ClientError, Result};
+pub use tap::Tap;
 pub use world::ClientWorld;
 
 /// How long to wait for any single expected packet.
@@ -69,6 +72,8 @@ pub enum Event {
     PlayerHurt(terrustia_proto::hurt::PlayerHurt),
     /// A player died.
     PlayerDied(terrustia_proto::hurt::PlayerDeath),
+    /// Liquid moved. Already folded into the world view.
+    LiquidChanged(Vec<terrustia_proto::net_module::LiquidChange>),
     /// The handshake finished.
     FinishedConnecting,
     /// Anything not otherwise interpreted.
@@ -84,6 +89,8 @@ pub struct Client {
     world: ClientWorld,
     position: (f32, f32),
     timeout: Duration,
+    /// Where to record the raw stream, when someone has asked for a capture.
+    tap: Option<Tap>,
 }
 
 impl Client {
@@ -106,7 +113,23 @@ impl Client {
             world: ClientWorld::default(),
             position: (0.0, 0.0),
             timeout: DEFAULT_TIMEOUT,
+            tap: None,
         })
+    }
+
+    /// Record every byte of this connection to a file, in both directions.
+    ///
+    /// Set it before the handshake to capture the handshake, which is the part worth having.
+    pub fn record_to(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        self.tap = Some(Tap::create(path)?);
+        Ok(())
+    }
+
+    /// Flush the capture, if one is open.
+    pub fn flush_recording(&mut self) {
+        if let Some(tap) = self.tap.as_mut() {
+            tap.flush();
+        }
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {
@@ -480,6 +503,18 @@ impl Client {
         self.send(&frame).await
     }
 
+    /// Start talking to a town NPC, or stop by passing `None`.
+    ///
+    /// Talking is not only chatter: it is how somebody tied up is freed, which is the only way six
+    /// of the game's residents ever arrive.
+    pub async fn talk_to_npc(&mut self, index: impl Into<Option<u8>>) -> Result<()> {
+        let mut w = terrustia_proto::PacketWriter::new(id::SYNC_TALK_N_P_C);
+        w.u8(self.slot);
+        w.i16(index.into().map_or(-1, i16::from));
+        let frame = w.finish()?;
+        self.send(&frame).await
+    }
+
     /// Report picking an item up. Only works for an item the server reserved for us.
     pub async fn pick_up(&mut self, index: i16) -> Result<()> {
         self.send(&terrustia_proto::items::item_despawn(index)?)
@@ -575,6 +610,9 @@ impl Client {
 
     /// Send an already-encoded frame, for anything this API does not cover.
     pub async fn send(&mut self, frame: &[u8]) -> Result<()> {
+        if let Some(tap) = self.tap.as_mut() {
+            tap.chunk(crate::tap::Direction::ToServer, frame);
+        }
         self.stream.write_all(frame).await?;
         Ok(())
     }
@@ -706,12 +744,29 @@ impl Client {
                         text: text.text,
                     });
                 }
+                // Water moving is module 0, not a tile square, so a client that only reads
+                // squares watches a flooding room stay dry.
+                if let Some(changes) = net_module::decode_liquid_changes(&frame.payload)? {
+                    for change in &changes {
+                        self.world.set_liquid(
+                            change.x,
+                            change.y,
+                            change.amount,
+                            change.kind,
+                        );
+                    }
+                    return Ok(Event::LiquidChanged(changes));
+                }
                 Ok(Event::Other(frame))
             }
             id::SYNC_ITEM | id::SPAWN_INSTANCED_ITEM => {
                 Ok(Event::ItemSynced(SyncItem::decode(&frame.payload)?))
             }
-            id::SYNC_N_P_C => Ok(Event::NpcSynced(SyncNpc::decode(&frame.payload)?)),
+            id::SYNC_N_P_C => {
+                let sync = SyncNpc::decode(&frame.payload)?;
+                self.world.apply_npc(&sync);
+                Ok(Event::NpcSynced(sync))
+            }
             id::SYNC_PROJECTILE => Ok(Event::ProjectileSynced(
                 terrustia_proto::projectile::SyncProjectile::decode(&frame.payload)?,
             )),
@@ -791,6 +846,7 @@ impl Client {
             if let Some(frame) = codec::decode(&mut self.buf)? {
                 return Ok(frame);
             }
+            let before = self.buf.len();
             let read = timeout(self.timeout, self.stream.read_buf(&mut self.buf))
                 .await
                 .map_err(|_| ClientError::Timeout {
@@ -799,6 +855,9 @@ impl Client {
                 })??;
             if read == 0 {
                 return Err(ClientError::Closed);
+            }
+            if let Some(tap) = self.tap.as_mut() {
+                tap.chunk(crate::tap::Direction::ToClient, &self.buf[before..]);
             }
         }
     }

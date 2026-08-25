@@ -3,9 +3,20 @@ name = "terrustia-proto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# MIT rather than the workspace's AGPL, deliberately. This crate is a transcription of Terraria's
+# wire format with no I/O and no game logic; anyone writing a Terraria tool in Rust should be able
+# to use it without taking on the server's licence. The server itself stays AGPL.
+license = "MIT"
 description = "Terraria network wire format: primitives, packet types, tile-section coding"
+repository = "https://github.com/brooklyn/terrustia"
+documentation = "https://docs.rs/terrustia-proto"
+readme = "README.md"
+keywords = ["terraria", "protocol", "gamedev", "networking"]
+categories = ["game-development", "network-programming", "encoding"]
 
 [dependencies]
 flate2.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

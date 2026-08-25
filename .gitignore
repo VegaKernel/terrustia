@@ -23,3 +23,12 @@
 *.log
 perf.data*
 flamegraph.svg
+
+# Decompiled game source, if a generator is ever run with the tree inside this directory.
+#
+# `.gitattributes` already anticipates `.cs` files arriving; nothing stopped `git add` from
+# swallowing the whole decompiled tree along with them. The generators take the tree as a CLI
+# argument and never look for it in here, so this is a safety net rather than a workflow.
+*.cs
+/Terraria*/
+/decompiled/

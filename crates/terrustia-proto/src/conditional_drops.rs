@@ -28,6 +28,11 @@ pub struct Conditions {
     pub in_crimson: bool,
     /// Below the rock layer, which is where the souls live.
     pub underground: bool,
+    /// For the Twins only: whether the *other* one is already dead.
+    ///
+    /// The game gates their whole loot on `Conditions.MissingTwin`, so killing one while its
+    /// sibling still lives gives nothing. Without this the pair would drop twice over.
+    pub other_twin_dead: bool,
 }
 
 /// One conditional drop.
@@ -158,12 +163,22 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         }
     }
 
-    // Plantera's death opens the temple, and the key is what opens it.
-    if at.downed_plantera && npc_type == 262 {
-        out.push(always(1293));
+    // Plantera's first death gives the Grenade Launcher and its ammunition outright; every death
+    // after that offers one weapon out of a pool instead, which needs a draw this table cannot
+    // make. The first-kill half is the one that matters and is here.
+    //
+    // `ItemDropDatabase.RegisterBoss_Plantera` gates this on `FirstTimeKillingPlantera`, which is
+    // the inverse of the flag the world already carries.
+    if npc_type == 262 && !at.expert && !at.downed_plantera {
+        out.push(always(758));
+        out.push(a_few(771, 1, 50, 150));
     }
     if !at.expert {
-        out.extend(classic_only(npc_type));
+        // Killing one twin while the other lives gives nothing: the game hangs the whole pair's
+        // loot off `MissingTwin`, so it lands once rather than twice.
+        if !matches!(npc_type, 125 | 126) || at.other_twin_dead {
+            out.extend(classic_only(npc_type));
+        }
         // The Eye of Cthulhu drops its world's evil ore, and only in classic — in expert the bag
         // carries it. Which evil is a property of the world, not of the ground it died on.
         if npc_type == 4 {
@@ -180,6 +195,43 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     out
 }
 
+/// Pools a kill draws exactly one item from.
+///
+/// The game writes these as `OneFromOptions`, and they are not the same as a run of independent
+/// rolls: a King Slime gives you *one* piece of the ninja set, never two and never none. Choosing
+/// which needs a die, so the pools are returned here and the caller rolls.
+///
+/// Empty for anything with no such rule, which is nearly everything.
+pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
+    if at.expert {
+        // Expert replaces the lot with a treasure bag.
+        return &[];
+    }
+    match npc_type {
+        // The ninja set: hood, shirt, trousers.
+        50 => &[&[256, 257, 258]],
+        // The Wall of Flesh: an emblem and a weapon, one of each. The emblems are the whole of
+        // early hardmode's damage progression, so a run that gets neither is noticeably poorer.
+        113 => &[&[489, 490, 491, 2998], &[426, 434, 514, 4912]],
+        // Queen Bee: one of the bee weapons, and one piece of the bee set.
+        222 => &[&[1121, 1123, 2888], &[842, 843, 844]],
+        // Golem: one of its seven, which is where the Picksaw's siblings live.
+        245 => &[&[1258, 1122, 899, 1248, 1295, 1296, 1297]],
+        // Queen Slime's three.
+        657 => &[&[4982, 4983, 4984]],
+        // The Empress's weapon.
+        636 => &[&[4923, 4952, 4953, 4914]],
+        // Duke Fishron's weapon. The seventh option differs on the remix seed, which this server
+        // does not offer, so the ordinary set is the one here.
+        370 => &[&[5526, 2624, 2622, 2621, 5478, 3291, 2623]],
+        // Betsy.
+        551 => &[&[3827, 3859, 3870, 3858]],
+        // Deerclops.
+        668 => &[&[5117, 5118, 5119, 5095]],
+        _ => &[],
+    }
+}
+
 /// What a boss drops when the world is *not* in expert.
 ///
 /// In expert the treasure bag replaces all of this, which is why every one of these rules is
@@ -192,6 +244,49 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
             a_few(2112, 7, 1, 1),
             a_few(1299, 40, 1, 1),
             a_few(47, 1, 20, 50),
+        ],
+        // Skeletron. The three weapons are one chain in the game — each tried at one in seven and
+        // stopping at the first that lands — which is why they are not three separate rolls.
+        35 | 36 => vec![a_few(1281, 7, 1, 1), a_few(1273, 7, 1, 1), a_few(1313, 7, 1, 1)],
+        50 => vec![
+            a_few(2430, 4, 1, 1),
+            a_few(2493, 7, 1, 1),
+            a_few(2585, 3, 1, 1),
+            always(998),
+            a_few(1309, 30, 1, 1),
+        ],
+        // The Twins. Gated on the other one already being dead, handled by the caller.
+        125 | 126 => vec![
+            a_few(2106, 7, 1, 1),
+            a_few(1225, 1, 15, 30),
+            a_few(549, 1, 25, 40),
+        ],
+        // Plantera. The key is the whole of hardmode's second half: without it the Jungle Temple
+        // never opens, so Golem, the Cultist and the Moon Lord are all behind this one line.
+        262 => vec![
+            a_few(2109, 7, 1, 1),
+            always(1141),
+            a_few(1182, 20, 1, 1),
+            a_few(1305, 50, 1, 1),
+            a_few(1157, 4, 1, 1),
+            a_few(3021, 10, 1, 1),
+        ],
+        // Empress of Light.
+        636 => vec![
+            a_few(4823, 15, 1, 1),
+            a_few(4778, 4, 3, 3),
+            a_few(4715, 50, 1, 1),
+            a_few(4784, 7, 1, 1),
+            a_few(5075, 20, 1, 1),
+        ],
+        // Queen Slime.
+        657 => vec![
+            a_few(4986, 1, 25, 75),
+            a_few(4959, 7, 1, 1),
+            a_few(4758, 4, 1, 1),
+            a_few(4981, 4, 1, 1),
+            a_few(4980, 3, 1, 1),
+            a_few(4958, 20, 1, 1),
         ],
         13 => vec![
             a_few(56, 1, 20, 60),
@@ -221,6 +316,7 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
         ],
         222 => vec![
             a_few(2108, 7, 1, 1),
+            a_few(1129, 3, 1, 1),
             a_few(1132, 3, 1, 1),
             a_few(1170, 15, 1, 1),
             a_few(2502, 20, 1, 1),
@@ -450,19 +546,134 @@ mod tests {
         assert!(conditional(3, surface).is_empty(), "souls on the surface");
     }
 
-    /// Plantera's key only comes once she is down.
+    /// Plantera drops the Temple Key, every time, in a classic world.
+    ///
+    /// This test used to be named for the key and assert item **1293** — the Lihzahrd Power Cell,
+    /// which the game drops from temple *enemies* and never from Plantera. So it passed while the
+    /// key it is named after was not implemented at all, and the Jungle Temple could never be
+    /// opened: no Golem, no Cultist, no Moon Lord. A test can hide a gap as easily as find one.
     #[test]
-    fn the_temple_key_waits_for_plantera() {
+    fn plantera_drops_the_temple_key() {
+        const TEMPLE_KEY: u16 = 1141;
+
         let first = Conditions {
             hard_mode: true,
             ..plain()
         };
-        assert!(!conditional(262, first).iter().any(|d| d.item == 1293));
-        let after = Conditions {
+        assert!(
+            conditional(262, first).iter().any(|d| d.item == TEMPLE_KEY),
+            "the first Plantera kill must give the key, or the temple never opens",
+        );
+
+        let again = Conditions {
             downed_plantera: true,
             ..first
         };
-        assert!(conditional(262, after).iter().any(|d| d.item == 1293));
+        assert!(
+            conditional(262, again).iter().any(|d| d.item == TEMPLE_KEY),
+            "and so must every kill after it",
+        );
+
+        // The Grenade Launcher and its rockets are the half that really is first-kill only.
+        assert!(conditional(262, first).iter().any(|d| d.item == 758));
+        assert!(!conditional(262, again).iter().any(|d| d.item == 758));
+
+        // In expert the treasure bag carries all of it instead.
+        let expert = Conditions {
+            expert: true,
+            ..first
+        };
+        assert!(!conditional(262, expert).iter().any(|d| d.item == TEMPLE_KEY));
+    }
+
+    /// The Twins' loot lands once, when the second of them dies.
+    #[test]
+    fn the_twins_drop_only_when_the_pair_is_finished() {
+        const SOUL_OF_SIGHT: u16 = 549;
+
+        let alone = Conditions {
+            hard_mode: true,
+            ..plain()
+        };
+        for twin in [125u16, 126] {
+            assert!(
+                conditional(twin, alone).iter().all(|d| d.item != SOUL_OF_SIGHT),
+                "killing one twin while the other lives must give nothing",
+            );
+        }
+
+        let finished = Conditions {
+            other_twin_dead: true,
+            ..alone
+        };
+        assert!(
+            conditional(125, finished)
+                .iter()
+                .any(|d| d.item == SOUL_OF_SIGHT),
+            "no Soul of Sight means no Drax, so no Chlorophyte",
+        );
+    }
+
+    /// Every boss gives up the item the next step of the game needs.
+    ///
+    /// This is the test the project did not have, and its absence is why three separate blockers
+    /// sat behind 1,324 passing tests. The other drop tests check breadth — that a good many types
+    /// drop *something*, that a chain stops at its first success. None of them walked the chain,
+    /// so nothing noticed that the Temple Key was missing and the run could not be finished.
+    ///
+    /// Each row is "kill this, get that, or the game stops here".
+    #[test]
+    fn the_progression_chain_is_unbroken() {
+        // (boss, item, what it unlocks)
+        const CHAIN: &[(u16, u16, &str)] = &[
+            (4, 56, "Eye of Cthulhu -> demonite, in a corruption world"),
+            (13, 56, "Eater of Worlds -> demonite"),
+            (266, 880, "Brain of Cthulhu -> crimtane"),
+            (113, 367, "Wall of Flesh -> the Pwnhammer, so altars can be broken"),
+            (134, 548, "The Destroyer -> Soul of Might"),
+            (125, 549, "The Twins -> Soul of Sight"),
+            (127, 547, "Skeletron Prime -> Soul of Fright"),
+            (134, 1225, "a mechanical boss -> Hallowed Bars"),
+            (262, 1141, "Plantera -> the Temple Key, so the temple opens"),
+            (245, 1294, "Golem -> the Picksaw"),
+            (398, 3460, "Moon Lord -> luminite"),
+        ];
+
+        let at = Conditions {
+            hard_mode: true,
+            other_twin_dead: true,
+            ..plain()
+        };
+
+        let mut broken = Vec::new();
+        for &(boss, item, what) in CHAIN {
+            let dropped = conditional(boss, at).iter().any(|d| d.item == item)
+                || crate::npc_drops::drops(boss)
+                    .iter()
+                    .any(|chain| chain.iter().any(|d| d.item == item));
+            if !dropped {
+                broken.push(what);
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "{} link(s) of the progression chain are missing:\n  {}",
+            broken.len(),
+            broken.join("\n  "),
+        );
+    }
+
+    /// The Lunatic Cultist gives up the Ancient Manipulator.
+    ///
+    /// Not on the chain above because the Moon Lord can be reached without it — but every Luminite
+    /// item in the game is crafted at it, so without this the ending leads nowhere.
+    #[test]
+    fn the_cultist_drops_the_ancient_manipulator() {
+        assert!(
+            crate::npc_drops::drops(439)
+                .iter()
+                .any(|chain| chain.iter().any(|d| d.item == 3372)),
+        );
     }
 
     /// An ordinary enemy drops nothing conditional at all.
@@ -478,6 +689,7 @@ mod tests {
             in_corruption: false,
             in_crimson: false,
             underground: false,
+            other_twin_dead: true,
         };
         // A bunny, a goldfish, a guide.
         for ordinary in [46u16, 1, 22] {

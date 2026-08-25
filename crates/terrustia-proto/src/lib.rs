@@ -1,15 +1,20 @@
+#![forbid(unsafe_code)]
 //! Terraria network wire format.
 //!
 //! This crate is deliberately free of I/O so that every packet can be round-tripped in a unit test
 //! without a socket. The async server lives in the `terrustia` crate.
 //!
-//! Copyright (C) 2026 Brooklyn Halmstad.
-//! Licensed under the GNU Affero General Public License v3.0 or later; see LICENSE.
+//! Copyright (c) 2026 Brooklyn Halmstad.
+//! Licensed under the MIT licence; see the LICENSE file beside this crate's manifest. The server
+//! that uses it is AGPL, but this crate is not: it is a description of a wire format, and holding
+//! that hostage to a licence would help nobody.
 
 pub mod angler;
+pub mod banners;
 pub mod buffs;
 pub mod conditional_drops;
 pub mod convert;
+pub mod difficulty;
 pub mod error;
 pub mod housing;
 pub mod hurt_tiles;

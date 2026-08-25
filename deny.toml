@@ -1,0 +1,41 @@
+# cargo-deny policy.
+#
+# Without a config, `cargo deny check licenses` falls back to an empty allow-list and rejects
+# every dependency — including plain MIT — which reads like a licence problem and is not one. The
+# actual position, audited: 59 unique external crates, every one permissive, zero copyleft.
+#
+#   cargo deny check
+
+[licenses]
+# Everything the dependency graph actually uses. Deliberately a list rather than a category, so a
+# new dependency arriving under something unexpected fails rather than being waved through.
+allow = [
+    # Ours: the server and client are AGPL, `terrustia-proto` is MIT.
+    "AGPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "0BSD",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two majors of the same crate is usually a transitive disagreement rather than a mistake, so it
+# is worth seeing without being fatal. `syn`, `winnow` and `rand_core` are currently doubled.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates refer to each other by path, which is not the kind of wildcard this
+# check is for — that is an unpinned *registry* dependency.
+allow-wildcard-paths = true
+
+[advisories]
+# A known vulnerability or an unmaintained crate should stop a release, not produce a note nobody
+# reads. `cargo audit` currently reports neither.
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

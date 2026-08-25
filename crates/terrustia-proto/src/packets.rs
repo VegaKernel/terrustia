@@ -27,9 +27,14 @@ impl Hello {
         })
     }
 
-    /// Whether this client speaks the release this server implements.
+    /// Whether this client speaks a release this server understands.
+    ///
+    /// A range, not one string. 1.4.5.7 and 1.4.5.8 differ only in the number they announce, so
+    /// pinning to one of them turns a cosmetic patch release into a locked door.
     pub fn is_supported(&self) -> bool {
-        self.version == id::VERSION_STRING
+        id::SUPPORTED_RELEASES
+            .iter()
+            .any(|release| self.version == format!("Terraria{release}"))
     }
 }
 
@@ -220,6 +225,53 @@ pub fn place_object(x: i32, y: i32, block: u16, style: i32, random: i32) -> Resu
 
 pub fn empty(message_id: u8) -> Result<Vec<u8>> {
     PacketWriter::new(message_id).finish()
+}
+
+/// Packet `57`: how much of the world is hallow, corruption and crimson, as whole percentages.
+///
+/// The Dryad reads all three out when you talk to her, and the client has no way to work them out
+/// for itself — it only ever sees the sections it has asked for. Without this she reports a world
+/// that is nought per cent of everything.
+///
+/// Bytes, not integers: the game counts tiles in ints and then rounds each to a percentage before
+/// it sends them.
+pub fn world_evil_tally(hallow: u8, corruption: u8, crimson: u8) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::UNKNOWN57);
+    w.u8(hallow).u8(corruption).u8(crimson);
+    w.finish()
+}
+
+/// What the game's `TownRoomManager.GetHouseholdStatus` reports about where a town NPC lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HouseholdStatus {
+    /// Has a home tile, but no room on record for it.
+    Settled = 0,
+    /// No home at all: newly arrived, or evicted.
+    Homeless = 1,
+    /// Has a home and a room the game agrees is habitable.
+    Housed = 2,
+}
+
+/// Packet `60`: where a town NPC lives.
+///
+/// Sent for every town NPC as a player joins, and again whenever one moves. It is what the housing
+/// screen draws its banners and its "this room is home to" line from; a client never told is a
+/// client whose housing menu is empty however many villagers are walking about.
+pub fn npc_home(npc: u16, home_x: i16, home_y: i16, status: HouseholdStatus) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::UNKNOWN60);
+    w.i16(npc as i16).i16(home_x).i16(home_y).u8(status as u8);
+    w.finish()
+}
+
+/// Packet `139`: whether this player's slot counts as the host for gameplay purposes.
+///
+/// The game's rule is simply whether the connection came from the loopback address — somebody
+/// playing on the same machine the server runs on. It is only sent when true.
+pub fn counts_as_host(player: u8, is_host: bool) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::SET_COUNTS_AS_HOST_FOR_GAMEPLAY);
+    w.u8(player).bool(is_host);
+    w.finish()
 }
 
 /// Packet `13`: a client's control and position update.
@@ -515,16 +567,148 @@ pub struct WorldData {
     pub lobby_id: u64,
     pub sandstorm_severity: f32,
     pub extra_spawn_points: Vec<(i16, i16)>,
+    /// Where the dungeon entrance is, in tiles.
+    ///
+    /// New in release 326. It is not in the 1.4.5.7 source this project is written against, and it
+    /// was found the only way it could be: by connecting to a real 1.4.5.8 server and finding four
+    /// bytes left over at the end of its packet 7. Two worlds' worth of captures matched their own
+    /// `.wld` files' dungeon positions exactly, which is what turned a guess into a fact.
+    ///
+    /// Omitting it is not a cosmetic shortfall. A 326 client reads these four bytes whether or not
+    /// they were sent, so a packet 7 without them leaves the client parsing four bytes of the next
+    /// packet as a dungeon position and then desynchronised for the rest of the session.
+    pub dungeon_x: i16,
+    pub dungeon_y: i16,
 }
 
 /// Byte count of a `WorldData` payload before the world name and extra spawn points.
-pub const WORLD_DATA_FIXED_LEN: usize = 159;
+pub const WORLD_DATA_FIXED_LEN: usize = 163;
 
 impl WorldData {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut w = PacketWriter::new(id::WORLD_DATA);
         self.write_payload(&mut w);
         w.finish()
+    }
+
+    /// Read a packet 7 payload back into its fields.
+    ///
+    /// The server never needs this — it only ever writes packet 7 — which is exactly why it is
+    /// worth having. Pointed at a capture from a real `TerrariaServer`, a decode that succeeds and
+    /// re-encodes to the identical bytes is proof that this struct's field order, widths and
+    /// signedness match Re-Logic's, rather than merely matching our own reading of them. Every
+    /// other check available here is symmetric and cannot tell those two apart.
+    ///
+    /// Strict about trailing bytes for the same reason: a layout that is one field short still
+    /// decodes happily if the leftovers are ignored.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = PacketReader::new(payload);
+        let time = r.i32()?;
+        let day_flags = r.u8()?;
+        let moon_phase = r.u8()?;
+        let max_tiles_x = r.i16()?;
+        let max_tiles_y = r.i16()?;
+        let spawn_tile_x = r.i16()?;
+        let spawn_tile_y = r.i16()?;
+        let world_surface = r.i16()?;
+        let rock_layer = r.i16()?;
+        let world_id = r.i32()?;
+        let world_name = r.string()?;
+        let game_mode = r.u8()?;
+        let mut unique_id = [0u8; 16];
+        unique_id.copy_from_slice(r.bytes(16)?);
+        let world_gen_version = r.u64()?;
+        let moon_type = r.u8()?;
+        let mut backgrounds = [0u8; 13];
+        backgrounds.copy_from_slice(r.bytes(13)?);
+        let ice_back_style = r.u8()?;
+        let jungle_back_style = r.u8()?;
+        let hell_back_style = r.u8()?;
+        let wind_speed_target = r.f32()?;
+        let num_clouds = r.u8()?;
+
+        let mut tree_x = [0i32; 3];
+        for slot in &mut tree_x {
+            *slot = r.i32()?;
+        }
+        let mut tree_style = [0u8; 4];
+        tree_style.copy_from_slice(r.bytes(4)?);
+        let mut cave_back_x = [0i32; 3];
+        for slot in &mut cave_back_x {
+            *slot = r.i32()?;
+        }
+        let mut cave_back_style = [0u8; 4];
+        cave_back_style.copy_from_slice(r.bytes(4)?);
+        let mut tree_tops = [0u8; 13];
+        tree_tops.copy_from_slice(r.bytes(13)?);
+        let max_raining = r.f32()?;
+        let mut flag_bytes = [0u8; 11];
+        flag_bytes.copy_from_slice(r.bytes(11)?);
+        let sundial_cooldown = r.u8()?;
+        let moondial_cooldown = r.u8()?;
+
+        let mut ore_tiers = [0i16; 7];
+        for slot in &mut ore_tiers {
+            *slot = r.i16()?;
+        }
+        let invasion_type = r.i8()?;
+        let lobby_id = r.u64()?;
+        let sandstorm_severity = r.f32()?;
+
+        let extra = r.u8()? as usize;
+        let mut extra_spawn_points = Vec::with_capacity(extra);
+        for _ in 0..extra {
+            extra_spawn_points.push((r.i16()?, r.i16()?));
+        }
+        let dungeon_x = r.i16()?;
+        let dungeon_y = r.i16()?;
+        if !r.is_empty() {
+            return Err(ProtoError::TrailingBytes {
+                left: r.remaining(),
+            });
+        }
+
+        Ok(Self {
+            time,
+            day_time: day_flags & 0b001 != 0,
+            blood_moon: day_flags & 0b010 != 0,
+            eclipse: day_flags & 0b100 != 0,
+            moon_phase,
+            max_tiles_x,
+            max_tiles_y,
+            spawn_tile_x,
+            spawn_tile_y,
+            world_surface,
+            rock_layer,
+            world_id,
+            world_name,
+            game_mode,
+            unique_id,
+            world_gen_version,
+            moon_type,
+            backgrounds,
+            ice_back_style,
+            jungle_back_style,
+            hell_back_style,
+            wind_speed_target,
+            num_clouds,
+            tree_x,
+            tree_style,
+            cave_back_x,
+            cave_back_style,
+            tree_tops,
+            max_raining,
+            flags: WorldFlags(flag_bytes),
+            sundial_cooldown,
+            moondial_cooldown,
+            ore_tiers,
+            invasion_type,
+            lobby_id,
+            sandstorm_severity,
+            extra_spawn_points,
+            dungeon_x,
+            dungeon_y,
+        })
     }
 
     fn write_payload(&self, w: &mut Writer) {
@@ -578,6 +762,10 @@ impl WorldData {
         for (x, y) in &self.extra_spawn_points {
             w.i16(*x).i16(*y);
         }
+        // Release 326's addition, after the spawn-point list rather than before it. The order was
+        // settled by capture: read the other way round, a world whose dungeon sits at 3413 comes
+        // out at 21760.
+        w.i16(self.dungeon_x).i16(self.dungeon_y);
     }
 }
 
@@ -617,11 +805,17 @@ impl Default for WorldData {
             flags: WorldFlags::default(),
             sundial_cooldown: 0,
             moondial_cooldown: 0,
-            ore_tiers: [7, 6, 9, 8, 108, 111, 112],
+            // Copper, iron, silver, gold, then the three hardmode tiers a fresh world has not
+            // rolled yet. The hardmode ids are cobalt 107, mythril 108, adamantite 111 — this
+            // list used to read 108, 111, 112, which is each one shifted into the next tier's
+            // slot with a non-ore on the end.
+            ore_tiers: [7, 6, 9, 8, -1, -1, -1],
             invasion_type: 0,
             lobby_id: 0,
             sandstorm_severity: 0.0,
             extra_spawn_points: Vec::new(),
+            dungeon_x: 0,
+            dungeon_y: 0,
         }
     }
 }
@@ -818,18 +1012,185 @@ mod tests {
     }
 
     #[test]
-    fn world_data_ends_with_the_extra_spawn_point_list() {
-        // Added in 1.4.5 and easy to forget; without it the client reads past the payload.
+    fn world_data_survives_a_round_trip_through_every_field() {
+        // The decoder exists to be pointed at a real server's packet 7, so it has to be the exact
+        // mirror of the writer — not merely close enough that a default world survives. Every
+        // field is given a value distinguishable from its neighbours, so a swapped pair fails.
+        let world = WorldData {
+            time: 27_000,
+            day_time: false,
+            blood_moon: true,
+            eclipse: false,
+            moon_phase: 3,
+            max_tiles_x: 8400,
+            max_tiles_y: 2400,
+            spawn_tile_x: 4201,
+            spawn_tile_y: 341,
+            world_surface: 800,
+            rock_layer: 1200,
+            world_id: 1_234_567,
+            world_name: "Round Trip".into(),
+            game_mode: 2,
+            unique_id: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            ],
+            world_gen_version: 0x0102_0304_0506_0708,
+            moon_type: 5,
+            backgrounds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            ice_back_style: 2,
+            jungle_back_style: 1,
+            hell_back_style: 3,
+            wind_speed_target: -0.375,
+            num_clouds: 42,
+            tree_x: [100, 200, 300],
+            tree_style: [1, 2, 3, 4],
+            cave_back_x: [400, 500, 600],
+            cave_back_style: [5, 6, 7, 8],
+            tree_tops: [9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3],
+            max_raining: 0.625,
+            flags: WorldFlags([0xAA, 0x55, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            sundial_cooldown: 4,
+            moondial_cooldown: 6,
+            ore_tiers: [7, 6, 9, 8, 107, 108, 111],
+            invasion_type: -1,
+            lobby_id: 0x1122_3344_5566_7788,
+            sandstorm_severity: 0.5,
+            extra_spawn_points: vec![(11, 22), (33, 44)],
+            dungeon_x: 3413,
+            dungeon_y: 190,
+        };
+
+        let frame = world.encode().unwrap();
+        let back = WorldData::decode(payload(&frame)).unwrap();
+        assert_eq!(back, world);
+        // And the other way round, which is the direction that matters for a capture: bytes in,
+        // identical bytes out.
+        assert_eq!(back.encode().unwrap(), frame);
+    }
+
+    /// Packet 7 as a real 1.4.5.8 `TerrariaServer` sent it, byte for byte.
+    ///
+    /// Captured from the game's own dedicated server serving a world it generated itself, so
+    /// nothing about these bytes came from this project. It is the only test here that can catch a
+    /// field this codebase has never heard of — which is exactly how the two dungeon shorts at the
+    /// end were found, as four bytes left over that no field accounted for.
+    ///
+    /// The world was `ProbeTiny`, 4200x1200, seed 12345, and its `.wld` file independently reports
+    /// the dungeon at (3413, 190) — which is what turned the leftovers from a guess into a fact.
+    const REAL_SERVER_PACKET_7: &[u8] = &[
+        0xbc, 0x34, 0x00, 0x00, 0x01, 0x00, 0x68, 0x10, 0xb0, 0x04, 0x2f, 0x08, 0xe8, 0x00, 0x4b,
+        0x01, 0xab, 0x01, 0x32, 0x83, 0x8a, 0x71, 0x09, 0x50, 0x72, 0x6f, 0x62, 0x65, 0x54, 0x69,
+        0x6e, 0x79, 0x00, 0x15, 0xca, 0x11, 0x82, 0x13, 0x41, 0x54, 0x44, 0xbf, 0xd3, 0x40, 0x72,
+        0xe7, 0xb6, 0x66, 0x50, 0x01, 0x00, 0x00, 0x00, 0x46, 0x01, 0x00, 0x00, 0x02, 0x33, 0x09,
+        0x02, 0x06, 0x01, 0x05, 0x00, 0x02, 0x03, 0x02, 0x05, 0x02, 0x00, 0x02, 0x01, 0x02, 0x3b,
+        0x31, 0x37, 0x3e, 0x9d, 0x2a, 0x0b, 0x00, 0x00, 0x68, 0x10, 0x00, 0x00, 0x68, 0x10, 0x00,
+        0x00, 0x02, 0x04, 0x00, 0x00, 0x0b, 0x07, 0x00, 0x00, 0x68, 0x10, 0x00, 0x00, 0x68, 0x10,
+        0x00, 0x00, 0x05, 0x04, 0x00, 0x00, 0x02, 0x04, 0x00, 0x00, 0x01, 0x05, 0x00, 0x02, 0x03,
+        0x02, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa6, 0x00, 0xa7, 0x00, 0xa8, 0x00, 0x08, 0x00, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x55, 0x0d, 0xbe, 0x00,
+    ];
+
+    #[test]
+    fn a_real_servers_packet_7_decodes_to_the_world_it_describes() {
+        let world = WorldData::decode(REAL_SERVER_PACKET_7).expect("real bytes should decode");
+
+        assert_eq!(world.world_name, "ProbeTiny");
+        assert_eq!((world.max_tiles_x, world.max_tiles_y), (4200, 1200));
+        assert_eq!((world.spawn_tile_x, world.spawn_tile_y), (2095, 232));
+        assert_eq!(world.world_surface, 331);
+        // The high half of this is the release the world was generated by: 0x146 is 326.
+        assert_eq!(world.world_gen_version >> 32, 326);
+        // Tin, lead, tungsten, gold — an alternate-ore world — and the three hardmode tiers still
+        // unchosen. Terraria writes -1 for those, not nought, which is the sentinel `SmashAltar`
+        // checks before it rolls one.
+        assert_eq!(world.ore_tiers, [166, 167, 168, 8, -1, -1, -1]);
+        // The four bytes that started all this. The world file agrees.
+        assert_eq!((world.dungeon_x, world.dungeon_y), (3413, 190));
+    }
+
+    #[test]
+    fn a_real_servers_packet_7_re_encodes_byte_for_byte() {
+        // The check that actually proves the layout. Decoding leniently would survive a missing
+        // trailing field or a pair of swapped shorts; producing the identical bytes back does not.
+        let world = WorldData::decode(REAL_SERVER_PACKET_7).unwrap();
+        let ours = world.encode().unwrap();
+        assert_eq!(
+            payload(&ours),
+            REAL_SERVER_PACKET_7,
+            "our packet 7 no longer matches the one a real server sends"
+        );
+    }
+
+    /// Packets 57, 60 and 139 exactly as a real 1.4.5.8 server sent them.
+    ///
+    /// All three were found by connecting to the game's own dedicated server and noticing it sent
+    /// things this server never did. The bytes below are that session's, so these are checks
+    /// against Re-Logic's encoder rather than against our reading of it.
+    #[test]
+    fn the_small_join_packets_match_a_real_servers() {
+        // Packet 57: nought per cent hallow, nought corrupt, four crimson — a fresh crimson world.
+        // Three bytes, not three ints: the game counts tiles in ints and rounds before sending.
+        assert_eq!(
+            payload(&world_evil_tally(0, 0, 4).unwrap()),
+            &[0x00, 0x00, 0x04]
+        );
+
+        // Packet 60, the Old Man: NPC 0, living at the dungeon door on (3413, 190), settled.
+        assert_eq!(
+            payload(&npc_home(0, 3413, 190, HouseholdStatus::Settled).unwrap()),
+            &[0x00, 0x00, 0x55, 0x0d, 0xbe, 0x00, 0x00]
+        );
+        // And the Guide, freshly arrived at the spawn with nowhere to live.
+        assert_eq!(
+            payload(&npc_home(1, 2095, 232, HouseholdStatus::Homeless).unwrap()),
+            &[0x01, 0x00, 0x2f, 0x08, 0xe8, 0x00, 0x01]
+        );
+
+        // Packet 139: player 0 is on the same machine as the server.
+        assert_eq!(payload(&counts_as_host(0, true).unwrap()), &[0x00, 0x01]);
+    }
+
+    #[test]
+    fn world_data_decode_rejects_a_payload_with_more_in_it() {
+        // A layout one field short still parses if leftovers are ignored, and that is precisely
+        // the bug this decoder is meant to be able to find.
+        let mut frame = WorldData::default().encode().unwrap();
+        frame.push(0);
+        assert!(matches!(
+            WorldData::decode(&frame[3..]),
+            Err(ProtoError::TrailingBytes { left: 1 })
+        ));
+    }
+
+    #[test]
+    fn world_data_decode_rejects_a_truncated_payload() {
+        let frame = WorldData::default().encode().unwrap();
+        let p = payload(&frame);
+        assert!(WorldData::decode(&p[..p.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn world_data_ends_with_the_spawn_point_list_and_then_the_dungeon() {
+        // The spawn-point list was added in 1.4.5 and the dungeon pair in release 326; both are
+        // easy to forget, and either one missing leaves the client reading past the payload.
+        // The order is the part worth pinning: read the other way round, a dungeon at 3413 comes
+        // back as 21760, which is how the two were told apart in the first place.
         let world = WorldData {
             extra_spawn_points: vec![(10, 20), (30, 40)],
+            dungeon_x: 3413,
+            dungeon_y: 190,
             ..Default::default()
         };
         let frame = world.encode().unwrap();
         let p = payload(&frame);
-        let tail = &p[p.len() - 9..];
-        assert_eq!(tail[0], 2);
+        let tail = &p[p.len() - 13..];
+        assert_eq!(tail[0], 2, "two extra spawn points");
         assert_eq!(i16::from_le_bytes([tail[1], tail[2]]), 10);
         assert_eq!(i16::from_le_bytes([tail[7], tail[8]]), 40);
+        assert_eq!(i16::from_le_bytes([tail[9], tail[10]]), 3413);
+        assert_eq!(i16::from_le_bytes([tail[11], tail[12]]), 190);
     }
 
     #[test]

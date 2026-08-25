@@ -19,7 +19,12 @@ pub struct Cpu(Duration);
 
 impl Cpu {
     /// Read the calling thread's consumed CPU time.
+    ///
+    /// The one place in the whole workspace that needs `unsafe`, and the allow is per-function so
+    /// it stays an explicit exception rather than a blanket permission: there is no safe way to
+    /// ask an operating system how much processor a thread has used.
     #[cfg(unix)]
+    #[allow(unsafe_code)]
     pub fn now() -> Self {
         let mut ts = libc::timespec {
             tv_sec: 0,
@@ -48,6 +53,7 @@ impl Cpu {
     /// in a pair of `FILETIME`s. Both are wanted: a tick that spends its time in a write syscall
     /// costs the server just as much as one that spends it in a loop.
     #[cfg(windows)]
+    #[allow(unsafe_code)]
     pub fn now() -> Self {
         use std::mem::MaybeUninit;
 

@@ -10,6 +10,23 @@ pub enum Liquid {
     Shimmer,
 }
 
+impl Liquid {
+    /// The number the game calls `Tile.liquidType()`.
+    ///
+    /// Spelled out rather than taken from the variant order, because the *other* place a liquid
+    /// kind goes on the wire — the section stream — encodes it as bit patterns instead
+    /// (`0x10` lava, `0x18` honey), so there is nothing about this file that makes the plain
+    /// ordinal obviously right. It is what net module 0 carries.
+    pub fn as_type_byte(self) -> u8 {
+        match self {
+            Self::Water => 0,
+            Self::Lava => 1,
+            Self::Honey => 2,
+            Self::Shimmer => 3,
+        }
+    }
+}
+
 /// Boolean tile attributes, packed to keep a whole world in a reasonable amount of memory.
 ///
 /// A small world is 4200x1200 tiles, so every byte here costs about 5 MB.

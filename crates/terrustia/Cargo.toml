@@ -1,5 +1,7 @@
 [package]
 name = "terrustia"
+# The server. Distributed as binaries and a container, not as a crate — and marking it keeps an accidental `cargo publish` from putting the AGPL server on crates.io.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,8 +19,12 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+argon2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 terrustia-client = { path = "../terrustia-client" }
+
+[lints]
+workspace = true

@@ -8,6 +8,19 @@ edition = "2024"
 rust-version = "1.97"
 license = "AGPL-3.0-or-later"
 
+# Warnings are errors everywhere, so CI does not have to remember to check and a warning cannot
+# accumulate quietly into a hundred. `unsafe_code` is warned rather than forbidden here because
+# one crate legitimately needs it — `game/clock.rs` reads the thread's CPU clock — and the two
+# crates that do not need it forbid it outright at their own roots.
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+# Deliberately not `pedantic`: this codebase transcribes a game, and several of pedantic's rules
+# would push it away from the shape the original has, which is the one thing worth preserving.
+all = { level = "deny", priority = -1 }
+
 [workspace.dependencies]
 bytes = "1.12"
 # zlib-rs is about 1.6x faster than the miniz_oxide backend at encoding a tile section
@@ -30,10 +43,15 @@ tokio = { version = "1.53", features = [
     "time",
     "signal",
     "io-util",
+    # The server console reads stdin, which is the only place this is needed.
+    "io-std",
 ] }
 tokio-util = { version = "0.7", features = ["codec"] }
-# Config is only ever read, never written.
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# Config is read; the admin store is also written, which is what `display` is for.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "display"] }
+# The one place where writing it myself would be worse than taking a dependency: password hashing.
+# Everything else in this workspace is hand-rolled on purpose; a KDF is not the exception to make.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash", "std"] }
 tracing = "0.1"
 # `Targets` gives the same `terrustia=debug` filtering as `env-filter` without pulling in
 # a regex engine.

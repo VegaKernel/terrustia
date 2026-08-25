@@ -36,6 +36,14 @@ pub enum ProtoError {
     #[error("{field} has out-of-range value {value}")]
     OutOfRange { field: &'static str, value: i64 },
 
+    /// The packet parsed, and then there was more of it.
+    ///
+    /// Only raised where a layout claims to describe a payload exhaustively. Ignoring leftovers is
+    /// the failure mode that hides a missing trailing field: the decode succeeds, the struct is
+    /// short, and nothing says so until a client somewhere reads the wrong value.
+    #[error("packet parsed with {left} byte(s) left over")]
+    TrailingBytes { left: usize },
+
     #[error("deflate stream could not be decoded: {0}")]
     Deflate(String),
 }
