@@ -113,6 +113,11 @@ pub struct Fired {
     pub changed: Vec<(i32, i32)>,
     /// Trap tiles the current reached, for the caller to resolve into shots.
     pub traps: Vec<(i32, i32)>,
+    /// Buried land mines the current reached, for the caller to resolve into an explosion.
+    ///
+    /// Kept apart from `traps`: a mine is tile 141, not 137, and detonating is not a shot, so it
+    /// cannot go through [`trap_shot`] without that function guessing at a kind that isn't there.
+    pub mines: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
     /// The first two distinct teleporters the current reached, which are the pair it joins.
@@ -295,6 +300,9 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     if tile.is_active() && matches!(tile.block, TRAPS | GEYSER) {
         out.traps.push((x, y));
     }
+    if tile.is_active() && tile.block == EXPLOSIVES {
+        out.mines.push((x, y));
+    }
     if tile.is_active() && tile.block == TELEPORTER {
         // A teleporter is three tiles wide and the anchor is its left one. Only the first two
         // distinct ones matter: they are the pair the circuit joins.
@@ -344,6 +352,10 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
 const TRAPS: u16 = 137;
 /// The geyser, which is its own tile because it is two wide.
 const GEYSER: u16 = 443;
+/// A buried land mine, which is a different tile from every other trap and has no projectile —
+/// it detonates rather than shooting. Reported separately from `traps` rather than folded in,
+/// since [`trap_shot`] has no idea how to resolve it and should not be asked to.
+const EXPLOSIVES: u16 = 141;
 /// The tile every statue is a frame of.
 const STATUE: u16 = 105;
 /// The teleporter, which is three wide.
@@ -1008,6 +1020,25 @@ mod tests {
         assert_eq!(fired.traps, vec![(105, 100)]);
         // And the tile is untouched: a trap is not a thing the flood changes.
         assert_eq!(board.tile(105, 100).block, TRAPS);
+    }
+
+    /// A buried land mine is reported separately from `traps` — it is a different tile (141, not
+    /// 137) and has no shot for `trap_shot` to resolve, so folding it into `traps` would hand the
+    /// caller a tile that function cannot make sense of.
+    #[test]
+    fn the_flood_reports_mines_apart_from_traps() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(135, Wire::Red)); // pressure plate
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(EXPLOSIVES, Wire::Red));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.mines, vec![(105, 100)]);
+        assert!(fired.traps.is_empty(), "a mine is not a trap");
     }
 
     /// A pump moves what the inlet holds into the outlet, up to what the outlet can take.

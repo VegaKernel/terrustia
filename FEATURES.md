@@ -13,10 +13,10 @@ disagree with each other about whether cacti grow.
 
 **The short version:** point it at a `.wld` you already have and it serves it well —
 same clients, same file, and measurably lighter than the official server. Point it at nothing and
-it generates a world that is playable, decorated, and settled — forests, a green jungle, cacti,
-lakes, settled water, pots, statues, piles and fallen logs are all there now. What's left of Tier 1
-is smoothed terrain and Tier 2/3's biome set pieces (floating islands, spider caves, gem caves,
-pyramids and the rest); those are sized and tracked in `plan.md`.
+it generates a world that is playable, decorated, settled and smoothed — forests, a green jungle,
+cacti, lakes, settled water, pots, statues, piles, fallen logs, traps and rounded terrain are all
+there now. Tier 1 is done; what's left is Tier 2/3's biome set pieces (floating islands, spider
+caves, gem caves, pyramids and the rest), sized and tracked in `plan.md`.
 
 ---
 
@@ -45,9 +45,9 @@ pyramids and the rest); those are sized and tracked in `plan.md`.
 
 ## World generation
 
-~35 of Terraria's 106 passes have a counterpart. Tier 1 (the passes that make a world stop looking
-like a prototype) is nearly done; Tier 2 and 3 (biome set pieces, and the cosmetic/cleanup tail)
-are sized in `plan.md` but not yet started.
+~37 of Terraria's 106 passes have a counterpart. Tier 1 (the passes that make a world stop looking
+like a prototype) is done; Tier 2 and 3 (biome set pieces, and the cosmetic/cleanup tail) are sized
+in `plan.md` but not yet started.
 
 | | Feature | Notes |
 |---|---|---|
@@ -63,9 +63,10 @@ are sized in `plan.md` but not yet started.
 | ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
 | ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
 | ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is now transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`), replacing the earlier version carried over from sizing notes — also caught and fixed a wrong boulder-floor tile id and a missing slope/half-brick check in the small-pile placer along the way |
-| 🔴 | Traps | Needs a wire model on top of the object placement; not started |
-| 🔴 | Smoothed terrain (`SmoothWorld`) | Everything is still blocky. Not attempted rather than guessed — the source access needed to transcribe its 14 rules correctly wasn't available when this wave landed |
-| 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes (Tier 2) | Sized in `plan.md`; needs a shared shape/structure framework terrustia doesn't have yet, in addition to the passes themselves |
+| ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch is skipped (see the secret-seeds row below). A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
+| ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator runs smoothing *last*, after every decoration, rather than vanilla's before-decoration placement — see `smooth.rs`'s doc comment for why, and how the altar and other fixtures stay protected either way. 30,107 tiles smoothed on the same 4200×1200 world |
+| 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes, glowing mushroom biome (Tier 2) | Sized for real against restored source in `plan.md` — no longer needs the heavy shape/structure DSL that was assumed there; a ~200-line structure-overlap tracker covers it |
+| 🔴 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | In scope, not a disclosed exception like Steam P2P — deprioritized behind ordinary-world parity, tracked in `plan.md`'s backlog |
 | 🔴 | Moss, wall variety, waterfalls, thin ice, cleanup passes (Tier 3) | Sized in `plan.md`; mostly small single-purpose tile scans |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
 

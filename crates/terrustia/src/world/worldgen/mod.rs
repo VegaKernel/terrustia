@@ -36,11 +36,13 @@ pub mod place_object;
 pub mod pots;
 pub mod rand;
 pub mod scenery;
+pub mod smooth;
 pub mod statue_gen;
 pub mod structures;
 pub mod surface_plants;
 pub mod terrain;
 pub mod tiles;
+pub mod traps;
 
 pub use passes::compare_against;
 
@@ -84,6 +86,14 @@ pub struct Built {
     /// Whether the lakes, oceans and underworld lava all reached a stable rest state. Always
     /// `true` outside a bug in the reused liquid simulator — see [`liquid_settle::Report`].
     pub liquids_converged: bool,
+    pub dart_traps: usize,
+    pub mines: usize,
+    pub geysers: usize,
+    pub boulder_traps: usize,
+    pub sand_traps: usize,
+    /// Tiles the closing smoothing pass turned into slopes, pounded half-tiles or cleared away.
+    /// See [`smooth::Report`] for the breakdown; this is [`smooth::Report::total`].
+    pub smoothed: usize,
 }
 
 /// Generate a world of the given size.
@@ -196,6 +206,11 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let herbs = surface_plants::herbs(&mut world, &mut rand);
     let sunflowers = surface_plants::sunflowers(&mut world, &mut rand);
 
+    // Traps, after every other decoration so a trap never gets sited under a pot, statue or pile
+    // that outranks it for the same floor tile — same relative order vanilla's own `Traps` pass
+    // has against `Piles`.
+    let traps = traps::scatter(&mut world, &plan, &mut forest_rng);
+
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
     world.spawn_x = plan.spawn_x as i16;
@@ -204,6 +219,11 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     world.dungeon_y = Some(heights[plan.dungeon_x.clamp(0, width - 1) as usize]);
 
     let chests = chests.saturating_sub(drop_orphaned_chests(&mut world));
+
+    // Smoothing runs last, after every fixture above is already down — see `smooth`'s own doc
+    // comment for why that is a deliberate reversal of vanilla's own pass order (vanilla smooths
+    // before it decorates) and how `protects_tile_below` covers the difference.
+    let smoothed = smooth::smooth(&mut world, &plan, &mut rand).total();
 
     let built = Built {
         lakes,
@@ -225,6 +245,12 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         herbs,
         sunflowers,
         liquids_converged: liquids.converged,
+        dart_traps: traps.dart_traps,
+        mines: traps.mines,
+        geysers: traps.geysers,
+        boulder_traps: traps.boulder_traps,
+        sand_traps: traps.sand_traps,
+        smoothed,
     };
     (world, built)
 }
