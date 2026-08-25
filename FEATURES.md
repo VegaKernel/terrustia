@@ -101,7 +101,7 @@ The largest gap. ~26 of Terraria's 106 passes have any counterpart.
 | ✅ | PvP, teams, deaths, respawn, chat | |
 | ✅ | Accounts, groups, permissions, bans by name/address/uuid | Argon2, off the game task |
 | 🟡 | Chat commands | 17 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
-| 🔴 | Whitelist | Bans only, which is reactive |
+| ✅ | Whitelist | Empty means off, so it cannot lock the operator out on the day it is enabled |
 | 🔴 | REST / web admin | Console and in-game commands only |
 
 ## Hardening
@@ -111,7 +111,7 @@ The largest gap. ~26 of Terraria's 106 passes have any counterpart.
 | ✅ | Decode path cannot panic or over-allocate | One `unsafe` block in the workspace, for the CPU clock |
 | ✅ | A panic on the packet path saves the world and exits non-zero | So `Restart=on-failure` fires |
 | ✅ | Connection ceiling, per-address cap, handshake deadline | |
-| ✅ | Tile-edit spam limiter | Vanilla's own numbers |
+| ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
 | ✅ | Server claim requires a console token | |
 | ⬜ | Server-authoritative inventory and damage | Vanilla trusts the client for both; diverging would change how the game plays |
 
@@ -120,7 +120,7 @@ The largest gap. ~26 of Terraria's 106 passes have any counterpart.
 | | | Notes |
 |---|---|---|
 | ✅ | Linux x86_64 / aarch64, macOS arm64 / x86_64, Windows x86_64 | All five pass `cargo check` |
-| 🔴 | Container image, signed releases, packaging | Not published yet |
+| 🟡 | Container image, signed releases, packaging | Written and validated, never run — the repository does not exist yet, so no workflow has executed |
 
 ---
 
@@ -135,6 +135,11 @@ Same 4200×1200 world, same machine, nobody connected.
 | RAM, idle | 641.8 MB | 45.4 MB |
 | Bandwidth over 5 min | 148,874 B | 133,400 B |
 
-One caveat worth stating: "a verified full 60 Hz tick" was a claim resting on instrumentation that
-turned out to be comparing CPU time against wall time. It is very likely still true and it is no
-longer *verified*, so it is not claimed here until it has been measured again.
+A note on the tick, because the claim changed twice. "A verified full 60 Hz tick" originally rested
+on instrumentation that was comparing CPU time against wall time, so it was withdrawn. With that
+fixed, it has been measured again on the same world: a typical tick costs **184–330 µs of a
+16,666 µs budget**, and the autosave — previously the most expensive thing an idle server did, at
+up to 7,656 µs — now costs 43–137 µs because only changed sections are copied.
+
+The remaining figures above were measured externally, at the process level, and were never affected
+by that instrumentation.
