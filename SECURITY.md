@@ -23,7 +23,7 @@ Some of these look like vulnerabilities and are not. They are properties of Terr
 multiplayer design, and diverging from them would change how the game plays:
 
 - **The client is authoritative for its own position, inventory, and the damage it deals.** Vanilla
-  trusts all of it. This server does too, on purpose — see `FEATURES.md`. A cheating client is a
+  trusts all of it. This server does too, on purpose — see `README.md`. A cheating client is a
   moderation problem, not a vulnerability. (Server-authoritative validation is planned as an
   opt-in, much later.)
 - **The protocol has no encryption.** There is none to add without breaking every client.

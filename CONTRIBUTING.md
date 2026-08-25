@@ -38,8 +38,8 @@ well with the bug present.
 - **`cargo fmt --check` and `clippy` clean.** Warnings are denied workspace-wide.
 - **A measurement, if it is a performance change.** A before number and an after number from the
   same world under the same load. Not "should be faster".
-- **A `FEATURES.md` row moved,** if you changed what works. Landing a feature and not moving its
-  row counts as not having landed it.
+- **A `README.md` "What works" row moved,** if you changed what works. Landing a feature and not
+  moving its row counts as not having landed it.
 
 ## Comments
 

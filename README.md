@@ -25,107 +25,144 @@ Saves are verified before they replace anything, fsynced, and rotated through th
 header is preserved byte-for-byte and patched, so everything this server does not model — Journey
 research, the bestiary, pylon rooms — survives untouched.
 
-## World generation is experimental
-
-Generate a world instead and you get somewhere playable, with forests, a green jungle, cacti and
-lakes — but **no settled water in its caves**, and no smoothed terrain. About 27 of Terraria's 106
-generation passes have a counterpart so far; the rest are being worked through pass by pass.
-
-**[FEATURES.md](FEATURES.md) is the honest, feature-by-feature answer** to what works, what is
-partial and why, and what is deliberately out of scope. It is kept in step with the code rather
-than written once — read it before deciding whether this suits you.
-
 ## Not affiliated with Re-Logic
 
 Terraria is a trademark of Re-Logic. This project is an independent reimplementation of the
 dedicated server and is not affiliated with, endorsed by, or supported by Re-Logic. You need a copy
 of the game to play; this replaces the server, not the game.
 
-## Status
+## What works
 
-Implemented:
+The honest answer, feature by feature. Built from audits run against the code rather than against
+these notes — the two documents this section replaces (a separate `README.md` status list and
+`FEATURES.md`) had drifted far enough apart to disagree with each other about whether cacti grow.
+This is the one place that answer lives now.
 
-- **Connection**: full 1.4.5 handshake and client state machine, optional server password
-- **World streaming**: `WorldData`, tile sections, and the 1.4.5 pull-based section requests
-- **Players**: join/leave, movement, health, mana, appearance, buffs, biome zones, teams, PvP
-  toggle, death and respawn
-- **Combat**: enemies hurt players on contact and with what they throw, with the game's own
-  invulnerability window; players hurt enemies; both directions are the server's decision rather
-  than a client's claim
-- **Projectiles**: entity, physics and the arcing, lobbing and accelerating routines, with packets
-  `27` and `29`. Every shot an NPC decides on flies, and players' own projectiles are relayed
-- **Tiles**: break and place blocks and walls, wires, actuators, slopes, half bricks, and
-  `TileSquare` rectangles so multi-tile objects work without reimplementing the game's placement
-  rules
-- **Items**: blocks and furniture both drop the right item when mined — the frame names a style,
-  and the style names the item that placed it — drops fall and settle, the server reserves them
-  for a nearby player, pickup and player-thrown items both sync
-- **Chests**: open, read and edit contents, with the same one-player-at-a-time rule vanilla uses
-- **Signs**: read and rewrite
-- **NPCs and enemies**: the **whole roster — 691 types across all 128 AI styles, every one of them
-  running a routine transcribed from the game rather than an approximation of it**. They spawn by
-  biome, depth and time of day, chase, jump, fly, swim, burrow, perch, glide, dig and ambush; they
-  take damage, die, drop their coin value and their loot. Worms spawn as linked chains, and cutting
-  an Eater of Worlds in half leaves you fighting two of them.
-- **Bosses**: every one, as its real phase machine — King Slime, the Eye of Cthulhu, the Eater of
-  Worlds, the Brain of Cthulhu, Queen Bee, Skeletron, the Wall of Flesh, Deerclops, the Destroyer,
-  the Twins, Skeletron Prime, Plantera, Golem, Duke Fishron, Queen Slime, the Empress of Light, the
-  Lunatic Cultist, the four lunar pillars and the Moon Lord
-- **Events**: goblin, frost legion, pirate and Martian invasions; the Old One's Army across all
-  three tiers with its crystal, lane portals and wave tables; the pumpkin and frost moons with the
-  game's own point quotas; the solar eclipse; blood moons; and the Lunar Apocalypse
-- **Hardmode**: the Wall of Flesh cuts the two stripes through the world, altars seed the three ore
-  tiers, and the biomes creep — held off by sunflowers and halved for good once Plantera is down
-- **Weather**: wind and rain on the game's own simulation, and the sandstorms a strong wind raises
-  over a desert
-- **Liquids**: water, lava and honey fall and level, and react where they meet — obsidian, crispy
-  honey, honey blocks
-- **Town NPCs**: housing validation to the game's own rules, move-in, and the movement routine —
-  the leash around their house, going indoors at nightfall and in rain, opening doors and stopping
-  at ledges. Enemies can kill them, and their armour comes off everything the world has beaten, so
-  a blood moon that walks through a town is a threat rather than scenery. Shops need nothing from
-  the server: a client builds one from the world flags, and those are sent in full
-- **Chat**: player chat plus `/help`, `/players`, `/time`, `/save`, `/where`, `/spawn`, `/npcs`,
-  `/butcher`, `/house`
-- **Worlds**: a reader for `.wld` saves (format 279 and newer) and a writer that saves losslessly,
-  with autosave and a save on shutdown. A world loaded from a file keeps its own header byte for
-  byte; a generated one gets a header written from scratch at format 325. Progression flags,
-  weather and the lunar state survive a save. World *generation* is terrain only — see below
-- **Wiring**: circuits run on the server — the flood over whatever is connected, four colours as
-  four independent circuits. Actuators toggle the block they sit on; traps throw what they are
-  framed to throw, on the game's own cooldowns; statues produce monsters, items or a fetched
-  townsperson, under the game's crowding limits; teleporters swap whoever is on each pad; and
-  pumps move liquid, refusing to mix water into lava. **Timers** keep a contraption running with
-  nobody touching it, and **logic gates** — all six kinds, including the faulty one that rolls a
-  die — read their stack of lamps and start a circuit of their own, so a machine built out of
-  gates works rather than just lighting up. A timer left running when the world was saved is
-  still running when it is served again — a deliberate divergence, since the game keeps that list
-  only in memory and a restart would otherwise kill every contraption in the world
-- **Tile entities**: placed and remembered, with the training dummy raising and dismissing its NPC
-- **Pylon travel**: every pylon is announced as a player joins and as one is planted or mined, and
-  a travel request is served — refused unless the traveller is near a pylon of their own and two
-  townsfolk live within the destination's scan box, which is the game's rule. The biome
-  requirement is not enforced, so a pylon planted in the wrong biome still works here
-- **Banners and the bestiary**: kills are counted per banner, survive a restart, and are sent to
-  every client, so the counters fill in as they should and the banner drops on the threshold
-- **The Dryad's report**: how much of the world is hallow, corruption and crimson, counted one
-  column per tick the way the game counts it — surface weighted five times over
-- **Day/night clock**
+| | Meaning |
+|---|---|
+| ✅ | Implemented, and checked |
+| 🟡 | Works, with the limitation named in the row. "Partial" without a qualifier is a lie by omission |
+| 🔴 | Not implemented. A player will notice |
+| ⬜ | Deliberately out of scope, with the reason |
 
-Not implemented:
+**The short version:** point it at a `.wld` you already have and it serves it well — same clients,
+same file, and measurably lighter than the official server. Point it at nothing and it generates a
+world that is playable, decorated, settled and smoothed — forests, a green jungle, cacti, lakes,
+settled water, pots, statues, piles, fallen logs, traps and rounded terrain are all there now.
+Tier 1 worldgen is done; what's left is Tier 2/3's biome set pieces (floating islands, spider caves,
+gem caves, pyramids and the rest), sized and tracked in `plan.md`.
 
-- **Authoritative inventories.** Every player's inventory is kept and relayed, so a joining player
-  sees what everyone is wearing and carrying. It is not *checked*: a client that claims to hold a
-  key is believed. Every server-side consequence of an item — a drop, a lock, an event — is
-  handled; verifying the claim is not.
-- **Seed-identical world generation.** The generator builds a complete, finishable world — biomes,
-  a dungeon, the underworld, chests, shadow orbs, demon altars, the jungle temple — verified by
-  `cargo run --release -p terrustia --example playable`. What it does *not* do is reproduce
-  Terraria's own world for a given seed, which is a far larger job sized in `docs/worldgen-parity.md`.
-  So a seed shared with another player will not give you their world.
-- **Player weapons.** Projectiles an NPC throws or a trap fires are flown by the server; a
-  player's own are simulated by their own client and relayed, which is what a vanilla server does
-  too. The server still refuses any a client claims that would hurt other players.
+### Protocol and connectivity
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | Protocol release 326 (1.4.5.8) | Release 325 accepted too; they differ in the announced number and four bytes of packet 7 |
+| ✅ | Handshake, world data, section streaming | Checked against a real `TerrariaServer`, not only against our own client |
+| ✅ | Server password | |
+| ✅ | Localized announcements | Keys with substitutions, as the game sends — so a non-English client reads its own language |
+| 🟡 | Packet coverage | 109 of 163 message ids handled; most of the rest are outbound-only or dead in vanilla too. Genuinely missing: PvP buff spread (55), portal-gunning an NPC (100), spectating (150), shop overrides (104) |
+| ⬜ | Steam P2P / lobbies | Steamworks' licence is incompatible with AGPL |
+| ⬜ | Encryption | Terraria's protocol has none. `/login` sends a password as ordinary chat text — do not reuse a real one |
+
+### World files
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | Load `.wld` (format 279–325) | Refuses older and newer by name rather than guessing |
+| ✅ | Save `.wld` | Header preserved byte-for-byte and patched, so state we do not model survives untouched |
+| ✅ | Journey research, bestiary, pylon rooms, pressure plates | Carried through verbatim — verified by section index, not assumed |
+| ✅ | Verified before replacing, fsynced, 3 rotating backups | An atomic rename over a corrupt file is an atomic loss |
+| 🟡 | Bestiary | Existing data is preserved; kills during a session are not added to it |
+| 🟡 | In-progress blood moon / eclipse | Not resumed from the file. The file's own bytes are undisturbed |
+
+### World generation
+
+~37 of Terraria's 106 passes have a counterpart. Tier 1 (the passes that make a world stop looking
+like a prototype) is done; Tier 2 and 3 (biome set pieces, and the cosmetic/cleanup tail) are sized
+in `plan.md` but not yet started.
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | Terrain, caves, ore veins | |
+| ✅ | Dungeon, hive, underworld, evil chasms | Our own algorithms, not vanilla's |
+| ✅ | Jungle temple, **including the Lihzahrd Altar** | The altar was missing for a while without anyone noticing — a real client refuses to let a player even attempt the Power Cell interaction without one nearby, so its absence made Golem unreachable in every world this generator ever produced. Found by a sizing pass, fixed, tested across 40 seeds |
+| ✅ | Demon/crimson altars, life crystals, shadow orbs | Enough to be beatable |
+| ✅ | Chests | Depth-tiered everywhere; vanilla's own jungle and underground-desert item lists where the biome matches |
+| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree` — trunk, branches, roots, canopy |
+| ✅ | Vines and jungle grass | The underground jungle's mud is lined with grass, which is what vines hang from |
+| ✅ | Cacti | |
+| ✅ | Lakes | Sited on level ground with a solid floor |
+| ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
+| ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
+| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`) |
+| ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch is skipped (see the secret-seeds row below). A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
+| ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator runs smoothing *last*, after every decoration, rather than vanilla's before-decoration placement — see `smooth.rs`'s doc comment for why, and how the altar and other fixtures stay protected either way. 30,107 tiles smoothed on the same 4200×1200 world |
+| 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes, glowing mushroom biome (Tier 2) | Sized for real against restored source in `plan.md` — no longer needs the heavy shape/structure DSL that was assumed there; a ~200-line structure-overlap tracker covers it |
+| 🔴 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | In scope, not a disclosed exception like Steam P2P — deprioritized behind ordinary-world parity, tracked in `plan.md`'s backlog |
+| 🔴 | Moss, wall variety, waterfalls, thin ice, cleanup passes (Tier 3) | Sized in `plan.md`; mostly small single-purpose tile scans |
+| ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
+
+### NPCs, bosses and events
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | All 691 NPC types | Each runs a transcribed routine; a test walks the whole roster, across 126 distinct AI styles |
+| ✅ | All 20 bosses | Multi-phase, including Moon Lord's opening sequence and the cultist's tablet ritual |
+| ✅ | Both moons, all four invasions, Old One's Army with Betsy, eclipse with Mothron | |
+| ✅ | Rain, wind, sandstorms | |
+| ✅ | Town NPC arrival and housing | Including the in-game housing screen |
+| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla — no packet populates it, and the click gate (`townNPC`, derived from `type` alone, plus `velocity.Y == 0`) is satisfied by an ordinary NPC sync. The one thing the server owns, packet 40, was already correct; a test proves it, relayed to other players. No happiness-driven pricing or shop overrides yet — tracked separately below and as packet 104 |
+| 🟡 | **Town NPCs fighting back** | Four representative types across all of vanilla's attack classes — Merchant (ranged), Arms Dealer (ranged), Wizard (ranged), Dye Trader (melee) — target and damage nearby hostiles, verified end to end over a real socket including the shot actually landing. The other ~23 vanilla combat-capable town NPCs are mechanical to add from here but not yet done, so a town with only those types still stands still |
+| 🔴 | NPC happiness, price effects, moving out | |
+| 🔴 | Slime Rain, Party, Lantern Night | |
+| 🟡 | Enemy drops | `tools/check_drops.py` had real parsing bugs producing false positives; fixed, and boss loot is now genuinely complete — every trophy, every unique weapon pool. ~111 ordinary enemies are still short at least one drop |
+
+### Items and mechanics
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | Buffs and debuffs, item entities, shimmer | |
+| ✅ | Wiring, logic gates, timers, teleporters | |
+| ✅ | Chests, signs, tile entities, pylons | |
+| ✅ | Boss summon items, Angler quests, fishing NPCs | |
+| ⬜ | Crafting validation | Terraria has no craft packet; the client is authoritative in vanilla too |
+| ⬜ | Armour set bonuses, accessories | Client-side in vanilla; the server applies plain defence |
+| 🔴 | Pets, mounts, minecart tracks | No server-side existence |
+
+### Journey mode
+
+| | Feature | Notes |
+|---|---|---|
+| 🔴 | **Every Journey power** | Net module 4 is not defined, so godmode, time and weather freeze, the sliders, research and duplication are all silently swallowed |
+| ✅ | Existing research survives a save | Preserved verbatim; it simply cannot grow here |
+
+### Multiplayer
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | PvP, teams, deaths, respawn, chat | |
+| ✅ | Accounts, groups, permissions, bans by name/address/uuid | Argon2, off the game task |
+| 🟡 | Chat commands | 17 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
+| ✅ | Whitelist | Empty means off, so it cannot lock the operator out on the day it is enabled |
+| 🔴 | Web admin panel | In progress — see `plan.md` |
+
+### Hardening
+
+| | Feature | Notes |
+|---|---|---|
+| ✅ | Decode path cannot panic or over-allocate | One `unsafe` block in the workspace, for the CPU clock |
+| ✅ | A panic on the packet path saves the world and exits non-zero | So `Restart=on-failure` fires |
+| ✅ | Connection ceiling, per-address cap, handshake deadline | |
+| ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
+| ✅ | Server claim requires a console token | |
+| ⬜ | Server-authoritative inventory and damage | Vanilla trusts the client for both; diverging would change how the game plays |
+
+### Platforms
+
+| | | Notes |
+|---|---|---|
+| ✅ | Linux x86_64 / aarch64, macOS arm64 / x86_64, Windows x86_64 | All five pass `cargo check` |
+| 🟡 | Container image, signed releases, packaging | The container workflow has actually run: multi-arch image built, pushed, cosign-signed, and smoke-tested serving with no configuration. Getting there for real found and fixed real CI bugs invisible to local `cargo check` alone — see `AUDIT.md`. Signed releases still untested; that workflow only triggers on a `v*` tag |
 
 ## Running
 
@@ -181,7 +218,7 @@ Differences from 1.4.4 that matter, and that stale documentation gets wrong:
 
 ## Verification
 
-Beyond the unit and integration tests, two examples check this implementation against the real
+Beyond the unit and integration tests, several examples check this implementation against the real
 game rather than against itself.
 
 `probe` drives a client handshake and dumps the packet sequence, so vanilla and terrustia can be
@@ -209,8 +246,7 @@ cargo run --release --example verify_sections -- /tmp/sections
 
 `verify` plays the game: it joins a running server, spawns things, and checks that enemies move,
 that the ones that shoot put projectiles in the air, that standing among them costs health, that
-the Eye of Cthulhu runs its phases and summons, and that killing something drops loot. Unit tests
-prove each routine in isolation; this proves the whole thing works together over the real protocol.
+the Eye of Cthulhu runs its phases and summons, and that killing something drops loot.
 
 ```sh
 cargo run --release --example verify -- 127.0.0.1:7777
@@ -218,8 +254,7 @@ cargo run --release --example verify -- 127.0.0.1:7777
 
 `stress` fills the world with three rounds of the whole roster and holds it there while the server
 reports its own per-phase tick costs, and `crowd` joins a given number of players and walks them
-about. Between them they are what a server's cost actually looks like — one measures NPCs, the
-other measures players, and several of the per-tick surveys scale with the second:
+about:
 
 ```sh
 TERRUSTIA_LOG=terrustia=debug cargo run --release -- --world World.wld   # then, elsewhere:
@@ -250,53 +285,51 @@ Results at the time of writing, against Terraria 1.4.5.8:
 - The handshake packet sequence and sizes match vanilla's, including `WorldData` at exactly 163
   bytes plus the encoded world name.
 - A real server's `WorldData` payload, captured verbatim, decodes and **re-encodes to the identical
-  bytes** — every field, in order, at the right width. This is what turned up the two `dungeonX`/
-  `dungeonY` shorts release 326 appends, which are in no version of the decompiled source this
-  project was written against.
+  bytes** — every field, in order, at the right width.
 - Both servers serving the *same* world file agree on **45 of 47 packet 7 fields**; the two that
   differ are the clock and the wind, which both servers simulate as they run.
-- The same headless client, run against both servers, reports **identical** world data, section
-  counts, terrain under spawn, and tiles 420 blocks east — including the sections each server
-  streams in response to a walk.
 - Re-saving a 2.9 MB world produces a file **byte-identical to the original except the revision
   counter**, which the game increments too.
-- A 12 MB world in the **older format 279** — where the chest section states its capacity once for
-  the whole file rather than per chest, and the claimable-banner list does not exist yet — loads,
-  re-saves and reloads with every tile, chest and sign intact. Its header alignment was checked
-  against the file itself rather than against this reader: the four saved ore tiers land on tiles
-  7, 167, 9 and 169, which are copper, lead, silver and platinum.
 - A world edited through this server, saved, and then handed to the real `TerrariaServer` **loads
   and serves correctly**, with the edits in place.
-- A world this server **generated from scratch** — no header copied from anywhere — survives the
-  full round trip `our writer → Re-Logic's reader → Re-Logic's writer → our reader`: **46 of 47
-  packet 7 fields identical** afterwards (the other is the clock), and all **308 chests with their
-  1224 item stacks intact**. The game deleting orphaned chest records on its first save is the
-  failure that fix was written for, and this is the check that confirms it against the game.
-- A world this server **generated** — with no header to copy from — is written at format 325, and
-  every section boundary lands exactly on its own pointer when walked by a decoder written from
-  the game's source independently of this reader. It reloads with zero differing tiles out of
-  1.26 million, and serving it back runs the whole 691-type bestiary.
-- Pointing both servers at the same pristine `.wld` and capturing their spawn streams gives
-  **15 of 15 sections byte-identical and zero differing tiles** out of 450,000.
-- The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol
-  and confirms every one arrives and syncs: 691 of 691, exercising 126 distinct AI styles.
-- The `watch` example joins a running server, stands where it is told, and reports what spawns
-  nearby — which is how the hardmode pools were checked against a real world rather than a test
-  fixture.
-- Every table was diffed against the game's own, mechanically:
-  **5,103 NPC stat fields** across 686 types and **5,488 flag fields** on top of them; the 27
-  projectile types this server flies; both tile-solidity bitsets and the frame-importance table,
-  all 754 entries each; the 345 tile types whose drop the game states as a constant; and all 248
-  unconditional drop rules. What that turned up is in the git log — fourteen NPCs recorded as
-  one-hit props, six tiles players could walk through, sixteen wrong projectile lifetimes, and a
-  loot table missing three quarters of its rules, the Eater of Worlds' ore among them.
-- The `crowd` example joins **twenty-four players**, spreads them across the world and walks them
-  at the rate a real client reports at. They hold with nothing dropped, and the worst tick over
-  the whole run — bestiary, fuzz, crowd and stress against one server — is **520 microseconds
-  against a budget of 16,666**, at 50 MB.
-- The `fuzz` example throws **fifty thousand malformed packets** at a running server — half noise,
-  half structurally plausible traffic naming tiles at the extremes of an `i16` — and checks it is
-  still answering afterwards, with the world uncorrupted and nothing in the log.
+- A world this server **generated from scratch** survives the full round trip `our writer →
+  Re-Logic's reader → Re-Logic's writer → our reader`: **46 of 47 packet 7 fields identical**
+  afterwards, and all **308 chests with their 1224 item stacks intact**.
+- The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol and
+  confirms every one arrives and syncs.
+- Every table was diffed against the game's own, mechanically: **5,103 NPC stat fields** across 686
+  types and **5,488 flag fields** on top of them; the 27 projectile types this server flies; both
+  tile-solidity bitsets and the frame-importance table, all 754 entries each; the 345 tile types
+  whose drop the game states as a constant; and every unconditional drop rule.
+- The `crowd` example joins **twenty-four players**, spreads them across the world and walks them at
+  the rate a real client reports at. The worst tick over the whole run — bestiary, fuzz, crowd and
+  stress against one server — is **520 microseconds against a budget of 16,666**, at 50 MB.
+- The `fuzz` example throws **fifty thousand malformed packets** at a running server and checks it
+  is still answering afterwards, with the world uncorrupted and nothing in the log.
+
+### Measured against the official server
+
+Same 4200×1200 world, same machine, nobody connected.
+
+| | vanilla 1.4.5.8 | terrustia |
+|---|---|---|
+| Startup | 2.26 s | 0.41 s |
+| CPU, idle | 104% of a core | 0.7% |
+| RAM, idle | 641.8 MB | 45.4 MB |
+| Bandwidth over 5 min | 148,874 B | 133,400 B |
+
+A note on the tick, because the claim has changed three times now. "A verified full 60 Hz tick"
+originally rested on instrumentation that was comparing CPU time against wall time, so it was
+withdrawn. With that fixed, it was measured again on the same world: a typical tick costs
+**184–330 µs of a 16,666 µs budget**, and the autosave — previously the most expensive thing an
+idle server did, at up to 7,656 µs — now costs 43–137 µs because only changed sections are copied.
+That third figure had a real gap the other two didn't: it was measured from a server's *second*
+autosave onward. The first one, with no prior buffer to diff against, cost 14,833 µs — 89% of the
+whole budget — until this repository's own first real CI soak run caught it and it was fixed by
+building that buffer during startup instead of inside a counted tick.
+
+The remaining figures above were measured externally, at the process level, and were never affected
+by that instrumentation.
 
 ## Licence
 

@@ -181,10 +181,10 @@ Two more things this pass turned up, checked immediately rather than left as fla
   terrustia's pots/piles/statues ✅ row is correct as-is. Confirmed by reading the gate condition
   directly, not by re-trusting the sizing pass's own flag.
 - **Resolved**: terrustia had no handling at all for vanilla's secret seeds (Celebrationmk10, drunk,
-  not-the-bees, remix, no-traps, "get fixed boi", Don't Starve), and neither `FEATURES.md` nor this
+  not-the-bees, remix, no-traps, "get fixed boi", Don't Starve), and neither `README.md` nor this
   plan ever stated whether they were in scope. Asked rather than assumed, the same way Steam P2P
   was flagged rather than defaulted — **in scope, but deprioritized behind ordinary-world parity**.
-  Tracked as a `FEATURES.md` 🔴 row and in the backlog below, not a disclosed exception like Steam
+  Tracked as a `README.md` 🔴 row and in the backlog below, not a disclosed exception like Steam
   P2P.
 - The Lihzahrd Altar fix (already shipped, tested across 40 seeds) uses a different mechanism than
   vanilla: a 7-offset retry loop inside `structures::temple()` with a `debug_assert` fallback,

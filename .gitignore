@@ -18,6 +18,10 @@
 .idea/
 .vscode/
 
+# Python bytecode cache from tools/*.py — regenerated, not source.
+__pycache__/
+*.pyc
+
 # Scratch space for profiling output and captured logs.
 /scratch/
 *.log

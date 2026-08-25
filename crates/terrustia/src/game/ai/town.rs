@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn a_merchant_fights_back_against_a_nearby_hostile() {
         // Before this pass, `World` had no `hostile` field and `town_combat` did not exist — a
-        // settled town NPC never fired regardless of what was nearby. FEATURES.md's own words for
+        // settled town NPC never fired regardless of what was nearby. README.md's own words for
         // the gap this closes: "the town stands still and dies."
         let tiles = flat(0, 400);
         let mut merchant = stand_on(17, 200);

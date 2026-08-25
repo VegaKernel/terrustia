@@ -1455,7 +1455,7 @@ async fn a_town_npc_can_be_talked_to_and_it_is_visible_to_everyone() {
 /// A settled town NPC fights back against a hostile nearby, and the shot is visible over the wire
 /// to every connected player — not just applied silently on the server.
 ///
-/// Before this, FEATURES.md's own words: "the first Blood Moon after anyone moves in, the town
+/// Before this, README.md's own words: "the first Blood Moon after anyone moves in, the town
 /// stands still and dies." A Merchant (npc type 17) is one of four representative town NPCs this
 /// pass covers (see `game::ai::town_combat`'s module doc) — real vanilla numbers (projectile 48,
 /// `NPC.cs:54969`), reimplemented cadence.
@@ -1506,7 +1506,7 @@ async fn a_town_npc_fights_back_against_a_nearby_hostile() {
 }
 
 /// The shot a town NPC fires is not just broadcast — it actually lands. This is the concrete claim
-/// FEATURES.md's row named: a town does not merely animate a fight, a hostile beside it takes real
+/// README.md's row named: a town does not merely animate a fight, a hostile beside it takes real
 /// damage from it, the same as it would from a player's own gunfire.
 #[tokio::test]
 async fn a_town_npcs_shot_actually_damages_the_hostile_it_targeted() {

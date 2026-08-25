@@ -123,7 +123,7 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
 
 /// `NPC.GetAttackDamage_ForTownNPC`, transcribed: `GameDifficultyData.TownNPCDamageMultiplier` is
 /// 1.0 in classic and 1.5 in expert-or-better. Journey's 2.0 and master's separate 2.0 are not
-/// modelled — this project has no Journey-mode power state yet (`FEATURES.md`), and `Conditions`
+/// modelled — this project has no Journey-mode power state yet (`README.md`), and `Conditions`
 /// carries only `expert`, not a distinct master flag.
 pub fn town_npc_damage(base: i32, expert: bool) -> i32 {
     let multiplier = if expert { 1.5 } else { 1.0 };
