@@ -22,7 +22,7 @@ PORT=$((20000 + RANDOM % 20000))
 trap 'rm -rf "$WORK"; [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
 BIN="$ROOT/target/release/terrustia"
-[[ -x "$BIN" ]] || { echo "build first: cargo build --release --workspace --examples"; exit 1; }
+[[ -x "$BIN" ]] || { echo "build first: cargo build --release --workspace --bins --examples"; exit 1; }
 
 cat > "$WORK/soak.toml" <<EOF
 listen = "127.0.0.1:$PORT"

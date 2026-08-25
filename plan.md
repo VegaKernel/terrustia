@@ -48,6 +48,8 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **`cargo fmt` across the tree** | 46 files, its own commit |
 | ✓ | **Trees, jungle grass, vines, cacti at generation** | 349 trees, 2,415 vine tiles, jungle grass 700→3,198. Frames transcribed from `WorldGen.GrowTree`. Found three bugs by measuring: wrong argument to `grow_cactus`, a vine scan that could never match, and a latent frame-sentinel bug that broke the save round trip for 1,987 tiles |
 | ✓ | **Whitelist, SECURITY.md, CONTRIBUTING.md** | |
+| ✓ | **Lakes** | 4 on a 4200×1200 world; surface water 5,764 → 6,069. Reimplemented, not transcribed — vanilla's siting filter reads `GenVars` this generator never writes |
+| ✓ | **Fixed a bug in my own CI** | `cargo build --workspace --examples` builds examples and *not* the server, so the soak job would have failed on its first run |
 | ✓ | **Doors build frame-important tiles correctly** | `Tile::block` on a framed type trips a debug assertion and ships -1 frames; six tests were failing on it |
 
 ## Audit findings, ranked
@@ -76,7 +78,7 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 cargo fmt --check          clean
 cargo clippy               0 warnings (warnings denied workspace-wide)
 cargo deny check           advisories ok, bans ok, licenses ok, sources ok
-cargo test --workspace     1,486 passing, 0 failing
+cargo test --workspace     1,489 passing, 0 failing
 five release targets       all ok
 tools/soak_ci.sh           passed
 real-world round trip      faithful; every field survives
