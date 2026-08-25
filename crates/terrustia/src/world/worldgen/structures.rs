@@ -19,9 +19,22 @@
 use terrustia_proto::Tile;
 
 use super::layout::{Evil, Layout, Surface};
+use super::place_object::place_object;
 use super::rand::UnifiedRandom;
 use super::tiles::{self, walls};
 use crate::world::{Chest, World};
+
+/// The Lihzahrd Altar. Using a Lihzahrd Power Cell on it is the only way to fight Golem.
+///
+/// Not a decoration: a real client will not let a player attempt the use-item interaction at all
+/// without an active tile of this type nearby, so a temple with none anywhere in the world made
+/// Golem permanently unreachable through ordinary play in every world this generator has ever
+/// produced — found by a worldgen sizing pass that happened to read vanilla's separate
+/// `LihzahrdAltar` generation pass (`WorldGen.cs:22131`) and noticed `structures::temple` never
+/// calls anything like it. `terrustia-proto`'s own `tile_object` table confirms the shape
+/// independently: entry 237 is a 3-wide, 2-tall object with origin `(1, 1)` — the bottom-middle
+/// cell, which is what `place_object`'s anchor argument expects.
+const LIHZAHRD_ALTAR: u16 = 237;
 
 /// Hollow out a tile, leaving its wall and liquid behind so a cave looks like a cave.
 ///
@@ -439,6 +452,28 @@ pub fn temple(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) {
             }
         }
     }
+
+    // The altar. It stands on the temple's own floor — the last hollow row before the shell's
+    // bottom edge — so `place_object`'s footprint-and-floor check passes against the brick the
+    // edge loop above already laid down. That row sits inside every inner room's doorway gap
+    // (`(y - (ty+half_h-6)).abs() <= 3`, the same test the wall loop above uses to *skip* a wall),
+    // so no inner wall can be standing where the altar needs to go, in any room it might land in.
+    //
+    // Centred first, since the interior is symmetric and centre is clear of both the outer shell
+    // and every inner wall column by construction; a few fallback offsets cover the rare case
+    // where a small `half_w` roll puts the centre awkwardly close to a wall column.
+    let altar_y = ty + half_h - 3;
+    let mut altar_placed = false;
+    for dx in [0, -4, 4, -8, 8, -12, 12] {
+        if place_object(world, tx + dx, altar_y, LIHZAHRD_ALTAR, 0, -1) {
+            altar_placed = true;
+            break;
+        }
+    }
+    debug_assert!(
+        altar_placed,
+        "the jungle temple must always get an altar, or Golem is unreachable in this world"
+    );
 }
 
 /// Hellstone and lava, which are what the underworld is for.
@@ -827,5 +862,51 @@ mod chest_loot_tests {
     fn test_layout() -> Layout {
         let mut rand = UnifiedRandom::new(1);
         Layout::plan(2000, 800, &mut rand)
+    }
+}
+
+/// Golem's fight is gated on a single tile that `temple()` used to never place.
+///
+/// A real client will not let a player attempt to use a Lihzahrd Power Cell at all without an
+/// active `LIHZAHRD_ALTAR` tile nearby — this is a client-side gate on the interaction itself, not
+/// something a server can work around after the fact. So a temple with no altar anywhere in the
+/// world does not make Golem merely hard to reach; it makes Golem unreachable through any
+/// legitimate play, in every world this generator has ever produced, forever, silently — the
+/// worldgen module's own doc comment already claimed "Jungle temple → no Golem" as the reason the
+/// temple exists at all, so this is a case where the code did not do what its own comment said it
+/// did.
+///
+/// Run across several seeds and several of the random temple sizes `temple()` itself rolls
+/// (`half_w` 34-55, `half_h` 20-32), rather than one lucky draw, because the fix's fallback offsets
+/// exist specifically to cover sizes where the centre placement is not immediately clear.
+#[cfg(test)]
+mod temple_altar_tests {
+    use super::*;
+
+    #[test]
+    fn every_temple_gets_a_lihzahrd_altar() {
+        for seed in 0..40i32 {
+            let mut rand = UnifiedRandom::new(seed);
+            let mut world = World::empty(400, 300, "temple");
+            let layout_rand = &mut UnifiedRandom::new(seed);
+            let mut layout = Layout::plan(400, 300, layout_rand);
+            layout.temple = (200, 150);
+
+            temple(&mut world, &layout, &mut rand);
+
+            let mut found = 0usize;
+            for x in 140..260 {
+                for y in 100..200 {
+                    if world.tile(x, y).is_active() && world.tile(x, y).block == LIHZAHRD_ALTAR {
+                        found += 1;
+                    }
+                }
+            }
+            assert!(
+                found > 0,
+                "seed {seed}: no Lihzahrd Altar tile anywhere in this temple — Golem would be \
+                 unreachable in a world generated from this seed"
+            );
+        }
     }
 }
