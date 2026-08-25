@@ -510,6 +510,14 @@ pub fn hive(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> boo
 }
 
 /// Chests, scattered through the caverns with tiered loot.
+///
+/// The signature item is vanilla's own where the biome and depth match one it treats specially —
+/// jungle and underground desert, both transcribed from `AddBuriedChest`'s own item selection
+/// (`WorldGen.cs:36429-36447` for the jungle roll, `:36404-36420` for the desert one). Everywhere
+/// else keeps the existing depth-tiered table: vanilla's own selection there is not self-contained
+/// in this function — the underworld's rotates through a shuffled array set up during world
+/// generation elsewhere, and this generator does not model underground-desert as a region distinct
+/// from a plain deep desert column, so a biome-tagged column just below `rock` is treated as one.
 pub fn chests(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> usize {
     let wanted = (layout.width / 14).max(60) as usize;
     let mut placed = 0usize;
@@ -522,7 +530,9 @@ pub fn chests(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> u
         let Some(feet) = find_ledge(world, x, from, layout.underworld - 20, 2, 2) else {
             continue;
         };
-        if add_chest(world, x, feet, cavern_loot(layout, feet, rand), rand) {
+        let loot = biome_chest_loot(layout, x, feet, rand)
+            .unwrap_or_else(|| cavern_loot(layout, feet, rand));
+        if add_chest(world, x, feet, loot, rand) {
             placed += 1;
         }
     }
@@ -566,6 +576,56 @@ fn add_chest(
     }
     world.add_chest(chest);
     true
+}
+
+/// Vanilla's real jungle-chest and underground-desert-chest signature items, if this site is
+/// biome-tagged for one of them. `None` for everywhere else, so the caller falls back to the
+/// existing depth-tiered table.
+///
+/// Transcribed from `AddBuriedChest`, which does not pick these by a clean per-style switch —
+/// it derives them from a chain of boolean flags gated on the chest's site. The two item lists
+/// below are exactly its `flag2` (jungle) and the desert-tool block near the top of the function,
+/// item IDs and roll odds unchanged.
+fn biome_chest_loot(
+    layout: &Layout,
+    x: i32,
+    y: i32,
+    rand: &mut UnifiedRandom,
+) -> Option<Vec<terrustia_proto::ItemStack>> {
+    use terrustia_proto::ItemStack;
+
+    if layout.jungle.contains(x) {
+        // WorldGen.cs:36429 `num10 = Utils.SelectRandom(genRand, new short[7] { 670, 724, 950,
+        // 1319, 987, 1579, 6153 })`, then a further one-in-twenty reroll to 997 at :36444.
+        const JUNGLE: [i32; 7] = [670, 724, 950, 1319, 987, 1579, 6153];
+        let mut signature = JUNGLE[rand.next_max(JUNGLE.len() as i32) as usize];
+        if rand.next_max(20) == 0 {
+            signature = 997;
+        }
+        let mut items = vec![ItemStack::new(signature, 1, 0)];
+        items.push(ItemStack::new(8, rand.next_range(10, 30) as i16, 0));
+        items.push(ItemStack::new(71, rand.next_range(10, 99) as i16, 0));
+        return Some(items);
+    }
+
+    // Vanilla's underground desert is a region distinct from a plain desert column at depth —
+    // sized against `GenVars.UndergroundDesertLocation`, which this generator does not carve as
+    // its own shape. A desert-biome column once it is below the rock layer is treated as close
+    // enough: it is what the surface desert becomes once you dig, which is the case this table
+    // exists for.
+    if layout.desert.contains(x) && y > layout.rock {
+        // WorldGen.cs:36404 `num10 = Utils.SelectRandom(genRand, new short[4] { 4056, 4055, 4262,
+        // 4263 })`. Vanilla has a second, rarer four-item set for the shallow half of the desert
+        // hive band specifically; that band is not modelled here, so only the common set is used.
+        const DESERT: [i32; 4] = [4056, 4055, 4262, 4263];
+        let signature = DESERT[rand.next_max(DESERT.len() as i32) as usize];
+        let mut items = vec![ItemStack::new(signature, 1, 0)];
+        items.push(ItemStack::new(8, rand.next_range(10, 30) as i16, 0));
+        items.push(ItemStack::new(71, rand.next_range(10, 99) as i16, 0));
+        return Some(items);
+    }
+
+    None
 }
 
 /// What a cavern chest holds. Deeper is better, which is the whole of the reward curve.
@@ -684,5 +744,88 @@ pub fn cobwebs(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod chest_loot_tests {
+    use super::*;
+    use crate::world::worldgen::layout::Band;
+
+    /// A biome-tagged chest carries vanilla's real signature item, not the generic cavern table.
+    ///
+    /// Transcribed from `AddBuriedChest`'s own item lists (`WorldGen.cs:36429` jungle,
+    /// `:36404` desert) rather than guessed — asserted against the exact vanilla item id set
+    /// rather than merely "some item", since the whole point is that these are *vanilla's* ids.
+    #[test]
+    fn a_jungle_column_gets_vanillas_jungle_chest_items() {
+        let mut layout = test_layout();
+        layout.jungle = Band { from: 100, to: 200 };
+
+        // Enough draws that both the main roll and the one-in-twenty 997 reroll are exercised.
+        let mut seen_signature = false;
+        let mut seen_reroll = false;
+        for seed in 0..200i32 {
+            let mut rand = UnifiedRandom::new(seed);
+            let items = biome_chest_loot(&layout, 150, 500, &mut rand)
+                .expect("a jungle-biome column must not fall through to the generic table");
+            let signature = items[0].id;
+            assert!(
+                [670, 724, 950, 1319, 987, 1579, 6153, 997].contains(&signature),
+                "unexpected jungle chest item id {signature}"
+            );
+            if signature != 997 {
+                seen_signature = true;
+            } else {
+                seen_reroll = true;
+            }
+        }
+        assert!(
+            seen_signature,
+            "the jungle table should produce its own items"
+        );
+        assert!(
+            seen_reroll,
+            "the one-in-twenty 997 reroll should show up over 200 draws"
+        );
+    }
+
+    #[test]
+    fn a_deep_desert_column_gets_vanillas_desert_chest_items() {
+        let mut layout = test_layout();
+        layout.desert = Band { from: 300, to: 400 };
+        layout.rock = 400;
+
+        for seed in 0..50i32 {
+            let mut rand = UnifiedRandom::new(seed);
+            let items = biome_chest_loot(&layout, 350, 500, &mut rand)
+                .expect("a deep desert column must not fall through to the generic table");
+            assert!(
+                [4056, 4055, 4262, 4263].contains(&items[0].id),
+                "unexpected desert chest item id {}",
+                items[0].id
+            );
+        }
+    }
+
+    /// A shallow desert column — above the rock layer — is not vanilla's underground desert, and
+    /// a non-biome column gets the ordinary depth-tiered table, not a biome one.
+    #[test]
+    fn everywhere_else_falls_back_to_the_generic_table() {
+        let mut layout = test_layout();
+        layout.jungle = Band { from: 100, to: 200 };
+        layout.desert = Band { from: 300, to: 400 };
+        layout.rock = 400;
+        let mut rand = UnifiedRandom::new(1);
+
+        // Shallow desert: above the rock layer.
+        assert!(biome_chest_loot(&layout, 350, 100, &mut rand).is_none());
+        // Plain caverns, in neither band.
+        assert!(biome_chest_loot(&layout, 250, 500, &mut rand).is_none());
+    }
+
+    fn test_layout() -> Layout {
+        let mut rand = UnifiedRandom::new(1);
+        Layout::plan(2000, 800, &mut rand)
     }
 }
