@@ -58,6 +58,8 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **`place_object` + pots, statues, piles, fallen logs at generation** | 4,032 pots, 143 statues, 35+8 piles measured on a real world. Two real bugs caught before landing: a floor check that read an inactive tile's leftover block id as solid ground, and a dropped step-back in statue placement that made every attempt overlap its own floor |
 | ✓ | **The Lihzahrd Altar is placed in the jungle temple** — was silently making Golem unreachable in every generated world | A real client refuses the Power Cell interaction without an altar tile nearby — no server-side workaround exists for its absence. Found by a worldgen sizing pass reading vanilla's source, not by anyone playing the game. Tested across 40 seeds and the full range of rolled temple sizes; verified failing on the unfixed code |
 | ✓ | **Persistent scratch directory** | `/private/tmp` gets reaped by the OS after a few days and took the decompiled Terraria source tree with it mid-session, out from under several running agents. `.scratch/` lives inside the repo instead |
+| ✓ | **Piles' ground→style table, transcribed from source** | Replaces the version carried over from sizing notes. Caught two real bugs along the way: `BOULDER` was defined as tile id 26 (Demon Altar) instead of 138, and the small-pile floor check was missing vanilla's slope/half-brick exclusion |
+| ✓ | **Worldgen Tier 1 is done: traps and smoothed terrain** | `traps.rs` (dart traps, mines, boulder traps, geysers, sand traps) and `smooth.rs` (`SmoothWorld`, reordered to run last — see its module doc). Real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser, 30,107 tiles smoothed. `wiring.rs` gained a real fix alongside traps: a land mine is tile 141, not a variant of the dart trap's tile 137 |
 
 ## Audit findings, ranked
 
@@ -124,14 +126,9 @@ real-world round trip      faithful; every field survives
 
 ### Block D — make it complete
 
-**Worldgen Tier 1**: trees, jungle grass/vines, cacti, lakes, settled water, flowers/mushrooms/
-herbs/sunflowers, pots/statues/piles/fallen logs, and the Lihzahrd Altar are all done and wired
-into `build()` — see Done, above. What's left of Tier 1:
-
-| | Item |
-|---|---|
-| — | Traps (`placeTrap` + `PlaceSandTrap`, ~900 lines) — needs a wire model on top of object placement |
-| — | `SmoothWorld` (14 local slope/pound rules) — not attempted; source access was unavailable when this wave landed rather than guessed at |
+**Worldgen Tier 1 is done.** Trees, jungle grass/vines, cacti, lakes, settled water,
+flowers/mushrooms/herbs/sunflowers, pots/statues/piles/fallen logs, the Lihzahrd Altar, traps and
+smoothed terrain are all wired into `build()` — see Done, above.
 
 **Worldgen Tiers 2 and 3**: re-sized for real once the decompiled source came back (the first pass
 was done mostly blind, mid-session, after a tmp-reaper wiped the source tree — several numbers
@@ -179,11 +176,12 @@ Two more things this pass turned up, checked immediately rather than left as fla
   seed. Ordinary worlds never get pre-placed tombstones from this pass in vanilla either, so
   terrustia's pots/piles/statues ✅ row is correct as-is. Confirmed by reading the gate condition
   directly, not by re-trusting the sizing pass's own flag.
-- **Real, but separate, question raised by the same investigation**: terrustia has no handling at
-  all for vanilla's secret seeds (Celebrationmk10, drunk, not-the-bees, remix, no-traps, "get fixed
-  boi", Don't Starve) — they aren't a `FEATURES.md` row, and the "full parity" plan never states
-  whether they're in scope. Flagging for you rather than picking a default, the same way Steam P2P
-  was flagged rather than assumed.
+- **Resolved**: terrustia had no handling at all for vanilla's secret seeds (Celebrationmk10, drunk,
+  not-the-bees, remix, no-traps, "get fixed boi", Don't Starve), and neither `FEATURES.md` nor this
+  plan ever stated whether they were in scope. Asked rather than assumed, the same way Steam P2P
+  was flagged rather than defaulted — **in scope, but deprioritized behind ordinary-world parity**.
+  Tracked as a `FEATURES.md` 🔴 row and in the backlog below, not a disclosed exception like Steam
+  P2P.
 - The Lihzahrd Altar fix (already shipped, tested across 40 seeds) uses a different mechanism than
   vanilla: a 7-offset retry loop inside `structures::temple()` with a `debug_assert` fallback,
   where vanilla has a dedicated unconditional pass (`LihzahrdAltar`, 32 lines) placing the altar at
@@ -196,12 +194,13 @@ Two more things this pass turned up, checked immediately rather than left as fla
 | — | Build the ~200-line `StructureMap`/`ShapeData` subset (not the full 5,253-line DSL — see correction above) |
 | — | Worldgen Tier 2, item by item, once the tracker above exists |
 | — | Worldgen Tier 3, item by item — the ~25 easy items first |
-| — | A bot that starts with nothing and kills Moon Lord — Tier 1's own acceptance test, once traps and `SmoothWorld` land |
+| — | A bot that starts with nothing and kills Moon Lord — Tier 1's own acceptance test, now that traps and `SmoothWorld` have landed |
 | — | Town NPCs (shops, combat, happiness) |
 | — | Journey mode |
 | — | 3 missing events (Slime Rain, Party, Lantern Night) |
 | — | ~123 enemy drop tables |
 | — | Pets, mounts, minecart tracks |
+| — | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) — in scope, deprioritized behind ordinary-world parity |
 
 ## Corrections to earlier claims
 
