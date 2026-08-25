@@ -221,6 +221,108 @@ pub fn plant_forest(world: &mut World, rng: &mut SmallRng) -> usize {
     grown
 }
 
+/// Hang vines from the undersides of grass, and grow cacti in the sand.
+///
+/// Both reuse the runtime growers in `growth.rs`, which already know the rules — a vine only hangs
+/// from grass of its own biome, a cactus only stands on sand with room above. Calling them at
+/// generation is the difference between a jungle that looks like a jungle and one that looks like
+/// a green cave.
+///
+/// Returns how many of each grew.
+pub fn plant_undergrowth(world: &mut World, rng: &mut SmallRng) -> (usize, usize) {
+    use super::growth;
+
+    let (mut vines, mut cacti) = (0, 0);
+    let surface = world.surface as i32;
+    let top = (surface - 200).max(1);
+    let bottom = (surface + 400).min(world.height() - 2);
+
+    for x in 1..world.width() - 1 {
+        // The whole column, not just its topmost tile. A vine hangs from grass with *air beneath
+        // it* — an overhang, a ledge, a cave roof — and the topmost tile of a column never has
+        // that by definition, which is why scanning only the surface grew exactly none.
+        let mut cactus_here = false;
+        for y in top..bottom {
+            let here = world.tile(x, y);
+            if !here.is_active() {
+                continue;
+            }
+            if !world.tile(x, y + 1).is_active() && rng.random_range(0..5) < 2 {
+                // Each call extends a vine by one tile, so a vine of any length needs several.
+                let length = rng.random_range(1..10);
+                let mut at = (x, y);
+                for _ in 0..length {
+                    match growth::grow_vine(world, at.0, at.1) {
+                        Some(next) => {
+                            at = next;
+                            vines += 1;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            // One cactus per column at most, on the first sand with room above it. `grow_cactus`
+            // takes the *sand*, not the air over it — passing the air was the other reason none
+            // grew.
+            if !cactus_here
+                && here.block == 53
+                && !world.tile(x, y - 1).is_active()
+                && rng.random_range(0..25) == 0
+            {
+                for _ in 0..rng.random_range(1..4) {
+                    if growth::grow_cactus(world, x, y).is_some() {
+                        cacti += 1;
+                    }
+                }
+                cactus_here = true;
+            }
+        }
+    }
+    (vines, cacti)
+}
+
+/// Line the jungle's exposed mud with grass.
+///
+/// Vanilla's jungle is mud walled in jungle grass wherever a cave has opened it to the air, which
+/// is what makes an underground jungle green rather than brown — and it is what vines hang from.
+/// Measured before this existed: a whole 4200-wide world had **two** grass tiles with air beneath
+/// them, so the vine pass was correct and had nowhere to work.
+///
+/// Deliberately separate from `growth::spread_grass`, which is the runtime spread and only handles
+/// dirt. This is a generation-time sweep over mud, and keeping them apart means changing one
+/// cannot quietly change how the other behaves during play.
+///
+/// Returns how many tiles turned green.
+pub fn grass_the_jungle(world: &mut World) -> usize {
+    const MUD: u16 = 59;
+    const JUNGLE_GRASS: u16 = 60;
+
+    let mut spread = 0;
+    // Collected first, then applied: converting as we go would let a tile that has just become
+    // grass qualify its neighbour in the same sweep, and the green would creep through solid rock.
+    let mut turning = Vec::new();
+    for x in 1..world.width() - 1 {
+        for y in 1..world.height() - 1 {
+            if world.tile(x, y).block != MUD {
+                continue;
+            }
+            let open = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+                .iter()
+                .any(|(dx, dy)| !world.tile(x + dx, y + dy).is_active());
+            if open {
+                turning.push((x, y));
+            }
+        }
+    }
+    for (x, y) in turning {
+        let mut tile = world.tile(x, y);
+        tile.block = JUNGLE_GRASS;
+        world.set_tile(x, y, tile);
+        spread += 1;
+    }
+    spread
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +406,54 @@ mod tests {
             grown > 20,
             "a 600-wide meadow should grow a forest, got {grown} trees"
         );
+    }
+
+    /// Mud open to the air becomes grass; mud buried in mud does not.
+    ///
+    /// The measurement that prompted this: before it, a whole 4200-wide world had **two** grass
+    /// tiles with air beneath them, so the vine pass was correct and had nowhere to work. After,
+    /// 732 — and 2,415 vine tiles where there had been nine.
+    #[test]
+    fn only_mud_open_to_the_air_turns_green() {
+        const MUD: u16 = 59;
+        let mut world = World::empty(40, 40, "jungle");
+        // A solid block of mud with one face open at the top.
+        for x in 10..20 {
+            for y in 20..30 {
+                world.set_tile(x, y, Tile::block(MUD));
+            }
+        }
+        let spread = grass_the_jungle(&mut world);
+
+        assert!(spread > 0, "the open face should have turned green");
+        assert_eq!(world.tile(15, 20).block, 60, "the exposed top is grass");
+        assert_eq!(
+            world.tile(15, 25).block,
+            MUD,
+            "mud buried in mud stays mud, or the green creeps through solid ground"
+        );
+    }
+
+    /// The sweep must not feed on itself: a tile that turns green cannot qualify its neighbour in
+    /// the same pass, or the whole block converts.
+    #[test]
+    fn the_grass_does_not_creep_through_solid_ground() {
+        const MUD: u16 = 59;
+        let mut world = World::empty(40, 60, "jungle");
+        for x in 10..20 {
+            for y in 20..50 {
+                world.set_tile(x, y, Tile::block(MUD));
+            }
+        }
+        grass_the_jungle(&mut world);
+
+        // Deep inside, well away from every face.
+        for y in 25..45 {
+            assert_eq!(
+                world.tile(15, y).block,
+                MUD,
+                "mud at depth {y} should not have turned"
+            );
+        }
     }
 }

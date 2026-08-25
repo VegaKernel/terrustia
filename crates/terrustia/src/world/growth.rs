@@ -292,7 +292,11 @@ pub fn grow_vine(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
     if below.is_active() || below.liquid > 0 {
         return None;
     }
-    world.set_tile(x, y + 1, Tile::framed(vine, 0, 0));
+    // `block`, not `framed(.., 0, 0)`. A vine is not frame-important, so the save format stores
+    // no frames for it and a reload brings it back as -1 — the sentinel for "no frame". Writing 0
+    // here made the in-memory world disagree with the one on disk about thousands of tiles, which
+    // the round-trip test catches the moment a generated world contains any number of them.
+    world.set_tile(x, y + 1, Tile::block(vine));
     Some((x, y + 1))
 }
 
@@ -356,7 +360,8 @@ pub fn grow_cactus(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
         }
     }
 
-    world.set_tile(x, y - 1, Tile::framed(CACTUS, 0, 0));
+    // Likewise: a cactus carries no frames in the save format.
+    world.set_tile(x, y - 1, Tile::block(CACTUS));
     Some((x, y - 1))
 }
 

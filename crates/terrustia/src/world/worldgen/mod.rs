@@ -54,6 +54,9 @@ pub const SMALL_HEIGHT: i32 = 1200;
 pub struct Built {
     /// How many trees the forest pass grew.
     pub trees: usize,
+    /// Vine tiles hung, and cacti grown.
+    pub vines: usize,
+    pub cacti: usize,
     pub orbs: usize,
     pub altars: usize,
     pub life_crystals: usize,
@@ -131,7 +134,12 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         use ::rand::SeedableRng;
         ::rand::rngs::SmallRng::seed_from_u64(seed ^ 0x7265_6573)
     };
+    // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
+    crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
+    // Vines and cacti reuse the runtime growers, which already know the rules. A jungle without
+    // vines reads as a green cave.
+    let (vines, cacti) = crate::world::trees::plant_undergrowth(&mut world, &mut forest_rng);
 
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
@@ -144,6 +152,8 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
 
     let built = Built {
         trees,
+        vines,
+        cacti,
         orbs,
         altars,
         life_crystals,
