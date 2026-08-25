@@ -2,7 +2,7 @@ use std::{path::PathBuf, process::ExitCode, time::Instant};
 
 use terrustia::{
     config::Config,
-    game::{GameServer, ServerEvent},
+    game::{GameServer, ServerEvent, Stopped},
     net::listener,
     term::{self, Palette},
     world::{wld, worldgen},
@@ -122,28 +122,95 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!();
 
+    let recorder = match &args.record {
+        Some(path) => Some(terrustia::net::record::Recorder::create(path)?),
+        None => None,
+    };
+
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
     let mut game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
-    let accept = tokio::spawn(listener::run(listener, config, events_tx.clone()));
+    let accept = tokio::spawn(listener::run(
+        listener,
+        config,
+        events_tx.clone(),
+        recorder,
+    ));
+
+    // Whoever has the terminal already has the world file, so the console is not gated. Reading
+    // stdin has to be its own task: the blocking read would otherwise hold up the accept loop, and
+    // a closed stdin (a service with no terminal) simply ends the task rather than the server.
+    let console = tokio::spawn(read_console(events_tx.clone()));
 
     // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
     // than moved so it is still here afterwards to be waited on.
+    // A crash and a clean stop used to be indistinguishable from out here, so a server that had
+    // panicked still exited 0 and no supervisor restarted it.
+    let mut crashed = false;
     tokio::select! {
         reason = stop_signal() => info!(reason, "shutting down"),
-        _ = &mut game => info!("game task ended"),
+        ended = &mut game => {
+            match ended {
+                Ok(Stopped::Cleanly) => info!("game task ended"),
+                Ok(Stopped::Panicked) => {
+                    error!("the game loop stopped because something panicked");
+                    crashed = true;
+                }
+                Err(e) if e.is_cancelled() => info!("game task cancelled"),
+                Err(e) => {
+                    error!(error = %e, "the game task died");
+                    crashed = true;
+                }
+            }
+        }
     }
 
     accept.abort();
+    console.abort();
     drop(events_tx);
     // Wait for the game task to finish. It saves the world on its way out, and returning here
     // without waiting would drop the runtime mid-write — which is a shutdown that quietly loses
     // everything since the last autosave.
-    if let Err(e) = game.await
-        && !e.is_cancelled()
-    {
-        error!(error = %e, "the game task did not shut down cleanly");
+    match game.await {
+        Ok(Stopped::Panicked) => crashed = true,
+        Ok(Stopped::Cleanly) => {}
+        Err(e) if e.is_cancelled() => {}
+        Err(e) => {
+            error!(error = %e, "the game task did not shut down cleanly");
+            crashed = true;
+        }
+    }
+    if crashed {
+        // Non-zero, so `Restart=on-failure` and container restart policies actually fire.
+        return Err("the server stopped because of a crash".into());
     }
     Ok(())
+}
+
+/// Forward lines typed at the terminal to the game task.
+///
+/// Stdin was completely unused before this. A dedicated server with no way to say anything to its
+/// own players — or to ban somebody without editing a file and restarting — is missing the half of
+/// administration that happens while it is running.
+async fn read_console(events: mpsc::Sender<ServerEvent>) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if events.send(ServerEvent::Console { line }).await.is_err() {
+                    return; // the game task has gone
+                }
+            }
+            // End of input: a service started without a terminal. Not an error, and not a reason
+            // to stop the server — just nothing more to read.
+            Ok(None) => return,
+            Err(e) => {
+                warn!(error = %e, "console input closed");
+                return;
+            }
+        }
+    }
 }
 
 /// Wait for whichever signal asks the server to stop, and say which it was.
@@ -183,6 +250,8 @@ struct Args {
     world: Option<PathBuf>,
     /// Where to write the world, for a generated one that has nowhere else to go.
     save: Option<PathBuf>,
+    /// Where to record every byte of every connection, for checking against a real client.
+    record: Option<PathBuf>,
     help: bool,
 }
 
@@ -194,6 +263,7 @@ impl Args {
             seed: None,
             world: None,
             save: None,
+            record: None,
             help: false,
         };
         let mut args = args.peekable();
@@ -218,6 +288,9 @@ impl Args {
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
+                "--record" => {
+                    parsed.record = Some(args.next().ok_or("--record needs a path")?.into());
+                }
                 "-s" | "--seed" => {
                     let value = args.next().ok_or("--seed needs a number")?;
                     parsed.seed = Some(
@@ -234,7 +307,11 @@ impl Args {
 }
 
 /// The version of the game this server speaks to.
-const GAME_VERSION: &str = "1.4.5.7";
+///
+/// Both releases, in fact: 1.4.5.7 and 1.4.5.8 differ on the wire only in the number they announce
+/// and in four bytes at the end of packet 7, and refusing the older one would strand anybody who
+/// has not updated for no reason at all. See `id::SUPPORTED_RELEASES`.
+const GAME_VERSION: &str = "1.4.5.8";
 
 fn print_usage(palette: Palette) {
     let heading = |text: &str| palette.paint(term::sgr::BOLD, text);
@@ -254,6 +331,11 @@ fn print_usage(palette: Palette) {
             "",
         ),
         ("-s, --seed <NUMBER>", "World generation seed", "random"),
+        (
+            "    --record <PATH>",
+            "Record every connection's bytes, for checking against a real client",
+            "",
+        ),
         ("-h, --help", "Show this message", ""),
     ];
 

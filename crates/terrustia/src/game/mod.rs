@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod army;
+pub mod arrivals;
 pub mod buffs;
 pub mod cavern_monsters;
 pub mod clock;
@@ -11,10 +12,11 @@ pub mod npc;
 pub mod npc_ai;
 pub mod player;
 pub mod projectile;
+pub mod rescues;
 pub mod server;
 pub mod spawn;
 pub mod teleport;
 pub mod weather;
 
 pub use player::{ConnState, Player};
-pub use server::{GameServer, ServerEvent};
+pub use server::{GameServer, ServerEvent, Stopped};

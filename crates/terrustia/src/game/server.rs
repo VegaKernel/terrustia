@@ -73,7 +73,17 @@ const ITEM_GRAB_RANGE: f32 = 400.0;
 const TICK: Duration = Duration::from_nanos(16_666_667);
 
 /// How often the world clock is pushed to clients.
-const TIME_SYNC_TICKS: u64 = 60;
+///
+/// A minute, not a second. Vanilla never sends packet 18 at all — nothing in the game's source
+/// calls `SendData(18)` — and keeps clients' clocks right by resending packet 7 whenever something
+/// about the world changes, which on a quiet world is a handful of times an hour. A client runs its
+/// own clock at a known rate between those.
+///
+/// Once a second was three and a quarter kilobytes over a five-minute session to say something a
+/// client already knew. This keeps a correction, because drifting for an hour on nothing but a
+/// client's own arithmetic is a worse failure than a small packet, but at a cadence that costs
+/// nothing worth measuring.
+const TIME_SYNC_TICKS: u64 = 60 * 60;
 
 /// How often the worst tick in the window is reported, when it is worth reporting.
 const TICK_REPORT_EVERY: u64 = 600;
@@ -139,6 +149,26 @@ const GUIDE: u16 = 22;
 /// Ticks between housing scans. The room check is a flood fill, so it is not run every tick.
 const HOUSING_SCAN_INTERVAL: u64 = 60 * 5;
 
+/// Pixels of frame each pylon style occupies: three tiles wide, eighteen pixels each.
+const PYLON_FRAME_WIDTH: i16 = 54;
+
+/// How far from a pylon a player may stand and still travel, in tiles.
+///
+/// `TileReachCheckSettings.Pylons` overrides the usual reach with sixty in each direction — far
+/// more than an arm's length, so that standing anywhere in the room counts.
+const PYLON_REACH: f32 = 60.0;
+
+/// How many townsfolk have to live near a pylon before it will carry anybody.
+const PYLON_RESIDENTS_NEEDED: usize = 2;
+
+/// Half the box a pylon looks in for those residents.
+///
+/// `SceneMetrics.ZoneScanSize` works out to 169 x 124 tiles — a screen at the game's assumed
+/// 1920x1200, plus twenty-five tiles of padding on every side — and the box is centred on the
+/// pylon.
+const PYLON_SCAN_HALF_WIDTH: i32 = 84;
+const PYLON_SCAN_HALF_HEIGHT: i32 = 62;
+
 /// One invader every this many ticks. An invasion arrives steadily rather than all at once.
 const INVASION_SPAWN_EVERY: u64 = 45;
 
@@ -177,6 +207,35 @@ const OLD_MAN_NOTICE: f32 = 250.0;
 /// screen, not as it arrives.
 const SECTION_REACH: i32 = 1;
 
+/// How many NPC syncs each of the two paths has sent, for the tick-window log.
+///
+/// Counters rather than a guess. The two paths look interchangeable from the code and are not: a
+/// measurement here showed 251 full syncs against 5 streamed ones, which said immediately that the
+/// rate limiter was doing all the work and the real problem was upstream in how often an NPC was
+/// being marked as having changed. Relaxed atomics on a path that already does a hash lookup.
+pub static SYNC_FULL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SYNC_STREAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How much a round of proximity streaming has to accumulate before an update is sent.
+///
+/// The weights below are chosen against it: eight means a player standing on top of something gets
+/// an update every streaming round, and one means they get one every eighth round.
+const STREAM_THRESHOLD: u8 = 8;
+
+/// How heavily one player's nearness counts towards streaming an NPC to them.
+///
+/// From `NPC.StreamUpdatesToNearbyPlayers`: full weight within about fifteen tiles, then halving
+/// outward, and nothing at all past ninety-odd tiles — which is roughly a screen and a half.
+fn stream_weight(distance: f32) -> u8 {
+    match distance {
+        d if d < 250.0 => 8,
+        d if d < 500.0 => 4,
+        d if d < 1000.0 => 2,
+        d if d < 1500.0 => 1,
+        _ => 0,
+    }
+}
+
 /// How many times in a row an NPC's state may be withheld from a player who is not near it.
 ///
 /// Withholding it entirely would leave a distant NPC frozen where a client last saw it; the game
@@ -213,6 +272,37 @@ const NO_SPACE_RESCUE: u8 = 4;
 type SaveOutcome = std::result::Result<u64, ()>;
 type SaveReport = std::sync::mpsc::Sender<SaveOutcome>;
 type SaveReports = std::sync::mpsc::Receiver<SaveOutcome>;
+
+/// The most password hashes that may be in flight at once, server-wide.
+///
+/// Per-slot exclusivity alone is not enough: at 255 players, 255 concurrent Argon2 hashes is
+/// nineteen megabytes each and every core the machine has. This is the ceiling that makes the
+/// cost bounded no matter how many people ask at once.
+const MAX_AUTH_IN_FLIGHT: usize = 4;
+
+/// A finished password hash, on its way back to the game task to be applied.
+///
+/// The work — hashing a new password, or verifying one against a stored hash — happens on a
+/// worker thread. Only the game task may touch the admin store, so the answer comes back here and
+/// is applied on the next tick.
+enum AuthOutcome {
+    /// A `/register` whose password has been hashed.
+    Registered {
+        slot: u8,
+        account: Box<std::result::Result<crate::admin::Account, String>>,
+        /// Whether this account claims the server, decided before the hash was started.
+        first: bool,
+    },
+    /// A `/login` whose password has been checked.
+    SignedIn {
+        slot: u8,
+        account: String,
+        correct: bool,
+    },
+}
+
+type AuthReport = std::sync::mpsc::Sender<AuthOutcome>;
+type AuthReports = std::sync::mpsc::Receiver<AuthOutcome>;
 
 /// The most slots a quick stack may offer at once.
 ///
@@ -396,6 +486,28 @@ pub enum ServerEvent {
     Leave {
         slot: u8,
     },
+    /// A line typed at the server's own console.
+    ///
+    /// Slot 255 is "the server" in chat, and the console is treated the same way: it owns the
+    /// place unconditionally, because somebody with the terminal already has the world file.
+    Console {
+        line: String,
+    },
+}
+
+/// How the game loop ended.
+///
+/// This exists so the process can exit with a code that means something. A panicked game task used
+/// to look identical to a clean stop from outside — `main` returned `Ok(())` either way — so a
+/// server that had crashed exited 0, and every supervisor configured with
+/// `Restart=on-failure` (or a Docker restart policy keyed on exit status) left it dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Stopped {
+    /// Asked to stop, and did.
+    Cleanly,
+    /// Something panicked. The world was still saved on the way out.
+    Panicked,
 }
 
 pub struct GameServer {
@@ -435,8 +547,21 @@ pub struct GameServer {
     lunar: crate::game::lunar::LunarState,
     /// The wind and the rain, which several ported routines read.
     weather: crate::game::weather::Weather,
+    /// How much of the world is hallow, corruption and crimson. One column is counted per tick,
+    /// as the game does, and the figures go out in packet 57 when a sweep completes.
+    census: crate::world::census::Census,
+    /// Which network each announced pylon belongs to, by position.
+    ///
+    /// Remembered rather than re-derived, because a pylon's network lives in its *tile's* frame
+    /// and mining the tile is what removes the entity — so by the time there is a removal to
+    /// announce, the frame is gone. The client matches a removal on position **and** type
+    /// (`TeleportPylonInfo.Equals`), so getting the type wrong there does not remove anything: the
+    /// pylon stays on every travel map for the rest of the session.
+    pylon_kinds: HashMap<(i16, i16), u8>,
     /// How many syncs in a row each NPC has been withheld from each player.
     npc_skips: HashMap<(u8, u8), u8>,
+    /// How much nearness each player has accumulated towards the next streamed update of each NPC.
+    npc_stream: HashMap<(u8, u8), u8>,
     /// Whose turn it is to have the ground around them searched for a house.
     housing_turn: usize,
     /// Timers that are switched on, and how long each has left in its window.
@@ -457,6 +582,16 @@ pub struct GameServer {
     /// A channel rather than the join handle because the tick is not async and polling a handle
     /// for its value needs an executor; a try-receive needs nothing.
     save_results: (SaveReport, SaveReports),
+    /// Password hashing that finished on a worker thread, waiting to be applied.
+    ///
+    /// Argon2 costs tens of milliseconds by design, against a tick budget of 16.67. Running it
+    /// inline — which `/register` and `/login` used to do, with no permission check and no rate
+    /// limit — meant any connected client could freeze the world for everybody simply by sending
+    /// `/register` in a loop. The hash now happens off the game task and its answer arrives here,
+    /// the same shape the background save already uses.
+    auth_results: (AuthReport, AuthReports),
+    /// Slots with a hash already running. One at a time, so nobody can queue up work.
+    auth_in_flight: std::collections::HashSet<u8>,
     /// The six cavern enemies this world happens to have.
     ///
     /// Drawn from the world's id rather than from the run's generator, so the same world always
@@ -489,8 +624,10 @@ pub struct GameServer {
     tile_entity_anchors: HashMap<u8, i32>,
     /// Liquid waiting to settle. Empty unless something has disturbed it.
     liquids: crate::world::liquid::Liquids,
-    /// Which of each pair of hardmode ores this world settled on.
-    ore_tiers: crate::world::hardmode::OreTiers,
+    /// Who may do what, and who is kept out. Read from disk beside the world.
+    admin: crate::admin::Admin,
+    /// Set by the console's `stop`, so the loop ends and the world is saved on the way out.
+    stopping: bool,
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
@@ -554,7 +691,12 @@ impl GameServer {
             moon: crate::game::moons::MoonState::default(),
             lunar: crate::game::lunar::LunarState::default(),
             weather,
+            census: crate::world::census::Census::new(
+                terrustia_proto::tile_sets::TILE_COUNT,
+            ),
+            pylon_kinds: HashMap::new(),
             npc_skips: HashMap::new(),
+            npc_stream: HashMap::new(),
             housing_turn: 0,
             running_timers,
             mech_cooldown: HashMap::new(),
@@ -562,6 +704,8 @@ impl GameServer {
             saving: None,
             save_reason: "",
             save_results: std::sync::mpsc::channel(),
+            auth_results: std::sync::mpsc::channel(),
+            auth_in_flight: std::collections::HashSet::new(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
@@ -571,7 +715,13 @@ impl GameServer {
             angler_quest: 0,
             angler_finished_today: std::collections::HashSet::new(),
             liquids: crate::world::liquid::Liquids::default(),
-            ore_tiers: crate::world::hardmode::OreTiers::default(),
+            // Beside the world it belongs to. A world with nowhere to save has nowhere to put
+            // this either, and should not scatter one into whatever directory it was started in.
+            admin: match &save_path {
+                Some(path) => crate::admin::Admin::load(&path.with_extension("admin.toml")),
+                None => crate::admin::Admin::in_memory(),
+            },
+            stopping: false,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
             save_path,
@@ -580,7 +730,204 @@ impl GameServer {
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
         server.roll_angler_quest();
+        // Count the world once up front. The per-tick sweep would otherwise take a full minute of
+        // play to produce its first figures, and the Dryad would tell everyone who joined in that
+        // minute that their world was nought per cent of everything.
+        server.census.sweep(&server.world);
+        // Remember every pylon's network up front, rather than waiting for the first join to fill
+        // the map in. Otherwise a pylon mined before anybody had connected would be announced with
+        // the wrong network and stay on every travel map afterwards.
+        for pylon in server.pylons() {
+            server.pylon_kinds.insert((pylon.x, pylon.y), pylon.kind);
+        }
         server
+    }
+
+    /// Every pylon in the world, as module 8 describes them.
+    ///
+    /// A pylon keeps nothing of its own — which network it belongs to is the tile's frame — so the
+    /// kind is read back off the tile rather than stored beside the entity, which is also what
+    /// keeps the two from ever disagreeing.
+    fn pylons(&self) -> Vec<net_module::Pylon> {
+        use terrustia_proto::tile_entity::EntityKind;
+
+        self.world
+            .tile_entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::TeleportationPylon)
+            .filter_map(|entity| {
+                let tile = self.world.tile(i32::from(entity.x), i32::from(entity.y));
+                if !tile.is_active() || tile.block != EntityKind::TeleportationPylon.tile() {
+                    // The entity outlived its tile. Not worth announcing: the client would draw a
+                    // travel destination that is not there.
+                    return None;
+                }
+                Some(net_module::Pylon {
+                    x: entity.x,
+                    y: entity.y,
+                    // A pylon is three tiles wide, so each style occupies 54 pixels of frame.
+                    kind: (tile.frame_x / PYLON_FRAME_WIDTH) as u8,
+                })
+            })
+            .collect()
+    }
+
+    /// Tell one player about a pylon appearing or vanishing.
+    fn broadcast_pylon(&mut self, message: net_module::PylonMessage, pylon: net_module::Pylon) {
+        if let Ok(frame) = net_module::pylon_message(message, pylon) {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// A client asking to be taken to a pylon.
+    ///
+    /// The game's rules, in the order it checks them: you have to be standing near a pylon, and the
+    /// one you are going to needs two townsfolk living within its scan box — except the Victory
+    /// pylon, which needs none. The biome requirement is *not* enforced here, because deciding
+    /// whether a stretch of ground counts as a jungle needs `SceneMetrics`, which this server does
+    /// not have; the effect is that a pylon planted in the wrong biome still works. That is a
+    /// permissive difference rather than a broken one, and it is written down rather than hidden.
+    fn on_pylon_teleport(
+        &mut self,
+        slot: u8,
+        pylon: net_module::Pylon,
+    ) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let known = self.pylons();
+        let Some(&destination) = known
+            .iter()
+            .find(|p| p.x == pylon.x && p.y == pylon.y)
+        else {
+            debug!(slot, x = pylon.x, y = pylon.y, "no pylon there");
+            return Ok(());
+        };
+
+        let Some(player) = self.player(slot) else {
+            return Ok(());
+        };
+        let at = (player.position.0 / 16.0, player.position.1 / 16.0);
+        if !known.iter().any(|p| {
+            (f32::from(p.x) - at.0).abs() <= PYLON_REACH && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
+        }) {
+            self.tell(slot, "You need to be near a pylon to travel.");
+            return Ok(());
+        }
+
+        if destination.kind != net_module::Pylon::VICTORY
+            && self.town_npcs_near(destination.x, destination.y) < PYLON_RESIDENTS_NEEDED
+        {
+            self.tell(
+                slot,
+                "That pylon needs two townsfolk living near it before it will work.",
+            );
+            return Ok(());
+        }
+
+        // Land on the pylon's own tile, as the game does.
+        let to = (f32::from(destination.x) * 16.0, f32::from(destination.y) * 16.0);
+        if let Some(player) = self.player_mut(slot) {
+            player.position = to;
+            player.velocity = (0.0, 0.0);
+        }
+        // Style 9 is the pylon's own animation; the extra value picks the colour by network.
+        let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
+        w.u8(0x08) // the fourth bit says an extra value follows
+            .i16(i16::from(slot))
+            .f32(to.0)
+            .f32(to.1)
+            .u8(9)
+            .i32(i32::from(destination.kind));
+        let frame = w.finish()?;
+        self.broadcast(frame, None);
+        debug!(slot, x = destination.x, y = destination.y, "pylon travel");
+        Ok(())
+    }
+
+    /// How many housed town NPCs live within a pylon's scan box.
+    fn town_npcs_near(&self, x: i16, y: i16) -> usize {
+        self.npcs
+            .iter()
+            .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+            .filter(|(_, npc)| {
+                let Some((hx, hy)) = npc.home else {
+                    // Homeless townsfolk do not count towards a pylon, in the game or here.
+                    return false;
+                };
+                (hx - i32::from(x)).abs() <= PYLON_SCAN_HALF_WIDTH
+                    && (hy - i32::from(y)).abs() <= PYLON_SCAN_HALF_HEIGHT
+            })
+            .count()
+    }
+
+    /// The whole banner kill table, as module 11 message 0.
+    fn banner_state_frame(&self) -> terrustia_proto::Result<Vec<u8>> {
+        let mut kills = [0u32; net_module::BANNER_SLOTS];
+        for (&banner, &count) in &self.world.banner_kills {
+            if let Some(slot) = kills.get_mut(usize::from(banner)) {
+                *slot = count;
+            }
+        }
+        // Nothing is ever claimable here: a banner is dropped where the kill happened rather than
+        // held for collection, so there is never a pending one to report.
+        let claimable = [0u16; net_module::BANNER_SLOTS];
+        net_module::banners_full_state(&kills, &claimable)
+    }
+
+    /// One packet 60 per town NPC, saying where it lives.
+    ///
+    /// A homeless one still gets a frame — the game sends its home tile anyway and flags it as
+    /// homeless, which is how the client knows to draw the "no home" marker rather than nothing.
+    fn npc_home_frames(&self) -> Vec<Vec<u8>> {
+        self.npcs
+            .iter()
+            .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+            .filter_map(|(index, _)| self.npc_home_frame(index))
+            .collect()
+    }
+
+    /// One packet 60 for one town NPC.
+    fn npc_home_frame(&self, index: u8) -> Option<Vec<u8>> {
+        let npc = self.npcs.get(index)?;
+        let (home, status) = match npc.home {
+            // The game distinguishes "has a home tile" from "has a room the game agrees is
+            // habitable"; this server only tracks the first, so a housed NPC reports `Settled`
+            // rather than claiming a room record it does not keep.
+            Some(home) => (home, packets::HouseholdStatus::Settled),
+            // A homeless one still reports a position — wherever it happens to be standing — which
+            // is what the game sends for an NPC that has been evicted.
+            None => (
+                (
+                    (npc.position.0 / 16.0) as i32,
+                    (npc.position.1 / 16.0) as i32,
+                ),
+                packets::HouseholdStatus::Homeless,
+            ),
+        };
+        packets::npc_home(u16::from(index), home.0 as i16, home.1 as i16, status).ok()
+    }
+
+    /// Tell every client where one town NPC lives, after it moves in or is evicted.
+    fn broadcast_npc_home(&mut self, index: u8) {
+        if let Some(frame) = self.npc_home_frame(index) {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Advance the world census by one column, and publish it when a sweep completes.
+    fn tick_census(&mut self) {
+        self.census.tick(&self.world);
+
+        if self.census.just_finished
+            && let Ok(frame) = packets::world_evil_tally(
+                self.census.percent_hallow,
+                self.census.percent_corrupt,
+                self.census.percent_crimson,
+            )
+        {
+            self.broadcast(frame, None);
+        }
     }
 
     /// Write the world to disk, announcing the outcome in chat.
@@ -596,6 +943,7 @@ impl GameServer {
         let Some(path) = self.save_path.clone() else {
             return;
         };
+        self.record_town_npcs();
         let started = Instant::now();
         match wld_save::save(&self.world, &path) {
             Ok(()) => {
@@ -636,6 +984,10 @@ impl GameServer {
             return;
         }
 
+        // The roster has to reach the world before the snapshot is taken, or the copy that goes to
+        // disk holds whoever lived here when it was loaded rather than who lives here now.
+        self.record_town_npcs();
+
         let began = Instant::now();
         let snapshot = self.world.snapshot();
         let copied = began.elapsed();
@@ -665,6 +1017,80 @@ impl GameServer {
         );
     }
 
+    /// Claim a slot's one allowed password hash, or explain why not.
+    ///
+    /// Two limits, and both are needed. Per-slot exclusivity stops one client queueing thousands
+    /// of hashes; the server-wide ceiling stops two hundred and fifty-five clients each queueing
+    /// one. Without them `/register` — which needs no permission at all — was a way for anybody
+    /// who could join to stall the world for everybody else.
+    fn start_auth(&mut self, slot: u8) -> bool {
+        if self.auth_in_flight.contains(&slot) {
+            self.tell(slot, "still checking your last one; wait a moment.");
+            return false;
+        }
+        if self.auth_in_flight.len() >= MAX_AUTH_IN_FLIGHT {
+            self.tell(slot, "the server is busy checking passwords; try again shortly.");
+            return false;
+        }
+        self.auth_in_flight.insert(slot);
+        true
+    }
+
+    /// Apply any password hashing that finished since the last tick.
+    ///
+    /// Polled rather than awaited, for the same reason the save report is: the tick is not async
+    /// and should not become so for this.
+    fn note_finished_auth(&mut self) {
+        while let Ok(outcome) = self.auth_results.1.try_recv() {
+            match outcome {
+                AuthOutcome::Registered {
+                    slot,
+                    account,
+                    first,
+                } => {
+                    self.auth_in_flight.remove(&slot);
+                    match *account {
+                        Ok(made) => {
+                            let (name, group) = (made.name.clone(), made.group.clone());
+                            match self.admin.insert_account(made) {
+                                Ok(()) => {
+                                    let _ = self.admin.save();
+                                    self.tell(slot, &format!("account '{name}' made ({group})."));
+                                    if first {
+                                        self.tell(
+                                            slot,
+                                            "you are the first account here, so you own it.",
+                                        );
+                                    }
+                                    info!(account = %name, group = %group, "account registered");
+                                }
+                                // Somebody else took the name while this was hashing.
+                                Err(e) => self.tell(slot, &e),
+                            }
+                        }
+                        Err(e) => self.tell(slot, &e),
+                    }
+                }
+                AuthOutcome::SignedIn {
+                    slot,
+                    account,
+                    correct,
+                } => {
+                    self.auth_in_flight.remove(&slot);
+                    if correct {
+                        self.admin.complete_sign_in(slot, &account);
+                        let group = self.admin.group_of(slot).name.clone();
+                        self.tell(slot, &format!("signed in as {account} ({group})."));
+                        info!(slot, account, "signed in");
+                    } else {
+                        // One message for both, so it does not say which accounts exist.
+                        self.tell(slot, "that name and password do not go together.");
+                    }
+                }
+            }
+        }
+    }
+
     /// Announce a background save that has finished since the last tick.
     ///
     /// The writer runs on another thread and cannot reach the chat, so it posts its result down a
@@ -686,20 +1112,57 @@ impl GameServer {
         }
     }
 
-    pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) {
+    pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) -> Stopped {
+        // Whoever lived here when the world was last saved lives here again.
+        self.restore_town_npcs();
+
         let mut ticker = interval(TICK);
         // Catching up on missed ticks would fast-forward the world clock after any stall.
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        let mut outcome = Stopped::Cleanly;
         loop {
             tokio::select! {
                 event = events.recv() => match event {
-                    Some(event) => self.handle_event(event),
+                    // Wrapped for the same reason the tick below is, and more urgently: this is
+                    // the path every byte from an untrusted client travels. It was left bare, so
+                    // a panic anywhere under `handle_packet` — or in any of the ~130 AI routines
+                    // beneath it — unwound straight out of this loop, past the shutdown save at
+                    // the bottom of the function, taking everything since the last autosave.
+                    Some(event) => {
+                        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || self.handle_event(event),
+                        ));
+                        if handled.is_err() {
+                            error!("handling a packet panicked; saving the world and stopping");
+                            outcome = Stopped::Panicked;
+                            break;
+                        }
+                    }
                     None => break,
                 },
                 _ = ticker.tick() => {
-                    let cost = self.tick();
-                    self.note_tick_cost(cost);
+                    // A panic in here would otherwise take the world with it. The game is a
+                    // single task and the shutdown save below lives inside it, so an unwind
+                    // straight out of the loop loses everything since the last autosave. Catching
+                    // it turns that into a clean stop that still writes the world out.
+                    //
+                    // `AssertUnwindSafe` is the honest choice rather than a safe one: the server's
+                    // state may well be inconsistent after a panic. That is exactly why this saves
+                    // and stops rather than carrying on.
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.tick())) {
+                        Ok(cost) => {
+                            self.note_tick_cost(cost);
+                            if self.stopping {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            error!("the game loop panicked; saving the world and stopping");
+                            outcome = Stopped::Panicked;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -715,6 +1178,7 @@ impl GameServer {
         }
         self.save_world("shutdown");
         info!("game loop stopped");
+        outcome
     }
 
     /// Keep an eye on how much of the sixteen-millisecond budget a tick is actually using.
@@ -744,6 +1208,8 @@ impl GameServer {
             stall_us = stall.as_micros() as u64,
             phase = worst.worst_phase().0,
             npcs = self.npcs.len(),
+            sync_full = SYNC_FULL.load(std::sync::atomic::Ordering::Relaxed),
+            sync_stream = SYNC_STREAM.load(std::sync::atomic::Ordering::Relaxed),
             "tick window"
         );
         if worst.cpu * 2 > TICK {
@@ -806,13 +1272,32 @@ impl GameServer {
             self.save_world_in_background("autosave");
         }
         self.note_finished_save();
+        self.note_finished_auth();
+        // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
+        // keeping it here means no spawn site has to remember to scale.
+        let difficulty = terrustia_proto::difficulty::of_game_mode(self.world.game_mode);
+        self.npcs.set_scaling(crate::game::npc::Scaling {
+            difficulty,
+            players: self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .count() as u32,
+        });
+        self.projectiles.set_hostile_damage_scale(
+            terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty),
+        );
+
         self.tick_tile_entities();
         self.tick_liquids();
+        self.tick_growth();
         self.tick_spread();
         self.tick_weather();
         self.tick_mech_cooldowns();
         self.tick_timers();
         self.tick_lunar();
+        self.tick_census();
         lap(&mut cost, Phase::World);
 
         self.flush_dirty_sections();
@@ -1351,6 +1836,59 @@ impl GameServer {
             }
             ServerEvent::Packet { slot, frame } => self.handle_packet(slot, frame),
             ServerEvent::Leave { slot } => self.remove_player(slot),
+            ServerEvent::Console { line } => self.run_console(&line),
+        }
+    }
+
+    /// A line typed at the server's own terminal.
+    ///
+    /// Whoever has the console already has the world file, so it is not gated: there is nothing a
+    /// permission could protect them from. Output goes to the log rather than to chat, because the
+    /// person who typed it is looking at the log.
+    fn run_console(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let (name, argument) = line
+            .split_once(char::is_whitespace)
+            .unwrap_or((line, ""));
+
+        match name.to_ascii_lowercase().as_str() {
+            // Only exists in a test build. There has to be *some* way to make the packet path
+            // panic on purpose, or the guard around it is only believed rather than checked —
+            // and "we catch panics" is exactly the sort of claim that is never true until tried.
+            #[cfg(test)]
+            "__panic_probe" => panic!("deliberate panic, to prove the packet path is guarded"),
+            "help" => info!(
+                "console: say <text> | players | save | kick <name> [reason] | \
+                 ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
+                 stop"
+            ),
+            "say" => {
+                self.announce(argument);
+            }
+            "players" => {
+                let names: Vec<&str> = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.is_playing())
+                    .map(|p| p.name.as_str())
+                    .collect();
+                info!(online = names.len(), "{}", names.join(", "));
+            }
+            "save" => self.save_world_in_background("console"),
+            "stop" => {
+                info!("stopping on console request");
+                self.stopping = true;
+            }
+            // The player-facing ones do the same thing here, reporting to the log. Slot 255 is
+            // "the server", which `tell` already knows how to address.
+            "kick" | "ban" | "unban" | "group" => {
+                let _ = self.run_admin_command(net_module::SERVER_AUTHOR, name, argument);
+            }
+            other => info!("console: unknown command {other:?} (try 'help')"),
         }
     }
 
@@ -1373,10 +1911,17 @@ impl GameServer {
     }
 
     fn remove_player(&mut self, slot: u8) {
+        // Before the early return, not after it. A client that disconnects mid-check would
+        // otherwise hold one of the server's few hashing slots until its worker happened to
+        // finish — and one doing it deliberately, repeatedly, would hold all of them.
+        self.auth_in_flight.remove(&slot);
+
         let Some(player) = self.players.get_mut(slot as usize).and_then(Option::take) else {
             return;
         };
         info!(slot, name = %player.name, "player disconnected");
+        // A session is not state: whoever reuses this slot starts as nobody.
+        self.admin.sign_out(slot);
 
         // Whatever they had open is free again. Without this a mannequin somebody was looking at
         // when their connection dropped stays locked for the rest of the world's life.
@@ -1715,12 +2260,35 @@ impl GameServer {
         r.u8()?;
         let name = r.string()?;
 
+        // Two players sharing a name is not merely confusing. `angler_finished_today` is keyed by
+        // name on purpose, so a duplicate shares one daily reward with the original and either can
+        // shed the cooldown by renaming. Refuse the collision at the door instead.
+        let wanted = name.trim().to_string();
+        if !wanted.is_empty()
+            && self
+                .players
+                .iter()
+                .flatten()
+                .any(|p| p.slot != slot && p.name.eq_ignore_ascii_case(&wanted))
+        {
+            info!(slot, name = %wanted, "rejecting a duplicate name");
+            self.kick(slot, "Someone is already playing under that name.");
+            return Ok(());
+        }
+
         if let Some(player) = self.player_mut(slot) {
-            if !name.trim().is_empty() {
-                player.name = name.trim().to_string();
+            if !wanted.is_empty() {
+                player.name = wanted;
             }
             player.appearance = Some(Bytes::copy_from_slice(payload));
             player.advance_to(ConnState::Identified);
+        }
+
+        // The name is known now, so a name or address ban can be enforced before the world is
+        // sent. A UUID ban has to wait for packet 68, which arrives later.
+        self.enforce_ban(slot);
+        if self.player(slot).is_none() {
+            return Ok(());
         }
 
         // Relay live appearance changes; a first-time sync reaches others at spawn instead.
@@ -1749,9 +2317,12 @@ impl GameServer {
         self.send(slot, world_data);
 
         let sections = self.sections_for(request);
+        // The key rather than the English, which is what vanilla sends here (`Lang.inter[44]`):
+        // a literal would put "Receiving tile data" on the loading screen of a client playing in
+        // any other language.
         let status = packets::status_text(
             sections.len() as i32,
-            &NetworkText::literal("Receiving tile data"),
+            &NetworkText::key("LegacyInterface.44", Vec::new()),
             0,
         )?;
         self.send(slot, status);
@@ -1785,12 +2356,14 @@ impl GameServer {
         if sx < 0 || sy < 0 || sx >= self.world.sections_x() || sy >= self.world.sections_y() {
             return Ok(());
         }
-        // `insert` returns false when the client already has this section.
-        let is_new = match self.player_mut(slot) {
-            Some(player) => player.sent_sections.insert((sx, sy)),
-            None => false,
-        };
-        if !is_new {
+        // Membership is only *checked* here, and claimed further down once the bytes exist.
+        // Claiming it up front meant a section that failed to encode was marked delivered anyway,
+        // and every re-request for it was then dropped by this same dedupe — leaving a 200x150
+        // hole of sky that no amount of walking back through would fill in.
+        if self
+            .player(slot)
+            .is_none_or(|player| player.sent_sections.contains(&(sx, sy)))
+        {
             return Ok(());
         }
 
@@ -1803,14 +2376,70 @@ impl GameServer {
             Some(cached) => cached.clone(),
             None => {
                 let extras = self.world.extras_for(bounds);
-                let encoded = Bytes::from(encode_section_packet(bounds, &extras, |x, y| {
-                    self.world.tile(x, y)
-                })?);
+                let encoded =
+                    match encode_section_packet(bounds, &extras, |x, y| self.world.tile(x, y)) {
+                        Ok(bytes) => Bytes::from(bytes),
+                        Err(e) => {
+                            // Loud, because the symptom is a missing piece of world rather than
+                            // anything that looks like an error to whoever is playing.
+                            warn!(slot, sx, sy, error = %e, "could not encode a section");
+                            return Err(e);
+                        }
+                    };
                 self.section_cache.insert((sx, sy), encoded.clone());
                 encoded
             }
         };
+        if let Some(player) = self.player_mut(slot) {
+            player.sent_sections.insert((sx, sy));
+        }
         self.send_bytes(slot, frame);
+        self.send_chest_contents_for_section(slot, bounds)?;
+        Ok(())
+    }
+
+    /// Send the contents of every chest inside a section that has just gone out.
+    ///
+    /// The section itself only announces each chest's id, position and name — enough to draw it,
+    /// and nothing more. The game follows every section with the contents as well
+    /// (`NetMessage.SyncChestContentsForSection`), and the client needs them for the things it
+    /// does without opening a chest: crafting from what is nearby, quick-stacking into it, and the
+    /// item search. Without this a room full of stocked chests looks, to all three of those, like
+    /// a room full of empty ones.
+    fn send_chest_contents_for_section(
+        &mut self,
+        slot: u8,
+        bounds: terrustia_proto::section::SectionBounds,
+    ) -> terrustia_proto::Result<()> {
+        let right = bounds.x + i32::from(bounds.width);
+        let bottom = bounds.y + i32::from(bounds.height);
+        let inside: Vec<(i16, Vec<terrustia_proto::ItemStack>)> = self
+            .world
+            .chests
+            .iter()
+            .enumerate()
+            // A chest's id is its slot in the table, so the index has to survive the gaps that
+            // deleted chests leave behind.
+            .filter_map(|(id, slot)| slot.as_ref().map(|chest| (id, chest)))
+            .filter(|(_, chest)| {
+                let (x, y) = (i32::from(chest.x), i32::from(chest.y));
+                x >= bounds.x && x < right && y >= bounds.y && y < bottom
+            })
+            .map(|(id, chest)| (id as i16, chest.items.clone()))
+            .collect();
+
+        for (id, items) in inside {
+            self.send(slot, objects::sync_chest_size(id, items.len() as i16)?);
+            for (index, item) in items.iter().enumerate() {
+                let frame = SyncChestItem {
+                    chest: id,
+                    slot: index as u8,
+                    item: *item,
+                }
+                .encode()?;
+                self.send(slot, frame);
+            }
+        }
         Ok(())
     }
 
@@ -1928,6 +2557,46 @@ impl GameServer {
         // Tell everyone else about the newcomer.
         for frame in self.presence_frames(slot)? {
             self.broadcast(frame, Some(slot));
+        }
+
+        // A player joining on the same machine the server runs on counts as the host, which is
+        // exactly the rule the game uses — `DoesPlayerSlotCountAsAHost` asks the socket whether the
+        // far end is the loopback address and nothing else. Only sent when true, as the game only
+        // sends it when true.
+        if self.player(slot).is_some_and(Player::is_local) {
+            self.send(slot, packets::counts_as_host(slot, true)?);
+        }
+
+        // How much of the world has gone over to each side. The client cannot work this out from
+        // the sections it holds, so without it the Dryad reports a world that is nought per cent
+        // of everything however far the corruption has spread.
+        self.send(
+            slot,
+            packets::world_evil_tally(
+                self.census.percent_hallow,
+                self.census.percent_corrupt,
+                self.census.percent_crimson,
+            )?,
+        );
+
+        // Where every town NPC lives. This is what the housing screen draws its banners from; a
+        // client never told has an empty housing menu no matter how many villagers it can see.
+        for frame in self.npc_home_frames() {
+            self.send(slot, frame);
+        }
+
+        // Every banner's kill count. The world has been recording these since §26; nothing was
+        // ever telling a client about them, so the bestiary showed nought kills for everything.
+        self.send(slot, self.banner_state_frame()?);
+
+        // Every pylon. The client keeps its own list and draws the travel map from it, so one it
+        // was never told about is scenery: standing beside it opens a map with nowhere to go.
+        for pylon in self.pylons() {
+            self.pylon_kinds.insert((pylon.x, pylon.y), pylon.kind);
+            self.send(
+                slot,
+                net_module::pylon_message(net_module::PylonMessage::Added, pylon)?,
+            );
         }
 
         self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
@@ -2317,7 +2986,34 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.talking_to = if npc >= 0 { Some(npc as u8) } else { None };
         }
+        if npc >= 0 {
+            self.try_rescue(npc as u8);
+        }
         self.relay_player_packet(slot, id::SYNC_TALK_N_P_C, payload)
+    }
+
+    /// Talking to somebody tied up frees them.
+    ///
+    /// Six residents are found rather than earned, and the flag their arrival waits on is only
+    /// ever set here. Without this the Mechanic could never appear, and she sells the only wire in
+    /// the game — so an entire implemented subsystem sat unreachable behind one missing
+    /// interaction.
+    fn try_rescue(&mut self, index: u8) {
+        let Some(npc) = self.npcs.get(index) else {
+            return;
+        };
+        let Some(rescue) = crate::game::rescues::rescue_for(npc.npc_type) else {
+            return;
+        };
+
+        if let Some(npc) = self.npcs.get_mut(index) {
+            npc.become_type(rescue.freed);
+        }
+        crate::game::rescues::remember(&mut self.world.progress, rescue.freed);
+        self.announce(rescue.announcement);
+        self.broadcast_npc(index);
+        self.broadcast_world_data();
+        info!(freed = rescue.freed, "a bound townsperson was rescued");
     }
 
     /// A player placed a multi-tile object: a chest, a door, a bed, a workbench.
@@ -2584,7 +3280,32 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.uuid = Some(uuid);
         }
+        // The last of the three identities arrives here, so this is the first moment a UUID ban
+        // can be enforced. Name and address are checked earlier, at the handshake; a UUID cannot
+        // be, because packet 68 comes after the slot is already assigned.
+        self.enforce_ban(slot);
         Ok(())
+    }
+
+    /// Turn somebody away if any of their three identities is banned.
+    ///
+    /// Name, address and client UUID. `Player::uuid` was stored by this server and read by nothing
+    /// at all until now; this is what it was for.
+    fn enforce_ban(&mut self, slot: u8) {
+        let Some(player) = self.player(slot) else {
+            return;
+        };
+        let (name, address) = (player.name.clone(), player.addr.ip().to_string());
+        let uuid = player.uuid.clone();
+        let Some(ban) = self
+            .admin
+            .ban_for(&name, &address, uuid.as_deref())
+        else {
+            return;
+        };
+        let reason = ban.reason.clone();
+        info!(slot, %name, %address, reason, "refusing a banned player");
+        self.kick(slot, &format!("You are banned: {reason}"));
     }
 
     fn on_tile_manipulation(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
@@ -3501,6 +4222,15 @@ impl GameServer {
     }
 
     fn on_net_module(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        // Module 8 is the only other one a client sends that this server acts on: "take me to that
+        // pylon". Checked before chat because `IncomingChat::decode` returns `None` for it and the
+        // request would otherwise be dropped on the floor.
+        if let Some((message, pylon)) = net_module::decode_pylon_message(payload)?
+            && message == net_module::PylonMessage::RequestTeleport
+        {
+            return self.on_pylon_teleport(slot, pylon);
+        }
+
         let Some(chat) = IncomingChat::decode(payload)? else {
             return Ok(());
         };
@@ -3526,13 +4256,198 @@ impl GameServer {
             .unwrap_or_default();
         info!("<{name}> {}", chat.text);
 
+        // The text goes out bare, with the author's slot beside it. The client adds the name
+        // itself — `ChatHelper.DisplayMessage` prefixes `Main.player[author].name` whenever the
+        // author is a real slot — so a server that helpfully prefixes it too has every line
+        // rendered with the speaker's name twice, and puts the tag inside the speech bubble over
+        // their head as well. Found by asking a real server to relay a line and comparing: it
+        // sends `"provoke: hello"` where this sent `"<provoke-actor> provoke: hello"`.
+        //
+        // The console line above keeps its own `<name>` because nothing is going to add one there.
         let frame = net_module::chat_broadcast(
             slot,
-            &NetworkText::literal(format!("<{name}> {}", chat.text)),
+            &NetworkText::literal(chat.text.clone()),
             [255, 255, 255],
         )?;
         self.broadcast(frame, None);
         Ok(())
+    }
+
+    /// The commands about people rather than the world.
+    ///
+    /// Kept apart from the rest because they are the ones that need the argument's case intact —
+    /// a lowercased password is a different password, and `run_command` lowercases everything for
+    /// the benefit of NPC-name lookup.
+    fn run_admin_command(
+        &mut self,
+        slot: u8,
+        name: &str,
+        argument: &str,
+    ) -> terrustia_proto::Result<()> {
+        use crate::admin::BanKind;
+
+        let words: Vec<&str> = argument.split_whitespace().collect();
+        match name {
+            "register" => match words.as_slice() {
+                [account, password] => {
+                    // Everything that can be decided without hashing is decided first, so a bad
+                    // request costs nothing at all.
+                    if self.admin.name_taken(account) {
+                        self.tell(slot, &format!("there is already an account called {account}"));
+                    } else if password.len() < 6 {
+                        self.tell(slot, "that password is too short; use at least six characters");
+                    } else if self.start_auth(slot) {
+                        // The first account made on a fresh server owns it; every one after that
+                        // is ordinary. Otherwise nobody could ever grant themselves anything and
+                        // the admin file would have to be edited by hand before the server was
+                        // useful.
+                        let first = self.admin.accounts.is_empty();
+                        let group = if first { "owner" } else { "default" };
+                        let (account, password) = (account.to_string(), password.to_string());
+                        let group = group.to_string();
+                        let report = self.auth_results.0.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let made = crate::admin::Account::new(&account, &password, &group);
+                            let _ = report.send(AuthOutcome::Registered {
+                                slot,
+                                account: Box::new(made),
+                                first,
+                            });
+                        });
+                    }
+                }
+                _ => self.tell(slot, "usage: /register <name> <password>"),
+            },
+            "login" => match words.as_slice() {
+                [account, password] => {
+                    // The hash is fetched here and compared on a worker thread. An account that
+                    // does not exist still pays a hash, deliberately: answering instantly for an
+                    // unknown name and slowly for a known one tells an attacker which is which.
+                    let stored = self.admin.account_hash(account);
+                    if self.start_auth(slot) {
+                        let (account, password) = (account.to_string(), password.to_string());
+                        let report = self.auth_results.0.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let correct = match &stored {
+                                Some(hash) => {
+                                    crate::admin::Account::verify_hash(hash, &password)
+                                }
+                                // No account: hash against a throwaway anyway, so the two cases
+                                // take the same time.
+                                None => {
+                                    let _ = crate::admin::Account::new("", &password, "");
+                                    false
+                                }
+                            };
+                            let _ = report.send(AuthOutcome::SignedIn {
+                                slot,
+                                account,
+                                correct,
+                            });
+                        });
+                    }
+                }
+                _ => self.tell(slot, "usage: /login <name> <password>"),
+            },
+            "logout" => {
+                self.admin.sign_out(slot);
+                self.tell(slot, "signed out.");
+            }
+            "whoami" => {
+                let who = self
+                    .admin
+                    .signed_in_as(slot)
+                    .unwrap_or("nobody")
+                    .to_string();
+                let group = self.admin.group_of(slot).name.clone();
+                self.tell(slot, &format!("you are {who}, in group '{group}'."));
+            }
+            "kick" => match words.split_first() {
+                Some((who, rest)) => {
+                    let reason = if rest.is_empty() {
+                        "kicked".to_string()
+                    } else {
+                        rest.join(" ")
+                    };
+                    match self.slot_named(who) {
+                        Some(target) => {
+                            self.announce(&format!("{who} was kicked: {reason}"));
+                            self.kick(target, &reason);
+                        }
+                        None => self.tell(slot, &format!("nobody here is called {who}.")),
+                    }
+                }
+                None => self.tell(slot, "usage: /kick <name> [reason]"),
+            },
+            "ban" => match words.split_first() {
+                Some((kind, rest)) if !rest.is_empty() => {
+                    let Some(kind) = (match *kind {
+                        "name" => Some(BanKind::Name),
+                        "ip" | "address" => Some(BanKind::Address),
+                        "uuid" => Some(BanKind::Uuid),
+                        _ => None,
+                    }) else {
+                        self.tell(slot, "usage: /ban <name|ip|uuid> <value> [reason]");
+                        return Ok(());
+                    };
+                    let value = rest[0].to_string();
+                    let reason = if rest.len() > 1 {
+                        rest[1..].join(" ")
+                    } else {
+                        "banned".to_string()
+                    };
+                    self.admin.ban(kind, &value, &reason);
+                    self.announce(&format!("{value} is banned: {reason}"));
+                    // And remove them if they are standing here.
+                    if let Some(target) = self.slot_named(&value) {
+                        self.kick(target, &reason);
+                    }
+                    info!(value, reason, "ban added");
+                }
+                _ => self.tell(slot, "usage: /ban <name|ip|uuid> <value> [reason]"),
+            },
+            "unban" => match words.as_slice() {
+                [value] => {
+                    let removed = self.admin.unban(value);
+                    self.tell(slot, &format!("{removed} ban(s) lifted for {value}."));
+                }
+                _ => self.tell(slot, "usage: /unban <value>"),
+            },
+            "group" => match words.as_slice() {
+                [account, group] => {
+                    if !self.admin.groups.iter().any(|g| &g.name == group) {
+                        self.tell(slot, &format!("there is no group called {group}."));
+                        return Ok(());
+                    }
+                    match self
+                        .admin
+                        .accounts
+                        .iter_mut()
+                        .find(|a| a.name.eq_ignore_ascii_case(account))
+                    {
+                        Some(found) => {
+                            found.group = (*group).to_string();
+                            let _ = self.admin.save();
+                            self.tell(slot, &format!("{account} is now in {group}."));
+                            info!(account, group, "group changed");
+                        }
+                        None => self.tell(slot, &format!("there is no account called {account}.")),
+                    }
+                }
+                _ => self.tell(slot, "usage: /group <account> <group>"),
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The slot of whoever is playing under this name.
+    fn slot_named(&self, name: &str) -> Option<u8> {
+        self.players
+            .iter()
+            .flatten()
+            .find(|p| p.is_playing() && p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.slot)
     }
 
     /// Send a line of server text to one player.
@@ -3548,16 +4463,52 @@ impl GameServer {
 
     /// Handle a chat line beginning with `/`.
     ///
-    /// There is no permission model: this is aimed at a server among friends, and every command
-    /// here is either read-only or something any player could achieve anyway.
+    /// Commands are gated by the permission table below: `time`, `save`, `spawn` and `butcher`
+    /// need `World`, `kick`/`ban`/`unban` need `Players`, `group` needs `Admin`, and the rest are
+    /// read-only or something any player could do anyway. Until somebody registers, the server is
+    /// unclaimed and every check passes — see `Admin::unclaimed`.
     fn run_command(&mut self, slot: u8, command: &str) -> terrustia_proto::Result<()> {
+        use crate::admin::Permission;
+
         let mut parts = command.split_whitespace();
         let name = parts.next().unwrap_or("").to_ascii_lowercase();
         // The whole rest of the line, not the first word of it: `/spawn Eater of Worlds Head` has
         // to reach the resolver intact or it looks up "eater" and finds nothing.
         let argument = parts.collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+        // And the same line with its case intact, because a password, an account name and a
+        // player's name are all case-sensitive and the lowercased form silently corrupts them.
+        let raw_argument = command
+            .split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // What each command costs. Anything absent needs nothing beyond being here.
+        let needed = match name.as_str() {
+            "time" | "save" | "spawn" | "butcher" => Some(Permission::World),
+            "kick" | "ban" | "unban" => Some(Permission::Players),
+            "group" => Some(Permission::Admin),
+            _ => None,
+        };
+        if let Some(permission) = needed
+            && !self.admin.may(slot, permission)
+        {
+            // Named rather than vague: "you may not" invites a second attempt, and the point is to
+            // tell somebody how to become allowed.
+            self.tell(
+                slot,
+                &format!(
+                    "/{name} needs the '{}' permission. Sign in with /login <name> <password>.",
+                    permission.as_str()
+                ),
+            );
+            return Ok(());
+        }
 
         match name.as_str() {
+            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "group" | "whoami" => {
+                return self.run_admin_command(slot, &name, &raw_argument);
+            }
             "help" => {
                 for line in [
                     "/help            this list",
@@ -3569,6 +4520,14 @@ impl GameServer {
                     "/npcs            what is alive right now",
                     "/butcher         remove every hostile NPC",
                     "/house           is the room you are standing in a valid house?",
+                    "/register <name> <password>   make an account",
+                    "/login <name> <password>      sign in",
+                    "/logout          give up whatever you signed in for",
+                    "/whoami          who the server thinks you are",
+                    "/kick <name> [reason]",
+                    "/ban <name|uuid|ip> <value> [reason]",
+                    "/unban <value>",
+                    "/group <account> <group>      move somebody between groups",
                 ] {
                     self.tell(slot, line);
                 }
@@ -3813,6 +4772,13 @@ impl TileView for WorldTiles<'_> {
 
 /// How often the biomes are given a chance to creep, and how far from a player they may.
 const SPREAD_EVERY: u64 = 10;
+
+/// Ticks between passes of the world growing.
+///
+/// Slower than the biome spread because grass has nowhere to be: the game runs its own tile
+/// updates every tick over the whole world, and a sixth of that around the players is more than
+/// enough for a field to green over while somebody is looking at it.
+const GROWTH_EVERY: u64 = 10;
 const SPREAD_TRIES: usize = 3;
 const SPREAD_RANGE: i32 = 120;
 
@@ -4055,6 +5021,8 @@ impl GameServer {
         }
 
         let mut expired = Vec::new();
+        // Things a routine killed, as opposed to things that wandered off.
+        let mut slain: Vec<(u8, u16, (f32, f32), f32)> = Vec::new();
         let mut transformed = Vec::new();
         let mut blasts = Vec::new();
         // Life carried home by leeches this tick, delivered once everything has moved.
@@ -4406,7 +5374,33 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.healed) > 0 {
                     healing.push(std::mem::take(&mut ai_out.healed));
                 }
-                if npc.time_left <= 0 {
+                // A routine that decided this one is dead — a burst spore, an uprooted plant, a
+                // fallen lunar pillar, the Moon Lord finishing its ten seconds of coming apart.
+                //
+                // `effects.died` only sets the life to zero; nothing reaped it, so these lingered
+                // at zero health forever and **never dropped anything or recorded the kill**. For
+                // the Moon Lord that meant beating the game left no luminite and no flag: the
+                // world did not notice you had won.
+                if npc.life <= 0 {
+                    slain.push((
+                        index,
+                        npc.npc_type,
+                        npc.center(),
+                        if npc.from_statue {
+                            0.0
+                        } else {
+                            npc.stats.value
+                        },
+                    ));
+                } else if npc.time_left <= 0 {
+                    // Outside the world is a separate reason from running out of time, and it has
+                    // to be here or nothing catches it: a flying routine that keeps its vertical
+                    // velocity does not turn round at the sky, so a bat or a bird leaves through
+                    // the top and carries on for ever. Found in a five-minute capture where one
+                    // reached y = -8338 — five hundred tiles above the world — and was still being
+                    // simulated and broadcast to every client, five hundred and fifteen times, at
+                    // coordinates nothing can draw. The game's own check is the same four-sided
+                    // hundred-pixel margin.
                     expired.push(index);
                 }
             }
@@ -4547,8 +5541,8 @@ impl GameServer {
                         direction,
                     });
                 }
-                crate::game::ai::town::DoorAction::Close { .. }
-                | crate::game::ai::town::DoorAction::None => {}
+                crate::game::ai::town::DoorAction::Close { x, y } => self.close_door(x, y),
+                crate::game::ai::town::DoorAction::None => {}
             }
         }
 
@@ -4621,6 +5615,12 @@ impl GameServer {
             self.start_invasion(Invasion::Martian);
         }
 
+        // Deaths first: `npc_died` drops the loot and records the kill, which is the difference
+        // between beating the Moon Lord and merely making it go away.
+        for (index, npc_type, center, value) in slain {
+            self.npc_died(index, npc_type, center, value);
+        }
+
         for index in expired {
             self.npcs.remove(index);
             // A silently vanished NPC would linger on every client, so tell them it is gone.
@@ -4628,20 +5628,119 @@ impl GameServer {
         }
         self.resolve_worm_chains();
 
-        // Position updates go out at ten a second rather than sixty: clients interpolate, and a
-        // full-rate stream of every NPC would swamp the connection.
-        if self.ticks.is_multiple_of(NPC_SYNC_INTERVAL) {
-            let dirty: Vec<u8> = self
-                .npcs
-                .iter()
-                .filter(|(_, npc)| npc.dirty)
-                .map(|(index, _)| index)
-                .collect();
-            for index in dirty {
-                if let Some(npc) = self.npcs.get_mut(index) {
-                    npc.dirty = false;
+        // How often an NPC's full state goes out, and to whom.
+        //
+        // Ported from `NPC.UpdateNetworkCode` and `NPC.StreamUpdatesToNearbyPlayers`, which are two
+        // mechanisms rather than one and only make sense together:
+        //
+        // * a **token bucket** limits full syncs to one per thirty ticks sustained — five for a
+        //   boss — with three allowed back to back on top of that;
+        // * **proximity streaming** then tops that up for anything actually moving, weighted by how
+        //   near each player is, so a creature you are standing next to updates several times a
+        //   second while the same creature across the world does not.
+        //
+        // This server previously had neither, and sent every changed NPC every six ticks to
+        // everyone nearby: twenty times the game's sustained rate, measured at seven times its
+        // bandwidth over a five-minute capture against the real server on the same world.
+        self.tick_npc_syncs();
+    }
+
+    /// One tick of NPC network bookkeeping: the rate-limited full sync, then the proximity stream.
+    fn tick_npc_syncs(&mut self) {
+        // ---- full syncs, rate limited ------------------------------------------------------
+        let ready: Vec<u8> = self
+            .npcs
+            .iter()
+            .filter(|(_, npc)| npc.dirty)
+            .map(|(index, _)| index)
+            .collect();
+        for index in ready {
+            let Some(npc) = self.npcs.get_mut(index) else {
+                continue;
+            };
+            let cost = if npc.stats.boss {
+                crate::game::npc::NET_SPAM_PER_PACKET_BOSS
+            } else {
+                crate::game::npc::NET_SPAM_PER_PACKET
+            };
+            if npc.net_spam > crate::game::npc::NET_SPAM_PACKET_LIMIT * cost {
+                // Out of tokens. It stays dirty and is tried again next tick, which is what makes
+                // this a delay rather than a dropped update.
+                continue;
+            }
+            npc.net_spam += cost;
+            npc.dirty = false;
+            SYNC_FULL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Cleared before sending and put back if anybody was skipped. Clearing it
+            // unconditionally silently loses a one-off change to a distant NPC: it is marked dirty,
+            // the one broadcast it earns is withheld from every faraway player, and since nothing
+            // changes it again it is never sent. A player who was elsewhere at that moment sees
+            // that NPC at its old health for the rest of the session.
+            if self.broadcast_npc(index)
+                && let Some(npc) = self.npcs.get_mut(index)
+            {
+                npc.dirty = true;
+            }
+        }
+
+        // The bucket drains a tick at a time, which is what sets the sustained rate.
+        for (_, npc) in self.npcs.iter_mut() {
+            if npc.net_spam > 0 {
+                npc.net_spam -= 1;
+            }
+        }
+
+        // ---- proximity streaming ------------------------------------------------------------
+        //
+        // Only for things that are moving: a stationary creature has nothing to interpolate and is
+        // already correct on every client that has been told about it once.
+        let streaming: Vec<(u8, (f32, f32))> = self
+            .npcs
+            .iter_mut()
+            .filter(|(_, npc)| {
+                !npc.stats.town_npc
+                    && npc.velocity.0.abs() + npc.velocity.1.abs() > 0.5
+                    // The three the game excludes from proximity syncing, via
+                    // `NPCID.Sets.UsesMultiplayerProximitySyncing`.
+                    && !matches!(npc.npc_type, 396..=398)
+            })
+            .filter_map(|(index, npc)| {
+                npc.net_stream = npc.net_stream.saturating_add(1);
+                if npc.net_stream < crate::game::npc::NPC_STREAM_SPEED {
+                    return None;
                 }
-                self.broadcast_npc(index);
+                npc.net_stream = 0;
+                Some((index, npc.center()))
+            })
+            .collect();
+
+        for (index, at) in streaming {
+            let watchers: Vec<(u8, (f32, f32))> = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .map(|p| (p.slot, p.position))
+                .collect();
+            for (slot, position) in watchers {
+                let distance =
+                    ((position.0 - at.0).powi(2) + (position.1 - at.1).powi(2)).sqrt();
+                let weight = stream_weight(distance);
+                if weight == 0 {
+                    continue;
+                }
+                let counter = self.npc_stream.entry((index, slot)).or_insert(0);
+                *counter = counter.saturating_add(weight);
+                if *counter < STREAM_THRESHOLD {
+                    continue;
+                }
+                *counter = 0;
+                SYNC_STREAM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some(sync) = self.npc_sync(index)
+                    && let Ok(frame) = sync.encode()
+                {
+                    self.send(slot, frame);
+                }
             }
         }
     }
@@ -5259,15 +6358,17 @@ impl GameServer {
         })
     }
 
-    fn broadcast_npc(&mut self, index: u8) {
+    /// Returns whether the frame was withheld from at least one player, so the caller knows this
+    /// NPC still owes somebody an update.
+    fn broadcast_npc(&mut self, index: u8) -> bool {
         let Some(sync) = self.npc_sync(index) else {
-            return;
+            return false;
         };
         let Ok(frame) = sync.encode() else {
-            return;
+            return false;
         };
         let at = sync.position;
-        self.broadcast_near(frame, at, index);
+        self.broadcast_near(frame, at, index)
     }
 
     /// Send an NPC's state only to the players whose part of the world it is in.
@@ -5278,8 +6379,10 @@ impl GameServer {
     /// rule is to skip an NPC for a client whose loaded sections do not cover it — but never more
     /// than four times in a row, so something far away still gets an occasional update rather than
     /// freezing where it was last seen.
-    fn broadcast_near(&mut self, frame: Vec<u8>, at: (f32, f32), index: u8) {
+    /// Returns whether anybody was skipped, which is the caller's cue to try again next interval.
+    fn broadcast_near(&mut self, frame: Vec<u8>, at: (f32, f32), index: u8) -> bool {
         let bytes = Bytes::from(frame);
+        let mut withheld = false;
         let section = section_of(at);
         let targets: Vec<(u8, bool)> = self
             .players
@@ -5293,23 +6396,56 @@ impl GameServer {
                 let skipped = self.npc_skips.entry((index, slot)).or_insert(0);
                 if *skipped < MAX_NPC_SYNC_SKIPS {
                     *skipped += 1;
+                    withheld = true;
                     continue;
                 }
             }
             self.npc_skips.remove(&(index, slot));
             self.send_bytes(slot, bytes.clone());
         }
+        withheld
     }
 
     /// Carry out what a fighter decided to do to a door.
+    /// Pull a door shut behind a resident who has walked through it.
+    ///
+    /// The close half of this was being dropped on the floor: a town NPC produced the action, the
+    /// server matched it and did nothing, and `ai/town.rs` documented the behaviour as "opened and
+    /// then closed behind it". So every door an NPC ever used stayed open on every client, and at
+    /// night that is the difference between a sealed house and an invitation.
+    ///
+    /// `action: 1` is the game's close, against `0` for open (`MessageBuffer.cs:1310`).
+    fn close_door(&mut self, x: i32, y: i32) {
+        if !self.world.in_bounds(x, y) {
+            return;
+        }
+        if !crate::world::doors::close(&mut self.world, x, y) {
+            return;
+        }
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: 1,
+            x: x as i16,
+            y: y as i16,
+            direction: 0,
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
     fn apply_door_action(&mut self, action: crate::game::ai::fighter::Action) {
         use crate::game::ai::fighter::Action;
         match action {
             Action::None => {}
             Action::OpenDoor { x, y, direction } => {
-                // Swinging a door open moves the tile and reframes a 2x3 block, which is placement
-                // logic this server does not implement. Broadcasting the toggle makes every client
-                // open it, which is how vanilla propagates the change anyway.
+                // Move the tiles, then tell everyone. Broadcasting alone — which this used to do,
+                // on the reasoning that every client would open it for itself — left the *server*
+                // believing the door was still shut, so the NPC standing at it decided to open it
+                // again on its next look, and again, for ever. On a world with a town that came to
+                // eighteen thousand door packets in five minutes and half of all traffic.
+                if !crate::world::doors::open(&mut self.world, x, y, direction) {
+                    return;
+                }
                 let toggle = terrustia_proto::objects::DoorToggle {
                     action: 0,
                     x: x as i16,
@@ -5444,6 +6580,7 @@ impl GameServer {
         self.note_army_kill(npc_type);
         self.note_moon_kill(npc_type);
         self.lunar.note_kill(npc_type);
+        self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
     }
 
@@ -5481,7 +6618,24 @@ impl GameServer {
                 Some(terrustia_proto::convert::Biome::Crimson)
             ),
             underground: ty > i32::from(self.world.rock_layer),
+            // The sibling has to be gone already, and the one that just died is still in the
+            // roster at this point, so it is excluded by index rather than by type.
+            other_twin_dead: !self
+                .npcs
+                .iter()
+                .any(|(_, n)| matches!(n.npc_type, 125 | 126) && n.is_alive()),
         };
+
+        // Pools that give exactly one of their options.
+        for pool in terrustia_proto::conditional_drops::one_from(npc_type, at) {
+            let pick = pool[rand::Rng::random_range(&mut self.rng, 0..pool.len())];
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(i32::from(pick), 1, 0), center)
+            {
+                self.broadcast_item(index);
+            }
+        }
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
                 continue;
@@ -5583,8 +6737,16 @@ impl GameServer {
             .map(|(index, _)| index)
             .collect();
 
+        // Who would arrive if there were somewhere to put them. Worked out before the house
+        // search because that search is the expensive half and there is no point paying for it
+        // when nobody is homeless and nobody is waiting.
         let guide_present = self.npcs.iter().any(|(_, n)| n.npc_type == GUIDE);
-        if homeless.is_empty() && guide_present {
+        let newcomer = if guide_present {
+            self.next_arrival()
+        } else {
+            Some((GUIDE, "Guide"))
+        };
+        if homeless.is_empty() && newcomer.is_none() {
             return;
         }
 
@@ -5606,20 +6768,141 @@ impl GameServer {
                 .unwrap_or("Someone");
             self.announce(&format!("{name} has moved in."));
             self.broadcast_npc(*index);
+            // Where they now live, so every client's housing screen shows the room as taken
+            // rather than as still empty.
+            self.broadcast_npc_home(*index);
             return;
         }
 
-        // Nobody is homeless and there is no Guide, so the Guide moves in.
+        // Nobody is homeless, so the newcomer worked out above can take the house.
+        let Some((npc_type, name)) = newcomer else {
+            return;
+        };
+
         if let Some(index) = self
             .npcs
-            .spawn(GUIDE, (hx as f32 * 16.0, (hy - 3) as f32 * 16.0))
+            .spawn(npc_type, (hx as f32 * 16.0, (hy - 3) as f32 * 16.0))
         {
             if let Some(npc) = self.npcs.get_mut(index) {
                 npc.home = Some(house);
             }
-            self.announce("The Guide has moved in.");
+            self.announce(&format!("The {name} has moved in."));
             self.broadcast_npc(index);
+            self.broadcast_npc_home(index);
         }
+    }
+
+    /// Copy the live townsfolk into the world, so a save records who actually lives here.
+    ///
+    /// The world file's NPC section used to be carried through untouched, which meant every
+    /// resident was a session-long guest: their name was regenerated on the next start and their
+    /// house forgotten.
+    fn record_town_npcs(&mut self) {
+        let residents: Vec<crate::world::objects::TownNpc> = self
+            .npcs
+            .iter()
+            .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+            .map(|(_, npc)| {
+                let home = npc.home.unwrap_or((0, 0));
+                crate::world::objects::TownNpc {
+                    net_id: i32::from(npc.npc_type),
+                    name: npc.given_name.clone(),
+                    position: npc.position,
+                    homeless: npc.home.is_none(),
+                    home,
+                    variation: npc.town_variation,
+                    homeless_despawn: false,
+                }
+            })
+            .collect();
+        self.world.town_npcs = residents;
+    }
+
+    /// Put a loaded world's townsfolk back into the roster.
+    ///
+    /// Called once at startup. Without it a world with a full town opened here empty, and the
+    /// arrival logic would slowly re-invite everyone under new names.
+    fn restore_town_npcs(&mut self) {
+        let saved = std::mem::take(&mut self.world.town_npcs);
+        let mut restored = 0usize;
+        for npc in &saved {
+            let Ok(npc_type) = u16::try_from(npc.net_id.max(0)) else {
+                continue;
+            };
+            let Some(index) = self.npcs.spawn(npc_type, npc.position) else {
+                break; // out of slots
+            };
+            if let Some(live) = self.npcs.get_mut(index) {
+                live.given_name = npc.name.clone();
+                live.town_variation = npc.variation;
+                live.home = (!npc.homeless).then_some(npc.home);
+                live.dirty = true;
+            }
+            restored += 1;
+        }
+        self.world.town_npcs = saved;
+        if restored > 0 {
+            info!(residents = restored, "the town's residents are back");
+        }
+    }
+
+    /// Who is waiting to move in, given what the world has been through and what people carry.
+    ///
+    /// Only the Guide ever arrived before this, so a town was one house and one resident forever.
+    /// The cost of that was not cosmetic: the Mechanic sells the only wire in the game, and the
+    /// entire wiring system was therefore unreachable.
+    fn next_arrival(&mut self) -> Option<(u16, &'static str)> {
+        use crate::game::arrivals::{Town, ready};
+
+        let mut coins: i64 = 0;
+        let mut best_life = 0i32;
+        let (mut has_explosives, mut has_gun, mut has_dye_material) = (false, false, false);
+        for player in self.players.iter().flatten().filter(|p| p.is_playing()) {
+            best_life = best_life.max(i32::from(player.life_max));
+            for slot in player.inventory.values() {
+                let (kind, stack) = (slot.item.id, i64::from(slot.item.stack));
+                coins += match kind {
+                    71 => stack,
+                    72 => stack * 100,
+                    73 => stack * 10_000,
+                    74 => stack * 1_000_000,
+                    _ => 0,
+                };
+                // Bombs, dynamite and grenades; the guns the Arms Dealer answers to; and the dye
+                // plants the Dye Trader wants. Small named sets rather than a table, because that
+                // is what the game uses too.
+                has_explosives |= matches!(kind, 166 | 167 | 168 | 235 | 1167 | 3006);
+                has_gun |= matches!(kind, 24 | 39 | 43 | 96 | 98 | 99 | 120 | 434 | 1255);
+                has_dye_material |= matches!(kind, 1105..=1111);
+            }
+        }
+
+        let residents = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.stats.town_npc && n.is_alive())
+            .count();
+        let here: std::collections::HashSet<u16> = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.is_alive())
+            .map(|(_, n)| n.npc_type)
+            .collect();
+
+        let town = Town {
+            progress: &self.world.progress,
+            coins,
+            best_life,
+            has_explosives,
+            has_gun,
+            has_dye_material,
+            residents,
+            hard_mode: self.world.progress.hard_mode,
+        };
+        ready(town, &|kind| here.contains(&kind))
+            .into_iter()
+            .next()
+            .map(|arrival| (arrival.npc_type, arrival.name))
     }
 
     /// Find a valid house near a player that no town NPC has claimed.
@@ -6002,16 +7285,53 @@ impl GameServer {
         let Some(entity) = self.world.tile_entities.iter().find(|e| e.id == id) else {
             return;
         };
+        let is_pylon = entity.kind == terrustia_proto::tile_entity::EntityKind::TeleportationPylon;
+        let where_it_is = (entity.x, entity.y);
         let Ok(frame) = terrustia_proto::tile_entity::share(entity) else {
             return;
         };
         self.broadcast(frame, None);
+
+        // A pylon needs a second announcement: the tile-entity message puts it in the world, and
+        // module 8 is what puts it on the travel map. Only the second one is what a player sees.
+        if is_pylon
+            && let Some(pylon) = self
+                .pylons()
+                .into_iter()
+                .find(|p| (p.x, p.y) == where_it_is)
+        {
+            self.pylon_kinds.insert(where_it_is, pylon.kind);
+            self.broadcast_pylon(net_module::PylonMessage::Added, pylon);
+        }
     }
 
     /// Tell everyone a tile entity has gone.
     fn unshare_tile_entity(&mut self, id: i32) {
+        // Read before the caller removes it, so a pylon can be taken off the travel map by the
+        // same call that takes it out of the world.
+        let pylon = self
+            .world
+            .tile_entities
+            .iter()
+            .find(|e| {
+                e.id == id
+                    && e.kind == terrustia_proto::tile_entity::EntityKind::TeleportationPylon
+            })
+            .map(|e| (e.x, e.y));
         if let Ok(frame) = terrustia_proto::tile_entity::unshare(id) {
             self.broadcast(frame, None);
+        }
+        if let Some(at) = pylon {
+            // The remembered network, not one read off a tile that is already gone.
+            let kind = self.pylon_kinds.remove(&at).unwrap_or(0);
+            self.broadcast_pylon(
+                net_module::PylonMessage::Removed,
+                net_module::Pylon {
+                    x: at.0,
+                    y: at.1,
+                    kind,
+                },
+            );
         }
     }
 
@@ -6864,29 +8184,28 @@ impl GameServer {
         }
         touched.sort_unstable();
         touched.dedup();
-        // Runs of changed tiles in the same column go out as one square. A flowing pool changes a
-        // stripe of neighbours every tick, and a packet each would be a flood of its own.
-        let mut runs: Vec<(i32, i32, i32)> = Vec::new();
-        for (x, y) in touched {
-            match runs.last_mut() {
-                Some((rx, _, end)) if *rx == x && *end + 1 == y => *end = y,
-                _ => runs.push((x, y, y)),
-            }
-        }
-        for (x, top, bottom) in runs {
-            let height = (bottom - top + 1).clamp(1, 255) as u8;
-            let tiles: Vec<terrustia_proto::Tile> = (0..i32::from(height))
-                .map(|dy| self.world.tile(x, top + dy))
-                .collect();
-            let square = TileSquare {
-                x: x as i16,
-                y: top as i16,
-                width: 1,
-                height,
-                change_type: 0,
-                tiles,
-            };
-            if let Ok(frame) = square.encode() {
+
+        // Net module 0, not tile squares. This is the message the client expects for water moving,
+        // and it costs six bytes a tile against a square's per-tile flag chain plus a header —
+        // which matters because a settling pool dirties a whole stripe of neighbours every tick,
+        // and this used to be a flood of its own.
+        let changes: Vec<net_module::LiquidChange> = touched
+            .iter()
+            .map(|&(x, y)| {
+                let tile = self.world.tile(x, y);
+                net_module::LiquidChange {
+                    x,
+                    y,
+                    amount: tile.liquid,
+                    kind: tile.liquid_kind.as_type_byte(),
+                }
+            })
+            .collect();
+
+        // Split rather than truncate: the count is a `u16` and the frame has a size limit, so a
+        // large enough disturbance has to go out as several frames or the tail is simply lost.
+        for batch in changes.chunks(net_module::MAX_LIQUID_CHANGES) {
+            if let Ok(frame) = net_module::liquid_changes(batch) {
                 self.broadcast(frame, None);
             }
         }
@@ -7358,6 +8677,45 @@ impl GameServer {
         }
     }
 
+    /// Count one more of something towards its banner, and hand the banner over on the threshold.
+    ///
+    /// Nothing counted kills at all before this, so the reward never arrived and the world file's
+    /// banner section was written as two zeroes. The count lives on the world, so it survives a
+    /// restart rather than starting again at nought every session.
+    fn note_banner_kill(&mut self, npc_type: u16, at: (f32, f32)) {
+        use terrustia_proto::banners;
+
+        let Some(banner) = banners::banner_of(npc_type) else {
+            return;
+        };
+        let item = banners::banner_item(banner);
+        let needed = banners::kills_needed(item);
+
+        let count = self.world.banner_kills.entry(banner).or_insert(0);
+        *count += 1;
+        let reached = (*count).is_multiple_of(needed);
+        let total = *count;
+
+        // Tell every client the new count, so the bestiary's counter moves while they watch rather
+        // than only on their next join.
+        if let Ok(frame) = net_module::banner_kill_count(banner, total) {
+            self.broadcast(frame, None);
+        }
+
+        if !reached {
+            return;
+        }
+
+        let name = terrustia_proto::npc_data::npc_stats(npc_type).map_or("them", |s| s.name);
+        self.announce(&format!("{total} {name} defeated!"));
+        if let Some(index) = self
+            .items
+            .spawn(ItemStack::new(i32::from(item), 1, 0), at)
+        {
+            self.broadcast_item(index);
+        }
+    }
+
     /// Record a boss's death against the world's history.
     ///
     /// Nothing in the game reads a boss's death directly — everything reads the flag it sets. A
@@ -7487,6 +8845,48 @@ impl GameServer {
         // Every client's view of the world is now wrong: drop the caches so they re-request.
         self.section_cache.clear();
         self.broadcast_world_data();
+    }
+
+    /// One tick of the world growing: grass creeping over bare dirt near whoever is playing.
+    ///
+    /// Terraria samples random tiles across the whole world every tick. This samples around the
+    /// players instead, which costs a fraction as much and changes only the part of the world
+    /// anyone can see. The sample count is small deliberately — this runs every tick, and grass
+    /// that takes a minute to cross a field is indistinguishable from grass that takes ten
+    /// seconds, while a hundred times the sampling is very distinguishable in the tick budget.
+    fn tick_growth(&mut self) {
+        /// Tiles tried per player per tick.
+        const SAMPLES: usize = 3;
+        /// How far from a player growth is considered, in tiles.
+        const REACH: i32 = 90;
+
+        if !self.ticks.is_multiple_of(GROWTH_EVERY) {
+            return;
+        }
+        let around: Vec<(i32, i32)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| {
+                (
+                    (p.position.0 / crate::game::npc::TILE) as i32,
+                    (p.position.1 / crate::game::npc::TILE) as i32,
+                )
+            })
+            .collect();
+        if around.is_empty() {
+            return;
+        }
+
+        let changed = {
+            let world = &mut self.world;
+            crate::world::growth::tick_growth(world, &around, SAMPLES, REACH, &mut self.rng)
+        };
+        // A grown tile is a tile change like any other; clients re-request the section.
+        for (x, y) in changed {
+            self.liquids.wake(x, y);
+        }
     }
 
     /// One tick of the biomes creeping.
@@ -7766,7 +9166,9 @@ impl GameServer {
     fn smash_altar(&mut self, x: i32, y: i32, slot: u8) {
         use crate::world::hardmode;
 
-        let mut tiers = self.ore_tiers;
+        // The world owns the tiers, so a loaded world that already chose palladium keeps it
+        // instead of being re-rolled by the next altar broken here.
+        let mut tiers = hardmode::OreTiers::load(&self.world.ore_tiers);
         let Some(smashed) = hardmode::smash(
             self.world.progress.altar_count,
             self.world.progress.hard_mode,
@@ -7781,7 +9183,7 @@ impl GameServer {
         ) else {
             return;
         };
-        self.ore_tiers = tiers;
+        tiers.store(&mut self.world.ore_tiers);
         self.world.progress.altar_count += 1;
 
         let mut dug = Vec::new();
@@ -8368,6 +9770,134 @@ mod worm_tests {
             store
                 .iter()
                 .all(|(_, n)| n.npc_type != 10 || n.follows.is_none())
+        );
+    }
+}
+
+/// Does a panic on the untrusted-packet path actually get caught, and does the world still reach
+/// disk on the way out?
+///
+/// `catch_unwind` used to wrap only `tick()`. `handle_event` — which is where every byte from
+/// every client is decoded — was bare, so a panic under it unwound out of the loop, past the
+/// shutdown save at the bottom of `run`, and the process still exited zero.
+#[cfg(test)]
+mod panic_path {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "panic probe")
+    }
+
+    #[tokio::test]
+    async fn a_panic_handling_an_event_is_caught_and_reported() {
+        let (tx, rx) = mpsc::channel::<ServerEvent>(4);
+        let server = GameServer::new(Config::default(), tiny_world());
+
+        tx.send(ServerEvent::Console {
+            line: "__panic_probe".into(),
+        })
+        .await
+        .expect("the game task should still be listening");
+
+        // The panic is deliberate; let it not spew a backtrace over the test output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = server.run(rx).await;
+        std::panic::set_hook(hook);
+
+        assert_eq!(
+            outcome,
+            Stopped::Panicked,
+            "a panic on the packet path must be caught and reported, not unwind the task"
+        );
+    }
+
+    /// The ordinary case still reports a clean stop, so the exit code stays meaningful.
+    #[tokio::test]
+    async fn a_normal_shutdown_reports_cleanly() {
+        let (tx, rx) = mpsc::channel::<ServerEvent>(4);
+        let server = GameServer::new(Config::default(), tiny_world());
+        drop(tx);
+        assert_eq!(server.run(rx).await, Stopped::Cleanly);
+    }
+}
+
+/// Can a connected client stall the world by asking to register?
+///
+/// It could. `/register` needs no permission — it falls through the `needed` match to `None` — and
+/// it used to run Argon2 inline on the game task. Argon2 is deliberately expensive: tens of
+/// milliseconds against a 16.67 ms tick, so a client sending `/register` in a loop froze the world
+/// for everybody. The hashing now happens on a worker thread, with a per-slot lock and a
+/// server-wide ceiling so the queue cannot be grown either.
+#[cfg(test)]
+mod auth_cost {
+    use super::*;
+    use crate::config::Config;
+    use std::time::{Duration, Instant};
+
+    /// What one hash actually costs, measured rather than assumed, so the margin below is real.
+    #[test]
+    fn a_single_hash_is_far_more_than_a_tick() {
+        let started = Instant::now();
+        crate::admin::Account::new("probe", "a long enough password", "default").expect("hashing");
+        let cost = started.elapsed();
+        assert!(
+            cost > Duration::from_millis(1),
+            "argon2 finished in {cost:?}; if it is really this cheap the ceiling below is \
+             meaningless and this whole guard needs rethinking"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_registrations_does_not_cost_the_tick() {
+        let mut server = GameServer::new(Config::default(), World::empty(200, 150, "auth"));
+
+        // Far more than the ceiling, from one slot and then from many.
+        let started = Instant::now();
+        for i in 0..64u8 {
+            let _ = server.run_admin_command(
+                i % 8,
+                "register",
+                &format!("account{i} a_long_enough_password"),
+            );
+        }
+        let elapsed = started.elapsed();
+
+        // Inline, sixty-four hashes would be well over a second. Deferred, this is bookkeeping.
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "sixty-four registrations took {elapsed:?} on the game task; they are being hashed \
+             inline again, which is a denial of service any connected client can trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_slot_gets_one_hash_at_a_time_and_the_server_has_a_ceiling() {
+        let mut server = GameServer::new(Config::default(), World::empty(200, 150, "auth"));
+
+        assert!(server.start_auth(3), "the first is allowed");
+        assert!(!server.start_auth(3), "a second from the same slot is not");
+
+        // Fill the rest of the server-wide ceiling from other slots.
+        for slot in 0..(MAX_AUTH_IN_FLIGHT as u8 - 1) {
+            assert!(server.start_auth(slot), "slot {slot} within the ceiling");
+        }
+        assert!(
+            !server.start_auth(200),
+            "past the ceiling, nobody else gets one however many slots are asking"
+        );
+    }
+
+    /// Leaving mid-check must not hold a hashing slot open.
+    #[tokio::test]
+    async fn disconnecting_releases_the_hashing_slot() {
+        let mut server = GameServer::new(Config::default(), World::empty(200, 150, "auth"));
+        assert!(server.start_auth(5));
+        server.remove_player(5);
+        assert!(
+            server.start_auth(5),
+            "a slot freed by a disconnect must be usable again, or repeated joins exhaust the pool"
         );
     }
 }
