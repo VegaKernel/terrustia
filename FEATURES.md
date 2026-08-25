@@ -62,7 +62,7 @@ are sized in `plan.md` but not yet started.
 | ✅ | Lakes | Sited on level ground with a solid floor |
 | ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
 | ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
-| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is carried over from sizing notes rather than independently re-verified against source — flagged for a follow-up pass |
+| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is now transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`), replacing the earlier version carried over from sizing notes — also caught and fixed a wrong boulder-floor tile id and a missing slope/half-brick check in the small-pile placer along the way |
 | 🔴 | Traps | Needs a wire model on top of the object placement; not started |
 | 🔴 | Smoothed terrain (`SmoothWorld`) | Everything is still blocky. Not attempted rather than guessed — the source access needed to transcribe its 14 rules correctly wasn't available when this wave landed |
 | 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes (Tier 2) | Sized in `plan.md`; needs a shared shape/structure framework terrustia doesn't have yet, in addition to the passes themselves |
