@@ -133,39 +133,68 @@ into `build()` — see Done, above. What's left of Tier 1:
 | — | Traps (`placeTrap` + `PlaceSandTrap`, ~900 lines) — needs a wire model on top of object placement |
 | — | `SmoothWorld` (14 local slope/pound rules) — not attempted; source access was unavailable when this wave landed rather than guessed at |
 
-**Worldgen Tiers 2 and 3**: sized for real this session (line-by-line against the decompiled
-source, the same way Tier 1 was). Full detail in the sizing report; headline numbers:
+**Worldgen Tiers 2 and 3**: re-sized for real once the decompiled source came back (the first pass
+was done mostly blind, mid-session, after a tmp-reaper wiped the source tree — several numbers
+below correct that pass rather than merely refining it).
 
-| | Tier 2 (10 items) | Tier 3 (36 items) |
-|---|---|---|
-| Closures only | 1,560 lines | 3,128 lines |
-| + first-order helpers | ~7,773 lines (reuse-adjusted — see below) | 4,792 lines (**floor**; ~20 helpers unmeasured before source access was lost) |
-| Estimated effort | 2–3 weeks | 1–2 weeks |
+**Headline correction: the 5,253-line `Terraria.WorldBuilding` DSL estimate was wrong.** Measured
+directly: zero Tier 2/3 pass bodies, and none of their helpers, call the heavy `WorldUtils`/
+`Actions`/`Modifiers`/`Shapes` pipeline. What they actually use is `StructureMap` (98 lines, an
+overlap-rectangle tracker reached via `GenVars.structures`) and a `Biome`-class convention
+(`GenVars.configuration.CreateBiome<T>()`) for ~15 self-contained micro-biome routines.
+`CaveWallVariety` touches `ShapeData` (114 lines, a point-set container), not the full DSL. **A
+~200-line structure-overlap tracker covers everything measured — not a 5,253-line framework.**
 
-Notes that change the schedule, not just the numbers:
-- **Tier 2 has no easy wave at all.** Every item is at least moderate; four (floating islands,
-  living trees, pyramids, micro-biomes) are individually harder than Tier 1's *entire* 18-pass
-  closure total on their own, and most need a shared shape/structure framework
-  (`Terraria.WorldBuilding` — `WorldUtils`/`Actions`/`Modifiers`/`StructureMap`, ~5,253 lines,
-  none of it built) that has to exist before the first line of `MicroBiomes`, `Marble` or
-  `Granite` can even compile. Build a minimal subset of that first, the same way `place_object`
-  had to exist before this wave's middle-tier passes could start.
-- **Don't port `AddBuriedChest`'s 1,692 lines a second time.** Terrustia's own ~90-line chest
-  pattern already does the job (see the chest-loot commit above) — reusing it for jungle shrines'
-  and underground cabins' chests removes ~3,300 lines from the Tier 2 estimate on its own.
-- **Tier 3 is mostly Tier-1-Wave-A shaped** — ~25 of 36 items are 15–130-line single-purpose tile
-  scans with no exotic dependency. Three outliers (`TileCleanup` 431 lines, `FinalCleanup` 355,
-  `MossAndMossCaves` 236 + unmeasured helpers) and one DSL-gated item (`CaveWallVariety`) are the
-  exceptions.
-- **`GlowingMushroomPatches` (219 lines) was never read** before source access was lost — its
-  difficulty is genuinely unknown, not "moderate by line count."
-- Tier 1's `CactusPalmTreesAndCoral` and Tier 3's "coral and palms" are the *same* gap under two
-  names — cacti are done, palms and coral are not, and it's one item, not two.
+| | Item | Vanilla pass(es) | Real size | DSL? | Difficulty |
+|---|---|---|---|---|---|
+| Tier 2 | Floating islands + houses | `FloatingIslands`+`FloatingIslandHouses` | ~1,950 (incl. `CloudIsland`/`SnowCloudIsland`/`DesertCloudIsland`/`CloudLake`) | none | Hard — big, plain transcription like Tier 1 |
+| Tier 2 | Living trees + walls | `LivingTrees`+`LivingTreeWalls` | ≥274 + `GrowLivingTree` unmeasured | none | Medium |
+| Tier 2 | Spider caves | `SpiderCaves` | ~142 | none | Easy–medium |
+| Tier 2 | Gem caves | `GemCaves` | 45 | none | Easy |
+| Tier 2 | Pyramids | `DunesAndPyramidLocations`+`Pyramids` | ~640 (incl. `Pyramid()`, `DunesBiome`) | none | Medium |
+| Tier 2 | Underworld ruined houses + hellforges | `Underworld`+`Hellforges` | ≥273 + 2 helpers unmeasured | none | Medium |
+| Tier 2 | Jungle shrines + chests | `JungleShrines`+`ChestsInJungleShrines`+`LihzahrdTemplePart2` | ~201 | none | Medium |
+| Tier 2 | Underground cabins | `UndergroundHousesAndBuriedChests` | ≥252 | `StructureMap` only | Medium |
+| Tier 2 | Oasis | `Oasis` | 26 | none | Easy |
+| Tier 2 | **Micro-biomes** (was one unsized bullet — now the largest single Tier 2 item) | `MicroBiomes`+`Marble`+`Granite` | **~2,700+** (15 classes in `Terraria.GameContent.Biomes/`, 4,240 lines total) | `StructureMap` + `Biome` pattern | Medium per-biome, large in aggregate |
+| Tier 2 | Glowing mushroom biome (missing from both the old item list *and* this sizing pass's report — found and measured directly while integrating it) | `GlowingMushroomPatches`+`GlowingMushroomPlantsUndergroundAndJunglePlants` | 219 + 43 = **262** | none (0 DSL calls, 17 plain loops) | Medium — resolves the old "never read, difficulty unknown" flag |
+| Tier 3 | Moss + moss caves | `MossAndMossCaves`+`LongMoss` | 284 | none | Medium |
+| Tier 3 | Speleothems + exposed gems | `SpeleothemsAndGemTrees`+2 exposed-gem passes+shared web pass | 229 | none | Easy–medium |
+| Tier 3 | Wall variety | `CaveWallVariety`+`CaveWallsInEnclosedSpaces` | 194 | `ShapeData` (light) | Easy–medium |
+| Tier 3 | Dirt-wall cleanup | `DirtWallCleanup` | 116 | none | Easy |
+| Tier 3 | Tile cleanup (bundle of 6 passes) | `TileCleanup`+`QuickCleanup`+`FinalCleanup`(356, corrected from a mis-bounded 65,864)+`BrokenTrapCleanup`+`GravitatingSandCleanup`+`SurfaceOreAndStone`+`SurfaceDirtWallsToGrassWalls` | **1,121** | none | Bigger than "small tile scans" implied, but each pass is mechanically simple |
+| Tier 3 | Waterfalls | `Waterfalls` | 59 | none | Easy |
+| Tier 3 | Thin ice | `FragileIceOverIceBiomeWater` (the actual `ThinIceBiome` is counted under Tier 2 micro-biomes — don't double-book) | 30 | none | Easy |
+| Tier 3 | Lilypads/cattails/coral/palms | `LilypadsCattailsBambooAndSeaweed`+`CactusPalmTreesAndCoral` | 277 | none | Medium |
+
+Measured totals: Tier 2 ≈ 6,500+ lines (plus a handful of still-unmeasured helper functions —
+`GrowLivingTree`, `GetMaxPossibleRoomsInABigAbandonedHouse`, `GenerateUnderworldStartingMound`),
+Tier 3 ≈ 2,310 lines. Both lower than the old blind estimate once the DSL correction is applied —
+the old ~7,773/~4,792 numbers were inflated by assuming framework work that isn't actually needed.
+
+Two more things this pass turned up, checked immediately rather than left as flags:
+- **Not a gap**: vanilla's `PotsGraveyardsAndBoulderPiles` (the pass `pots.rs`/`piles.rs` already
+  transcribe) also contains a `SpawnGraveyardBiomesEverywhere()` call — but it's gated behind
+  `dontStarveWorldGen && drunkWorldGen && getGoodWorldGen` or the `graveyardBloodmoonStart` secret
+  seed. Ordinary worlds never get pre-placed tombstones from this pass in vanilla either, so
+  terrustia's pots/piles/statues ✅ row is correct as-is. Confirmed by reading the gate condition
+  directly, not by re-trusting the sizing pass's own flag.
+- **Real, but separate, question raised by the same investigation**: terrustia has no handling at
+  all for vanilla's secret seeds (Celebrationmk10, drunk, not-the-bees, remix, no-traps, "get fixed
+  boi", Don't Starve) — they aren't a `FEATURES.md` row, and the "full parity" plan never states
+  whether they're in scope. Flagging for you rather than picking a default, the same way Steam P2P
+  was flagged rather than assumed.
+- The Lihzahrd Altar fix (already shipped, tested across 40 seeds) uses a different mechanism than
+  vanilla: a 7-offset retry loop inside `structures::temple()` with a `debug_assert` fallback,
+  where vanilla has a dedicated unconditional pass (`LihzahrdAltar`, 32 lines) placing the altar at
+  precomputed `GenVars.lAltarX/lAltarY` with no failure path. Functionally verified and passing —
+  this is a structural note for a future hardening pass, not a bug: our retry loop could in theory
+  hit its assert on a pathological layout that vanilla's precomputed-coordinate approach can't.
 
 | | Item |
 |---|---|
-| — | Build a minimal `Terraria.WorldBuilding` subset (gates half of Tier 2 plus `Marble`/`Granite`/`CaveWallVariety`) |
-| — | Worldgen Tier 2, item by item, once the framework above exists |
+| — | Build the ~200-line `StructureMap`/`ShapeData` subset (not the full 5,253-line DSL — see correction above) |
+| — | Worldgen Tier 2, item by item, once the tracker above exists |
 | — | Worldgen Tier 3, item by item — the ~25 easy items first |
 | — | A bot that starts with nothing and kills Moon Lord — Tier 1's own acceptance test, once traps and `SmoothWorld` land |
 | — | Town NPCs (shops, combat, happiness) |
@@ -185,4 +214,8 @@ Kept because they are the reason the bugs above went unnoticed for so long.
 5. "Verified 60 Hz" rested on (4), so it is withdrawn until re-measured.
 6. `GAPS.md` §31's round trip used a *generated* world, so it never exercised the preserved-header
    path — the one that touches real players' files.
+7. The first Tier 2/3 sizing pass claimed a ~5,253-line `Terraria.WorldBuilding` DSL gated half of
+   Tier 2 — made mostly blind, mid-session, after the decompiled source was wiped. Re-measured
+   directly against restored source: zero Tier 2/3 passes call that pipeline. A ~200-line
+   `StructureMap`/`ShapeData` subset covers everything actually used.
 7. `server.rs:8496` and `GAPS.md:38` both claimed banner kills survive a restart. They did not.
