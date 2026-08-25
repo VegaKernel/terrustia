@@ -37,6 +37,15 @@ A row becomes `✓` only when all four hold, or it says which one does not apply
 | ✓ | **A stranger cannot claim a fresh server** | Everyone had every permission until the first `/register`, and first-come won. Now needs a one-time token printed to the console |
 | ✓ | **Announcements send localization keys** | Parity bug + localization bug + verbatim game text, fixed at once. Four kept as English deliberately, where I could not verify the key |
 | ✓ | **The housing screen works** | Packet 60 inbound fell through to the ignore arm, so dragging an NPC into a room did nothing. Driven over a real socket; verified failing without the dispatch arm |
+| ✓ | **Save durability + 3 rotating backups + `backups`/`rollback`** | Verified live: rollback restores, keeps the replaced world aside, refuses an unreadable backup, and stops rather than hot-swapping |
+| ✓ | **All five release targets compile** | Windows was the sole blocker; `ctrl_close`/`ctrl_shutdown` added so a service stop does not skip the save |
+| ✓ | **Licence split, workspace lints, `cargo deny`** | proto is genuinely MIT now; warnings denied everywhere; all four deny checks pass |
+| ✓ | **CI, release and container workflows** | fmt/clippy/tests, five-target matrix, `cargo deny`, and a 60-second soak with assertions. Soak run locally: passes |
+| ✓ | **`FEATURES.md` and a rewritten README** | Leads with "serve the world you already have"; says "there are no trees" plainly |
+| ✓ | **`--world <name>` and `--worlds`** | Verified: `--world "The Successful Excrement"` resolves the space→underscore rename |
+| ✓ | **Version refusals name both sides** | The message named 1.4.5.7 while the server spoke 326. Plus a test that fires when the game moves |
+| ✓ | **Whitelist** | Empty means off, so it cannot lock the operator out on the day it lands |
+| ✓ | **`cargo fmt` across the tree** | 46 files, its own commit |
 | ✓ | **Doors build frame-important tiles correctly** | `Tile::block` on a framed type trips a debug assertion and ships -1 frames; six tests were failing on it |
 
 ## Audit findings, ranked
@@ -66,14 +75,9 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | | Item |
 |---|---|
 | — | Round-trip a real *played-in* world through real Terraria (GAPS §31 never exercised the preserved path) |
-| — | `world rollback` / `world backups` console commands |
-| — | Commit backlog (~8 topical commits), `cargo fmt`, version → 0.0.1 |
-| — | Licence split: AGPL root, MIT for `terrustia-proto` (currently inherits AGPL) |
-| — | `[workspace.lints]`, `#![forbid(unsafe_code)]` on proto+client, `deny.toml`, `*.cs` ignored |
-| — | `FEATURES.md`; README leads with "serve the world you already have"; non-affiliation line |
-| — | Repo, CI, release + container workflows, cosign keyless signing |
-| — | `--world <name>` finds the platform world directory; `--worlds` lists; `--new` |
-| — | Reject unknown protocol releases by name; a test that fires when the game moves |
+| — | **Create the GitHub repo and push** (workflows written, never run) |
+| — | Tile action log + `world undo <player> <duration>` |
+| — | `--new <name>` to generate into the world directory |
 
 ### Block B — earn the tag
 
@@ -91,7 +95,6 @@ Six audits ran against the code. Everything below is either fixed above, or has 
 | — | Liquid pinning test, then `liquid.rs` read/alloc reductions |
 | — | Benchmarks: large world × 16 (tuning), × 255 (ceiling, pass/fail) |
 | — | Section encoding off the tick; parallel worldgen |
-| — | Whitelist; tile action log; `world undo <player> <duration>` |
 | — | Packaging: Homebrew, winget, AUR, systemd unit, container `HEALTHCHECK` |
 | — | `terrustia update` with signature verification |
 | — | Sticky console, new commands, startup panel alignment |
