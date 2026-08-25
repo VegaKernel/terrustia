@@ -120,7 +120,7 @@ real-world round trip      faithful; every field survives
 | — | Section encoding off the tick; parallel worldgen |
 | — | Packaging: Homebrew, winget, AUR, systemd unit, container `HEALTHCHECK` |
 | — | `terrustia update` with signature verification |
-| ~ | Sticky console, new commands, startup panel alignment | in progress |
+| ✓ | Sticky console (history, tab completion), equal-width startup panels, save destination/autosave rows | |
 
 ### Block D — make it complete
 
