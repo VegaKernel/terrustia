@@ -1938,6 +1938,7 @@ impl GameServer {
         self.tick_town_npcs();
         self.tick_travelling_merchant();
         self.tick_old_man();
+        self.tick_cultist_tablet();
         lap(&mut cost, Phase::Housing);
 
         if self.ticks.is_multiple_of(TIME_SYNC_TICKS)
@@ -1993,6 +1994,7 @@ impl GameServer {
             self.broadcast_item(index);
         }
         self.tick_shimmer();
+        self.tick_wall_of_flesh_trigger();
         self.correct_item_drift();
 
         // Offer unreserved items to the nearest player in range. Range is per-player, not one
@@ -10648,6 +10650,80 @@ impl GameServer {
         }
     }
 
+    /// Whether the cultist tablet (and its four attendants) may appear at the dungeon entrance —
+    /// the periodic, `tick_old_man`-shaped check the Moon Lord acceptance-test bot
+    /// (`examples/moonlord.rs`, task #37) found was entirely missing: nothing anywhere placed npc
+    /// 437 (`CULTIST_TABLET`), even though its own AI (`ai/boss/tablet.rs`) is real and complete
+    /// once it exists — gather four attendants, wait for all four to die, shatter, raise the
+    /// Cultist. Without this, the entire post-Golem game (the Lunatic Cultist, the Lunar
+    /// Apocalypse, Moon Lord) was unreachable through ordinary play.
+    ///
+    /// ## What is confirmed vs. reasoned
+    ///
+    /// **Confirmed**, read directly this session from `terraria.wiki.gg`'s own "Lunatic Cultist"
+    /// and "Cultists" pages (no decompiled source tree exists in this environment — see
+    /// `secret_seed.rs`'s own module doc for the same standing disclosure this project already
+    /// uses when it has to lean on public documentation instead of source): the tablet and its
+    /// four Cultists (two Archers, two Devotees) appear at the dungeon's entrance once Golem has
+    /// been defeated; they do **not** appear until Skeletron has also been defeated, because the
+    /// Old Man takes spawn priority over that exact spot — the same mutual exclusion
+    /// `tick_old_man` above already enforces the other way (it stops the moment `downed_boss3` is
+    /// set). Killing all four attendants is what raises the Lunatic Cultist, destroying the
+    /// tablet — already real and complete in `ai/boss/tablet.rs` and wired through to
+    /// `ai/mod.rs`'s `ritual_complete` handling; this function's only job is to put the tablet
+    /// itself on the ground so that machinery has something to run.
+    ///
+    /// **Reasoned, not independently sourced**: that the tablet stops reappearing once the
+    /// Lunatic Cultist has actually been killed (`downed_ancient_cultist`). Nothing read this
+    /// session states this explicitly, but it matches this file's own standing pattern of a
+    /// one-time boss-history flag permanently retiring its own spawn path — the same shape
+    /// `downed_boss3` already uses to retire the Old Man above — and the alternative, a tablet
+    /// that keeps reappearing at a dungeon whose Cultist fight is already finished, has no
+    /// support in anything read either.
+    fn tick_cultist_tablet(&mut self) {
+        use terrustia_proto::npc_params::{
+            CULTIST, CULTIST_ARCHER, CULTIST_DEVOTE, CULTIST_TABLET,
+        };
+
+        if !self.ticks.is_multiple_of(OLD_MAN_CHECK_INTERVAL) {
+            return;
+        }
+        let progress = self.world.progress;
+        if !progress.downed_golem || !progress.downed_boss3 || progress.downed_ancient_cultist {
+            return;
+        }
+        // The tablet, its four attendants, and the boss they raise all occupy the same spot the
+        // Old Man used to — never more than one of this whole chain on the ground at a time.
+        if self.npcs.iter().any(|(_, n)| {
+            matches!(
+                n.npc_type,
+                CULTIST_TABLET | CULTIST_DEVOTE | CULTIST_ARCHER | CULTIST
+            )
+        }) {
+            return;
+        }
+        let (Some(x), Some(y)) = (self.world.dungeon_x, self.world.dungeon_y) else {
+            return;
+        };
+        // Only bother once somebody is near enough to see it appear — the same reasoning
+        // `tick_old_man` above already uses for the same spot.
+        let watched = self.players.iter().flatten().any(|p| {
+            p.is_playing()
+                && (p.position.0 / crate::game::npc::TILE - x as f32).abs() < OLD_MAN_NOTICE
+        });
+        if !watched {
+            return;
+        }
+        let at = (x as f32 * 16.0, (y - 3) as f32 * 16.0);
+        if let Some(index) = self.npcs.spawn(CULTIST_TABLET, at) {
+            self.broadcast_npc(index);
+            info!(
+                x,
+                y, "the cultist tablet has appeared at the dungeon entrance"
+            );
+        }
+    }
+
     /// Turn the Old Man into Skeletron.
     ///
     /// He is not killed and Skeletron is not summoned beside him — he *becomes* it, which is why
@@ -10923,6 +10999,153 @@ impl GameServer {
             self.broadcast(frame, None);
         }
         debug!(x, y, "a plantera's bulb grew");
+    }
+
+    /// Real vanilla's Wall of Flesh trigger: a Guide Voodoo Doll destroyed by lava in the
+    /// Underworld while the Guide is alive. Called every tick from `tick_items` — see that
+    /// function's own call site.
+    ///
+    /// The Moon Lord acceptance-test bot (`examples/moonlord.rs`, task #37) found this was
+    /// entirely missing: npc 113 (Wall of Flesh) is absent from `npc_params::SUMMONABLE` on
+    /// purpose (see below), and nothing else in this file ever spawned it either — grepping for
+    /// its id, `voodoo`, `Voodoo` found only the *death*-side hardmode-transition flag already in
+    /// `note_boss_kill_inner`. Without a trigger, hardmode — and everything after it — was
+    /// unreachable through ordinary play.
+    ///
+    /// ## What is confirmed vs. what this project narrows
+    ///
+    /// **Confirmed**, read directly this session from `terraria.wiki.gg`'s own "Wall of Flesh" and
+    /// "Guide Voodoo Doll" pages (no decompiled source tree exists in this environment — see
+    /// `secret_seed.rs`'s own module doc for the same standing disclosure this project already
+    /// uses when it has to lean on public documentation instead of source): the doll must be
+    /// destroyed by lava while it is in the Underworld; the Guide must be alive beforehand and
+    /// dies as a direct result of the doll burning (not the other way around — the doll does not
+    /// need the Guide to be nearby, only alive somewhere); at least one player must be in the
+    /// Underworld; the boss then spawns off whichever edge of the map is nearer to where the doll
+    /// burned and walks inward. This is also *why* npc 113 is deliberately absent from
+    /// `SUMMONABLE`: real vanilla never lets the Wall of Flesh be quick-summoned through the
+    /// ordinary boss-item packet the way an Eye of Cthulhu or King Slime can be — adding it there
+    /// would be a real behavioural addition vanilla does not have, not a fix. The Guide Voodoo
+    /// Doll's own internal item id — 267 — is confirmed the same way (the wiki's own infobox
+    /// states it directly; cross-checked against a second, independent page,
+    /// `terrariachecklist.com/item/267`, whose own URL slug agrees).
+    ///
+    /// **Narrowed, and disclosed rather than silently approximated**, because this project's own
+    /// item-entity physics (`world/items.rs`) has real position and real gravity, but no liquid
+    /// awareness at all — `items::fall`'s own `blocked` test only asks whether a tile is solid, so
+    /// an item dropped over lava today falls straight through it with no buoyancy or immersion of
+    /// any kind. Building a full float-on-liquid simulation just for this one item would be a
+    /// large undertaking disproportionate to this fix (this project's own standing preference —
+    /// see `plan.md`'s Tier 2 "narrow, purpose-built implementation" notes — is a narrower,
+    /// disclosed trigger over either fabricating physics vanilla's own item class has but this
+    /// codebase doesn't, or leaving the progression blocker unfixed):
+    /// - "Touches lava" is read the tile at the item's own position, sampled every tick — the same
+    ///   shape `tick_shimmer` already uses to ask "is this item in shimmer" for its own liquid,
+    ///   the closest existing precedent in this codebase, rather than a dedicated buoyancy
+    ///   simulation. An item falling *through* a lava tile on its way to the floor beneath it
+    ///   (this generator's own items have no buoyancy to stop them floating on the surface) still
+    ///   satisfies this on the tick it passes through, which is a real, if narrower, sense of
+    ///   "touches lava" than vanilla's own floating-on-the-surface one.
+    /// - "In the Underworld" reuses the exact `height() - 200` boundary this file's own
+    ///   `on_server_teleport` and `world/bulbs.rs`'s own `UNDERWORLD` constant already use for the
+    ///   same question — not a new threshold invented for this fix.
+    /// - "At least one player is in the Underworld" is not tracked as an independent, separate
+    ///   check on player position — a player had to physically carry the doll there to drop it in
+    ///   the first place, so requiring the *doll itself* to be in the Underworld stands in for it.
+    ///   Disclosed as an inferred substitute for vanilla's own distinct check, not a re-derivation
+    ///   of it: a doll that somehow ended up in underworld lava with no player nearby (for
+    ///   instance, swept there by an unrelated mechanic) would trigger this where real vanilla
+    ///   would not.
+    /// - Vanilla's exact off-screen spawn distance is not reproduced pixel-for-pixel; this spawns
+    ///   the boss from the nearer world edge instead (matching the wiki's own "closer to the left
+    ///   edge, comes from the left" rule for *which side*) and lets `ai/boss/wall.rs`'s own AI —
+    ///   "its opening direction is toward whoever woke it" — pick which way it walks from there,
+    ///   since that already does not depend on the exact vanilla spawn offset to behave correctly.
+    fn tick_wall_of_flesh_trigger(&mut self) {
+        const GUIDE_VOODOO_DOLL: i32 = 267;
+
+        if self.world.progress.hard_mode || self.items.is_empty() {
+            return;
+        }
+
+        let mut burned: Vec<(i16, (f32, f32))> = Vec::new();
+        {
+            let world = &self.world;
+            let underworld_from = world.height() - 200;
+            for (index, item) in self.items.iter() {
+                if item.item.id != GUIDE_VOODOO_DOLL {
+                    continue;
+                }
+                let x =
+                    ((item.position.0 + crate::world::items::ITEM_SIZE / 2.0) / TILE_SIZE) as i32;
+                let y =
+                    ((item.position.1 + crate::world::items::ITEM_SIZE / 2.0) / TILE_SIZE) as i32;
+                if y < underworld_from {
+                    continue;
+                }
+                let tile = world.tile(x, y);
+                if tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Lava {
+                    burned.push((index, item.position));
+                }
+            }
+        }
+
+        for (index, at) in burned {
+            if self.summon_wall_of_flesh(at) {
+                self.items.remove(index);
+                if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+                    self.broadcast(frame, None);
+                }
+            }
+        }
+    }
+
+    /// The Guide dies with the doll, and the Wall rises to replace him — see
+    /// `tick_wall_of_flesh_trigger`'s own doc comment for the full disclosure of what is real
+    /// vanilla behaviour here versus this project's own narrowing.
+    ///
+    /// Returns whether it actually happened, so the caller knows whether to consume the doll that
+    /// triggered it: real vanilla always destroys a Voodoo Doll that burns in lava, but this
+    /// project has no general "items burn in lava" mechanic to fall back on if the trigger did
+    /// not actually fire (hardmode already begun, no Guide alive) — so a doll that cannot do
+    /// anything is left alone rather than silently vanishing for no visible reason.
+    fn summon_wall_of_flesh(&mut self, at: (f32, f32)) -> bool {
+        const WALL_OF_FLESH: u16 = 113;
+
+        if self.world.progress.hard_mode {
+            return false;
+        }
+        if self.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH) {
+            return false;
+        }
+        let guide = self
+            .npcs
+            .iter()
+            .find(|(_, n)| n.npc_type == GUIDE && n.is_alive())
+            .map(|(index, _)| index);
+        let Some(guide_index) = guide else {
+            debug!("a voodoo doll burned in the underworld, but no guide is alive to die with it");
+            return false;
+        };
+
+        self.npcs.remove(guide_index);
+        self.broadcast_npc_death(guide_index);
+
+        let width = self.world.width() as f32 * TILE_SIZE;
+        let spawn_x = if at.0 < width / 2.0 { 0.0 } else { width };
+        let spawn_at = (spawn_x, at.1);
+        if let Some(index) = self.npcs.spawn(WALL_OF_FLESH, spawn_at) {
+            let name = self
+                .npcs
+                .get(index)
+                .map(|n| n.stats.name)
+                .unwrap_or("Something");
+            let who = NetworkText::key(format!("NPCName.{name}"), Vec::new());
+            self.announce_key("Announcement.HasAwoken", vec![who]);
+            self.broadcast_npc(index);
+            info!(x = spawn_at.0, y = spawn_at.1, "the Wall of Flesh rises");
+        }
+        true
     }
 
     /// Wake a boss that has no summon item, from the tile that was its only door.
@@ -13194,5 +13417,290 @@ mod panel_admin_events {
         );
 
         assert_eq!(GameServer::equipped_items(&player), vec![42]);
+    }
+}
+
+/// The Lunatic Cultist's tablet (npc 437) — real vanilla places it at the dungeon entrance once
+/// Golem is down, the same "periodic server-side check" shape `tick_old_man` already uses to keep
+/// Skeletron reachable. Before this fix, nothing anywhere ever called `self.npcs.spawn` with npc
+/// 437 at all — the Moon Lord acceptance-test bot's own finding (task #37), confirmed by direct
+/// inspection: `CULTIST_TABLET` was a named constant nothing referenced as a spawn trigger. Every
+/// test below fails on the unfixed code (no `tick_cultist_tablet` to call at all) and passes once
+/// it exists and is wired into the tick loop.
+#[cfg(test)]
+mod cultist_tablet_trigger {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::npc_params::CULTIST_TABLET;
+
+    fn dungeon_world() -> crate::world::World {
+        let mut world = crate::world::World::empty(200, 150, "cultist tablet probe");
+        world.dungeon_x = Some(100);
+        world.dungeon_y = Some(50);
+        world
+    }
+
+    /// A playing player standing right at the dungeon entrance — near enough for
+    /// `tick_cultist_tablet`'s own "somebody has to be there to see it" check, the same reasoning
+    /// `tick_old_man` already uses for the same spot.
+    fn seat_player_at_the_dungeon(server: &mut GameServer) {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        player.state = ConnState::Playing;
+        player.position = (100.0 * TILE_SIZE, 50.0 * TILE_SIZE);
+        server.players[0] = Some(player);
+    }
+
+    #[test]
+    fn the_tablet_appears_once_golem_and_skeletron_are_both_down() {
+        let mut server = GameServer::new(Config::default(), dungeon_world());
+        seat_player_at_the_dungeon(&mut server);
+        server.world.progress.downed_golem = true;
+        server.world.progress.downed_boss3 = true;
+
+        server.tick_cultist_tablet();
+
+        assert!(
+            server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == CULTIST_TABLET),
+            "the tablet should have appeared at the dungeon entrance"
+        );
+    }
+
+    /// Golem alone is not enough — real vanilla's own documented gate (`terraria.wiki.gg`'s
+    /// "Cultists" page: the Old Man takes spawn priority over the same spot until Skeletron is
+    /// down), and the same mutual exclusion `tick_old_man` above already enforces the other way.
+    #[test]
+    fn no_tablet_while_skeletron_is_still_undefeated() {
+        let mut server = GameServer::new(Config::default(), dungeon_world());
+        seat_player_at_the_dungeon(&mut server);
+        server.world.progress.downed_golem = true;
+        server.world.progress.downed_boss3 = false;
+
+        server.tick_cultist_tablet();
+
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == CULTIST_TABLET),
+            "Golem alone should not be enough"
+        );
+    }
+
+    #[test]
+    fn no_tablet_before_golem_is_down() {
+        let mut server = GameServer::new(Config::default(), dungeon_world());
+        seat_player_at_the_dungeon(&mut server);
+        server.world.progress.downed_boss3 = true;
+        server.world.progress.downed_golem = false;
+
+        server.tick_cultist_tablet();
+
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == CULTIST_TABLET)
+        );
+    }
+
+    /// Once the Lunatic Cultist has actually been beaten, the tablet does not return — this
+    /// project's own reasoned assumption (disclosed in `tick_cultist_tablet`'s own doc comment),
+    /// mirroring how `downed_boss3` already permanently retires the Old Man above.
+    #[test]
+    fn no_tablet_once_the_cultist_is_already_downed() {
+        let mut server = GameServer::new(Config::default(), dungeon_world());
+        seat_player_at_the_dungeon(&mut server);
+        server.world.progress.downed_golem = true;
+        server.world.progress.downed_boss3 = true;
+        server.world.progress.downed_ancient_cultist = true;
+
+        server.tick_cultist_tablet();
+
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == CULTIST_TABLET)
+        );
+    }
+
+    /// Nobody standing nearby to see it appear — the same reasoning `tick_old_man` already
+    /// applies to the Old Man's own arrival.
+    #[test]
+    fn no_tablet_with_nobody_watching() {
+        let mut server = GameServer::new(Config::default(), dungeon_world());
+        server.world.progress.downed_golem = true;
+        server.world.progress.downed_boss3 = true;
+
+        server.tick_cultist_tablet();
+
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == CULTIST_TABLET)
+        );
+    }
+}
+
+/// The Wall of Flesh's real vanilla trigger: a Guide Voodoo Doll destroyed by lava in the
+/// Underworld while the Guide is alive. Before this fix, no packet a real client could ever send
+/// spawned npc 113 at all — the Moon Lord acceptance-test bot's own finding (task #37), confirmed
+/// by direct inspection: npc 113 is (deliberately) absent from `npc_params::SUMMONABLE`, and
+/// nothing else in this file spawned it either. Every test below fails on the unfixed code (no
+/// `tick_wall_of_flesh_trigger` to call at all) and passes once it exists and is wired into
+/// `tick_items`.
+#[cfg(test)]
+mod wall_of_flesh_trigger {
+    use super::*;
+    use crate::config::Config;
+
+    /// Real vanilla's Guide Voodoo Doll item id, confirmed via `terraria.wiki.gg`'s own infobox —
+    /// see `tick_wall_of_flesh_trigger`'s own doc comment for the full citation.
+    const GUIDE_VOODOO_DOLL: i32 = 267;
+    const GUIDE: u16 = 22;
+    const WALL_OF_FLESH: u16 = 113;
+
+    fn underworld_world() -> crate::world::World {
+        crate::world::World::empty(200, 400, "wall of flesh probe")
+    }
+
+    /// A tile of lava well within the underworld's own `height() - 200` band — the same threshold
+    /// `bulbs.rs`'s own `UNDERWORLD` constant and `on_server_teleport`'s own inline arithmetic
+    /// already use for the same question.
+    fn put_lava_in_the_underworld(server: &mut GameServer) -> (i32, i32) {
+        let x = 50;
+        let y = server.world.height() - 50;
+        server.world.set_tile(
+            x,
+            y,
+            Tile::AIR.with_liquid(terrustia_proto::Liquid::Lava, 255),
+        );
+        (x, y)
+    }
+
+    #[test]
+    fn a_guide_voodoo_doll_burning_in_underworld_lava_spawns_the_wall_and_kills_the_guide() {
+        let mut server = GameServer::new(Config::default(), underworld_world());
+        server.npcs.spawn(GUIDE, (500.0, 500.0)).expect("a slot");
+        let (x, y) = put_lava_in_the_underworld(&mut server);
+        server
+            .items
+            .spawn(
+                ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
+                (x as f32 * TILE_SIZE, y as f32 * TILE_SIZE),
+            )
+            .expect("an item slot");
+
+        server.tick_wall_of_flesh_trigger();
+
+        assert!(
+            server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH),
+            "the Wall of Flesh should have risen"
+        );
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == GUIDE && n.is_alive()),
+            "the guide should have died with the doll"
+        );
+        assert!(
+            server.items.is_empty(),
+            "the doll should have burned up in the process"
+        );
+    }
+
+    /// The Guide must be alive beforehand — real vanilla's own confirmed requirement. Left
+    /// narrowly disclosed here: without a general "items burn in lava" mechanic, a doll that
+    /// cannot trigger anything is left alone rather than silently destroyed for no visible
+    /// reason — see `summon_wall_of_flesh`'s own doc comment.
+    #[test]
+    fn nothing_happens_without_a_guide_alive() {
+        let mut server = GameServer::new(Config::default(), underworld_world());
+        let (x, y) = put_lava_in_the_underworld(&mut server);
+        let index = server
+            .items
+            .spawn(
+                ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
+                (x as f32 * TILE_SIZE, y as f32 * TILE_SIZE),
+            )
+            .expect("an item slot");
+
+        server.tick_wall_of_flesh_trigger();
+
+        assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH));
+        assert!(
+            server.items.get(index).is_some(),
+            "left alone, since it could not trigger anything"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_item_burning_in_the_same_lava_does_nothing() {
+        let mut server = GameServer::new(Config::default(), underworld_world());
+        server.npcs.spawn(GUIDE, (500.0, 500.0)).expect("a slot");
+        let (x, y) = put_lava_in_the_underworld(&mut server);
+        server
+            .items
+            .spawn(
+                ItemStack::new(1, 1, 0), // not the doll
+                (x as f32 * TILE_SIZE, y as f32 * TILE_SIZE),
+            )
+            .expect("an item slot");
+
+        server.tick_wall_of_flesh_trigger();
+
+        assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH));
+    }
+
+    /// The doll has to be in the Underworld itself, not merely in lava somewhere else in the
+    /// world — matching real vanilla's own location requirement.
+    #[test]
+    fn a_doll_burning_outside_the_underworld_does_nothing() {
+        let mut server = GameServer::new(Config::default(), underworld_world());
+        server.npcs.spawn(GUIDE, (500.0, 500.0)).expect("a slot");
+        let (x, y) = (50, 10); // the surface, not the underworld
+        server.world.set_tile(
+            x,
+            y,
+            Tile::AIR.with_liquid(terrustia_proto::Liquid::Lava, 255),
+        );
+        server
+            .items
+            .spawn(
+                ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
+                (x as f32 * TILE_SIZE, y as f32 * TILE_SIZE),
+            )
+            .expect("an item slot");
+
+        server.tick_wall_of_flesh_trigger();
+
+        assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH));
+    }
+
+    /// Once hardmode has already begun there is nothing left for this trigger to do — matching
+    /// `note_boss_kill_inner`'s own `if !p.hard_mode` guard on the death side.
+    #[test]
+    fn nothing_happens_once_hardmode_has_already_begun() {
+        let mut server = GameServer::new(Config::default(), underworld_world());
+        server.npcs.spawn(GUIDE, (500.0, 500.0)).expect("a slot");
+        server.world.progress.hard_mode = true;
+        let (x, y) = put_lava_in_the_underworld(&mut server);
+        server
+            .items
+            .spawn(
+                ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
+                (x as f32 * TILE_SIZE, y as f32 * TILE_SIZE),
+            )
+            .expect("an item slot");
+
+        server.tick_wall_of_flesh_trigger();
+
+        assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH));
     }
 }
