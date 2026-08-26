@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: bybrooklyn.terrustia
+PackageVersion: 0.0.1
+PackageLocale: en-US
+Publisher: bybrooklyn
+PublisherUrl: https://github.com/bybrooklyn
+PublisherSupportUrl: https://github.com/bybrooklyn/terrustia/issues
+PackageName: terrustia
+PackageUrl: https://github.com/bybrooklyn/terrustia
+License: AGPL-3.0-or-later
+LicenseUrl: https://github.com/bybrooklyn/terrustia/blob/master/LICENSE
+ShortDescription: An async Terraria 1.4.5.8 dedicated server, written from scratch in Rust
+Description: |-
+  terrustia is a from-scratch, clean-room reimplementation of the Terraria 1.4.5.8 dedicated
+  server, transcribed from a legally-obtained decompiled reference rather than derived from
+  Re-Logic's own source. It speaks the real protocol (release 326) to a real Terraria client,
+  reads and writes real .wld world files, and is built to point at a world you already own and
+  serve it — not to grow trees for you. Not affiliated with Re-Logic.
+Moniker: terrustia
+Tags:
+- terraria
+- game-server
+- dedicated-server
+- rust
+ReleaseNotesUrl: https://github.com/bybrooklyn/terrustia/releases/tag/v0.0.1
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

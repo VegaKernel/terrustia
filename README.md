@@ -155,10 +155,12 @@ in `plan.md` but not yet started.
 |---|---|---|
 | ✅ | Decode path cannot panic or over-allocate | One `unsafe` block in the workspace, for the CPU clock |
 | ✅ | A panic on the packet path saves the world and exits non-zero | So `Restart=on-failure` fires |
+| ✅ | A real `SIGTERM` actually stops the server, with a real shutdown save | Found by hand while verifying `packaging/terrustia.service`: the web panel's supervisor task held its own clone of the shutdown channel forever, so the game loop never actually noticed a signal — it kept ticking and autosaving indefinitely. `packaging/terrustia.service`'s own `TimeoutStopSec=90` would eventually have masked this with a hard kill |
 | ✅ | Connection ceiling, per-address cap, handshake deadline | |
 | ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
 | ✅ | Server claim requires a console token | |
 | ✅ | `/world undo <player> <duration>` | Admin-only grief recovery, up to 72h back. In-memory and time-windowed on purpose — does not survive a restart, and only covers `on_tile_manipulation` edits (not the wire tool's bulk drag-paint); both disclosed in `tile_log.rs`'s own doc comment |
+| ✅ | `terrustia update`: check-and-notify on boot, signature-verified, manual apply | Console log plus an in-game notice to the first admin who signs in after one is found. Verification shells out to the real `cosign` binary against the same keyless GitHub Actions signing chain `release.yml` already signs with — no separate trust root. Applying is always a deliberate `terrustia update`, never automatic |
 | ⬜ | Server-authoritative inventory and damage | Vanilla trusts the client for both; diverging would change how the game plays |
 
 ### Platforms
@@ -186,6 +188,53 @@ Then in Terraria: **Multiplayer → Join via IP → `127.0.0.1`**, port `7777`.
 
 Configuration is optional; `terrustia.toml` in the working directory overrides the defaults. See
 `terrustia.toml.example`. `TERRUSTIA_LOG=debug` raises the log level.
+
+## Hosting and setup
+
+No single "the" easy path — Docker, a native binary behind systemd, and OS packages (Homebrew,
+winget, AUR) are all documented and supported equally; see [Packaging](#packaging) below.
+
+- **`terrustia --setup`** runs a short interactive wizard (dedicated config directory, world name,
+  max players, whether to turn the web panel on) and starts the server with what it wrote. It also
+  runs automatically on a first, zero-flag launch when the working directory is the same directory
+  the executable itself is in and nothing terrustia-shaped is there yet — the shape a raw binary
+  double-clicked right out of `~/Downloads` actually has. Plain `terrustia` with no flags, run from
+  anywhere else, is unchanged: still the original non-interactive "generate a world and serve it."
+  The wizard's dedicated directory is refused outright if anything is already in it, and the world
+  itself is generated into the platform's own Terraria world directory (the same place `--new`
+  writes to) — never beside the executable, so double-clicking the raw binary can never scatter a
+  world file and a config into wherever it happened to land.
+- **Environment variables** configure everything a `terrustia.toml` can, for Docker/automation use
+  where there is often no shell around the process to pass a flag and no volume mount to put a file
+  on: `TERRUSTIA_LISTEN`, `TERRUSTIA_MAX_PLAYERS`, `TERRUSTIA_WORLD_NAME`, `TERRUSTIA_PANEL_ENABLED`,
+  and so on — every key in `terrustia.toml.example` has a `TERRUSTIA_<UPPERCASE_KEY>` equivalent.
+  Precedence is defaults < `terrustia.toml` < environment < an explicit CLI flag.
+- **UPnP**: on startup, terrustia asks the router to forward the game port automatically (the same
+  thing AstroLauncher does for its own server launcher). When no UPnP-capable router answers, or it
+  refuses, this logs a specific fallback message naming the port and the local address to forward
+  it to by hand — never a fatal error. Set `upnp_enabled = false` (or `TERRUSTIA_UPNP_ENABLED=false`)
+  to turn it off entirely. This has nothing to do with the web panel, which stays bound to loopback
+  regardless — see `panel_listen` above.
+- **`terrustia update`**: on boot, terrustia checks GitHub for a newer, signature-verified release
+  and says so — console log, plus an in-game notice to the first recognised admin who signs in
+  afterward. Applying it is a separate, deliberate step: run `terrustia update` yourself. It shells
+  out to the real `cosign` binary, checking the exact same keyless GitHub Actions signing chain
+  described below in [Platforms](#platforms) — no separate trust root.
+
+## Packaging
+
+| Target | Where | Status |
+|---|---|---|
+| Homebrew | `packaging/homebrew/terrustia.rb` | Builds from source with `cargo install`. `brew style` clean; verified with a real `cargo install --path crates/terrustia` build. `brew audit`/`brew install --build-from-source` could not run in this environment specifically — its Xcode Command Line Tools are below Homebrew's own required minimum, a system-level fix this session did not make unilaterally on a machine shared with other work in progress |
+| systemd | `packaging/terrustia.service` | Verified by running the unit's literal `ExecStart` command and sending it the exact `SIGTERM` its `KillSignal` names — which is how this session found and fixed a real, severe shutdown deadlock (see the Hardening table above) |
+| Docker | `Dockerfile`, `.github/workflows/docker.yml` | Multi-arch image, cosign-signed. `HEALTHCHECK` already present in the Dockerfile (pre-existing). Could not exercise it live this session — see plan.md for why |
+| winget | `packaging/winget/manifests/...` | Validated against the real, current (1.12.0) JSON schemas from `microsoft/winget-cli` — all three manifests pass structurally. Publishing needs a PR into `microsoft/winget-pkgs`, which needs a maintainer account this session does not have |
+| AUR | `packaging/aur/PKGBUILD` | Builds from source with `cargo`, matching Arch's own Rust package guidelines; `shellcheck`-clean. `makepkg`/`namcap` need a real Arch environment this session's Docker attempt could not complete — see plan.md. Publishing needs an AUR account this session does not have |
+
+Every `url`/checksum above that points at a `v0.0.1` release asset is a disclosed placeholder —
+that tag does not exist yet (see plan.md). Each package was verified as far as this environment
+allows without it; see plan.md's own packaging row for exactly what was and wasn't possible to run
+for real.
 
 ## Layout
 

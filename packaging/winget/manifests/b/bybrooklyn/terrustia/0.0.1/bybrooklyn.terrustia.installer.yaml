@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+#
+# `terrustia` ships on Windows as a plain `.zip` containing a standalone `.exe` — no installer
+# wizard, matching this project's own "point it at a world and go" design everywhere else.
+# `InstallerType: zip` + `NestedInstallerType: portable` is exactly the shape a real, current
+# winget-pkgs manifest uses for the same situation (checked against BurntSushi.ripgrep.MSVC's real
+# manifest, which ships the same way). `terrustia --setup`/env-var config (see README) works the
+# same after a winget install as anywhere else — winget has no opinion on that.
+#
+# `InstallerSha256` below is a disclosed placeholder: `release.yml`'s `v0.0.1` tag does not exist
+# yet (plan.md's own Block B still lists tagging it as open work), so there is no real
+# `terrustia-v0.0.1-x86_64-pc-windows-msvc.zip` to hash. Fill this in with the real
+# `sha256sum`/`Get-FileHash` output — or better, the matching line straight out of the release's
+# own cosign-verified `SHA256SUMS` — once that tag exists.
+
+PackageIdentifier: bybrooklyn.terrustia
+PackageVersion: 0.0.1
+InstallerType: zip
+NestedInstallerType: portable
+Installers:
+- Architecture: x64
+  NestedInstallerFiles:
+  - RelativeFilePath: terrustia-v0.0.1-x86_64-pc-windows-msvc/terrustia.exe
+    PortableCommandAlias: terrustia
+  InstallerUrl: https://github.com/bybrooklyn/terrustia/releases/download/v0.0.1/terrustia-v0.0.1-x86_64-pc-windows-msvc.zip
+  # TODO: replace once v0.0.1 is tagged and this asset actually exists — see the note above.
+  # Schema requires 64 hex chars; deliberately all zeros so it's unmistakably a placeholder rather
+  # than a plausible-looking fake hash. Replace with the real value once v0.0.1 exists.
+  InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+ManifestType: installer
+ManifestVersion: 1.12.0

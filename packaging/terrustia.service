@@ -1,6 +1,6 @@
 [Unit]
 Description=terrustia, a Terraria server
-Documentation=https://github.com/brooklyn/terrustia
+Documentation=https://github.com/bybrooklyn/terrustia
 After=network-online.target
 Wants=network-online.target
 

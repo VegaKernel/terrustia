@@ -1,4 +1,10 @@
 # Copy to terrustia.toml to override the defaults. Every key is optional.
+#
+# No file at all is also a valid way to configure this: every key below has a
+# TERRUSTIA_<UPPERCASE_KEY> environment variable equivalent (TERRUSTIA_LISTEN,
+# TERRUSTIA_MAX_PLAYERS, TERRUSTIA_WORLD_NAME, ...) for Docker/automation use, where there is
+# often no shell around the process to pass a --flag and no volume mount to put a file on.
+# Precedence is defaults < this file < environment < an explicit CLI flag.
 
 listen = "0.0.0.0:7777"
 max_players = 8
@@ -40,3 +46,9 @@ idle_timeout_secs = 60
 # creates.
 panel_enabled = false
 panel_listen = "127.0.0.1:7778"
+
+# Check GitHub for a newer, signature-verified release on boot, and say so — console log, plus an
+# in-game notice to the first recognised admin who signs in afterward. Applying it is always a
+# separate, manual `terrustia update`; this only checks and notifies. Turn off for an air-gapped
+# host, or to stop this server from talking to GitHub at all.
+update_check_enabled = true

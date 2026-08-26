@@ -1,0 +1,56 @@
+# Maintainer: (needs a real AUR account to submit — see plan.md's packaging row for what this
+# environment could and couldn't verify without one)
+#
+# Builds from source with cargo, matching Arch's own Rust package guidelines
+# (https://wiki.archlinux.org/title/Rust_package_guidelines) rather than downloading a prebuilt
+# binary — a `-bin` variant of this package is a reasonable thing for someone with an AUR account
+# to add later, but the canonical `terrustia` name should build from source the way `ripgrep` and
+# most other real Rust AUR packages do.
+#
+# `url`/`source`/`sha256sums` below point at the `v0.0.1` release tag, which does not exist yet —
+# plan.md's own Block B still lists tagging it as open work — so the checksum cannot be computed
+# for real until it does; the placeholder is disclosed, not hidden.
+#
+# What *was* verified in this session, disclosed plainly rather than overclaimed: `bash -n` (valid
+# syntax) and `shellcheck --shell=bash` (clean past PKGBUILD's own special-variable false
+# positives — `pkgname`/`arch`/`pkgdir` and friends are read by `makepkg` itself, not this script,
+# which shellcheck has no way to know), plus the real `cargo build --release -p terrustia` this
+# file's own `build()` runs — confirmed working directly, the same command exercised for the
+# Homebrew formula above. `makepkg --printsrcinfo`/`namcap`/an actual `makepkg` build all need a
+# real Arch environment this macOS session does not have; a Docker-based attempt to get one is
+# recorded in plan.md, including why it did not complete.
+
+pkgname=terrustia
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="An async Terraria 1.4.5.8 dedicated server, written from scratch in Rust"
+arch=('x86_64' 'aarch64')
+url="https://github.com/bybrooklyn/terrustia"
+license=('AGPL-3.0-or-later')
+depends=('gcc-libs')
+makedepends=('cargo')
+backup=('etc/terrustia/terrustia.toml')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/bybrooklyn/terrustia/archive/refs/tags/v$pkgver.tar.gz")
+# TODO: replace once v0.0.1 is tagged and this tarball actually exists.
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+prepare() {
+  cd "terrustia-$pkgver" || exit
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "terrustia-$pkgver" || exit
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p terrustia
+}
+
+package() {
+  cd "terrustia-$pkgver" || exit
+  install -Dm755 "target/release/terrustia" "$pkgdir/usr/bin/terrustia"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "terrustia.toml.example" "$pkgdir/usr/share/doc/$pkgname/terrustia.toml.example"
+  install -Dm644 "packaging/terrustia.service" "$pkgdir/usr/lib/systemd/system/terrustia.service"
+}

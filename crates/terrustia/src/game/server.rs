@@ -940,6 +940,14 @@ pub struct GameServer {
     /// Journey mode's shared toggles. See [`crate::game::journey`]'s own module doc for which
     /// powers this covers and, just as importantly, which fifteen-minus-eleven it does not yet.
     journey: crate::game::journey::JourneyPowers,
+    /// Set by `main`'s background `update::boot_check` task once it finds a newer, signature-
+    /// verified release; taken (delivered, then cleared) the first time a recognised admin signs
+    /// in afterward, in [`Self::note_finished_auth`]. `None` in every test that never calls
+    /// [`Self::with_update_notice`] — the sign-in path still works in that case, it just has
+    /// nothing to hand over. An `Arc<Mutex<..>>` for the same reason `pending_world_switch` above
+    /// is one: `main` needs to keep writing to it from outside after `self` is moved into the
+    /// spawned game task, so a handle cloned out before that move is the only way in.
+    update_notice: Option<Arc<Mutex<Option<String>>>>,
 }
 
 impl GameServer {
@@ -1047,6 +1055,7 @@ impl GameServer {
             panel_toggle: None,
             pending_world_switch: Arc::new(Mutex::new(None)),
             journey: crate::game::journey::JourneyPowers::default(),
+            update_notice: None,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -1070,6 +1079,14 @@ impl GameServer {
     /// them have no use for, just to construct a server at all.
     pub fn with_panel_toggle(mut self, toggle: mpsc::UnboundedSender<()>) -> Self {
         self.panel_toggle = Some(toggle);
+        self
+    }
+
+    /// Wires up the handle `main`'s background `update::boot_check` task writes a message into
+    /// once it finds a newer, signature-verified release. Builder-style for the same reason as
+    /// [`Self::with_panel_toggle`] just above — most call sites have no use for one.
+    pub fn with_update_notice(mut self, notice: Arc<Mutex<Option<String>>>) -> Self {
+        self.update_notice = Some(notice);
         self
     }
 
@@ -1632,12 +1649,30 @@ impl GameServer {
                         let group = self.admin.group_of(slot).name.clone();
                         self.tell(slot, &format!("signed in as {account} ({group})."));
                         info!(slot, account, "signed in");
+                        self.notify_update_if_pending(slot);
                     } else {
                         // One message for both, so it does not say which accounts exist.
                         self.tell(slot, "that name and password do not go together.");
                     }
                 }
             }
+        }
+    }
+
+    /// Hands `slot` the pending update notice, if there is one and `slot` just signed in with the
+    /// `Admin` permission — "the first recognised admin who connects" from `update`'s own module
+    /// doc. `.take()` on the shared cell delivers it exactly once, to whoever this turns out to
+    /// be; every sign-in after that finds the cell already empty and says nothing.
+    fn notify_update_if_pending(&mut self, slot: u8) {
+        if !self.admin.may(slot, crate::admin::Permission::Admin) {
+            return;
+        }
+        let Some(handle) = &self.update_notice else {
+            return;
+        };
+        let message = handle.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(message) = message {
+            self.tell(slot, &message);
         }
     }
 

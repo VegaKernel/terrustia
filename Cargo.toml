@@ -77,6 +77,31 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # on the frontend without a full `cargo build`. See `panel/mod.rs`'s doc comment for the pattern,
 # referenced from `../alchemist`'s own `src/server/mod.rs`.
 rust-embed = { version = "8", features = ["axum"] }
+# `terrustia update`'s one HTTP client: a single blocking GET against the GitHub releases API and
+# a couple of small release assets, run inside `spawn_blocking` rather than on the game task. This
+# is deliberately not `reqwest` — that pulls in hyper, h2 and an async client stack for a job that
+# is one request at a time, at most once a boot; `ureq`'s synchronous, rustls-backed client is the
+# whole dependency for the same job. Verification itself is not this crate's job at all: it shells
+# out to the real `cosign` binary, the same trust chain `release.yml` already signs releases with
+# (keyless, GitHub Actions OIDC) rather than re-implementing Sigstore bundle verification here.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+# UPnP IGD automatic port-mapping for the game port on startup (see `upnp.rs`) — the same job
+# AstroLauncher does for its own Terraria/Minecraft/Valheim server launcher. The actual protocol
+# (SSDP multicast discovery, then a SOAP call to whatever the router answers with) is exactly the
+# kind of "narrow, well-defined external protocol" this workspace otherwise hand-rolls — except
+# unlike TOML or the game's own wire format, there is no single specification to transcribe: real
+# router firmware disagrees on details in ways a compliant implementation already has to work
+# around, which is what this crate (an actively maintained fork of the original, now-unmaintained
+# `igd`) exists to have already sorted out. `aio_tokio` only, no separate blocking client needed.
+igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
+# `terrustia update`'s scratch directory for downloaded/extracted release files has to resist a
+# symlink/pre-creation attack from another local user on a shared machine — a predictable
+# `std::env::temp_dir().join(format!("...-{pid}"))` does not, since `create_dir_all` silently
+# reuses whatever (or whoever's) directory or symlink is already sitting at that name. This is the
+# one narrow job `tempfile` exists for — an unpredictable name, created atomically, 0700 on
+# Unix — and unlike everything else in this workspace, hand-rolling the atomicity/unpredictability
+# correctly is not worth it for something load-bearing for security.
+tempfile = "3"
 
 [profile.dev]
 opt-level = 1

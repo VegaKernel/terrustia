@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+#
+# The version manifest — one of three files winget-pkgs wants per release, laid out exactly the
+# way the real repository expects (manifests/<first-letter>/<publisher>/<package>/<version>/), so
+# this subtree can be copied straight into a PR against microsoft/winget-pkgs once there's a
+# maintainer with an account to open one. Structure and field shape checked against a real,
+# current manifest in that repository (BurntSushi.ripgrep.MSVC, schema 1.12.0) rather than guessed
+# from documentation alone — see plan.md for what was and wasn't possible to verify locally
+# without a Windows machine or a winget-pkgs PR to actually merge.
+
+PackageIdentifier: bybrooklyn.terrustia
+PackageVersion: 0.0.1
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.12.0

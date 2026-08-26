@@ -38,6 +38,15 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
+      # `update.rs`'s own tests shell out to a real `cosign` binary to sign and verify a fixture
+      # release end to end — the same verifier `terrustia update` and the boot-time check run in
+      # production, just with a locally generated key instead of a live OIDC token (see that
+      # module's own doc comment for why keyless signing itself cannot be minted in a test). Tests
+      # that need it skip themselves when it is missing rather than failing the build, but this
+      # makes "present" the real answer here, the same way `release.yml`/`docker.yml` already
+      # install it to *use* cosign rather than merely test around its absence.
+      - uses: sigstore/cosign-installer@v3
+
       - name: Formatting
         run: cargo fmt --all --check
 

@@ -26,6 +26,9 @@ tracing-subscriber.workspace = true
 crossterm.workspace = true
 axum.workspace = true
 rust-embed.workspace = true
+ureq.workspace = true
+tempfile.workspace = true
+igd-next.workspace = true
 
 [dev-dependencies]
 terrustia-client = { path = "../terrustia-client" }

@@ -33,6 +33,21 @@ async fn main() -> ExitCode {
         .with(filter)
         .init();
 
+    // `terrustia update` is a subcommand, not a flag: it does its own thing entirely (check
+    // GitHub, verify, download, apply) and never starts a server. Handled before `Args::parse`
+    // even sees the rest of the arguments, the same way a bare word ahead of any flag would
+    // otherwise just be reported as "unrecognised argument".
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.first().map(String::as_str) == Some("update") {
+        return match terrustia::update::run_update_command(&raw_args[1..]).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                error!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match run(palette).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -43,7 +58,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse(std::env::args().skip(1))?;
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = Args::parse(raw_args.iter().cloned())?;
     if args.help {
         print_usage(palette);
         return Ok(());
@@ -51,6 +67,19 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     if args.list_worlds {
         print_worlds();
         return Ok(());
+    }
+
+    // Opt-in-triggered, not the zero-flag default path: `--setup` always asks; a genuinely
+    // fresh, no-flags launch only asks when `should_auto_trigger` recognises the specific shape
+    // of "just downloaded the raw binary and ran it right where it landed" — see `setup.rs`'s own
+    // module doc for exactly what that check is and, just as importantly, is not. Either way this
+    // only ever changes which config file `--config` effectively points at from here on; every
+    // later precedence rule (environment, an explicit flag) keeps working unchanged.
+    if args.setup || terrustia::setup::should_auto_trigger(raw_args.is_empty()) {
+        let config_path = tokio::task::spawn_blocking(terrustia::setup::run_wizard)
+            .await
+            .map_err(|e| format!("the setup wizard panicked: {e}"))??;
+        args.config = config_path;
     }
 
     print!(
@@ -64,6 +93,10 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut config = Config::load(&args.config)?;
+    // Layered between the file and the CLI flags below, matching every other host convention:
+    // defaults < file < environment < explicit flag. Docker/automation-friendly config that needs
+    // no file on disk and no shell around the process to pass flags either.
+    config.apply_env()?;
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
@@ -182,14 +215,42 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let (panel_toggle_tx, panel_toggle_rx) = mpsc::unbounded_channel();
-    tokio::spawn(terrustia::panel::supervise(
+    // Handle kept and aborted below, alongside `accept`/`console` — this task holds its own clone
+    // of `events_tx` for as long as it runs (it has to, to start the panel on a later toggle), so
+    // leaving it unaborted here was a real, found-by-actually-testing-it deadlock: `main`'s own
+    // `drop(events_tx)` during shutdown was never actually the *last* sender while this task kept
+    // running, so the game task's `events.recv() => None => break` exit path could never fire, and
+    // a real SIGTERM sat there logging "shutting down" while the game loop kept ticking and
+    // autosaving forever, never actually stopping — exactly what `packaging/terrustia.service`'s
+    // `TimeoutStopSec=90` exists to eventually paper over with a hard kill, defeating the graceful
+    // shutdown save that whole unit is built around. Found by actually sending a real `SIGTERM` to
+    // a real running process while verifying that unit's `ExecStart` path, not by inspection.
+    let panel_supervisor = tokio::spawn(terrustia::panel::supervise(
         config.clone(),
         events_tx.clone(),
         panel_toggle_rx,
         initial_panel,
     ));
 
-    let game_server = GameServer::new(config.clone(), world).with_panel_toggle(panel_toggle_tx);
+    // Check-and-notify only, entirely in the background: never blocks startup, never downloads a
+    // full binary, never applies anything. `update_notice` is set at most once, by
+    // `update::boot_check`, and taken at most once — by the first recognised admin's login, in
+    // `game::server`'s `note_finished_auth` — see that field's own doc comment on `GameServer`.
+    let update_notice = std::sync::Arc::new(std::sync::Mutex::new(None));
+    if config.update_check_enabled {
+        tokio::spawn(terrustia::update::boot_check(update_notice.clone()));
+    }
+
+    // Also entirely background and non-fatal: a router with no UPnP, or none at all, logs a clear
+    // fallback message and moves on — see `upnp.rs`'s own module doc for the full behaviour. Never
+    // touches the panel's own bind, which stays loopback-only regardless of anything here.
+    if config.upnp_enabled {
+        tokio::spawn(terrustia::upnp::attempt(config.listen));
+    }
+
+    let game_server = GameServer::new(config.clone(), world)
+        .with_panel_toggle(panel_toggle_tx)
+        .with_update_notice(update_notice);
     // Cloned out before `run` consumes `game_server` — see the field's own doc comment in
     // `game::server` for why a shared cell, read only after the task ends, is how a world switch
     // requested from the panel reaches this function at all.
@@ -240,6 +301,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     accept.abort();
     console.abort();
+    panel_supervisor.abort();
     drop(events_tx);
     // Wait for the game task to finish. It saves the world on its way out, and returning here
     // without waiting would drop the runtime mid-write — which is a shutdown that quietly loses
@@ -432,6 +494,8 @@ struct Args {
     record: Option<PathBuf>,
     /// List the worlds Terraria has on this machine, and stop.
     list_worlds: bool,
+    /// Always run the interactive setup wizard — see `setup.rs`.
+    setup: bool,
     help: bool,
 }
 
@@ -446,6 +510,7 @@ impl Args {
             save: None,
             record: None,
             list_worlds: false,
+            setup: false,
             help: false,
         };
         let mut args = args.peekable();
@@ -472,6 +537,7 @@ impl Args {
                     parsed.new_world = Some(args.next().ok_or("--new needs a world name")?);
                 }
                 "--worlds" => parsed.list_worlds = true,
+                "--setup" => parsed.setup = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
@@ -536,6 +602,11 @@ fn print_usage(palette: Palette) {
             "Record every connection's bytes, for checking against a real client",
             "",
         ),
+        (
+            "    --setup",
+            "Interactive first-run wizard: writes a terrustia.toml and starts",
+            "",
+        ),
         ("-h, --help", "Show this message", ""),
     ];
 
@@ -544,7 +615,10 @@ fn print_usage(palette: Palette) {
         heading("terrustia"),
         note(&format!("an async Terraria {GAME_VERSION} server"))
     );
-    println!("{}\n    terrustia [OPTIONS]\n", heading("USAGE"));
+    println!(
+        "{}\n    terrustia [OPTIONS]\n    terrustia update [--check]\n",
+        heading("USAGE")
+    );
     println!("{}", heading("OPTIONS"));
     for (name, what, default) in options {
         let tail = if default.is_empty() {
@@ -563,6 +637,15 @@ fn print_usage(palette: Palette) {
         "    {} Turn colour off, or force it on through a pipe",
         flag(&format!("{:<32}", "NO_COLOR / CLICOLOR_FORCE"))
     );
+    println!(
+        "\n    {} config, no file needed — see terrustia.toml.example for every",
+        note("TERRUSTIA_<KEY> overrides")
+    );
+    println!(
+        "    key (TERRUSTIA_LISTEN, TERRUSTIA_MAX_PLAYERS, TERRUSTIA_WORLD_NAME, ...); a config \
+         file"
+    );
+    println!("    still wins if given, and a CLI flag wins over both.");
 }
 
 #[cfg(test)]
