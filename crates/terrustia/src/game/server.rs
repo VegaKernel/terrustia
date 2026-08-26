@@ -950,6 +950,8 @@ pub struct GameServer {
     update_notice: Option<Arc<Mutex<Option<String>>>>,
     /// The birthday party — see [`crate::game::party`]'s own module doc.
     party: crate::game::party::PartyState,
+    /// Slime Rain — see [`crate::game::slime_rain`]'s own module doc.
+    slime_rain: crate::game::slime_rain::SlimeRainState,
 }
 
 impl GameServer {
@@ -1059,6 +1061,7 @@ impl GameServer {
             journey: crate::game::journey::JourneyPowers::default(),
             update_notice: None,
             party: crate::game::party::PartyState::default(),
+            slime_rain: crate::game::slime_rain::SlimeRainState::default(),
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -1849,6 +1852,7 @@ impl GameServer {
         // since `tick_time`'s own loop already handles more than one day/night flip in one call.
         if !self.journey.freeze_time {
             self.world.tick_time(self.journey.time_rate());
+            self.tick_slime_rain();
         }
         // Dawn puts the moons away and takes the blood moon with them, and rolls for an eclipse.
         if self.world.day_time && !was_day {
@@ -4273,6 +4277,8 @@ impl GameServer {
         let mut data = self.world.world_data();
         data.flags
             .set_flag(WorldFlag::PartyIsUp, self.party.is_up());
+        data.flags
+            .set_flag(WorldFlag::SlimeRain, self.slime_rain.is_active());
         data
     }
 
@@ -7918,6 +7924,40 @@ impl GameServer {
         self.lunar.note_kill(npc_type);
         self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
+        self.note_slime_rain_kill(npc_type, center);
+    }
+
+    /// `DoDeathEvents_AdvanceSlimeRain`. Advances the kill count while a rain is up and, once the
+    /// threshold is reached, summons King Slime at the *closest* player to this kill
+    /// (`SpawnOnPlayer(closestPlayer.whoAmI, 50)`, real vanilla's own choice — not a random one).
+    fn note_slime_rain_kill(&mut self, npc_type: u16, center: (f32, f32)) {
+        let king_slime_present = self
+            .npcs
+            .iter()
+            .any(|(_, n)| n.npc_type == crate::game::slime_rain::KING_SLIME);
+        let summon = self.slime_rain.note_kill(
+            npc_type,
+            king_slime_present,
+            self.world.progress.downed_king_slime,
+        );
+        if !summon {
+            return;
+        }
+        let closest = self
+            .players
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, p)| p.as_ref().map(|p| (slot as u8, p)))
+            .filter(|(_, p)| p.is_playing())
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.position.0 - center.0).powi(2) + (a.position.1 - center.1).powi(2);
+                let db = (b.position.0 - center.0).powi(2) + (b.position.1 - center.1).powi(2);
+                da.total_cmp(&db)
+            })
+            .map(|(slot, _)| slot);
+        if let Some(slot) = closest {
+            self.summon_on_player(slot, crate::game::slime_rain::KING_SLIME);
+        }
     }
 
     /// Drop whatever an NPC was carrying.
@@ -9891,6 +9931,56 @@ impl GameServer {
         });
         if ended {
             self.announce("Party time's over!");
+            self.broadcast_world_data();
+        }
+    }
+
+    /// Slime Rain's own per-tick countdown, daily roll, and delayed start/stop announcement — see
+    /// `crate::game::slime_rain`'s own module doc. Unlike the birthday party's once-per-dawn roll,
+    /// `roll`'s own gate (`day_time && before_noon`) needs to catch the exact moment it becomes
+    /// true, so this runs every tick rather than only at dawn — the same reason real vanilla's own
+    /// `UpdateTime` checks it unconditionally too.
+    fn tick_slime_rain(&mut self) {
+        let rate = self.journey.time_rate();
+        self.slime_rain.tick(rate, &mut self.rng);
+
+        let other_events_busy = self.world.blood_moon
+            || self.world.eclipse
+            || self.moon.running()
+            || self.invasion.is_some()
+            || self.army.ongoing();
+        // `AnyPlayerReadyToFightKingSlime`'s own `statDefense > 8` half is not modelled — this
+        // server never tracks a player's own defense stat (only NPC/town-resident defense is
+        // server-authoritative; a player's is a client-computed value this project never
+        // receives), the same narrowing `start_invasion`'s own `life_max >= 200` qualifying check
+        // already made for a different event's readiness gate.
+        let someone_ready = self
+            .players
+            .iter()
+            .flatten()
+            .any(|p| p.is_playing() && p.life_max > 140);
+        self.slime_rain.roll(
+            self.slime_rain.is_active(),
+            self.world.day_time,
+            self.world.time < DAY_LENGTH / 2,
+            rate,
+            other_events_busy,
+            self.world.progress.downed_king_slime,
+            self.world.progress.hard_mode,
+            someone_ready,
+            self.is_expert(),
+            &mut self.rng,
+        );
+
+        if let Some(now_active) = self.slime_rain.tick_warning() {
+            self.announce_key(
+                if now_active {
+                    "LegacyWorldGen.74"
+                } else {
+                    "LegacyWorldGen.75"
+                },
+                Vec::new(),
+            );
             self.broadcast_world_data();
         }
     }
@@ -12172,6 +12262,112 @@ mod party {
 
         server.on_hit_switch(0, &payload).unwrap();
         assert!(!server.party.manual, "and off again");
+    }
+}
+
+#[cfg(test)]
+mod slime_rain {
+    use super::*;
+    use crate::config::Config;
+    use rand::SeedableRng;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "slime rain probe")
+    }
+
+    /// `world_data`'s own `WorldFlag::SlimeRain` patch — real state, not left unwired the way
+    /// `PartyIsUp` sat before the birthday party landed.
+    #[test]
+    fn world_data_reflects_whether_a_rain_is_active() {
+        // `WorldFlag::SlimeRain` is byte 2, bit 2 (`packets.rs`'s own `position()`, private to
+        // that module) — read directly rather than via a setter-only API that has no matching
+        // getter.
+        let has_flag = |server: &GameServer| server.world_data().flags.0[2] & (1 << 2) != 0;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        assert!(!has_flag(&server));
+        server.slime_rain.timer = 100;
+        assert!(has_flag(&server));
+    }
+
+    /// `tick_slime_rain`'s own daily-roll wiring, driven through a real server rather than
+    /// `SlimeRainState::roll` in isolation — proves `effective_difficulty`/`journey.time_rate`/
+    /// the world's own day-time fields actually connect, not just the state machine's own
+    /// already-tested logic. Expert mode alone is enough to let it fire (no ready player needed),
+    /// matching `slime_rain.rs`'s own `expert_mode_alone_can_still_start_a_rain` test — and
+    /// Journey's fastest clock (`time_rate_slider = 1.0`, 24x) keeps the odds (`9375`, per that
+    /// same test's own comment) small enough for a real server loop to observe within a test.
+    #[test]
+    fn the_daily_roll_eventually_starts_a_rain_with_a_real_server() {
+        for seed in 0..30u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            server.world.game_mode = 2; // expert
+            server.journey.time_rate_slider = 1.0;
+            server.world.day_time = true;
+            server.world.time = 0;
+            for _ in 0..50_000 {
+                server.tick_slime_rain();
+                if server.slime_rain.is_active() {
+                    return;
+                }
+            }
+        }
+        panic!("a rain should have started at least once across 30 seeds");
+    }
+
+    /// A hundred and fifty Blue Slime kills during a rain summons King Slime at the *closest*
+    /// player to the last kill — `DoDeathEvents_AdvanceSlimeRain`'s own real choice, not a random
+    /// one, and not just "some player" the way a first draft might assume.
+    #[test]
+    fn one_hundred_and_fifty_blue_slime_kills_summons_king_slime_near_the_closest_player() {
+        use crate::game::slime_rain::{BLUE_SLIME, KING_SLIME};
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.slime_rain.timer = 100;
+
+        let (near_tx, _near_rx) = mpsc::channel(16);
+        let mut near = Player::new(0, "127.0.0.1:1".parse().unwrap(), near_tx);
+        near.state = ConnState::Playing;
+        near.position = (10.0, 10.0);
+        server.players[0] = Some(near);
+
+        let (far_tx, _far_rx) = mpsc::channel(16);
+        let mut far = Player::new(1, "127.0.0.1:2".parse().unwrap(), far_tx);
+        far.state = ConnState::Playing;
+        far.position = (10_000.0, 10_000.0);
+        server.players[1] = Some(far);
+
+        for _ in 0..149 {
+            server.note_slime_rain_kill(BLUE_SLIME, (10.0, 10.0));
+        }
+        assert!(
+            !server.npcs.iter().any(|(_, n)| n.npc_type == KING_SLIME),
+            "not yet — only 149 kills"
+        );
+
+        server.note_slime_rain_kill(BLUE_SLIME, (10.0, 10.0));
+
+        assert!(
+            server.npcs.iter().any(|(_, n)| n.npc_type == KING_SLIME),
+            "the 150th kill should have summoned him"
+        );
+    }
+
+    /// A kill while no rain is active does nothing at all — `note_kill`'s own `!is_active()`
+    /// guard, proven connected through the real death path rather than assumed from the isolated
+    /// state-machine test.
+    #[test]
+    fn a_blue_slime_kill_with_no_rain_active_summons_nothing() {
+        use crate::game::slime_rain::{BLUE_SLIME, KING_SLIME};
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (out_tx, _out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+
+        for _ in 0..200 {
+            server.note_slime_rain_kill(BLUE_SLIME, (10.0, 10.0));
+        }
+        assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == KING_SLIME));
     }
 }
 
