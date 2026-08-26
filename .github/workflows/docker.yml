@@ -24,6 +24,19 @@ jobs:
           targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
 
+      # A shipped image with an empty embedded panel is a broken deliverable someone might
+      # actually enable and find nothing — build the real frontend before either target compiles.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/terrustia/web-panel/package-lock.json
+      - name: Build the web panel frontend
+        working-directory: crates/terrustia/web-panel
+        run: |
+          npm ci
+          npm run build
+
       # Both architectures built natively on the x86 runner, because nothing in the dependency
       # graph needs a C compiler. Compiling aarch64 inside a QEMU-emulated container instead would
       # turn a few minutes into most of an hour, for the same bytes.
