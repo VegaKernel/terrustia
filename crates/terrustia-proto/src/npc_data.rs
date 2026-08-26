@@ -8543,7 +8543,13 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_gravity: false,
             no_tile_collide: false,
             friendly: true,
-            town_npc: false,
+            // A real pre-existing bug, found verifying this session's town-combat work: vanilla's
+            // own `NPCID.Sets.AttackType` only ever assigns a value to town NPCs (`NPCID.cs:4855`
+            // sets `453 -> 0`, the same set Merchant/Nurse/etc. share) — a non-town NPC has no
+            // town-combat branch to reach in the first place, so this could never have been `false`
+            // in vanilla. He is a real settleable town NPC (moves in after being freed as a
+            // cursed prisoner in the dungeon).
+            town_npc: true,
             boss: false,
             lava_immune: false,
             dont_take_damage: false,

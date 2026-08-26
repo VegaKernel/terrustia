@@ -728,18 +728,22 @@ mod tests {
 
     #[test]
     fn a_town_npc_with_no_combat_profile_still_does_not_fight() {
-        // The Guide (22) is a real vanilla AttackType-1 NPC; this pass covers four representative
-        // types, not all ~27, so he should keep standing still exactly as before.
+        // Town Cat (637): vanilla's own `AttackType` set explicitly re-asserts `-1` for town pets
+        // rather than leaving it at the array's default (`NPCID.cs:4855`) — a real town resident
+        // with no combat profile, and, unlike an ordinary town NPC this project simply hasn't
+        // covered yet, guaranteed to *stay* that way rather than gain one the next time this
+        // module's coverage grows (see `game::ai::town_combat`'s own module doc: all 28 real
+        // `AttackType` NPCs are covered as of this session).
         let tiles = flat(0, 400);
-        let mut guide = stand_on(22, 200);
+        let mut cat = stand_on(637, 200);
         let mut w = day(&tiles);
         w.hostile = Some(crate::game::npc_ai::Target {
             slot: 9,
-            center: (guide.center().0 + 10.0, guide.center().1),
+            center: (cat.center().0 + 10.0, cat.center().1),
             velocity: (0.0, 0.0),
             alive: true,
         });
-        let result = update(&mut guide, &w, None, &mut rng());
+        let result = update(&mut cat, &w, None, &mut rng());
         assert!(result.shot.is_none());
         assert!(result.melee.is_none());
     }

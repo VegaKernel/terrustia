@@ -1711,6 +1711,120 @@ async fn a_town_npcs_shot_actually_damages_the_hostile_it_targeted() {
     );
 }
 
+/// Every one of the 24 town NPCs added to `game::ai::town_combat` this session — beyond the four
+/// (Merchant/Arms Dealer/Wizard/Dye Trader) the two tests above already cover — actually fights,
+/// over a real socket, the same way those four were proven: land, spawn a hostile beside it, watch
+/// it open fire (a real `ProjectileSynced` of the right type for the ranged ones; a real health
+/// drop with no projectile at all for the two melee ones), and confirm the hostile it targeted
+/// actually loses life. A fresh server and client per NPC (see the loop's own comment for why one
+/// shared server does not work here) — `try_combat`'s own logic (`town.rs`) sets a freshly-engaged
+/// NPC's `ai[1]` to `0.0`, so the first shot fires on the very next tick rather than waiting out
+/// its `cooldown`, which keeps each of the 24 iterations fast despite the fresh server each pays
+/// for.
+#[tokio::test]
+async fn every_newly_covered_town_npc_actually_fights() {
+    // (npc_type, projectile_type — None for the two melee NPCs). `projectile_type` is `i16` to
+    // match `terrustia_proto`'s own `ProjectileSynced::projectile_type` field.
+    const NPCS: &[(u16, Option<i16>)] = &[
+        (38, Some(30)),   // Demolitionist
+        (633, Some(880)), // Bestiary Girl
+        (550, Some(669)), // DD2 Bartender
+        (588, Some(721)), // Golfer
+        (208, Some(588)), // Party Girl
+        (369, Some(520)), // Angler
+        (453, Some(21)),  // Skeleton Merchant
+        (107, Some(24)),  // Goblin Tinkerer
+        (124, Some(582)), // Mechanic
+        (18, Some(583)),  // Nurse
+        (142, Some(589)), // Santa Claus
+        (227, Some(587)), // Painter
+        (368, Some(14)),  // Travelling Merchant
+        (22, Some(1)),    // Guide
+        (228, Some(267)), // Witch Doctor
+        (178, Some(242)), // Steampunker
+        (229, Some(14)),  // Pirate
+        (209, Some(135)), // Cyborg
+        (54, Some(585)),  // Clothier
+        (160, Some(590)), // Truffle
+        (663, Some(950)), // Princess
+        (20, Some(586)),  // Dryad (real vanilla zero-damage attack — see town_combat's doc)
+        (441, None),      // Tax Collector (melee)
+        (353, None),      // Stylist (melee)
+    ];
+
+    for &(npc_type, projectile_type) in NPCS {
+        // A fresh server and client per NPC, not one shared across all 24 — every `/spawn` in this
+        // test lands at the same fixed offset near world origin (the test client never sends a
+        // real position update, so the server-side `player.position` `/spawn` actually reads from
+        // stays at its default rather than tracking where a real client would be), so reusing one
+        // server let 24 iterations' worth of town NPCs and zombies pile up in the same few tiles.
+        // Once enough of them were jostling each other, a freshly-landed NPC's velocity would
+        // never settle to *exactly* zero long enough for this test's own landing check to catch
+        // it — a real bug in this test's own design, not in anything under test.
+        let addr = start().await;
+        let mut alice = join(addr, "alice").await;
+        // Wider than this file's usual 10s: the town NPC's very first shot aims at wherever the
+        // hostile is *right now*, which can still be mid-fall (only the NPC's own landing is
+        // waited on above, not the hostile's — both are dropped together and usually settle close
+        // together, but not identically), so a miss on the very first shot is real, not a bug, and
+        // the test has to survive to whichever later shot the NPC's own cooldown fires once the
+        // hostile has actually come to rest. Under a busy machine — this test found this exact gap
+        // running inside the full workspace suite rather than alone — the server's own tick rate
+        // can lag real time too, so the retry needs real wall-clock room as well as ticks.
+        alice.set_timeout(Duration::from_secs(20));
+
+        // Spawned back to back, before waiting on either — both `/spawn` at (player position +
+        // (64, -32)) and fall together, exactly like the existing Merchant test above. Waiting for
+        // the town NPC to land *before* spawning its hostile (the first, obvious way to write
+        // this) is a real bug, not just a slower version of the same thing: `try_combat` only
+        // starts a fight when a hostile is already in range, and a landed town NPC with nothing to
+        // fight immediately starts walking — by the time a hostile spawned only afterward finally
+        // reaches the ground, the NPC has often already wandered hundreds of pixels away.
+        let npc = spawn_npc(&mut alice, &npc_type.to_string()).await;
+        assert_eq!(npc.npc_type(), npc_type, "the spawn command resolved by id");
+        let hostile = spawn_npc(&mut alice, "Zombie").await;
+
+        alice
+            .wait_for(
+                "it to land",
+                |e| matches!(e, Event::NpcSynced(n) if n.index == npc.index && n.velocity.1 == 0.0),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("npc {npc_type} never landed"));
+
+        if let Some(projectile_type) = projectile_type {
+            alice
+                .wait_for("it to open fire", |e| {
+                    matches!(e, Event::ProjectileSynced(p) if p.projectile_type == projectile_type)
+                })
+                .await
+                .unwrap_or_else(|_| panic!("npc {npc_type} never fired projectile {projectile_type}"));
+        }
+
+        // Dryad (20) is the one real exception: her attack faithfully deals zero pre-scaling
+        // damage in vanilla (see town_combat's own module doc), so there is nothing to wait for
+        // beyond the shot itself — asserting a health drop here would wait forever on a real
+        // vanilla behaviour, not a bug.
+        if npc_type == 20 {
+            continue;
+        }
+
+        let hurt = alice
+            .wait_for("the hostile to take damage", |e| {
+                matches!(e, Event::NpcSynced(n) if n.index == hostile.index && n.life < hostile.life)
+            })
+            .await
+            .unwrap_or_else(|_| panic!("npc {npc_type}'s attack never damaged its target"));
+        let Event::NpcSynced(hurt) = hurt else {
+            unreachable!("matched on it")
+        };
+        assert!(
+            hurt.life < hostile.life,
+            "npc {npc_type}: life should have gone down, not merely changed"
+        );
+    }
+}
+
 /// Registering an account claims the server, and a stranger loses the dangerous commands.
 ///
 /// Before this, the comment above the command dispatcher said "there is no permission model: this

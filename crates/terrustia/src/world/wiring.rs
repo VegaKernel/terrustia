@@ -75,8 +75,8 @@ impl Wire {
 pub fn is_trigger(block: u16) -> bool {
     matches!(
         block,
-        // Switch, lever, and the pressure plates.
-        135 | 136 | 144 | 314 | 423 | 428 | 440 | 442 | 476
+        // Switch, lever, a track switch, and the pressure plates.
+        135 | 136 | 144 | MINECART_TRACK | 423 | 428 | 440 | 442 | 476
     )
 }
 
@@ -198,11 +198,20 @@ pub fn trip_wire(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
 
 /// Flood every colour present on a footprint, each as its own circuit.
 fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &mut Fired) {
-    // The tiles a circuit starts from are not acted on by it. Without this a timer's own circuit
-    // would reach the timer and switch it off, so every timer would fire exactly once.
+    // The tiles a circuit starts from are not acted on by it, with one exception: a track switch.
+    // Every other trigger this protects (lever, switch, timer) either already had its own frame
+    // toggled directly, before `run_from` was ever called (`hit_switch`'s own lever/switch step),
+    // or fires on its own schedule and must not retrigger itself every time its own circuit reaches
+    // it (`trip_wire`'s timer — without this a timer's circuit would reach the timer and switch it
+    // straight back off, so every timer would fire exactly once). A track switch gets no such
+    // direct step (see `act`'s own `MINECART_TRACK` case for why) — the flood reaching *itself* is
+    // the only thing that ever flips one a player hits directly, wired to nothing else at all.
     for dx in 0..w {
         for dy in 0..h {
-            out.skipped.insert((x + dx, y + dy));
+            let (tx, ty) = (x + dx, y + dy);
+            if world.tile(tx, ty).block != MINECART_TRACK {
+                out.skipped.insert((tx, ty));
+            }
         }
     }
     for colour in Wire::ALL {
@@ -287,6 +296,38 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         }
         return;
     }
+    if tile.is_active() && tile.block == MINECART_TRACK {
+        // `Minecart.FlipSwitchTrack` (`Minecart.cs:1302`), reached from `Wiring.cs`'s own per-tile
+        // dispatch (`case 314: if (CheckMech(i, j, 5)) { Minecart.FlipSwitchTrack(i, j); }`) — a
+        // wired track switch is a *separate* mechanic from `HitSwitch`'s frame toggle (that branch
+        // for tile 314 only relays the current, `Wiring.cs`'s own `TripWire(i, j, 1, 1)`; it never
+        // touches the tile), which is exactly why this project's own `is_trigger`/`flips` split
+        // left tracks doing nothing on the way through: nothing ever called the piece that does.
+        //
+        // `FrontTrack()`/`BackTrack()` are themselves nothing but `frameX`/`frameY` in vanilla
+        // (`Minecart.cs`'s own private extension methods alias them directly, no packed encoding)
+        // — so no new tile field is needed here, only reading the two this project already has.
+        // `_trackType`'s own table (`Minecart.cs::Initialize`) classifies every track frame into
+        // one of three groups: frames 20-23 (`trackType == 1`, physics-only bumper/dead-end pieces
+        // read elsewhere in `Minecart.cs` for cart collision — nothing to do with switching) and
+        // frames 30-35 (`trackType == 2`, the six booster-pad frames a *hammer* reframes, not
+        // wire) are both out of scope here; every other track frame (`trackType == 0`, vanilla's
+        // own array default) is what `FlipSwitchTrack`'s `case 0` actually swaps. A frame in that
+        // group only actually has something to swap to if its own `BackTrack()` (`frameY`) was
+        // ever set — not every track tile has a second track stacked underneath it — matching
+        // vanilla's own `BackTrack() != -1` guard.
+        if track_type(tile.frame_x) == 0 && tile.frame_y != -1 {
+            if !out.skipped.insert((x, y)) {
+                return;
+            }
+            let mut flipped = tile;
+            flipped.frame_x = tile.frame_y;
+            flipped.frame_y = tile.frame_x;
+            world.set_tile(x, y, flipped);
+            out.changed.push((x, y));
+        }
+        return;
+    }
     // An actuator toggles its block between solid and passable. It runs whether or not the block
     // is active, which is the only way a block that has been actuated away can ever come back.
     if tile.flags.has(TileFlags::ACTUATOR) {
@@ -358,6 +399,24 @@ const GEYSER: u16 = 443;
 const EXPLOSIVES: u16 = 141;
 /// The tile every statue is a frame of.
 const STATUE: u16 = 105;
+/// The minecart track, `MinecartTrack` — also one of `is_trigger`'s own tiles (a player can hit it
+/// by hand too), but its wired behaviour, [`act`]'s own case for it, is a different mechanism from
+/// [`hit_switch`]'s frame toggle — see that block's own comment for why.
+const MINECART_TRACK: u16 = 314;
+
+/// `Minecart._trackType`'s own frame classification (`Minecart.cs::Initialize`): `0` (vanilla's own
+/// array default, so every frame not explicitly listed below is this) is ordinary track — the only
+/// group `FlipSwitchTrack`'s `case 0` ever swaps. `1` (frames 20-23) is a small set of dead-end/
+/// bumper pieces `Minecart.cs` reads for cart collision physics elsewhere, nothing to do with
+/// switching. `2` (frames 30-35) is the six booster-pad frames, reframed by a hammer, not wire.
+fn track_type(frame: i16) -> u8 {
+    match frame {
+        20..=23 => 1,
+        30..=35 => 2,
+        _ => 0,
+    }
+}
+
 /// The teleporter, which is three wide.
 const TELEPORTER: u16 = 235;
 /// The timer, which is the one trigger that keeps firing on its own.
@@ -794,6 +853,78 @@ mod tests {
         assert_eq!(board.tile(100, 100).frame_y, 18, "thrown");
         hit_switch(&mut board, 100, 100);
         assert_eq!(board.tile(100, 100).frame_y, 0, "and thrown back");
+    }
+
+    /// A wired track switch swaps its front and back track — vanilla's `Minecart.FlipSwitchTrack`,
+    /// reached from a *different* branch than `hit_switch`'s own frame toggle (`HitSwitch`'s own
+    /// `type == 314` case only relays the current; it never touches the tile). Frame 1 (plain
+    /// straight track) and frame 6 (one of the sloped connector frames) are both ordinary,
+    /// `trackType == 0` frames — the only group `FlipSwitchTrack`'s `case 0` ever swaps; frame 6
+    /// here stands in for "whatever second track was stacked underneath."
+    ///
+    /// Fails on the code before this fix: without `act`'s own `MINECART_TRACK` case, the current
+    /// reaches the tile and does nothing to it at all, so `frame_x`/`frame_y` would still read
+    /// `(1, 6)` after `hit_switch` instead of the swapped `(6, 1)`.
+    #[test]
+    fn a_wired_track_switch_swaps_its_stored_path() {
+        let mut board = Board(HashMap::new());
+        let mut track = wired(MINECART_TRACK, Wire::Red);
+        track.frame_x = 1;
+        track.frame_y = 6;
+        board.set_tile(100, 100, track);
+
+        hit_switch(&mut board, 100, 100);
+
+        let after = board.tile(100, 100);
+        assert_eq!(after.frame_x, 6, "front is now what back held");
+        assert_eq!(after.frame_y, 1, "and back now holds what front held");
+
+        // Flips back just as cleanly.
+        hit_switch(&mut board, 100, 100);
+        let back = board.tile(100, 100);
+        assert_eq!(back.frame_x, 1);
+        assert_eq!(back.frame_y, 6);
+    }
+
+    /// A frame `_trackType` classifies outside the ordinary group — a dead-end/bumper piece
+    /// (frame 20, `trackType == 1`, read elsewhere in `Minecart.cs` for cart collision, nothing to
+    /// do with switching) or a booster pad (frame 30, `trackType == 2`, reframed by a hammer, not
+    /// wire) — is left alone even with a real value stored in its own back track: `FlipSwitchTrack`
+    /// only has cases for `0` and `2`, and only `0` performs this swap at all.
+    #[test]
+    fn a_non_switchable_track_frame_is_not_touched_by_a_wired_hit() {
+        let mut board = Board(HashMap::new());
+        for bumper_or_booster in [20i16, 30] {
+            let mut track = wired(MINECART_TRACK, Wire::Red);
+            track.frame_x = bumper_or_booster;
+            track.frame_y = 1; // a real stored value — still must not swap.
+            board.set_tile(100, 100, track);
+
+            hit_switch(&mut board, 100, 100);
+
+            let after = board.tile(100, 100);
+            assert_eq!(after.frame_x, bumper_or_booster);
+            assert_eq!(after.frame_y, 1);
+        }
+    }
+
+    /// An ordinary track frame with nothing stored in its back track (`BackTrack() == -1`, the
+    /// state a plain track tile is in before anyone has stacked a second one underneath it) has
+    /// nothing to swap to — vanilla's own guard, `FlipSwitchTrack`'s `BackTrack() != -1` check, not
+    /// a gap this project invented.
+    #[test]
+    fn a_track_frame_with_no_stored_back_track_does_not_swap() {
+        let mut board = Board(HashMap::new());
+        let mut track = wired(MINECART_TRACK, Wire::Red);
+        track.frame_x = 1;
+        track.frame_y = -1;
+        board.set_tile(100, 100, track);
+
+        hit_switch(&mut board, 100, 100);
+
+        let after = board.tile(100, 100);
+        assert_eq!(after.frame_x, 1);
+        assert_eq!(after.frame_y, -1);
     }
 
     /// A pressure plate fires without remembering anything.
