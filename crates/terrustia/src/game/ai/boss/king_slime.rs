@@ -10,7 +10,8 @@
 //! crossing five thresholds on the way, so the fight accelerates as it goes.
 //!
 //! It **sheds**. Every five per cent of its maximum health lost, one to three blue slimes drop out
-//! of it, which is what turns the arena into a crowd.
+//! of it, which is what turns the arena into a crowd. In Expert Mode, each one shed is
+//! independently a 1-in-4 roll to be a Spiked Slime (npc 535) instead.
 //!
 //! And it teleports. Five seconds of not being able to see you — or of being more than ten tiles
 //! off your level — and it fades out, moves, and fades back in. Hold it at range long enough and it
@@ -21,7 +22,8 @@ use terrustia_proto::npc_params::{
     KING_SLIME_ANTI_CHEESE, KING_SLIME_DRIFT, KING_SLIME_DRIFT_PUSH, KING_SLIME_FADE_IN,
     KING_SLIME_FADE_OUT, KING_SLIME_GIVE_UP, KING_SLIME_HOPS, KING_SLIME_LEVEL,
     KING_SLIME_PATIENCE, KING_SLIME_RAGE, KING_SLIME_SCALE_FLOOR, KING_SLIME_SCALE_SPAN,
-    KING_SLIME_SHED_STEP, KING_SLIME_SIZE, KING_SLIME_SPAWN, KING_SLIME_WIND,
+    KING_SLIME_SHED_STEP, KING_SLIME_SIZE, KING_SLIME_SPAWN, KING_SLIME_SPAWN_SPECIAL,
+    KING_SLIME_WIND,
 };
 use terrustia_proto::tile_solid::solid;
 
@@ -264,7 +266,10 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         resize(npc, scale);
     }
 
-    // Shedding: one to three slimes for every twentieth of its health.
+    // Shedding: one to three slimes for every twentieth of its health. In Expert Mode, each one
+    // shed is independently a 1-in-4 chance of being a Spiked Slime instead of a plain Blue Slime
+    // (`AI_015_KingSlime`'s own `Main.expertMode && Main.rand.Next(4) == 0` roll, taken once per
+    // slime inside the loop — not once for the whole batch).
     let step = npc.life_max as f32 * KING_SLIME_SHED_STEP;
     if (npc.life as f32 + step) < npc.ai[3] {
         npc.ai[3] = npc.life as f32;
@@ -273,8 +278,13 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                 npc.position.0 + rng.random_range(0..(npc.stats.width - 32).max(1)) as f32,
                 npc.position.1 + rng.random_range(0..(npc.stats.height - 32).max(1)) as f32,
             );
+            let shed_type = if world.conditions.expert && rng.random_range(0..4) == 0 {
+                KING_SLIME_SPAWN_SPECIAL
+            } else {
+                KING_SLIME_SPAWN
+            };
             court.shed.push((
-                KING_SLIME_SPAWN,
+                shed_type,
                 at,
                 (
                     rng.random_range(-15..16) as f32 * 0.1,
@@ -443,6 +453,65 @@ mod tests {
             court.shed.iter().any(|(_, _, v)| v.1 <= 0.0),
             "and thrown them upward"
         );
+    }
+
+    /// In Expert Mode, each shed slime independently has a 1-in-4 chance of being a Spiked Slime
+    /// (npc 535) instead of a plain one (`AI_015_KingSlime`'s own `Main.expertMode &&
+    /// Main.rand.Next(4) == 0` roll, taken per slime inside the shed loop). Looped across many
+    /// seeds rather than pinned to one exact roll, since nothing in this project exposes vanilla's
+    /// own `Random` sequence to pin against directly — the same shape this codebase already uses
+    /// elsewhere for a roll it cannot pin exactly.
+    #[test]
+    fn expert_mode_can_shed_the_special_minion() {
+        let tiles = arena();
+        let mut saw_special = false;
+        for seed in 0..500u64 {
+            let mut k = king();
+            let (cx, cy) = k.center();
+            let t = Some(player_at(cx + 200.0, cy));
+            let mut w = world(&tiles, t);
+            w.conditions = crate::game::ai::Conditions {
+                expert: true,
+                ..crate::game::ai::Conditions::default()
+            };
+            let mut r = SmallRng::seed_from_u64(seed);
+            update(&mut k, &w, &mut r);
+            k.life -= k.life_max / 10;
+            let court = update(&mut k, &w, &mut r);
+            if court
+                .shed
+                .iter()
+                .any(|(t, _, _)| *t == KING_SLIME_SPAWN_SPECIAL)
+            {
+                saw_special = true;
+                break;
+            }
+        }
+        assert!(
+            saw_special,
+            "500 expert-mode sheds never produced a Spiked Slime — the roll is missing"
+        );
+    }
+
+    /// Classic mode never rolls the special shed at all — the flag gates it outright, not just the
+    /// odds.
+    #[test]
+    fn classic_mode_never_sheds_the_special_minion() {
+        let tiles = arena();
+        for seed in 0..50u64 {
+            let mut k = king();
+            let (cx, cy) = k.center();
+            let t = Some(player_at(cx + 200.0, cy));
+            let w = world(&tiles, t);
+            let mut r = SmallRng::seed_from_u64(seed);
+            update(&mut k, &w, &mut r);
+            k.life -= k.life_max / 10;
+            let court = update(&mut k, &w, &mut r);
+            assert!(
+                court.shed.iter().all(|(t, _, _)| *t == KING_SLIME_SPAWN),
+                "classic mode should never shed the special minion"
+            );
+        }
     }
 
     #[test]

@@ -348,3 +348,45 @@ Kept because they are the reason the bugs above went unnoticed for so long.
     across both (1,628,072 + 1,278,163), no crash in either — disclosed as a clean bounded run, not
     proof the newly-added decoders are panic-free; the OOM row above is itself the reason not to read
     a quiet short run as more than that.
+13. `fishron.rs`/`king_slime.rs` predate this file's own row-by-row Done tracking, so neither ever
+    carried an explicit claim here to correct — but a parallel boss/NPC-AI audit found two real
+    bugs sitting in them regardless, confirmed directly against the decompiled source rather than
+    taken on the audit's word. **Duke Fishron**: `wants_phase` ran unconditionally at the top of
+    every tick, ahead of the state dispatch, so crossing the 50%/15% Expert health threshold cut
+    off a charge, a burst, or a bubble stream already under way. Real vanilla
+    (`AI_069_DukeFishron`, `NPC.cs:49295`) only ever reads its `flag`/`flag2` threshold checks
+    (`:49651`/`:49908`) nested strictly inside the hover-timer-just-expired branches
+    (`:49621`/`:49886`, themselves inside the `ai[0]==0f`/`ai[0]==5f` hover states at
+    `:49567`/`:49832`) — the same point it picks its next attack, never mid-attack. Fixed by moving
+    the check inside `fishron.rs`'s `HOVERING` match arm, after the hover-ticks-elapsed early
+    return, so it is only ever read at that one decision point. Its own regression test,
+    `half_health_starts_the_second_phase`, asserted the interrupt itself — starting Fishron
+    mid-charge and expecting the change on the very next tick — which is exactly the bug, not a
+    property of real vanilla; renamed to
+    `half_health_finishes_the_current_attack_before_the_second_phase_starts` and rewritten to assert
+    the corrected shape instead: the charge runs out on its own, and only once back in the hover,
+    past its own timer, does the phase actually change. Fixing the interrupt broke a second,
+    independent test the same way — `the_third_phase_has_no_armour_at_all` started Fishron already
+    hovering and expected the low-health check to fire on the very first tick, which no longer
+    holds once the check only fires at the hover timer's own expiry; updated to run the hover out
+    first, same reasoning, no separate bug.
+14. **King Slime**, same audit: never rolled Expert Mode's special minion shed. Real vanilla
+    (`AI_015_KingSlime`, `NPC.cs:43576`, the shed loop at `:43848-43875`) gives each individual
+    shed slime its own roll, `if (Main.expertMode && Main.rand.Next(4) == 0) num12 = 535;` — a
+    1-in-4 chance per slime (not per batch) of a Spiked Slime instead of a plain one.
+    `king_slime.rs`'s shed loop always pushed `KING_SLIME_SPAWN` (npc 1), with no roll and no
+    Expert check anywhere. Fixed: `terrustia-proto`'s `npc_params.rs` gained
+    `KING_SLIME_SPAWN_SPECIAL` (535 — already a registered, stat-complete npc in `npc_data.rs`,
+    nothing new needed there), and the shed loop now rolls it independently per slime, gated on
+    `world.conditions.expert`.
+15. The Town NPC combat Done row above ("all 28 real vanilla `AttackType` NPCs now covered") claimed
+    each entry was "transcribed directly from its own `NPC.cs` state-10/12/14/15 branch — real
+    projectile/damage/speed/knockback per NPC, not a generic fallback." True for 27 of 28: the
+    Stylist's (npc 353) melee damage was transcribed as 15, when real vanilla is 10. `NPC.cs`'s
+    `type == 353` block (`AI_007_TownEntities` state 15) sets two numbers a few lines apart —
+    `num81 = 10`, the one that actually reaches `StrikeNPCNoInteraction`, and `num80 = 15`, which
+    feeds only the attack-cooldown roll (`ai[1] = num80 + Main.rand.Next(maxValue4)`) — an isolated
+    read-the-wrong-local slip, not a systemic one: this session's audit re-checked the other 27
+    entries against their own `NPC.cs` blocks and all 27 matched. Fixed: `town_combat.rs`'s Stylist
+    entry now reads `damage: 10`, with a comment at the match site naming the two nearby locals so
+    the same slip is harder to repeat.

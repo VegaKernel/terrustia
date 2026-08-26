@@ -1682,6 +1682,10 @@ pub const KING_SLIME_SCALE_FLOOR: f32 = 0.75;
 pub const KING_SLIME_SHED_STEP: f32 = 0.05;
 /// What it sheds.
 pub const KING_SLIME_SPAWN: u16 = 1;
+/// In Expert Mode, each shed slime independently has a 1-in-4 chance of being this — a Spiked
+/// Slime (`NPC.cs`'s `AI_015_KingSlime`: `if (Main.expertMode && Main.rand.Next(4) == 0)
+/// num12 = 535;`, rolled once per slime inside the shed loop, not once for the whole batch).
+pub const KING_SLIME_SPAWN_SPECIAL: u16 = 535;
 
 /// How many creepers the Brain of Cthulhu surrounds itself with.
 pub const BRAIN_CREEPERS: usize = 20;

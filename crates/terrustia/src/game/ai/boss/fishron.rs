@@ -7,8 +7,11 @@
 //! left. By the third phase it has none at all.
 //!
 //! The attacks come off a counter rather than a die roll, ten charges to one sharkron burst to one
-//! spray of bubbles, so the pattern is learnable. Crossing half health interrupts whatever it is
-//! doing for two seconds while it changes, and in expert crossing fifteen per cent does it again.
+//! spray of bubbles, so the pattern is learnable. Crossing half health does not interrupt whatever
+//! it is doing — vanilla only re-checks the threshold once it is back in its hover, choosing its
+//! next attack, so a charge/burst/bubble stream in progress finishes on its own terms. Once it
+//! does notice, it stops to change for two seconds, and in expert crossing fifteen per cent does
+//! it again.
 //!
 //! A **Sharkron** (71) is not a chaser. It hangs in the air for a second and a half, aims once, and
 //! commits — and dies on whatever it hits, terrain included.
@@ -76,19 +79,6 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
     let (cx, cy) = npc.center();
     let health = npc.life as f32 / npc.life_max.max(1) as f32;
 
-    // Crossing a threshold interrupts whatever it is doing.
-    let wants_phase = if expert && health <= FISHRON_THIRD_AT {
-        2
-    } else if health <= FISHRON_SECOND_AT {
-        1
-    } else {
-        0
-    };
-    if wants_phase > phase && npc.ai[0] != base + state::CHANGING {
-        npc.ai = [base + state::CHANGING, 0.0, 0.0, npc.ai[3]];
-        return out;
-    }
-
     match npc.ai[0] - base {
         s if s == state::HOVERING => {
             // The side it takes station on is chosen once and kept for the whole hover.
@@ -106,6 +96,25 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
             if npc.ai[2] < p.hover_ticks {
                 return out;
             }
+
+            // Real vanilla nests both this check and the Expert-only second one strictly inside
+            // the hover-timer-just-expired branch (`AI_069_DukeFishron`: `flag`/`flag2` are only
+            // ever read where `num28`/`num33` — the *next attack* it is about to choose — get
+            // computed, right here, and nowhere else). Crossing a threshold does not interrupt a
+            // charge, a burst or a bubble stream already under way; it only ever gets checked at
+            // this one decision point, the same one vanilla checks it at.
+            let wants_phase = if expert && health <= FISHRON_THIRD_AT {
+                2
+            } else if health <= FISHRON_SECOND_AT {
+                1
+            } else {
+                0
+            };
+            if wants_phase > phase {
+                npc.ai = [base + state::CHANGING, 0.0, 0.0, npc.ai[3]];
+                return out;
+            }
+
             // The cycle: ten charges, then a burst, then bubbles.
             let attack = npc.ai[3] as i32;
             let next = if attack == FISHRON_CYCLE_SHARKRONS {
@@ -364,22 +373,62 @@ mod tests {
         assert!(order.contains(&state::BUBBLING), "it bubbles: {order:?}");
     }
 
-    /// Crossing half health interrupts whatever it is doing and starts the second phase.
+    /// This used to be `half_health_starts_the_second_phase`, and its own assertion — that
+    /// starting Fishron mid-charge and crossing 50% health interrupts the charge on the very next
+    /// tick — was itself the bug: real vanilla (`AI_069_DukeFishron`) only ever reads the
+    /// threshold flags (`flag`/`flag2`) inside the `ai[0]==0f`/`ai[0]==5f` hover branches, at the
+    /// exact point the hover timer has just expired and it is choosing its next attack. There is
+    /// no code path in vanilla that checks health mid-charge, mid-burst, or mid-bubble-stream, so
+    /// asserting an immediate interrupt there was asserting a behaviour vanilla doesn't have. This
+    /// test now asserts the corrected shape: the current attack always finishes, and the phase
+    /// only changes once it is back in the hover and its own timer has run out.
     #[test]
-    fn half_health_starts_the_second_phase() {
+    fn half_health_finishes_the_current_attack_before_the_second_phase_starts() {
         let tiles = Sky(HashMap::new());
         let mut d = duke(0.0, 0.0);
         let w = world(&tiles, Some((600.0, 400.0)));
 
+        // Start it mid-charge, already below the 50% threshold.
         d.ai[0] = state::CHARGING;
+        d.ai[2] = 0.0;
         d.life = d.life_max / 3;
         fishron(&mut d, &w);
-        assert_eq!(d.ai[0], state::CHANGING, "it should stop to change");
+        assert_eq!(
+            d.ai[0],
+            state::CHARGING,
+            "a charge already in progress should not be interrupted by crossing a threshold"
+        );
+
+        // Let the charge run out on its own terms.
+        for _ in 0..(FISHRON_FIRST.charge_ticks as i32 + 2) {
+            if d.ai[0] != state::CHARGING {
+                break;
+            }
+            fishron(&mut d, &w);
+        }
+        assert_eq!(
+            d.ai[0],
+            state::HOVERING,
+            "the charge finishes and returns to hovering, not a phase change mid-attack"
+        );
+
+        // Only once it is back in the hover, past its own hover timer, does it notice.
+        for _ in 0..(FISHRON_FIRST.hover_ticks as i32 + 2) {
+            if d.ai[0] == state::CHANGING {
+                break;
+            }
+            fishron(&mut d, &w);
+        }
+        assert_eq!(
+            d.ai[0],
+            state::CHANGING,
+            "the hover's own decision point is where it finally notices"
+        );
 
         for _ in 0..(FISHRON_SHIFT_TICKS as i32 + 2) {
             fishron(&mut d, &w);
         }
-        assert_eq!(d.ai[0], state::PHASE, "and come out in the second phase");
+        assert_eq!(d.ai[0], state::PHASE, "and comes out in the second phase");
         assert!(
             d.defense < d.stats.defense,
             "with less armour: {} was {}",
@@ -401,7 +450,15 @@ mod tests {
         d.ai[0] = state::PHASE + state::HOVERING;
         d.life = d.life_max / 20;
 
-        fishron(&mut d, &w);
+        // Same fix as `half_health_finishes_the_current_attack_before_the_second_phase_starts`:
+        // even starting fresh in the hover, real vanilla only notices the threshold once that
+        // hover's own timer has actually run out — not on the very first tick of it.
+        for _ in 0..(FISHRON_SECOND.hover_ticks as i32 + 2) {
+            if d.ai[0] == state::PHASE + state::CHANGING {
+                break;
+            }
+            fishron(&mut d, &w);
+        }
         assert_eq!(d.ai[0], state::PHASE + state::CHANGING);
         for _ in 0..(FISHRON_SHIFT_TICKS as i32 + 2) {
             fishron(&mut d, &w);

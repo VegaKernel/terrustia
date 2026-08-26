@@ -469,12 +469,16 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
             range: 50.0,
             cooldown: 16,
         },
-        // Stylist. NPC.cs state-15 block, `type == 353`: damage 15, knockback 5, hitbox 32x32.
-        // AttackTime[353]=12, AttackAverageChance[353]=1, DangerDetectRange[353]=60.
+        // Stylist. NPC.cs state-15 block, `type == 353`: damage 10, knockback 5, hitbox 32x32.
+        // AttackTime[353]=12, AttackAverageChance[353]=1, DangerDetectRange[353]=60. The block
+        // also sets a second local (15) alongside the damage one (10) — that second number feeds
+        // only `ai[1] = <that local> + rand(maxValue4)`, the attack-cooldown roll, never
+        // `StrikeNPCNoInteraction`'s damage argument. An earlier pass here read that cooldown
+        // local as the damage instead, off by 5.
         353 => TownCombat {
             state: 15.0,
             kind: AttackKind::Melee {
-                damage: 15,
+                damage: 10,
                 knockback: 5.0,
                 reach: (32.0, 32.0),
             },
@@ -569,6 +573,15 @@ mod tests {
     fn expert_mode_scales_damage_by_one_and_a_half() {
         assert_eq!(town_npc_damage(12, false), 12);
         assert_eq!(town_npc_damage(12, true), 18);
+    }
+
+    #[test]
+    fn the_stylists_melee_damage_is_ten_not_fifteen() {
+        // NPC.cs's `type == 353` block sets two numbers close together — 10 for the damage that
+        // actually reaches `StrikeNPCNoInteraction`, and a separate 15 used only for the
+        // attack-cooldown roll. An earlier transcription used the cooldown's 15 as the damage.
+        let combat = town_combat(353).unwrap();
+        assert!(matches!(combat.kind, AttackKind::Melee { damage: 10, .. }));
     }
 
     #[test]
