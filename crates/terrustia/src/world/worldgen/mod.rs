@@ -35,6 +35,7 @@ pub mod layout;
 pub mod liquid_settle;
 pub mod living_trees;
 pub mod manifest;
+pub mod micro_biomes;
 pub mod oasis;
 pub mod passes;
 pub mod piles;
@@ -128,6 +129,21 @@ pub struct Built {
     pub floating_island_houses: usize,
     /// The lake-topped floating island variant — a water-filled basin instead of a house.
     pub cloud_lakes: usize,
+    /// Frozen-pond patches of breakable ice, in the snow.
+    pub thin_ice: usize,
+    /// Ebonstone sinkholes with a hollow core, Corruption-only.
+    pub corruption_pits: usize,
+    /// Stone hollows with a spiked floor.
+    pub spike_pits: usize,
+    /// Honeycomb-capped honey pools in the jungle.
+    pub honey_patches: usize,
+    /// Surface campfires with a tent and props.
+    pub campsites: usize,
+    /// Marble-painted cavern pockets.
+    pub marble: usize,
+    /// Granite-painted cavern pockets (a disclosed structural stand-in, not vanilla's real
+    /// algorithm — see `micro_biomes`'s own module doc).
+    pub granite: usize,
 }
 
 /// Generate a world of the given size.
@@ -267,6 +283,14 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // floor tile a shrine's own clearance scan would then refuse.
     let jungle_shrines = jungle_shrines::scatter(&mut world, &plan, &mut structures, &mut rand);
 
+    // Micro-biomes: real vanilla splits this across three passes at very different points in its
+    // own pipeline (`Marble`/`Granite` run right after `Terrain`, long before `FloatingIslands`;
+    // `MicroBiomes` itself runs much later, after every structure pass above). Merged into one call
+    // here, placed after jungle grass exists (`honey_patch`'s own site check needs it, the same way
+    // `jungle_shrines` above does) rather than split to match each vanilla pass's own timing — see
+    // `micro_biomes`'s own module doc for exactly which of the 15 real classes this covers.
+    let micro_biomes = micro_biomes::scatter(&mut world, &plan, &mut structures, &mut rand);
+
     // Pots, statues, piles and fallen logs: the small object-placement passes built on
     // `place_object`. Ground-truth loot and decoration that makes a cave look excavated rather
     // than merely hollow.
@@ -362,6 +386,13 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         floating_islands: floating_islands.islands,
         floating_island_houses: floating_islands.houses,
         cloud_lakes: floating_islands.lakes,
+        thin_ice: micro_biomes.thin_ice,
+        corruption_pits: micro_biomes.corruption_pits,
+        spike_pits: micro_biomes.spike_pits,
+        honey_patches: micro_biomes.honey_patches,
+        campsites: micro_biomes.campsites,
+        marble: micro_biomes.marble,
+        granite: micro_biomes.granite,
     };
     (world, built)
 }

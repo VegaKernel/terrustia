@@ -72,6 +72,12 @@ pub const CLOUD: u16 = 189;
 /// `TileID.Sunplate` — the floating island house's own build material (`IslandHouse`,
 /// `WorldGen.cs:80394`).
 pub const SUNPLATE: u16 = 202;
+/// `TileID.BreakableIce` — `ThinIceBiome`'s own material.
+pub const BREAKABLE_ICE: u16 = 162;
+/// `TileID.Campfire` — `CampsiteBiome`'s centrepiece.
+pub const CAMPFIRE: u16 = 215;
+/// `TileID.GoldCoinPile` — one of `CampsiteBiome`'s decorative props.
+pub const GOLD_COIN_PILE: u16 = 332;
 
 /// The wall ids, from `WallID`.
 pub mod walls {
@@ -118,4 +124,11 @@ pub mod walls {
     /// `WorldGen.cs:80395`; the real name is a holdover from a cut item, not a description of what
     /// it looks like here).
     pub const SUNPLATE: u16 = 82;
+    /// `WallID.MarbleUnsafe`/`GraniteUnsafe` — `MarbleBiome.PlaceSlab`'s own two wall materials
+    /// (`WorldGen.cs`'s decompiled `Terraria.GameContent.Biomes.MarbleBiome`, not `WorldGen.cs`
+    /// itself), one swapped in for the other on a drunk-world seed.
+    pub const MARBLE: u16 = 178;
+    pub const GRANITE: u16 = 180;
+    /// `WallID.CorruptGrassUnsafe` — `CorruptionPitBiome`'s own interior wall.
+    pub const CORRUPT_GRASS: u16 = 69;
 }
