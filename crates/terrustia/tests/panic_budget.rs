@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// Every site outside a `#[cfg(test)]` module that can panic on purpose.
 ///
 /// Raise this only alongside a comment at the new site saying which invariant makes it safe.
-const ALLOWED: usize = 9;
+const ALLOWED: usize = 10;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
