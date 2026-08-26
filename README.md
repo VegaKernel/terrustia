@@ -50,9 +50,11 @@ verified rather than assumed.
 **The short version:** point it at a `.wld` you already have and it serves it well — same clients,
 same file, and measurably lighter than the official server. Point it at nothing and it generates a
 world that is playable, decorated, settled and smoothed — forests, a green jungle, cacti, lakes,
-settled water, pots, statues, piles, fallen logs, traps and rounded terrain are all there now.
-Tier 1 worldgen is done; what's left is Tier 2/3's biome set pieces (floating islands, spider caves,
-gem caves, pyramids and the rest), sized and tracked in `plan.md`.
+settled water, pots, statues, piles, fallen logs, traps and rounded terrain, floating islands, spider
+and gem caves, pyramids, living trees, jungle shrines, underground cabins, an oasis, and the full
+Tier 3 cosmetic/cleanup tail (moss, wall variety, waterfalls, thin ice, speleothems, exposed gems,
+lily pads, cacti, and the seven-pass tile-cleanup bundle) are all there now. What's left of worldgen
+is 7 of 15 real micro-biome classes and the secret seeds — sized and tracked in `plan.md`.
 
 ### Protocol and connectivity
 
@@ -80,9 +82,12 @@ gem caves, pyramids and the rest), sized and tracked in `plan.md`.
 
 ### World generation
 
-~37 of Terraria's 106 passes have a counterpart. Tier 1 (the passes that make a world stop looking
-like a prototype) is done; Tier 2 and 3 (biome set pieces, and the cosmetic/cleanup tail) are sized
-in `plan.md` but not yet started.
+Tier 1 (the passes that make a world stop looking like a prototype), Tier 2 (biome set pieces —
+floating islands, spider and gem caves, pyramids, living trees, jungle shrines, underground cabins,
+the oasis, the glowing mushroom biome) and Tier 3 (the cosmetic/cleanup tail — moss, wall variety,
+waterfalls, thin ice, speleothems, exposed gems, lily pads and beach decorations, the seven-pass
+tile-cleanup bundle) are all done. What's left: 7 of 15 real `MicroBiome` classes (each one sized and
+disclosed individually below), and the secret seeds.
 
 | | Feature | Notes |
 |---|---|---|
@@ -100,9 +105,10 @@ in `plan.md` but not yet started.
 | ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`) |
 | ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch is skipped (see the secret-seeds row below). A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
 | ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator runs smoothing *last*, after every decoration, rather than vanilla's before-decoration placement — see `smooth.rs`'s doc comment for why, and how the altar and other fixtures stay protected either way. 30,107 tiles smoothed on the same 4200×1200 world |
-| 🔴 | Floating islands, spider/gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, micro-biomes, glowing mushroom biome (Tier 2) | Sized for real against restored source in `plan.md` — no longer needs the heavy shape/structure DSL that was assumed there; a ~200-line structure-overlap tracker covers it |
+| ✅ | Floating islands, spider caves, gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | The ~200-line structure-overlap tracker (`StructureMap`) this project built instead of porting vanilla's heavy shape/structure DSL turned out to be enough for all nine — no DSL needed |
+| 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes: `CaveHouseBiome`, `ThinIceBiome`, `CorruptionPitBiome`, `SpikePitBiome`, `HoneyPatchBiome`, `CampsiteBiome`, and a shared painter standing in for both `MarbleBiome`/`GraniteBiome`. The other 7 — `DeadMansChestBiome`, `DesertBiome`, `DunesBiome`, `MahoganyTreeBiome`, `EnchantedSwordBiome`, `MiningExplosivesBiome`, `HiveBiome` — each need a genuinely separate subsystem this project doesn't have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape...); sized individually in `plan.md` |
+| ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads/cattails/coral/cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed. Each has its own disclosed narrowing where vanilla's version leans on a genuinely separate subsystem (`neonMossBiome`'s grass-diffusion machinery, gem trees, bamboo/seaweed/palm growth, vanilla's own defensive multi-tile-frame repair this project's placement code has no equivalent need for) — see `plan.md`'s own Done rows for the full, pass-by-pass account |
 | 🔴 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | In scope, not a disclosed exception like Steam P2P — deprioritized behind ordinary-world parity, tracked in `plan.md`'s backlog |
-| 🔴 | Moss, wall variety, waterfalls, thin ice, cleanup passes (Tier 3) | Sized in `plan.md`; mostly small single-purpose tile scans |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
 
 ### NPCs, bosses and events
@@ -114,11 +120,12 @@ in `plan.md` but not yet started.
 | ✅ | Both moons, all four invasions, Old One's Army with Betsy, eclipse with Mothron | |
 | ✅ | Rain, wind, sandstorms | |
 | ✅ | Town NPC arrival and housing | Including the in-game housing screen |
-| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla — no packet populates it, and the click gate (`townNPC`, derived from `type` alone, plus `velocity.Y == 0`) is satisfied by an ordinary NPC sync. The one thing the server owns, packet 40, was already correct; a test proves it, relayed to other players. No happiness-driven pricing or shop overrides yet — tracked separately below and as packet 104 |
-| 🟡 | **Town NPCs fighting back** | Four representative types across all of vanilla's attack classes — Merchant (ranged), Arms Dealer (ranged), Wizard (ranged), Dye Trader (melee) — target and damage nearby hostiles, verified end to end over a real socket including the shot actually landing. The other ~23 vanilla combat-capable town NPCs are mechanical to add from here but not yet done, so a town with only those types still stands still |
+| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla — no packet populates it, and the click gate (`townNPC`, derived from `type` alone, plus `velocity.Y == 0`) is satisfied by an ordinary NPC sync. The one thing the server owns, packet 40, was already correct; a test proves it, relayed to other players. Happiness-driven pricing is covered below; shop overrides (packet 104) are not yet done, see the packet-coverage row above |
+| ✅ | **Town NPCs fighting back** | All 28 real vanilla combat-capable town NPCs, across every one of vanilla's attack classes (ranged, melee, magic and the rest) — target and damage nearby hostiles, verified end to end over a real socket including the shot actually landing |
 | ✅ | NPC happiness, price effects, moving out | Same shape as the "Town NPC shops" row above: moving out is the housing screen's own "kick out" (packet 60), which the existing eviction handler already does and broadcasts. Happiness/price adjustment is player-local computation in vanilla too — its one call site (`Player.cs`) reads nearby NPCs' type/position, each NPC's home state, and the player's own position/biome, all of which terrustia already sends completely (not just on change — a joining player gets every town NPC's current home immediately). Verified by source-tracing and by confirming terrustia's sends are complete; not verified by watching a real client's shop UI, which nothing in this environment can launch |
-| 🔴 | Slime Rain, Party, Lantern Night | |
-| 🟡 | Enemy drops | Boss loot is genuinely complete. `tools/check_drops.py` and `tools/gen_drops.py` each had real bugs of their own (parsing false positives, a variable-name collision silently misattributing whole registration blocks, an over-broad exclusion that discarded a chain's genuinely-flat prefix); fixed, which recovered 45 of 111 ordinary-enemy gaps outright. ~66 remain, all individually traced against source and left for a real reason — most need either a chance-gated item *pool* (a shape neither table can represent yet) or a `Conditions` dimension this project doesn't track (an active seasonal event's wave count, a world-progression flag), not a guess |
+| ✅ | The birthday party | Natural daily rolls (Party Girl gated, five eligible town NPCs minimum), the Party Monolith (direct click or wire signal), and the every-party-ends-at-nightfall rule, for both genuine and manually-forced parties |
+| 🔴 | Slime Rain, Lantern Night | |
+| 🟡 | Enemy drops | Boss loot has zero remaining unjustified gaps. `tools/check_drops.py` and `tools/gen_drops.py` each had real bugs of their own (parsing false positives, a variable-name collision silently misattributing whole registration blocks, an over-broad exclusion that discarded a chain's genuinely-flat prefix); fixed, which recovered the great majority of the ordinary-enemy gaps outright. 6 remain, each individually traced against source: 5 are `RemixSeed`-only branches genuinely out of scope, and one is a pre-existing documented nested-fallback-chain shape |
 
 ### Items and mechanics
 
@@ -130,13 +137,13 @@ in `plan.md` but not yet started.
 | ✅ | Boss summon items, Angler quests, fishing NPCs | |
 | ⬜ | Crafting validation | Terraria has no craft packet; the client is authoritative in vanilla too |
 | ⬜ | Armour set bonuses, accessories | Client-side in vanilla; the server applies plain defence |
-| 🔴 | Pets, mounts, minecart tracks | No server-side existence |
+| ✅ | Pets, mounts, minecart tracks | Pets and mounts are already client-authoritative and working in vanilla too — a real gap in this file's own tracking, not in the server. Minecart tracks had one real bug: a track switch's own flip did nothing at all, fixed |
 
 ### Journey mode
 
 | | Feature | Notes |
 |---|---|---|
-| 🔴 | **Every Journey power** | Net module 4 is not defined, so godmode, time and weather freeze, the sliders, research and duplication are all silently swallowed |
+| ✅ | **Every Journey power** | All 15 real vanilla powers, across all 5 real wire shapes: the four time-skip buttons, four shared toggles, four shared sliders (including `Difficulty`, a continuous 0–3 replacement for the discrete game-mode read at dozens of call sites), and the three per-player powers (Godmode, FarPlacementRange, SpawnRate) — bit-packed sync across up to 255 players, with a real anti-cheat property (a client can't claim to toggle another player's slot) pinned by a two-client integration test |
 | ✅ | Existing research survives a save | Preserved verbatim; it simply cannot grow here |
 
 ### Multiplayer
@@ -147,7 +154,7 @@ in `plan.md` but not yet started.
 | ✅ | Accounts, groups, permissions, bans by name/address/uuid | Argon2, off the game task |
 | 🟡 | Chat commands | 18 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
 | ✅ | Whitelist | Empty means off, so it cannot lock the operator out on the day it is enabled |
-| 🔴 | Web admin panel | In progress — see `plan.md` |
+| ✅ | Web admin panel | A full subsystem, embedded in the main binary, off by default: player list with kick/ban, whitelist management, world switching (a real graceful process restart, not a hot-swap), a live console/chat stream (the same event stream the terminal itself prints), live-editable settings, and a stylized live world view — player avatars coloured from their own real skin/hair/gear data over the wire, no game assets shipped or read. Always localhost-only, independent of whatever the game port is exposed to |
 
 ### Hardening
 
