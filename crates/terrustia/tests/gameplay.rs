@@ -7,7 +7,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use terrustia::{
     config::Config,
-    game::{GameServer, ServerEvent},
+    game::{GameServer, ServerEvent, Stopped},
     net::listener,
     world::{Chest, Sign, World, wld, wld_save, worldgen},
 };
@@ -1761,7 +1761,21 @@ async fn every_newly_covered_town_npc_actually_fights() {
         // Once enough of them were jostling each other, a freshly-landed NPC's velocity would
         // never settle to *exactly* zero long enough for this test's own landing check to catch
         // it — a real bug in this test's own design, not in anything under test.
-        let addr = start().await;
+        //
+        // `start()` itself never stops what it spawns — both the game task and the listener task
+        // run forever, by design, for every other test in this file (a real server does not manage
+        // its own shutdown from a test harness). Fine for one server; fatal for 24 in a row inside
+        // one process: with no explicit teardown, each iteration leaves its server and listener
+        // running in the background, so by NPC 22 (Dryad) there are 21 dead servers still ticking
+        // and 21 dead listeners still bound, all competing for the same tokio runtime's threads.
+        // That is a real, separate bug from the one the comment above already fixed — found the
+        // same way: it reproduced consistently on the one NPC whose very first shot has to survive
+        // a real tick round-trip rather than firing off a value already computed, and it reproduced
+        // identically whether or not anything else was running on the machine at the time, which
+        // ruled out ordinary system load as the cause. `start_with_owned_tasks` below is the same
+        // few lines `start_with` already does, just handing back what it spawned so this loop can
+        // abort both tasks at the end of every iteration instead of leaking them.
+        let (addr, game_task, listener_task) = start_with_owned_tasks().await;
         let mut alice = join(addr, "alice").await;
         // Wider than this file's usual 10s: the town NPC's very first shot aims at wherever the
         // hostile is *right now*, which can still be mid-fall (only the NPC's own landing is
@@ -1784,45 +1798,84 @@ async fn every_newly_covered_town_npc_actually_fights() {
         assert_eq!(npc.npc_type(), npc_type, "the spawn command resolved by id");
         let hostile = spawn_npc(&mut alice, "Zombie").await;
 
-        alice
-            .wait_for(
-                "it to land",
-                |e| matches!(e, Event::NpcSynced(n) if n.index == npc.index && n.velocity.1 == 0.0),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("npc {npc_type} never landed"));
-
-        if let Some(projectile_type) = projectile_type {
-            alice
-                .wait_for("it to open fire", |e| {
-                    matches!(e, Event::ProjectileSynced(p) if p.projectile_type == projectile_type)
-                })
-                .await
-                .unwrap_or_else(|_| panic!("npc {npc_type} never fired projectile {projectile_type}"));
-        }
-
+        // Landing, the first shot (if ranged), and the hostile taking damage are all watched for
+        // together in one scan, not as separate sequential `wait_for` calls — they can genuinely
+        // arrive in the same batch of events. Landing detection and combat engagement both key off
+        // this NPC's own velocity settling to exactly zero, and a freshly engaged NPC acts
+        // immediately with no cooldown wait (see `try_combat`'s own doc): a ranged NPC's first shot
+        // and a melee NPC's first hit can both land on the very same tick its landing is confirmed.
+        // Sequential `wait_for` calls race on that: each one discards whatever it scans past
+        // looking for its own match, so an event that arrives before (or interleaved with) an
+        // earlier wait's own target gets silently eaten while that earlier wait is still scanning
+        // — found running this exact test against Dryad (20), whose zero-cooldown first shot makes
+        // the race far more likely to land than it does for anything with a real windup.
+        let mut landed = false;
+        let mut fired = projectile_type.is_none();
         // Dryad (20) is the one real exception: her attack faithfully deals zero pre-scaling
-        // damage in vanilla (see town_combat's own module doc), so there is nothing to wait for
-        // beyond the shot itself — asserting a health drop here would wait forever on a real
-        // vanilla behaviour, not a bug.
-        if npc_type == 20 {
-            continue;
+        // damage in vanilla (see town_combat's own module doc), so there is no damage to wait
+        // for — asserting a health drop here would wait forever on a real vanilla behaviour.
+        let mut hurt = npc_type == 20;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while (!landed || !fired || !hurt) && tokio::time::Instant::now() < deadline {
+            let Ok(event) = alice.next_event().await else {
+                break;
+            };
+            match event {
+                Event::NpcSynced(n) if n.index == npc.index && n.velocity.1 == 0.0 => {
+                    landed = true;
+                }
+                Event::ProjectileSynced(p) if Some(p.projectile_type) == projectile_type => {
+                    fired = true;
+                }
+                Event::NpcSynced(n) if n.index == hostile.index && n.life < hostile.life => {
+                    hurt = true;
+                }
+                _ => {}
+            }
         }
-
-        let hurt = alice
-            .wait_for("the hostile to take damage", |e| {
-                matches!(e, Event::NpcSynced(n) if n.index == hostile.index && n.life < hostile.life)
-            })
-            .await
-            .unwrap_or_else(|_| panic!("npc {npc_type}'s attack never damaged its target"));
-        let Event::NpcSynced(hurt) = hurt else {
-            unreachable!("matched on it")
-        };
-        assert!(
-            hurt.life < hostile.life,
-            "npc {npc_type}: life should have gone down, not merely changed"
-        );
+        assert!(landed, "npc {npc_type} never landed");
+        if let Some(projectile_type) = projectile_type {
+            assert!(
+                fired,
+                "npc {npc_type} never fired projectile {projectile_type}"
+            );
+        }
+        assert!(hurt, "npc {npc_type}'s attack never damaged its target");
+        game_task.abort();
+        listener_task.abort();
     }
+}
+
+/// Same setup `start_with` does, but handing back what it spawned instead of leaving both tasks to
+/// run forever — needed only by tests, like the one above, that create many short-lived servers in
+/// a loop and must tear each one down before the next, rather than the ordinary one-server-per-test
+/// case every other test in this file is, where a server outliving the test is harmless.
+async fn start_with_owned_tasks() -> (
+    SocketAddr,
+    tokio::task::JoinHandle<Stopped>,
+    tokio::task::JoinHandle<()>,
+) {
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        ..Config::default()
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let world = worldgen::generate(
+        config.world_width,
+        config.world_height,
+        config.world_name.clone(),
+        7,
+    );
+
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    let game_task = tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let listener_task = tokio::spawn(listener::run(listener, config, tx, None));
+    (addr, game_task, listener_task)
 }
 
 /// Registering an account claims the server, and a stranger loses the dangerous commands.

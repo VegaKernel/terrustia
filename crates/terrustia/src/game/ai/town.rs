@@ -727,6 +727,29 @@ mod tests {
     }
 
     #[test]
+    fn a_dryad_shoots_at_a_hostile_in_range() {
+        // Her ranged attack is a real vanilla outlier — zero pre-scaling damage and a 600-tick
+        // cooldown, both far off every other combat-capable town NPC's numbers (see
+        // `town_combat`'s own module doc) — worth its own direct test rather than trusting the
+        // exhaustive end-to-end sweep in `gameplay.rs` alone to exercise this specific shape.
+        let tiles = flat(0, 400);
+        let mut dryad = stand_on(20, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 5,
+            center: (dryad.center().0 + 10.0, dryad.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut dryad, &w, None, &mut rng());
+        let shot = result
+            .shot
+            .expect("a hostile 10px away is well within her 1200px range");
+        assert_eq!(shot.projectile, 586);
+        assert_eq!(shot.damage, 0, "her attack is faithfully harmless");
+    }
+
+    #[test]
     fn a_town_npc_with_no_combat_profile_still_does_not_fight() {
         // Town Cat (637): vanilla's own `AttackType` set explicitly re-asserts `-1` for town pets
         // rather than leaving it at the array's default (`NPCID.cs:4855`) — a real town resident
