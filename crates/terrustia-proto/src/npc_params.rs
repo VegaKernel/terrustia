@@ -1724,8 +1724,12 @@ pub const SERVANT_OF_CTHULHU: u16 = 5;
 /// How the Eye hovers in each of its two forms: (offset above the target, speed, acceleration).
 pub const EYE_HOVER_FIRST: (f32, f32, f32) = (200.0, 5.0, 0.04);
 pub const EYE_HOVER_SECOND: (f32, f32, f32) = (120.0, 6.0, 0.07);
-/// How long it hovers before the first dash of a set.
+/// Expert Mode's own speed and acceleration for the first form's hover — the offset above the
+/// target is unchanged.
+pub const EYE_HOVER_FIRST_EXPERT: (f32, f32) = (7.0, 0.15);
+/// How long it hovers before the first dash of a set, and Expert Mode's much shorter version.
 pub const EYE_HOVER_TICKS_FIRST: f32 = 600.0;
+pub const EYE_HOVER_TICKS_FIRST_EXPERT: f32 = 210.0;
 pub const EYE_HOVER_TICKS_SECOND: f32 = 200.0;
 
 /// Dash speed in each form.
@@ -1741,13 +1745,17 @@ pub const EYE_DASH_DRAG_SECOND: f32 = 0.97;
 /// Dashes per set.
 pub const EYE_DASHES: f32 = 3.0;
 
-/// How often the first form throws out a servant, and how far it can be to bother.
+/// How often the first form throws out a servant, and how far it can be to bother. Expert Mode
+/// calls one much more often, and throws it a little faster.
 pub const EYE_SERVANT_EVERY: f32 = 110.0;
+pub const EYE_SERVANT_EVERY_EXPERT: f32 = 44.0;
 pub const EYE_SERVANT_RANGE: f32 = 500.0;
 pub const EYE_SERVANT_SPEED: f32 = 5.0;
+pub const EYE_SERVANT_SPEED_EXPERT: f32 = 6.0;
 
-/// The health fraction at which it splits open.
+/// The health fraction at which it splits open, and Expert Mode's own, higher one.
 pub const EYE_SPLIT_AT: f32 = 0.5;
+pub const EYE_SPLIT_AT_EXPERT: f32 = 0.65;
 /// How long the transformation takes, in each of its two halves.
 pub const EYE_SPLIT_TICKS: f32 = 100.0;
 /// How fast the spin builds during it, and where it tops out.
@@ -1757,6 +1765,12 @@ pub const EYE_SPIN_MAX: f32 = 0.5;
 /// Its damage and defence once it has split.
 pub const EYE_SECOND_FORM_DAMAGE: i32 = 23;
 pub const EYE_SECOND_FORM_DEFENSE: i32 = 0;
+/// Expert Mode strips even more armour once it is nearly dead (`flag2`/`flag3` in source, each
+/// overwriting the last since the lower threshold always implies the higher one).
+pub const EYE_SECOND_FORM_DEFENSE_LOW: i32 = -15;
+pub const EYE_SECOND_FORM_DEFENSE_LOW_AT: f32 = 0.12;
+pub const EYE_SECOND_FORM_DEFENSE_VERY_LOW: i32 = -30;
+pub const EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT: f32 = 0.04;
 
 /// Skeletron's hand.
 pub const SKELETRON_HAND: u16 = 36;
@@ -1814,31 +1828,57 @@ pub const QUEEN_CLIMBING: f32 = 2.0;
 pub const QUEEN_STINGING: f32 = 3.0;
 pub const QUEEN_LEAVING: f32 = 5.0;
 
-/// Charge speed at full health, and the extra it gains at each quarter lost.
+/// Charge speed at full health, and the extra it gains at each quarter lost — Expert Mode only;
+/// Normal mode never gains any of it.
 pub const QUEEN_CHARGE: f32 = 12.0;
 pub const QUEEN_CHARGE_RAGE: [(f32, f32); 4] = [(0.75, 1.0), (0.5, 1.0), (0.25, 2.0), (0.1, 2.0)];
+/// Expert Mode's own, higher base speed, and its own larger bonus at the same four thresholds.
+pub const QUEEN_CHARGE_EXPERT: f32 = 16.0;
+pub const QUEEN_CHARGE_SPEED_RAGE_EXPERT: [(f32, f32); 4] =
+    [(0.75, 2.0), (0.5, 2.0), (0.25, 2.0), (0.1, 2.0)];
 /// How level with you she has to be before she commits, in pixels.
 pub const QUEEN_CHARGE_ALIGN: f32 = 20.0;
-/// How many charges she strings together, and the extra at each health threshold.
+/// How many charges she strings together.
 pub const QUEEN_CHARGES: i32 = 2;
+/// The three health fractions (1/2, 1/3, 1/5) at which Expert Mode alone adds another charge to
+/// the string — and, at the same three, brakes harder out of one.
+pub const QUEEN_EXPERT_STEPS: [f32; 3] = [0.5, 1.0 / 3.0, 0.2];
 /// The band she holds while lining a charge up.
 pub const QUEEN_STANDOFF: (f32, f32) = (300.0, 600.0);
-/// How fast she climbs into position, and her acceleration.
+/// How fast she climbs into position while lining up a charge, and her acceleration — Expert
+/// Mode's own bonus to each, at the same four thresholds as the charge speed above, is added on
+/// top of these base values (unlike the charge speed, whose base itself changes in Expert Mode).
 pub const QUEEN_HOVER: f32 = 12.0;
 pub const QUEEN_HOVER_ACCEL: f32 = 0.07;
+pub const QUEEN_CLIMB_ACCEL_RAGE_EXPERT: [(f32, f32); 4] =
+    [(0.75, 0.05), (0.5, 0.05), (0.25, 0.05), (0.1, 0.1)];
+/// How far a charge overshoots before it brakes, and Expert Mode's tighter, health-tiered leash
+/// on it — Normal mode always uses the flat value below.
+pub const QUEEN_CHARGE_LIMIT: f32 = 600.0;
+/// Her acceleration while hovering into position to call bees — Expert Mode replaces it outright.
+pub const QUEEN_CLIMBING_HOVER_ACCEL_EXPERT: f32 = 0.1;
 /// How far above you she hovers to summon, and to sting.
 pub const QUEEN_SUMMON_ABOVE: f32 = 200.0;
 pub const QUEEN_STING_ABOVE: f32 = 300.0;
 /// How often she calls a bee, how fast it leaves, and how many she calls before moving on.
+/// Expert Mode's own bonus to the cadence, at the same four thresholds again.
 pub const QUEEN_SUMMON_EVERY: f32 = 40.0;
+pub const QUEEN_SUMMON_CADENCE_RAGE_EXPERT: [(f32, f32); 4] =
+    [(0.75, 0.25), (0.5, 0.25), (0.25, 0.25), (0.1, 0.25)];
 pub const QUEEN_BEE_SPEED: f32 = 5.0;
 pub const QUEEN_SUMMONS: f32 = 5.0;
-/// How often she spits, at full health and at a tenth.
+/// How often she spits at full health (Normal mode, always) and at a tenth (either mode); Expert
+/// Mode's own baseline above half health sits between the two.
 pub const QUEEN_STING_EVERY: f32 = 40.0;
+pub const QUEEN_STING_EVERY_EXPERT: f32 = 35.0;
 pub const QUEEN_STING_EVERY_ENRAGED: f32 = 15.0;
+/// Expert Mode's own bonus to stinger speed, and the extra it adds again below a tenth health.
+pub const QUEEN_STING_SPEED_EXPERT: f32 = 2.0;
+pub const QUEEN_STING_SPEED_EXPERT_ENRAGED: f32 = 3.0;
 /// Beyond this she leaves.
 pub const QUEEN_GIVE_UP: f32 = 3000.0;
-/// Her defence climbs by this much as her health falls away.
+/// Her defence climbs by this much as her health falls away — Expert Mode only; Normal mode's
+/// defence never moves from the type table.
 pub const QUEEN_DEFENSE_RAMP: f32 = 20.0;
 
 /// Deerclops' three projectiles: the ice spike, the falling rubble, and the shadow hand.
@@ -1923,7 +1963,24 @@ pub const WALL_LEECH_AFTER: f32 = 2700.0;
 /// Its walking speed at full health, and what each threshold adds.
 pub const WALL_SPEED: f32 = 1.5;
 pub const WALL_SPEED_RAGE: [(f32, f32); 4] = [(0.75, 0.25), (0.5, 0.4), (0.25, 0.5), (0.1, 0.6)];
-/// The flat multiplier and bonus the game applies on top.
+/// Five more thresholds Expert Mode alone crosses, on top of the four above (`aiStyle==27`'s
+/// `Main.expertMode` block in `NPC.cs`).
+pub const WALL_SPEED_RAGE_EXPERT: [(f32, f32); 5] = [
+    (0.66, 0.3),
+    (0.33, 0.3),
+    (0.05, 0.6),
+    (0.035, 0.6),
+    (0.025, 0.6),
+];
+/// Expert Mode's own multiplier and bonus, applied once on top of every threshold above —
+/// separate from, and stacking with, get-fixed-boi's pair below.
+pub const WALL_EXPERT_SPEED_SCALE: f32 = 1.35;
+pub const WALL_EXPERT_SPEED_BONUS: f32 = 0.35;
+/// The flat multiplier and bonus get-fixed-boi (`Main.getGoodWorld`) applies on top of that.
+///
+/// Applied unconditionally here rather than gated on the secret seed: nothing in gameplay tracks
+/// `getGoodWorld` yet (`secret_seed.rs` only reaches worldgen), so there is no flag to read. Left
+/// exactly as it already behaved rather than silently dropped while adding Expert Mode above it.
 pub const WALL_SPEED_SCALE: f32 = 1.1;
 pub const WALL_SPEED_BONUS: f32 = 0.2;
 /// How tall the wall is kept, at least.

@@ -5,18 +5,23 @@
 //! still. Between them she returns to a chooser state, which is the only place the next attack is
 //! decided — so the fight has a rhythm you can read but not predict.
 //!
-//! Everything scales twice over. As her health falls her charges get faster, she strings more of
-//! them together, and her stingers come three times as often. And she is furious about geography:
-//! fight her above ground or drag her out of the jungle and every one of those numbers jumps
-//! again. That penalty is the game telling you where the fight is supposed to happen.
+//! In Expert Mode, everything scales twice over. As her health falls her charges get faster, she
+//! strings more of them together, and her stingers come three times as often — none of which
+//! Normal mode's health ever moves; only the geography penalty below always applies. And she is
+//! furious about geography in either mode: fight her above ground or drag her out of the jungle
+//! and every one of those numbers jumps again. That penalty is the game telling you where the
+//! fight is supposed to happen.
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    BEE, BEE_STRONG, QUEEN_BEE_SPEED, QUEEN_CHARGE, QUEEN_CHARGE_ALIGN, QUEEN_CHARGE_RAGE,
-    QUEEN_CHARGES, QUEEN_CHARGING, QUEEN_CHOOSING, QUEEN_CLIMBING, QUEEN_DEFENSE_RAMP,
-    QUEEN_GIVE_UP, QUEEN_HOVER, QUEEN_HOVER_ACCEL, QUEEN_LEAVING, QUEEN_STANDOFF,
-    QUEEN_STING_ABOVE, QUEEN_STING_EVERY, QUEEN_STING_EVERY_ENRAGED, QUEEN_STINGING,
-    QUEEN_SUMMON_ABOVE, QUEEN_SUMMON_EVERY, QUEEN_SUMMONING, QUEEN_SUMMONS, STINGER,
+    BEE, BEE_STRONG, QUEEN_BEE_SPEED, QUEEN_CHARGE, QUEEN_CHARGE_ALIGN, QUEEN_CHARGE_EXPERT,
+    QUEEN_CHARGE_LIMIT, QUEEN_CHARGE_RAGE, QUEEN_CHARGE_SPEED_RAGE_EXPERT, QUEEN_CHARGES,
+    QUEEN_CHARGING, QUEEN_CHOOSING, QUEEN_CLIMB_ACCEL_RAGE_EXPERT, QUEEN_CLIMBING,
+    QUEEN_CLIMBING_HOVER_ACCEL_EXPERT, QUEEN_DEFENSE_RAMP, QUEEN_EXPERT_STEPS, QUEEN_GIVE_UP,
+    QUEEN_HOVER, QUEEN_HOVER_ACCEL, QUEEN_LEAVING, QUEEN_STANDOFF, QUEEN_STING_ABOVE,
+    QUEEN_STING_EVERY, QUEEN_STING_EVERY_ENRAGED, QUEEN_STING_EVERY_EXPERT,
+    QUEEN_STING_SPEED_EXPERT, QUEEN_STING_SPEED_EXPERT_ENRAGED, QUEEN_STINGING, QUEEN_SUMMON_ABOVE,
+    QUEEN_SUMMON_CADENCE_RAGE_EXPERT, QUEEN_SUMMON_EVERY, QUEEN_SUMMONING, QUEEN_SUMMONS, STINGER,
     STINGER_DAMAGE, STINGER_SPEED,
 };
 
@@ -46,14 +51,23 @@ fn displeasure<T: TileView>(npc: &Npc, world: &World<'_, T>) -> f32 {
     n
 }
 
-/// How many of the health thresholds she has passed.
-fn wounds(npc: &Npc) -> f32 {
-    let health = npc.life as f32 / npc.life_max as f32;
-    QUEEN_CHARGE_RAGE
+/// How many of a set of health thresholds she has passed, and what they add up to.
+///
+/// Every one of these tables is Expert Mode only in real vanilla (`aiStyle==43`'s dozen or so
+/// `Main.expertMode` blocks) — Normal mode never reads any of them, so callers gate on `expert`
+/// themselves rather than this function assuming it.
+fn wounds(health: f32, table: &[(f32, f32)]) -> f32 {
+    table
         .iter()
         .filter(|(threshold, _)| health < *threshold)
         .map(|(_, extra)| extra)
         .sum()
+}
+
+/// How many of the three Expert-only steps (1/2, 1/3, 1/5 health) she has passed — real vanilla's
+/// `life < lifeMax / 2`, `/ 3`, `/ 5`, reused for both an extra charge and a harder brake.
+fn expert_steps(health: f32) -> usize {
+    QUEEN_EXPERT_STEPS.iter().filter(|t| health < **t).count()
 }
 
 /// Edge one axis toward a wanted velocity, doubling the push while still going the wrong way.
@@ -74,10 +88,16 @@ fn close_on(velocity: &mut f32, wanted: f32, accel: f32) {
 /// Drive the Queen Bee for a tick.
 pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> Hive {
     let mut hive = Hive::default();
+    let expert = world.conditions.expert;
+    let health = npc.life as f32 / npc.life_max as f32;
 
-    // Her defence climbs as her health falls: the fight gets harder as you win it.
-    npc.stats.defense +=
-        (QUEEN_DEFENSE_RAMP * (1.0 - npc.life as f32 / npc.life_max as f32)) as i32;
+    // Her defence climbs as her health falls: the fight gets harder as you win it — Expert Mode
+    // only (`if (Main.expertMode) { defense = defDefense + num657; }`). Written to the live
+    // `defense` field combat actually reads, from the type's own baseline each tick rather than
+    // compounding on whatever the field already held.
+    if expert {
+        npc.defense = npc.stats.defense + (QUEEN_DEFENSE_RAMP * (1.0 - health)) as i32;
+    }
 
     let Some(target) = world.target else {
         npc.ai[0] = QUEEN_LEAVING;
@@ -128,8 +148,14 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     }
 
     if npc.ai[0] == QUEEN_CHARGING {
-        // Two charges, and one more for every quarter of her health gone.
-        let runs = QUEEN_CHARGES + wounds(npc) as i32 + cross as i32;
+        // Two charges, one more at each of three health steps in Expert Mode, and one more again
+        // for the biome penalty, in any mode.
+        let extra_charges = if expert {
+            expert_steps(health) as i32
+        } else {
+            0
+        };
+        let runs = QUEEN_CHARGES + extra_charges + cross as i32;
         if npc.ai[1] > (2 * runs) as f32 && npc.ai[1] % 2.0 == 0.0 {
             npc.ai[0] = QUEEN_CHOOSING;
             npc.ai[1] = 0.0;
@@ -144,7 +170,13 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             if (cy - target.center.1).abs() < align {
                 npc.ai[1] += 1.0;
                 npc.ai[2] = 0.0;
-                let speed = QUEEN_CHARGE + wounds(npc) + 7.0 * cross;
+                // Expert Mode's own, higher base and its own, larger bonus at the same four
+                // thresholds; Normal mode's charge speed never moves with health at all.
+                let speed = if expert {
+                    QUEEN_CHARGE_EXPERT + wounds(health, &QUEEN_CHARGE_SPEED_RAGE_EXPERT)
+                } else {
+                    QUEEN_CHARGE
+                } + 7.0 * cross;
                 let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
                 let k = speed / (dx * dx + dy * dy).sqrt().max(0.01);
                 npc.velocity = (dx * k, dy * k);
@@ -152,9 +184,18 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                 npc.dirty = true;
                 return hive;
             }
-            // Not level yet: climb or dive to their line, holding a standoff.
-            let climb = QUEEN_HOVER + wounds(npc) + 3.0 * cross;
-            let accel = 0.15 + 0.05 * wounds(npc) + 0.5 * cross;
+            // Not level yet: climb or dive to their line, holding a standoff. Expert Mode's own
+            // bonus to both, at the same four thresholds again; Normal mode gets neither.
+            let (climb_bonus, accel_bonus) = if expert {
+                (
+                    wounds(health, &QUEEN_CHARGE_RAGE),
+                    wounds(health, &QUEEN_CLIMB_ACCEL_RAGE_EXPERT),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let climb = QUEEN_HOVER + climb_bonus + 3.0 * cross;
+            let accel = 0.15 + accel_bonus + 0.5 * cross;
             if cy < target.center.1 {
                 npc.velocity.1 += accel;
             } else {
@@ -177,14 +218,20 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         }
 
         // Mid-charge: it ends when she has overshot far enough, and then she brakes to a stop.
+        // The tighter, health-tiered leash below is Expert Mode only; Normal always uses the flat
+        // one.
         npc.direction = if npc.velocity.0 < 0.0 { -1 } else { 1 };
         npc.sprite_direction = npc.direction;
-        let mut limit = match npc.life as f32 / npc.life_max as f32 {
-            h if h < 0.1 => 300.0,
-            h if h < 0.25 => 450.0,
-            h if h < 0.5 => 500.0,
-            h if h < 0.75 => 550.0,
-            _ => 600.0,
+        let mut limit = if expert {
+            match health {
+                h if h < 0.1 => 300.0,
+                h if h < 0.25 => 450.0,
+                h if h < 0.5 => 500.0,
+                h if h < 0.75 => 550.0,
+                _ => QUEEN_CHARGE_LIMIT,
+            }
+        } else {
+            QUEEN_CHARGE_LIMIT
         };
         limit -= 100.0 * cross;
         let away = if cx < target.center.0 { -1 } else { 1 };
@@ -196,7 +243,21 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         if npc.ai[2] == 1.0 {
             npc.velocity.0 *= 0.9;
             npc.velocity.1 *= 0.9;
-            let stop = 0.1 + 0.05 * wounds(npc);
+            // Expert Mode brakes harder — one more `*0.9` per step she has passed — and needs to
+            // slow further before she counts as stopped.
+            let mut stop = 0.1;
+            if expert {
+                for _ in 0..expert_steps(health) {
+                    npc.velocity.0 *= 0.9;
+                    npc.velocity.1 *= 0.9;
+                    stop += 0.05;
+                }
+            }
+            // Out of her jungle, or above ground, she brakes harder still, in any mode.
+            if cross > 0.0 {
+                npc.velocity.0 *= 0.7;
+                npc.velocity.1 *= 0.7;
+            }
             if npc.velocity.0.abs() + npc.velocity.1.abs() < stop {
                 npc.ai[2] = 0.0;
                 npc.ai[1] += 1.0;
@@ -208,7 +269,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     }
 
     if npc.ai[0] == QUEEN_CLIMBING {
-        // Getting into position above them to call her bees.
+        // Getting into position above them to call her bees. Expert Mode accelerates faster.
         let (dx, dy) = (
             target.center.0 - cx,
             target.center.1 - QUEEN_SUMMON_ABOVE - cy,
@@ -220,17 +281,27 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             npc.dirty = true;
             return hive;
         }
+        let hover_accel = if expert {
+            QUEEN_CLIMBING_HOVER_ACCEL_EXPERT
+        } else {
+            QUEEN_HOVER_ACCEL
+        };
         let k = QUEEN_HOVER / gap.max(0.01);
-        close_on(&mut npc.velocity.0, dx * k, QUEEN_HOVER_ACCEL);
-        close_on(&mut npc.velocity.1, dy * k, QUEEN_HOVER_ACCEL);
+        close_on(&mut npc.velocity.0, dx * k, hover_accel);
+        close_on(&mut npc.velocity.1, dy * k, hover_accel);
         npc.sprite_direction = npc.direction;
         npc.dirty = true;
         return hive;
     }
 
     if npc.ai[0] == QUEEN_SUMMONING {
-        // A bee roughly every forty ticks, sooner the more hurt she is.
-        npc.ai[1] += 1.0 + wounds(npc) * 0.25;
+        // A bee roughly every forty ticks, sooner the more hurt she is — Expert Mode only.
+        let cadence_bonus = if expert {
+            wounds(health, &QUEEN_SUMMON_CADENCE_RAGE_EXPERT)
+        } else {
+            0.0
+        };
+        npc.ai[1] += 1.0 + cadence_bonus;
         let every = QUEEN_SUMMON_EVERY - 18.0 * cross;
         if npc.ai[1] > every.max(1.0) {
             npc.ai[1] = 0.0;
@@ -262,35 +333,56 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         return hive;
     }
 
-    // Stinging: she hangs high and spits, and only downward.
+    // Stinging: she hangs high and spits, and only downward. Her approach speed and acceleration
+    // toward that height are their own, higher, flat values in Expert Mode; the biome penalty
+    // adds to either, in any mode.
     let (dx, dy) = (
         target.center.0 - cx,
         target.center.1 - QUEEN_STING_ABOVE - cy,
     );
     let gap = (dx * dx + dy * dy).sqrt().max(0.01);
-    let speed = 4.0 + 6.0 * cross;
-    let accel = 0.05 + 0.2 * cross;
+    let (speed_base, accel_base) = if expert { (6.0, 0.075) } else { (4.0, 0.05) };
+    let speed = speed_base + 6.0 * cross;
+    let accel = accel_base + 0.2 * cross;
     let k = speed / gap;
     close_on(&mut npc.velocity.0, dx * k, accel);
     close_on(&mut npc.velocity.1, dy * k, accel);
 
     npc.ai[1] += 1.0;
-    let mut every = match npc.life as f32 / npc.life_max as f32 {
-        h if h < 0.1 => QUEEN_STING_EVERY_ENRAGED,
-        h if h < 0.33 => 25.0,
-        h if h < 0.5 => 30.0,
-        _ => QUEEN_STING_EVERY,
+    // Cadence: flat in Normal mode; a health-tiered ladder, faster throughout, in Expert.
+    let mut every = if expert {
+        match health {
+            h if h < 0.1 => QUEEN_STING_EVERY_ENRAGED,
+            h if h < 1.0 / 3.0 => 25.0,
+            h if h < 0.5 => 30.0,
+            _ => QUEEN_STING_EVERY_EXPERT,
+        }
+    } else {
+        QUEEN_STING_EVERY
     };
     every -= 5.0 * cross;
     let every = every.max(1.0);
     if npc.ai[1] % every == every - 1.0 && npc.position.1 + npc.height() < target.center.1 {
         let muzzle = (cx, npc.position.1 + npc.height() * 0.8);
-        let scatter = (80.0 - 39.0 * cross).max(1.0) as i32;
+        // The horizontal and vertical scatter are not the same width in real vanilla.
+        let scatter_x = (80.0 - 39.0 * cross).max(1.0) as i32;
+        let scatter_y = (40.0 - 19.0 * cross).max(1.0) as i32;
         let aim = (
-            target.center.0 - muzzle.0 + rng.random_range(-scatter..=scatter) as f32,
-            target.center.1 - muzzle.1 + rng.random_range(-scatter..=scatter) as f32,
+            target.center.0 - muzzle.0 + rng.random_range(-scatter_x..=scatter_x) as f32,
+            target.center.1 - muzzle.1 + rng.random_range(-scatter_y..=scatter_y) as f32,
         );
-        let shot_speed = STINGER_SPEED + 5.0 + 7.0 * cross;
+        // Expert Mode's own bonus, and the extra it adds again below a tenth health; Normal mode
+        // gains neither.
+        let speed_bonus = if expert {
+            QUEEN_STING_SPEED_EXPERT
+        } else {
+            0.0
+        } + if expert && health < 0.1 {
+            QUEEN_STING_SPEED_EXPERT_ENRAGED
+        } else {
+            0.0
+        };
+        let shot_speed = STINGER_SPEED + speed_bonus + 7.0 * cross;
         let k = shot_speed / (aim.0 * aim.0 + aim.1 * aim.1).sqrt().max(0.01);
         hive.stingers.push(Shot {
             projectile: STINGER,
@@ -393,8 +485,32 @@ mod tests {
         );
     }
 
+    /// Real vanilla (`NPC.cs`, `aiStyle==43`): `num664` only gains its four health-tiered bonuses
+    /// — and only replaces its 12-baseline with 16 — under `Main.expertMode`. On the unfixed code
+    /// (which read `wounds(npc)` unconditionally, in every difficulty) this would have passed for
+    /// the wrong reason; splitting it into these two proves the gating is real.
     #[test]
-    fn a_wounded_queen_charges_faster() {
+    fn a_wounded_queen_charges_faster_in_expert_mode() {
+        let tiles = Hollow;
+        let charge_speed = |life_fraction: f32| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * life_fraction) as i32;
+            q.ai[0] = QUEEN_CHARGING;
+            let (cx, cy) = q.center();
+            let level = Some(player_at(cx + 400.0, cy));
+            let mut w = hive_world(&tiles, level);
+            w.conditions.expert = true;
+            update(&mut q, &w, &mut rng());
+            q.velocity.0.hypot(q.velocity.1)
+        };
+        assert!(
+            charge_speed(0.05) > charge_speed(1.0),
+            "she should speed up as she dies, in Expert Mode"
+        );
+    }
+
+    #[test]
+    fn normal_mode_charge_speed_never_scales_with_health() {
         let tiles = Hollow;
         let charge_speed = |life_fraction: f32| {
             let mut q = queen();
@@ -406,8 +522,130 @@ mod tests {
             q.velocity.0.hypot(q.velocity.1)
         };
         assert!(
-            charge_speed(0.05) > charge_speed(1.0),
-            "she should speed up as she dies"
+            (charge_speed(0.05) - charge_speed(1.0)).abs() < 1e-4,
+            "Normal mode's charge speed should never move with health"
+        );
+    }
+
+    #[test]
+    fn expert_mode_strings_more_charges_together_at_low_health() {
+        let tiles = Hollow;
+        // At Normal's own count (2 + the biome penalty), still charging means Expert strung on
+        // another; moved on to choosing means it did not.
+        let still_charging = |expert: bool| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * 0.03) as i32; // below all three Expert steps
+            q.ai[0] = QUEEN_CHARGING;
+            q.ai[1] = 2.0 * QUEEN_CHARGES as f32 + 2.0; // one cycle past Normal's own count
+            let (cx, cy) = q.center();
+            // Not level with her, so this tick cannot commit to yet another charge itself.
+            let t = Some(player_at(cx + 400.0, cy + 2000.0));
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.ai[0] == QUEEN_CHARGING
+        };
+        assert!(
+            !still_charging(false),
+            "Normal mode should have moved on to choosing by now"
+        );
+        assert!(
+            still_charging(true),
+            "Expert Mode should still have another charge to string on"
+        );
+    }
+
+    #[test]
+    fn expert_mode_climbs_faster_toward_the_charge_line() {
+        let tiles = Hollow;
+        let velocity_after_one_tick = |expert: bool| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * 0.05) as i32;
+            q.ai[0] = QUEEN_CHARGING;
+            let (cx, cy) = q.center();
+            // Far below her, well outside the alignment window: she should be climbing.
+            let t = Some(player_at(cx, cy + 2000.0));
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.velocity.1
+        };
+        assert!(
+            velocity_after_one_tick(true) > velocity_after_one_tick(false) * 1.5,
+            "Expert's steeper acceleration at low health should show up after a single tick"
+        );
+    }
+
+    #[test]
+    fn expert_mode_tightens_the_charge_overshoot_leash() {
+        let tiles = Hollow;
+        let overshot = |expert: bool| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * 0.05) as i32; // Expert's own 300px tier
+            q.ai[0] = QUEEN_CHARGING;
+            q.ai[1] = 1.0; // mid-charge
+            q.velocity.0 = -5.0; // already moving away from where the target is
+            let (cx, cy) = q.center();
+            let t = Some(player_at(cx + 450.0, cy));
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.ai[2] == 1.0
+        };
+        assert!(
+            !overshot(false),
+            "450px is well inside Normal's flat 600px leash"
+        );
+        assert!(
+            overshot(true),
+            "but well outside Expert's own 300px leash at 5% health"
+        );
+    }
+
+    #[test]
+    fn expert_mode_brakes_harder_out_of_a_charge() {
+        let tiles = Hollow;
+        let exited_braking = |expert: bool| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * 0.05) as i32; // all three Expert brake steps
+            q.ai[0] = QUEEN_CHARGING;
+            q.ai[1] = 1.0;
+            q.ai[2] = 1.0; // already braking
+            q.velocity = (0.2, 0.0);
+            let (cx, cy) = q.center();
+            let t = Some(player_at(cx, cy)); // on top of her: no overshoot re-trigger this tick
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.ai[2] == 0.0
+        };
+        assert!(
+            !exited_braking(false),
+            "Normal's single *0.9 should not have slowed her enough yet"
+        );
+        assert!(
+            exited_braking(true),
+            "Expert's extra compounding *0.9 per step should finish the brake"
+        );
+    }
+
+    #[test]
+    fn expert_mode_climbs_to_summon_faster() {
+        let tiles = Hollow;
+        let velocity_after_one_tick = |expert: bool| {
+            let mut q = queen();
+            q.ai[0] = QUEEN_CLIMBING;
+            let (cx, cy) = q.center();
+            // Far below where she wants to hover, so she accelerates upward this tick.
+            let t = Some(player_at(cx, cy + 2000.0));
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.velocity.1.abs()
+        };
+        assert!(
+            velocity_after_one_tick(true) > velocity_after_one_tick(false),
+            "Expert's 0.1 acceleration should out-pace Normal's 0.07"
         );
     }
 
@@ -452,6 +690,27 @@ mod tests {
         assert_eq!(q.ai[0], QUEEN_CHOOSING, "and then move on");
     }
 
+    /// Real vanilla (`num681`/health-tier additions to `ai[1]`) is Expert Mode only; the unfixed
+    /// code added the health-tier bonus in every difficulty.
+    #[test]
+    fn expert_mode_calls_bees_faster_at_low_health() {
+        let tiles = Hollow;
+        let cadence = |expert: bool| {
+            let mut q = queen();
+            q.life = (q.life_max as f32 * 0.05) as i32; // all four thresholds crossed
+            q.ai[0] = QUEEN_SUMMONING;
+            let t = Some(player_at(10_000.0, 10_000.0));
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.ai[1]
+        };
+        assert!(
+            cadence(true) > cadence(false),
+            "Expert's health-scaled bonus should push ai[1] up faster in a single tick"
+        );
+    }
+
     #[test]
     fn she_spits_stingers_downward_only() {
         let tiles = Hollow;
@@ -481,6 +740,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expert_mode_approaches_its_stinging_height_faster() {
+        let tiles = Hollow;
+        let velocity_after_one_tick = |expert: bool| {
+            let mut q = queen();
+            q.ai[0] = QUEEN_STINGING;
+            let (cx, cy) = q.center();
+            let t = Some(player_at(cx, cy + 2000.0)); // far below her sting height
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut q, &w, &mut rng());
+            q.velocity.1.abs()
+        };
+        assert!(
+            velocity_after_one_tick(true) > velocity_after_one_tick(false),
+            "Expert's 0.075 acceleration should out-pace Normal's 0.05"
+        );
+    }
+
+    /// Real vanilla's cadence (`num693`) and speed (`num694`) bonuses are both Expert Mode only.
+    /// The unfixed code applied the maximum speed bonus (`+5.0`) in every difficulty and used the
+    /// wrong, always-on cadence table, so this fails on it.
+    #[test]
+    fn expert_mode_spits_stingers_faster_and_harder_at_low_health() {
+        let tiles = Hollow;
+        let spat_at = |expert: bool| {
+            let mut q = queen();
+            q.ai[0] = QUEEN_STINGING;
+            q.life = (q.life_max as f32 * 0.05) as i32; // Expert's own enraged tier
+            let (cx, cy) = q.center();
+            let below = Some(player_at(cx + 50.0, cy + 500.0));
+            let mut w = hive_world(&tiles, below);
+            w.conditions.expert = expert;
+            let mut r = rng();
+            let mut spat = Vec::new();
+            for _ in 0..200 {
+                spat.extend(update(&mut q, &w, &mut r).stingers);
+            }
+            spat
+        };
+        let normal = spat_at(false);
+        let expert = spat_at(true);
+        assert!(
+            expert.len() > normal.len(),
+            "Expert's 15-tick cadence should fire more often than Normal's flat 40 in 200 ticks"
+        );
+        assert!(
+            expert[0].velocity.0.hypot(expert[0].velocity.1)
+                > normal[0].velocity.0.hypot(normal[0].velocity.1),
+            "and each shot should leave faster too"
+        );
+    }
+
     /// Drag her out of the jungle and every number in the fight moves against you.
     #[test]
     fn taking_her_out_of_the_jungle_enrages_her() {
@@ -501,17 +813,34 @@ mod tests {
         );
     }
 
+    /// Real vanilla (`if (Main.expertMode) { defense = defDefense + num657; }`) only ever writes
+    /// this in Expert Mode, and to the live `defense` field, not the type's own baseline stats.
+    /// The unfixed code raised `stats.defense` — a field combat never reads — unconditionally and
+    /// cumulatively, so this fails on it both by mode and by field.
     #[test]
-    fn her_defence_climbs_as_she_is_worn_down() {
+    fn her_defence_climbs_as_she_is_worn_down_in_expert_mode() {
         let tiles = Hollow;
         let defence = |life_fraction: f32| {
             let mut q = queen();
             q.life = (q.life_max as f32 * life_fraction) as i32;
             let t = Some(player_at(10_400.0, 10_000.0));
-            update(&mut q, &hive_world(&tiles, t), &mut rng());
-            q.stats.defense
+            let mut w = hive_world(&tiles, t);
+            w.conditions.expert = true;
+            update(&mut q, &w, &mut rng());
+            q.defense
         };
         assert!(defence(0.05) > defence(1.0));
+    }
+
+    #[test]
+    fn normal_mode_defence_never_climbs() {
+        let tiles = Hollow;
+        let mut q = queen();
+        let base = q.defense;
+        q.life = (q.life_max as f32 * 0.05) as i32;
+        let t = Some(player_at(10_400.0, 10_000.0));
+        update(&mut q, &hive_world(&tiles, t), &mut rng());
+        assert_eq!(q.defense, base, "Normal mode's defence should never move");
     }
 
     #[test]

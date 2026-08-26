@@ -13,13 +13,21 @@
 //! pattern played at speed, which is why the fight feels like it doubles rather than changes.
 //!
 //! Dawn ends it: daylight sends the Eye straight up and out of the world.
+//!
+//! Expert Mode changes more than the numbers: it opens the split at 65% health rather than 50%,
+//! hovers faster and far more briefly in the first form, drops that form's "servants only from
+//! above" rule, calls a servant much more often, and — once split — strips still more armour as
+//! the second form nears death.
 
 use terrustia_proto::npc_params::{
     EYE_DASH_DRAG_FIRST, EYE_DASH_DRAG_SECOND, EYE_DASH_DRIVE, EYE_DASH_FIRST, EYE_DASH_SECOND,
-    EYE_DASH_TICKS_FIRST, EYE_DASH_TICKS_SECOND, EYE_DASHES, EYE_HOVER_FIRST, EYE_HOVER_SECOND,
-    EYE_HOVER_TICKS_FIRST, EYE_HOVER_TICKS_SECOND, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DEFENSE,
-    EYE_SERVANT_EVERY, EYE_SERVANT_RANGE, EYE_SERVANT_SPEED, EYE_SPIN_MAX, EYE_SPIN_RAMP,
-    EYE_SPLIT_AT, EYE_SPLIT_TICKS, SERVANT_OF_CTHULHU,
+    EYE_DASH_TICKS_FIRST, EYE_DASH_TICKS_SECOND, EYE_DASHES, EYE_HOVER_FIRST,
+    EYE_HOVER_FIRST_EXPERT, EYE_HOVER_SECOND, EYE_HOVER_TICKS_FIRST, EYE_HOVER_TICKS_FIRST_EXPERT,
+    EYE_HOVER_TICKS_SECOND, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DEFENSE,
+    EYE_SECOND_FORM_DEFENSE_LOW, EYE_SECOND_FORM_DEFENSE_LOW_AT, EYE_SECOND_FORM_DEFENSE_VERY_LOW,
+    EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT, EYE_SERVANT_EVERY, EYE_SERVANT_EVERY_EXPERT,
+    EYE_SERVANT_RANGE, EYE_SERVANT_SPEED, EYE_SERVANT_SPEED_EXPERT, EYE_SPIN_MAX, EYE_SPIN_RAMP,
+    EYE_SPLIT_AT, EYE_SPLIT_AT_EXPERT, EYE_SPLIT_TICKS, SERVANT_OF_CTHULHU,
 };
 
 use crate::game::ai::World;
@@ -53,6 +61,7 @@ fn close_on(velocity: &mut f32, wanted: f32, accel: f32) {
 /// Drive the Eye of Cthulhu for a tick.
 pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     let mut summoned = Vec::new();
+    let expert = world.conditions.expert;
     let Some(target) = world.target else {
         npc.velocity.1 -= 0.04;
         npc.time_left = npc.time_left.min(10);
@@ -99,13 +108,23 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     }
 
     let second = npc.ai[0] == SECOND_FORM;
+    // Expert Mode hovers faster and much more briefly in the first form — the second form's own
+    // hover (already faster and briefer than the first's) does not change again in Expert Mode.
     let (lift, hover_speed, hover_accel) = if second {
         EYE_HOVER_SECOND
+    } else if expert {
+        (
+            EYE_HOVER_FIRST.0,
+            EYE_HOVER_FIRST_EXPERT.0,
+            EYE_HOVER_FIRST_EXPERT.1,
+        )
     } else {
         EYE_HOVER_FIRST
     };
     let hover_for = if second {
         EYE_HOVER_TICKS_SECOND
+    } else if expert {
+        EYE_HOVER_TICKS_FIRST_EXPERT
     } else {
         EYE_HOVER_TICKS_FIRST
     };
@@ -125,10 +144,20 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         EYE_DASH_DRAG_FIRST
     };
 
-    // Its shell is gone, so nothing softens a hit any more.
+    // Its shell is gone, so nothing softens a hit any more — and Expert Mode strips even more
+    // armour once it is nearly dead. Both write the live `defense`/`damage_bonus` fields combat
+    // actually reads, not the type's own baseline stats.
     if second {
-        npc.stats.defense = EYE_SECOND_FORM_DEFENSE;
-        npc.stats.damage = EYE_SECOND_FORM_DAMAGE;
+        npc.defense = EYE_SECOND_FORM_DEFENSE;
+        if expert {
+            let health = npc.life as f32 / npc.life_max as f32;
+            if health < EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT {
+                npc.defense = EYE_SECOND_FORM_DEFENSE_VERY_LOW;
+            } else if health < EYE_SECOND_FORM_DEFENSE_LOW_AT {
+                npc.defense = EYE_SECOND_FORM_DEFENSE_LOW;
+            }
+        }
+        npc.damage_bonus = EYE_SECOND_FORM_DAMAGE as f32 / npc.stats.damage.max(1) as f32;
     }
 
     if npc.ai[1] == HOVERING {
@@ -149,14 +178,27 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
             npc.ai[3] = 0.0;
             npc.dirty = true;
         } else if !second {
-            // The first form spits servants while it hovers, but only from above and only close.
+            // The first form spits servants while it hovers, close enough and — in Normal mode
+            // only — from above; Expert Mode drops the "from above" requirement and calls one
+            // much more often, a little faster.
             let (dx, dy) = (their_middle.0 - centre.0, their_middle.1 - centre.1);
             let reach = (dx * dx + dy * dy).sqrt();
-            if npc.position.1 + npc.height() < target.center.1 && reach < EYE_SERVANT_RANGE {
+            let above = npc.position.1 + npc.height() < target.center.1;
+            if (above || expert) && reach < EYE_SERVANT_RANGE {
                 npc.ai[3] += 1.0;
-                if npc.ai[3] >= EYE_SERVANT_EVERY {
+                let every = if expert {
+                    EYE_SERVANT_EVERY_EXPERT
+                } else {
+                    EYE_SERVANT_EVERY
+                };
+                if npc.ai[3] >= every {
                     npc.ai[3] = 0.0;
-                    let k = EYE_SERVANT_SPEED / reach.max(f32::MIN_POSITIVE);
+                    let speed = if expert {
+                        EYE_SERVANT_SPEED_EXPERT
+                    } else {
+                        EYE_SERVANT_SPEED
+                    };
+                    let k = speed / reach.max(f32::MIN_POSITIVE);
                     let throw = (dx * k, dy * k);
                     summoned.push(Spawn {
                         npc_type: SERVANT_OF_CTHULHU,
@@ -205,9 +247,14 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         }
     }
 
-    // Half health opens it up. Checked only in the first form, so it happens once.
-    if !second && npc.ai[0] == FIRST_FORM && (npc.life as f32) < npc.life_max as f32 * EYE_SPLIT_AT
-    {
+    // Half health opens it up — 65% in Expert Mode. Checked only in the first form, so it happens
+    // once.
+    let split_at = if expert {
+        EYE_SPLIT_AT_EXPERT
+    } else {
+        EYE_SPLIT_AT
+    };
+    if !second && npc.ai[0] == FIRST_FORM && (npc.life as f32) < npc.life_max as f32 * split_at {
         npc.ai = [1.0, 0.0, 0.0, 0.0];
         npc.dirty = true;
     }
@@ -368,8 +415,145 @@ mod tests {
         e.ai[0] = SECOND_FORM;
         let t = Some(player_at(10_000.0, 10_000.0));
         update(&mut e, &world(&tiles, t));
-        assert_eq!(e.stats.defense, EYE_SECOND_FORM_DEFENSE);
-        assert_eq!(e.stats.damage, EYE_SECOND_FORM_DAMAGE);
+        // The live fields combat actually reads (`server.rs`'s "live armour, not the type's"),
+        // not the type's own baseline stats — writing those left the shell's defence in place.
+        assert_eq!(e.defense, EYE_SECOND_FORM_DEFENSE);
+        assert!(
+            (e.damage_bonus - EYE_SECOND_FORM_DAMAGE as f32 / e.stats.damage as f32).abs() < 1e-6
+        );
+    }
+
+    /// Real vanilla (`NPC.cs`, `aiStyle==4`): `flag2`/`flag3` drop defence to -15 below 12% health
+    /// and -30 below 4%, Expert Mode only. On the unfixed code neither `world.conditions.expert`
+    /// nor these thresholds were read at all, so this fails on that code with every case at 0.
+    #[test]
+    fn expert_mode_strips_more_armour_as_the_second_form_nears_death() {
+        let tiles = Night;
+        let t = Some(player_at(10_000.0, 10_000.0));
+        let defense_at = |life_fraction: f32, expert: bool| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.life = (e.life_max as f32 * life_fraction) as i32;
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut e, &w);
+            e.defense
+        };
+        assert_eq!(
+            defense_at(0.5, true),
+            EYE_SECOND_FORM_DEFENSE,
+            "still just shell-less at half health"
+        );
+        assert_eq!(defense_at(0.1, true), EYE_SECOND_FORM_DEFENSE_LOW);
+        assert_eq!(defense_at(0.03, true), EYE_SECOND_FORM_DEFENSE_VERY_LOW);
+        assert_eq!(
+            defense_at(0.03, false),
+            EYE_SECOND_FORM_DEFENSE,
+            "Normal mode's defence never drops further"
+        );
+    }
+
+    /// Real vanilla splits the first form open at 50% health, 65% in Expert Mode (`flag`-less
+    /// `num28` check). Fails on the unfixed code, which splits at 50% regardless of Expert Mode.
+    #[test]
+    fn expert_mode_splits_it_open_at_a_higher_health_fraction() {
+        let tiles = Night;
+        let t = Some(player_at(10_000.0, 10_000.0));
+        // Above Normal's 50% threshold but below Expert's 65%.
+        let splits = |expert: bool| {
+            let mut e = eye();
+            e.life = (e.life_max as f32 * 0.6) as i32;
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut e, &w);
+            e.ai[0]
+        };
+        assert_eq!(
+            splits(false),
+            FIRST_FORM,
+            "Normal mode should not have split yet"
+        );
+        assert_eq!(splits(true), 1.0, "Expert Mode should already be splitting");
+    }
+
+    /// Real vanilla: the first form's hover is 5px/s at 0.04 accel and 600 ticks long in Normal
+    /// mode, 7px/s at 0.15 accel and 210 ticks in Expert. Fails on the unfixed code, which hovers
+    /// identically either way.
+    #[test]
+    fn expert_mode_hovers_faster_and_far_more_briefly() {
+        let tiles = Night;
+        let t = Some(player_at(10_000.0, 10_000.0));
+
+        let hover_ticks = |expert: bool| {
+            let mut e = eye();
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            let mut ticks = 0;
+            while e.ai[1] == HOVERING && ticks < 2000 {
+                update(&mut e, &w);
+                ticks += 1;
+            }
+            ticks
+        };
+        assert_eq!(hover_ticks(false), EYE_HOVER_TICKS_FIRST as i32);
+        assert_eq!(hover_ticks(true), EYE_HOVER_TICKS_FIRST_EXPERT as i32);
+
+        let velocity_after_one_tick = |expert: bool| {
+            let mut e = eye();
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            update(&mut e, &w);
+            e.velocity.0.hypot(e.velocity.1)
+        };
+        assert!(
+            velocity_after_one_tick(true) > velocity_after_one_tick(false) * 2.0,
+            "Expert's much sharper acceleration should show up after a single tick"
+        );
+    }
+
+    /// Real vanilla: Expert Mode calls a servant every 44 ticks instead of every 110, and does not
+    /// require being above the player first. Fails on the unfixed code, which never varies by
+    /// Expert Mode and never spawns when not above the player.
+    #[test]
+    fn expert_mode_calls_servants_more_often_and_even_when_not_above_you() {
+        let tiles = Night;
+        let t = Some(player_at(10_000.0, 10_000.0));
+
+        // Safely above the player: satisfies both modes' gate, isolating the cadence difference.
+        let spawned_above = |expert: bool| {
+            let mut e = eye();
+            e.position = (10_000.0, 10_000.0 - 250.0);
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            let mut spawned = 0;
+            for _ in 0..(EYE_SERVANT_EVERY as i32 + 5) {
+                spawned += update(&mut e, &w).len();
+            }
+            spawned
+        };
+        assert!(
+            spawned_above(true) > spawned_above(false),
+            "Expert's shorter cadence should call more of them in the same window"
+        );
+
+        // Level with the player rather than above: Normal mode's gate should block it outright.
+        let spawned_level = |expert: bool| {
+            let mut e = eye();
+            e.position = (10_000.0, 10_000.0);
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            let mut spawned = 0;
+            for _ in 0..(EYE_SERVANT_EVERY_EXPERT as i32 + 5) {
+                spawned += update(&mut e, &w).len();
+            }
+            spawned
+        };
+        assert_eq!(
+            spawned_level(false),
+            0,
+            "Normal mode needs to be above the player"
+        );
+        assert!(spawned_level(true) > 0, "Expert Mode does not");
     }
 
     #[test]

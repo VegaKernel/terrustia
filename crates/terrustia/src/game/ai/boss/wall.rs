@@ -2,7 +2,9 @@
 //!
 //! The Wall is the one boss that does not chase: it *advances*. It walks in one direction along the
 //! underworld at a fixed pace, faster the more it is hurt, and never turns around. The fight is
-//! therefore a race, and everything else in it exists to make the race harder.
+//! therefore a race, and everything else in it exists to make the race harder. Expert Mode makes
+//! it harder still: five more health thresholds push the pace up sooner, and a final multiplier
+//! on top of all of them applies only there.
 //!
 //! Its **eyes** ride at a quarter and three-quarters of its height and fire lasers in volleys that
 //! grow longer as the Wall weakens. Its **Hungry** hang off it on tethers and lunge at whoever comes
@@ -16,10 +18,11 @@
 use rand::rngs::SmallRng;
 use terrustia_proto::npc_params::{
     HUNGRY_ACCEL, HUNGRY_LEASH, HUNGRY_LEASH_DYING, HUNGRY_LEASH_WOUNDED, HUNGRY_RECOIL,
-    HUNGRY_SPEED, WALL_EYE, WALL_EYE_CADENCE, WALL_EYE_CHARGE, WALL_EYE_VOLLEY, WALL_FADE_TICKS,
-    WALL_HUNGRY, WALL_HUNGRY_COUNT, WALL_LASER, WALL_LASER_DAMAGE, WALL_LASER_SPEED, WALL_LEECH,
-    WALL_LEECH_AFTER, WALL_LEECH_CAP, WALL_LEECH_EVERY, WALL_MIN_HEIGHT, WALL_SPEED,
-    WALL_SPEED_BONUS, WALL_SPEED_RAGE, WALL_SPEED_SCALE,
+    HUNGRY_SPEED, WALL_EXPERT_SPEED_BONUS, WALL_EXPERT_SPEED_SCALE, WALL_EYE, WALL_EYE_CADENCE,
+    WALL_EYE_CHARGE, WALL_EYE_VOLLEY, WALL_FADE_TICKS, WALL_HUNGRY, WALL_HUNGRY_COUNT, WALL_LASER,
+    WALL_LASER_DAMAGE, WALL_LASER_SPEED, WALL_LEECH, WALL_LEECH_AFTER, WALL_LEECH_CAP,
+    WALL_LEECH_EVERY, WALL_MIN_HEIGHT, WALL_SPEED, WALL_SPEED_BONUS, WALL_SPEED_RAGE,
+    WALL_SPEED_RAGE_EXPERT, WALL_SPEED_SCALE,
 };
 
 use crate::game::ai::{Shot, World};
@@ -36,13 +39,23 @@ pub struct Advance {
 }
 
 /// How many of its health thresholds it has passed, and what they add up to.
-fn rage(npc: &Npc) -> f32 {
+///
+/// Expert Mode crosses five more of its own, on top of these four (`aiStyle==27`'s
+/// `Main.expertMode` block) — so only count them when `expert` is set.
+fn rage(npc: &Npc, expert: bool) -> f32 {
     let health = npc.life as f32 / npc.life_max as f32;
-    WALL_SPEED_RAGE
-        .iter()
-        .filter(|(threshold, _)| health < *threshold)
-        .map(|(_, extra)| extra)
-        .sum()
+    let crossed = |table: &[(f32, f32)]| -> f32 {
+        table
+            .iter()
+            .filter(|(threshold, _)| health < *threshold)
+            .map(|(_, extra)| extra)
+            .sum()
+    };
+    let mut total = crossed(&WALL_SPEED_RAGE);
+    if expert {
+        total += crossed(&WALL_SPEED_RAGE_EXPERT);
+    }
+    total
 }
 
 /// Drive the Wall of Flesh for a tick.
@@ -128,8 +141,15 @@ pub fn wall<T: TileView>(
         npc.dirty = true;
     }
 
-    // It walks, and only ever the way it is already going.
-    let speed = (WALL_SPEED + rage(npc)) * WALL_SPEED_SCALE + WALL_SPEED_BONUS;
+    // It walks, and only ever the way it is already going. Expert Mode applies its own multiplier
+    // on top of every threshold crossed above (its own five, and Normal's four) — separate from,
+    // and stacking with, get-fixed-boi's multiplier just below, which stays unconditional.
+    let expert = world.conditions.expert;
+    let mut speed = WALL_SPEED + rage(npc, expert);
+    if expert {
+        speed = speed * WALL_EXPERT_SPEED_SCALE + WALL_EXPERT_SPEED_BONUS;
+    }
+    let speed = speed * WALL_SPEED_SCALE + WALL_SPEED_BONUS;
     if npc.velocity.0 == 0.0 {
         // Its opening direction is toward whoever woke it.
         if let Some(t) = world.target {
@@ -470,6 +490,44 @@ mod tests {
             w.velocity.0.abs()
         };
         assert!(pace(0.05) > pace(1.0) * 1.5, "the race gets harder");
+    }
+
+    /// Real vanilla (`NPC.cs`, `aiStyle==27`): at low health, `num382 += 0.3` twice more
+    /// (66%/33%) and `+= 0.6` three times more (5%/3.5%/2.5%) than Normal mode ever adds, and then
+    /// `num382 = num382 * 1.35f + 0.35f` on top of that — entirely separate from, and applied
+    /// before, get-fixed-boi's own `* 1.1f + 0.2f`. On the unfixed code neither `world.conditions
+    /// .expert` nor these five thresholds were read at all, so Expert and Normal produced the
+    /// exact same pace; this fails on that code since the two would come out equal instead.
+    #[test]
+    fn expert_mode_crosses_five_more_thresholds_and_its_own_final_multiplier() {
+        let tiles = Hell;
+        let pace = |expert: bool| {
+            let mut w = the_wall();
+            // Below every threshold either mode has, so the whole ladder is climbed.
+            w.life = (w.life_max as f32 * 0.02) as i32;
+            let t = Some(player_at(11_000.0, 20_000.0));
+            let mut world = hell(&tiles, t);
+            world.conditions.expert = expert;
+            wall(&mut w, &world, 0, &mut rng());
+            w.velocity.0.abs()
+        };
+        let normal = pace(false);
+        let expert = pace(true);
+        // (1.5 + 1.75) * 1.1 + 0.2, all four Normal thresholds crossed, get-fixed-boi's pair only.
+        assert!(
+            (normal - 3.775).abs() < 1e-4,
+            "Normal mode's own pace, got {normal}"
+        );
+        // ((1.5 + 1.75 + 2.4) * 1.35 + 0.35) * 1.1 + 0.2: Normal's four thresholds, Expert's own
+        // five, Expert's final multiplier, then get-fixed-boi's — every stage transcribed in turn.
+        assert!(
+            (expert - 8.975_25).abs() < 1e-3,
+            "Expert Mode's own pace, got {expert}"
+        );
+        assert!(
+            expert > normal * 2.0,
+            "Expert should be dramatically faster, not merely different: {expert} against {normal}"
+        );
     }
 
     #[test]
