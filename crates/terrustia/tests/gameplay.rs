@@ -2664,6 +2664,278 @@ fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A module-4 request exactly as a real Terraria client would build one — the wire shape
+/// `NetCreativePowersModule.PreparePacket` uses for every power, button or toggle alike: the
+/// module id, then the power id, then whatever that power's own shape needs (nothing for a
+/// button; one bool for a shared toggle).
+fn creative_power_request(power_id: u16, toggle_state: Option<bool>) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&terrustia_proto::net_module::MODULE_CREATIVE_POWERS.to_le_bytes());
+    body.extend_from_slice(&power_id.to_le_bytes());
+    if let Some(state) = toggle_state {
+        body.push(u8::from(state));
+    }
+    frame(id::NET_MODULES, &body)
+}
+
+/// The same wire shape as [`creative_power_request`], for a shared slider's single `f32` payload.
+fn creative_slider_request(power_id: u16, value: f32) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&terrustia_proto::net_module::MODULE_CREATIVE_POWERS.to_le_bytes());
+    body.extend_from_slice(&power_id.to_le_bytes());
+    body.extend_from_slice(&value.to_le_bytes());
+    frame(id::NET_MODULES, &body)
+}
+
+/// All four of Journey mode's time-skip buttons set the clock to exactly the values vanilla's own
+/// `SpawnSkeletron`-adjacent `SkipToTime` calls use (`CreativePowers.cs`'s `StartDayImmediately`/
+/// `StartNoonImmediately`/`StartNightImmediately`/`StartMidnightImmediately`) — the same values
+/// `/time day|noon|night|midnight` already sends, over the same real `SET_TIME` packet.
+#[tokio::test]
+async fn each_journey_time_skip_button_sends_the_right_time_set() {
+    let addr = start().await;
+    let mut client = join(addr, "traveller").await;
+
+    for (power_id, expect_day, expect_time) in [
+        (terrustia_proto::net_module::power::START_DAY, true, 0),
+        (
+            terrustia_proto::net_module::power::START_NOON,
+            true,
+            terrustia::world::world::DAY_LENGTH / 2,
+        ),
+        (terrustia_proto::net_module::power::START_NIGHT, false, 0),
+        (
+            terrustia_proto::net_module::power::START_MIDNIGHT,
+            false,
+            terrustia::world::world::NIGHT_LENGTH / 2,
+        ),
+    ] {
+        client
+            .send(&creative_power_request(power_id, None))
+            .await
+            .unwrap();
+
+        let event = client
+            .wait_for(
+                "a time-set packet",
+                |e| matches!(e, Event::Other(f) if f.id == id::SET_TIME),
+            )
+            .await
+            .unwrap();
+        let Event::Other(f) = event else {
+            unreachable!()
+        };
+        let day_time = f.payload[0] != 0;
+        let time = i32::from_le_bytes(f.payload[1..5].try_into().unwrap());
+        assert_eq!(day_time, expect_day, "power id {power_id}");
+        assert_eq!(time, expect_time, "power id {power_id}");
+    }
+}
+
+/// A Journey toggle request from one client is relayed to a witness who never sent it — the
+/// dedicated-server broadcast shape `ASharedTogglePower::DeserializeNetMessage` uses, not a
+/// private echo back to the sender alone.
+#[tokio::test]
+async fn a_journey_toggle_is_relayed_to_a_witness() {
+    let addr = start().await;
+    let mut toggler = join(addr, "toggler").await;
+    let mut witness = join(addr, "witness").await;
+
+    toggler
+        .send(&creative_power_request(
+            terrustia_proto::net_module::power::FREEZE_TIME,
+            Some(true),
+        ))
+        .await
+        .unwrap();
+
+    // The witness's own join a moment ago already queued four "current state" sync frames of its
+    // own (`introduce()`'s own send, all four starting `false`) — including one for this exact
+    // power id. Matching on the fully decoded message, not just "any module-4 frame", is what
+    // actually distinguishes the toggler's real broadcast from the witness's own join-time sync.
+    let event = witness
+        .wait_for("the freeze-time toggle to relay", |e| {
+            matches!(
+                e,
+                Event::Other(f) if f.id == id::NET_MODULES
+                    && terrustia_proto::net_module::decode_creative_power(&f.payload) == Ok(Some(
+                        terrustia_proto::net_module::CreativePowerMessage::Toggle(
+                            terrustia_proto::net_module::power::FREEZE_TIME,
+                            true,
+                        )
+                    ))
+            )
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(event, Event::Other(f) if f.id == id::NET_MODULES),
+        "a witness who never sent the toggle should still see it take effect"
+    );
+}
+
+/// A client that joins *after* a Journey toggle was already flipped still learns its state — the
+/// `OnPlayerJoining` sync, not just the live broadcast the toggle test above already covers.
+#[tokio::test]
+async fn a_late_joiner_learns_an_already_set_journey_toggle() {
+    let addr = start().await;
+    let mut first = join(addr, "first").await;
+    first
+        .send(&creative_power_request(
+            terrustia_proto::net_module::power::STOP_BIOME_SPREAD,
+            Some(true),
+        ))
+        .await
+        .unwrap();
+    // Give the server a moment to actually apply it before anyone else joins and asks. Matched on
+    // the decoded message, not just "any module-4 frame" — `first`'s own join a moment ago queued
+    // its own four join-time sync frames (all starting `false`), which a looser match could catch
+    // instead of the real confirmation.
+    let confirmed = terrustia_proto::net_module::CreativePowerMessage::Toggle(
+        terrustia_proto::net_module::power::STOP_BIOME_SPREAD,
+        true,
+    );
+    first
+        .wait_for("confirmation the toggle landed", |e| {
+            matches!(
+                e,
+                Event::Other(f) if f.id == id::NET_MODULES
+                    && terrustia_proto::net_module::decode_creative_power(&f.payload)
+                        == Ok(Some(confirmed))
+            )
+        })
+        .await
+        .unwrap();
+
+    let mut late = join(addr, "latecomer").await;
+    let event = late
+        .wait_for("the already-set toggle, sent on join", |e| {
+            matches!(
+                e,
+                Event::Other(f) if f.id == id::NET_MODULES
+                    && terrustia_proto::net_module::decode_creative_power(&f.payload)
+                        == Ok(Some(confirmed))
+            )
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(event, Event::Other(f) if f.id == id::NET_MODULES),
+        "a player joining after the fact should not have to ask"
+    );
+}
+
+/// Each of the three shared sliders — `ModifyTimeRate`/`ModifyWindDirectionAndStrength`/
+/// `ModifyRainPower` — is relayed to a witness who never sent it, carrying the exact raw value
+/// requested (each power's own remap — the 1×–24× rate, the wind lerp, the rain strength — is a
+/// gameplay concern, unit-tested where it is actually applied, not the wire's job to prove).
+#[tokio::test]
+async fn each_journey_slider_change_is_relayed_to_a_witness() {
+    let addr = start().await;
+    let mut slider = join(addr, "slider").await;
+    let mut witness = join(addr, "witness").await;
+
+    for (power_id, value) in [
+        (terrustia_proto::net_module::power::MODIFY_TIME_RATE, 0.75),
+        (terrustia_proto::net_module::power::MODIFY_WIND, 0.25),
+        (terrustia_proto::net_module::power::MODIFY_RAIN, 0.6),
+    ] {
+        slider
+            .send(&creative_slider_request(power_id, value))
+            .await
+            .unwrap();
+
+        let expected = terrustia_proto::net_module::CreativePowerMessage::Slider(power_id, value);
+        witness
+            .wait_for("the slider change to relay", |e| {
+                matches!(
+                    e,
+                    Event::Other(f) if f.id == id::NET_MODULES
+                        && terrustia_proto::net_module::decode_creative_power(&f.payload)
+                            == Ok(Some(expected))
+                )
+            })
+            .await
+            .unwrap_or_else(|_| panic!("power id {power_id} never relayed"));
+    }
+}
+
+/// `ModifyTimeRate` syncs to a player who joins after it was set (`_syncToJoiningPlayers = true`
+/// in source); `ModifyWind`/`ModifyRain` do not (`false` in source, and neither persists past the
+/// moment it's applied — see `journey.rs`'s own module doc). A late joiner should see the one and
+/// never the other two.
+#[tokio::test]
+async fn only_the_time_rate_slider_syncs_to_a_late_joiner() {
+    let addr = start().await;
+    let mut setter = join(addr, "setter").await;
+
+    for (power_id, value) in [
+        (terrustia_proto::net_module::power::MODIFY_TIME_RATE, 0.75),
+        (terrustia_proto::net_module::power::MODIFY_WIND, 0.25),
+        (terrustia_proto::net_module::power::MODIFY_RAIN, 0.6),
+    ] {
+        setter
+            .send(&creative_slider_request(power_id, value))
+            .await
+            .unwrap();
+        let expected = terrustia_proto::net_module::CreativePowerMessage::Slider(power_id, value);
+        setter
+            .wait_for("confirmation each slider landed", |e| {
+                matches!(
+                    e,
+                    Event::Other(f) if f.id == id::NET_MODULES
+                        && terrustia_proto::net_module::decode_creative_power(&f.payload)
+                            == Ok(Some(expected))
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut late = join(addr, "latecomer").await;
+    let expected_time_rate = terrustia_proto::net_module::CreativePowerMessage::Slider(
+        terrustia_proto::net_module::power::MODIFY_TIME_RATE,
+        0.75,
+    );
+    late.wait_for("the time-rate slider, sent on join", |e| {
+        matches!(
+            e,
+            Event::Other(f) if f.id == id::NET_MODULES
+                && terrustia_proto::net_module::decode_creative_power(&f.payload)
+                    == Ok(Some(expected_time_rate))
+        )
+    })
+    .await
+    .unwrap();
+
+    // Nothing else arriving within a short, generous window should ever decode as the wind or
+    // rain slider — a bounded wait rather than an infinite one, since this is checking an absence.
+    let never_wind_or_rain = late
+        .try_wait_for(
+            "a wind or rain slider frame that should never come",
+            |e| {
+                matches!(
+                    e,
+                    Event::Other(f) if f.id == id::NET_MODULES
+                        && matches!(
+                            terrustia_proto::net_module::decode_creative_power(&f.payload),
+                            Ok(Some(terrustia_proto::net_module::CreativePowerMessage::Slider(
+                                p,
+                                _
+                            ))) if p == terrustia_proto::net_module::power::MODIFY_WIND
+                                || p == terrustia_proto::net_module::power::MODIFY_RAIN
+                        )
+                )
+            },
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(
+        never_wind_or_rain.is_none(),
+        "wind/rain must not be sent on join, only requested-and-relayed live"
+    );
+}
+
 /// Breaking a chest removes it, rather than leaving a ghost behind.
 #[tokio::test]
 async fn breaking_a_chest_removes_it() {

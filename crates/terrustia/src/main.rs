@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::ExitCode, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Instant,
+};
 
 use terrustia::{
     config::Config,
@@ -185,11 +189,15 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         initial_panel,
     ));
 
-    let mut game = tokio::spawn(
-        GameServer::new(config.clone(), world)
-            .with_panel_toggle(panel_toggle_tx)
-            .run(events_rx),
-    );
+    let game_server = GameServer::new(config.clone(), world).with_panel_toggle(panel_toggle_tx);
+    // Cloned out before `run` consumes `game_server` — see the field's own doc comment in
+    // `game::server` for why a shared cell, read only after the task ends, is how a world switch
+    // requested from the panel reaches this function at all.
+    let world_switch = game_server.world_switch_handle();
+    // `config` is about to be moved into the accept loop below; a relaunch only needs the address
+    // back, so that is all that is kept.
+    let listen_addr = config.listen;
+    let mut game = tokio::spawn(game_server.run(events_rx));
 
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
 
@@ -251,6 +259,67 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         // Non-zero, so `Restart=on-failure` and container restart policies actually fire.
         return Err("the server stopped because of a crash".into());
     }
+
+    // The world has already been saved by the ordinary shutdown path above — a switch is just an
+    // ordinary clean stop with a note left behind about what to serve next. See
+    // `game::server::GameServer::pending_world_switch`'s doc comment for why this cannot be a
+    // hot-swap of the in-memory `World` and has to be a real process restart instead.
+    let requested = world_switch
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(new_world) = requested {
+        info!(world = %new_world.display(), "restarting into the requested world");
+        return relaunch_into(&new_world, &args.config, listen_addr)
+            .map_err(|e| format!("could not restart into {}: {e}", new_world.display()).into());
+    }
+    Ok(())
+}
+
+/// Replace this process with a fresh one pointed at `world`, keeping the config file and listen
+/// address the operator already chose. Never returns on success: on Unix `exec` replaces the
+/// process image outright, same PID, which is what lets a supervisor (systemd, a container
+/// restart policy) see this as the same service continuing rather than one stopping and another
+/// starting. There is no equivalent primitive on Windows, so there the best available shape is a
+/// detached child followed by this process exiting — a real PID change a process-monitor keyed on
+/// PID would need to notice, the same platform gap `main`'s own `ctrl_close`/`ctrl_shutdown`
+/// handling already lives with.
+#[cfg(unix)]
+fn relaunch_into(
+    world: &Path,
+    config_path: &Path,
+    listen: std::net::SocketAddr,
+) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe()?;
+    let error = std::process::Command::new(exe)
+        .arg("--config")
+        .arg(config_path)
+        .arg("--listen")
+        .arg(listen.to_string())
+        .arg("--world")
+        .arg(world)
+        .exec();
+    // `exec` only returns here on failure — a successful call replaces this process and never
+    // reaches this line at all.
+    Err(error)
+}
+
+#[cfg(not(unix))]
+fn relaunch_into(
+    world: &Path,
+    config_path: &Path,
+    listen: std::net::SocketAddr,
+) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe)
+        .arg("--config")
+        .arg(config_path)
+        .arg("--listen")
+        .arg(listen.to_string())
+        .arg("--world")
+        .arg(world)
+        .spawn()?;
     Ok(())
 }
 

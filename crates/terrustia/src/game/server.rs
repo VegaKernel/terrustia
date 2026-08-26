@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -579,6 +580,154 @@ pub enum ServerEvent {
     PanelStatus {
         reply: oneshot::Sender<PanelStatus>,
     },
+    /// The web panel asking who is connected, for the player list and the live world view.
+    PanelPlayers {
+        reply: oneshot::Sender<Vec<PanelPlayer>>,
+    },
+    /// The web panel's kick button. Reuses exactly what `/kick` and the console's `kick` already
+    /// call ([`Self::kick`]/[`Self::announce`] by way of `run_admin_command`'s own logic) rather
+    /// than a second copy of it.
+    PanelKick {
+        name: String,
+        reason: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The web panel's ban button. Same reasoning as `PanelKick`.
+    PanelBan {
+        kind: crate::admin::BanKind,
+        value: String,
+        reason: String,
+        reply: oneshot::Sender<()>,
+    },
+    PanelUnban {
+        value: String,
+        reply: oneshot::Sender<usize>,
+    },
+    /// The web panel asking who is on the guest list, and whether it is currently in force.
+    PanelWhitelist {
+        reply: oneshot::Sender<PanelWhitelist>,
+    },
+    PanelWhitelistAdd {
+        name: String,
+        reply: oneshot::Sender<bool>,
+    },
+    PanelWhitelistRemove {
+        name: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// A coarse, sampled view of the world's tiles, for the panel's live world screen. Sampled
+    /// rather than exhaustive — see [`Self::world_tile_sample`]'s own doc comment for why a full
+    /// tile-for-tile dump is neither necessary nor safe to send over a websocket on every tick.
+    PanelWorldTiles {
+        reply: oneshot::Sender<PanelWorldTiles>,
+    },
+    /// A read-only snapshot of the running configuration, for the panel's settings view.
+    PanelConfigSnapshot {
+        reply: oneshot::Sender<PanelConfigSnapshot>,
+    },
+    /// The one setting the panel is allowed to change live: the MOTD is read fresh out of
+    /// `Config` every time a player spawns (see `on_player_spawn`), so writing a new one here takes
+    /// effect for the very next join with nothing else to coordinate.
+    PanelSetMotd {
+        motd: String,
+        reply: oneshot::Sender<()>,
+    },
+    /// Ask to restart the process pointed at a different world file. `path` has already been
+    /// resolved and validated against `crate::worlds::list()` by the panel — this only checks it
+    /// still exists (it could have been removed between the listing and the click) and, if so, sets
+    /// `stopping` so the ordinary shutdown save runs before `main` re-execs.
+    PanelSwitchWorld {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// One connected player, as the panel needs to show them: who they are, how they are doing, where
+/// they are, and — for the live world view — enough of their real appearance data to draw a
+/// stylized avatar rather than a sprite. See `panel/mod.rs`'s module doc for why nothing here is
+/// (or ever will be) a composited Terraria asset.
+#[derive(Debug, Clone)]
+pub struct PanelPlayer {
+    pub slot: u8,
+    pub name: String,
+    pub address: String,
+    pub life: i16,
+    pub life_max: i16,
+    pub mana: i16,
+    pub mana_max: i16,
+    pub position: (f32, f32),
+    pub pvp: bool,
+    pub appearance: Option<terrustia_proto::player_info::PlayerAppearance>,
+    /// Non-zero item ids currently worn in the armour/accessory slots (`inventory.rs`'s
+    /// `SLOT_RUNS` run 2, slots 59..79) — real equipped gear, not decoration invented for the
+    /// avatar.
+    pub equipped: Vec<i32>,
+}
+
+/// What [`ServerEvent::PanelWhitelist`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelWhitelist {
+    pub on: bool,
+    pub names: Vec<String>,
+}
+
+/// A coarse sample of the world's tiles for the panel's live world screen: one colour bucket per
+/// sample point on a fixed-size grid, regardless of how large the actual world is. See
+/// [`GameServer::world_tile_sample`] for how the grid is chosen and why sampling — not a full
+/// tile dump — is the honest way to stream this over a websocket.
+#[derive(Debug, Clone)]
+pub struct PanelWorldTiles {
+    pub world_width: i32,
+    pub world_height: i32,
+    pub sample_cols: u32,
+    pub sample_rows: u32,
+    /// `sample_cols * sample_rows` colour buckets, row-major, one per sample point.
+    pub tiles: Vec<TileColor>,
+}
+
+/// A tile's colour bucket, for the panel's stylized (not sprite-accurate) world render. See
+/// [`GameServer::tile_color`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileColor {
+    /// No active tile — open sky, or an unlit cave; the sample carries no depth information to
+    /// tell those apart, so it does not pretend to.
+    Empty,
+    Dirt,
+    Stone,
+    Grass,
+    Corruption,
+    Crimson,
+    Sand,
+    Snow,
+    Ice,
+    Jungle,
+    Ore,
+    Gem,
+    Water,
+    Lava,
+    Honey,
+    Ash,
+    /// Anything active with no bucket of its own — built structures, furniture, and the many tile
+    /// ids this sampler does not have a named constant for.
+    Other,
+}
+
+/// A read-only snapshot of [`Config`] for the panel's settings view. Never carries the actual
+/// server password — only whether one is set.
+#[derive(Debug, Clone)]
+pub struct PanelConfigSnapshot {
+    pub listen: SocketAddr,
+    pub max_players: usize,
+    pub world_width: i32,
+    pub world_height: i32,
+    pub motd: String,
+    pub password_set: bool,
+    pub max_chat_len: usize,
+    pub idle_timeout_secs: u64,
+    pub autosave_secs: u64,
+    pub save_target: Option<String>,
+    pub whitelist_on: bool,
+    pub whitelist_count: usize,
 }
 
 /// What [`ServerEvent::PanelAuthLookup`] hands back.
@@ -599,6 +748,9 @@ pub struct PanelStatus {
     pub player_count: usize,
     pub max_players: usize,
     pub world_name: String,
+    /// The file stem of the world currently being served, if it has one, so the panel's world
+    /// list can mark which entry is the running one.
+    pub world_file: Option<String>,
 }
 
 /// What the console can offer to complete a command's second argument with.
@@ -771,6 +923,23 @@ pub struct GameServer {
     /// command. `None` in every test that never calls [`Self::with_panel_toggle`] — the console
     /// command still works in that case, it just has nothing to notify and says so.
     panel_toggle: Option<mpsc::UnboundedSender<()>>,
+    /// Set by [`ServerEvent::PanelSwitchWorld`], and read by `main` after [`Self::run`] returns.
+    ///
+    /// Switching worlds is not something a single running process can do to its own in-memory
+    /// [`crate::world::World`] safely — every system in this file, from `section_cache` to
+    /// `cavern_monsters`, is sized and seeded for the world that was loaded at startup. The honest
+    /// version is a full graceful restart pointed at a different save file: this field is how the
+    /// request crosses from the game task (which decides *whether* to stop, by setting
+    /// `stopping`) to `main` (which is the only thing that can actually replace the process), once
+    /// `run` has already saved the current world and returned.
+    ///
+    /// An `Arc<Mutex<..>>` rather than a channel because `main` needs to read it *after* `self` has
+    /// been moved into the spawned task and consumed by `run` — a handle cloned out before that
+    /// move is the only way to still have an opinion once the task is gone.
+    pending_world_switch: Arc<Mutex<Option<PathBuf>>>,
+    /// Journey mode's shared toggles. See [`crate::game::journey`]'s own module doc for which
+    /// powers this covers and, just as importantly, which fifteen-minus-eleven it does not yet.
+    journey: crate::game::journey::JourneyPowers,
 }
 
 impl GameServer {
@@ -876,6 +1045,8 @@ impl GameServer {
             autosave_ticks,
             tile_log: crate::game::tile_log::TileLog::default(),
             panel_toggle: None,
+            pending_world_switch: Arc::new(Mutex::new(None)),
+            journey: crate::game::journey::JourneyPowers::default(),
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -900,6 +1071,13 @@ impl GameServer {
     pub fn with_panel_toggle(mut self, toggle: mpsc::UnboundedSender<()>) -> Self {
         self.panel_toggle = Some(toggle);
         self
+    }
+
+    /// A handle to whatever [`ServerEvent::PanelSwitchWorld`] requests, for `main` to read once
+    /// [`Self::run`] has returned. Call this before `run` consumes `self` — cloning an `Arc` out of
+    /// a value about to be moved is the whole trick.
+    pub fn world_switch_handle(&self) -> Arc<Mutex<Option<PathBuf>>> {
+        self.pending_world_switch.clone()
     }
 
     /// Every pylon in the world, as module 8 describes them.
@@ -1625,7 +1803,15 @@ impl GameServer {
 
         self.ticks += 1;
         let was_day = self.world.day_time;
-        self.world.tick_time();
+        // Journey mode's `FreezeTime` (`Main.cs:6342` gates the whole day/night update the same
+        // way). The clock — and everything below keyed off it turning midnight or dawn — simply
+        // does not run this tick; nothing here needs its own separate "and skip that too" branch.
+        // `ModifyTimeRate` (`Main.cs:6343`'s own `targetTimeRate`) is the other half of the same
+        // gate in source — applied here as the tick count itself rather than a separate branch,
+        // since `tick_time`'s own loop already handles more than one day/night flip in one call.
+        if !self.journey.freeze_time {
+            self.world.tick_time(self.journey.time_rate());
+        }
         // Dawn puts the moons away and takes the blood moon with them, and rolls for an eclipse.
         if self.world.day_time && !was_day {
             self.stop_moon();
@@ -2264,8 +2450,243 @@ impl GameServer {
                     player_count,
                     max_players: self.config.max_players,
                     world_name: self.world.name.clone(),
+                    world_file: self.current_world_file_stem(),
                 });
             }
+            ServerEvent::PanelPlayers { reply } => {
+                let _ = reply.send(self.panel_players());
+            }
+            ServerEvent::PanelKick {
+                name,
+                reason,
+                reply,
+            } => {
+                let Some(target) = self.slot_named(&name) else {
+                    let _ = reply.send(Err(format!("nobody named {name} is connected")));
+                    return;
+                };
+                let reason = if reason.trim().is_empty() {
+                    "kicked from the web panel".to_string()
+                } else {
+                    reason
+                };
+                // The exact two calls `run_admin_command`'s own "kick" arm makes.
+                self.announce(&format!("{name} was kicked: {reason}"));
+                self.kick(target, &reason);
+                let _ = reply.send(Ok(()));
+            }
+            ServerEvent::PanelBan {
+                kind,
+                value,
+                reason,
+                reply,
+            } => {
+                let reason = if reason.trim().is_empty() {
+                    "banned from the web panel".to_string()
+                } else {
+                    reason
+                };
+                // The exact sequence `run_admin_command`'s own "ban" arm runs.
+                self.admin.ban(kind, &value, &reason);
+                self.announce(&format!("{value} is banned: {reason}"));
+                if let Some(target) = self.slot_named(&value) {
+                    self.kick(target, &reason);
+                }
+                info!(value, reason, "ban added from the web panel");
+                let _ = reply.send(());
+            }
+            ServerEvent::PanelUnban { value, reply } => {
+                let _ = reply.send(self.admin.unban(&value));
+            }
+            ServerEvent::PanelWhitelist { reply } => {
+                let _ = reply.send(PanelWhitelist {
+                    on: self.admin.whitelist_on(),
+                    names: self.admin.whitelist.clone(),
+                });
+            }
+            ServerEvent::PanelWhitelistAdd { name, reply } => {
+                let added = self.admin.add_to_whitelist(&name);
+                if added {
+                    let _ = self.admin.save();
+                }
+                let _ = reply.send(added);
+            }
+            ServerEvent::PanelWhitelistRemove { name, reply } => {
+                let removed = self.admin.remove_from_whitelist(&name);
+                if removed {
+                    let _ = self.admin.save();
+                    // Take effect now rather than at their next join — mirrors the console's own
+                    // `whitelist remove` arm.
+                    if let Some(slot) = self.slot_named(&name) {
+                        self.kick(slot, "You are no longer on this server's guest list.");
+                    }
+                }
+                let _ = reply.send(removed);
+            }
+            ServerEvent::PanelWorldTiles { reply } => {
+                let _ = reply.send(self.world_tile_sample());
+            }
+            ServerEvent::PanelConfigSnapshot { reply } => {
+                let _ = reply.send(PanelConfigSnapshot {
+                    listen: self.config.listen,
+                    max_players: self.config.max_players,
+                    world_width: self.world.width(),
+                    world_height: self.world.height(),
+                    motd: self.config.motd.clone(),
+                    password_set: !self.config.password.is_empty(),
+                    max_chat_len: self.config.max_chat_len,
+                    idle_timeout_secs: self.config.idle_timeout_secs,
+                    autosave_secs: self.config.autosave_secs,
+                    save_target: self.save_path.as_ref().map(|p| p.display().to_string()),
+                    whitelist_on: self.admin.whitelist_on(),
+                    whitelist_count: self.admin.whitelist.len(),
+                });
+            }
+            ServerEvent::PanelSetMotd { motd, reply } => {
+                self.config.motd = motd;
+                let _ = reply.send(());
+            }
+            ServerEvent::PanelSwitchWorld { path, reply } => {
+                if !path.exists() {
+                    let _ = reply.send(Err(format!("{} no longer exists", path.display())));
+                    return;
+                }
+                self.announce("The server is restarting into a different world.");
+                info!(path = %path.display(), "world switch requested from the web panel");
+                *self
+                    .pending_world_switch
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()) = Some(path);
+                self.stopping = true;
+                let _ = reply.send(Ok(()));
+            }
+        }
+    }
+
+    /// The file stem of the world currently being served, if it has one.
+    fn current_world_file_stem(&self) -> Option<String> {
+        self.save_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+    }
+
+    /// Every connected player, in the shape the panel needs for the player list and the live world
+    /// view. `appearance` decodes `Player::appearance`'s raw bytes on demand rather than caching a
+    /// decoded copy on `Player` itself — this is the only consumer, and it is asked for at most a
+    /// couple of times a second, not once per tick.
+    fn panel_players(&self) -> Vec<PanelPlayer> {
+        self.players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| PanelPlayer {
+                slot: p.slot,
+                name: p.name.clone(),
+                address: p.addr.ip().to_string(),
+                life: p.life,
+                life_max: p.life_max,
+                mana: p.mana,
+                mana_max: p.mana_max,
+                position: p.position,
+                pvp: p.pvp,
+                appearance: p.appearance.as_ref().and_then(|bytes| {
+                    terrustia_proto::player_info::PlayerAppearance::decode(bytes).ok()
+                }),
+                equipped: Self::equipped_items(p),
+            })
+            .collect()
+    }
+
+    /// Non-zero item ids in the armour/accessory slot run — real gear, used to accent the panel's
+    /// stylized avatar. See `terrustia_proto::inventory`'s `SLOT_RUNS` for the layout: 58 inventory
+    /// slots, then 1 cursor slot, then this 20-slot armour/accessory run.
+    fn equipped_items(player: &Player) -> Vec<i32> {
+        const ARMOR_SLOTS_START: u16 = 59;
+        const ARMOR_SLOTS_END: u16 = 79;
+        let mut items: Vec<i32> = player
+            .inventory
+            .iter()
+            .filter(|(slot, _)| (ARMOR_SLOTS_START..ARMOR_SLOTS_END).contains(slot))
+            .filter(|(_, equip)| equip.item.id != 0)
+            .map(|(_, equip)| equip.item.id)
+            .collect();
+        items.sort_unstable();
+        items
+    }
+
+    /// How many sample points the panel's live world view gets along each axis, regardless of how
+    /// large the actual world is. A full tile-for-tile dump of even a small 4200x1200 world is
+    /// five million tiles — nothing a websocket should re-send every few seconds. This is dense
+    /// enough to show real terrain shape at a glance and cheap enough to resample from scratch on
+    /// every request: at most `WORLD_SAMPLE_COLS * WORLD_SAMPLE_ROWS` tile reads, each a plain
+    /// array index.
+    fn world_tile_sample(&self) -> PanelWorldTiles {
+        const WORLD_SAMPLE_COLS: u32 = 160;
+        const WORLD_SAMPLE_ROWS: u32 = 90;
+
+        let width = self.world.width();
+        let height = self.world.height();
+        let cols = WORLD_SAMPLE_COLS.min(width.max(1) as u32).max(1);
+        let rows = WORLD_SAMPLE_ROWS.min(height.max(1) as u32).max(1);
+        let mut tiles = Vec::with_capacity((cols * rows) as usize);
+        for row in 0..rows {
+            let y = ((row * height.max(1) as u32) / rows).min((height - 1).max(0) as u32) as i32;
+            for col in 0..cols {
+                let x = ((col * width.max(1) as u32) / cols).min((width - 1).max(0) as u32) as i32;
+                tiles.push(Self::tile_color(self.world.tile(x, y)));
+            }
+        }
+        PanelWorldTiles {
+            world_width: width,
+            world_height: height,
+            sample_cols: cols,
+            sample_rows: rows,
+            tiles,
+        }
+    }
+
+    /// Bucket a tile into a solid colour, not a sprite. Every id below is transcribed from
+    /// `crate::world::worldgen::tiles`, the same table the generator itself is checked against —
+    /// nothing here is invented. An id with no bucket falls into [`TileColor::Other`] rather than
+    /// guessing.
+    fn tile_color(tile: terrustia_proto::Tile) -> TileColor {
+        use crate::world::worldgen::tiles as t;
+
+        if tile.liquid > 0 {
+            return match tile.liquid_kind {
+                terrustia_proto::Liquid::Lava => TileColor::Lava,
+                terrustia_proto::Liquid::Honey => TileColor::Honey,
+                terrustia_proto::Liquid::Water | terrustia_proto::Liquid::Shimmer => {
+                    TileColor::Water
+                }
+            };
+        }
+        if !tile.is_active() {
+            return TileColor::Empty;
+        }
+        match tile.block {
+            t::GRASS => TileColor::Grass,
+            t::CORRUPT_GRASS | t::EBONSTONE | t::DEMON_ALTAR | t::SHADOW_ORB => {
+                TileColor::Corruption
+            }
+            t::CRIMSON_GRASS | t::CRIMSTONE => TileColor::Crimson,
+            t::JUNGLE_GRASS | t::MUD | t::HIVE | t::LIHZAHRD_BRICK | t::MUSHROOM_GRASS => {
+                TileColor::Jungle
+            }
+            t::SAND | t::EBONSAND | t::CRIMSAND | t::SANDSTONE | t::HARDENED_SAND | t::SILT => {
+                TileColor::Sand
+            }
+            t::SNOW => TileColor::Snow,
+            t::ICE => TileColor::Ice,
+            t::STONE | t::MARBLE | t::GRANITE | t::ASH | t::OBSIDIAN | t::CLAY => TileColor::Stone,
+            t::IRON | t::COPPER | t::GOLD | t::SILVER | t::DEMONITE | t::CRIMTANE => TileColor::Ore,
+            t::SAPPHIRE | t::RUBY | t::EMERALD | t::TOPAZ | t::AMETHYST | t::DIAMOND => {
+                TileColor::Gem
+            }
+            t::DIRT => TileColor::Dirt,
+            _ => TileColor::Other,
         }
     }
 
@@ -2522,7 +2943,10 @@ impl GameServer {
     }
 
     fn announce(&mut self, text: &str) {
-        info!("{text}");
+        // This always reaches players as real in-game chat (`chat_broadcast`, just below) — a
+        // kick notice, a save confirmation, `say`'s own text — so it is exactly as much "chat" for
+        // the panel's live feed as a player's own line is, tagged the same way.
+        info!(target: crate::term::CHAT_TARGET, "{text}");
         if let Ok(frame) = net_module::chat_broadcast(
             net_module::SERVER_AUTHOR,
             &NetworkText::literal(text),
@@ -3183,6 +3607,31 @@ impl GameServer {
             if let Ok(frame) = w.finish() {
                 self.send(slot, frame);
             }
+        }
+
+        // Journey mode's four shared toggles this server models — `ASharedTogglePower::
+        // OnPlayerJoining`'s own effect. A client never told assumes every power starts off, which
+        // is wrong the moment an operator has frozen time or the weather before this player joined.
+        for id in [
+            net_module::power::FREEZE_TIME,
+            net_module::power::FREEZE_RAIN,
+            net_module::power::FREEZE_WIND,
+            net_module::power::STOP_BIOME_SPREAD,
+        ] {
+            if let Some(enabled) = self.journey.get(id)
+                && let Ok(frame) = net_module::creative_power_toggle(id, enabled)
+            {
+                self.send(slot, frame);
+            }
+        }
+        // `ModifyTimeRate` is the one shared slider that syncs to a joining player
+        // (`_syncToJoiningPlayers = true` — `ModifyWind`/`ModifyRain` are both `false` in source,
+        // see `journey.rs`'s own module doc for why there is nothing to send for those two here).
+        if let Ok(frame) = net_module::creative_power_slider(
+            net_module::power::MODIFY_TIME_RATE,
+            self.journey.time_rate_slider,
+        ) {
+            self.send(slot, frame);
         }
 
         // What the Angler wants today. A client that is never told shows no quest at all, so a
@@ -4948,13 +5397,18 @@ impl GameServer {
     }
 
     fn on_net_module(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
-        // Module 8 is the only other one a client sends that this server acts on: "take me to that
-        // pylon". Checked before chat because `IncomingChat::decode` returns `None` for it and the
-        // request would otherwise be dropped on the floor.
+        // Module 8: "take me to that pylon". Checked before chat because `IncomingChat::decode`
+        // returns `None` for it and the request would otherwise be dropped on the floor.
         if let Some((message, pylon)) = net_module::decode_pylon_message(payload)?
             && message == net_module::PylonMessage::RequestTeleport
         {
             return self.on_pylon_teleport(slot, pylon);
+        }
+
+        // Module 4: Journey mode powers. Same reason as module 8 above — neither is chat, and
+        // `IncomingChat::decode` would return `None` for it too, so it has to be checked first.
+        if let Some(message) = net_module::decode_creative_power(payload)? {
+            return self.on_creative_power(message);
         }
 
         let Some(chat) = IncomingChat::decode(payload)? else {
@@ -4980,7 +5434,9 @@ impl GameServer {
             .player(slot)
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        info!("<{name}> {}", chat.text);
+        // Tagged so the web panel's live feed can tell an in-game chat line apart from an
+        // operational one — both are `info!`, and only the target says which is which.
+        info!(target: crate::term::CHAT_TARGET, "<{name}> {}", chat.text);
 
         // The text goes out bare, with the author's slot beside it. The client adds the name
         // itself — `ChatHelper.DisplayMessage` prefixes `Main.player[author].name` whenever the
@@ -5101,12 +5557,7 @@ impl GameServer {
             },
             "ban" => match words.split_first() {
                 Some((kind, rest)) if !rest.is_empty() => {
-                    let Some(kind) = (match *kind {
-                        "name" => Some(BanKind::Name),
-                        "ip" | "address" => Some(BanKind::Address),
-                        "uuid" => Some(BanKind::Uuid),
-                        _ => None,
-                    }) else {
+                    let Some(kind) = BanKind::parse(kind) else {
                         self.tell(slot, "usage: /ban <name|ip|uuid> <value> [reason]");
                         return Ok(());
                     };
@@ -5311,16 +5762,7 @@ impl GameServer {
                 };
                 match set {
                     Some((day_time, time)) => {
-                        self.world.day_time = day_time;
-                        self.world.time = time;
-                        let frame = packets::TimeSet {
-                            day_time,
-                            time,
-                            sun_mod_y: 0,
-                            moon_mod_y: 0,
-                        }
-                        .encode()?;
-                        self.broadcast(frame, None);
+                        self.set_time(day_time, time)?;
                         self.announce(&format!("Time set to {argument}."));
                     }
                     None => self.tell(slot, "usage: /time <day|noon|night|midnight>"),
@@ -9081,7 +9523,13 @@ impl GameServer {
             .any(|p| p.is_playing() && p.life_max >= 120);
         let was_raining = self.weather.raining;
         let hard_mode = self.world.progress.hard_mode;
-        self.weather.tick(strong_enough, hard_mode, &mut self.rng);
+        self.weather.tick(
+            strong_enough,
+            hard_mode,
+            self.journey.freeze_wind,
+            self.journey.freeze_rain,
+            &mut self.rng,
+        );
         // The world carries the weather so it goes into the save with everything else.
         self.world.wind = self.weather.wind;
         self.world.raining = self.weather.raining;
@@ -9914,6 +10362,118 @@ impl GameServer {
         self.broadcast_world_data();
     }
 
+    /// Set the clock to an exact point and tell everyone — the `/time` admin command's own effect,
+    /// pulled out so Journey mode's four time-skip buttons (`StartDayImmediately`/
+    /// `StartNoonImmediately`/`StartNightImmediately`/`StartMidnightImmediately`) can share it
+    /// rather than re-decide what a client needs to hear about a jumped clock.
+    fn set_time(&mut self, day_time: bool, time: i32) -> terrustia_proto::Result<()> {
+        self.world.day_time = day_time;
+        self.world.time = time;
+        let frame = packets::TimeSet {
+            day_time,
+            time,
+            sun_mod_y: 0,
+            moon_mod_y: 0,
+        }
+        .encode()?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Module 4: Journey mode powers. See [`crate::game::journey`]'s own module doc for exactly
+    /// which of vanilla's fifteen this covers.
+    ///
+    /// Takes no `slot`: nothing here is per-sender yet. Real vanilla's `PowerPermissionLevel` (an
+    /// operator-configurable "who may flip this" gate — not modelled here, see this function's own
+    /// comment below) is the only thing that would need one, whenever it lands.
+    fn on_creative_power(
+        &mut self,
+        message: net_module::CreativePowerMessage,
+    ) -> terrustia_proto::Result<()> {
+        use net_module::{CreativePowerMessage, power};
+
+        match message {
+            // The four buttons share `set_time` with `/time` — same effect, same values
+            // (`DAY_LENGTH/2`/`NIGHT_LENGTH/2` for noon/midnight match `SkipToTime`'s own
+            // `27000`/`16200` exactly; see that pair's own doc comment on the constants).
+            CreativePowerMessage::Button(id) => {
+                let set = match id {
+                    power::START_DAY => Some((true, 0)),
+                    power::START_NOON => Some((true, DAY_LENGTH / 2)),
+                    power::START_NIGHT => Some((false, 0)),
+                    power::START_MIDNIGHT => Some((false, NIGHT_LENGTH / 2)),
+                    _ => None,
+                };
+                if let Some((day_time, time)) = set {
+                    self.set_time(day_time, time)?;
+                }
+            }
+            // No permission-level check yet (`PowerPermissionLevel` — real vanilla lets an
+            // operator configure who may flip each power, `journeypermission_<name>` in its own
+            // config). Every connected player may toggle these for now, disclosed rather than
+            // silently assumed — see `journey.rs`'s own module doc for the fuller list of what
+            // this slice does and does not cover.
+            CreativePowerMessage::Toggle(id, enabled) => {
+                if self.journey.set(id, enabled)
+                    && let Ok(frame) = net_module::creative_power_toggle(id, enabled)
+                {
+                    // A dedicated server broadcasts the accepted state to everyone, the toggling
+                    // player included — that player's own client does not apply its request
+                    // locally, it waits to be told, the same request/confirm shape `RequestUse`
+                    // uses in source.
+                    self.broadcast(frame, None);
+                }
+            }
+            // Three real, different effects behind the same wire shape:
+            // - `ModifyTimeRate`: stored (`journey.time_rate_slider`), read every tick by
+            //   `tick()`'s own `journey.time_rate()` call.
+            // - `ModifyWind`/`ModifyRain`: applied straight to `self.weather` and forgotten —
+            //   neither is `_syncToJoiningPlayers` nor `IPersistentPerWorldContent` in source (see
+            //   `journey.rs`'s own module doc), so there is nothing to hold onto here at all.
+            CreativePowerMessage::Slider(id, value) => {
+                let applied = match id {
+                    power::MODIFY_TIME_RATE => {
+                        self.journey.time_rate_slider = value;
+                        true
+                    }
+                    power::MODIFY_WIND => {
+                        // `MathHelper.Lerp(-0.8f, 0.8f, value)`, set to both the current wind and
+                        // its target at once — `ModifyWindDirectionAndStrength::
+                        // UpdateInfoFromSliderValueCache`'s own two assignments.
+                        let wind = -0.8 + value.clamp(0.0, 1.0) * 1.6;
+                        self.weather.wind = wind;
+                        self.weather.target = wind;
+                        self.world.wind = wind;
+                        true
+                    }
+                    power::MODIFY_RAIN => {
+                        // `Main.StartRain(instant: true, value)`/`Main.StopRain(instant: true)`.
+                        // Real vanilla rain set this way has no timer at all; this project's own
+                        // rain model is timer-driven (`Weather::tick_rain`'s own countdown), so a
+                        // long sentinel approximates "does not expire on its own" rather than
+                        // removing the timer concept entirely — disclosed, not a silent gap.
+                        if value <= 0.0 {
+                            self.weather.stop_rain();
+                        } else {
+                            self.weather.raining = true;
+                            self.weather.max_rain = value.clamp(0.0, 1.0);
+                            self.weather.rain_time = i32::MAX;
+                        }
+                        self.world.raining = self.weather.raining;
+                        self.world.rain_time = self.weather.rain_time;
+                        self.world.max_rain = self.weather.max_rain;
+                        true
+                    }
+                    _ => false,
+                };
+                if applied && let Ok(frame) = net_module::creative_power_slider(id, value) {
+                    self.broadcast(frame, None);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Put one Plantera's bulb somewhere in the underground jungle, and tell everyone.
     ///
     /// Called when the third mechanical boss falls, and again whenever the last one is broken —
@@ -10739,6 +11299,97 @@ mod panel_toggle_command {
     }
 }
 
+/// Journey mode's `FreezeTime` actually stops the clock — not just the toggle sticking, the real
+/// gameplay effect (`tick()`'s own gate on `self.journey.freeze_time`, mirroring `Main.cs:6342`'s
+/// gate on the same power in source).
+#[cfg(test)]
+mod freeze_time {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "freeze time probe")
+    }
+
+    #[test]
+    fn frozen_time_does_not_advance_across_many_ticks() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.journey.freeze_time = true;
+        let (day_time, time) = (server.world.day_time, server.world.time);
+
+        for _ in 0..500 {
+            server.tick();
+        }
+
+        assert_eq!(
+            (server.world.day_time, server.world.time),
+            (day_time, time),
+            "the clock should not have moved a single tick while frozen"
+        );
+    }
+
+    #[test]
+    fn unfreezing_lets_it_advance_again() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.journey.freeze_time = true;
+        let before = server.world.time;
+        for _ in 0..10 {
+            server.tick();
+        }
+        assert_eq!(server.world.time, before, "still frozen so far");
+
+        server.journey.freeze_time = false;
+        for _ in 0..10 {
+            server.tick();
+        }
+        assert!(
+            server.world.time > before,
+            "the clock should have moved once unfrozen, got {} from a start of {before}",
+            server.world.time
+        );
+    }
+}
+
+/// Journey mode's `ModifyTimeRate` actually changes how fast the clock runs — `tick()`'s own
+/// `self.journey.time_rate()` argument to `tick_time`, mirroring `Main.cs:6343`'s own
+/// `targetTimeRate` read in source.
+#[cfg(test)]
+mod modify_time_rate {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "time rate probe")
+    }
+
+    #[test]
+    fn the_top_of_the_slider_advances_the_clock_twenty_four_times_as_fast() {
+        let mut baseline = GameServer::new(Config::default(), tiny_world());
+        let mut sped_up = GameServer::new(Config::default(), tiny_world());
+        sped_up.journey.time_rate_slider = 1.0; // the slider's real top: 24x
+
+        // Deltas, not absolute values: `new()`'s own startup work (angler quest roll and friends)
+        // can leave `world.time` non-zero before the first real tick, which a bare before/after-one-
+        // tick comparison would otherwise fold into the "24x" ratio and make it come out wrong.
+        let (before_baseline, before_sped) = (baseline.world.time, sped_up.world.time);
+        baseline.tick();
+        sped_up.tick();
+        let (moved_baseline, moved_sped) = (
+            baseline.world.time - before_baseline,
+            sped_up.world.time - before_sped,
+        );
+
+        assert_eq!(
+            moved_baseline, 1,
+            "an ordinary tick should move the clock by exactly one"
+        );
+        assert_eq!(
+            moved_sped, 24,
+            "one tick at the slider's top should move the clock 24 real ticks' worth"
+        );
+    }
+}
+
 /// Can a connected client stall the world by asking to register?
 ///
 /// It could. `/register` needs no permission — it falls through the `needed` match to `None` — and
@@ -11119,4 +11770,259 @@ mod tile_spam {
     /// A `const` block, so swapping the two by accident fails the build rather than a test run.
     const _: () = assert!(SPAM_BREAK_MAX > SPAM_PLACE_MAX);
     const _: () = assert!(SPAM_BREAK_DECAY > SPAM_PLACE_DECAY);
+}
+
+/// The web panel's kick/ban/whitelist/world-view/world-switch events. Each one is checked
+/// directly against `handle_event`, the same entry point the real panel HTTP handlers reach
+/// through `ServerEvent` — see `tests/panel.rs` for the same features exercised end to end over a
+/// real socket instead.
+#[cfg(test)]
+mod panel_admin_events {
+    use super::*;
+    use crate::admin::BanKind;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "panel events probe")
+    }
+
+    /// A player in `ConnState::Playing`, inserted directly into the slot — the shape every other
+    /// test in this file that needs a "connected" player without a real socket already uses.
+    fn seat_player(server: &mut GameServer, slot: u8, name: &str) {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut player = Player::new(slot, "127.0.0.1:4000".parse().unwrap(), tx);
+        player.name = name.to_string();
+        player.state = ConnState::Playing;
+        server.players[slot as usize] = Some(player);
+    }
+
+    fn oneshot_reply<T>() -> (oneshot::Sender<T>, oneshot::Receiver<T>) {
+        oneshot::channel()
+    }
+
+    #[test]
+    fn kicking_a_connected_player_removes_them_and_reports_success() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        seat_player(&mut server, 0, "Griefer");
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelKick {
+            name: "griefer".into(), // case-insensitive, matching `/kick`
+            reason: "wrecked spawn".into(),
+            reply,
+        });
+        assert!(rx.try_recv().expect("a reply was sent").is_ok());
+        assert!(
+            server.players[0].is_none(),
+            "the kicked player must actually be gone"
+        );
+    }
+
+    #[test]
+    fn kicking_nobody_reports_failure_without_touching_anyone() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelKick {
+            name: "nobody-here".into(),
+            reason: String::new(),
+            reply,
+        });
+        assert!(rx.try_recv().expect("a reply was sent").is_err());
+    }
+
+    #[test]
+    fn banning_a_connected_player_bans_and_kicks_them() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        seat_player(&mut server, 0, "Griefer");
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelBan {
+            kind: BanKind::Name,
+            value: "Griefer".into(),
+            reason: "wrecked spawn".into(),
+            reply,
+        });
+        rx.try_recv().expect("a reply was sent");
+        assert!(server.players[0].is_none(), "a banned player is removed");
+        assert!(
+            server.admin.ban_for("Griefer", "1.2.3.4", None).is_some(),
+            "the ban itself must be recorded, not just the kick"
+        );
+    }
+
+    #[test]
+    fn unbanning_lifts_a_real_ban() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.admin.ban(BanKind::Name, "Griefer", "wrecked spawn");
+        assert!(server.admin.ban_for("Griefer", "0.0.0.0", None).is_some());
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelUnban {
+            value: "Griefer".into(),
+            reply,
+        });
+        assert_eq!(rx.try_recv().unwrap(), 1);
+        assert!(server.admin.ban_for("Griefer", "0.0.0.0", None).is_none());
+    }
+
+    #[test]
+    fn whitelist_add_and_remove_round_trip_through_the_events() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+
+        let (add_reply, mut add_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistAdd {
+            name: "Brooklyn".into(),
+            reply: add_reply,
+        });
+        assert!(add_rx.try_recv().unwrap());
+
+        let (list_reply, mut list_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelist { reply: list_reply });
+        let list = list_rx.try_recv().unwrap();
+        assert!(list.on);
+        assert_eq!(list.names, vec!["Brooklyn".to_string()]);
+
+        let (remove_reply, mut remove_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistRemove {
+            name: "brooklyn".into(), // case-insensitive, matching the console command
+            reply: remove_reply,
+        });
+        assert!(remove_rx.try_recv().unwrap());
+
+        let (list_reply2, mut list_rx2) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelist { reply: list_reply2 });
+        assert!(!list_rx2.try_recv().unwrap().on, "an empty list is off");
+    }
+
+    #[test]
+    fn a_switch_to_a_real_file_arms_the_pending_switch_and_starts_stopping() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let handle = server.world_switch_handle();
+        let target = std::env::temp_dir().join(format!(
+            "terrustia-panel-switch-test-{}.wld",
+            std::process::id()
+        ));
+        std::fs::write(&target, b"not a real world, just needs to exist").unwrap();
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelSwitchWorld {
+            path: target.clone(),
+            reply,
+        });
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert!(server.stopping, "a switch is a controlled shutdown");
+        assert_eq!(
+            handle.lock().unwrap().as_deref(),
+            Some(target.as_path()),
+            "main has to be able to read this back after `run` returns"
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn a_switch_to_a_missing_file_is_refused_and_does_not_stop_the_server() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelSwitchWorld {
+            path: PathBuf::from("/no/such/world/anywhere.wld"),
+            reply,
+        });
+        assert!(rx.try_recv().unwrap().is_err());
+        assert!(!server.stopping);
+    }
+
+    #[test]
+    fn tile_colour_buckets_match_the_generators_own_ids() {
+        use crate::world::worldgen::tiles as t;
+
+        let dirt = terrustia_proto::Tile {
+            block: t::DIRT,
+            flags: TileFlags(TileFlags::ACTIVE),
+            ..terrustia_proto::Tile::AIR
+        };
+        assert_eq!(GameServer::tile_color(dirt), TileColor::Dirt);
+
+        let stone = terrustia_proto::Tile {
+            block: t::STONE,
+            flags: TileFlags(TileFlags::ACTIVE),
+            ..terrustia_proto::Tile::AIR
+        };
+        assert_eq!(GameServer::tile_color(stone), TileColor::Stone);
+
+        assert_eq!(
+            GameServer::tile_color(terrustia_proto::Tile::AIR),
+            TileColor::Empty,
+            "an inactive tile has nothing to colour"
+        );
+
+        let mut lava = terrustia_proto::Tile::AIR;
+        lava.liquid = 255;
+        lava.liquid_kind = terrustia_proto::Liquid::Lava;
+        assert_eq!(GameServer::tile_color(lava), TileColor::Lava);
+    }
+
+    #[test]
+    fn the_world_sample_never_exceeds_the_actual_world_and_never_panics_on_a_tiny_one() {
+        let server = GameServer::new(Config::default(), crate::world::World::empty(200, 150, "s"));
+        let sample = server.world_tile_sample();
+        assert!(sample.sample_cols as i32 <= sample.world_width);
+        assert!(sample.sample_rows as i32 <= sample.world_height);
+        assert_eq!(
+            sample.tiles.len(),
+            (sample.sample_cols * sample.sample_rows) as usize
+        );
+    }
+
+    #[test]
+    fn equipped_items_only_reads_the_armour_slot_run_and_ignores_empty_slots() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        // Slot 10 is ordinary inventory, not gear — must be ignored.
+        player.inventory.insert(
+            10,
+            terrustia_proto::inventory::SyncEquipment {
+                player: 0,
+                slot: 10,
+                item: terrustia_proto::ItemStack {
+                    id: 999,
+                    stack: 1,
+                    prefix: 0,
+                },
+                favorited: false,
+                blocked: false,
+            },
+        );
+        // Slot 60 is inside the armour run and carries a real item.
+        player.inventory.insert(
+            60,
+            terrustia_proto::inventory::SyncEquipment {
+                player: 0,
+                slot: 60,
+                item: terrustia_proto::ItemStack {
+                    id: 42,
+                    stack: 1,
+                    prefix: 0,
+                },
+                favorited: false,
+                blocked: false,
+            },
+        );
+        // Slot 61 is inside the run but empty (item id 0) — must be ignored too.
+        player.inventory.insert(
+            61,
+            terrustia_proto::inventory::SyncEquipment {
+                player: 0,
+                slot: 61,
+                item: terrustia_proto::ItemStack {
+                    id: 0,
+                    stack: 0,
+                    prefix: 0,
+                },
+                favorited: false,
+                blocked: false,
+            },
+        );
+
+        assert_eq!(GameServer::equipped_items(&player), vec![42]);
+    }
 }

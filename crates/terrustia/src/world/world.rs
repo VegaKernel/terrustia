@@ -645,16 +645,22 @@ impl World {
         bounds
     }
 
-    /// Advance the clock by one tick, rolling over between day and night.
-    pub fn tick_time(&mut self) {
-        self.time += 1;
-        let limit = if self.day_time {
-            DAY_LENGTH
-        } else {
-            NIGHT_LENGTH
-        };
-        if self.time >= limit {
-            self.time = 0;
+    /// Advance the clock by `rate` ticks, rolling over between day and night — `rate` is always 1
+    /// except under Journey mode's `ModifyTimeRate` (1×–24×, `GameServer::tick`'s own caller
+    /// applies the slider). A `while` rather than a single `if`: at the top of that range a whole
+    /// short night can pass inside one call, and a single check would only ever cross it once.
+    pub fn tick_time(&mut self, rate: i32) {
+        self.time += rate;
+        loop {
+            let limit = if self.day_time {
+                DAY_LENGTH
+            } else {
+                NIGHT_LENGTH
+            };
+            if self.time < limit {
+                break;
+            }
+            self.time -= limit;
             self.day_time = !self.day_time;
             if self.day_time {
                 self.moon_phase = (self.moon_phase + 1) % 8;
@@ -1017,7 +1023,7 @@ mod tests {
         let mut w = World::empty(10, 10, "t");
         w.day_time = true;
         w.time = DAY_LENGTH - 1;
-        w.tick_time();
+        w.tick_time(1);
         assert!(!w.day_time);
         assert_eq!(w.time, 0);
     }
@@ -1028,9 +1034,26 @@ mod tests {
         w.day_time = false;
         w.time = NIGHT_LENGTH - 1;
         let before = w.moon_phase;
-        w.tick_time();
+        w.tick_time(1);
         assert!(w.day_time);
         assert_eq!(w.moon_phase, (before + 1) % 8);
+    }
+
+    /// Journey mode's `ModifyTimeRate` can push the clock up to 24 ticks in one call — enough, at
+    /// the top of a short night, to cross into the next day and partway through it in a single
+    /// `tick_time`. A single `if` would only ever cross the boundary once and lose the remainder;
+    /// this is exactly the bug a `while`-shaped fix would leave in place if it only ran one lap.
+    #[test]
+    fn a_large_rate_can_cross_a_day_night_boundary_within_one_call() {
+        let mut w = World::empty(10, 10, "t");
+        w.day_time = false;
+        w.time = NIGHT_LENGTH - 5;
+        w.tick_time(20);
+        assert!(w.day_time, "20 ticks should have crossed the 5 remaining");
+        assert_eq!(
+            w.time, 15,
+            "the other 15 ticks should carry into the new day"
+        );
     }
 
     #[test]

@@ -244,6 +244,125 @@ pub fn validate_chat(text: &str, max_len: usize) -> Result<()> {
     Ok(())
 }
 
+/// Module 4: Journey (creative) mode powers.
+/// `Terraria.GameContent.NetModules.NetCreativePowersModule`, fifth in the registration order.
+pub const MODULE_CREATIVE_POWERS: u16 = 4;
+
+/// Power ids, in `CreativePowerManager`'s own registration order
+/// (`CreativePowerManager.cs:90-104`) — the order *is* the wire format, a power's id is its
+/// registration index, not a label chosen for readability.
+///
+/// [`Button`](CreativePowerMessage::Button), [`Toggle`](CreativePowerMessage::Toggle) and
+/// [`Slider`](CreativePowerMessage::Slider) shaped powers are decoded by
+/// [`decode_creative_power`] today: `FREEZE_TIME`, the four `START_*` buttons, `FREEZE_RAIN`,
+/// `FREEZE_WIND`, `STOP_BIOME_SPREAD`, and `MODIFY_WIND`/`MODIFY_RAIN`/`MODIFY_TIME_RATE` — eleven
+/// of the fifteen. The remaining four — `GODMODE`/`FAR_PLACEMENT_RANGE`/`SPAWN_RATE` (per-player,
+/// bit-packed sync across up to 255 players) and `DIFFICULTY` (a slider on the wire, but a
+/// continuous 0–3 replacement for the discrete `world.game_mode` read at dozens of call sites
+/// throughout `server.rs` — real, separately-sized work, not a same-shape extension of the other
+/// three sliders) — are not yet modelled; their ids are still named here so nothing downstream has
+/// to invent a number.
+pub mod power {
+    pub const FREEZE_TIME: u16 = 0;
+    pub const START_DAY: u16 = 1;
+    pub const START_NOON: u16 = 2;
+    pub const START_NIGHT: u16 = 3;
+    pub const START_MIDNIGHT: u16 = 4;
+    pub const GODMODE: u16 = 5;
+    pub const MODIFY_WIND: u16 = 6;
+    pub const MODIFY_RAIN: u16 = 7;
+    pub const MODIFY_TIME_RATE: u16 = 8;
+    pub const FREEZE_RAIN: u16 = 9;
+    pub const FREEZE_WIND: u16 = 10;
+    pub const FAR_PLACEMENT_RANGE: u16 = 11;
+    pub const DIFFICULTY: u16 = 12;
+    pub const STOP_BIOME_SPREAD: u16 = 13;
+    pub const SPAWN_RATE: u16 = 14;
+}
+
+/// The four `ASharedButtonPower`s, in registration order — used to recognise a button id without
+/// repeating the list at every call site.
+const BUTTON_POWERS: [u16; 4] = [
+    power::START_DAY,
+    power::START_NOON,
+    power::START_NIGHT,
+    power::START_MIDNIGHT,
+];
+
+/// The four `ASharedTogglePower`s this server models the effect of. `GODMODE`/
+/// `FAR_PLACEMENT_RANGE` are also toggles on the wire, but per-player (a 255-entry bit-packed
+/// array, not this single-bool shape) — see [`power`]'s own doc for why they are excluded here.
+const TOGGLE_POWERS: [u16; 4] = [
+    power::FREEZE_TIME,
+    power::FREEZE_RAIN,
+    power::FREEZE_WIND,
+    power::STOP_BIOME_SPREAD,
+];
+
+/// The three `ASharedSliderPower`s this server models the effect of. `SPAWN_RATE` is also a
+/// slider on the wire, but per-player (`APerPlayerSliderPower`, the same bit-packed-per-player
+/// shape as the two per-player toggles); `DIFFICULTY` is shared but excluded for its own,
+/// different reason — see [`power`]'s own doc.
+const SLIDER_POWERS: [u16; 3] = [
+    power::MODIFY_WIND,
+    power::MODIFY_RAIN,
+    power::MODIFY_TIME_RATE,
+];
+
+/// A decoded module-4 packet, as far as this server understands it today.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CreativePowerMessage {
+    /// One of the four day/noon/night/midnight buttons (`ASharedButtonPower`). No payload beyond
+    /// the power id itself — `DeserializeNetMessage` triggers `UsePower()` on receipt, nothing
+    /// else to read.
+    Button(u16),
+    /// One of the four shared on/off powers (`ASharedTogglePower`). Carries the requested state.
+    Toggle(u16, bool),
+    /// One of the three shared sliders (`ASharedSliderPower`). Carries the raw 0.0–1.0 slider
+    /// position — each power's own `UpdateInfoFromSliderValueCache` remaps that into its actual
+    /// effect (`ModifyTimeRate`'s 1×–24× rate, `ModifyWindDirectionAndStrength`'s -0.8..0.8 lerp,
+    /// `ModifyRainPower`'s rain strength read as-is), which is deliberately kept out of the proto
+    /// crate — that remapping is gameplay, not wire format.
+    Slider(u16, f32),
+}
+
+/// Read a module-4 frame. Returns `None` for any other module, and also for a power id this
+/// server does not model the wire shape of yet (real ids, just not decoded — not out-of-range).
+pub fn decode_creative_power(payload: &[u8]) -> Result<Option<CreativePowerMessage>> {
+    let mut r = PacketReader::new(payload);
+    if r.u16()? != MODULE_CREATIVE_POWERS {
+        return Ok(None);
+    }
+    let power_id = r.u16()?;
+    if BUTTON_POWERS.contains(&power_id) {
+        return Ok(Some(CreativePowerMessage::Button(power_id)));
+    }
+    if TOGGLE_POWERS.contains(&power_id) {
+        return Ok(Some(CreativePowerMessage::Toggle(power_id, r.bool()?)));
+    }
+    if SLIDER_POWERS.contains(&power_id) {
+        return Ok(Some(CreativePowerMessage::Slider(power_id, r.f32()?)));
+    }
+    Ok(None)
+}
+
+/// Encode a shared toggle power's state — the same shape `ASharedTogglePower` uses both for
+/// `OnPlayerJoining` (telling a newly connected client where things stand) and for the dedicated
+/// server's own re-broadcast of an accepted toggle to everyone else.
+pub fn creative_power_toggle(power_id: u16, enabled: bool) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::NET_MODULES);
+    w.u16(MODULE_CREATIVE_POWERS).u16(power_id).bool(enabled);
+    w.finish()
+}
+
+/// Encode a shared slider power's raw value — the same shape `ASharedSliderPower` uses for both
+/// `OnPlayerJoining` and the dedicated server's own re-broadcast of an accepted change.
+pub fn creative_power_slider(power_id: u16, value: f32) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::NET_MODULES);
+    w.u16(MODULE_CREATIVE_POWERS).u16(power_id).f32(value);
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +476,111 @@ mod tests {
         let mut w = Writer::new();
         w.u16(MODULE_TEXT).string("Say"); // missing the text
         assert!(IncomingChat::decode(w.as_slice()).is_err());
+    }
+
+    #[test]
+    fn decodes_each_of_the_four_time_skip_buttons() {
+        for id in [
+            power::START_DAY,
+            power::START_NOON,
+            power::START_NIGHT,
+            power::START_MIDNIGHT,
+        ] {
+            let mut w = Writer::new();
+            w.u16(MODULE_CREATIVE_POWERS).u16(id);
+            assert_eq!(
+                decode_creative_power(w.as_slice()).unwrap(),
+                Some(CreativePowerMessage::Button(id)),
+                "power id {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_each_of_the_four_shared_toggles_with_their_state() {
+        for id in [
+            power::FREEZE_TIME,
+            power::FREEZE_RAIN,
+            power::FREEZE_WIND,
+            power::STOP_BIOME_SPREAD,
+        ] {
+            for state in [true, false] {
+                let mut w = Writer::new();
+                w.u16(MODULE_CREATIVE_POWERS).u16(id).bool(state);
+                assert_eq!(
+                    decode_creative_power(w.as_slice()).unwrap(),
+                    Some(CreativePowerMessage::Toggle(id, state)),
+                    "power id {id}, state {state}"
+                );
+            }
+        }
+    }
+
+    /// The per-player and slider powers are real ids, just not modelled yet — a client sending
+    /// one should not desync (an `Err`) or be misread as a button or toggle it is not.
+    #[test]
+    fn an_unmodelled_power_id_decodes_to_nothing_rather_than_an_error() {
+        let mut w = Writer::new();
+        w.u16(MODULE_CREATIVE_POWERS).u16(power::GODMODE);
+        assert_eq!(decode_creative_power(w.as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn ignores_other_modules_for_creative_powers_too() {
+        let mut w = Writer::new();
+        w.u16(MODULE_TEXT).u16(power::FREEZE_TIME).bool(true);
+        assert_eq!(decode_creative_power(w.as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn the_toggle_encoder_round_trips_through_the_decoder() {
+        let frame = creative_power_toggle(power::FREEZE_WIND, true).unwrap();
+        assert_eq!(
+            decode_creative_power(&frame[3..]).unwrap(),
+            Some(CreativePowerMessage::Toggle(power::FREEZE_WIND, true))
+        );
+    }
+
+    #[test]
+    fn decodes_each_of_the_three_shared_sliders_with_their_raw_value() {
+        for id in [
+            power::MODIFY_WIND,
+            power::MODIFY_RAIN,
+            power::MODIFY_TIME_RATE,
+        ] {
+            let mut w = Writer::new();
+            w.u16(MODULE_CREATIVE_POWERS).u16(id).f32(0.75);
+            assert_eq!(
+                decode_creative_power(w.as_slice()).unwrap(),
+                Some(CreativePowerMessage::Slider(id, 0.75)),
+                "power id {id}"
+            );
+        }
+    }
+
+    /// `DIFFICULTY` and `SPAWN_RATE` are real sliders on the wire too, but neither of this
+    /// server's shapes — `DIFFICULTY` needs its own follow-up work (see `power`'s own doc),
+    /// `SPAWN_RATE` is per-player. Both should still decode to nothing rather than being
+    /// misread as one of the three shared sliders this server does model.
+    #[test]
+    fn the_other_two_real_slider_powers_are_not_misdecoded_as_shared_sliders() {
+        for id in [power::DIFFICULTY, power::SPAWN_RATE] {
+            let mut w = Writer::new();
+            w.u16(MODULE_CREATIVE_POWERS).u16(id).f32(0.5);
+            assert_eq!(
+                decode_creative_power(w.as_slice()).unwrap(),
+                None,
+                "power id {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_slider_encoder_round_trips_through_the_decoder() {
+        let frame = creative_power_slider(power::MODIFY_TIME_RATE, 0.5).unwrap();
+        assert_eq!(
+            decode_creative_power(&frame[3..]).unwrap(),
+            Some(CreativePowerMessage::Slider(power::MODIFY_TIME_RATE, 0.5))
+        );
     }
 }

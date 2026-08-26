@@ -239,6 +239,46 @@ impl TermLayer {
 /// events. Public so `game::server` can reuse the exact string rather than retyping it.
 pub const CONSOLE_REPLY_TARGET: &str = "console_reply";
 
+/// The tag a player's ordinary chat line is logged under, so it can be told apart from an
+/// operational log line carrying the same level. Public for the same reason as
+/// [`CONSOLE_REPLY_TARGET`]: `game::server` sets it, this module reads it back.
+pub const CHAT_TARGET: &str = "chat";
+
+/// One line for the web panel's live feed: the terminal's own output, mirrored off the same
+/// `tracing` events, without the ANSI a browser has no use for.
+///
+/// This exists so the panel does not need its own parallel logging path — every console reply,
+/// every ordinary log line and every line of in-game chat already flows through
+/// [`TermLayer::on_event`] once; this just also hands a plain copy to anyone listening.
+#[derive(Debug, Clone)]
+pub struct ConsoleLine {
+    pub kind: ConsoleLineKind,
+    /// `"INFO"`, `"WARN"`, `"ERROR"` and so on; empty for a console reply or a chat line, which
+    /// have no level of their own.
+    pub level: &'static str,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLineKind {
+    Log,
+    Reply,
+    Chat,
+}
+
+/// A ring-bounded broadcast of every line this process has printed since the panel first asked.
+///
+/// `tokio::sync::broadcast` with no subscribers is cheap to send into — the point of a `OnceLock`
+/// here rather than plumbing a sender through every call site is that most runs of this server
+/// never start the panel at all, and this must cost nothing when nobody is listening. 500 lines is
+/// a few minutes of an active server's chat and console traffic, which is enough for a panel that
+/// only ever attaches live rather than asking for history.
+static CONSOLE_FEED: OnceLock<tokio::sync::broadcast::Sender<ConsoleLine>> = OnceLock::new();
+
+pub fn console_feed() -> &'static tokio::sync::broadcast::Sender<ConsoleLine> {
+    CONSOLE_FEED.get_or_init(|| tokio::sync::broadcast::channel(500).0)
+}
+
 /// Coordination between the sticky console prompt (`console.rs`) and ordinary log lines, so a log
 /// line can never land in the middle of a half-typed command.
 ///
@@ -328,12 +368,38 @@ where
         let mut parts = Parts::default();
         event.record(&mut parts);
         let meta = event.metadata();
-        let line = if meta.target() == CONSOLE_REPLY_TARGET {
+        let is_reply = meta.target() == CONSOLE_REPLY_TARGET;
+        let line = if is_reply {
             self.render_reply(&parts)
         } else {
             self.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
         write_line_coordinated(&line);
+
+        // A second, ANSI-free rendering for the web panel's live feed. `broadcast::Sender::send`
+        // on a channel nobody is subscribed to just returns an error immediately, so this costs
+        // nothing on every run that never starts the panel.
+        let kind = if is_reply {
+            ConsoleLineKind::Reply
+        } else if meta.target() == CHAT_TARGET {
+            ConsoleLineKind::Chat
+        } else {
+            ConsoleLineKind::Log
+        };
+        let plain = TermLayer {
+            palette: Palette::PLAIN,
+            started: self.started,
+        };
+        let text = if is_reply {
+            plain.render_reply(&parts)
+        } else {
+            plain.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
+        };
+        let _ = console_feed().send(ConsoleLine {
+            kind,
+            level: meta.level().as_str(),
+            text,
+        });
     }
 }
 

@@ -37,3 +37,7 @@ flamegraph.svg
 /Terraria*/
 /decompiled/
 .scratch/
+
+# Agent worktrees used for concurrent fork work this session — not part of the tree itself, and
+# `git add -A` will otherwise swallow them whole as embedded repositories.
+/.claude/

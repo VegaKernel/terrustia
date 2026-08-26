@@ -18,6 +18,20 @@ pub enum BanKind {
     Uuid,
 }
 
+impl BanKind {
+    /// The three words `/ban` and the console accept, so the web panel can parse the same three
+    /// rather than growing its own copy of the match. `"address"` is accepted as a synonym for
+    /// `"ip"`, matching `run_admin_command`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "name" => Some(Self::Name),
+            "ip" | "address" => Some(Self::Address),
+            "uuid" => Some(Self::Uuid),
+            _ => None,
+        }
+    }
+}
+
 /// One entry in the ban list.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Ban {

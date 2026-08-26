@@ -6,6 +6,7 @@ pub mod cavern_monsters;
 pub mod clock;
 pub mod event;
 pub mod housing;
+pub mod journey;
 pub mod lunar;
 pub mod moons;
 pub mod npc;

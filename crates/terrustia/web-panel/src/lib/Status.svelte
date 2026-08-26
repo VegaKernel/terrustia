@@ -1,11 +1,31 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { watchStatus, logout, type StatusResponse } from "./api";
+  import { watchStatus, logout, type StatusResponse, type ConsoleFeedLine } from "./api";
+  import Players from "./Players.svelte";
+  import Whitelist from "./Whitelist.svelte";
+  import Worlds from "./Worlds.svelte";
+  import Console from "./Console.svelte";
+  import Settings from "./Settings.svelte";
+  import WorldView from "./WorldView.svelte";
 
   let { session, onLoggedOut }: { session: string; onLoggedOut: () => void } = $props();
 
+  type Tab = "overview" | "players" | "whitelist" | "worlds" | "console" | "settings" | "world";
+  const TABS: { id: Tab; label: string }[] = [
+    { id: "overview", label: "overview" },
+    { id: "players", label: "players" },
+    { id: "whitelist", label: "whitelist" },
+    { id: "worlds", label: "worlds" },
+    { id: "console", label: "console" },
+    { id: "world", label: "world" },
+    { id: "settings", label: "settings" },
+  ];
+
+  let tab = $state<Tab>("overview");
   let status = $state<StatusResponse | null>(null);
   let live = $state(false);
+  const MAX_LINES = 400;
+  let consoleLines = $state<ConsoleFeedLine[]>([]);
 
   // `session` is read once, here, on purpose: `watchStatus` takes a plain string and opens one
   // socket for this component's whole lifetime (closed in `onDestroy` below) — it was never meant
@@ -17,10 +37,13 @@
     session,
     (s) => {
       status = s;
-      live = true;
     },
-    () => {
-      live = false;
+    (line) => {
+      consoleLines.push(line);
+      if (consoleLines.length > MAX_LINES) consoleLines.splice(0, consoleLines.length - MAX_LINES);
+    },
+    (isLive) => {
+      live = isLive;
     },
   );
   onDestroy(stop);
@@ -42,32 +65,47 @@
   <span class="dot" class:live></span>
   <strong>terrustia</strong>
   {#if status}<span class="dim">v{status.version}</span>{/if}
+  <nav>
+    {#each TABS as t (t.id)}
+      <button class="tab" class:active={tab === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
+    {/each}
+  </nav>
   <span class="spacer"></span>
   <button onclick={signOut}>sign out</button>
 </header>
 
-<main>
-  {#if status}
-    <div class="grid">
-      <div class="card">
-        <span class="label">world</span>
-        <span class="value">{status.world_name}</span>
+<main class:no-pad={tab === "world"}>
+  {#if tab === "overview"}
+    {#if status}
+      <div class="grid">
+        <div class="card">
+          <span class="label">world</span>
+          <span class="value">{status.world_name}</span>
+        </div>
+        <div class="card">
+          <span class="label">players</span>
+          <span class="value">{status.player_count} / {status.max_players}</span>
+        </div>
+        <div class="card">
+          <span class="label">uptime</span>
+          <span class="value">{uptime(status.uptime_secs)}</span>
+        </div>
       </div>
-      <div class="card">
-        <span class="label">players</span>
-        <span class="value">{status.player_count} / {status.max_players}</span>
-      </div>
-      <div class="card">
-        <span class="label">uptime</span>
-        <span class="value">{uptime(status.uptime_secs)}</span>
-      </div>
-    </div>
-    <p class="dim note">
-      This is the panel's foundation — a live status view over a real WebSocket connection to the
-      running server. Player list, world controls, and the rest land in follow-up work.
-    </p>
-  {:else}
-    <p class="dim">waiting for the server…</p>
+    {:else}
+      <p class="dim">waiting for the server…</p>
+    {/if}
+  {:else if tab === "players"}
+    <Players {session} />
+  {:else if tab === "whitelist"}
+    <Whitelist {session} />
+  {:else if tab === "worlds"}
+    <Worlds {session} />
+  {:else if tab === "console"}
+    <Console {session} lines={consoleLines} {live} />
+  {:else if tab === "world"}
+    <WorldView {session} />
+  {:else if tab === "settings"}
+    <Settings {session} />
   {/if}
 </main>
 
@@ -76,9 +114,10 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    padding: 0.75rem 1rem;
+    padding: 0.6rem 1rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-raised);
+    flex-wrap: wrap;
   }
 
   .dot {
@@ -93,6 +132,31 @@
     background: var(--accent);
   }
 
+  nav {
+    display: flex;
+    gap: 0.2rem;
+    margin-left: 1rem;
+  }
+
+  .tab {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-dim);
+    padding: 0.35rem 0.7rem;
+    font-size: 0.85rem;
+  }
+
+  .tab:hover {
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  .tab.active {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-dim);
+  }
+
   .spacer {
     flex: 1;
   }
@@ -100,6 +164,13 @@
   main {
     flex: 1;
     padding: 1.5rem;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  main.no-pad {
+    padding: 0;
   }
 
   .grid {
@@ -129,10 +200,5 @@
   .value {
     font-size: 1.1rem;
     color: var(--accent);
-  }
-
-  .note {
-    margin-top: 1.5rem;
-    max-width: 46em;
   }
 </style>

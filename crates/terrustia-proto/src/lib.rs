@@ -34,6 +34,7 @@ pub mod objects;
 pub mod orbs;
 pub mod packets;
 pub mod placed_items;
+pub mod player_info;
 pub mod prehardmode;
 pub mod projectile;
 pub mod projectile_data;

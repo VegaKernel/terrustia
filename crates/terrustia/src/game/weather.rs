@@ -74,9 +74,26 @@ const DAY: i32 = 86_400;
 impl Weather {
     /// One tick. `strong_enough` is whether anyone in the world has found a life crystal, which
     /// is the gate on real weather happening at all.
-    pub fn tick(&mut self, strong_enough: bool, hard_mode: bool, rng: &mut SmallRng) {
-        self.tick_wind(strong_enough, rng);
-        self.tick_rain(strong_enough, rng);
+    ///
+    /// `freeze_wind`/`freeze_rain` are Journey mode's `FreezeWindDirectionAndStrength`/
+    /// `FreezeRainPower` — independent in real vanilla (`Main.cs:59762` and `Main.cs:65846` gate
+    /// separate update calls), which is why they are two parameters here rather than one shared
+    /// pause: freezing a storm mid-downpour should not also freeze which way the wind is blowing.
+    /// Sandstorms have no Journey power of their own and are never frozen by either flag.
+    pub fn tick(
+        &mut self,
+        strong_enough: bool,
+        hard_mode: bool,
+        freeze_wind: bool,
+        freeze_rain: bool,
+        rng: &mut SmallRng,
+    ) {
+        if !freeze_wind {
+            self.tick_wind(strong_enough, rng);
+        }
+        if !freeze_rain {
+            self.tick_rain(strong_enough, rng);
+        }
         self.tick_sandstorm(hard_mode, rng);
     }
 
@@ -281,7 +298,7 @@ mod tests {
         let mut weather = Weather::default();
         let mut trace = Vec::new();
         for _ in 0..ticks {
-            weather.tick(strong_enough, false, &mut rng);
+            weather.tick(strong_enough, false, false, false, &mut rng);
             trace.push(weather.wind);
         }
         (weather, trace)
@@ -476,7 +493,7 @@ mod tests {
         let started = weather.rain_time;
         let mut ticks = 0;
         while weather.raining && ticks < started + 10 {
-            weather.tick(true, false, &mut rng);
+            weather.tick(true, false, false, false, &mut rng);
             ticks += 1;
         }
         assert!(!weather.raining, "and it should have stopped");
@@ -491,7 +508,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut weather = Weather::default();
             for _ in 0..2_000_000 {
-                weather.tick(true, false, &mut rng);
+                weather.tick(true, false, false, false, &mut rng);
                 if weather.raining {
                     rained = true;
                     break;
