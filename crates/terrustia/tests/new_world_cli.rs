@@ -43,6 +43,29 @@ fn find_named(dir: &Path, name: &str) -> Vec<PathBuf> {
     found
 }
 
+/// Poll for `name` to show up under `dir` as a non-empty file, rather than sleeping a fixed amount
+/// and hoping. A real subprocess's first autosave landing inside a set wall-clock window is
+/// inherently load-sensitive — both tests in this file spawn a real OS process each and, by
+/// default, run concurrently in the same binary — so a fixed sleep is exactly the kind of "usually
+/// enough" timing assumption this project's own testing discipline avoids elsewhere (see
+/// `gameplay.rs`'s `deadline`-loop convention, reused here rather than reinvented).
+fn wait_for_file(dir: &Path, name: &str, timeout: Duration) -> Vec<PathBuf> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let found = find_named(dir, name);
+        if found
+            .iter()
+            .any(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
+        {
+            return found;
+        }
+        if std::time::Instant::now() >= deadline {
+            return found;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Run `terrustia --new <name>` against a scratch home, with autosave fast enough that a short
 /// fixed wait is enough to see the file land, then kill it — a clean shutdown's own save path is
 /// already covered by the game-level save/reload tests; this only needs the file to exist once.
@@ -73,11 +96,10 @@ fn new_generates_a_world_into_the_platforms_terraria_world_directory() {
     std::fs::create_dir_all(&home).expect("scratch home");
 
     let mut child = run_new(&home, "Fork Test World", "127.0.0.1:17779");
-    std::thread::sleep(Duration::from_secs(12));
+    let found = wait_for_file(&home, "Fork_Test_World.wld", Duration::from_secs(30));
     let _ = child.kill();
     let _ = child.wait();
 
-    let found = find_named(&home, "Fork_Test_World.wld");
     assert_eq!(
         found.len(),
         1,
@@ -99,11 +121,11 @@ fn new_refuses_a_name_that_already_exists() {
     std::fs::create_dir_all(&home).expect("scratch home");
 
     let mut first = run_new(&home, "Collision World", "127.0.0.1:17780");
-    std::thread::sleep(Duration::from_secs(12));
+    let found = wait_for_file(&home, "Collision_World.wld", Duration::from_secs(30));
     let _ = first.kill();
     let _ = first.wait();
     assert_eq!(
-        find_named(&home, "Collision_World.wld").len(),
+        found.len(),
         1,
         "the first run should have written the world before the second one is tried"
     );
