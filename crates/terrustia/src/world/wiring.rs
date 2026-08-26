@@ -320,13 +320,24 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         // — so no new tile field is needed here, only reading the two this project already has.
         // `_trackType`'s own table (`Minecart.cs::Initialize`) classifies every track frame into
         // one of three groups: frames 20-23 (`trackType == 1`, physics-only bumper/dead-end pieces
-        // read elsewhere in `Minecart.cs` for cart collision — nothing to do with switching) and
-        // frames 30-35 (`trackType == 2`, the six booster-pad frames a *hammer* reframes, not
-        // wire) are both out of scope here; every other track frame (`trackType == 0`, vanilla's
-        // own array default) is what `FlipSwitchTrack`'s `case 0` actually swaps. A frame in that
-        // group only actually has something to swap to if its own `BackTrack()` (`frameY`) was
-        // ever set — not every track tile has a second track stacked underneath it — matching
-        // vanilla's own `BackTrack() != -1` guard.
+        // read elsewhere in `Minecart.cs` for cart collision — nothing to do with switching, and
+        // `FlipSwitchTrack`'s own `switch` has no `case` for this group at all) is out of scope
+        // here. The other two groups really are both switched by `FlipSwitchTrack`, in two
+        // different ways: ordinary track (`trackType == 0`, vanilla's own array default) is
+        // `case 0`'s simple front/back swap, handled directly below; booster-pad frames
+        // (`trackType == 2`, frames 30-35) are `case 2`, a real, separate mechanism — see
+        // [`booster_switch_target`]'s own doc for what it does and why.
+        //
+        // **Correction**: an earlier version of this comment claimed booster frames were "reframed
+        // by a hammer, not wire" — that was wrong, confirmed directly against `Minecart.cs:1320-
+        // 1323`, which calls `FrameTrack(i, j, pound: true, mute: true)` from inside
+        // `FlipSwitchTrack` itself, reached only from `Wiring.cs`'s own tile-314 case above (never
+        // from a hammer). A wire signal genuinely does reach and toggle a booster-pad track, the
+        // same as it does an ordinary one.
+        //
+        // A frame in the ordinary group only actually has something to swap to if its own
+        // `BackTrack()` (`frameY`) was ever set — not every track tile has a second track stacked
+        // underneath it — matching vanilla's own `BackTrack() != -1` guard.
         if track_type(tile.frame_x) == 0 && tile.frame_y != -1 {
             if !out.skipped.insert((x, y)) {
                 return;
@@ -334,6 +345,14 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
             let mut flipped = tile;
             flipped.frame_x = tile.frame_y;
             flipped.frame_y = tile.frame_x;
+            world.set_tile(x, y, flipped);
+            out.changed.push((x, y));
+        } else if let Some(new_frame) = booster_switch_target(world, x, y, tile.frame_x) {
+            if !out.skipped.insert((x, y)) {
+                return;
+            }
+            let mut flipped = tile;
+            flipped.frame_x = new_frame;
             world.set_tile(x, y, flipped);
             out.changed.push((x, y));
         }
@@ -432,16 +451,82 @@ const MINECART_TRACK: u16 = 314;
 const PARTY_MONOLITH: u16 = 455;
 
 /// `Minecart._trackType`'s own frame classification (`Minecart.cs::Initialize`): `0` (vanilla's own
-/// array default, so every frame not explicitly listed below is this) is ordinary track — the only
-/// group `FlipSwitchTrack`'s `case 0` ever swaps. `1` (frames 20-23) is a small set of dead-end/
-/// bumper pieces `Minecart.cs` reads for cart collision physics elsewhere, nothing to do with
-/// switching. `2` (frames 30-35) is the six booster-pad frames, reframed by a hammer, not wire.
+/// array default, so every frame not explicitly listed below is this) is ordinary track, switched by
+/// `FlipSwitchTrack`'s `case 0`. `1` (frames 20-23) is a small set of dead-end/bumper pieces
+/// `Minecart.cs` reads for cart collision physics elsewhere — `FlipSwitchTrack`'s `switch` has no
+/// case for this group, so a wire signal reaching one does nothing, and that is real vanilla
+/// behaviour, not a gap. `2` (frames 30-35) is the six booster-pad frames — also genuinely switched
+/// by wire, via `FlipSwitchTrack`'s `case 2`; see [`booster_switch_target`] for what that does.
 fn track_type(frame: i16) -> u8 {
     match frame {
         20..=23 => 1,
         30..=35 => 2,
         _ => 0,
     }
+}
+
+/// One booster-frame pair: the two frame ids, and the two neighbour offsets (relative to the tile
+/// itself) that must both be track for [`booster_switch_target`] to switch between them.
+type BoosterPair = (i16, i16, (i32, i32), (i32, i32));
+
+/// What `FlipSwitchTrack`'s `case 2` (`Minecart.cs:1320-1323`, `FrameTrack(i, j, pound: true, mute:
+/// true)`) does to a booster-pad tile — derived by hand from the full algorithm rather than
+/// transcribed line-for-line, and narrower than it by design; see the "Investigate proportionality"
+/// reasoning this function departs from written up in `plan.md`'s corrections section for this row.
+///
+/// `FrameTrack` unpounded is vanilla's general track auto-tiling: a lookup keyed by which of a
+/// tile's six diagonal/side neighbours (`GetNearbyTilesSetLookupIndex` — up-left, left, down-left,
+/// up-right, right, down-right; never straight up or down) are themselves track, filtered against
+/// every one of the 36 track frames' own `(leftSideConnection, rightSideConnection)` pair
+/// (`_trackSwitchOptions`, built once in `Minecart.Initialize`). Read in full before deciding scope,
+/// per the task's own instruction — porting it whole would mean carrying all of `_trackSwitchOptions`
+/// and `_leftSideConnection`/`_rightSideConnection` for no real player benefit, since almost every
+/// wired contraption anyone actually builds hits `case 0` (ordinary track), not this one.
+///
+/// For the six booster-pad frames specifically (`_trackType == 2`) the general algorithm collapses
+/// to something much smaller, worked out directly from `Minecart.Initialize`'s own table rather than
+/// guessed: all six have real (non-`-1`) connections on both sides, so none is ever an "end" piece,
+/// and the three same-shape pairs — `(30, 31)` flat, `(32, 34)` down-right slope, `(33, 35)`
+/// down-left slope — each share one identical `(leftSideConnection, rightSideConnection)` pair,
+/// differing only by `_boostLeft` (which way the pad boosts). Because a pair's two members always
+/// have identical connections, `FrameTrack`'s own "find a different-shaped candidate" search
+/// (its `flag3` branch) can never succeed for a booster tile; it always falls through to "step to
+/// the next matching entry in frame order", and since only a pair's own two members ever qualify as
+/// candidates together, that step always means: swap to the other member of the pair. A pair
+/// qualifies at all only when both of its own two required neighbour cells actually hold track —
+/// `(30, 31)` needs track directly left and right; `(32, 34)` needs it up-left and down-right;
+/// `(33, 35)` down-left and up-right — otherwise `FrameTrack` returns `false` and nothing changes,
+/// which this returns `None` for.
+///
+/// Two things the general algorithm also does that this does not, both disclosed rather than
+/// silently dropped: it resolves a `BackTrack` too, but the same derivation shows a booster pair's
+/// own search for one can never succeed either (`num5` stays `-1` in vanilla's own code), so never
+/// touching `frame_y` here matches the real outcome rather than shortcutting past it. And vanilla's
+/// fallback for a tile whose own stored frame does not appear in its neighbour-derived candidate
+/// list at all — a world where the frame and the actual surrounding tiles have gone out of sync,
+/// which ordinary hammering or wiring cannot produce — resets `FrontTrack` to `0`, plain straight
+/// track; that fallback is not reproduced, and a tile in that state (not reachable through normal
+/// play) is left exactly as it is.
+fn booster_switch_target(world: &impl WiredWorld, x: i32, y: i32, frame_x: i16) -> Option<i16> {
+    // Each pair's two frames, and the two neighbour offsets (relative to the tile itself) that
+    // must both be track for the pair to be switchable at all.
+    const PAIRS: [BoosterPair; 3] = [
+        (30, 31, (-1, 0), (1, 0)),
+        (32, 34, (-1, -1), (1, 1)),
+        (33, 35, (-1, 1), (1, -1)),
+    ];
+    let is_track = |dx: i32, dy: i32| world.tile(x + dx, y + dy).block == MINECART_TRACK;
+    for (a, b, left, right) in PAIRS {
+        if frame_x != a && frame_x != b {
+            continue;
+        }
+        return if is_track(left.0, left.1) && is_track(right.0, right.1) {
+            Some(if frame_x == a { b } else { a })
+        } else {
+            None
+        };
+    }
+    None
 }
 
 /// The teleporter, which is three wide.
@@ -913,26 +998,132 @@ mod tests {
         assert_eq!(back.frame_y, 6);
     }
 
-    /// A frame `_trackType` classifies outside the ordinary group — a dead-end/bumper piece
-    /// (frame 20, `trackType == 1`, read elsewhere in `Minecart.cs` for cart collision, nothing to
-    /// do with switching) or a booster pad (frame 30, `trackType == 2`, reframed by a hammer, not
-    /// wire) — is left alone even with a real value stored in its own back track: `FlipSwitchTrack`
-    /// only has cases for `0` and `2`, and only `0` performs this swap at all.
+    /// A dead-end/bumper piece (frame 20, `trackType == 1`, read elsewhere in `Minecart.cs` for
+    /// cart collision, nothing to do with switching) is left alone even with a real value stored in
+    /// its own back track: `FlipSwitchTrack`'s `switch` has no `case` for `trackType == 1` at all,
+    /// unlike `trackType == 0` (`case 0`, the front/back swap above) and `trackType == 2` (`case 2`,
+    /// booster pads — see the tests below, not "left alone" the way this project's own comment used
+    /// to wrongly claim).
     #[test]
-    fn a_non_switchable_track_frame_is_not_touched_by_a_wired_hit() {
+    fn a_bumper_track_frame_is_not_touched_by_a_wired_hit() {
         let mut board = Board(HashMap::new());
-        for bumper_or_booster in [20i16, 30] {
-            let mut track = wired(MINECART_TRACK, Wire::Red);
-            track.frame_x = bumper_or_booster;
-            track.frame_y = 1; // a real stored value — still must not swap.
-            board.set_tile(100, 100, track);
+        let mut track = wired(MINECART_TRACK, Wire::Red);
+        track.frame_x = 20;
+        track.frame_y = 1; // a real stored value — still must not swap.
+        board.set_tile(100, 100, track);
+
+        hit_switch(&mut board, 100, 100);
+
+        let after = board.tile(100, 100);
+        assert_eq!(after.frame_x, 20);
+        assert_eq!(after.frame_y, 1);
+    }
+
+    /// A wired booster-pad track (`trackType == 2`) genuinely is switched by wire — `Minecart.cs`'s
+    /// `FlipSwitchTrack` has a real `case 2`, calling `FrameTrack(i, j, pound: true, mute: true)`.
+    /// This project's own earlier comment claiming boosters were "reframed by a hammer, not wire"
+    /// was wrong; this is the regression test for that gap. Frame 30 and 31 are the flat pair
+    /// (`_boostLeft` false/true, sharing one connection shape) — properly connected with track
+    /// directly left and right, the pair swaps.
+    ///
+    /// Fails on the code before this fix: without `booster_switch_target`, `act`'s own
+    /// `MINECART_TRACK` case only ever handles `trackType == 0`, so a booster tile's `frame_x`
+    /// would still read `30` after `hit_switch` instead of the swapped `31`.
+    #[test]
+    fn a_wired_booster_pad_swaps_between_its_pair_when_properly_connected() {
+        let mut board = Board(HashMap::new());
+        let mut booster = wired(MINECART_TRACK, Wire::Red);
+        booster.frame_x = 30;
+        board.set_tile(100, 100, booster);
+        // Real track directly left and right, matching the flat pair's required neighbours.
+        board.set_tile(99, 100, Tile::framed(MINECART_TRACK, 1, -1));
+        board.set_tile(101, 100, Tile::framed(MINECART_TRACK, 1, -1));
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(100, 100).frame_x, 31, "boosts the other way now");
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(100, 100).frame_x,
+            30,
+            "and flips back just as cleanly"
+        );
+    }
+
+    /// The two sloped booster pairs swap the same way, given the neighbours their own shape needs:
+    /// `(32, 34)` up-left and down-right; `(33, 35)` down-left and up-right.
+    #[test]
+    fn the_sloped_booster_pairs_swap_given_their_own_required_neighbours() {
+        let cases: &[BoosterPair] = &[(32, 34, (-1, -1), (1, 1)), (33, 35, (-1, 1), (1, -1))];
+        for &(a, b, left, right) in cases {
+            let mut board = Board(HashMap::new());
+            let mut booster = wired(MINECART_TRACK, Wire::Red);
+            booster.frame_x = a;
+            board.set_tile(100, 100, booster);
+            board.set_tile(
+                100 + left.0,
+                100 + left.1,
+                Tile::framed(MINECART_TRACK, 1, -1),
+            );
+            board.set_tile(
+                100 + right.0,
+                100 + right.1,
+                Tile::framed(MINECART_TRACK, 1, -1),
+            );
 
             hit_switch(&mut board, 100, 100);
-
-            let after = board.tile(100, 100);
-            assert_eq!(after.frame_x, bumper_or_booster);
-            assert_eq!(after.frame_y, 1);
+            assert_eq!(board.tile(100, 100).frame_x, b, "pair ({a}, {b})");
         }
+    }
+
+    /// A booster pad with nothing around it does not swap at all: vanilla's own algorithm requires
+    /// both of a pair's specific neighbour cells to actually be track before `FrameTrack` will
+    /// change anything, and this is that guard, not a gap.
+    #[test]
+    fn an_unconnected_booster_pad_does_not_swap() {
+        let mut board = Board(HashMap::new());
+        let mut booster = wired(MINECART_TRACK, Wire::Red);
+        booster.frame_x = 30;
+        board.set_tile(100, 100, booster);
+        // No neighbouring track tiles at all.
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(100, 100).frame_x,
+            30,
+            "nothing to swap to without the required neighbours"
+        );
+    }
+
+    /// A booster pad on two wire colours swaps once, not twice — the same `skipped` guard that
+    /// stops a two-colour lamp or ordinary track tile double-toggling back to where it started.
+    #[test]
+    fn a_booster_pad_on_two_colours_swaps_once() {
+        let mut board = Board(HashMap::new());
+        // Wire approaches from above, so the booster's own left/right track neighbours (its
+        // switching requirement) stay free of the wire run itself.
+        let mut lever = wired(136, Wire::Red);
+        lever.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(100, 90, lever);
+        for y in 91..100 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            wire.flags.set(TileFlags::WIRE_BLUE, true);
+            board.set_tile(100, y, wire);
+        }
+        let mut booster = Tile::framed(MINECART_TRACK, 30, -1);
+        booster.flags.set(TileFlags::WIRE_RED, true);
+        booster.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(100, 100, booster);
+        board.set_tile(99, 100, Tile::framed(MINECART_TRACK, 1, -1));
+        board.set_tile(101, 100, Tile::framed(MINECART_TRACK, 1, -1));
+
+        hit_switch(&mut board, 100, 90);
+        assert_eq!(
+            board.tile(100, 100).frame_x,
+            31,
+            "swapped once, not flipped back by the second colour's pass"
+        );
     }
 
     /// An ordinary track frame with nothing stored in its back track (`BackTrack() == -1`, the
