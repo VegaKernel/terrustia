@@ -952,6 +952,8 @@ pub struct GameServer {
     party: crate::game::party::PartyState,
     /// Slime Rain — see [`crate::game::slime_rain`]'s own module doc.
     slime_rain: crate::game::slime_rain::SlimeRainState,
+    /// Lantern Night — see [`crate::game::lantern_night`]'s own module doc.
+    lantern_night: crate::game::lantern_night::LanternNightState,
 }
 
 impl GameServer {
@@ -1062,6 +1064,7 @@ impl GameServer {
             update_notice: None,
             party: crate::game::party::PartyState::default(),
             slime_rain: crate::game::slime_rain::SlimeRainState::default(),
+            lantern_night: crate::game::lantern_night::LanternNightState::default(),
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -4279,6 +4282,8 @@ impl GameServer {
             .set_flag(WorldFlag::PartyIsUp, self.party.is_up());
         data.flags
             .set_flag(WorldFlag::SlimeRain, self.slime_rain.is_active());
+        data.flags
+            .set_flag(WorldFlag::LanternNight, self.lantern_night.is_up());
         data
     }
 
@@ -9878,6 +9883,12 @@ impl GameServer {
         }
         self.roll_angler_quest();
         self.roll_natural_party();
+        // `LanternNight::CheckMorning` — a lantern night, genuine or manually forced, never
+        // survives past one dawn. No chat announcement in real vanilla either, just the world-flag
+        // resync `broadcast_world_data` below already sends.
+        if self.lantern_night.end_for_the_morning() {
+            self.broadcast_world_data();
+        }
     }
 
     /// `BirthdayParty::NaturalAttempt`, called once at dawn (`Main.UpdateTime_StartDay` calling
@@ -10142,6 +10153,7 @@ impl GameServer {
             self.announce("Party time's over!");
             self.broadcast_world_data();
         }
+        self.roll_natural_lantern_night();
         if self.world.blood_moon || self.moon.running() || self.world.moon_phase == 4 {
             return;
         }
@@ -10154,6 +10166,40 @@ impl GameServer {
             self.world.blood_moon = true;
             self.announce_key("LegacyMisc.8", Vec::new());
             info!("blood moon");
+            self.broadcast_world_data();
+        }
+    }
+
+    /// `LanternNight::CheckNight`, called once at dusk — see `game/lantern_night.rs`'s own module
+    /// doc for the mechanism. `can_start` is real vanilla's own `LanternsCanStart()`, computed
+    /// here from every input this project already tracks: no blood moon, no moon event, no real
+    /// invasion, no meteor already owed, and nothing boss-shaped currently up — including the
+    /// Eater of Worlds' three segments specifically, `NPCID` 13/14/15, none of which carry the
+    /// ordinary `.boss` stat (confirmed directly against `npc_data.rs`, the same reason real
+    /// vanilla's own `BossIsActive()` needed the same special case).
+    fn roll_natural_lantern_night(&mut self) {
+        let boss_active = self.npcs.iter().any(|(_, n)| {
+            matches!(n.npc_type, 13..=15)
+                || terrustia_proto::npc_data::npc_stats(n.npc_type).is_some_and(|s| s.boss)
+        });
+        let can_start = !self.world.progress.spawn_meteor
+            && !self.world.blood_moon
+            && !self.world.pumpkin_moon
+            && !self.world.snow_moon
+            && self.invasion.is_none()
+            && self.lunar.countdown == 0
+            && !boss_active;
+        let was_up = self.lantern_night.is_up();
+        self.lantern_night.natural_attempt(
+            can_start,
+            self.world.progress.downed_moon_lord,
+            &mut self.rng,
+        );
+        // Real vanilla's own `LanternNight::UpdateTime` only resyncs the world flag here
+        // (`NetMessage.SendData(7)`) — no chat announcement at all, unlike blood moon/eclipse/the
+        // birthday party, each of which really does broadcast a line. Checked directly against
+        // source rather than assumed from the pattern those other events set.
+        if self.lantern_night.is_up() != was_up {
             self.broadcast_world_data();
         }
     }
@@ -10270,13 +10316,48 @@ impl GameServer {
         }
     }
 
-    /// Record a boss's death against the world's history.
+    /// Record a boss's death against the world's history, and — real vanilla's own
+    /// `OnGameEventClearedForTheFirstTime`, `NPC.cs`'s own `SetEventFlagCleared` calls scattered
+    /// through the very dispatcher `note_boss_kill_inner` below already is — guarantee the next
+    /// lantern night if any of the flags it sets just flipped false→true for the first time.
+    /// Wrapped around the whole existing dispatcher, snapshot-and-diff, rather than touching each
+    /// of its match arms individually: every one of vanilla's own real trigger flags this project
+    /// tracks at all is covered this way without duplicating that dispatcher's own boss roster by
+    /// hand, and any flag `note_boss_kill_inner` gains later is covered automatically too.
+    fn note_boss_kill(&mut self, npc_type: u16) {
+        let before = self.world.progress;
+        self.note_boss_kill_inner(npc_type);
+        let p = &self.world.progress;
+        let first_time = (!before.downed_boss1 && p.downed_boss1)
+            || (!before.downed_boss2 && p.downed_boss2)
+            || (!before.downed_boss3 && p.downed_boss3)
+            || (!before.downed_king_slime && p.downed_king_slime)
+            || (!before.downed_queen_bee && p.downed_queen_bee)
+            || (!before.downed_deerclops && p.downed_deerclops)
+            || (!before.hard_mode && p.hard_mode)
+            || (!before.downed_mech1 && p.downed_mech1)
+            || (!before.downed_mech2 && p.downed_mech2)
+            || (!before.downed_mech3 && p.downed_mech3)
+            || (!before.downed_plantera && p.downed_plantera)
+            || (!before.downed_golem && p.downed_golem)
+            || (!before.downed_fishron && p.downed_fishron)
+            || (!before.downed_queen_slime && p.downed_queen_slime)
+            || (!before.downed_empress_of_light && p.downed_empress_of_light)
+            || (!before.downed_ancient_cultist && p.downed_ancient_cultist)
+            || (!before.downed_moon_lord && p.downed_moon_lord);
+        if first_time {
+            self.lantern_night.next_night_guaranteed = true;
+        }
+    }
+
+    /// The actual boss-kill dispatcher — see [`note_boss_kill`](Self::note_boss_kill), its own
+    /// thin wrapper, for the lantern-night guarantee this function's own flag transitions feed.
     ///
     /// Nothing in the game reads a boss's death directly — everything reads the flag it sets. A
     /// shop that opens, a spawn pool that widens, an event that becomes possible: all of it hangs
     /// off this, which is why a server that kills bosses without recording them has a world that
     /// never progresses.
-    fn note_boss_kill(&mut self, npc_type: u16) {
+    fn note_boss_kill_inner(&mut self, npc_type: u16) {
         use terrustia_proto::npc_params as ids;
         let p = &mut self.world.progress;
         let mut announce: Option<&'static str> = None;
@@ -12368,6 +12449,114 @@ mod slime_rain {
             server.note_slime_rain_kill(BLUE_SLIME, (10.0, 10.0));
         }
         assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == KING_SLIME));
+    }
+}
+
+#[cfg(test)]
+mod lantern_night {
+    use super::*;
+    use crate::config::Config;
+    use rand::SeedableRng;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "lantern night probe")
+    }
+
+    /// `world_data`'s own `WorldFlag::LanternNight` patch — real state, the same wiring
+    /// `WorldFlag::SlimeRain`/`PartyIsUp` already got for their own events.
+    #[test]
+    fn world_data_reflects_whether_a_lantern_night_is_up() {
+        // `WorldFlag::LanternNight` is byte 5, bit 1 (`packets.rs`'s own `position()`, private to
+        // that module) — read directly, the same way the slime-rain flag test above does.
+        let has_flag = |server: &GameServer| server.world_data().flags.0[5] & (1 << 1) != 0;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        assert!(!has_flag(&server));
+        server.lantern_night.genuine = true;
+        assert!(has_flag(&server));
+    }
+
+    /// `roll_natural_lantern_night`'s own daily-roll wiring, driven through a real server —
+    /// proves `world.progress.downed_moon_lord`/the busy-gate computation actually connect, not
+    /// just `LanternNightState::natural_attempt`'s own already-tested logic in isolation.
+    #[test]
+    fn a_natural_lantern_night_eventually_starts_with_moon_lord_downed() {
+        for seed in 0..2000u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            server.world.progress.downed_moon_lord = true;
+            server.roll_natural_lantern_night();
+            if server.lantern_night.genuine {
+                return;
+            }
+        }
+        panic!("a lantern night should have started at least once across 2000 seeds");
+    }
+
+    /// Without Moon Lord ever downed, no amount of trying starts a natural lantern night — real
+    /// vanilla's own one real gate on the roll firing at all.
+    #[test]
+    fn no_lantern_night_without_moon_lord_downed() {
+        for seed in 0..500u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            server.roll_natural_lantern_night();
+            assert!(!server.lantern_night.genuine);
+        }
+    }
+
+    /// `note_boss_kill`'s own snapshot-and-diff guarantee wiring: killing King Slime for the
+    /// first time (a `downed_king_slime` false→true transition) arms
+    /// `lantern_night.next_night_guaranteed`, and the very next `roll_natural_lantern_night` call
+    /// fires a lantern night outright — deterministic, since the guarantee bypasses the daily
+    /// roll's own odds entirely, unlike the statistical test above.
+    #[test]
+    fn killing_a_boss_for_the_first_time_guarantees_the_next_lantern_night() {
+        const KING_SLIME: u16 = crate::game::slime_rain::KING_SLIME;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        assert!(!server.lantern_night.next_night_guaranteed);
+
+        server.note_boss_kill(KING_SLIME);
+        assert!(server.world.progress.downed_king_slime);
+        assert!(
+            server.lantern_night.next_night_guaranteed,
+            "a first-time boss kill should have armed the guarantee"
+        );
+
+        server.roll_natural_lantern_night();
+        assert!(
+            server.lantern_night.genuine,
+            "the armed guarantee should have fired the very next roll"
+        );
+    }
+
+    /// Killing the *same* boss again (already downed before this kill) does not re-arm the
+    /// guarantee — `note_boss_kill`'s own diff is against the flag's own transition, not the kill
+    /// event itself.
+    #[test]
+    fn killing_an_already_downed_boss_again_does_not_rearm_the_guarantee() {
+        const KING_SLIME: u16 = crate::game::slime_rain::KING_SLIME;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.progress.downed_king_slime = true;
+
+        server.note_boss_kill(KING_SLIME);
+        assert!(
+            !server.lantern_night.next_night_guaranteed,
+            "already downed before this kill — no false→true transition to guarantee off of"
+        );
+    }
+
+    /// `roll_dawn_events`'s own `LanternNight::CheckMorning` hook — a lantern night never
+    /// survives past one dawn, genuine or manually forced alike, matching the birthday party's
+    /// own analogous dawn-end rule.
+    #[test]
+    fn a_lantern_night_ends_at_dawn() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.lantern_night.manual = true;
+        server.roll_dawn_events();
+        assert!(
+            !server.lantern_night.is_up(),
+            "manual nights end at dawn too"
+        );
     }
 }
 

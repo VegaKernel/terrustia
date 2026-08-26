@@ -7,6 +7,7 @@ pub mod clock;
 pub mod event;
 pub mod housing;
 pub mod journey;
+pub mod lantern_night;
 pub mod lunar;
 pub mod moons;
 pub mod npc;
