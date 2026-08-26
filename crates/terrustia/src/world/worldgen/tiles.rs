@@ -66,6 +66,12 @@ pub const HARDENED_SAND: u16 = 397;
 /// `TileID.SandstoneBrick` — the pyramid's own worked-stone material, distinct from the natural
 /// desert [`SANDSTONE`] (396) it shares a name with in English but not in `TileID`.
 pub const SANDSTONE_BRICK: u16 = 151;
+/// `TileID.Cloud` — the floating island's own material, both islands (`CloudIsland`) and lakes
+/// (`CloudLake`).
+pub const CLOUD: u16 = 189;
+/// `TileID.Sunplate` — the floating island house's own build material (`IslandHouse`,
+/// `WorldGen.cs:80394`).
+pub const SUNPLATE: u16 = 202;
 
 /// The wall ids, from `WallID`.
 pub mod walls {
@@ -105,4 +111,11 @@ pub mod walls {
     /// same 0-5 index order `randGemTile` (`WorldGen.cs:9707`) uses for its matching tile: 0
     /// amethyst, 1 topaz, 2 sapphire, 3 emerald, 4 ruby, 5 diamond.
     pub const GEM_WALLS: [u16; 6] = [48, 49, 50, 51, 52, 53];
+    /// `WallID.Cloud` — the background a floating island (and its lake variant) gets filled with
+    /// once fully enclosed (`WorldGen.cs:79513`/`:79939`).
+    pub const CLOUD: u16 = 73;
+    /// `WallID.DiscWall` — the floating island house's own interior wall (`IslandHouse`,
+    /// `WorldGen.cs:80395`; the real name is a holdover from a cut item, not a description of what
+    /// it looks like here).
+    pub const SUNPLATE: u16 = 82;
 }

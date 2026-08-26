@@ -27,6 +27,7 @@
 
 pub mod cave_flood;
 pub mod fallen_logs;
+pub mod floating_islands;
 pub mod gem_caves;
 pub mod jungle_shrines;
 pub mod lakes;
@@ -121,6 +122,12 @@ pub struct Built {
     pub hellforges: usize,
     /// Living-Wood trunk-and-branch trees, each with a taproot and one hollow chamber.
     pub living_trees: usize,
+    /// Sky landmasses grown from a random-walk blob, most holding a house.
+    pub floating_islands: usize,
+    /// How many of those islands actually got a house built on them.
+    pub floating_island_houses: usize,
+    /// The lake-topped floating island variant — a water-filled basin instead of a house.
+    pub cloud_lakes: usize,
 }
 
 /// Generate a world of the given size.
@@ -239,6 +246,15 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let living_trees = living_trees::scatter(&mut world, &plan, &mut rand);
     living_trees::scatter_walls(&mut world, &plan);
 
+    // Floating islands: entirely in the sky, well above `plan.surface`, so — unlike every other
+    // Tier 2 pass above — its relative order against ground-level passes is genuinely inert rather
+    // than merely convenient; placed here, alongside its fellow Tier 2 scatters, for readability
+    // rather than because anything below would otherwise conflict with it. Vanilla itself runs the
+    // driving `FloatingIslands` pass far earlier (`WorldGen.cs:12988`, before even `OresAndShinies`)
+    // and `FloatingIslandHouses` much later (`:17986`, after the underground-cabins-equivalent
+    // pass) — the two are merged into one call here; see `floating_islands`'s own module doc.
+    let floating_islands = floating_islands::scatter(&mut world, &plan, &mut structures, &mut rand);
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
@@ -343,6 +359,9 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         underworld_ruins,
         hellforges,
         living_trees,
+        floating_islands: floating_islands.islands,
+        floating_island_houses: floating_islands.houses,
+        cloud_lakes: floating_islands.lakes,
     };
     (world, built)
 }
