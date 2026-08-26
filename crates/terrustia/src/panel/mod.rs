@@ -2,10 +2,11 @@
 //!
 //! What exists here: an embedded frontend, served through `axum`; a login flow reusing the same
 //! account store `/register` and `/login` already use (no second credential system); a status
-//! endpoint and a WebSocket that streams it live. What does *not* exist yet, deliberately, per the
-//! plan this task came from: the player list, kick/ban, whitelist management, world switching, the
-//! live console/chat view, the world screen with player avatars, and the runtime `panel` console
-//! command to toggle this on and off without a restart. Those are follow-up work.
+//! endpoint and a WebSocket that streams it live; and the runtime `panel` console command
+//! ([`supervise`]) to toggle this on and off without a restart. What does *not* exist yet,
+//! deliberately, per the plan this task came from: the player list, kick/ban, whitelist
+//! management, world switching, the live console/chat view, and the world screen with player
+//! avatars. Those are follow-up work.
 //!
 //! **Bundling**: `rust-embed`'s `axum` feature embeds the built frontend
 //! (`crates/terrustia/web-panel/dist/`), served with a catch-all SPA route and an `index.html`
@@ -130,6 +131,40 @@ pub async fn run(
         }
     });
     Ok(handle)
+}
+
+/// Owns the panel's lifecycle for the life of the process, starting and stopping it each time a
+/// toggle arrives on `toggle` — the other end of the console's `panel` command
+/// (`GameServer::run_console`'s `"panel"` arm), which only ever sends a pulse and never touches
+/// the actual [`tokio::task::JoinHandle`] itself: dropping a `JoinHandle` detaches rather than
+/// stopping the task it names, so whatever holds it is the only thing that may [`abort`
+/// it](tokio::task::JoinHandle::abort), and that has to be one single owner living for the whole
+/// process, not something reconstructed per toggle.
+///
+/// `initial` is whatever `main` already started at boot (or `None`, the ordinary case — the panel
+/// is opt-in). A bind failure *here*, after boot, is reported and left off rather than propagated:
+/// unlike the startup path (`run`, called directly with `?` in `main`), a toggle happens against a
+/// server already serving real players, and a configuration mistake discovered this way should not
+/// take the rest of the server down with it.
+pub async fn supervise(
+    config: Config,
+    events: mpsc::Sender<ServerEvent>,
+    mut toggle: mpsc::UnboundedReceiver<()>,
+    initial: Option<tokio::task::JoinHandle<()>>,
+) {
+    let mut handle = initial;
+    while toggle.recv().await.is_some() {
+        match handle.take() {
+            Some(running) => {
+                running.abort();
+                info!("web panel stopped (console toggle)");
+            }
+            None => match run(config.clone(), events.clone()).await {
+                Ok(started) => handle = Some(started),
+                Err(e) => warn!(error = %e, "could not start the web panel"),
+            },
+        }
+    }
 }
 
 // ---- static assets -------------------------------------------------------------------------

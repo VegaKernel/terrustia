@@ -51,6 +51,8 @@ const COMMANDS: &[&str] = &[
     "ban",
     "unban",
     "group",
+    "world",
+    "panel",
     "stop",
 ];
 

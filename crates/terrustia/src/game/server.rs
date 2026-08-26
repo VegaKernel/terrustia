@@ -767,6 +767,10 @@ pub struct GameServer {
     /// A trailing, time-windowed log of player tile edits, for `/world undo`. See
     /// [`crate::game::tile_log`]'s own module doc for retention and scope.
     tile_log: crate::game::tile_log::TileLog,
+    /// The other end of [`crate::panel::supervise`]'s toggle channel, for the console's `panel`
+    /// command. `None` in every test that never calls [`Self::with_panel_toggle`] — the console
+    /// command still works in that case, it just has nothing to notify and says so.
+    panel_toggle: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl GameServer {
@@ -871,6 +875,7 @@ impl GameServer {
             save_path,
             autosave_ticks,
             tile_log: crate::game::tile_log::TileLog::default(),
+            panel_toggle: None,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -886,6 +891,15 @@ impl GameServer {
             server.pylon_kinds.insert((pylon.x, pylon.y), pylon.kind);
         }
         server
+    }
+
+    /// Wires the console's `panel` command up to a running [`crate::panel::supervise`] task.
+    /// Builder-style rather than a `new()` parameter: every existing call site (`main`, and
+    /// seventeen call sites across this workspace's tests) would otherwise need a channel most of
+    /// them have no use for, just to construct a server at all.
+    pub fn with_panel_toggle(mut self, toggle: mpsc::UnboundedSender<()>) -> Self {
+        self.panel_toggle = Some(toggle);
+        self
     }
 
     /// Every pylon in the world, as module 8 describes them.
@@ -2314,8 +2328,19 @@ impl GameServer {
                  whitelist add|remove|list [name] | \
                  claim <name> <password> | kick <name> [reason] | \
                  ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
-                 stop"
+                 world undo <player> <duration> | panel | stop"
             ),
+            // Toggles the web panel: starts it if it is not running, stops it if it is.
+            // `panel_toggle`'s other end (`crate::panel::supervise`) owns the actual bind/abort and
+            // decides which of those this pulse means — this arm only ever sends one and reports
+            // whether it could.
+            "panel" => match &self.panel_toggle {
+                Some(toggle) if toggle.send(()).is_ok() => {
+                    info!(target: CONSOLE_REPLY, "panel toggled — see the log line just above for which way");
+                }
+                Some(_) => info!(target: CONSOLE_REPLY, "the panel supervisor is gone"),
+                None => info!(target: CONSOLE_REPLY, "no panel supervisor is wired up in this run"),
+            },
             "say" => {
                 self.announce(argument);
             }
@@ -10633,6 +10658,62 @@ mod panic_path {
         let server = GameServer::new(Config::default(), tiny_world());
         drop(tx);
         assert_eq!(server.run(rx).await, Stopped::Cleanly);
+    }
+}
+
+/// The console's `panel` command sends exactly one pulse on `panel_toggle` — the other end
+/// (`crate::panel::supervise`) decides what that pulse means and actually owns the bind/abort.
+/// This only proves the command reaches the channel and never panics without one wired; the real
+/// start/stop behaviour is covered end-to-end, over a real socket, in `tests/panel.rs`.
+#[cfg(test)]
+mod panel_toggle_command {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "panel toggle probe")
+    }
+
+    #[tokio::test]
+    async fn the_panel_command_sends_one_pulse_when_a_toggle_channel_is_wired() {
+        let (tx, rx) = mpsc::channel::<ServerEvent>(4);
+        let (toggle_tx, mut toggle_rx) = mpsc::unbounded_channel();
+        let server = GameServer::new(Config::default(), tiny_world()).with_panel_toggle(toggle_tx);
+        let handle = tokio::spawn(server.run(rx));
+
+        tx.send(ServerEvent::Console {
+            line: "panel".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        assert_eq!(handle.await.unwrap(), Stopped::Cleanly);
+
+        assert!(
+            toggle_rx.try_recv().is_ok(),
+            "the console command should have sent exactly one pulse"
+        );
+        assert!(
+            toggle_rx.try_recv().is_err(),
+            "and only one — not, say, one per tick"
+        );
+    }
+
+    /// Every test that constructs a `GameServer` directly (all seventeen call sites, before this
+    /// one) never calls `with_panel_toggle` — the command has to stay harmless there, not panic.
+    #[tokio::test]
+    async fn the_panel_command_does_not_panic_with_no_toggle_channel_wired() {
+        let (tx, rx) = mpsc::channel::<ServerEvent>(4);
+        let server = GameServer::new(Config::default(), tiny_world());
+        let handle = tokio::spawn(server.run(rx));
+
+        tx.send(ServerEvent::Console {
+            line: "panel".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        assert_eq!(handle.await.unwrap(), Stopped::Cleanly);
     }
 }
 

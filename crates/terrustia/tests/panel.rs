@@ -129,6 +129,105 @@ async fn static_assets_and_the_unclaimed_flow_work_over_a_real_socket() {
     assert_eq!(status, 200, "the real password should sign in: {body}");
 }
 
+/// The console's `panel` command, driven exactly as `main` wires it: `GameServer` holds one end
+/// of an unbounded channel, `panel::supervise` owns the other and the actual bind/abort. Starts
+/// with the panel off (`panel_enabled: false`, no `initial` handle) — the ordinary case, since the
+/// panel is opt-in — and drives it on, then off, entirely through real `ServerEvent::Console`
+/// lines over a real TCP port, the same way an operator typing at the sticky console would.
+#[tokio::test]
+async fn the_console_panel_command_starts_and_stops_a_real_listener() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: false,
+        panel_listen: addr,
+        ..Config::default()
+    };
+    let world = worldgen::generate(
+        config.world_width,
+        config.world_height,
+        config.world_name.clone(),
+        11,
+    );
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    let (toggle_tx, toggle_rx) = mpsc::unbounded_channel();
+    tokio::spawn(
+        GameServer::new(config.clone(), world)
+            .with_panel_toggle(toggle_tx)
+            .run(rx),
+    );
+    tokio::spawn(panel::supervise(
+        config.clone(),
+        tx.clone(),
+        toggle_rx,
+        None,
+    ));
+
+    assert!(
+        !port_answers(addr).await,
+        "the panel must not be listening before anyone asks for it"
+    );
+
+    tx.send(ServerEvent::Console {
+        line: "panel".to_string(),
+    })
+    .await
+    .unwrap();
+    assert!(
+        wait_until(|| port_answers(addr)).await,
+        "the panel should be listening within the deadline after the first toggle"
+    );
+
+    // Actually reachable, not just holding the port — the same static-asset path the foundation
+    // test exercises.
+    let index = reqwest_lite::Client::new()
+        .get(&format!("http://{addr}"))
+        .await;
+    assert!(
+        index.contains("id=\"app\""),
+        "expected the app shell once toggled on: {index}"
+    );
+
+    tx.send(ServerEvent::Console {
+        line: "panel".to_string(),
+    })
+    .await
+    .unwrap();
+    assert!(
+        wait_until(|| async { !port_answers(addr).await }).await,
+        "the panel should stop listening within the deadline after the second toggle"
+    );
+}
+
+/// Whether *something* is accepting connections on `addr` right now — a closed port refuses
+/// immediately rather than hanging, so no timeout is needed here.
+async fn port_answers(addr: std::net::SocketAddr) -> bool {
+    tokio::net::TcpStream::connect(addr).await.is_ok()
+}
+
+/// Poll `check` until it is true or five seconds pass — the toggle is asynchronous (a channel
+/// send, then a supervisor task waking up and, on the way on, a real `bind`), so the effect is
+/// never visible at the instant the console line is sent.
+async fn wait_until<F, Fut>(mut check: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if check().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
 fn extract_session(body: &str) -> String {
     let key = "\"session\":\"";
     let start = body

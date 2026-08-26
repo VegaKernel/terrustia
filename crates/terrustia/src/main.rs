@@ -166,15 +166,30 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
-    let mut game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
 
-    // Foundation only — see `panel/mod.rs`'s module doc. Opt-in, so a bind failure here is a
-    // configuration mistake worth failing loudly on rather than silently running without it.
-    let _panel = if config.panel_enabled {
+    // Opt-in, so a bind failure *here* — at boot, before anything is actually serving — is a
+    // configuration mistake worth failing loudly on rather than silently running without it. Once
+    // up, ownership passes to `panel::supervise` below, which handles every later start/stop (the
+    // console's `panel` command) without that same all-or-nothing behaviour — see its own doc
+    // comment for why a runtime toggle failure should not take the rest of the server down too.
+    let initial_panel = if config.panel_enabled {
         Some(terrustia::panel::run(config.clone(), events_tx.clone()).await?)
     } else {
         None
     };
+    let (panel_toggle_tx, panel_toggle_rx) = mpsc::unbounded_channel();
+    tokio::spawn(terrustia::panel::supervise(
+        config.clone(),
+        events_tx.clone(),
+        panel_toggle_rx,
+        initial_panel,
+    ));
+
+    let mut game = tokio::spawn(
+        GameServer::new(config.clone(), world)
+            .with_panel_toggle(panel_toggle_tx)
+            .run(events_rx),
+    );
 
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
 
