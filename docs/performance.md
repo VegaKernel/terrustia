@@ -110,6 +110,160 @@ deployment does — using a deterministic packet-count burst rather than wall-cl
 differently-loaded profile). Verified failing on the unfixed code (31 of 255 dropped) and passing
 on the fix (zero drops, repeatedly).
 
+## World generation time, and what actually parallelizes safely
+
+The section above measured a real 8400x2400 world at 28.171 s to generate, wall-clock, on this
+session's own shared machine. That number is real — it happened, on a real clock — but re-running
+the identical work (same seed, same size, so the same sequence of RNG draws and therefore the same
+amount of algorithmic work every time) gave wall-clock totals from **8.4 s to 41.0 s** across five
+back-to-back trials on the same machine, at the same commit. That is not seed-dependent variance;
+it is contention. `ps aux` at the time showed a second, independent `cargo test` running in a
+sibling worktree, plus a desktop's worth of ordinary GUI processes (Steam, WindowServer) — this
+machine is shared, and its own load average sat at roughly 1.5-2x its core count for most of this
+investigation.
+
+Wall-clock time is the wrong tool for measuring this codebase's own cost on a machine like that —
+`game/clock.rs`'s own doc comment already makes this exact point about tick timing, and it applies
+just as well to a one-shot generation run. Re-measured on this thread's CPU clock instead
+(`game::clock::Cpu`, the same mechanism the tick loop already uses), via `examples/gencost.rs` (new
+this session, a per-pass profiler mirroring `build()`'s own call sequence), three trials each:
+
+| World | wall-clock spread | CPU-time spread | CPU-time median |
+|---|---:|---:|---:|
+| 4200x1200 (seed 999) | 1.3-2.0 s | 1.8-2.1 s | ~1.9 s |
+| 8400x2400 (seed 999) | 8.4-41.0 s | 7.9-12.6 s | ~8.6 s |
+
+CPU time for the large world is about 4.5x the small world's — almost exactly the 4x tile-count
+ratio between them. **World generation scales linearly with tile count.** The appearance of wild
+superlinear scaling in an earlier wall-clock-only comparison of these same two sizes (a single
+small-world sample against a single large-world sample showed individual passes apparently costing
+36x to 546x more for a 4x tile increase) was a comparison of a low-contention moment against a
+high-contention one, not a property of the code. Worth stating plainly, since it would have been
+easy to chase as a bug: there is no algorithmic blowup here, once measured honestly.
+
+### Where the time actually goes
+
+Per-pass CPU time on the large world, seed 999 (`gencost.rs`, ranked by cost): `smooth::smooth`
+(roughly a fifth of the total on its own), `waterfalls::scatter`, `dirt_wall_cleanup::scrub`,
+`oasis::scatter`, `pots::scatter`, `wall_variety::variety`, and the `tile_cleanup` bundle together
+account for most of the rest. Every one of these is what it looks like: a real full-world scan or a
+real retry-based site search, run once, at the size the world actually is — not a hidden quadratic
+term hiding behind a small line count.
+
+### What's actually safe to parallelize, and what isn't
+
+Every pass in `build()` was checked for genuine, safe parallelism — at the pass level (independent
+passes running concurrently) and within a single pass (splitting its own scan across threads).
+
+**Pass-level parallelism is not safe, and was not attempted.** `build()`'s own module doc already
+says ordering is load-bearing for *world state* (caves before ore, structures before decorations);
+what rules out running independent-looking passes concurrently is a second, separate dependency
+this investigation turned up by reading every pass's own signature: nearly every one takes
+`&mut rand` (`UnifiedRandom`) or `&mut forest_rng` — one shared, strictly-ordered RNG stream
+threaded through the whole ~50-pass sequence. Two passes running on different threads would each
+need their own RNG state to be sound at all, which means reseeding, which means every pass
+downstream of the split draws different random numbers than it does today. That is not an
+implementation detail — it would silently change the *already-measured, already-published*
+per-seed counts this project's own `plan.md` Done table carries for roughly twenty Tier 2/3 passes
+(jungle shrines, pyramids, cabins, ruins, speleothems and more, each pinned against seeds
+999/4242/12345). Chasing pass-level concurrency here would mean re-verifying every one of those
+rows for a codebase-wide behaviour change well outside this task's own brief.
+
+**Intra-pass parallelism is safe for exactly one pass**, found by checking every big-cost candidate
+for two properties: no shared RNG, and no cross-column read. `tile_cleanup::gravitating_sand_cleanup`
+is the only one of the six biggest passes with neither — checked by reading every line, not
+assumed: it takes no `rand` at all, and every read and write it makes is to its own column (`x`
+never varies within the inner loop, and there is no `x-1`/`x+1` anywhere in it). Every other big
+pass fails at least one of the two: `dirt_wall_cleanup::scrub`, `waterfalls::scatter`,
+`oasis::scatter`, `pots::scatter` and `wall_variety::variety` all draw from the shared RNG inside
+their own loop; `quick_cleanup`/`tile_cleanup`/`final_cleanup` are RNG-free but each reads a
+horizontal neighbour (`x-1`/`x+1`) whose value, inside the current sequential pass, can itself
+already have been modified earlier in that same run — genuinely ambiguous to parallelize safely
+without either a fresh read of vanilla's own source (unavailable this session — the decompiled tree
+was wiped by a tmp-reaper earlier in this project's history, see `plan.md`) or an expensive
+per-pass empirical proof that a snapshot-based rewrite changes nothing; `broken_trap_cleanup` is a
+wire-circuit flood that can span the whole world, not local to any column range at all.
+
+`gravitating_sand_cleanup` now splits `0..width` into one column band per available core
+(`std::thread::available_parallelism`), computes each band's writes against a read-only `&World`
+on its own thread — sound without `unsafe` or a lock, since `&World` has no interior mutability and
+sharing it across threads is already permitted — and applies every write on the calling thread once
+all workers finish. Application order cannot matter: `set_tile` during generation is a plain array
+write (`track_dirty` is off until well after `build()` returns — see `World::set_tile`), and no two
+columns can ever compute a write to the same tile.
+
+Measured, this one pass alone, wall-clock (the number that matters for how long the single-writer
+thread would be blocked if this ran mid-game — CPU time undercounts a threaded call, since the
+calling thread mostly waits on `.join()` rather than computing):
+
+| World | before (single-threaded) | after (parallel) | speedup |
+|---|---:|---:|---:|
+| 4200x1200 | 53 ms | 7.3 ms | ~7.3x |
+| 8400x2400 | 251-314 ms | 34-44 ms | ~7-8x |
+
+Real, with the honest caveat sitting right next to it: this pass was never among the pipeline's
+biggest costs — roughly 2-6% of a large world's total build time before this change — so the effect
+on the headline "how long does a Large world take to generate" number is real but small, not a
+rewrite of the 28-second figure above. The passes that actually dominate (`smooth`, `waterfalls`,
+`dirt_wall_cleanup`, `oasis`, `pots`, `wall_variety`) are exactly the ones this investigation found
+genuinely unsafe to parallelize without either breaking RNG-order determinism or risking a silent
+behaviour change nobody could fully verify this session. Left for whoever next has reason to chase
+generation time further, with the reasoning already done rather than left to rediscover.
+
+**Verified bit-identical, not just argued safe.** `tile_cleanup.rs` gained two new tests:
+`many_independent_columns_parallelize_to_the_same_result_as_one_thread` (a synthetic wide world
+with a floating-sand pocket in most columns, deliberately spanning several thread-band boundaries)
+and `gravitating_sand_cleanup_is_bit_identical_to_a_single_threaded_reference_on_real_worlds` (the
+real pipeline through `structures::ores`, three real seeds, full tile-for-tile comparison). Both
+were checked to actually discriminate rather than pass by construction: a deliberate two-column gap
+injected into the band-boundary math failed the synthetic test immediately (206,064 vs 207,008
+tiles dropped), while the real-seed test — real "gravitating sand" sites are sparse — did *not*
+reliably catch the same injected bug, which is why both tests are kept rather than either alone.
+
+## Section encoding at join — measured, real, and out of this session's reach to fix
+
+`send_section` (`game/server.rs`) turns a section of tiles into the packet a client receives, and
+runs inline on the single-writer game task — the same task every tick runs on. It caches what it
+encodes (`section_cache`) and only re-encodes a section once a tile inside it has changed since it
+was last sent, so ordinary gameplay pays this rarely. The place it cannot avoid paying it is a
+join: `on_spawn_tile_data` sends every section in `sections_for`'s own starting block — up to a 5x3
+block around spawn (15 sections) plus a 6x4 block around the joining player's own requested
+position (24 more, if it names a real location) — synchronously, one `send_section` call after
+another, inside one event. That is a guaranteed cache miss for whichever sections a server's very
+first player ever spawns into, and a likely one for anyone spawning somewhere the cache hasn't been
+warmed yet.
+
+`examples/sectioncost.rs`, new this session, samples every section of a real generated world rather
+than the one convenient section near spawn that `bench.rs` already measures (spawn is cleared, so
+it is unusually cheap to encode):
+
+| World | sections sampled | min | p50 | p99 | max | max as % of a 16,666 µs tick |
+|---|---:|---:|---:|---:|---:|---:|
+| 4200x1200 | 168 | 120 µs | 277 µs | 1,075 µs | 1,322 µs | 7.9% |
+| 8400x2400 | 672 | 121 µs | 240 µs | 2,856 µs | 2,976 µs | 17.9% |
+
+One section — even the worst one measured, on the larger world — is not a stall on its own; nowhere
+close to the autosave's 71 ms. The real cost is the *burst*: multiplying a realistic 15-39 section
+join by these real percentiles puts a cold join somewhere between roughly 15 ms (15 sections at the
+small world's p50) and 115 ms (39 sections at the large world's p99) of synchronous work on the
+single-writer task before that player sees a single tile — one to seven tick budgets, back to back.
+The same *shape* of problem the autosave stall was (real synchronous cost, paid worst on a cold
+cache), smaller in typical magnitude, genuinely real, and **not fixed this session**.
+
+Not fixed because it cannot honestly be fixed from here: the code that would need to change
+(`send_section`, `on_spawn_tile_data`, `sections_for`, all in `game/server.rs`) was explicitly out
+of this session's scope — that file was single-owner, with other in-flight work depending on it
+staying stable, and this session was told plainly not to touch it. Measured and disclosed instead
+of guessed at or silently skipped, with the fix's real shape written down so it does not have to be
+rediscovered: unlike the autosave, this cannot simply move to a background task, because encoding
+needs to read `World`, which the single-writer task owns for the whole tick — there is no
+snapshot-and-hand-off shortcut here the way there was for a save. The lower-risk fix is to *spread*
+a join's own section burst across several ticks instead of one synchronous loop: a joining player
+is already sitting on a loading screen for the whole burst regardless, so a few extra ticks of load
+time costs them nothing visible, unlike a stall that briefly freezes everyone else already playing.
+`section_cache` itself is not the problem — it does exactly what this page already documented it
+doing; the problem is only ever the first, uncached pass through a join burst.
+
 ## The autosave stall, and how it was found
 
 The crowd test reported this:
@@ -320,8 +474,10 @@ does not degrade this server; it loses the world back to the last autosave.
 Outside tests there are a small number of `unwrap`/`expect` calls, each on a proven invariant and
 each carrying a message saying which: parsing the built-in default listen address, a buff-slot
 search whose loop cannot exit without a slot, a boss routine that has just checked its target,
-reading a fixed-width field out of a slice already length-checked, and the worldgen layout's
-best-candidate search.
+reading a fixed-width field out of a slice already length-checked, the worldgen layout's
+best-candidate search, and — new this round — joining `gravitating_sand_cleanup`'s own worker
+threads, safe because the closure they run only calls `World::tile` (which never panics) and
+`Vec::push`.
 
 **The count is pinned by `tests/panic_budget.rs` rather than stated here.** This paragraph used to
 say "three", and named three, when there were seven — nobody had lied, the sentence was simply

@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 /// Every site outside a `#[cfg(test)]` module that can panic on purpose.
 ///
 /// Raise this only alongside a comment at the new site saying which invariant makes it safe.
-const ALLOWED: usize = 10;
+///
+/// 11, up from 10: `tile_cleanup.rs`'s `gravitating_sand_cleanup` gained one, joining the worker
+/// threads its own column-band parallelization spawns — see that call site's own comment for the
+/// invariant (`gravitating_sand_column_range` only reads `World::tile`, which never panics, and
+/// pushes to a `Vec`, so the joined thread cannot actually have panicked).
+const ALLOWED: usize = 11;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -101,12 +101,105 @@ fn kill(world: &mut World, x: i32, y: i32) {
 const FALLING: [u16; 11] = [53, 234, 112, 116, 224, 123, 330, 331, 332, 333, 495];
 
 /// The `GravitatingSandCleanup` pass, faithful and complete. Returns how many tiles were dropped.
+///
+/// **Parallelized across column bands — the one pass in this generator proven safe to.** Every
+/// read and write below touches only its own column: `x` is fixed for the whole inner loop, and
+/// nothing here ever reads or writes `x-1`/`x+1`, unlike `quick_cleanup`/`tile_cleanup`/
+/// `final_cleanup` just below, which all read a horizontal neighbour and were left sequential for
+/// exactly that reason (see this module's own doc comment). That column-purity is what makes
+/// splitting the world into independent `x` ranges and running them on separate threads safe
+/// rather than merely convenient — there is no cross-thread aliasing to reason about, checked by
+/// inspection rather than assumed. It also takes no `rand`, so there is no shared RNG stream for
+/// concurrent threads to race over or reorder — the other reason most of this generator's passes
+/// cannot be parallelized this way (see `world/worldgen/mod.rs`'s own module doc: pass order is
+/// load-bearing, and a single `UnifiedRandom` is threaded through nearly every pass in `build()`).
+///
+/// Each thread computes its own column range's writes purely by reading a shared `&World` — safe
+/// without `unsafe` or a lock, because `&World` is already sound to share across threads (no
+/// interior mutability) — and returns them; the main thread applies every write once every worker
+/// has finished. Application order does not matter: `set_tile` during generation is a plain array
+/// write (`track_dirty` is off until `World::start_tracking_changes` runs, well after `build()`
+/// returns — see `World::set_tile`), and two different columns can never compute a write to the
+/// same tile, so nothing here can race or double-write regardless of which thread finishes first
+/// or which order the collected writes are applied in.
+/// `tests::gravitating_sand_cleanup_is_bit_identical_to_a_single_threaded_reference_on_real_worlds`
+/// and `tests::many_independent_columns_parallelize_to_the_same_result_as_one_thread` pin this
+/// empirically against three real seeds and a synthetic multi-band fixture, rather than leaving it
+/// as a paper argument — the synthetic test is the one that actually caught a deliberately injected
+/// band-boundary bug during review; the real-seed test alone did not, since real "gravitating sand"
+/// sites are sparse enough that a two-column gap between bands rarely lands on one.
 pub fn gravitating_sand_cleanup(world: &mut World, layout: &Layout) -> usize {
-    let mut dropped = 0usize;
-    for x in 0..world.width() {
+    let width = world.width();
+    let height = world.height();
+    let threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(width.max(1) as usize)
+        .max(1);
+
+    // A read-only reborrow: several threads below need to read `world` at once, which `&World`
+    // already permits safely (no interior mutability), but `&mut World` itself is not `Copy` and
+    // cannot be captured by more than one closure.
+    let world_ref: &World = world;
+
+    let writes: Vec<(i32, i32, Tile)> = if threads <= 1 {
+        gravitating_sand_column_range(world_ref, layout, 0, width, height)
+    } else {
+        // Manual ceiling division: `i32::div_ceil` is still unstable (`int_roundings`); `usize`
+        // has it, but working in `usize` here would need width/threads range checks this project
+        // has no reason to add for a value already bounded by a real world's own dimensions.
+        let band = (width + threads as i32 - 1) / threads as i32;
+        let band = band.max(1);
+        let mut writes = Vec::new();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .filter_map(|t| {
+                    let x0 = t as i32 * band;
+                    let x1 = ((t as i32 + 1) * band).min(width);
+                    (x0 < x1).then(|| {
+                        scope.spawn(move || {
+                            gravitating_sand_column_range(world_ref, layout, x0, x1, height)
+                        })
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A worker's only failure mode is its own panic, and `gravitating_sand_column_range`
+                // cannot: it only calls `World::tile` (never panics, returns air out of bounds — see
+                // its own doc comment), `solid_or_sloped` (the same, plus plain field reads), and
+                // `Vec::push`. Named in `tests/panic_budget.rs`'s own pinned count.
+                writes.extend(
+                    handle
+                        .join()
+                        .expect("gravitating_sand_column_range cannot panic"),
+                );
+            }
+        });
+        writes
+    };
+
+    let dropped = writes.len();
+    for (x, y, tile) in writes {
+        world.set_tile(x, y, tile);
+    }
+    dropped
+}
+
+/// One column band's worth of `GravitatingSandCleanup`, computed against a read-only `world`
+/// rather than applied in place — see [`gravitating_sand_cleanup`]'s own doc comment for why that
+/// split is what makes this safe to run on several threads at once.
+fn gravitating_sand_column_range(
+    world: &World,
+    layout: &Layout,
+    x0: i32,
+    x1: i32,
+    height: i32,
+) -> Vec<(i32, i32, Tile)> {
+    let mut writes = Vec::new();
+    for x in x0..x1 {
         let mut flag = false;
         let mut last_solid = 0i32;
-        for y in (1..world.height()).rev() {
+        for y in (1..height).rev() {
             if !solid_or_sloped(world, x, y) {
                 continue;
             }
@@ -120,15 +213,14 @@ pub fn gravitating_sand_cleanup(world: &mut World, layout: &Layout) -> usize {
                     t.frame_y = -1;
                     t.slope = 0;
                     t.flags.set(TileFlags::HALF_BRICK, false);
-                    world.set_tile(x, j, t);
-                    dropped += 1;
+                    writes.push((x, j, t));
                 }
             }
             flag = true;
             last_solid = y;
         }
     }
-    dropped
+    writes
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -809,5 +901,107 @@ mod tests {
         let _ = tile_cleanup(&mut world);
         let _ = broken_trap_cleanup(&mut world);
         let _ = final_cleanup(&mut world, &layout);
+    }
+
+    /// Applies a single-threaded reference run of `gravitating_sand_cleanup`, bypassing the
+    /// thread-band split entirely — the pre-parallelization behaviour, kept alive here as the
+    /// thing the parallel version is checked against rather than trusted to match by inspection
+    /// alone.
+    fn gravitating_sand_cleanup_reference(world: &mut World, layout: &Layout) -> usize {
+        let writes = gravitating_sand_column_range(world, layout, 0, world.width(), world.height());
+        let dropped = writes.len();
+        for (x, y, tile) in writes {
+            world.set_tile(x, y, tile);
+        }
+        dropped
+    }
+
+    /// The property that makes splitting this pass across threads sound in the first place: many
+    /// independent floating-sand columns, spread across a world wide enough to span several
+    /// thread bands on a real multi-core machine (`available_parallelism()` is whatever this
+    /// machine actually reports, not stubbed — this test only means something run for real). If
+    /// column-band splitting ever let one band's write leak into another's, or reordered which
+    /// tile "won" a write, this would catch it directly rather than relying on the doc comment's
+    /// own reasoning being correct.
+    #[test]
+    fn many_independent_columns_parallelize_to_the_same_result_as_one_thread() {
+        let width = 4000;
+        let height = 400;
+        let (mut reference, layout) = stone_world(width, height, 42);
+        let ground_y = layout.surface + 60;
+        // A floating sand pocket in most columns, at a slightly different height each time, so
+        // thread-band boundaries fall in the middle of some pockets rather than conveniently
+        // beside every one of them.
+        for x in (10..width - 10).step_by(3) {
+            for y in 0..ground_y {
+                reference.set_tile(x, y, Tile::AIR);
+            }
+            reference.set_tile(x, ground_y, Tile::block(tiles::STONE));
+            let top = 10 + (x % 7);
+            for y in top..top + 4 {
+                reference.set_tile(x, y, Tile::block(53)); // Sand
+            }
+        }
+        let mut parallel = reference.clone();
+
+        let dropped_reference = gravitating_sand_cleanup_reference(&mut reference, &layout);
+        let dropped_parallel = gravitating_sand_cleanup(&mut parallel, &layout);
+
+        assert!(
+            dropped_reference > 0,
+            "the fixture should have real work to do"
+        );
+        assert_eq!(
+            dropped_parallel, dropped_reference,
+            "the parallel pass dropped a different number of tiles than the single-threaded one"
+        );
+        for x in 0..width {
+            for y in 0..height {
+                assert_eq!(
+                    parallel.tile(x, y),
+                    reference.tile(x, y),
+                    "tile ({x}, {y}) diverged between the parallel and single-threaded runs"
+                );
+            }
+        }
+    }
+
+    /// The same equivalence, on three real generated worlds rather than a synthetic fixture —
+    /// `docs/performance.md`'s own seeds. Runs the real pipeline up through `structures::ores`
+    /// (the state `gravitating_sand_cleanup` actually sees inside `build()`, per `mod.rs`), then
+    /// diverges: one clone through the parallel pass, one through the pre-parallelization
+    /// reference, full tile-for-tile comparison.
+    #[test]
+    fn gravitating_sand_cleanup_is_bit_identical_to_a_single_threaded_reference_on_real_worlds() {
+        for seed in [999, 4242, 12345] {
+            let width = super::super::SMALL_WIDTH;
+            let height = super::super::SMALL_HEIGHT;
+            let mut rand = UnifiedRandom::new(seed);
+            let plan = Layout::plan(width, height, &mut rand);
+            let heights = super::super::terrain::heightmap(&plan, &mut rand);
+            let mut world = World::empty(width, height, "gravitating-sand-parity");
+            super::super::terrain::fill(&mut world, &plan, &heights, &mut rand);
+            super::super::structures::caves(&mut world, &plan, &mut rand);
+            super::super::structures::ores(&mut world, &plan, &mut rand);
+
+            let mut reference = world.clone();
+            let mut parallel = world.clone();
+            let dropped_reference = gravitating_sand_cleanup_reference(&mut reference, &plan);
+            let dropped_parallel = gravitating_sand_cleanup(&mut parallel, &plan);
+
+            assert_eq!(
+                dropped_parallel, dropped_reference,
+                "seed {seed}: parallel and single-threaded runs dropped different tile counts"
+            );
+            for x in 0..width {
+                for y in 0..height {
+                    assert_eq!(
+                        parallel.tile(x, y),
+                        reference.tile(x, y),
+                        "seed {seed}: tile ({x}, {y}) diverged between parallel and single-threaded runs"
+                    );
+                }
+            }
+        }
     }
 }
