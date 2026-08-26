@@ -257,6 +257,60 @@ async fn a_sign_can_be_read_and_rewritten() {
     );
 }
 
+/// A tile edit for a section the client was never actually sent must not apply — vanilla parity:
+/// `MessageBuffer.cs`'s packet-17 handler forces its own `flag14` (`fail`) true the moment the
+/// edited tile's section is missing from `Netplay.Clients[whoAmI].TileSections`
+/// (`RemoteClient.cs:31`), which is the same state `Player::sent_sections` mirrors here.
+///
+/// Server-side truth has to be checked through a client that never received the original attempt's
+/// relay: every edit is broadcast to already-connected clients regardless of whether it actually
+/// applied (`on_tile_manipulation`'s own comment: "even an edit the server does not model must
+/// reach other clients"), so a bystander present at the time would show the edit having happened
+/// in its own optimistic view either way. A client joining *after* the attempt, requesting the
+/// section for the first time, only ever sees the server's real canonical state.
+#[tokio::test]
+async fn a_tile_edit_for_a_never_sent_section_is_rejected() {
+    let addr = start().await;
+    let mut bob = join(addr, "bob").await;
+
+    // Any tile bob's own client-side world has no data for at all is, by construction, one the
+    // server never streamed to bob either — the two can't have diverged, since streaming is the
+    // only way a client learns a tile exists. Scan for one rather than assuming a fixed distance
+    // from spawn, since the test world here is a fixed 800x600 (`start_with` hardcodes it) and a
+    // guess could land inside whatever the initial spawn stream actually covered.
+    let (far_x, far_y) = (0..800)
+        .step_by(97)
+        .flat_map(|x| (0..600).step_by(97).map(move |y| (x, y)))
+        .find(|&(x, y)| bob.world().tile(x, y).is_none())
+        .expect("an 800x600 world should have at least one tile bob's spawn stream never covered");
+
+    bob.place_tile(far_x as i16, far_y as i16, 30)
+        .await
+        .unwrap(); // 30: stone, distinctive enough
+
+    let mut witness = join(addr, "witness").await;
+    let (far_sx, far_sy) = (
+        far_x / terrustia_proto::section::SECTION_WIDTH,
+        far_y / terrustia_proto::section::SECTION_HEIGHT,
+    );
+    witness
+        .request_section(far_sx as u16, far_sy as u16)
+        .await
+        .unwrap();
+    witness
+        .wait_for("the far section, from a client that never saw bob's attempt", |e| {
+            matches!(e, Event::SectionLoaded { section_x, section_y } if *section_x == far_sx && *section_y == far_sy)
+        })
+        .await
+        .unwrap();
+
+    assert_ne!(
+        witness.world().tile(far_x, far_y).map(|t| t.block),
+        Some(30),
+        "a tile edit for a section bob was never sent applied anyway"
+    );
+}
+
 #[tokio::test]
 async fn a_tile_square_is_applied_and_relayed() {
     let addr = start().await;
@@ -5134,5 +5188,51 @@ async fn a_part_batch_does_not_decraft() {
         broke.is_none(),
         "{short} of item {item} is short of a batch of {} and should not come apart",
         recipe.makes
+    );
+}
+
+/// Pets, mounts, minecarts and hooks are equipped into the five "miscellaneous equipment" slots
+/// (`PlayerItemSlotID`, transcribed in `terrustia_proto::inventory::SLOT_RUNS`) — vanilla itself
+/// implements all three almost entirely client-side: `Player.UpdatePet`/`UpdatePetLight` are
+/// gated `if (i == Main.myPlayer)`, the pet/mount visual is a player-owned projectile or a
+/// modification to the player's own movement stats, and a minecart track switch is an ordinary
+/// tile-frame edit. The server's actual job, in vanilla and here, is exactly what `SyncEquipment`
+/// (packet 5) already does for every other equipment slot: remember what's equipped, relay it to
+/// everyone else so their own client can render/simulate it. This proves that relay actually
+/// reaches a second connected player for the misc-equip range specifically, not just the slots
+/// this project built the mechanism for originally (armour/accessories) — nothing pet/mount/
+/// minecart-specific needed to be built for this to work, and this is the test that backs that
+/// claim rather than leaving it asserted.
+#[tokio::test]
+async fn a_pet_summon_item_equipped_in_the_misc_slot_relays_to_another_player() {
+    // `terrustia_proto::inventory::SLOT_RUNS` (private to that crate) lays the slots out as
+    // Inventory(58) + cursor(1) + armour/accessories(20) + their dyes(10) = 89, then the five
+    // "Miscellaneous equipment" slots (pet, light pet, mount, minecart, hook) start right there.
+    let misc_start: u16 = 58 + 1 + 20 + 10;
+
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut bob = join(addr, "bob").await;
+
+    const SLIME_STAFF: i32 = 1309; // ItemID.SlimeStaff — a real light-pet summon item
+
+    alice
+        .set_equipment(misc_start, ItemStack::new(SLIME_STAFF, 1, 0))
+        .await
+        .unwrap();
+
+    let synced = bob
+        .wait_for(
+            "alice's pet-slot equip to relay",
+            |e| matches!(e, Event::EquipmentSynced(eq) if eq.slot == misc_start),
+        )
+        .await
+        .expect("the misc-equipment slot should relay the same as any other equipment slot");
+    let Event::EquipmentSynced(eq) = synced else {
+        unreachable!("matched on it")
+    };
+    assert_eq!(
+        eq.item.id, SLIME_STAFF,
+        "bob should see the exact item alice put in her pet slot"
     );
 }

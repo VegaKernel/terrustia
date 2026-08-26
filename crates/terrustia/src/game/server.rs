@@ -3986,6 +3986,22 @@ impl GameServer {
             return Ok(());
         }
 
+        // Vanilla parity: `MessageBuffer.cs`'s packet-17 handler (`case 17`) starts its own local
+        // `flag14` from the client's own claimed failure bit, then forces it to `true` — never back
+        // to `false` — the moment the edit's section isn't in `Netplay.Clients[whoAmI].TileSections`
+        // (`RemoteClient.cs:31`, the exact state `Player::sent_sections` already mirrors here). That
+        // combined flag is what every `WorldGen.KillTile`/`KillWall` call in that packet passes as
+        // its own `fail` argument: a client editing a tile it was never sent a section for still
+        // gets the swing animation, but the edit itself never actually lands — the same shape the
+        // check below reproduces by folding into `changed` rather than dropping the packet outright.
+        // Relaying regardless (below, unconditional on `changed`) is also load-bearing and already
+        // vanilla-shaped: it is exactly how vanilla's own "this edit failed" state reaches every
+        // other client too, not something this check needs to special-case.
+        let (sx, sy) = self.world.section_of(x, y);
+        let section_owned = self
+            .player(slot)
+            .is_some_and(|p| p.sent_sections.contains(&(sx, sy)));
+
         let mut tile = self.world.tile(x, y);
         let mut changed = true;
         let mut broke = None;
@@ -4063,12 +4079,19 @@ impl GameServer {
             }
         }
 
+        // Never turns a rejected edit back into an accepted one — only ever suppresses one the
+        // match above already decided should apply, matching `flag14`'s own one-way OR in source.
+        changed = changed && section_owned;
         if changed {
             self.world.set_tile(x, y, tile);
             // Mining a block is the commonest way liquid starts moving.
             self.liquids.disturb(x, y);
         }
-        if let Some((block, frame_x, frame_y)) = broke {
+        // Gated on `section_owned`, not `changed`: a rejected edit still leaves `broke` set to
+        // whatever the match arm above decided a real kill would drop, and applying these side
+        // effects (a real item drop, an altar smash, waking a boss) without the tile ever actually
+        // having been removed is exactly the exploit this whole check exists to close.
+        if section_owned && let Some((block, frame_x, frame_y)) = broke {
             self.spawn_tile_drop(block, frame_x, frame_y, x, y);
             // A demon altar is the only way hardmode ore gets into a world, and it always costs
             // something to break.
