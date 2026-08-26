@@ -51,6 +51,7 @@ pub mod surface_plants;
 pub mod terrain;
 pub mod tiles;
 pub mod traps;
+pub mod underground_cabins;
 
 pub use passes::compare_against;
 
@@ -110,6 +111,8 @@ pub struct Built {
     pub jungle_shrines: usize,
     /// Solid sandstone-brick masses buried in the desert, each with a tunnel to a treasure room.
     pub pyramids: usize,
+    /// Small furnished houses found underground, in whichever material dominates the site.
+    pub underground_cabins: usize,
 }
 
 /// Generate a world of the given size.
@@ -264,6 +267,12 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let gem_caves = gem_caves::scatter(&mut world, &plan, &mut rand);
     let spider_caves = spider_caves::scatter(&mut world, &plan, &mut forest_rng);
 
+    // Underground cabins, same reasoning and same relative position as gem/spider caves above:
+    // sites into ground the passes above have already decorated, and needs `structures` (already
+    // carrying every protected structure placed so far) to avoid overlapping one of them.
+    let underground_cabins =
+        underground_cabins::scatter(&mut world, &plan, &mut structures, &mut rand);
+
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
     world.spawn_x = plan.spawn_x as i16;
@@ -309,6 +318,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         spider_caves,
         jungle_shrines,
         pyramids,
+        underground_cabins,
     };
     (world, built)
 }

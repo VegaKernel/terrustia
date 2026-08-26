@@ -711,7 +711,10 @@ pub(crate) fn biome_chest_loot(
 }
 
 /// What a cavern chest holds. Deeper is better, which is the whole of the reward curve.
-fn cavern_loot(
+///
+/// `pub(crate)`: `underground_cabins.rs` reuses this directly for the one chest each cabin holds,
+/// rather than re-deriving the same depth-tiered table a second time.
+pub(crate) fn cavern_loot(
     layout: &Layout,
     y: i32,
     rand: &mut UnifiedRandom,
