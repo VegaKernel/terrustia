@@ -32,6 +32,7 @@ pub mod jungle_shrines;
 pub mod lakes;
 pub mod layout;
 pub mod liquid_settle;
+pub mod living_trees;
 pub mod manifest;
 pub mod oasis;
 pub mod passes;
@@ -118,6 +119,8 @@ pub struct Built {
     pub underworld_ruins: usize,
     /// Real Hellforges, each sited against a ruin's own background wall.
     pub hellforges: usize,
+    /// Living-Wood trunk-and-branch trees, each with a taproot and one hollow chamber.
+    pub living_trees: usize,
 }
 
 /// Generate a world of the given size.
@@ -230,6 +233,12 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // wide window the way oasis does.
     let pyramids = pyramids::scatter(&mut world, &plan, &mut rand, &mut forest_rng);
 
+    // Living trees, right after pyramids for the same reason — vanilla's own `LivingTrees` pass
+    // (`WorldGen.cs:15563`) runs between `Pyramids` (15438) and `Oasis` (16339), before anything
+    // below gets a chance to leave a tile in the 100-wide clear footprint a trunk needs.
+    let living_trees = living_trees::scatter(&mut world, &plan, &mut rand);
+    living_trees::scatter_walls(&mut world, &plan);
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
@@ -333,6 +342,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         underground_cabins,
         underworld_ruins,
         hellforges,
+        living_trees,
     };
     (world, built)
 }
