@@ -1,0 +1,12 @@
+target
+artifacts
+coverage
+# The curated seed corpus under corpus/<target>/ *is* tracked — it's the real, valid protocol
+# data fuzzing needs to be worth anything. What's ignored is what a real local fuzzing run adds on
+# top of it: libFuzzer names newly-discovered inputs by content hash. Matching "starts with a hex
+# digit" was tried first and was wrong — plenty of real words (checkerboard, framed_and_liquid)
+# start with a-f too. Naming every curated seed with an unambiguous `seed_`/`regression_` prefix
+# and ignoring everything else in a target's corpus directory has no such false-positive risk.
+corpus/*/*
+!corpus/*/seed_*
+!corpus/*/regression_*

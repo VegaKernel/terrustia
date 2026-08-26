@@ -93,6 +93,30 @@ jobs:
         with:
           command: check
 
+  # A bounded replay, not an open-ended campaign — this is a CI gate confirming the decoder still
+  # survives everything the committed corpus already knows how to break it with, plus 60 seconds
+  # of genuinely new exploration per target. `regression_oom_oversized_header` in
+  # fuzz/corpus/section_stream is not a hypothetical: fuzzing found a real out-of-memory abort
+  # within the first 90 seconds this target ever ran, on a fresh checkout, before any CI job had
+  # ever exercised it. 60s/target was chosen because that is what was actually run and measured
+  # locally before this job was written (2.4-2.7 million executions per target in that window) —
+  # not a number assumed to be enough.
+  fuzz:
+    name: Fuzz the decoder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz section_stream
+        run: cargo fuzz run section_stream -- -max_total_time=60
+      - name: Fuzz packet_decoders
+        run: cargo fuzz run packet_decoders -- -max_total_time=60
+
   # The job most likely to earn its keep. Unit tests are self-consistent by construction: this
   # server once sent 18,165 door packets in five minutes — 48% of all its traffic — behind a
   # completely green suite, and it was found months later by a person watching a log. A minute of

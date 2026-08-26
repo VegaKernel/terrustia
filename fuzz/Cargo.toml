@@ -1,0 +1,33 @@
+[package]
+name = "terrustia-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Its own workspace, deliberately: the fuzz crate needs sanitizer-instrumented dependencies and
+# nightly-only flags the main workspace has no reason to carry, and cargo refuses to leave a
+# nested crate that's neither a member nor excluded in limbo — this is the standard fix.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.terrustia-proto]
+path = "../crates/terrustia-proto"
+
+[[bin]]
+name = "section_stream"
+path = "fuzz_targets/section_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_decoders"
+path = "fuzz_targets/packet_decoders.rs"
+test = false
+doc = false
+bench = false

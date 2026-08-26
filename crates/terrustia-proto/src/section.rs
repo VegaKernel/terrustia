@@ -324,10 +324,22 @@ pub fn decode_section_stream(stream: &[u8]) -> Result<(SectionBounds, Vec<Tile>,
         width: r.i16()?,
         height: r.i16()?,
     };
-    if bounds.width < 0 || bounds.height < 0 {
+    // A real section is always exactly `SECTION_WIDTH` x `SECTION_HEIGHT` — `SectionBounds::of_section`
+    // never constructs anything else, and nothing in this codebase sends a partial one. Bounding
+    // `tile_count()` to that before it drives an allocation, not just checking the sign, is load
+    // bearing: found by fuzzing, not review — 8 bytes claiming a 31232x12815 section (a real,
+    // structurally-valid-looking header, just absurd numbers) drove `Vec::with_capacity` to try
+    // and reserve room for ~400 million `Tile`s, aborting the process on the allocation itself
+    // before a single byte of tile data was ever read. This is exactly the "decode path cannot
+    // panic or over-allocate" guarantee this project already claims elsewhere; it was not true of
+    // this decoder until this bound existed.
+    if bounds.width < 0
+        || bounds.height < 0
+        || bounds.tile_count() > (SECTION_WIDTH * SECTION_HEIGHT) as usize
+    {
         return Err(ProtoError::OutOfRange {
             field: "section size",
-            value: i64::from(bounds.width.min(bounds.height)),
+            value: i64::from(bounds.width) * i64::from(bounds.height),
         });
     }
 
@@ -775,5 +787,25 @@ mod tests {
             decode_section_stream(stream.as_slice()),
             Err(ProtoError::OutOfRange { .. })
         ));
+    }
+
+    /// Found by `cargo fuzz run section_stream` within its first 90 seconds, not by review: a
+    /// header claiming a 31232x12815 section — a structurally plausible header, just absurd
+    /// numbers — drove `Vec::with_capacity` to try to reserve room for ~400 million `Tile`s and
+    /// aborted the process on the allocation itself, before a single byte of tile data was ever
+    /// read. Only the *sign* of width/height was checked before this; nothing bounded their size,
+    /// even though every section this project ever constructs is exactly `SECTION_WIDTH` x
+    /// `SECTION_HEIGHT`. This is the exact fuzzer-found input, minimized to just the header.
+    #[test]
+    fn an_oversized_section_header_is_rejected_before_it_allocates() {
+        let mut stream = Writer::new();
+        stream.i32(983060).i32(76672).i16(31232).i16(12815);
+        assert!(
+            matches!(
+                decode_section_stream(stream.as_slice()),
+                Err(ProtoError::OutOfRange { .. })
+            ),
+            "an oversized section header must be rejected before Vec::with_capacity ever runs"
+        );
     }
 }
