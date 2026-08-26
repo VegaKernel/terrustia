@@ -134,6 +134,7 @@ pub fn trophy(npc_type: u16) -> Option<u16> {
         395 => 3358,
         398 => 3595, // Moon Lord
         636 => 4783, // Empress of Light
+        657 => 4958, // Queen Slime — was missing entirely; see `classic_only`'s own note
         668 => 5108, // Deerclops
         _ => return None,
     })
@@ -456,8 +457,15 @@ pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
         // The Wall of Flesh: an emblem and a weapon, one of each. The emblems are the whole of
         // early hardmode's damage progression, so a run that gets neither is noticeably poorer.
         113 => &[&[489, 490, 491, 2998], &[426, 434, 514, 4912]],
-        // Queen Bee: one of the bee weapons, and one piece of the bee set.
-        222 => &[&[1121, 1123, 2888], &[842, 843, 844]],
+        // Queen Bee: one of the bee weapons, guaranteed (`OneFromOptionsNotScalingWithLuck(1,
+        // 1121, 1123, 2888)`, `ItemDropDatabase.cs:545` — a bare `1` denominator, which is what
+        // makes this belong here). The Bee-armor pool used to also be listed here as a second,
+        // *unconditionally* drawn pool — that was bug #2 itself: real vanilla only reaches the
+        // armor pool via a `ByCondition(1129, 3).OnFailedRoll(...)` chain, at ~1/3 overall and
+        // mutually exclusive with the Hive Wand, which `conditional_chains` now owns. Left here it
+        // would keep firing on every kill regardless of that chain, guaranteeing an armor piece
+        // every time and letting it co-occur with the wand — exactly what was found and fixed.
+        222 => &[&[1121, 1123, 2888]],
         // Golem: one of its seven, which is where the Picksaw's siblings live.
         245 => &[&[1258, 1122, 899, 1248, 1295, 1296, 1297]],
         // Queen Slime's three.
@@ -489,6 +497,52 @@ pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
         // Moss Zombie: one of ten fossil-ore-family drops, guaranteed (`ItemDropDatabase.cs:1146`).
         691 => &[&[4352, 4350, 4349, 4353, 4351, 4354, 5127, 4378, 4377, 4389]],
         _ => &[],
+    }
+}
+
+/// Moon Lord's own guaranteed draw of *two distinct* items from his ten-weapon pool —
+/// `RegisterToNPC(398, new LeadingConditionRule(NotExpert)).OnSuccess(new
+/// FromOptionsWithoutRepeatsDropRule(2, 3063, 3389, 3065, 1553, 3930, 3541, 3570, 3571, 3569,
+/// 5480))` (`ItemDropDatabase.cs:605`) — Meowmere, Star Wrath, Terrarian, S.D.M.G., Last Prism,
+/// Celebration Mk2, Lunar Flare Book, Rainbow Crystal Staff, Moonlord Turret Staff and the Moon
+/// Lord Legacy Whip. Classic-only, same as every other boss's ordinary loot (the bag replaces it
+/// in expert), and previously missing entirely — no case for npc 398 existed anywhere in this
+/// module, so a classic-mode kill granted none of these.
+///
+/// Deliberately not a [`one_from`] arm: `FromOptionsWithoutRepeatsDropRule` draws its two items
+/// *without replacement* (the game removes each pick from its temporary pool before the second
+/// draw — `FromOptionsWithoutRepeatsDropRule.TryDroppingItem`), which `one_from`'s own consumer
+/// cannot express — it draws one item per returned pool, independently, with no memory of what an
+/// earlier pool already picked. Two entries of this same ten-item pool could then hand back the
+/// same weapon twice — a real, material deviation (1-in-10 per kill) for what this project's own
+/// audit called "the single most iconic loot in the game." The caller draws both indices itself,
+/// using the same "pick one, then pick again excluding it" algorithm as source, so this returns
+/// only the plain pool (or an empty slice when the condition does not hold).
+pub fn moon_lord_weapons(npc_type: u16, at: Conditions) -> &'static [u16] {
+    if npc_type == 398 && !at.expert {
+        &[3063, 3389, 3065, 1553, 3930, 3541, 3570, 3571, 3569, 5480]
+    } else {
+        &[]
+    }
+}
+
+/// A companion item some [`one_from`] picks bring along automatically.
+///
+/// Golem's Stynger draw also grants its own ammunition: `IItemDropRule itemDropRule =
+/// ItemDropRule.Common(1258); itemDropRule.OnSuccess(ItemDropRule.Common(1261, 1, 60, 180),
+/// hideLootReport: true);` nested inside the seven-way weapon pool (`ItemDropDatabase.cs:654-656`)
+/// — both `Common` calls default to `chanceDenominator: 1`, so the bundle is unconditional
+/// whenever Stynger itself is the pool's outcome, not a further chance. `one_from`'s own consumer
+/// spawns exactly the one item it picked, with no notion of "this pick also grants something
+/// else" — a shape distinct from mode-gating (already handled by `one_from`'s own early return),
+/// so it gets its own small lookup rather than a change to `one_from`'s pool format.
+///
+/// Item 1261 (Stynger Bolt) has no other drop or craft source anywhere in this codebase, so
+/// without this its only legitimate source was missing entirely.
+pub fn bundled_with(item: u16) -> Option<(u16, i16, i16)> {
+    match item {
+        1258 => Some((1261, 60, 180)), // Stynger -> Stynger Bolt
+        _ => None,
     }
 }
 
@@ -602,17 +656,13 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
             a_few(1299, 40, 1, 1),
             a_few(47, 1, 20, 50),
         ],
-        // Skeletron. The three weapons are one chain in the game — each tried at one in seven and
-        // stopping at the first that lands — which is why they are not three separate rolls.
-        35 | 36 => vec![
-            a_few(1281, 7, 1, 1),
-            a_few(1273, 7, 1, 1),
-            a_few(1313, 7, 1, 1),
-        ],
+        // Skeletron's three weapons — moved to `conditional_chains`: they are one
+        // `ByCondition(...).OnFailedRoll(...).OnFailedRoll(...)` chain in the game, stopping at
+        // the first that lands, which this function's independent per-item rolls cannot express.
+        // King Slime's Slime Hook/Slime Gun pair is the same shape and lives there too.
         50 => vec![
             a_few(2430, 4, 1, 1),
             a_few(2493, 7, 1, 1),
-            a_few(2585, 3, 1, 1),
             always(998),
             a_few(1309, 30, 1, 1),
         ],
@@ -640,14 +690,18 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
             a_few(4784, 7, 1, 1),
             a_few(5075, 20, 1, 1),
         ],
-        // Queen Slime.
+        // Queen Slime. Item 4958 is her trophy, not part of this boss-specific registration at
+        // all — it belongs to the generic `RegisterBossTrophies` pass (`trophy()`, above), at the
+        // standard 1-in-10 rate, in every mode, the same as every other boss's. This arm used to
+        // carry a stray `a_few(4958, 20, 1, 1)` — half the real rate and wrongly classic-only,
+        // since `trophy()` itself had no npc-657 case for it to double up with. Removed here now
+        // that `trophy()` covers it correctly instead.
         657 => vec![
             a_few(4986, 1, 25, 75),
             a_few(4959, 7, 1, 1),
             a_few(4758, 4, 1, 1),
             a_few(4981, 4, 1, 1),
             a_few(4980, 3, 1, 1),
-            a_few(4958, 20, 1, 1),
         ],
         13 => vec![
             a_few(56, 1, 20, 60),
@@ -675,9 +729,17 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
             a_few(1225, 1, 15, 30),
             a_few(548, 1, 25, 40),
         ],
+        // Queen Bee. The Hive Wand at 1129 moved to `conditional_chains` — it and the Bee-armor
+        // pool are one `ByCondition(...).OnFailedRoll(OneFromOptions(...))` chain in the game
+        // (mutually exclusive, not two independent rolls), which this function's independent
+        // per-item rolls cannot express.
+        //
+        // A further, real find while verifying this block against source, left unfixed as
+        // out of scope for the same reason as the Creeper's own note above: 1130's real
+        // `ByCondition(condition, 1130, 4, 10, 30, 3)` has `chanceNumerator: 3`, so the true rate
+        // is 3-in-4, not the 1-in-4 kept here — `Conditional` has no numerator field.
         222 => vec![
             a_few(2108, 7, 1, 1),
-            a_few(1129, 3, 1, 1),
             a_few(1132, 3, 1, 1),
             a_few(1170, 15, 1, 1),
             a_few(2502, 20, 1, 1),
@@ -711,6 +773,65 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
             a_few(5113, 3, 1, 1),
             a_few(5385, 14, 1, 1),
         ],
+        _ => Vec::new(),
+    }
+}
+
+/// One fallback chain among the classic-only rolls: tried in order, stopping at the first link
+/// that lands — the same shape [`crate::npc_drops::DropChain`] already gives the flat table, kept
+/// separate here rather than folded into it.
+pub type ConditionalChain = Vec<Conditional>;
+
+/// The classic-only rolls the game writes as an explicit `OnFailedRoll` chain rather than a set of
+/// independent rules — `Common(a, N).OnFailedRoll(Common(b, M))` tries `b` only when `a`'s own
+/// random roll misses, unlike every rule [`classic_only`] returns, which [`conditional`]'s own
+/// consumer rolls independently. Kept as its own function (matching [`one_from`]/[`chance_pools`]'s
+/// own precedent of one function per distinct shape) rather than changing `classic_only`'s return
+/// type for the sake of three chains out of many flat rules.
+///
+/// Every one of these three is also `Conditions.NotExpert`-gated in source, exactly like
+/// `classic_only`'s own rules — checked once here rather than per match arm. The flat table in
+/// [`crate::npc_drops`] cannot express any of this: its own `drops()` takes no [`Conditions`] at
+/// all (by design — see its module doc, "the other half... lives in `conditional_drops`"), so a
+/// chain moved there would keep firing in expert mode instead of yielding to the boss bag. Checked
+/// directly against that constraint rather than routed around it.
+pub fn conditional_chains(npc_type: u16, at: Conditions) -> Vec<ConditionalChain> {
+    if at.expert {
+        return Vec::new();
+    }
+    match npc_type {
+        // Queen Bee: `ItemDropRule.ByCondition(condition, 1129, 3).OnFailedRoll(
+        // OneFromOptionsNotScalingWithLuck(2, 842, 843, 844))` (`ItemDropDatabase.cs:550`) — the
+        // Hive Wand at 1/3, and only on failure a further 1/2 chance at one piece of the Bee set,
+        // mutually exclusive with the wand rather than an independent extra roll.
+        //
+        // The nested `OneFromOptions(2, ...)` (a 1/2 gate, then a uniform pick among 3) is itself
+        // a shape this flat chain format cannot represent directly, but is exactly reproducible as
+        // three further sequential links: worked by hand, wanting each armor piece to land at the
+        // real unconditional rate of (2/3 chance the wand already failed) * (1/2 gate) * (1/3
+        // pick) = 1/9, the per-item chain denominator at step *i* (given every earlier link in the
+        // chain has already failed) is `1 / (1/9 / (1 - already-assigned probability))` — 1/6,
+        // then 1/5 of what remains, then 1/4 of what remains after that. Checked: 1/3 (wand) +
+        // 1/9*3 (armor) + 1/3 (nothing) sums to 1, and 1/6, then (5/6)*(1/5)=1/6, then
+        // (4/6)*(1/4)=1/6 reproduces the real 1/9 per piece exactly.
+        222 => vec![vec![
+            a_few(1129, 3, 1, 1),
+            a_few(842, 6, 1, 1),
+            a_few(843, 5, 1, 1),
+            a_few(844, 4, 1, 1),
+        ]],
+        // Skeletron: `ByCondition(condition, 1281, 7).OnFailedRoll(Common(1273,
+        // 7)).OnFailedRoll(Common(1313, 7))` (`ItemDropDatabase.cs:563`) — at most one of
+        // Skeletron Hand, Bone Sword and Muramasa per kill, never independently.
+        35 | 36 => vec![vec![
+            a_few(1281, 7, 1, 1),
+            a_few(1273, 7, 1, 1),
+            a_few(1313, 7, 1, 1),
+        ]],
+        // King Slime: `NotScalingWithLuck(2585, 3).OnFailedRoll(Common(2610))`
+        // (`ItemDropDatabase.cs:404`) — 1/3 chance of the Slime Hook, else the Slime Gun
+        // guaranteed. Item 2610 previously appeared as a drop nowhere in this project.
+        50 => vec![vec![a_few(2585, 3, 1, 1), always(2610)]],
         _ => Vec::new(),
     }
 }
@@ -770,8 +891,25 @@ fn by_mode(npc_type: u16, at: Conditions) -> Vec<Conditional> {
             a_few(1729, 1, 25, 40),
             a_few(1729, 1, 30, 50),
         )],
-        // The Brain of Cthulhu: tissue samples and crimtane.
-        266 => vec![
+        // The Creeper — Brain of Cthulhu's own 20-strong minion escort, npc **267** — not the
+        // Brain itself (npc 266, whose own classic-only trophy/orb/heart drops are in
+        // `classic_only` and are unaffected by this). `RegisterBoss_BOC` registers this
+        // `DropBasedOnMasterAndExpertMode` pair to a *separate* `short type2 = 267` local, a
+        // distinct `RegisterToNPC` call from the Brain's own three lines just above
+        // (`ItemDropDatabase.cs:501-503`). Wiring it to 266 was a real bug — this comment's own
+        // earlier wording ("The Brain of Cthulhu: tissue samples and crimtane") was itself part
+        // of the mistake, describing the wrong NPC — found by a parallel audit and independently
+        // confirmed here directly against source.
+        //
+        // A second, real finding along the way, left unfixed: every one of these six branches'
+        // real `chanceNumerator` is **2**, not the implicit `1` this project's `Conditional` can
+        // represent (`new CommonDrop(1329, 3, 2, 5, 2)` etc. — the fifth constructor argument).
+        // True classic/expert odds are 2-in-3 for both items, not the 1-in-3 kept here; master's
+        // 1329 branch is 2-in-4 (an exact 1-in-2, also not corrected, to keep this fix to the
+        // assigned npc-id bug alone). Same class of gap already disclosed for the dungeon-guardian
+        // family and the Black Recluse above — `Conditional` has no numerator field project-wide,
+        // not something introduced or silently accepted new here.
+        267 => vec![
             pick(
                 at,
                 a_few(1329, 3, 2, 5),
@@ -854,11 +992,11 @@ mod tests {
         assert_eq!(bags.len(), 15, "fifteen bosses have bags: {bags:?}");
         // Moon Lord, Empress of Light and Deerclops added: their trophies (3595, 4783, 5108) were
         // simply absent from this table before, found by tools/check_drops.py against source.
-        assert_eq!(
-            trophies.len(),
-            19,
-            "and nineteen have trophies: {trophies:?}"
-        );
+        // Queen Slime's (4958) added later still: it was present only as a stray, wrongly
+        // classic-only, half-rate entry in `classic_only(657)` — this table's own count of 19 was
+        // itself proof of the miscount, since real vanilla's `RegisterBossTrophies` registers
+        // twenty of these at the standard rate.
+        assert_eq!(trophies.len(), 20, "and twenty have trophies: {trophies:?}");
         // The Twins are the one boss whose halves have different trophies.
         assert_ne!(trophy(125), trophy(126));
         // ...but they share a bag.
@@ -1229,5 +1367,207 @@ mod tests {
             ..plain()
         };
         assert!(conditional(253, all_three).iter().any(|d| d.item == 1327));
+    }
+
+    /// Bug #1: Moon Lord's own ten-weapon pool was missing entirely — no case for npc 398 existed
+    /// anywhere in this module, so classic-mode kills granted none of the signature weapons.
+    /// Fails on the unfixed code (`moon_lord_weapons` did not exist / returned an empty pool for
+    /// 398), passes now that the pool is wired up and correctly classic-only.
+    #[test]
+    fn moon_lord_has_his_own_weapon_pool() {
+        const MOON_LORD: u16 = 398;
+        let pool = moon_lord_weapons(MOON_LORD, plain());
+        assert_eq!(pool.len(), 10, "the real ten-item pool: {pool:?}");
+        for item in [3063, 3389, 3065, 1553, 3930, 3541, 3570, 3571, 3569, 5480] {
+            assert!(pool.contains(&item), "missing {item} from the real pool");
+        }
+
+        assert!(
+            moon_lord_weapons(
+                MOON_LORD,
+                Conditions {
+                    expert: true,
+                    ..plain()
+                }
+            )
+            .is_empty(),
+            "expert replaces this with the treasure bag, same as every other boss"
+        );
+        assert!(
+            moon_lord_weapons(50, plain()).is_empty(),
+            "King Slime has no business getting Moon Lord's pool"
+        );
+    }
+
+    /// Bug #2: Queen Bee's Hive Wand and Bee-armor pool used to be modelled as independent rolls
+    /// (`classic_only`'s flat `a_few(1129, 3, 1, 1)` plus a guaranteed `one_from` armor pool),
+    /// which made the armor unconditional and let it co-occur with the wand — real vanilla is one
+    /// `OnFailedRoll` chain, mutually exclusive, at an overall ~1/3. Fails on the unfixed code
+    /// (1129 was in `classic_only`, not this chain, and the armor pool had no gate at all).
+    #[test]
+    fn queen_bees_bee_drops_are_one_chain_not_independent_rolls() {
+        const QUEEN_BEE: u16 = 222;
+        let chains = conditional_chains(QUEEN_BEE, plain());
+        assert_eq!(chains.len(), 1, "one chain, not several: {chains:?}");
+        let chain = &chains[0];
+        assert_eq!(
+            chain,
+            &vec![
+                a_few(1129, 3, 1, 1),
+                a_few(842, 6, 1, 1),
+                a_few(843, 5, 1, 1),
+                a_few(844, 4, 1, 1),
+            ]
+        );
+        // 1129 must no longer also appear as an independent `classic_only` roll, or the chain
+        // above and the old flat rule would both fire and double the wand's real odds.
+        assert!(!classic_only(QUEEN_BEE).iter().any(|d| d.item == 1129));
+        // Nor may the armor pieces still be an *unconditional* `one_from` pool — that was the
+        // original bug (found by this exact assertion failing against a real, unfixed
+        // `one_from(222)` while writing this test's own server.rs sibling): a guaranteed second
+        // pool alongside this chain would give an armor piece on every single kill, chain or not.
+        for pool in one_from(QUEEN_BEE, plain()) {
+            for item in [842, 843, 844] {
+                assert!(
+                    !pool.contains(&item),
+                    "one_from(222) must not also guarantee bee armor: {pool:?}"
+                );
+            }
+        }
+
+        assert!(
+            conditional_chains(
+                QUEEN_BEE,
+                Conditions {
+                    expert: true,
+                    ..plain()
+                }
+            )
+            .is_empty(),
+            "expert replaces this with the treasure bag"
+        );
+    }
+
+    /// Bug #3: Skeletron's three weapons used to be three independent `classic_only` rolls, so a
+    /// single kill could grant 0, 1, 2 or all 3 — real vanilla is one chain, stopping at the
+    /// first that lands, so at most one per kill. Fails on the unfixed code (all three were
+    /// independent entries in `classic_only(35 | 36)`).
+    #[test]
+    fn skeletrons_three_weapons_are_one_chain_not_three_independent_rolls() {
+        for skeletron in [35u16, 36] {
+            let chains = conditional_chains(skeletron, plain());
+            assert_eq!(chains.len(), 1, "npc {skeletron}: {chains:?}");
+            assert_eq!(
+                chains[0],
+                vec![
+                    a_few(1281, 7, 1, 1),
+                    a_few(1273, 7, 1, 1),
+                    a_few(1313, 7, 1, 1),
+                ]
+            );
+            // None of the three may also be an independent `classic_only` roll any more.
+            let flat = classic_only(skeletron);
+            for item in [1281, 1273, 1313] {
+                assert!(
+                    !flat.iter().any(|d| d.item == item),
+                    "npc {skeletron}: {item} must not also roll independently"
+                );
+            }
+        }
+    }
+
+    /// Bug #4: the tissue-sample/crimtane rule was wired to npc 266 (the Brain of Cthulhu itself),
+    /// but real vanilla's `RegisterBoss_BOC` registers it to npc **267** (the Creeper, the Brain's
+    /// own escort) — a separate `RegisterToNPC` call on a separate local. Fails on the unfixed
+    /// code (the rule lived on 266, and 267 had nothing).
+    #[test]
+    fn the_creeper_not_the_brain_carries_the_tissue_sample_and_crimtane_rule() {
+        const BRAIN_OF_CTHULHU: u16 = 266;
+        const CREEPER: u16 = 267;
+        let hard_mode = Conditions {
+            hard_mode: true,
+            ..plain()
+        };
+
+        let creeper_drops = conditional(CREEPER, hard_mode);
+        assert!(
+            creeper_drops.iter().any(|d| d.item == 1329),
+            "the Creeper should carry the Tissue Sample rule: {creeper_drops:?}"
+        );
+        assert!(
+            creeper_drops.iter().any(|d| d.item == 880),
+            "and the mode-scaled Crimtane Ore rule: {creeper_drops:?}"
+        );
+
+        let brain_drops = conditional(BRAIN_OF_CTHULHU, hard_mode);
+        assert!(
+            !brain_drops.iter().any(|d| d.item == 1329),
+            "the Brain itself must not carry the Creeper's own rule: {brain_drops:?}"
+        );
+        // The Brain's own real classic-only drops (its own 880 roll included) are untouched.
+        assert!(
+            classic_only(BRAIN_OF_CTHULHU).iter().any(|d| d.item == 880),
+            "the Brain's own separate classic-only crimtane roll must still be there"
+        );
+    }
+
+    /// Bug #5: King Slime never dropped the Slime Gun — `classic_only(50)` only ever had the 1/3
+    /// Slime Hook roll, with no fallback. Real vanilla: 1/3 Slime Hook, else the Slime Gun
+    /// guaranteed. Fails on the unfixed code (item 2610 appeared nowhere).
+    #[test]
+    fn king_slime_falls_back_to_the_slime_gun() {
+        const KING_SLIME: u16 = 50;
+        let chains = conditional_chains(KING_SLIME, plain());
+        assert_eq!(chains.len(), 1);
+        assert_eq!(
+            chains[0],
+            vec![a_few(2585, 3, 1, 1), always(2610)],
+            "1/3 Slime Hook, else the Slime Gun guaranteed"
+        );
+        assert!(
+            !classic_only(KING_SLIME).iter().any(|d| d.item == 2585),
+            "2585 must not also roll independently now that it is chained"
+        );
+    }
+
+    /// Bug #6: Queen Slime's trophy (4958) was missing from the generic `trophy()` table and
+    /// instead sat as a stray, half-rate (1/20 vs. the real 1/10), wrongly classic-only entry in
+    /// `classic_only(657)`. Fails on the unfixed code (`trophy(657)` was `None`, and the trophy
+    /// dropped at the wrong rate only outside expert mode).
+    #[test]
+    fn queen_slimes_trophy_is_in_the_generic_table_at_the_standard_rate() {
+        const QUEEN_SLIME: u16 = 657;
+        assert_eq!(trophy(QUEEN_SLIME), Some(4958));
+
+        // `conditional()` folds `trophy()` in at the standard 1-in-10, in every mode — including
+        // expert, unlike the ordinary loot below it.
+        let expert = conditional(
+            QUEEN_SLIME,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        assert!(
+            expert.iter().any(|d| d.item == 4958 && d.one_in == 10),
+            "the trophy still drops in expert, at 1-in-10: {expert:?}"
+        );
+
+        assert!(
+            !classic_only(QUEEN_SLIME).iter().any(|d| d.item == 4958),
+            "the stray classic-only half-rate entry must be gone"
+        );
+    }
+
+    /// Bug #7: drawing Stynger (1258) from Golem's weapon pool must also grant its own 60-180
+    /// Stynger Bolt (1261) — a nested `OnSuccess` in source. Fails on the unfixed code
+    /// (`bundled_with` did not exist, so item 1261 had no source anywhere in this project).
+    #[test]
+    fn golems_stynger_brings_its_own_ammunition() {
+        assert_eq!(bundled_with(1258), Some((1261, 60, 180)));
+        // Nothing else in Golem's pool bundles anything.
+        for item in [1122, 899, 1248, 1295, 1296, 1297] {
+            assert_eq!(bundled_with(item), None, "item {item} should not bundle");
+        }
     }
 }

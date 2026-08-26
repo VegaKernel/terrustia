@@ -7969,8 +7969,11 @@ impl GameServer {
 
     /// Drop whatever an NPC was carrying.
     ///
-    /// Each chain is rolled in order and stops at the first success, which is what keeps a
-    /// skeleton's four weapons rare rather than giving it four separate chances at one.
+    /// Each chain — both the unconditional ones in `drop_flat_loot`, below, and the classic-only
+    /// ones `conditional_chains` returns (Queen Bee's Hive Wand/Bee-armor, Skeletron's three
+    /// weapons, King Slime's Slime Hook/Slime Gun) — is rolled in order and stops at the first
+    /// success, which is what keeps a run of alternatives rare rather than giving independent
+    /// chances at every one of them.
     ///
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
@@ -8025,6 +8028,46 @@ impl GameServer {
             {
                 self.broadcast_item(index);
             }
+            // Some picks bring a companion item along automatically — Golem's Stynger with its
+            // own ammunition (`ItemDropDatabase.cs:654-656`), the only one of these this
+            // project's drop tables have found so far. Unconditional once the pick lands: real
+            // vanilla's own nested `OnSuccess` has no further gate of its own.
+            if let Some((companion, min, max)) =
+                terrustia_proto::conditional_drops::bundled_with(pick)
+            {
+                let stack = if max > min {
+                    rand::Rng::random_range(&mut self.rng, min..=max)
+                } else {
+                    min
+                };
+                if let Some(index) = self
+                    .items
+                    .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
+                {
+                    self.broadcast_item(index);
+                }
+            }
+        }
+        // Moon Lord: two *distinct* items drawn from his own ten-weapon pool
+        // (`FromOptionsWithoutRepeatsDropRule`) — empty for every other npc and in expert mode, so
+        // this is a no-op there. Mirrors the game's own algorithm exactly: pick one index, then
+        // pick a second uniformly from what remains, rather than drawing from `one_from`'s
+        // independent-per-pool mechanism, which could otherwise repeat the same weapon.
+        let moon_lord_pool = terrustia_proto::conditional_drops::moon_lord_weapons(npc_type, at);
+        if moon_lord_pool.len() >= 2 {
+            let first = rand::Rng::random_range(&mut self.rng, 0..moon_lord_pool.len());
+            let mut second = rand::Rng::random_range(&mut self.rng, 0..moon_lord_pool.len() - 1);
+            if second >= first {
+                second += 1;
+            }
+            for &item in &[moon_lord_pool[first], moon_lord_pool[second]] {
+                if let Some(index) = self
+                    .items
+                    .spawn(ItemStack::new(i32::from(item), 1, 0), center)
+                {
+                    self.broadcast_item(index);
+                }
+            }
         }
         // Chance-gated pools: roll the gate first, and only on success pick which option.
         for pool in terrustia_proto::conditional_drops::chance_pools(npc_type, at) {
@@ -8053,6 +8096,30 @@ impl GameServer {
                 .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
             {
                 self.broadcast_item(index);
+            }
+        }
+        // Fallback chains among the classic-only rolls (Queen Bee's Hive Wand/Bee-armor,
+        // Skeletron's three weapons, King Slime's Slime Hook/Slime Gun): stop at the first link
+        // that lands, the same break-on-first-success shape `drop_flat_loot` already has below —
+        // these three cannot live in the flat table itself, which has no notion of expert/classic
+        // mode at all (see `conditional_chains`'s own doc for why).
+        for chain in terrustia_proto::conditional_drops::conditional_chains(npc_type, at) {
+            for rule in chain {
+                if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+                    continue;
+                }
+                let stack = if rule.max > rule.min {
+                    rand::Rng::random_range(&mut self.rng, rule.min..=rule.max)
+                } else {
+                    rule.min
+                };
+                if let Some(index) = self
+                    .items
+                    .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
+                {
+                    self.broadcast_item(index);
+                }
+                break;
             }
         }
         self.drop_flat_loot(npc_type, center);
@@ -13702,5 +13769,221 @@ mod wall_of_flesh_trigger {
         server.tick_wall_of_flesh_trigger();
 
         assert!(!server.npcs.iter().any(|(_, n)| n.npc_type == WALL_OF_FLESH));
+    }
+}
+
+/// Real server-side coverage for the seven boss-drop-table bugs a parallel audit found this
+/// session, cross-referenced against `ItemDropDatabase.cs` and fixed in `conditional_drops.rs`
+/// (`conditional_chains`, `moon_lord_weapons`, `bundled_with`, the Creeper npc-id fix, the Queen
+/// Slime trophy fix).
+///
+/// `conditional_drops.rs`'s own test module pins the *data* — the exact item ids, rates, and
+/// which npc a rule is wired to. It cannot pin the *algorithms* that actually roll that data,
+/// because those live here, in `drop_loot`: break-on-first-success for a chain, draw-without-
+/// replacement for Moon Lord's pair, and "spawn a companion item" for Golem's bundle. These tests
+/// drive the real consumer end to end instead.
+#[cfg(test)]
+mod boss_drop_table_fixes {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::items::ItemStore;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "boss drop table probe")
+    }
+
+    /// Every `(item id, stack size)` this one kill spawned, in allocation order.
+    /// `ItemStore::spawn` always fills the lowest free slot, and nothing here ever removes an
+    /// item, so resetting the store immediately before each kill means everything found
+    /// afterward belongs to that kill alone — no need to diff against a running total.
+    fn kill_and_collect(server: &mut GameServer, npc_type: u16) -> Vec<(i32, i16)> {
+        server.items = ItemStore::new();
+        server.drop_loot(npc_type, (0.0, 0.0), false);
+        let mut items: Vec<(i16, i32, i16)> = server
+            .items
+            .iter()
+            .map(|(index, it)| (index, it.item.id, it.item.stack))
+            .collect();
+        items.sort_unstable_by_key(|(index, _, _)| *index);
+        items
+            .into_iter()
+            .map(|(_, id, stack)| (id, stack))
+            .collect()
+    }
+
+    /// Bug #1, driven end to end: Moon Lord must hand back exactly two items from his real
+    /// ten-weapon pool, and never the same one twice. The unfixed code had no case for npc 398 at
+    /// all, so this pool never dropped anything; a naive fix drawing from `one_from`'s own
+    /// independent-per-pool mechanism could still repeat the same weapon (~1-in-10 per kill) —
+    /// this pins the actual without-replacement algorithm in `drop_loot`.
+    #[test]
+    fn moon_lord_always_drops_two_distinct_signature_weapons() {
+        const MOON_LORD: u16 = 398;
+        const POOL: [i32; 10] = [3063, 3389, 3065, 1553, 3930, 3541, 3570, 3571, 3569, 5480];
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        for trial in 0..60 {
+            let dropped = kill_and_collect(&mut server, MOON_LORD);
+            let picked: Vec<i32> = dropped
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| POOL.contains(id))
+                .collect();
+            assert_eq!(
+                picked.len(),
+                2,
+                "trial {trial}: exactly two signature weapons, got {picked:?}"
+            );
+            assert_ne!(
+                picked[0], picked[1],
+                "trial {trial}: never the same weapon twice"
+            );
+        }
+    }
+
+    /// Bug #1, expert side: expert mode replaces this pool with nothing at all — the treasure bag
+    /// carries it instead, same as every other boss's ordinary loot.
+    #[test]
+    fn moon_lord_gives_none_of_his_signature_weapons_in_expert() {
+        const MOON_LORD: u16 = 398;
+        const POOL: [i32; 10] = [3063, 3389, 3065, 1553, 3930, 3541, 3570, 3571, 3569, 5480];
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        for trial in 0..10 {
+            let dropped = kill_and_collect(&mut server, MOON_LORD);
+            assert!(
+                !dropped.iter().any(|(id, _)| POOL.contains(id)),
+                "trial {trial}: expert should give none of these: {dropped:?}"
+            );
+        }
+    }
+
+    /// Bug #2, driven end to end: Queen Bee must never hand back both the Hive Wand and a piece
+    /// of Bee armor in the same kill. The unfixed code rolled 1129 as an independent
+    /// `classic_only` entry and spawned an armor piece from `one_from` *unconditionally* — so
+    /// both a guaranteed armor piece and a possible wand could land together.
+    #[test]
+    fn queen_bee_never_gives_the_wand_and_armor_together() {
+        const QUEEN_BEE: u16 = 222;
+        const BEE_STUFF: [i32; 4] = [1129, 842, 843, 844];
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut saw_wand = false;
+        let mut saw_armor = false;
+        for trial in 0..150 {
+            let dropped = kill_and_collect(&mut server, QUEEN_BEE);
+            let hits: Vec<i32> = dropped
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| BEE_STUFF.contains(id))
+                .collect();
+            assert!(
+                hits.len() <= 1,
+                "trial {trial}: at most one of the wand/armor, got {hits:?}"
+            );
+            match hits.first() {
+                Some(1129) => saw_wand = true,
+                Some(_) => saw_armor = true,
+                None => {}
+            }
+        }
+        assert!(
+            saw_wand,
+            "150 trials never landed the wand — check the odds"
+        );
+        assert!(
+            saw_armor,
+            "150 trials never landed any armor piece — check the odds"
+        );
+    }
+
+    /// Bug #3, driven end to end: Skeletron must never hand back more than one of its three
+    /// weapons in the same kill — the unfixed code rolled all three as independent `classic_only`
+    /// entries, so a single kill could give 0, 1, 2 or all 3.
+    #[test]
+    fn skeletron_never_gives_more_than_one_weapon_per_kill() {
+        const SKELETRON: u16 = 35;
+        const WEAPONS: [i32; 3] = [1281, 1273, 1313];
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut saw_any = false;
+        for trial in 0..250 {
+            let dropped = kill_and_collect(&mut server, SKELETRON);
+            let hits: Vec<i32> = dropped
+                .into_iter()
+                .map(|(id, _)| id)
+                .filter(|id| WEAPONS.contains(id))
+                .collect();
+            assert!(
+                hits.len() <= 1,
+                "trial {trial}: at most one weapon, got {hits:?}"
+            );
+            saw_any |= !hits.is_empty();
+        }
+        assert!(
+            saw_any,
+            "250 trials never landed any weapon — check the odds"
+        );
+    }
+
+    /// Bug #5, driven end to end: King Slime must get exactly one of the Slime Hook or Slime Gun
+    /// every single kill — never both, and, critically, never neither. The unfixed code only ever
+    /// had the 1/3 Slime Hook roll, so roughly two kills in three gave neither item.
+    #[test]
+    fn king_slime_always_gets_exactly_one_of_hook_or_gun() {
+        const KING_SLIME: u16 = 50;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut saw_hook = false;
+        let mut saw_gun = false;
+        for trial in 0..60 {
+            let dropped = kill_and_collect(&mut server, KING_SLIME);
+            let hook = dropped.iter().filter(|(id, _)| *id == 2585).count();
+            let gun = dropped.iter().filter(|(id, _)| *id == 2610).count();
+            assert_eq!(
+                hook + gun,
+                1,
+                "trial {trial}: exactly one of the two, got {dropped:?}"
+            );
+            saw_hook |= hook == 1;
+            saw_gun |= gun == 1;
+        }
+        assert!(saw_hook, "60 trials never landed the Slime Hook");
+        assert!(saw_gun, "60 trials never landed the Slime Gun");
+    }
+
+    /// Bug #7, driven end to end: whenever Golem's pool draw is the Stynger, the same kill must
+    /// also carry 60-180 of its own Stynger Bolt — and no other pick brings anything extra. The
+    /// unfixed code spawned only whatever `one_from` picked, with no notion of a bundled item, so
+    /// item 1261 never dropped from anywhere.
+    #[test]
+    fn golems_stynger_pick_always_brings_its_own_bolts() {
+        const GOLEM: u16 = 245;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut saw_stynger = false;
+        for trial in 0..300 {
+            let dropped = kill_and_collect(&mut server, GOLEM);
+            let stynger = dropped.iter().filter(|(id, _)| *id == 1258).count();
+            let bolts = dropped.iter().find(|(id, _)| *id == 1261);
+            assert!(
+                stynger <= 1,
+                "trial {trial}: the pool draws exactly one item"
+            );
+            if stynger == 1 {
+                saw_stynger = true;
+                let (_, stack) = *bolts.unwrap_or_else(|| {
+                    panic!("trial {trial}: Stynger without its own bolts: {dropped:?}")
+                });
+                assert!(
+                    (60..=180).contains(&stack),
+                    "trial {trial}: bolt stack {stack} out of the real 60-180 range"
+                );
+            } else {
+                assert!(
+                    bolts.is_none(),
+                    "trial {trial}: bolts without Stynger: {dropped:?}"
+                );
+            }
+        }
+        assert!(
+            saw_stynger,
+            "300 trials never drew the Stynger — check the odds"
+        );
     }
 }
