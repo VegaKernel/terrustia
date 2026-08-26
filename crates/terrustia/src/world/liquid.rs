@@ -223,21 +223,36 @@ impl Liquids {
             return;
         }
 
-        let span: Vec<i32> = (x - reach..=x + reach).collect();
+        // Middle first, then alternating outward — the order the spare unit is handed out in
+        // below. Building the tile list once here, in this order, and reusing it for both the
+        // flatness/total check and the final write loop reads each tile once instead of up to
+        // three times (the three separate `span`/`levels`/`order` passes this replaces each did
+        // their own `world.tile` calls), and needs no heap allocation: `reach` is bounded to
+        // 1..=3 here (0 already returned above), so at most 7 tiles, which fits on the stack.
+        let mut positions = [0i32; 7];
+        positions[0] = x;
+        let mut n = 1usize;
+        for step in 1..=reach {
+            positions[n] = x - step;
+            positions[n + 1] = x + step;
+            n += 2;
+        }
+        let positions = &positions[..n];
+
+        let mut levels = [0u8; 7];
+        for (slot, &sx) in levels.iter_mut().zip(positions) {
+            *slot = world.tile(sx, y).liquid;
+        }
+        let levels = &levels[..n];
+
         // Already level to within a drop: leave it alone. Without this the spare unit that
         // levelling cannot divide evenly gets handed back and forth between neighbours forever,
         // and a still pool costs as much as a flooding one.
-        let levels: Vec<u8> = span.iter().map(|&sx| world.tile(sx, y).liquid).collect();
-        let flat = levels.iter().max().copied().unwrap_or(0)
-            - levels.iter().min().copied().unwrap_or(0)
-            <= 1;
+        let flat = *levels.iter().max().unwrap() - *levels.iter().min().unwrap() <= 1;
         if flat && here.liquid >= 3 {
             return;
         }
-        let mut total: i32 = span
-            .iter()
-            .map(|&sx| i32::from(world.tile(sx, y).liquid))
-            .sum();
+        let mut total: i32 = levels.iter().map(|&l| i32::from(l)).sum();
         // A very thin film is allowed to lose its last drop rather than spreading forever, which
         // is what stops a puddle creeping across a whole cavern.
         if here.liquid < 3 {
@@ -247,17 +262,11 @@ impl Liquids {
         // The share is floored and the remainder handed out from the middle outward. The game
         // rounds each tile independently, which quietly creates liquid every time a pool settles;
         // dividing exactly costs nothing visible and means a world cannot flood itself.
-        let n = span.len() as i32;
-        let each = (total / n).clamp(0, i32::from(FULL));
-        let mut spare = (total - each * n).max(0);
-        // Middle first, then alternating outward, so the extra sits under the source.
-        let mut order: Vec<i32> = vec![x];
-        for step in 1..=reach {
-            order.push(x - step);
-            order.push(x + step);
-        }
+        let n_i32 = n as i32;
+        let each = (total / n_i32).clamp(0, i32::from(FULL));
+        let mut spare = (total - each * n_i32).max(0);
 
-        for sx in order {
+        for &sx in positions {
             let mut level = each;
             if spare > 0 && level < i32::from(FULL) {
                 level += 1;
@@ -634,5 +643,82 @@ mod tests {
         liquids.disturb(20, 10);
         run(&mut cave, &mut liquids, 10);
         assert_eq!(cave.liquid_at(20, 10), 0);
+    }
+
+    /// Pins `level()`'s exact per-tile output for a deterministic settle, tile by tile — not just
+    /// an aggregate ("it spread", "it's flat"), which is all the tests above check. Nothing in
+    /// this file uses randomness, so an exact assertion is the sharpest pin available: any change
+    /// to read order, caching, or the middle-out spare-unit distribution that alters a single
+    /// tile's result fails this immediately, which is exactly what a read/allocation change to
+    /// `level` needs guarding against.
+    #[test]
+    fn an_uneven_five_wide_pool_settles_to_an_exact_pinned_shape() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        // Walls flanking the pour directly, so the pool is confined to exactly these 5 tiles
+        // rather than spreading into open air further out — `Cave::new`'s own boundary walls at
+        // x=0/39 are too far away to confine anything, as the first version of this test found
+        // the hard way (350 units spread across most of the cave instead of just these 5 tiles).
+        cave.set_tile(17, 19, Tile::block(1));
+        cave.set_tile(23, 19, Tile::block(1));
+        for (x, amount) in [(18, 40u8), (19, 40), (20, 251), (21, 10), (22, 10)] {
+            cave.pour(x, 19, Liquid::Water, amount);
+        }
+        for x in 18..=22 {
+            liquids.disturb(x, 19);
+        }
+        run(&mut cave, &mut liquids, 50);
+
+        let settled: Vec<u8> = (18..=22).map(|x| cave.liquid_at(x, 19)).collect();
+        assert_eq!(
+            settled,
+            // 351 does not divide evenly by 5 (70 remainder 1) — the odd unit lands on x=20, the
+            // settle's own origin tile, because the middle-first ordering hands the spare out
+            // there before it ever reaches a neighbour. This is exactly the property a read/order
+            // regression in `level`'s tile list would break silently: two of the wrong three
+            // Vecs agreeing on a value that happened to still add up right is a real risk with a
+            // total this close to dividing evenly, which is why this seed is deliberately *not*
+            // the more obviously-round 350 the first version of this test used.
+            vec![70, 70, 71, 70, 70],
+            "351 total across these 5 tiles, walled in on both sides, should settle 70 everywhere \
+             except the one spare unit on the origin tile x=20 — if this changes, either level()'s \
+             behavior changed or the fixed total above did"
+        );
+    }
+
+    /// Not a correctness test — a manual timing run for `level`'s read/allocation reduction,
+    /// against a realistic flooded-cavern load rather than a synthetic microbenchmark. Run with
+    /// `cargo test --release -p terrustia --lib world::liquid::tests::time_a_large_settle -- \
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual timing run, not part of the normal suite"]
+    fn time_a_large_settle() {
+        let mut cave = Cave::new();
+        cave.width = 200;
+        cave.height = 50;
+        for x in 0..200 {
+            cave.tiles.insert((x, 49), Tile::block(1));
+        }
+        for y in 0..50 {
+            cave.tiles.insert((0, y), Tile::block(1));
+            cave.tiles.insert((199, y), Tile::block(1));
+        }
+        let mut liquids = Liquids::default();
+        for x in 5..195 {
+            for y in 5..40 {
+                cave.pour(x, y, Liquid::Water, 200);
+            }
+        }
+        for x in 5..195 {
+            for y in 5..40 {
+                liquids.disturb(x, y);
+            }
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..300 {
+            liquids.tick(&mut cave);
+        }
+        let elapsed = start.elapsed();
+        println!("300 ticks over a 190x35 flooded pool: {elapsed:?}");
     }
 }
