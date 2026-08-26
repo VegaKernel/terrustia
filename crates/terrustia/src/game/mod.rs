@@ -16,6 +16,7 @@ pub mod rescues;
 pub mod server;
 pub mod spawn;
 pub mod teleport;
+pub mod tile_log;
 pub mod weather;
 
 pub use player::{ConnState, Player};

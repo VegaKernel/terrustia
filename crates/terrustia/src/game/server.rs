@@ -764,6 +764,9 @@ pub struct GameServer {
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
+    /// A trailing, time-windowed log of player tile edits, for `/world undo`. See
+    /// [`crate::game::tile_log`]'s own module doc for retention and scope.
+    tile_log: crate::game::tile_log::TileLog,
 }
 
 impl GameServer {
@@ -867,6 +870,7 @@ impl GameServer {
             worst_stall: Duration::ZERO,
             save_path,
             autosave_ticks,
+            tile_log: crate::game::tile_log::TileLog::default(),
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -2378,7 +2382,7 @@ impl GameServer {
             }
             // The player-facing ones do the same thing here, reporting to the log. Slot 255 is
             // "the server", which `tell` already knows how to address.
-            "kick" | "ban" | "unban" | "group" => {
+            "kick" | "ban" | "unban" | "group" | "world" => {
                 let _ = self.run_admin_command(net_module::SERVER_AUTHOR, name, argument);
             }
             other => {
@@ -4003,6 +4007,9 @@ impl GameServer {
             .is_some_and(|p| p.sent_sections.contains(&(sx, sy)));
 
         let mut tile = self.world.tile(x, y);
+        // Snapshotted before any match arm below touches it, so `/world undo` can put back the
+        // tile's whole state — not just the field this particular edit happened to change.
+        let before = tile;
         let mut changed = true;
         let mut broke = None;
 
@@ -4086,6 +4093,9 @@ impl GameServer {
             self.world.set_tile(x, y, tile);
             // Mining a block is the commonest way liquid starts moving.
             self.liquids.disturb(x, y);
+            if let Some(name) = self.player(slot).map(|p| p.name.clone()) {
+                self.tile_log.record(x, y, before, &name);
+            }
         }
         // Gated on `section_owned`, not `changed`: a rejected edit still leaves `broke` set to
         // whatever the match arm above decided a real kill would drop, and applying these side
@@ -5121,6 +5131,32 @@ impl GameServer {
                 }
                 _ => self.tell(slot, "usage: /group <account> <group>"),
             },
+            "world" => match words.as_slice() {
+                &["undo", player, duration_text] => {
+                    let Some(within) = crate::game::tile_log::parse_duration(duration_text) else {
+                        self.tell(
+                            slot,
+                            "could not parse that duration — try something like 10m, 2h or 1d.",
+                        );
+                        return Ok(());
+                    };
+                    let reverted = self.tile_log.take_recent(player, within);
+                    let count = reverted.len();
+                    for (x, y, before) in reverted {
+                        self.world.set_tile(x, y, before);
+                        self.liquids.disturb(x, y);
+                        self.broadcast_tile(x, y);
+                    }
+                    self.tell(
+                        slot,
+                        &format!(
+                            "reverted {count} tile edit(s) by {player} from the last {duration_text}."
+                        ),
+                    );
+                    info!(slot, player, duration_text, count, "world undo");
+                }
+                _ => self.tell(slot, "usage: /world undo <player> <duration>"),
+            },
             _ => {}
         }
         Ok(())
@@ -5171,7 +5207,7 @@ impl GameServer {
         // What each command costs. Anything absent needs nothing beyond being here.
         let needed = match name.as_str() {
             "time" | "save" | "spawn" | "butcher" => Some(Permission::World),
-            "kick" | "ban" | "unban" => Some(Permission::Players),
+            "kick" | "ban" | "unban" | "world" => Some(Permission::Players),
             "group" => Some(Permission::Admin),
             _ => None,
         };
@@ -5191,7 +5227,8 @@ impl GameServer {
         }
 
         match name.as_str() {
-            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "group" | "whoami" => {
+            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "group" | "whoami"
+            | "world" => {
                 return self.run_admin_command(slot, &name, &raw_argument);
             }
             "help" => {
@@ -5213,6 +5250,8 @@ impl GameServer {
                     "/ban <name|uuid|ip> <value> [reason]",
                     "/unban <value>",
                     "/group <account> <group>      move somebody between groups",
+                    "/world undo <player> <duration>   revert their tile edits from the last",
+                    "                                   <duration> (e.g. 10m, 2h) — up to 72h back",
                 ] {
                     self.tell(slot, line);
                 }

@@ -74,6 +74,7 @@ gem caves, pyramids and the rest), sized and tracked in `plan.md`.
 | ✅ | Save `.wld` | Header preserved byte-for-byte and patched, so state we do not model survives untouched |
 | ✅ | Journey research, bestiary, pylon rooms, pressure plates | Carried through verbatim — verified by section index, not assumed |
 | ✅ | Verified before replacing, fsynced, 3 rotating backups | An atomic rename over a corrupt file is an atomic loss |
+| ✅ | `--new <name>` | Generates a fresh world straight into the platform's own Terraria world directory (creating it first if nothing has ever saved there), under vanilla's own space→underscore filename convention, so it shows up beside every world the game itself made. Refuses rather than overwrites if that name is already taken |
 | 🟡 | Bestiary | Existing data is preserved; kills during a session are not added to it |
 | 🟡 | In-progress blood moon / eclipse | Not resumed from the file. The file's own bytes are undisturbed |
 
@@ -144,7 +145,7 @@ in `plan.md` but not yet started.
 |---|---|---|
 | ✅ | PvP, teams, deaths, respawn, chat | |
 | ✅ | Accounts, groups, permissions, bans by name/address/uuid | Argon2, off the game task |
-| 🟡 | Chat commands | 17 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
+| 🟡 | Chat commands | 18 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
 | ✅ | Whitelist | Empty means off, so it cannot lock the operator out on the day it is enabled |
 | 🔴 | Web admin panel | In progress — see `plan.md` |
 
@@ -157,6 +158,7 @@ in `plan.md` but not yet started.
 | ✅ | Connection ceiling, per-address cap, handshake deadline | |
 | ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
 | ✅ | Server claim requires a console token | |
+| ✅ | `/world undo <player> <duration>` | Admin-only grief recovery, up to 72h back. In-memory and time-windowed on purpose — does not survive a restart, and only covers `on_tile_manipulation` edits (not the wire tool's bulk drag-paint); both disclosed in `tile_log.rs`'s own doc comment |
 | ⬜ | Server-authoritative inventory and damage | Vanilla trusts the client for both; diverging would change how the game plays |
 
 ### Platforms

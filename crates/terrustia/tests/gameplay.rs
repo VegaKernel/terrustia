@@ -501,6 +501,124 @@ async fn a_generated_world_saves_and_reloads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `/world undo` actually reverts a player's own tile edits, and the revert is visible to another
+/// connected player — not just applied silently on the server and never synced back out.
+///
+/// An unclaimed server grants every permission to everyone (see
+/// `a_stranger_cannot_claim_an_unclaimed_server`'s own comment on that), so this needs no
+/// registration step to exercise `/world undo`'s `Permission::Players` gate.
+#[tokio::test]
+async fn world_undo_reverts_a_players_tile_edits_and_a_witness_sees_it() {
+    let addr = start_with(Config::default(), |world| {
+        clear_with_floor(world, 401, 300, 8, 4);
+        world.set_tile(400, 300, Tile::block(57));
+        world.set_tile(402, 300, Tile::block(57));
+    })
+    .await;
+
+    let mut griefer = join(addr, "griefer").await;
+    griefer.set_timeout(Duration::from_secs(10));
+    let mut witness = join(addr, "witness").await;
+    witness.set_timeout(Duration::from_secs(10));
+
+    // Two edits, so the undo has more than one thing to put back. Ordinary player edits relay to
+    // other clients as the original TileManipulation packet (`on_tile_manipulation`'s own comment:
+    // "relay regardless... or their view of the world silently diverges from the sender's"), which
+    // the client surfaces as `Event::TileChanged` — wait for those specifically rather than a bare
+    // sleep, since the client only folds a packet into its own world model once it actually reads
+    // one off the socket.
+    griefer.break_tile(400, 300).await.unwrap();
+    witness
+        .wait_for(
+            "the break to relay",
+            |e| matches!(e, Event::TileChanged(edit) if edit.x == 400 && edit.y == 300),
+        )
+        .await
+        .unwrap();
+    griefer.place_tile(402, 300, 30).await.unwrap();
+    witness
+        .wait_for(
+            "the placement to relay",
+            |e| matches!(e, Event::TileChanged(edit) if edit.x == 402 && edit.y == 300),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        witness.world().tile(400, 300).map(|t| t.block),
+        Some(0),
+        "the witness should see the break"
+    );
+    assert_eq!(
+        witness.world().tile(402, 300).map(|t| t.block),
+        Some(30),
+        "and the placed block"
+    );
+
+    witness.say("/world undo griefer 1h").await.unwrap();
+    // `/world undo` broadcasts a revert (`broadcast_tile`, a raw tile snapshot — packet 20,
+    // AREA_TILE_CHANGE, since there is no player-originated TileManipulation to relay for a
+    // server-initiated change) for *each* reverted tile before it sends the confirmation chat
+    // line, so on the wire these two frames arrive first. `wait_for` discards whatever does not
+    // match while it scans, so waiting on the confirmation text before these would silently eat
+    // both real frames and leave nothing for a later wait to find — wait for them in the order
+    // the server actually sends them.
+    for _ in 0..2 {
+        witness
+            .wait_for("an undo revert to sync", |e| {
+                matches!(e, Event::Other(frame) if frame.id == terrustia_proto::id::AREA_TILE_CHANGE)
+            })
+            .await
+            .unwrap();
+    }
+    witness
+        .wait_for(
+            "the undo confirmation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("reverted 2 tile edit")),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        witness.world().tile(400, 300).map(|t| t.block),
+        Some(57),
+        "the broken tile should be back, seen by a client that never sent the undo itself"
+    );
+    assert_eq!(
+        witness.world().tile(402, 300).map(|t| t.block),
+        Some(57),
+        "and the placed one reverted to the original floor"
+    );
+
+    // A second undo has nothing left to revert — the log gave up what it had.
+    witness.say("/world undo griefer 1h").await.unwrap();
+    witness
+        .wait_for(
+            "an empty undo",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("reverted 0 tile edit")),
+        )
+        .await
+        .unwrap();
+}
+
+/// A duration `/world undo` cannot parse is refused with a usable message, not silently ignored
+/// or a panic.
+#[tokio::test]
+async fn world_undo_refuses_an_unparseable_duration() {
+    let addr = start().await;
+    let mut client = join(addr, "admin").await;
+    client.set_timeout(Duration::from_secs(10));
+
+    client.say("/world undo somebody whenever").await.unwrap();
+    client
+        .wait_for(
+            "a duration error",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("could not parse that duration")),
+        )
+        .await
+        .unwrap();
+}
+
 /// Build a small world, save it, and serve the save so the whole persistence path is exercised.
 #[tokio::test]
 async fn edits_survive_a_save_and_reload() {

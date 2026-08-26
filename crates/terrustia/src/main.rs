@@ -69,6 +69,30 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(world_file) = args.world {
         config.world_file = Some(world_file);
     }
+    if let Some(name) = args.new_world {
+        let destination = terrustia::worlds::new_world_path(&name)?;
+        if destination.exists() {
+            return Err(format!(
+                "a world named \"{name}\" already exists at {} — pick another name, or serve it \
+                 with --world {name}",
+                destination.display()
+            )
+            .into());
+        }
+        // The world directory itself may not exist yet — nothing has ever saved there, which on
+        // a fresh machine (nobody has run Terraria itself, or this is a fresh headless install)
+        // is the ordinary case, not an error to stop on.
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "could not create the world directory {}: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        config.world_name = name;
+        config.save_file = Some(destination);
+    }
     if let Some(save_file) = args.save {
         config.save_file = Some(save_file);
     }
@@ -314,6 +338,10 @@ struct Args {
     listen: Option<std::net::SocketAddr>,
     seed: Option<u64>,
     world: Option<PathBuf>,
+    /// Generate a fresh world under this name, written into the Terraria world directory itself —
+    /// so it shows up beside every other world, in the actual game, without anyone touching a
+    /// file path at all.
+    new_world: Option<String>,
     /// Where to write the world, for a generated one that has nowhere else to go.
     save: Option<PathBuf>,
     /// Where to record every byte of every connection, for checking against a real client.
@@ -330,6 +358,7 @@ impl Args {
             listen: None,
             seed: None,
             world: None,
+            new_world: None,
             save: None,
             record: None,
             list_worlds: false,
@@ -355,6 +384,9 @@ impl Args {
                     let given = args.next().ok_or("--world needs a name or a path")?;
                     parsed.world = Some(terrustia::worlds::resolve(&given));
                 }
+                "-n" | "--new" => {
+                    parsed.new_world = Some(args.next().ok_or("--new needs a world name")?);
+                }
                 "--worlds" => parsed.list_worlds = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
@@ -372,6 +404,9 @@ impl Args {
                 }
                 other => return Err(format!("unrecognised argument: {other}")),
             }
+        }
+        if parsed.world.is_some() && parsed.new_world.is_some() {
+            return Err("--world and --new cannot both be given — pick one world to serve".into());
         }
         Ok(parsed)
     }
@@ -394,6 +429,11 @@ fn print_usage(palette: Palette) {
         (
             "-w, --world <NAME|PATH>",
             "Serve an existing world, by name or by path",
+            "",
+        ),
+        (
+            "-n, --new <NAME>",
+            "Generate a fresh world, saved into the Terraria world directory",
             "",
         ),
         (
@@ -479,5 +519,22 @@ mod tests {
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn new_world_name_is_parsed() {
+        let args = Args::parse(["--new", "My Fork World"].into_iter().map(String::from)).unwrap();
+        assert_eq!(args.new_world.as_deref(), Some("My Fork World"));
+        assert!(args.world.is_none());
+    }
+
+    #[test]
+    fn new_and_world_together_are_rejected() {
+        assert!(Args::parse(["--new", "A", "--world", "B"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn new_needs_a_name() {
+        assert!(Args::parse(["--new"].into_iter().map(String::from)).is_err());
     }
 }

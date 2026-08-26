@@ -78,6 +78,39 @@ pub fn resolve(given: &str) -> PathBuf {
     PathBuf::from(given)
 }
 
+/// The filename a world called `name` gets, following Terraria's own convention of turning spaces
+/// into underscores (see [`resolve`]'s doc comment) — a world created here should look, on disk,
+/// exactly like one the game itself made.
+fn filename_for(name: &str) -> String {
+    format!("{}.wld", name.replace(' ', "_"))
+}
+
+/// Where a brand-new world called `name` should be written, so `--new` lands it next to every
+/// world Terraria already has rather than in some path nobody would think to look.
+///
+/// Refuses a `name` that is not a plain world name — one containing a path separator or a `..`
+/// segment — rather than silently joining it onto the world directory: `--new` is one command for
+/// one thing, "generate a fresh world here, called this," and a name that reaches outside the
+/// world directory is a mistake worth stopping on rather than a path worth following. Anyone who
+/// wants an exact file elsewhere already has `--save <path>` for that.
+pub fn new_world_path(name: &str) -> Result<PathBuf, String> {
+    if name.trim().is_empty() {
+        return Err("a world needs a name".into());
+    }
+    if name.contains('/') || name.contains('\\') || name.split(['/', '\\']).any(|s| s == "..") {
+        return Err(format!(
+            "\"{name}\" is not a plain world name; --new writes into the Terraria world \
+             directory itself, so pick a name with no path in it, or use --save <path> instead"
+        ));
+    }
+    let dir = directory().ok_or_else(|| {
+        "cannot find the Terraria world directory on this system; use --save <path> instead of \
+         --new"
+            .to_string()
+    })?;
+    Ok(dir.join(filename_for(name)))
+}
+
 /// Every `.wld` in the platform world directory, sorted by name.
 ///
 /// Backups are excluded: `.bak1` and friends are ours, and Terraria's own `.wld.bak` is not a
@@ -131,5 +164,46 @@ mod tests {
     fn looking_for_the_directory_never_fails() {
         let _ = directory();
         let _ = list();
+    }
+
+    #[test]
+    fn a_new_world_name_gets_terrarias_own_underscored_filename() {
+        assert_eq!(
+            filename_for("The Successful Excrement"),
+            "The_Successful_Excrement.wld"
+        );
+        assert_eq!(filename_for("NoSpaces"), "NoSpaces.wld");
+    }
+
+    #[test]
+    fn an_empty_new_world_name_is_refused() {
+        assert!(new_world_path("").is_err());
+        assert!(new_world_path("   ").is_err());
+    }
+
+    /// `--new` writes into the world directory itself; a name carrying its own path would either
+    /// escape it (an absolute-looking segment silently replaces the base in `Path::join`) or land
+    /// somewhere inside it nobody asked for. Both are refused rather than followed.
+    #[test]
+    fn a_new_world_name_with_a_path_in_it_is_refused() {
+        for name in [
+            "a/b",
+            "a\\b",
+            "../escape",
+            "sub/../../etc/passwd",
+            "/etc/passwd",
+        ] {
+            assert!(new_world_path(name).is_err(), "{name} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_plain_new_world_name_is_accepted_whenever_the_directory_is_known() {
+        // `directory()` depends on the environment, so this only asserts when it resolves —
+        // matching `looking_for_the_directory_never_fails` above, which does the same.
+        if let Some(dir) = directory() {
+            let path = new_world_path("My Fork World").unwrap();
+            assert_eq!(path, dir.join("My_Fork_World.wld"));
+        }
     }
 }
