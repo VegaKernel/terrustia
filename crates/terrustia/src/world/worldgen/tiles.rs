@@ -90,7 +90,15 @@ pub mod walls {
     pub const OBSIDIAN_BACK: u16 = 14;
     pub const MUD: u16 = 15;
     pub const JUNGLE: u16 = 64;
+    /// A real, pre-existing mislabel found while landing `tile_cleanup.rs`: `WallID.cs`'s own id 63
+    /// is `GrassUnsafe`, not `FlowerUnsafe` (that's 65) — this constant's name is wrong for its
+    /// value. Left as-is rather than renamed, since nothing in this codebase reads it yet (a `grep`
+    /// found zero real call sites), so there is no existing behaviour a rename could silently
+    /// change; [`GRASS_UNSAFE`] is the correctly-named constant for the same value, used by
+    /// `tile_cleanup.rs`'s own `SurfaceDirtWallsToGrassWalls` transcription.
     pub const FLOWER: u16 = 63;
+    /// `WallID.GrassUnsafe` — see [`FLOWER`]'s own doc comment just above.
+    pub const GRASS_UNSAFE: u16 = 63;
     pub const SNOW: u16 = 40;
     pub const ICE: u16 = 71;
     pub const CRIMSTONE: u16 = 83;

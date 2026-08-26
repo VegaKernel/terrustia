@@ -48,6 +48,7 @@ pub mod rand;
 pub mod scenery;
 pub mod shape_data;
 pub mod smooth;
+pub mod speleothems;
 pub mod spider_caves;
 pub mod statue_gen;
 pub mod structure_map;
@@ -55,11 +56,13 @@ pub mod structures;
 pub mod surface_plants;
 pub mod terrain;
 pub mod thin_ice;
+pub mod tile_cleanup;
 pub mod tiles;
 pub mod traps;
 pub mod underground_cabins;
 pub mod underworld_ruins;
 pub mod wall_variety;
+pub mod water_plants;
 pub mod waterfalls;
 
 pub use passes::compare_against;
@@ -167,6 +170,49 @@ pub struct Built {
     pub moss_changed: usize,
     /// Decorative overlay tiles hung off exposed moss surfaces (`LongMoss`).
     pub long_moss: usize,
+    /// Ceiling stalactites and floor stalagmites placed (`SpeleothemsAndGemTrees`, gem-tree branch
+    /// disclosed-skipped — see `speleothems.rs`'s own module doc).
+    pub speleothems: usize,
+    /// Liquid tiles behind Hive wall converted to honey (`WebsInSpiderCavesAndHoneyPlus...`).
+    pub honey_marked: usize,
+    /// Stalactites placed specifically off Hive-walled ceilings, in the same shared pass.
+    pub hive_stalactites: usize,
+    /// Cobweb tiles scattered near spider-cave wall, in the same shared pass.
+    pub cobwebs_placed: usize,
+    /// Small gem tiles exposed in the ice biome (`ExposedGemsInIceBiome`).
+    pub exposed_gems_ice: usize,
+    /// Small gem tiles exposed underground, both the general pocket scatter and the desert-wall
+    /// cluster scatter (`ExposedGemsUnderground`).
+    pub exposed_gems_underground: usize,
+    /// Cacti grown in the middle desert band (`CactusPalmTreesAndCoral`, palm-tree branch
+    /// disclosed-skipped — see `water_plants.rs`'s own module doc).
+    pub cacti_desert: usize,
+    /// Coral and seashell tiles placed at the two ocean beaches, in the same pass.
+    pub beach_decorations: usize,
+    /// Lily pads placed on still surface water (`LilypadsCattailsBambooAndSeaweed`, bamboo/seaweed
+    /// branches disclosed-skipped).
+    pub lily_pads: usize,
+    /// Cattails placed on still surface water, in the same pass.
+    pub cattails: usize,
+    /// Tiles dropped by `GravitatingSandCleanup`.
+    pub gravitating_sand: usize,
+    /// Tiles changed by `QuickCleanup` (desert-wall material normalisation, degenerate-slope
+    /// straightening — see `tile_cleanup.rs`'s own module doc for what's narrowed).
+    pub quick_cleanup: usize,
+    /// Ore/stone blobs placed near the surface (`SurfaceOreAndStone`, a disclosed narrower
+    /// stand-in for `OrePatch`/`StonePatch` — see `tile_cleanup.rs`'s own module doc).
+    pub surface_ore_and_stone: usize,
+    /// Grass-wall conversion sites flooded (`SurfaceDirtWallsToGrassWalls`, wall-conversion half
+    /// only).
+    pub surface_dirt_walls_to_grass_walls: usize,
+    /// Tiles changed by `TileCleanup` (the three narrow fixups plus the thin-ice cleanup kept —
+    /// see `tile_cleanup.rs`'s own module doc).
+    pub tile_cleanup: usize,
+    /// Tiles cleared by `BrokenTrapCleanup`'s real wire-circuit flood.
+    pub broken_trap_cleanup: usize,
+    /// Tiles changed by `FinalCleanup` (the five fixups kept — see `tile_cleanup.rs`'s own module
+    /// doc).
+    pub final_cleanup: usize,
 }
 
 /// Generate a world of the given size.
@@ -215,11 +261,11 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     structures::caves(&mut world, &plan, &mut rand);
     structures::ores(&mut world, &plan, &mut rand);
 
-    // Tier 3's `DirtWallCleanup` (`WorldGen.cs:15322`) runs here in vanilla's own pass order too —
-    // generation pass 39 of 105, well before `SmoothWorld` (53) and every decorative pass after it.
-    // It only strips wall near the surface crust above genuinely open cave space, so running it
-    // this early (right after the caves that create that open space, and the terrain fill that
-    // painted the wall in the first place) matches vanilla and needs nothing placed later.
+    // `GravitatingSandCleanup` (pass 36) then `DirtWallCleanup` (39) — both run here in vanilla's
+    // own pass order too, well before `SmoothWorld` (53) and every decorative pass after it. Both
+    // only reshape/strip what the terrain and caves passes just above already created, so running
+    // them this early matches vanilla and needs nothing placed later.
+    let gravitating_sand = tile_cleanup::gravitating_sand_cleanup(&mut world, &plan);
     let dirt_wall_cleared = dirt_wall_cleanup::scrub(&mut world, &plan, &mut rand);
 
     let orbs = structures::evil_chasms(&mut world, &plan, &heights, &mut rand);
@@ -390,10 +436,51 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // with the Tier 1/2 passes above and re-litigating where `smooth()` belongs.
     let waterfalls = waterfalls::scatter(&mut world, &plan, &mut rand);
     let fragile_ice = thin_ice::crust(&mut world, &plan);
+    // `cave_wall_variety`/`cave_walls_enclosed` (`CaveWallVariety` 56 / `CaveWallsInEnclosedSpaces`
+    // 67) are kept adjacent here rather than literally interleaved with `MossAndMossCaves` (65)
+    // between them — the two are `plan.md`'s own single bundled "Wall variety" item, landed and
+    // measured together as one unit; splitting their calls apart to match vanilla's exact pass
+    // numbers would only reorder which random draws each independent pass consumes (no correctness
+    // difference either way — this project already discloses seeds not being map-identical to real
+    // Terraria), at the cost of invalidating this row's own already-measured, already-published
+    // counts for no behavioural gain.
     let cave_wall_variety = wall_variety::variety(&mut world, &plan, &mut rand);
     let cave_walls_enclosed = wall_variety::enclosed_spaces(&mut world, &plan, &mut rand);
     let moss_changed = moss::scatter(&mut world, &plan, &mut rand);
     let long_moss = moss::hang_long_moss(&mut world);
+    // `QuickCleanup` (70), then `SurfaceOreAndStone` (74), then `SurfaceDirtWallsToGrassWalls`
+    // (79) — all between `CaveWallsInEnclosedSpaces` (67) and the web/honey pass (85) in vanilla's
+    // own order. Vanilla itself interleaves `SurfaceOreAndStone`/`SurfaceDirtWallsToGrassWalls`
+    // with `Hellforges`(72)/`FallenLogsAndWaterFeatures`(75)/`Traps`(76)/`Piles`(77) — all four
+    // already landed earlier in this project's own pipeline, before `smooth()` — so the exact
+    // vanilla interleaving with those four can't be reproduced without re-litigating where
+    // `smooth()` belongs (see this wave's own opening comment); their relative order against each
+    // other and against the rest of this trailing wave is preserved instead.
+    let quick_cleanup = tile_cleanup::quick_cleanup(&mut world, &plan);
+    let surface_ore_and_stone = tile_cleanup::surface_ore_and_stone(&mut world, &plan, &mut rand);
+    let surface_dirt_walls_to_grass_walls =
+        tile_cleanup::surface_dirt_walls_to_grass_walls(&mut world, &plan, &mut rand);
+    // `WebsInSpiderCavesAndHoneyPlusSpeleothemsInBeehives` (85), then the two exposed-gem passes
+    // (92, 93), then `LongMoss` (94) — all between `CaveWallsInEnclosedSpaces` (67) and
+    // `MicroBiomes` (97, already landed as Tier 2) in vanilla's own real order.
+    let (honey_marked, hive_stalactites, cobwebs_placed) =
+        speleothems::shared_web_and_honey(&mut world, &plan, &mut rand);
+    let exposed_gems_ice = speleothems::exposed_gems_in_ice_biome(&mut world, &plan, &mut rand);
+    let exposed_gems_underground =
+        speleothems::exposed_gems_underground(&mut world, &plan, &mut rand);
+    // `CactusPalmTreesAndCoral` (99), then `TileCleanup` (100), then
+    // `LilypadsCattailsBambooAndSeaweed` (102) — all after `MicroBiomes` (97, Tier 2) and
+    // `LongMoss` (94), all before `SpeleothemsAndGemTrees` (103).
+    let (cacti_desert, beach_decorations) =
+        water_plants::cacti_and_beach_decorations(&mut world, &plan, &mut rand);
+    let tile_cleanup_changed = tile_cleanup::tile_cleanup(&mut world);
+    let (lily_pads, cattails) = water_plants::lily_pads_and_cattails(&mut world, &plan, &mut rand);
+    // `SpeleothemsAndGemTrees` (103), then `BrokenTrapCleanup` (104), then `FinalCleanup` (105) —
+    // vanilla's own true final three passes, in that order, closing out this trailing wave and
+    // `build()` itself.
+    let speleothems = speleothems::scatter(&mut world, &plan, &mut rand);
+    let broken_trap_cleanup = tile_cleanup::broken_trap_cleanup(&mut world);
+    let final_cleanup = tile_cleanup::final_cleanup(&mut world, &plan);
 
     let built = Built {
         lakes,
@@ -447,6 +534,23 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         cave_walls_enclosed,
         moss_changed,
         long_moss,
+        speleothems,
+        honey_marked,
+        hive_stalactites,
+        cobwebs_placed,
+        exposed_gems_ice,
+        exposed_gems_underground,
+        cacti_desert,
+        beach_decorations,
+        lily_pads,
+        cattails,
+        gravitating_sand,
+        quick_cleanup,
+        surface_ore_and_stone,
+        surface_dirt_walls_to_grass_walls,
+        tile_cleanup: tile_cleanup_changed,
+        broken_trap_cleanup,
+        final_cleanup,
     };
     (world, built)
 }
@@ -504,7 +608,12 @@ mod tests {
             let (_world, built) = build(SMALL_WIDTH, SMALL_HEIGHT, "measure-tier3", seed);
             eprintln!(
                 "seed {seed}: dirt_wall_cleared={} waterfalls={} fragile_ice={} \
-                 cave_wall_variety={} cave_walls_enclosed={} moss_changed={} long_moss={} ({:?})",
+                 cave_wall_variety={} cave_walls_enclosed={} moss_changed={} long_moss={} \
+                 speleothems={} honey_marked={} hive_stalactites={} cobwebs_placed={} \
+                 exposed_gems_ice={} exposed_gems_underground={} cacti_desert={} \
+                 beach_decorations={} lily_pads={} cattails={} gravitating_sand={} \
+                 quick_cleanup={} surface_ore_and_stone={} surface_dirt_walls_to_grass_walls={} \
+                 tile_cleanup={} broken_trap_cleanup={} final_cleanup={} ({:?})",
                 built.dirt_wall_cleared,
                 built.waterfalls,
                 built.fragile_ice,
@@ -512,6 +621,23 @@ mod tests {
                 built.cave_walls_enclosed,
                 built.moss_changed,
                 built.long_moss,
+                built.speleothems,
+                built.honey_marked,
+                built.hive_stalactites,
+                built.cobwebs_placed,
+                built.exposed_gems_ice,
+                built.exposed_gems_underground,
+                built.cacti_desert,
+                built.beach_decorations,
+                built.lily_pads,
+                built.cattails,
+                built.gravitating_sand,
+                built.quick_cleanup,
+                built.surface_ore_and_stone,
+                built.surface_dirt_walls_to_grass_walls,
+                built.tile_cleanup,
+                built.broken_trap_cleanup,
+                built.final_cleanup,
                 start.elapsed()
             );
         }
