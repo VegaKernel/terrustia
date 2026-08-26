@@ -3,7 +3,9 @@
 //! An embedded frontend, served through `axum`; a login flow reusing the same account store
 //! `/register` and `/login` already use (no second credential system); a live status/console/chat
 //! WebSocket; the runtime `panel` console command ([`supervise`]) to toggle this on and off
-//! without a restart; and the full admin feature set: a player list with kick/ban, whitelist
+//! without a restart, and whose real inner task cannot outlive `supervise` itself under any
+//! circumstance — see [`PanelHandle`]'s doc comment for the real shutdown bug that guarantee
+//! closes; and the full admin feature set: a player list with kick/ban, whitelist
 //! management, world switching (a real graceful process restart — see
 //! [`crate::game::server::GameServer::pending_world_switch`]'s doc comment for why that is the
 //! honest answer rather than a hot-swap), a read-only settings view with the few fields that are
@@ -167,13 +169,50 @@ pub async fn run(
     Ok(handle)
 }
 
+/// Owns the panel's real inner [`JoinHandle`](tokio::task::JoinHandle) — the axum-serving task that
+/// holds the live `TcpListener` and its own clone of `events` — and aborts it whenever this guard
+/// is dropped, for *any* reason: the console toggle taking it out and aborting it explicitly (the
+/// ordinary case, below), or [`supervise`]'s own task ending some other way, which a plain
+/// `Option<JoinHandle<()>>` would not have caught.
+///
+/// That second case is a real bug this guard exists to close, not a hypothetical: `main`'s shutdown
+/// sequence `.abort()`s `supervise`'s *outer* task (alongside `accept`/`console`) so every clone of
+/// `events_tx` it might be holding actually gets dropped, which is what lets `GameServer::run`'s
+/// `events.recv() => None => break` exit path fire at all. But cancelling `supervise`'s future used
+/// to just drop its local `handle` variable on the way out — and dropping a `JoinHandle` detaches
+/// rather than stops the task it names (this module's own top doc already says so, for the toggle
+/// path; the gap was that `supervise`'s *own* cancellation went through the exact same trap). If the
+/// panel was running when a real `SIGTERM` arrived, that left the real inner task — and the live
+/// `events` clone captured in its `PanelState` — running forever, detached, so `GameServer::run`
+/// never saw its last sender go away and a `SIGTERM` logged "shutting down" and then never actually
+/// stopped the server. Wrapping the handle in a type whose `Drop` aborts it makes this structurally
+/// impossible regardless of *how* `supervise`'s future stops, rather than depending on every call
+/// site that might end it to also remember to reach in and abort the inner handle by hand.
+struct PanelHandle(Option<tokio::task::JoinHandle<()>>);
+
+impl PanelHandle {
+    fn take(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.0.take()
+    }
+}
+
+impl Drop for PanelHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Owns the panel's lifecycle for the life of the process, starting and stopping it each time a
 /// toggle arrives on `toggle` — the other end of the console's `panel` command
 /// (`GameServer::run_console`'s `"panel"` arm), which only ever sends a pulse and never touches
 /// the actual [`tokio::task::JoinHandle`] itself: dropping a `JoinHandle` detaches rather than
 /// stopping the task it names, so whatever holds it is the only thing that may [`abort`
 /// it](tokio::task::JoinHandle::abort), and that has to be one single owner living for the whole
-/// process, not something reconstructed per toggle.
+/// process, not something reconstructed per toggle. That owner is [`PanelHandle`] — see its own doc
+/// comment for the real bug (a leaked panel task defeating `SIGTERM` shutdown) its `Drop` impl
+/// closes, on top of the explicit `.abort()` the toggle path below already did correctly.
 ///
 /// `initial` is whatever `main` already started at boot (or `None`, the ordinary case — the panel
 /// is opt-in). A bind failure *here*, after boot, is reported and left off rather than propagated:
@@ -186,7 +225,7 @@ pub async fn supervise(
     mut toggle: mpsc::UnboundedReceiver<()>,
     initial: Option<tokio::task::JoinHandle<()>>,
 ) {
-    let mut handle = initial;
+    let mut handle = PanelHandle(initial);
     while toggle.recv().await.is_some() {
         match handle.take() {
             Some(running) => {
@@ -194,11 +233,16 @@ pub async fn supervise(
                 info!("web panel stopped (console toggle)");
             }
             None => match run(config.clone(), events.clone()).await {
-                Ok(started) => handle = Some(started),
+                Ok(started) => handle = PanelHandle(Some(started)),
                 Err(e) => warn!(error = %e, "could not start the web panel"),
             },
         }
     }
+    // The loop above only ends if `toggle`'s sender side is ever dropped (it currently never is —
+    // `main` holds it for the process's whole life) — but if it ever does, `handle`'s own `Drop`
+    // impl aborts whatever real inner task it's still holding on the way out, same as the explicit
+    // `.abort()` from outside covers. Nothing to do here by name; this comment exists so a future
+    // reader doesn't go looking for a missing cleanup call.
 }
 
 // ---- static assets -------------------------------------------------------------------------

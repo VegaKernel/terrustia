@@ -13,10 +13,24 @@
 //! is built around. Fixed by aborting `panel::supervise`'s handle alongside `accept`/`console` in
 //! `main`'s existing shutdown sequence — see that call site's own comment for the full story.
 //!
-//! This test sends a real `SIGTERM` to a real running subprocess and asserts it actually exits
-//! within a bounded window, with a real shutdown save on disk — the unfixed code hung
-//! indefinitely at exactly this point (observed directly: 27+ seconds and counting, autosaving on
-//! its ordinary 1-second interval throughout, before being killed by hand).
+//! `sigterm_stops_the_server_and_saves_within_a_bounded_window` below sends a real `SIGTERM` to a
+//! real running subprocess and asserts it actually exits within a bounded window, with a real
+//! shutdown save on disk — the unfixed code hung indefinitely at exactly this point (observed
+//! directly: 27+ seconds and counting, autosaving on its ordinary 1-second interval throughout,
+//! before being killed by hand).
+//!
+//! That fix was still incomplete for one real, undertested configuration: with the panel actually
+//! *running* (not just wired up but never started), aborting `panel::supervise`'s own outer task
+//! left its real inner axum-serving task — and the live `events_tx` clone captured inside it —
+//! running forever, detached rather than stopped, for exactly the reason this module doc already
+//! gives above (a dropped `JoinHandle` detaches, it does not stop the task). This test file's own
+//! panel-off test could never have caught that: with the panel off, `supervise`'s local handle is
+//! `None` for the test's whole life, so there is nothing for that half of the bug to leak.
+//! `panel_enabled_sigterm_still_stops_the_server_and_saves_within_a_bounded_window` below is the
+//! same pin, with the panel turned on — see its own doc comment, and `panel::PanelHandle`'s doc
+//! comment in `crates/terrustia/src/panel/mod.rs` for the actual fix (an abort-on-drop guard around
+//! `supervise`'s local handle, which makes the real inner task structurally unable to outlive
+//! `supervise` itself regardless of how or why its own future stops).
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -63,13 +77,21 @@ fn wait_for_line(rx: &mpsc::Receiver<String>, needle: &str, timeout: Duration) -
     }
 }
 
-fn spawn_server(home: &std::path::Path, listen: &str) -> Child {
+/// `panel_listen`, when given, turns the web admin panel on for this run — the specific
+/// configuration that triggers the second, separate SIGTERM bug `panel_enabled_sigterm_still_stops_
+/// the_server_and_saves_within_a_bounded_window` below pins: the ordinary (panel-off) case above
+/// never spawns the panel's own inner task at all, so it could not have caught that bug either way.
+fn spawn_server(home: &std::path::Path, listen: &str, panel_listen: Option<&str>) -> Child {
     let save_file = home.join("ShutdownSignalTest.wld");
+    let panel_config = match panel_listen {
+        Some(addr) => format!("panel_enabled = true\npanel_listen = \"{addr}\"\n"),
+        None => String::new(),
+    };
     std::fs::write(
         home.join("terrustia.toml"),
         format!(
             "autosave_secs = 300\nworld_width = 400\nworld_height = 300\nlisten = \"{listen}\"\n\
-             save_file = {save_file:?}\n"
+             save_file = {save_file:?}\n{panel_config}"
         ),
     )
     .expect("write config");
@@ -92,7 +114,7 @@ fn sigterm_stops_the_server_and_saves_within_a_bounded_window() {
     let home = scratch_home();
     std::fs::create_dir_all(&home).expect("scratch home");
 
-    let mut child = spawn_server(&home, "127.0.0.1:17796");
+    let mut child = spawn_server(&home, "127.0.0.1:17796", None);
     let stdout_lines = stream_stdout_lines(child.stdout.take().expect("piped stdout"));
 
     assert!(
@@ -138,6 +160,103 @@ fn sigterm_stops_the_server_and_saves_within_a_bounded_window() {
     // `autosave_secs = 300` above means the only way this file can exist at all, this soon, is
     // the shutdown save that just ran — on the unfixed code, nothing would ever have written it
     // within this test's whole window.
+    let save_file = home.join("ShutdownSignalTest.wld");
+    assert!(
+        save_file.is_file(),
+        "the shutdown save should have written {} by now",
+        save_file.display()
+    );
+    assert!(
+        std::fs::metadata(&save_file).is_ok_and(|m| m.len() > 0),
+        "the saved world file should not be empty"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The same bug the test above pins, but for the specific configuration that the fix above
+/// (storing and aborting `panel_supervisor`'s own outer `JoinHandle`) did *not* actually close:
+/// with the web panel turned on, `panel::supervise`'s own inner axum-serving task — which holds the
+/// real `TcpListener` and a live clone of `events_tx` inside its `PanelState` — used to survive
+/// `panel_supervisor.abort()` entirely, because cancelling `supervise`'s future just dropped its
+/// local `handle` variable, which detaches a `JoinHandle` rather than stopping the task it names.
+/// `GameServer::run`'s clean-exit path needs *every* clone of `events_tx` dropped, so that leaked
+/// clone meant a real SIGTERM logged "shutting down" and then the server never actually stopped,
+/// for as long as the panel had ever been running. Fixed by `panel::PanelHandle`, a small
+/// abort-on-drop guard around `supervise`'s local handle — see its own doc comment in
+/// `crates/terrustia/src/panel/mod.rs`.
+///
+/// This test is the reason the fix has to live where it does: with the panel off (the test above),
+/// `supervise`'s local `handle` is `None` for the test's whole life, so there is nothing for the
+/// old bug to leak and that test could never have caught this. Only a real panel-enabled run
+/// exercises the code path this test pins.
+#[test]
+fn panel_enabled_sigterm_still_stops_the_server_and_saves_within_a_bounded_window() {
+    let home = scratch_home();
+    std::fs::create_dir_all(&home).expect("scratch home");
+
+    let mut child = spawn_server(&home, "127.0.0.1:17798", Some("127.0.0.1:17799"));
+    let stdout_lines = stream_stdout_lines(child.stdout.take().expect("piped stdout"));
+
+    // Waited for in the order the server actually prints them, not the order that reads
+    // naturally: `main` binds and starts the panel (`panel::run`, opt-in, `?`-propagated on
+    // failure) *before* the accept loop's own "accepting connections" line — `wait_for_line`
+    // discards whatever it scans past while searching, so asking for "accepting connections"
+    // first would silently eat the earlier "web panel listening" line before the second wait ever
+    // got a chance to see it. This file's own module doc points at `plan.md`'s "Tile action log"
+    // Done row for another test in this codebase that hit exactly this ordering trap.
+    assert!(
+        wait_for_line(
+            &stdout_lines,
+            "web panel listening",
+            Duration::from_secs(30)
+        ),
+        "the panel should have finished binding by now"
+    );
+    assert!(
+        wait_for_line(
+            &stdout_lines,
+            "accepting connections",
+            Duration::from_secs(30)
+        ),
+        "the server should have reached its main loop by now"
+    );
+
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+
+    // On the unfixed code this hangs indefinitely — the panel's leaked inner task keeps the game
+    // loop's own `events.recv()` from ever seeing its last sender go away, so "game loop stopped"
+    // never prints at all. This timeout is generous next to the sub-second shutdown the fixed code
+    // actually measures, not a guess at how long a correct version might reasonably take.
+    #[cfg(unix)]
+    {
+        assert!(
+            wait_for_line(&stdout_lines, "game loop stopped", Duration::from_secs(15)),
+            "the server must actually stop after SIGTERM even with the web panel running, not \
+             just log \"shutting down\" and keep the panel's leaked task running forever"
+        );
+    }
+
+    let status = child.wait_timeout_or_kill(Duration::from_secs(10)).expect(
+        "the process must exit on its own after a graceful SIGTERM shutdown, even with the \
+             panel enabled",
+    );
+    assert!(
+        status.success(),
+        "a graceful SIGTERM shutdown should exit 0, got {status:?}"
+    );
+
+    // Same pin as the panel-off test above: a 300-second `autosave_secs` means the only way this
+    // file can exist at all, this soon, is the shutdown save that just ran.
     let save_file = home.join("ShutdownSignalTest.wld");
     assert!(
         save_file.is_file(),

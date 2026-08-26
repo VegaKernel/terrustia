@@ -131,6 +131,14 @@ impl Config {
     /// Unset or empty variables are left alone rather than treated as "set to empty" — a container
     /// runtime that always defines a variable, blank or not, should not be able to blank out
     /// `motd` or `password` by accident.
+    ///
+    /// Every field on [`Config`] has an entry here — `README.md` and `terrustia.toml.example` both
+    /// say so, and that claim was false in both directions until it was checked field-by-field
+    /// against this function: `max_chat_len`, `idle_timeout_secs`, `max_connections`,
+    /// `max_connections_per_address` and `handshake_timeout_secs` had no variable at all, and
+    /// `upnp_enabled`'s working variable was undocumented (missing from the example file). Adding a
+    /// field to `Config` without adding its variable here silently reintroduces the same gap, so
+    /// keep this in sync rather than treating the docs' "every key" claim as aspirational.
     pub fn apply_env(&mut self) -> Result<(), ConfigError> {
         fn get(name: &str) -> Option<String> {
             std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -173,6 +181,21 @@ impl Config {
         }
         if let Some(v) = get("TERRUSTIA_PASSWORD") {
             self.password = v;
+        }
+        if let Some(v) = get("TERRUSTIA_MAX_CHAT_LEN") {
+            self.max_chat_len = parsed("TERRUSTIA_MAX_CHAT_LEN", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_IDLE_TIMEOUT_SECS") {
+            self.idle_timeout_secs = parsed("TERRUSTIA_IDLE_TIMEOUT_SECS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_MAX_CONNECTIONS") {
+            self.max_connections = parsed("TERRUSTIA_MAX_CONNECTIONS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS") {
+            self.max_connections_per_address = parsed("TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_HANDSHAKE_TIMEOUT_SECS") {
+            self.handshake_timeout_secs = parsed("TERRUSTIA_HANDSHAKE_TIMEOUT_SECS", &v)?;
         }
         if let Some(v) = get("TERRUSTIA_PANEL_ENABLED") {
             self.panel_enabled = parsed("TERRUSTIA_PANEL_ENABLED", &v)?;
@@ -389,6 +412,46 @@ mod tests {
             std::env::remove_var("TERRUSTIA_WORLD_NAME");
             std::env::remove_var("TERRUSTIA_MOTD");
             std::env::remove_var("TERRUSTIA_PANEL_ENABLED");
+        }
+    }
+
+    /// The five fields that were real `Config` keys with no `TERRUSTIA_*` equivalent at all until
+    /// this test's own fix — see `apply_env`'s own doc comment for how that was found (a
+    /// field-by-field check against the "every key has one" claim `README.md`/
+    /// `terrustia.toml.example` both made). Doesn't re-prove the general override/precedence
+    /// machinery — `environment_variables_override_the_loaded_config` above already does that —
+    /// just that these five specific names are now wired up at all.
+    #[test]
+    #[allow(unsafe_code)] // `set_var`/`remove_var` — see the SAFETY comments inline below.
+    fn the_previously_missing_environment_variables_now_apply() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: `ENV_TEST_LOCK` above serializes every test in this file that touches a
+        // `TERRUSTIA_*` variable, so nothing else can be reading or writing one of these names
+        // concurrently for as long as `_guard` is held.
+        unsafe {
+            std::env::set_var("TERRUSTIA_MAX_CHAT_LEN", "123");
+            std::env::set_var("TERRUSTIA_IDLE_TIMEOUT_SECS", "45");
+            std::env::set_var("TERRUSTIA_MAX_CONNECTIONS", "678");
+            std::env::set_var("TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS", "9");
+            std::env::set_var("TERRUSTIA_HANDSHAKE_TIMEOUT_SECS", "10");
+        }
+
+        let mut config = Config::default();
+        config.apply_env().expect("valid environment overrides");
+
+        assert_eq!(config.max_chat_len, 123);
+        assert_eq!(config.idle_timeout_secs, 45);
+        assert_eq!(config.max_connections, 678);
+        assert_eq!(config.max_connections_per_address, 9);
+        assert_eq!(config.handshake_timeout_secs, 10);
+
+        // SAFETY: same justification as above — cleaning up what this test itself set.
+        unsafe {
+            std::env::remove_var("TERRUSTIA_MAX_CHAT_LEN");
+            std::env::remove_var("TERRUSTIA_IDLE_TIMEOUT_SECS");
+            std::env::remove_var("TERRUSTIA_MAX_CONNECTIONS");
+            std::env::remove_var("TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS");
+            std::env::remove_var("TERRUSTIA_HANDSHAKE_TIMEOUT_SECS");
         }
     }
 

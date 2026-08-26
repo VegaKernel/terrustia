@@ -270,6 +270,15 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // `TimeoutStopSec=90` exists to eventually paper over with a hard kill, defeating the graceful
     // shutdown save that whole unit is built around. Found by actually sending a real `SIGTERM` to
     // a real running process while verifying that unit's `ExecStart` path, not by inspection.
+    //
+    // That fix was still incomplete whenever the panel was actually *running* at shutdown time (not
+    // just wired up with `initial_panel: None`, ready to be started later): `.abort()` below only
+    // cancels `supervise`'s own outer task, and cancelling it used to just drop `supervise`'s local
+    // handle to the real inner axum-serving task — which detaches rather than stops it, leaking a
+    // live clone of `events_tx` right back into the same deadlock this comment already describes,
+    // just one level down. Closed structurally in `panel::supervise` itself (see its own
+    // `PanelHandle` type's doc comment) rather than here, since nothing `main` could do to this
+    // outer `JoinHandle` fixes an inner one it never sees.
     let panel_supervisor = tokio::spawn(terrustia::panel::supervise(
         config.clone(),
         events_tx.clone(),

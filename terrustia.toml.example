@@ -40,6 +40,17 @@ max_chat_len = 500
 # updates continuously, so this only catches dead sockets and stalled handshakes.
 idle_timeout_secs = 60
 
+# How many sockets may be open at once before anyone has said who they are, and how many of those
+# one address may hold open at a time. Separate from max_players: a socket is accepted, and counts
+# against these, well before it has a player slot.
+max_connections = 512
+max_connections_per_address = 8
+
+# How long a connection has to finish the handshake before it is dropped. idle_timeout_secs above
+# resets on any byte, so this is the backstop that makes a slowly-trickling connection's slot
+# finite.
+handshake_timeout_secs = 30
+
 # The web admin panel. Off by default. `panel_listen` must be loopback (127.0.0.1 or ::1) — the
 # server refuses to start otherwise. Remote panel access needs a deliberate step (an SSH tunnel,
 # for example), not an accident of opening this up. Sign in with the same accounts `/register`
@@ -52,3 +63,8 @@ panel_listen = "127.0.0.1:7778"
 # separate, manual `terrustia update`; this only checks and notifies. Turn off for an air-gapped
 # host, or to stop this server from talking to GitHub at all.
 update_check_enabled = true
+
+# Attempt UPnP automatic port-mapping for `listen` on startup. On by default; entirely background
+# and non-fatal — when no UPnP-capable router answers, or it refuses, this logs a specific fallback
+# message and moves on. Has nothing to do with the panel, which stays loopback-only regardless.
+upnp_enabled = true

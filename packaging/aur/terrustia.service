@@ -1,9 +1,3 @@
-# For a native binary installed by hand, outside any package manager — ExecStart below points at
-# /usr/local/bin, the real FHS location for software not managed by the distribution's package
-# manager. A package that installs the binary somewhere else (AUR installs to /usr/bin, matching
-# real Arch convention for anything managed by pacman) needs its own copy of this unit with a
-# matching ExecStart, not this one verbatim — see packaging/aur/terrustia.service and its PKGBUILD's
-# own header comment for why the two used to disagree and no longer do.
 [Unit]
 Description=terrustia, a Terraria server
 Documentation=https://github.com/bybrooklyn/terrustia
@@ -15,7 +9,15 @@ Type=simple
 User=terrustia
 Group=terrustia
 WorkingDirectory=/var/lib/terrustia
-ExecStart=/usr/local/bin/terrustia --config /etc/terrustia/terrustia.toml
+# Only difference from the top-level `packaging/terrustia.service` this is forked from: /usr/bin,
+# not /usr/local/bin. This PKGBUILD's own `package()` installs the binary to /usr/bin/terrustia —
+# the real Arch convention for a package managed by pacman (AUR included), where /usr/local is
+# reserved for software *not* managed by the distribution's package manager. The generic unit file
+# at the top level keeps assuming /usr/local/bin, which is correct for its own documented audience:
+# someone who built or downloaded the binary by hand and is not going through a package manager at
+# all. One shared unit cannot point at both paths at once, so AUR carries its own copy rather than
+# quietly being wrong for whichever audience lost the disagreement.
+ExecStart=/usr/bin/terrustia --config /etc/terrustia/terrustia.toml
 
 # The server exits non-zero when it crashes and zero when it is asked to stop, so this restarts
 # after a fault and stays down after `systemctl stop`. That distinction only started working when

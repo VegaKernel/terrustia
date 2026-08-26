@@ -19,6 +19,15 @@
 # Homebrew formula above. `makepkg --printsrcinfo`/`namcap`/an actual `makepkg` build all need a
 # real Arch environment this macOS session does not have; a Docker-based attempt to get one is
 # recorded in plan.md, including why it did not complete.
+#
+# This package installs its own copy of the systemd unit (`terrustia.service`, in this same
+# directory) rather than the top-level `packaging/terrustia.service` — the two differ only in
+# ExecStart's path. This package's own package() below installs the binary to /usr/bin/terrustia,
+# matching real Arch convention for anything managed by pacman; the top-level unit points at
+# /usr/local/bin, correct for its own documented audience (a hand-built or hand-downloaded binary,
+# installed outside any package manager). Found and fixed as a real, disclosed bug: the two used to
+# disagree, which would have made `systemctl start terrustia` fail outright for anyone who installed
+# this exact package and then enabled the unit it ships.
 
 pkgname=terrustia
 pkgver=0.0.1
@@ -52,5 +61,7 @@ package() {
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 "terrustia.toml.example" "$pkgdir/usr/share/doc/$pkgname/terrustia.toml.example"
-  install -Dm644 "packaging/terrustia.service" "$pkgdir/usr/lib/systemd/system/terrustia.service"
+  # This package's own unit, not the top-level packaging/terrustia.service — see this file's own
+  # header comment for why: the ExecStart path has to match /usr/bin, the line above installed to.
+  install -Dm644 "packaging/aur/terrustia.service" "$pkgdir/usr/lib/systemd/system/terrustia.service"
 }
