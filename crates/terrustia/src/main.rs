@@ -100,8 +100,13 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
-    if let Some(seed) = args.seed {
-        config.seed = seed;
+    if let Some(seed) = &args.seed {
+        // Keeps `config.seed` meaningful for anything that reads it besides generation itself
+        // (e.g. a numeric `--seed` still round-trips exactly). The word/secret-seed path below,
+        // through `worldgen::build_from_text`, re-derives this same number from `seed` itself
+        // rather than reading it back from here — see that function's own doc comment for why a
+        // typed seed is not pre-split into "the number" and "the text" before reaching it.
+        config.seed = worldgen::secret_seed::numeric_seed(seed);
     }
     if let Some(world_file) = args.world {
         config.world_file = Some(world_file);
@@ -136,16 +141,35 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let started = Instant::now();
     let loaded_from = config.world_file.clone();
-    let world = match &config.world_file {
-        Some(path) => wld::load(path)?,
-        None => worldgen::generate(
-            config.world_width,
-            config.world_height,
-            config.world_name.clone(),
-            config.seed,
-        ),
+    // A loaded existing world has no `Built` to read a detected secret seed off — nothing here
+    // re-derives one from an existing `.wld`'s own header. Disclosed rather than guessed at: see
+    // `worldgen::secret_seed`'s own module doc for why persisting which secret seed (if any) made
+    // a saved world is out of scope this session.
+    let (world, secret_seed) = match &config.world_file {
+        Some(path) => (wld::load(path)?, None),
+        None => {
+            let (world, built) = match &args.seed {
+                // The one real entry point that actually reaches
+                // `worldgen::secret_seed::SecretSeed::detect` — every other caller of
+                // `worldgen::build`/`generate` across this workspace never has real seed text to
+                // give it and is left alone.
+                Some(seed_text) => worldgen::build_from_text(
+                    config.world_width,
+                    config.world_height,
+                    config.world_name.clone(),
+                    seed_text,
+                ),
+                None => worldgen::build(
+                    config.world_width,
+                    config.world_height,
+                    config.world_name.clone(),
+                    config.seed,
+                ),
+            };
+            (world, built.secret_seed)
+        }
     };
-    let world_rows = [
+    let mut world_rows = vec![
         ("name", world.name.clone()),
         ("size", format!("{} x {}", world.width(), world.height())),
         ("spawn", format!("{}, {}", world.spawn_x, world.spawn_y)),
@@ -161,6 +185,11 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         ("chests", world.chests.len().to_string()),
         ("loaded in", format!("{} ms", started.elapsed().as_millis())),
     ];
+    // Only shown when one was actually detected — a plain numeric seed, or a loaded world, gets
+    // no row at all rather than a "none" filler on the common case.
+    if let Some(secret) = secret_seed {
+        world_rows.push(("secret seed", secret.display_name().to_string()));
+    }
 
     // Bind before starting the game task so a port clash fails fast.
     let listener = TcpListener::bind(config.listen).await?;
@@ -482,7 +511,11 @@ async fn stop_signal() -> &'static str {
 struct Args {
     config: PathBuf,
     listen: Option<std::net::SocketAddr>,
-    seed: Option<u64>,
+    /// The raw text typed after `--seed` — a plain number, or one of vanilla's seven secret-seed
+    /// magic strings, or any other text. Kept as text (not pre-parsed to a number) because a
+    /// magic string has to reach `worldgen::secret_seed::SecretSeed::detect` unmodified; see
+    /// `main`'s own use of it via `worldgen::generate_from_text`.
+    seed: Option<String>,
     world: Option<PathBuf>,
     /// Generate a fresh world under this name, written into the Terraria world directory itself —
     /// so it shows up beside every other world, in the actual game, without anyone touching a
@@ -545,12 +578,14 @@ impl Args {
                     parsed.record = Some(args.next().ok_or("--record needs a path")?.into());
                 }
                 "-s" | "--seed" => {
-                    let value = args.next().ok_or("--seed needs a number")?;
-                    parsed.seed = Some(
-                        value
-                            .parse()
-                            .map_err(|_| format!("not a number: {value}"))?,
-                    );
+                    // Any text is a valid seed, matching real vanilla's own free-text seed field:
+                    // a plain number reproduces that number, anything else (including the seven
+                    // secret-seed magic strings) is hashed into one instead — see
+                    // `worldgen::secret_seed`'s own module doc. No longer validated as numeric
+                    // here, deliberately: `--seed "get fixed boi"` used to be rejected as "not a
+                    // number", which was correct for the old numbers-only contract and wrong for
+                    // this one.
+                    parsed.seed = Some(args.next().ok_or("--seed needs a value")?);
                 }
                 other => return Err(format!("unrecognised argument: {other}")),
             }
@@ -596,7 +631,12 @@ fn print_usage(palette: Palette) {
             "Where to write the world; a loaded one saves back over itself",
             "",
         ),
-        ("-s, --seed <NUMBER>", "World generation seed", "random"),
+        (
+            "-s, --seed <TEXT>",
+            "World generation seed — a number, or one of vanilla's seven secret seeds \
+             (\"get fixed boi\" among them)",
+            "random",
+        ),
         (
             "    --record <PATH>",
             "Record every connection's bytes, for checking against a real client",
@@ -669,8 +709,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args.listen.unwrap().port(), 1234);
-        assert_eq!(args.seed, Some(9));
+        assert_eq!(args.seed.as_deref(), Some("9"));
         assert_eq!(args.config, PathBuf::from("x.toml"));
+    }
+
+    /// `--seed` takes any text now, not just a number — matching real vanilla's own free-text
+    /// seed field, and the actual trigger for its seven secret seeds. A non-numeric seed used to
+    /// be rejected ("not a number"); it is ordinary, valid input now, exactly as much as `9` is.
+    #[test]
+    fn a_word_seed_is_accepted() {
+        let args = Args::parse(["--seed", "get fixed boi"].into_iter().map(String::from)).unwrap();
+        assert_eq!(args.seed.as_deref(), Some("get fixed boi"));
     }
 
     #[test]
@@ -678,7 +727,6 @@ mod tests {
         for bad in [
             vec!["--listen"],
             vec!["--listen", "not-an-address"],
-            vec!["--seed", "abc"],
             vec!["--nonsense"],
         ] {
             assert!(

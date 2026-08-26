@@ -24,6 +24,12 @@
 //!
 //! Ordering is load-bearing rather than tidy. Ore seeded before the caves would be hollowed back
 //! out; chests placed before the caves would have nowhere to stand.
+//!
+//! [`secret_seed`] covers vanilla's seven magic seed strings ("get fixed boi" among them) — the
+//! real activation trigger, which of the seven this session actually wires to a behavioural
+//! difference (one: [`traps`]'s own `noTrapsWorldGen` short-circuit), and a precise sizing note
+//! for each of the other six, deferred. [`build_from_text`]/[`generate_from_text`] are the entry
+//! points that actually check seed text against it; [`build`]/[`generate`] never do.
 
 pub mod cave_flood;
 pub mod dirt_wall_cleanup;
@@ -46,6 +52,7 @@ pub mod pots;
 pub mod pyramids;
 pub mod rand;
 pub mod scenery;
+pub mod secret_seed;
 pub mod shape_data;
 pub mod smooth;
 pub mod speleothems;
@@ -69,6 +76,7 @@ pub use passes::compare_against;
 
 use layout::{Evil, Layout};
 use rand::UnifiedRandom;
+use secret_seed::SecretSeed;
 use tiles::{COPPER, GOLD, IRON, SILVER};
 
 use super::World;
@@ -213,6 +221,13 @@ pub struct Built {
     /// Tiles changed by `FinalCleanup` (the five fixups kept — see `tile_cleanup.rs`'s own module
     /// doc).
     pub final_cleanup: usize,
+    /// Which of vanilla's seven secret seeds the seed text named, if any — `None` for both an
+    /// ordinary numeric seed and a text seed that matched none of the seven. Only set by
+    /// [`build_from_text`]/[`generate_from_text`] and [`build_with_secret_seed`]; [`build`] and
+    /// [`generate`] always leave this `None`, the same as an ordinary vanilla numeric seed would.
+    /// See [`secret_seed`]'s own module doc for the real activation mechanism and exactly which of
+    /// the seven this actually changes generation for.
+    pub secret_seed: Option<SecretSeed>,
 }
 
 /// Generate a world of the given size.
@@ -221,7 +236,68 @@ pub fn generate(width: i32, height: i32, name: impl Into<String>, seed: u64) -> 
 }
 
 /// Generate a world, and say what went into it.
+///
+/// Always an ordinary world — no secret seed is ever active on this path, matching a plain
+/// numeric seed typed into real vanilla's own seed field. See [`build_from_text`] for the path
+/// that actually recognises the seven magic strings, and [`secret_seed`]'s own module doc for why
+/// this project's ~40 existing callers of `build`/`generate` are left alone rather than all
+/// growing a new required parameter for a feature only one of them (`main.rs`) can ever supply
+/// real text for.
 pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (World, Built) {
+    build_with_secret_seed(width, height, name, seed, None)
+}
+
+/// Generate a world from the exact text typed into a seed field, the way a real player (or a
+/// dedicated server's own `--seed` flag) would — a plain number reproduces that numeric seed,
+/// free text is hashed into one instead, and either way the text itself is checked against
+/// vanilla's seven real secret-seed magic strings. See [`secret_seed`]'s own module doc for the
+/// real mechanism and which parts of it are hard evidence vs. reasoned inference.
+///
+/// Unlike [`generate`], the generated [`World::seed_text`] is the trimmed *original text*, not
+/// the derived number — matching what real vanilla's own world-creation UI shows back afterward
+/// (typing "get fixed boi" and later being told your seed was some large hashed integer would be
+/// actively misleading).
+pub fn generate_from_text(
+    width: i32,
+    height: i32,
+    name: impl Into<String>,
+    seed_text: &str,
+) -> World {
+    build_from_text(width, height, name, seed_text).0
+}
+
+/// [`generate_from_text`], and say what went into it. See its own doc comment.
+pub fn build_from_text(
+    width: i32,
+    height: i32,
+    name: impl Into<String>,
+    seed_text: &str,
+) -> (World, Built) {
+    let secret = SecretSeed::detect(seed_text);
+    let seed = secret_seed::numeric_seed(seed_text);
+    let (mut world, built) = build_with_secret_seed(width, height, name, seed, secret);
+    // Overwrite the numeric-seed text `build_with_secret_seed` already recorded below with the
+    // real typed text — see this function's own doc comment for why that's the honest thing to
+    // show back, not the derived number.
+    world.seed_text = seed_text.trim().to_string();
+    (world, built)
+}
+
+/// [`build`], with a secret seed already decided rather than detected from text.
+///
+/// The real integration point every other function on this page delegates to — split out so
+/// [`build`] (~40 existing callers across this workspace, none of which have real seed text to
+/// give it) can keep its exact original signature while [`build_from_text`] (the one real caller
+/// that does) gets a genuine hook to thread a detected [`SecretSeed`] through to whichever passes
+/// need to branch on it. See [`secret_seed`]'s own module doc for exactly which passes that is —
+/// currently only [`traps::scatter`], for [`SecretSeed::NoTraps`].
+pub fn build_with_secret_seed(
+    width: i32,
+    height: i32,
+    name: impl Into<String>,
+    seed: u64,
+    secret: Option<SecretSeed>,
+) -> (World, Built) {
     let mut world = World::empty(width, height, name);
     // The same generator the parity work uses, so a seed means the same thing in both.
     let mut rand = UnifiedRandom::new(seed as i32);
@@ -387,7 +463,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // Traps, after every other decoration so a trap never gets sited under a pot, statue or pile
     // that outranks it for the same floor tile — same relative order vanilla's own `Traps` pass
     // has against `Piles`.
-    let traps = traps::scatter(&mut world, &plan, &mut forest_rng);
+    let traps = traps::scatter(&mut world, &plan, &mut forest_rng, secret);
 
     // The rest of Tier 2's first batch: gem-lined pockets and cobweb-lined spider caves both site
     // into the caves `structures::caves()` already carved (and, since that pass's own fix, left
@@ -551,6 +627,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         tile_cleanup: tile_cleanup_changed,
         broken_trap_cleanup,
         final_cleanup,
+        secret_seed: secret,
     };
     (world, built)
 }
@@ -594,6 +671,118 @@ mod tests {
 
     fn small() -> (World, Built) {
         build(2400, 900, "test", 1234)
+    }
+
+    /// `build`/`generate` never detect a secret seed — a plain numeric seed is always ordinary
+    /// generation, matching real vanilla typing a number into the seed field.
+    #[test]
+    fn build_never_sets_a_secret_seed() {
+        let (_world, built) = small();
+        assert_eq!(built.secret_seed, None);
+    }
+
+    /// `build_from_text` with an ordinary numeric string is identical to `build` with that same
+    /// number — the text path is a superset of the numeric path, not a different one.
+    #[test]
+    fn a_numeric_text_seed_matches_the_equivalent_numeric_seed() {
+        let (from_number, built_number) = build(1600, 700, "numeric", 1234);
+        let (from_text, built_text) = build_from_text(1600, 700, "numeric", "1234");
+        assert_eq!(built_number.secret_seed, None);
+        assert_eq!(built_text.secret_seed, None);
+        let differing = (0..from_number.width())
+            .step_by(7)
+            .flat_map(|x| (0..from_number.height()).step_by(7).map(move |y| (x, y)))
+            .filter(|&(x, y)| from_number.tile(x, y) != from_text.tile(x, y))
+            .count();
+        assert_eq!(
+            differing, 0,
+            "the numeric seed 1234 and the text seed \"1234\" produced different worlds"
+        );
+    }
+
+    /// `build_from_text` records the real typed text on `World::seed_text`, not the derived
+    /// number — what a player who typed "get fixed boi" should see reflected back.
+    #[test]
+    fn build_from_text_keeps_the_real_typed_text() {
+        let (world, built) = build_from_text(1600, 700, "text", "  get fixed boi  ");
+        assert_eq!(world.seed_text, "get fixed boi");
+        assert_eq!(built.secret_seed, Some(SecretSeed::GetFixedBoi));
+    }
+
+    /// The one secret seed this session actually wires to a behavioural difference: "No Traps
+    /// World" places zero traps of any kind on a real generated world, where an ordinary seed at
+    /// the same size reliably places some. End-to-end through `build_from_text` — `traps.rs`'s
+    /// own unit tests already pin the mechanism in isolation; this is the same claim proven
+    /// through the real pipeline `main.rs` actually calls.
+    #[test]
+    fn no_traps_world_generates_a_playable_world_with_zero_traps() {
+        let (_ordinary, ordinary_built) = build(SMALL_WIDTH, SMALL_HEIGHT, "ordinary", 4242);
+        assert!(
+            ordinary_built.dart_traps
+                + ordinary_built.mines
+                + ordinary_built.geysers
+                + ordinary_built.boulder_traps
+                + ordinary_built.sand_traps
+                > 0,
+            "the control seed should place at least one trap of some kind"
+        );
+
+        let (world, built) = build_from_text(SMALL_WIDTH, SMALL_HEIGHT, "no traps", "no traps");
+        assert_eq!(built.secret_seed, Some(SecretSeed::NoTraps));
+        assert_eq!(built.dart_traps, 0);
+        assert_eq!(built.mines, 0);
+        assert_eq!(built.geysers, 0);
+        assert_eq!(built.boulder_traps, 0);
+        assert_eq!(built.sand_traps, 0);
+        // Still a real, playable world — the short-circuit should not have broken anything else.
+        assert!(built.altars >= 6);
+        assert!(built.chests >= 30);
+        let has_hellstone = (0..world.width()).step_by(3).any(|x| {
+            (0..world.height())
+                .step_by(3)
+                .any(|y| world.tile(x, y).block == tiles::HELLSTONE)
+        });
+        assert!(
+            has_hellstone,
+            "no hellstone: No Traps World broke the underworld too"
+        );
+    }
+
+    /// Every one of the seven detected secret seeds still generates a real, playable world —
+    /// proof that threading `Option<SecretSeed>` through `build_with_secret_seed` doesn't panic
+    /// or corrupt anything for the six this session leaves as ordinary generation, even though
+    /// nothing downstream branches on them yet. See `secret_seed.rs`'s own module doc for exactly
+    /// which one (`NoTraps`) is the exception.
+    #[test]
+    fn every_secret_seed_still_generates_a_playable_world() {
+        for text in [
+            "celebrationmk10",
+            "drunk world",
+            "not the bees!",
+            "remix",
+            "no traps",
+            "get fixed boi",
+            "don't starve",
+        ] {
+            let (world, built) = build_from_text(1600, 700, "secret", text);
+            assert!(
+                built.secret_seed.is_some(),
+                "{text:?} should have been detected as a secret seed"
+            );
+            assert!(built.chests > 0, "{text:?}: no chests");
+            assert!(built.altars > 0, "{text:?}: no altars");
+            assert_eq!(
+                world.seed_text, text,
+                "{text:?}: seed text was not preserved"
+            );
+        }
+    }
+
+    /// A seed string that matches none of the seven is just an ordinary (hashed) text seed.
+    #[test]
+    fn an_unrecognised_text_seed_is_ordinary_generation() {
+        let (_world, built) = build_from_text(1600, 700, "ordinary text", "my cool world");
+        assert_eq!(built.secret_seed, None);
     }
 
     /// Real Tier 3 counts on real generated worlds — not asserted, just printed, matching

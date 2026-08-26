@@ -53,8 +53,10 @@ world that is playable, decorated, settled and smoothed — forests, a green jun
 settled water, pots, statues, piles, fallen logs, traps and rounded terrain, floating islands, spider
 and gem caves, pyramids, living trees, jungle shrines, underground cabins, an oasis, and the full
 Tier 3 cosmetic/cleanup tail (moss, wall variety, waterfalls, thin ice, speleothems, exposed gems,
-lily pads, cacti, and the seven-pass tile-cleanup bundle) are all there now. What's left of worldgen
-is 7 of 15 real micro-biome classes and the secret seeds — sized and tracked in `plan.md`.
+lily pads, cacti, and the seven-pass tile-cleanup bundle) are all there now. Vanilla's seven secret
+seeds are now detected by name (a real `--seed "get fixed boi"` works), and one of the seven — No
+Traps World — is fully wired; the other six are sized and deferred. What's left of worldgen is 7 of
+15 real micro-biome classes and the other six secret seeds — sized and tracked in `plan.md`.
 
 ### Protocol and connectivity
 
@@ -87,7 +89,8 @@ floating islands, spider and gem caves, pyramids, living trees, jungle shrines, 
 the oasis, the glowing mushroom biome) and Tier 3 (the cosmetic/cleanup tail — moss, wall variety,
 waterfalls, thin ice, speleothems, exposed gems, lily pads and beach decorations, the seven-pass
 tile-cleanup bundle) are all done. What's left: 7 of 15 real `MicroBiome` classes (each one sized and
-disclosed individually below), and the secret seeds.
+disclosed individually below), and six of the seven secret seeds (the seventh, No Traps World, is
+done — see below).
 
 | | Feature | Notes |
 |---|---|---|
@@ -103,12 +106,12 @@ disclosed individually below), and the secret seeds.
 | ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
 | ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
 | ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`) |
-| ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch is skipped (see the secret-seeds row below). A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
+| ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch but one (`noTrapsWorldGen`, now wired — see the secret-seeds row below) is skipped. A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
 | ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator runs smoothing *last*, after every decoration, rather than vanilla's before-decoration placement — see `smooth.rs`'s doc comment for why, and how the altar and other fixtures stay protected either way. 30,107 tiles smoothed on the same 4200×1200 world |
 | ✅ | Floating islands, spider caves, gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | The ~200-line structure-overlap tracker (`StructureMap`) this project built instead of porting vanilla's heavy shape/structure DSL turned out to be enough for all nine — no DSL needed |
 | 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes: `CaveHouseBiome`, `ThinIceBiome`, `CorruptionPitBiome`, `SpikePitBiome`, `HoneyPatchBiome`, `CampsiteBiome`, and a shared painter standing in for both `MarbleBiome`/`GraniteBiome`. The other 7 — `DeadMansChestBiome`, `DesertBiome`, `DunesBiome`, `MahoganyTreeBiome`, `EnchantedSwordBiome`, `MiningExplosivesBiome`, `HiveBiome` — each need a genuinely separate subsystem this project doesn't have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape...); sized individually in `plan.md` |
 | ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads/cattails/coral/cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed. Each has its own disclosed narrowing where vanilla's version leans on a genuinely separate subsystem (`neonMossBiome`'s grass-diffusion machinery, gem trees, bamboo/seaweed/palm growth, vanilla's own defensive multi-tile-frame repair this project's placement code has no equivalent need for) — see `plan.md`'s own Done rows for the full, pass-by-pass account |
-| 🔴 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | In scope, not a disclosed exception like Steam P2P — deprioritized behind ordinary-world parity, tracked in `plan.md`'s backlog |
+| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | All seven are now detected by name (case-insensitive, matching real vanilla's own seed-field check — `--seed "get fixed boi"` works). **No Traps World is done**: real vanilla's own `noTrapsWorldGen` flag, which the already-landed traps pass's own doc comment had already named, now short-circuits `traps::scatter` to placing nothing — verified on a real 4200×1200 world (397 real trap tiles on an ordinary seed, 0 on this one, read back independently from the saved `.wld` file, not merely the pass's own counters). The other six are detected and recorded but not yet consumed — each individually sized in `plan.md`'s backlog: Not the Bees and Drunk World are both genuinely pipeline-wide once their real ripple effects are traced, Remix is the largest (mirrors the whole world), Celebrationmk10 and Don't Starve have too little disclosed evidence in this codebase to implement without guessing, and "get fixed boi" is reasoned to be a superset of several of the others at once |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
 
 ### NPCs, bosses and events

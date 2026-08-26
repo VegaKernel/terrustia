@@ -3,11 +3,14 @@
 //! Transcribed from `WorldGen.cs`'s `placeTrap` (8872), its guard `placeTrap_CanContinue` (8859),
 //! `PlaceSandTrap` (35851), and the `GenPassNameID.Traps` pass that drives them all (18787).
 //!
-//! Vanilla gates almost every branch of this behind secret-seed flags this project does not model
-//! — `noTrapsWorldGen`, `remixWorldGen`, `tenthAnniversaryWorldGen`, `skyblockWorldGen`,
-//! `drunkWorldGen`, `getGoodWorldGen`, `Main.starGame`, `SecretSeed.*`. Only the ordinary-world
-//! path through each function is transcribed here, which is what every world this generator has
-//! ever produced actually needed and is the exact opposite of what was there before: nothing.
+//! Vanilla gates almost every branch of this behind secret-seed flags. One of them —
+//! `noTrapsWorldGen` — is modelled now: see [`scatter`]'s own `secret` parameter and
+//! `secret_seed.rs`'s own module doc for the real activation mechanism. The rest
+//! (`remixWorldGen`, `tenthAnniversaryWorldGen`, `skyblockWorldGen`, `drunkWorldGen`,
+//! `getGoodWorldGen`, `Main.starGame`, `SecretSeed.*`) are still not modelled — only the
+//! ordinary-world path through each function is transcribed here, which is what every world this
+//! generator produced before this module existed actually needed, and is the exact opposite of
+//! what was there before that: nothing.
 //!
 //! Four things get placed, chosen by vanilla's own weighted roll once a candidate site's floor is
 //! found:
@@ -38,6 +41,7 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::{Tile, tile::TileFlags, tile_solid};
 
 use super::layout::Layout;
+use super::secret_seed::SecretSeed;
 use super::tiles::walls;
 use crate::world::World;
 
@@ -867,8 +871,25 @@ impl TrapScatterResult {
 
 /// The `GenPassNameID.Traps` pass: scatters traps and sand traps across the already-generated
 /// world. Ordinary-world path only — see the module doc comment.
-pub fn scatter(world: &mut World, layout: &Layout, rng: &mut SmallRng) -> TrapScatterResult {
+///
+/// `secret`: the one flag this module's own doc comment already named as real vanilla's own gate
+/// on almost this entire pass — `noTrapsWorldGen`. This is the one secret seed this session
+/// actually wires to a behavioural difference (see `secret_seed.rs`'s own module doc for why the
+/// other six are detected but not yet consumed here): `SecretSeed::NoTraps` short-circuits the
+/// whole pass to placing nothing, rather than gating each of the four trap kinds and the sand trap
+/// loop separately — real vanilla's own name for this seed ("No Traps World") is the same
+/// all-or-nothing claim, and every other flag this pass's own module doc lists alongside
+/// `noTrapsWorldGen` stays unmodelled, same as before this parameter existed.
+pub fn scatter(
+    world: &mut World,
+    layout: &Layout,
+    rng: &mut SmallRng,
+    secret: Option<SecretSeed>,
+) -> TrapScatterResult {
     let mut result = TrapScatterResult::default();
+    if secret == Some(SecretSeed::NoTraps) {
+        return result;
+    }
     // The search bands below are `200..width-200` and `surface..height-210` — real, full-size
     // worlds always clear this by a wide margin, but the small synthetic worlds several unrelated
     // tests build (to keep persistence/header tests fast) do not. Skip rather than let
@@ -1108,10 +1129,32 @@ mod tests {
         let mut world = corridor();
         let layout = layout(&world);
         let mut rng = SmallRng::seed_from_u64(7);
-        let result = scatter(&mut world, &layout, &mut rng);
+        let result = scatter(&mut world, &layout, &mut rng, None);
         assert!(
             result.total() > 0,
             "a 200-wide corridor should get at least one trap"
+        );
+    }
+
+    /// The "No Traps World" secret seed: the same corridor that always gets at least one trap on
+    /// an ordinary seed gets none at all once `SecretSeed::NoTraps` is threaded through — the one
+    /// real behavioural difference this session actually wires (see `secret_seed.rs`'s own module
+    /// doc for why the other six secret seeds are detected but left as ordinary generation).
+    #[test]
+    fn no_traps_world_places_nothing() {
+        let mut world = corridor();
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let result = scatter(&mut world, &layout, &mut rng, Some(SecretSeed::NoTraps));
+        assert_eq!(
+            result,
+            TrapScatterResult::default(),
+            "No Traps World should place zero of every trap kind"
+        );
+        assert_eq!(
+            result.total(),
+            0,
+            "No Traps World should place nothing at all"
         );
     }
 }
