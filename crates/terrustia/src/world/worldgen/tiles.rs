@@ -25,6 +25,7 @@ pub const BLUE_DUNGEON_BRICK: u16 = 41;
 pub const GREEN_DUNGEON_BRICK: u16 = 43;
 pub const PINK_DUNGEON_BRICK: u16 = 44;
 pub const SPIKES: u16 = 48;
+pub const BANNERS: u16 = 91;
 /// `GoldBrick` — one of the five jungle-shrine wood/brick materials `GenVars.jungleHut` rolls.
 pub const GOLD_BRICK: u16 = 45;
 pub const COBWEB: u16 = 51;
@@ -62,6 +63,9 @@ pub const MARBLE: u16 = 367;
 pub const GRANITE: u16 = 368;
 pub const SANDSTONE: u16 = 396;
 pub const HARDENED_SAND: u16 = 397;
+/// `TileID.SandstoneBrick` — the pyramid's own worked-stone material, distinct from the natural
+/// desert [`SANDSTONE`] (396) it shares a name with in English but not in `TileID`.
+pub const SANDSTONE_BRICK: u16 = 151;
 
 /// The wall ids, from `WallID`.
 pub mod walls {
@@ -79,7 +83,12 @@ pub mod walls {
     pub const ICE: u16 = 71;
     pub const CRIMSTONE: u16 = 83;
     pub const CAVE: u16 = 61;
+    /// `WallID.Sandstone` — the natural desert wall. Distinct from [`SANDSTONE_BRICK`], the
+    /// pyramid's own worked interior wall.
     pub const SANDSTONE: u16 = 187;
+    /// `WallID.SandstoneBrick` — the pyramid's interior wall (`WorldGen.cs`'s `Pyramid()` sets
+    /// `wall = 34` throughout its own carving).
+    pub const SANDSTONE_BRICK: u16 = 34;
     pub const LIHZAHRD_BRICK: u16 = 87;
     /// The unsafe hive wall — `WallID.HiveUnsafe`, used only as a clearance-scan exclusion (a
     /// jungle shrine refuses to site near it) alongside [`LIHZAHRD_BRICK`] above.

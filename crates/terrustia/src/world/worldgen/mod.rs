@@ -38,6 +38,7 @@ pub mod passes;
 pub mod piles;
 pub mod place_object;
 pub mod pots;
+pub mod pyramids;
 pub mod rand;
 pub mod scenery;
 pub mod shape_data;
@@ -107,6 +108,8 @@ pub struct Built {
     pub spider_caves: usize,
     /// Small hollow jungle-grass huts, each holding a chest and a torch.
     pub jungle_shrines: usize,
+    /// Solid sandstone-brick masses buried in the desert, each with a tunnel to a treasure room.
+    pub pyramids: usize,
 }
 
 /// Generate a world of the given size.
@@ -212,6 +215,13 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // about `try_place` itself was wrong.
     let oases = oasis::scatter(&mut world, &plan, &mut rand);
 
+    // Pyramids, for the same reason as oases just above: vanilla's own `Pyramids` pass
+    // (`WorldGen.cs:15438`) runs before essentially every decoration pass too — earlier than
+    // `Oasis` itself, in fact (15438 vs 16339), though the two rarely interact in practice, since
+    // a pyramid's own site check only ever looks at the one point it starts digging from, not a
+    // wide window the way oasis does.
+    let pyramids = pyramids::scatter(&mut world, &plan, &mut rand, &mut forest_rng);
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
@@ -298,6 +308,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         oases,
         spider_caves,
         jungle_shrines,
+        pyramids,
     };
     (world, built)
 }
