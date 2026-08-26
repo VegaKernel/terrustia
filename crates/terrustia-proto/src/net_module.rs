@@ -252,16 +252,13 @@ pub const MODULE_CREATIVE_POWERS: u16 = 4;
 /// (`CreativePowerManager.cs:90-104`) — the order *is* the wire format, a power's id is its
 /// registration index, not a label chosen for readability.
 ///
-/// [`Button`](CreativePowerMessage::Button), [`Toggle`](CreativePowerMessage::Toggle) and
-/// [`Slider`](CreativePowerMessage::Slider) shaped powers are decoded by
-/// [`decode_creative_power`] today: `FREEZE_TIME`, the four `START_*` buttons, `FREEZE_RAIN`,
-/// `FREEZE_WIND`, `STOP_BIOME_SPREAD`, and `MODIFY_WIND`/`MODIFY_RAIN`/`MODIFY_TIME_RATE` — eleven
-/// of the fifteen. The remaining four — `GODMODE`/`FAR_PLACEMENT_RANGE`/`SPAWN_RATE` (per-player,
-/// bit-packed sync across up to 255 players) and `DIFFICULTY` (a slider on the wire, but a
-/// continuous 0–3 replacement for the discrete `world.game_mode` read at dozens of call sites
-/// throughout `server.rs` — real, separately-sized work, not a same-shape extension of the other
-/// three sliders) — are not yet modelled; their ids are still named here so nothing downstream has
-/// to invent a number.
+/// All fifteen are decoded by [`decode_creative_power`]: `FREEZE_TIME`, the four `START_*`
+/// buttons, `FREEZE_RAIN`, `FREEZE_WIND`, `STOP_BIOME_SPREAD`, `MODIFY_WIND`/`MODIFY_RAIN`/
+/// `MODIFY_TIME_RATE`/`DIFFICULTY`, and `GODMODE`/`FAR_PLACEMENT_RANGE`/`SPAWN_RATE`. `DIFFICULTY`
+/// is the same `ASharedSliderPower` wire shape as `MODIFY_TIME_RATE` — real vanilla's own
+/// `DifficultySliderPower : ASharedSliderPower` — its interesting part is entirely on the
+/// gameplay side (`game/journey.rs`'s `difficulty_multiplier`, and `server.rs`'s
+/// `effective_difficulty()`), not the wire.
 pub mod power {
     pub const FREEZE_TIME: u16 = 0;
     pub const START_DAY: u16 = 1;
@@ -299,15 +296,25 @@ const TOGGLE_POWERS: [u16; 4] = [
     power::STOP_BIOME_SPREAD,
 ];
 
-/// The three `ASharedSliderPower`s this server models the effect of. `SPAWN_RATE` is also a
-/// slider on the wire, but per-player (`APerPlayerSliderPower`, the same bit-packed-per-player
-/// shape as the two per-player toggles); `DIFFICULTY` is shared but excluded for its own,
-/// different reason — see [`power`]'s own doc.
-const SLIDER_POWERS: [u16; 3] = [
+/// The four `ASharedSliderPower`s this server models the effect of. `SPAWN_RATE` is also a
+/// slider on the wire, but per-player — see [`PER_PLAYER_SLIDER_POWERS`].
+const SLIDER_POWERS: [u16; 4] = [
     power::MODIFY_WIND,
     power::MODIFY_RAIN,
     power::MODIFY_TIME_RATE,
+    power::DIFFICULTY,
 ];
+
+/// The two `APerPlayerTogglePower`s.
+const PER_PLAYER_TOGGLE_POWERS: [u16; 2] = [power::GODMODE, power::FAR_PLACEMENT_RANGE];
+
+/// The one `APerPlayerSliderPower`.
+const PER_PLAYER_SLIDER_POWERS: [u16; 1] = [power::SPAWN_RATE];
+
+/// `APerPlayerTogglePower`'s own `SubMessageType` (`CreativePowers.cs`, nested in that class) —
+/// `SyncOnePlayer` is the only one this server ever needs to *decode*: `SyncEveryone` is what
+/// `OnPlayerJoining` sends server→client, never something a real client sends inbound.
+const SYNC_ONE_PLAYER: u8 = 1;
 
 /// A decoded module-4 packet, as far as this server understands it today.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -318,12 +325,24 @@ pub enum CreativePowerMessage {
     Button(u16),
     /// One of the four shared on/off powers (`ASharedTogglePower`). Carries the requested state.
     Toggle(u16, bool),
-    /// One of the three shared sliders (`ASharedSliderPower`). Carries the raw 0.0–1.0 slider
+    /// One of the four shared sliders (`ASharedSliderPower`). Carries the raw 0.0–1.0 slider
     /// position — each power's own `UpdateInfoFromSliderValueCache` remaps that into its actual
     /// effect (`ModifyTimeRate`'s 1×–24× rate, `ModifyWindDirectionAndStrength`'s -0.8..0.8 lerp,
-    /// `ModifyRainPower`'s rain strength read as-is), which is deliberately kept out of the proto
-    /// crate — that remapping is gameplay, not wire format.
+    /// `ModifyRainPower`'s rain strength read as-is, `DifficultySliderPower`'s 0.5×–3× strength
+    /// multiplier), which is deliberately kept out of the proto crate — that remapping is
+    /// gameplay, not wire format.
     Slider(u16, f32),
+    /// A per-player toggle request (`Godmode`/`FarPlacementRange`) — the `SyncOnePlayer`
+    /// sub-message, the only shape a client ever sends (see [`SYNC_ONE_PLAYER`]'s own doc). The
+    /// player index the client sent is **not** carried here: `DeserializeNetMessage`'s own
+    /// dedicated-server branch always substitutes the real sender's slot instead (`Main.netMode ==
+    /// 2` — a client cannot toggle Godmode for somebody else), so the caller supplies that slot
+    /// itself from the connection the packet arrived on, never trusts the wire for it.
+    PerPlayerToggle(u16, bool),
+    /// A per-player slider request (`SpawnRate`) — no sub-message type byte at all in this shape,
+    /// just a player index (also not carried here, same reason as `PerPlayerToggle`) then the raw
+    /// value.
+    PerPlayerSlider(u16, f32),
 }
 
 /// Read a module-4 frame. Returns `None` for any other module, and also for a power id this
@@ -343,6 +362,23 @@ pub fn decode_creative_power(payload: &[u8]) -> Result<Option<CreativePowerMessa
     if SLIDER_POWERS.contains(&power_id) {
         return Ok(Some(CreativePowerMessage::Slider(power_id, r.f32()?)));
     }
+    if PER_PLAYER_TOGGLE_POWERS.contains(&power_id) {
+        if r.u8()? != SYNC_ONE_PLAYER {
+            return Ok(None); // a SyncEveryone (or anything else) inbound is not a real request
+        }
+        let _player_index = r.u8()?; // discarded — see PerPlayerToggle's own doc
+        return Ok(Some(CreativePowerMessage::PerPlayerToggle(
+            power_id,
+            r.bool()?,
+        )));
+    }
+    if PER_PLAYER_SLIDER_POWERS.contains(&power_id) {
+        let _player_index = r.u8()?; // discarded — see PerPlayerSlider's own doc
+        return Ok(Some(CreativePowerMessage::PerPlayerSlider(
+            power_id,
+            r.f32()?,
+        )));
+    }
     Ok(None)
 }
 
@@ -360,6 +396,42 @@ pub fn creative_power_toggle(power_id: u16, enabled: bool) -> Result<Vec<u8>> {
 pub fn creative_power_slider(power_id: u16, value: f32) -> Result<Vec<u8>> {
     let mut w = PacketWriter::new(id::NET_MODULES);
     w.u16(MODULE_CREATIVE_POWERS).u16(power_id).f32(value);
+    w.finish()
+}
+
+/// Encode one player's confirmed per-player toggle state — the `SyncOnePlayer` shape
+/// `SetEnabledState` broadcasts to every connected client (the toggling player included) once a
+/// request is accepted.
+pub fn creative_power_toggle_for_player(
+    power_id: u16,
+    player_index: u8,
+    enabled: bool,
+) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::NET_MODULES);
+    w.u16(MODULE_CREATIVE_POWERS)
+        .u16(power_id)
+        .u8(SYNC_ONE_PLAYER)
+        .u8(player_index)
+        .bool(enabled);
+    w.finish()
+}
+
+/// Encode the full per-player toggle state (`SyncEveryone`, bit-packed) — `OnPlayerJoining`'s own
+/// shape, sent once to a newly connected client so it learns where every already-connected
+/// player's toggle stands. `states` is indexed by player slot; a slot nobody occupies reads
+/// `false`, the same as `_perPlayerIsEnabled`'s own C# default.
+pub fn creative_power_toggle_full_state(power_id: u16, states: &[bool; 255]) -> Result<Vec<u8>> {
+    let mut w = PacketWriter::new(id::NET_MODULES);
+    w.u16(MODULE_CREATIVE_POWERS).u16(power_id).u8(0);
+    for chunk in states.chunks(8) {
+        let mut byte = 0u8;
+        for (i, &enabled) in chunk.iter().enumerate() {
+            if enabled {
+                byte |= 1 << i;
+            }
+        }
+        w.u8(byte);
+    }
     w.finish()
 }
 
@@ -516,12 +588,13 @@ mod tests {
         }
     }
 
-    /// The per-player and slider powers are real ids, just not modelled yet — a client sending
-    /// one should not desync (an `Err`) or be misread as a button or toggle it is not.
+    /// All fifteen real power ids are modelled now, so this uses an id past the real range (real
+    /// vanilla only ever registers 0-14, `CreativePowerManager.cs:90-104`) — a client sending an
+    /// id this server doesn't recognise should not desync (an `Err`), just be ignored.
     #[test]
-    fn an_unmodelled_power_id_decodes_to_nothing_rather_than_an_error() {
+    fn an_unrecognised_power_id_decodes_to_nothing_rather_than_an_error() {
         let mut w = Writer::new();
-        w.u16(MODULE_CREATIVE_POWERS).u16(power::GODMODE);
+        w.u16(MODULE_CREATIVE_POWERS).u16(999).f32(0.5);
         assert_eq!(decode_creative_power(w.as_slice()).unwrap(), None);
     }
 
@@ -542,34 +615,18 @@ mod tests {
     }
 
     #[test]
-    fn decodes_each_of_the_three_shared_sliders_with_their_raw_value() {
+    fn decodes_each_of_the_four_shared_sliders_with_their_raw_value() {
         for id in [
             power::MODIFY_WIND,
             power::MODIFY_RAIN,
             power::MODIFY_TIME_RATE,
+            power::DIFFICULTY,
         ] {
             let mut w = Writer::new();
             w.u16(MODULE_CREATIVE_POWERS).u16(id).f32(0.75);
             assert_eq!(
                 decode_creative_power(w.as_slice()).unwrap(),
                 Some(CreativePowerMessage::Slider(id, 0.75)),
-                "power id {id}"
-            );
-        }
-    }
-
-    /// `DIFFICULTY` and `SPAWN_RATE` are real sliders on the wire too, but neither of this
-    /// server's shapes — `DIFFICULTY` needs its own follow-up work (see `power`'s own doc),
-    /// `SPAWN_RATE` is per-player. Both should still decode to nothing rather than being
-    /// misread as one of the three shared sliders this server does model.
-    #[test]
-    fn the_other_two_real_slider_powers_are_not_misdecoded_as_shared_sliders() {
-        for id in [power::DIFFICULTY, power::SPAWN_RATE] {
-            let mut w = Writer::new();
-            w.u16(MODULE_CREATIVE_POWERS).u16(id).f32(0.5);
-            assert_eq!(
-                decode_creative_power(w.as_slice()).unwrap(),
-                None,
                 "power id {id}"
             );
         }
@@ -582,5 +639,100 @@ mod tests {
             decode_creative_power(&frame[3..]).unwrap(),
             Some(CreativePowerMessage::Slider(power::MODIFY_TIME_RATE, 0.5))
         );
+    }
+
+    #[test]
+    fn decodes_a_per_player_toggle_request_ignoring_the_wire_player_index() {
+        for id in [power::GODMODE, power::FAR_PLACEMENT_RANGE] {
+            let mut w = Writer::new();
+            // The player index on the wire (200 here) is exactly what the caller must *not* trust
+            // — `PerPlayerToggle` carries only the state, the real slot comes from the connection.
+            w.u16(MODULE_CREATIVE_POWERS)
+                .u16(id)
+                .u8(SYNC_ONE_PLAYER)
+                .u8(200)
+                .bool(true);
+            assert_eq!(
+                decode_creative_power(w.as_slice()).unwrap(),
+                Some(CreativePowerMessage::PerPlayerToggle(id, true)),
+                "power id {id}"
+            );
+        }
+    }
+
+    /// A `SyncEveryone` (sub-message `0`) is what the server itself sends on join — never a real
+    /// inbound request. Decoding it as if it carried a state would silently apply the beginning of
+    /// a bit-packed array as a bool.
+    #[test]
+    fn a_sync_everyone_submessage_is_never_decoded_as_a_request() {
+        let mut w = Writer::new();
+        w.u16(MODULE_CREATIVE_POWERS)
+            .u16(power::GODMODE)
+            .u8(0)
+            .bytes(&[0u8; 32]);
+        assert_eq!(decode_creative_power(w.as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn decodes_a_per_player_slider_request_ignoring_the_wire_player_index() {
+        let mut w = Writer::new();
+        w.u16(MODULE_CREATIVE_POWERS)
+            .u16(power::SPAWN_RATE)
+            .u8(200)
+            .f32(0.75);
+        assert_eq!(
+            decode_creative_power(w.as_slice()).unwrap(),
+            Some(CreativePowerMessage::PerPlayerSlider(
+                power::SPAWN_RATE,
+                0.75
+            ))
+        );
+    }
+
+    #[test]
+    fn the_per_player_toggle_encoder_round_trips_through_the_decoder() {
+        let frame = creative_power_toggle_for_player(power::GODMODE, 7, true).unwrap();
+        assert_eq!(
+            decode_creative_power(&frame[3..]).unwrap(),
+            Some(CreativePowerMessage::PerPlayerToggle(power::GODMODE, true))
+        );
+    }
+
+    /// The bit-packed full-state shape, checked byte by byte against what
+    /// `APerPlayerTogglePower::OnPlayerJoining` actually writes: 32 bytes (`ceil(255/8)`), bit `j`
+    /// of byte `i` is slot `i*8+j`'s state — including the awkward last byte, only 7 real bits
+    /// wide (255 is not a multiple of 8), which a naive `255/8` (not `ceil`) would drop entirely.
+    #[test]
+    fn the_full_state_encoder_bit_packs_exactly_like_a_real_server() {
+        let mut states = [false; 255];
+        states[0] = true; // bit 0 of byte 0
+        states[9] = true; // bit 1 of byte 1
+        states[254] = true; // the last slot, inside the awkward 7-bit-wide final byte
+        let frame = creative_power_toggle_full_state(power::FAR_PLACEMENT_RANGE, &states).unwrap();
+        let payload = &frame[3..];
+
+        assert_eq!(
+            u16::from_le_bytes([payload[0], payload[1]]),
+            MODULE_CREATIVE_POWERS
+        );
+        assert_eq!(
+            u16::from_le_bytes([payload[2], payload[3]]),
+            power::FAR_PLACEMENT_RANGE
+        );
+        assert_eq!(payload[4], 0, "sub-message 0 is SyncEveryone");
+        let bits = &payload[5..];
+        assert_eq!(bits.len(), 32, "ceil(255/8)");
+        assert_eq!(bits[0], 0b0000_0001, "slot 0");
+        assert_eq!(bits[1], 0b0000_0010, "slot 9 is bit 1 of byte 1");
+        assert_eq!(
+            bits[31], 0b0100_0000,
+            "slot 254 is bit 6 of the 7-wide final byte"
+        );
+        // Every other byte should be untouched.
+        for (i, &b) in bits.iter().enumerate() {
+            if i != 0 && i != 1 && i != 31 {
+                assert_eq!(b, 0, "byte {i} should be all zero");
+            }
+        }
     }
 }

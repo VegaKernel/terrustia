@@ -1844,7 +1844,7 @@ impl GameServer {
         self.tick_tile_spam();
         // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
         // keeping it here means no spawn site has to remember to scale.
-        let difficulty = terrustia_proto::difficulty::of_game_mode(self.world.game_mode);
+        let difficulty = self.effective_difficulty();
         self.npcs.set_scaling(crate::game::npc::Scaling {
             difficulty,
             players: self
@@ -1949,13 +1949,27 @@ impl GameServer {
         self.tick_shimmer();
         self.correct_item_drift();
 
-        // Offer unreserved items to the nearest player in range.
-        let positions: Vec<(u8, (f32, f32))> = self
+        // Offer unreserved items to the nearest player in range. Range is per-player, not one
+        // shared constant: Journey mode's `FarPlacementRange` (a misleading name inherited from
+        // source — both of its two real vanilla uses, `Player.cs:35212`/`35440`, are about item
+        // *pickup* range, not tile placement at all) adds a flat 240 pixels for whichever players
+        // have it on, but — matching source's own `difficulty == 3` guard on both sites — only in
+        // a Journey-mode world; the power has no effect at all in an ordinary one, even for a
+        // player who somehow has it enabled.
+        let journey_world = self.world.game_mode == 3;
+        let positions: Vec<(u8, (f32, f32), f32)> = self
             .players
             .iter()
             .flatten()
             .filter(|p| p.is_playing())
-            .map(|p| (p.slot, p.position))
+            .map(|p| {
+                let range = if journey_world && self.journey.has_far_placement_range(p.slot) {
+                    ITEM_GRAB_RANGE + 240.0
+                } else {
+                    ITEM_GRAB_RANGE
+                };
+                (p.slot, p.position, range)
+            })
             .collect();
         if positions.is_empty() {
             return;
@@ -1968,13 +1982,13 @@ impl GameServer {
             .filter_map(|(index, item)| {
                 positions
                     .iter()
-                    .map(|(slot, pos)| {
+                    .map(|(slot, pos, range)| {
                         let (dx, dy) = (pos.0 - item.position.0, pos.1 - item.position.1);
-                        (*slot, dx * dx + dy * dy)
+                        (*slot, dx * dx + dy * dy, range * range)
                     })
-                    .filter(|(_, d2)| *d2 <= ITEM_GRAB_RANGE * ITEM_GRAB_RANGE)
+                    .filter(|(_, d2, range2)| *d2 <= *range2)
                     .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(slot, _)| (index, slot, item.position))
+                    .map(|(slot, ..)| (index, slot, item.position))
             })
             .collect();
 
@@ -3624,14 +3638,40 @@ impl GameServer {
                 self.send(slot, frame);
             }
         }
-        // `ModifyTimeRate` is the one shared slider that syncs to a joining player
-        // (`_syncToJoiningPlayers = true` — `ModifyWind`/`ModifyRain` are both `false` in source,
+        // `ModifyTimeRate` and `Difficulty` are the two shared sliders that sync to a joining
+        // player (`_syncToJoiningPlayers = true`, the base `ASharedSliderPower` default that
+        // neither constructor overrides — `ModifyWind`/`ModifyRain` are both `false` in source,
         // see `journey.rs`'s own module doc for why there is nothing to send for those two here).
-        if let Ok(frame) = net_module::creative_power_slider(
-            net_module::power::MODIFY_TIME_RATE,
-            self.journey.time_rate_slider,
-        ) {
-            self.send(slot, frame);
+        for (id, value) in [
+            (
+                net_module::power::MODIFY_TIME_RATE,
+                self.journey.time_rate_slider,
+            ),
+            (
+                net_module::power::DIFFICULTY,
+                self.journey.difficulty_slider,
+            ),
+        ] {
+            if let Ok(frame) = net_module::creative_power_slider(id, value) {
+                self.send(slot, frame);
+            }
+        }
+        // `Godmode`/`FarPlacementRange`'s full per-player state — `APerPlayerTogglePower::
+        // OnPlayerJoining`'s own `SyncEveryone`, bit-packed. `SpawnRate` sends nothing here on
+        // purpose: `APerPlayerSliderPower::OnPlayerJoining` only resets the *new* player's own
+        // local cache to the default, no network message at all — another player's slider
+        // position was never anyone else's business in the first place (see the slider handler's
+        // own comment on why a change to it is never broadcast either).
+        for (id, states) in [
+            (net_module::power::GODMODE, self.journey.godmode),
+            (
+                net_module::power::FAR_PLACEMENT_RANGE,
+                self.journey.far_placement_range,
+            ),
+        ] {
+            if let Ok(frame) = net_module::creative_power_toggle_full_state(id, &states) {
+                self.send(slot, frame);
+            }
         }
 
         // What the Angler wants today. A client that is never told shows no quest at all, so a
@@ -5408,7 +5448,7 @@ impl GameServer {
         // Module 4: Journey mode powers. Same reason as module 8 above — neither is chat, and
         // `IncomingChat::decode` would return `None` for it too, so it has to be checked first.
         if let Some(message) = net_module::decode_creative_power(payload)? {
-            return self.on_creative_power(message);
+            return self.on_creative_power(slot, message);
         }
 
         let Some(chat) = IncomingChat::decode(payload)? else {
@@ -6142,7 +6182,7 @@ impl GameServer {
                 fishron: p.downed_fishron,
                 infected_seed: false,
             },
-            i32::from(self.world.game_mode),
+            self.effective_difficulty(),
             false,
         )
     }
@@ -6416,27 +6456,7 @@ impl GameServer {
                         (t.center.1 / crate::game::npc::TILE) as i32,
                     )
                 });
-            let conditions = crate::game::ai::Conditions {
-                blood_moon: self.world.blood_moon,
-                day: self.world.day_time,
-                eclipse: self.world.eclipse,
-                raining: self.world.raining,
-                windy: self.weather.windy(),
-                crimson: self.world.crimson,
-                snow: biome == crate::game::spawn::Biome::Snow,
-                jungle: biome == crate::game::spawn::Biome::Jungle,
-                wind: self.weather.wind,
-                // Worked out once a tick from wherever the nearest player is, rather than per NPC:
-                // the zone scan reads a forty-tile square and only the tumbleweed asks.
-                desert: biome == crate::game::spawn::Biome::Desert,
-                sandstorm: self.weather.sandstorm,
-                surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
-                // Game mode 0 is classic; everything above it is expert or harder, and the
-                // routines that branch only ask whether it is above classic.
-                expert: self.world.game_mode >= 1,
-                hardmode: self.world.progress.hard_mode,
-                world_size: (self.world.width(), self.world.height()),
-            };
+            let conditions = self.ai_conditions(biome);
             for (index, npc) in self.npcs.iter_mut() {
                 // Segments are positioned by their leader, not by a routine of their own.
                 if npc.follows.is_some() {
@@ -7483,6 +7503,14 @@ impl GameServer {
         reason: terrustia_proto::hurt::DeathReason,
         immune_ticks: i32,
     ) {
+        // Journey mode's `Godmode`. Real vanilla's own `creativeGodMode` gates apply client-side
+        // (`Player.cs:31557`/`38486`/`39107`), since most damage in that game is client-decided —
+        // this is the one place *this* server decides damage on a player's behalf at all (NPC
+        // contact and NPC-thrown projectiles, this function's only two call sites), so it is the
+        // one place this server needs its own gate to match.
+        if self.journey.is_godmode(slot as u8) {
+            return;
+        }
         let Some(player) = self.players[slot].as_mut() else {
             return;
         };
@@ -7854,8 +7882,8 @@ impl GameServer {
         let ground = self.world.tile(tx, ty).block;
         let p = &self.world.progress;
         let at = terrustia_proto::conditional_drops::Conditions {
-            expert: self.world.game_mode >= 1,
-            master: self.world.game_mode >= 2,
+            expert: self.is_expert(),
+            master: self.is_master(),
             world_is_crimson: self.world.crimson,
             hard_mode: p.hard_mode,
             downed_plantera: p.downed_plantera,
@@ -9961,14 +9989,17 @@ impl GameServer {
     /// Kills are worth points rather than one each — a Pumpking is a third of a wave by itself and
     /// a scarecrow is nothing — so what you choose to fight decides how far the night gets.
     fn note_moon_kill(&mut self, npc_type: u16) {
-        if let Some(wave) = self.moon.note_kill(npc_type, self.world.game_mode) {
+        // Computed before borrowing `self.moon` mutably below — `is_expert`/`is_master` borrow
+        // all of `self`, which would otherwise overlap the `&mut self.moon` the call needs.
+        let (expert, master) = (self.is_expert(), self.is_master());
+        if let Some(wave) = self.moon.note_kill(npc_type, expert, master) {
             self.announce(&format!("Wave {wave}!"));
         }
     }
 
     /// Land whatever an enemy leaves behind on the player it just touched.
     fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16) {
-        let expert = self.world.game_mode >= 1;
+        let expert = self.is_expert();
         for rule in terrustia_proto::touch_debuffs::on_touch(npc_type) {
             if rule.expert_only && !expert {
                 continue;
@@ -10380,14 +10411,74 @@ impl GameServer {
         Ok(())
     }
 
+    /// `Main.Difficulty`'s own real shape: real vanilla never reads `Main.GameMode` for anything
+    /// difficulty-scaled — every such site reads this one float instead, with `expertMode`/
+    /// `masterMode` themselves just `Difficulty >= 2`/`>= 3` (`Main.cs`). It is ordinarily
+    /// `world.game_mode`-derived, but in a Journey world (`IsJourneyMode`) the `DifficultySlider`
+    /// power overrides it to its own continuous value (`Main.cs`'s
+    /// `UpdateCreativeGameModeOverride`) — every call site that used to read `world.game_mode`
+    /// directly for combat/drop/event scaling should go through this instead, so the slider
+    /// actually reaches it. `journey_world` gates (spawning/Godmode/FarPlacementRange/SpawnRate,
+    /// which ask "is this a Journey world" rather than "how hard is it") are a different question
+    /// and correctly still read `world.game_mode` directly.
+    fn effective_difficulty(&self) -> f32 {
+        if self.world.game_mode == 3 {
+            self.journey.difficulty_multiplier()
+        } else {
+            terrustia_proto::difficulty::of_game_mode(self.world.game_mode)
+        }
+    }
+
+    /// `Main.expertMode`'s own definition: `Difficulty >= GameDifficultyLevel.Expert` (`2.0`).
+    fn is_expert(&self) -> bool {
+        self.effective_difficulty() >= 2.0
+    }
+
+    /// `Main.masterMode`'s own definition: `Difficulty >= GameDifficultyLevel.Master` (`3.0`).
+    fn is_master(&self) -> bool {
+        self.effective_difficulty() >= 3.0
+    }
+
+    /// The per-tick AI context every NPC's own behaviour reads from — pulled out of `tick_npcs`
+    /// into its own method so it can be tested directly (a Journey world's `DifficultySlider`
+    /// reaching `expert` here, for instance) rather than only indirectly through a full AI tick.
+    fn ai_conditions(&self, biome: crate::game::spawn::Biome) -> crate::game::ai::Conditions {
+        crate::game::ai::Conditions {
+            blood_moon: self.world.blood_moon,
+            day: self.world.day_time,
+            eclipse: self.world.eclipse,
+            raining: self.world.raining,
+            windy: self.weather.windy(),
+            crimson: self.world.crimson,
+            snow: biome == crate::game::spawn::Biome::Snow,
+            jungle: biome == crate::game::spawn::Biome::Jungle,
+            wind: self.weather.wind,
+            desert: biome == crate::game::spawn::Biome::Desert,
+            sandstorm: self.weather.sandstorm,
+            surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
+            // `Main.expertMode` itself — `Difficulty >= Expert`, not a raw game-mode check, so a
+            // Journey world's `DifficultySlider` reaches AI branches that ask this too.
+            expert: self.is_expert(),
+            hardmode: self.world.progress.hard_mode,
+            world_size: (self.world.width(), self.world.height()),
+        }
+    }
+
     /// Module 4: Journey mode powers. See [`crate::game::journey`]'s own module doc for exactly
     /// which of vanilla's fifteen this covers.
     ///
-    /// Takes no `slot`: nothing here is per-sender yet. Real vanilla's `PowerPermissionLevel` (an
-    /// operator-configurable "who may flip this" gate — not modelled here, see this function's own
-    /// comment below) is the only thing that would need one, whenever it lands.
+    /// `slot` is only used by the three per-player powers, and only ever to *override* whatever
+    /// player index the wire carried — `APerPlayerTogglePower`/`APerPlayerSliderPower`'s own
+    /// `DeserializeNetMessage` does the identical substitution on a dedicated server
+    /// (`Main.netMode == 2`), which is why the proto layer discards that byte entirely rather than
+    /// handing it up: a client cannot toggle Godmode for somebody else by lying about which slot
+    /// it is. No permission-level check yet for any power (`PowerPermissionLevel` — real vanilla
+    /// lets an operator configure who may flip each power, `journeypermission_<name>` in its own
+    /// config) — every connected player may use every power this server models, disclosed rather
+    /// than silently assumed.
     fn on_creative_power(
         &mut self,
+        slot: u8,
         message: net_module::CreativePowerMessage,
     ) -> terrustia_proto::Result<()> {
         use net_module::{CreativePowerMessage, power};
@@ -10408,11 +10499,6 @@ impl GameServer {
                     self.set_time(day_time, time)?;
                 }
             }
-            // No permission-level check yet (`PowerPermissionLevel` — real vanilla lets an
-            // operator configure who may flip each power, `journeypermission_<name>` in its own
-            // config). Every connected player may toggle these for now, disclosed rather than
-            // silently assumed — see `journey.rs`'s own module doc for the fuller list of what
-            // this slice does and does not cover.
             CreativePowerMessage::Toggle(id, enabled) => {
                 if self.journey.set(id, enabled)
                     && let Ok(frame) = net_module::creative_power_toggle(id, enabled)
@@ -10424,9 +10510,11 @@ impl GameServer {
                     self.broadcast(frame, None);
                 }
             }
-            // Three real, different effects behind the same wire shape:
-            // - `ModifyTimeRate`: stored (`journey.time_rate_slider`), read every tick by
-            //   `tick()`'s own `journey.time_rate()` call.
+            // Four real, different effects behind the same wire shape:
+            // - `ModifyTimeRate`/`Difficulty`: stored (`journey.time_rate_slider`/
+            //   `difficulty_slider`), read every tick (`tick()`'s own `journey.time_rate()` call)
+            //   or on demand (`effective_difficulty()`, called wherever this server used to read
+            //   `world.game_mode` directly for anything difficulty-scaled).
             // - `ModifyWind`/`ModifyRain`: applied straight to `self.weather` and forgotten —
             //   neither is `_syncToJoiningPlayers` nor `IPersistentPerWorldContent` in source (see
             //   `journey.rs`'s own module doc), so there is nothing to hold onto here at all.
@@ -10434,6 +10522,10 @@ impl GameServer {
                 let applied = match id {
                     power::MODIFY_TIME_RATE => {
                         self.journey.time_rate_slider = value;
+                        true
+                    }
+                    power::DIFFICULTY => {
+                        self.journey.difficulty_slider = value;
                         true
                     }
                     power::MODIFY_WIND => {
@@ -10468,6 +10560,39 @@ impl GameServer {
                 };
                 if applied && let Ok(frame) = net_module::creative_power_slider(id, value) {
                     self.broadcast(frame, None);
+                }
+            }
+            // `Godmode`/`FarPlacementRange`. `slot` — the real sender, never the wire's own
+            // (discarded) player-index byte — is both what gets toggled and, once accepted, what
+            // the confirmation names: exactly `SetEnabledState`'s own
+            // `NetManager.Instance.Broadcast` of the same `SyncOnePlayer` shape to everyone,
+            // toggling player included (its own client waits to be told, same as the shared
+            // toggles above).
+            CreativePowerMessage::PerPlayerToggle(id, enabled) => {
+                let applied = match id {
+                    power::GODMODE => {
+                        self.journey.set_godmode(slot, enabled);
+                        true
+                    }
+                    power::FAR_PLACEMENT_RANGE => {
+                        self.journey.set_far_placement_range(slot, enabled);
+                        true
+                    }
+                    _ => false,
+                };
+                if applied
+                    && let Ok(frame) =
+                        net_module::creative_power_toggle_for_player(id, slot, enabled)
+                {
+                    self.broadcast(frame, None);
+                }
+            }
+            // `SpawnRate`. Stored for `slot` only — real vanilla's own `DeserializeNetMessage` has
+            // no broadcast branch here at all (unlike the toggle shape above): another player's
+            // personal spawn-rate preference is never anyone else's business, nothing to relay.
+            CreativePowerMessage::PerPlayerSlider(id, value) => {
+                if id == power::SPAWN_RATE {
+                    self.journey.set_spawn_rate_slider(slot, value);
                 }
             }
         }
@@ -10786,7 +10911,7 @@ impl GameServer {
             return;
         }
         // Expert and above count double.
-        let expert = self.world.game_mode >= 1;
+        let expert = self.is_expert();
         if let Some(wave) = self.army.note_kill(npc_type, expert) {
             if self.army.won() {
                 // Winning does not end the event here: the crystal plays it out first, and the
@@ -11001,6 +11126,7 @@ impl GameServer {
             &self.npcs,
             &self.players,
             &events,
+            &self.journey,
             &mut self.rng,
             self.ticks,
         );
@@ -11387,6 +11513,424 @@ mod modify_time_rate {
             moved_sped, 24,
             "one tick at the slider's top should move the clock 24 real ticks' worth"
         );
+    }
+}
+
+/// Journey mode's `Godmode` actually blocks the one damage path this server decides on a
+/// player's behalf — `hurt_player`'s own gate, mirroring the effect (not the client-side
+/// mechanism) of `creativeGodMode` in source. Unconditional on the world's own difficulty,
+/// deliberately unlike `FarPlacementRange`/`SpawnRate` below: `Player.cs`'s own
+/// `creativeGodMode = true;` assignment has no `difficulty == 3` guard around it at all.
+#[cfg(test)]
+mod godmode {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "godmode probe")
+    }
+
+    /// The receiver has to stay alive for as long as the caller keeps using `server` — `broadcast`
+    /// (`hurt_player`'s own `PlayerHurt`/`PlayerDeath`) removes a player whose send fails, and a
+    /// dropped receiver closes the channel immediately regardless of its buffer size, not merely
+    /// once that buffer fills. Returned rather than silently kept alive inside this function,
+    /// which would only postpone the drop to *this* function's own return, not the caller's use.
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        player.life = 100;
+        player.life_max = 100;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    #[test]
+    fn godmode_takes_no_damage() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.journey.set_godmode(0, true);
+
+        server.hurt_player(
+            0,
+            9999,
+            1,
+            terrustia_proto::hurt::DeathReason::from_npc(0),
+            0,
+        );
+
+        assert_eq!(
+            server.players[0].as_ref().unwrap().life,
+            100,
+            "life should be untouched while godmode is on"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_player_takes_damage_normally() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        // godmode left off — the control case, so the test above is proving something rather
+        // than passing regardless of whether the gate exists at all.
+
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+
+        assert_eq!(server.players[0].as_ref().unwrap().life, 70);
+    }
+
+    #[test]
+    fn turning_godmode_off_again_lets_damage_through() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.journey.set_godmode(0, true);
+        server.hurt_player(
+            0,
+            9999,
+            1,
+            terrustia_proto::hurt::DeathReason::from_npc(0),
+            0,
+        );
+        assert_eq!(server.players[0].as_ref().unwrap().life, 100, "still on");
+
+        server.journey.set_godmode(0, false);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        assert_eq!(server.players[0].as_ref().unwrap().life, 70);
+    }
+
+    #[test]
+    fn godmode_for_one_player_does_not_protect_another() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let (out_tx, _other_rx) = mpsc::channel(16);
+        let mut other = Player::new(1, "127.0.0.1:2".parse().unwrap(), out_tx);
+        other.state = ConnState::Playing;
+        other.life = 100;
+        other.life_max = 100;
+        server.players[1] = Some(other);
+
+        server.journey.set_godmode(0, true);
+        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+
+        assert_eq!(
+            server.players[1].as_ref().unwrap().life,
+            70,
+            "slot 1 was never given godmode"
+        );
+    }
+}
+
+/// Journey mode's `FarPlacementRange` — a misleading name inherited from source; both of its two
+/// real vanilla uses (`Player.cs:35212`/`35440`) are about item *pickup* range, not tile placement
+/// at all (see `tick_items`'s own comment) — extends how far an item can be reserved for a player,
+/// by exactly 240 pixels, and only in a world whose own difficulty is literally Journey
+/// (`world.game_mode == 3`), matching source's own `difficulty == 3` guard on both sites.
+#[cfg(test)]
+mod far_placement_range {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::ItemStack;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "far placement probe")
+    }
+
+    /// Same shape as `godmode`'s own `with_one_player` — the receiver has to outlive the tick
+    /// call, for the same reason (`broadcast` removes a player whose send fails).
+    fn with_one_player_at(
+        mut server: GameServer,
+        position: (f32, f32),
+    ) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        player.position = position;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    fn a_coin() -> ItemStack {
+        ItemStack {
+            id: 71, // Copper Coin
+            prefix: 0,
+            stack: 1,
+        }
+    }
+
+    #[test]
+    fn extends_pickup_range_by_exactly_two_hundred_forty_pixels_in_a_journey_world() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3; // Journey
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        // Within the boosted range (400 + 240 = 640) but outside the ordinary one — the only
+        // distance this test is actually about.
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            server.items.get(index).unwrap().is_reserved(),
+            "should have been reserved for the player once the range was extended"
+        );
+    }
+
+    #[test]
+    fn does_not_extend_range_without_the_power_enabled() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3;
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        // far_placement_range left off — the control case, so the test above is proving
+        // something rather than passing regardless of whether the extension exists at all.
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            !server.items.get(index).unwrap().is_reserved(),
+            "at ordinary range this item should never have been reserved at all"
+        );
+    }
+
+    /// The power has no effect at all outside a Journey world — `Player.cs`'s own two real uses
+    /// both gate on `difficulty == 3` before ever reading it, so an implementation that skipped
+    /// that gate would extend pickup range on every world, not just Journey ones.
+    #[test]
+    fn has_no_effect_outside_a_journey_world() {
+        let server = GameServer::new(Config::default(), tiny_world()); // game_mode 0: ordinary
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            !server.items.get(index).unwrap().is_reserved(),
+            "an ordinary-difficulty world should use the plain range regardless of the power"
+        );
+    }
+
+    #[test]
+    fn an_item_beyond_even_the_extended_range_is_still_out_of_reach() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3;
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        let index = server.items.spawn(a_coin(), (700.0, 0.0)).unwrap(); // past 400 + 240
+
+        server.tick_items();
+
+        assert!(!server.items.get(index).unwrap().is_reserved());
+    }
+}
+
+/// Journey mode's `Difficulty` — real vanilla's `Main.Difficulty` is the single float every
+/// difficulty-scaled system in source actually reads (`effective_difficulty`'s own doc), so this
+/// module pins that a Journey world's slider actually reaches every one of the call sites that
+/// used to read `world.game_mode` directly, one test per site — not just that the accessor itself
+/// computes the right number.
+///
+/// A genuine side-finding along the way, not something introduced by this change: five of those
+/// call sites (`ai_conditions`'s `expert`, `drop_loot`'s `expert`/`master`, `apply_touch_debuffs`,
+/// `note_army_kill`, `note_moon_kill`) read `world.game_mode >= 1`/`>= 2` directly — and `3 >= 1`
+/// and `3 >= 2` are both true, so a Journey world (`game_mode == 3`) was *already* silently read as
+/// full expert-and-master for every one of these before this module existed at all, regardless of
+/// the gentler `0.5` difficulty `of_game_mode` correctly gave it for NPC life/damage. Real vanilla
+/// never has this inconsistency, because `Main.Difficulty` is the one thing everything reads —
+/// `expertMode`/`masterMode` are just `Difficulty >= 2`/`>= 3` on it, and a Journey world's
+/// `Difficulty` (0.5 by default, whether or not the slider override is even active — `GameMode ==
+/// 3` matches neither of `Main.Difficulty`'s own `GameMode == 1`/`== 2` fallback branches) is below
+/// both thresholds. Routing every site through `effective_difficulty`/`is_expert`/`is_master`
+/// fixes this as a side effect of giving the slider anywhere to reach at all.
+#[cfg(test)]
+mod difficulty_slider {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "difficulty slider probe")
+    }
+
+    fn journey_at(slider: f32) -> GameServer {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3;
+        server.journey.difficulty_slider = slider;
+        server
+    }
+
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    #[test]
+    fn outside_a_journey_world_the_slider_is_ignored() {
+        for game_mode in [0u8, 1, 2] {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.world.game_mode = game_mode;
+            server.journey.difficulty_slider = 1.0; // set, but should never be read
+            assert_eq!(
+                server.effective_difficulty(),
+                terrustia_proto::difficulty::of_game_mode(game_mode),
+                "game_mode {game_mode} must ignore the slider entirely"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untouched_journey_world_keeps_journeys_own_old_fixed_difficulty() {
+        let server = journey_at(0.0);
+        assert_eq!(server.effective_difficulty(), 0.5);
+        assert!(!server.is_expert(), "a fresh Journey world is not expert");
+        assert!(!server.is_master(), "a fresh Journey world is not master");
+    }
+
+    #[test]
+    fn moving_the_slider_to_its_top_makes_a_journey_world_read_as_master() {
+        let server = journey_at(1.0);
+        assert_eq!(server.effective_difficulty(), 3.0);
+        assert!(server.is_expert());
+        assert!(server.is_master());
+    }
+
+    /// The main chokepoint (`tick()`'s own `let difficulty = self.effective_difficulty();`):
+    /// NPC life scaling. A zombie's `life_max` should reflect the slider's own continuous value,
+    /// not the fixed `0.5` a Journey world always used to be stuck with. `life_multiplier` is a
+    /// single linear segment from `(0.5, 0.5)` to `(4.0, 4.0)` — i.e. the identity function on
+    /// this range — so 0.5x to 3.0x should be a clean 6x, modulo the `as i32` truncation each
+    /// scaling step already applies (real vanilla's own `NPC.ScaleStats` truncates too), which is
+    /// why this checks a wide, unambiguous margin rather than an exact ratio.
+    #[test]
+    fn the_npc_scaling_chokepoint_reflects_a_moved_slider() {
+        const ZOMBIE: u16 = 3;
+        let mut gentle = journey_at(0.0);
+        gentle.tick();
+        let index = gentle.npcs.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
+        let gentle_life = gentle.npcs.get(index).unwrap().life_max;
+
+        let mut fierce = journey_at(1.0);
+        fierce.tick();
+        let index = fierce.npcs.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
+        let fierce_life = fierce.npcs.get(index).unwrap().life_max;
+
+        assert!(
+            fierce_life >= gentle_life * 5,
+            "0.5x to 3.0x should be roughly a 6x jump: gentle={gentle_life}, fierce={fierce_life}"
+        );
+    }
+
+    /// Dryad's Bane borrows the same difficulty curve as town NPC damage
+    /// (`dryad_bane_rate`/`buffs::town_npc_damage_multiplier`) — a separate call site from the NPC
+    /// scaling chokepoint above, reached through `self.effective_difficulty()` directly rather
+    /// than through `self.npcs.set_scaling`. Comparing classic-equivalent (slider 0.33) against
+    /// master (slider 1.0) rather than journey's own default (slider 0.0) against master: the
+    /// curve's own real shape (`the_difficulty_curve_hits_its_keys` in `buffs.rs`) peaks at
+    /// journey (2.0x) and dips before master (1.75x) — a real, pre-existing, already-pinned curve
+    /// shape, not something this change introduced, but the wrong pair to assert "goes up" on.
+    #[test]
+    fn dryad_banes_rate_reflects_a_moved_slider() {
+        let classic_equivalent = journey_at(0.33).dryad_bane_rate();
+        let master = journey_at(1.0).dryad_bane_rate();
+        assert_eq!(
+            classic_equivalent, 4,
+            "difficulty 1.0: base 4 * multiplier 1.0"
+        );
+        assert_eq!(
+            master, 7,
+            "difficulty 3.0: base 4 * multiplier 1.75, truncated"
+        );
+        assert!(master > classic_equivalent);
+    }
+
+    /// `ai_conditions`'s own `expert` field, which town NPC combat (and every other AI branch that
+    /// asks) reads instead of a raw game-mode check.
+    #[test]
+    fn ai_conditions_expert_reflects_a_moved_slider() {
+        let biome = crate::game::spawn::Biome::Forest;
+        assert!(!journey_at(0.0).ai_conditions(biome).expert);
+        assert!(journey_at(1.0).ai_conditions(biome).expert);
+    }
+
+    /// `drop_loot`'s `Conditions.expert` — a King Slime's treasure bag (item 3318) is an
+    /// unconditional expert-only drop (`conditional_drops::conditional`'s own `always(bag)`), so
+    /// its presence or absence is a clean, RNG-free signal.
+    #[test]
+    fn drop_loots_expert_condition_reflects_a_moved_slider() {
+        const KING_SLIME: u16 = 50;
+        const TREASURE_BAG: i32 = 3318;
+
+        let mut gentle = journey_at(0.0);
+        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        assert!(
+            !gentle
+                .items
+                .iter()
+                .any(|(_, it)| it.item.id == TREASURE_BAG),
+            "a fresh Journey world is not expert, so no bag"
+        );
+
+        let mut fierce = journey_at(1.0);
+        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        assert!(
+            fierce
+                .items
+                .iter()
+                .any(|(_, it)| it.item.id == TREASURE_BAG),
+            "the slider at its top is expert, so the bag should drop"
+        );
+    }
+
+    /// `apply_touch_debuffs`'s own `expert` gate — npc 222 (Queen Bee) always (`one_in: 1`) lands
+    /// an expert-only Poisoned on touch (`touch_debuffs::POISONED_IN_EXPERT`).
+    #[test]
+    fn apply_touch_debuffs_expert_gate_reflects_a_moved_slider() {
+        const QUEEN_BEE: u16 = 222;
+
+        let (mut gentle, mut gentle_rx) = with_one_player(journey_at(0.0));
+        gentle.apply_touch_debuffs(0, QUEEN_BEE);
+        assert!(
+            gentle_rx.try_recv().is_err(),
+            "a fresh Journey world is not expert, so no buff should be sent"
+        );
+
+        let (mut fierce, mut fierce_rx) = with_one_player(journey_at(1.0));
+        fierce.apply_touch_debuffs(0, QUEEN_BEE);
+        assert!(
+            fierce_rx.try_recv().is_ok(),
+            "the slider at its top is expert, so the buff should be sent"
+        );
+    }
+
+    /// `note_army_kill`'s own `expert` local — a plain Old One's Army goblin (any id in
+    /// `army::belongs`'s range) is worth double the kill points once expert.
+    #[test]
+    fn note_army_kill_expert_doubling_reflects_a_moved_slider() {
+        const A_PLAIN_ARMY_ENEMY: u16 = 552;
+
+        let mut gentle = journey_at(0.0);
+        gentle.army.start(crate::game::army::Tier::One, (0, 0));
+        gentle.note_army_kill(A_PLAIN_ARMY_ENEMY);
+        assert_eq!(gentle.army.kills, 1, "not expert, so one plain kill");
+
+        let mut fierce = journey_at(1.0);
+        fierce.army.start(crate::game::army::Tier::One, (0, 0));
+        fierce.note_army_kill(A_PLAIN_ARMY_ENEMY);
+        assert_eq!(fierce.army.kills, 2, "expert doubles a plain kill");
+    }
+
+    /// `note_moon_kill`'s own `is_expert()`/`is_master()` — the top of the slider is master, worth
+    /// 2.5x a kill rather than the classic 1x a fresh Journey world reads as.
+    #[test]
+    fn note_moon_kill_scaling_reflects_a_moved_slider() {
+        const A_PUMPKIN_MOON_SCARECROW: u16 = 305; // worth 1 point, from moons.rs's own table
+
+        let mut gentle = journey_at(0.0);
+        gentle.moon.start(crate::game::moons::Moon::Pumpkin);
+        gentle.note_moon_kill(A_PUMPKIN_MOON_SCARECROW);
+        assert_eq!(gentle.moon.points, 1.0, "classic scale is 1x");
+
+        let mut fierce = journey_at(1.0);
+        fierce.moon.start(crate::game::moons::Moon::Pumpkin);
+        fierce.note_moon_kill(A_PUMPKIN_MOON_SCARECROW);
+        assert_eq!(fierce.moon.points, 2.5, "master scale is 2.5x");
     }
 }
 

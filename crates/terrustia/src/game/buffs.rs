@@ -726,7 +726,12 @@ pub struct BossesDowned {
 }
 
 /// Work out the Dryad's Bane rate for a world at this point in its progression.
-pub fn dryad_bane_dps(downed: &BossesDowned, game_mode: i32, get_good: bool) -> i32 {
+///
+/// `difficulty` is the same continuous number `terrustia_proto::difficulty::of_game_mode`
+/// produces (0.5 journey, 1 classic, 2 expert, 3 master) — continuous rather than a raw game mode
+/// so a Journey world's `DifficultySlider` reaches this too (`server.rs`'s `effective_difficulty`
+/// is the accessor every caller should use to get it).
+pub fn dryad_bane_dps(downed: &BossesDowned, difficulty: f32, get_good: bool) -> i32 {
     let mut base = 4.0f32;
     let mut scale = 1.0f32;
     for (yes, by) in [
@@ -752,22 +757,16 @@ pub fn dryad_bane_dps(downed: &BossesDowned, game_mode: i32, get_good: bool) -> 
     if downed.infected_seed {
         base *= 2.0;
     }
-    (base * scale * town_npc_damage_multiplier(game_mode, get_good)) as i32
+    (base * scale * town_npc_damage_multiplier(difficulty, get_good)) as i32
 }
 
 /// How much harder a town NPC — and the Dryad's Bane, which borrows the same curve — hits on
 /// each difficulty. `GameDifficultyData.TownNPCDamageMultiplier`.
 ///
 /// A piecewise-linear curve over the difficulty number rather than a table, because Ravaged adds
-/// one to that number and can push it past the named levels.
-fn town_npc_damage_multiplier(game_mode: i32, get_good: bool) -> f32 {
-    // Journey is 0.5, classic 1, expert 2, master 3, and Ravaged adds one to whatever it is.
-    let mut difficulty = match game_mode {
-        1 => 2.0,
-        2 => 3.0,
-        3 => 0.5,
-        _ => 1.0,
-    };
+/// one to that number and can push it past the named levels — and, now, because a Journey world's
+/// `DifficultySlider` can land anywhere continuously between the four named levels too.
+fn town_npc_damage_multiplier(mut difficulty: f32, get_good: bool) -> f32 {
     if get_good {
         difficulty += 1.0;
     }
@@ -1055,14 +1054,33 @@ mod tests {
     /// The difficulty curve matches the game's keys at every named level.
     #[test]
     fn the_difficulty_curve_hits_its_keys() {
-        assert_eq!(town_npc_damage_multiplier(3, false), 2.0, "journey");
-        assert_eq!(town_npc_damage_multiplier(0, false), 1.0, "classic");
-        assert_eq!(town_npc_damage_multiplier(1, false), 1.5, "expert");
-        assert_eq!(town_npc_damage_multiplier(2, false), 1.75, "master");
+        assert_eq!(town_npc_damage_multiplier(0.5, false), 2.0, "journey");
+        assert_eq!(town_npc_damage_multiplier(1.0, false), 1.0, "classic");
+        assert_eq!(town_npc_damage_multiplier(2.0, false), 1.5, "expert");
+        assert_eq!(town_npc_damage_multiplier(3.0, false), 1.75, "master");
         assert_eq!(
-            town_npc_damage_multiplier(2, true),
+            town_npc_damage_multiplier(3.0, true),
             2.0,
             "ravaged master reaches the top of the curve"
+        );
+    }
+
+    /// A Journey world's `DifficultySlider` can land anywhere continuously between the named
+    /// levels — proving that requires a value the four named `game_mode`s could never have
+    /// produced (2.5 sits exactly between expert's 2.0 and master's 3.0), not just relabelled
+    /// versions of the same four fixed points the test above already covers.
+    #[test]
+    fn a_slider_value_between_named_levels_interpolates_rather_than_snapping() {
+        let expert = town_npc_damage_multiplier(2.0, false);
+        let between = town_npc_damage_multiplier(2.5, false);
+        let master = town_npc_damage_multiplier(3.0, false);
+        assert!(
+            between > expert && between < master,
+            "2.5 must land strictly between expert ({expert}) and master ({master}), got {between}"
+        );
+        assert_eq!(
+            between, 1.625,
+            "the exact midpoint of the (2.0, 1.5)-(4.0, 2.0) segment"
         );
     }
 
@@ -1103,8 +1121,8 @@ mod tests {
             fishron: true,
             ..fresh
         };
-        assert_eq!(dryad_bane_dps(&fresh, 0, false), 4);
-        assert!(dryad_bane_dps(&late, 0, false) > dryad_bane_dps(&fresh, 0, false));
+        assert_eq!(dryad_bane_dps(&fresh, 1.0, false), 4);
+        assert!(dryad_bane_dps(&late, 1.0, false) > dryad_bane_dps(&fresh, 1.0, false));
     }
 
     /// A request to lift a buff is refused, because this version permits none.

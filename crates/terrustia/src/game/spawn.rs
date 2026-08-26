@@ -8,7 +8,7 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::tile_solid::solid;
 
-use super::{npc::NpcStore, player::Player};
+use super::{journey::JourneyPowers, npc::NpcStore, player::Player};
 use crate::world::World;
 
 /// Everything about the world that changes how fast things spawn.
@@ -763,6 +763,7 @@ pub fn try_spawn(
     npcs: &NpcStore,
     players: &[Option<Player>],
     events: &EventSpawns<'_>,
+    journey: &JourneyPowers,
     rng: &mut SmallRng,
     _ticks: u64,
 ) -> Vec<(u16, (f32, f32))> {
@@ -815,9 +816,23 @@ pub fn try_spawn(
             (player.position.1 / 16.0) as i32,
         );
 
+        // Journey mode's `SpawnRate`, gated on the world's own difficulty being literally
+        // Journey (`Main.IsJourneyMode` — every one of its five real vanilla call sites checks
+        // this before reading the power at all; the power itself has no effect outside a Journey
+        // world, even for a player who somehow has it set). Both real effects — a hard "spawns
+        // off" at the slider's exact floor, and the ordinary rate scaling otherwise — are checked
+        // here; only the *rate*, not the shared cap above, is adjusted per player — this
+        // function's own cap is already one number shared across every active player rather than
+        // vanilla's fully independent per-player `maxSpawns`, an existing simplification predating
+        // this power, not something worth restructuring just to extend one Journey slider into.
+        let journey_world = world.game_mode == 3;
+        if journey_world && journey.spawns_disabled(player.slot) {
+            continue;
+        }
+
         // The rate is the player's own, not one number for the world: two people in the same
         // world can be standing in a quiet forest and a busy cavern at the same moment.
-        let (rate, _) = rates(Conditions {
+        let (mut rate, _) = rates(Conditions {
             depth: depth_at(world, py),
             hard_mode: world.progress.hard_mode,
             day_time: world.day_time,
@@ -826,6 +841,10 @@ pub fn try_spawn(
             event_moon: world.pumpkin_moon || world.snow_moon,
             town_npcs: town_npcs_near(npcs, player.position),
         });
+        if journey_world {
+            let multiplier = journey.spawn_rate_multiplier(player.slot);
+            rate = ((rate as f32) / multiplier).max(1.0) as u32;
+        }
         if rng.random_range(0..rate.max(1)) != 0 {
             continue;
         }
@@ -1133,7 +1152,18 @@ mod tests {
         let world = test_world();
         let npcs = NpcStore::new();
         let mut rng = SmallRng::seed_from_u64(1);
-        assert!(try_spawn(&world, &npcs, &[], &quiet(), &mut rng, 0).is_empty());
+        assert!(
+            try_spawn(
+                &world,
+                &npcs,
+                &[],
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1154,7 +1184,15 @@ mod tests {
         // Run many ticks so the one-in-600 roll fires repeatedly.
         let mut seen = 0;
         for _ in 0..20_000 {
-            for (npc_type, (px, py)) in try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0) {
+            for (npc_type, (px, py)) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            ) {
                 seen += 1;
                 assert!(
                     terrustia_proto::npc_data::npc_stats(npc_type).is_some(),
@@ -1213,7 +1251,16 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut spawned = 0;
         for _ in 0..3600 {
-            spawned += try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0).len();
+            spawned += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            )
+            .len();
         }
         assert!(
             spawned >= 3,
@@ -1240,10 +1287,110 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(3);
         for _ in 0..5_000 {
             assert!(
-                try_spawn(&world, &npcs, &players, &quiet(), &mut rng, 0).is_empty(),
+                try_spawn(
+                    &world,
+                    &npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut rng,
+                    0
+                )
+                .is_empty(),
                 "spawned past the cap"
             );
         }
+    }
+
+    /// A single test player, `is_playing` and clear of the safe zone, with a real channel behind
+    /// it — the same construction `spawns_appear_outside_the_safe_zone_and_on_solid_ground` above
+    /// already uses.
+    fn one_player(world: &World) -> Vec<Option<Player>> {
+        let (tx, ty) = (world.spawn_x as i32, world.spawn_y as i32);
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (tx as f32 * 16.0, ty as f32 * 16.0);
+        vec![Some(player)]
+    }
+
+    /// Journey mode's `SpawnRate` at its exact floor (`0.0`) disables spawns outright for that
+    /// player — `GetShouldDisableSpawnsFor`'s own hard condition, not merely the 0.1× remap floor
+    /// `spawn_rate_multiplier` alone would give.
+    #[test]
+    fn spawn_rate_at_the_floor_disables_spawns_in_a_journey_world() {
+        let mut world = test_world();
+        world.game_mode = 3; // Journey
+        let npcs = NpcStore::new();
+        let players = one_player(&world);
+        let mut journey = JourneyPowers::default();
+        journey.set_spawn_rate_slider(0, 0.0);
+
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut seen = 0;
+        for _ in 0..20_000 {
+            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+        }
+        assert_eq!(seen, 0, "spawns should be disabled outright at the floor");
+    }
+
+    /// The same slider at its floor has no effect at all outside a Journey world — every one of
+    /// `SpawnRateSliderPerPlayerPower`'s five real vanilla call sites gates on `Main.IsJourneyMode`
+    /// before reading the power, and this is the one behaviour among the three per-player powers
+    /// where getting that gate wrong is easy to miss testing, since an ungated implementation would
+    /// otherwise look identical to a correct one on an ordinary difficulty.
+    #[test]
+    fn spawn_rate_has_no_effect_outside_a_journey_world() {
+        let world = test_world(); // game_mode 0: ordinary
+        let npcs = NpcStore::new();
+        let players = one_player(&world);
+        let mut journey = JourneyPowers::default();
+        journey.set_spawn_rate_slider(0, 0.0); // would disable spawns entirely, in a Journey world
+
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut seen = 0;
+        for _ in 0..20_000 {
+            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+        }
+        assert!(
+            seen > 0,
+            "an ordinary-difficulty world should spawn normally regardless of the slider"
+        );
+    }
+
+    /// Above the floor, the slider scales how often spawns roll — pinned as a real measured ratio
+    /// across many ticks, not just "some vs none": a 10× player should see roughly ten times as
+    /// many spawn events as a 1× player over the same window.
+    #[test]
+    fn spawn_rate_at_its_top_spawns_far_more_often_than_the_default_in_a_journey_world() {
+        let mut world = test_world();
+        world.game_mode = 3;
+        let npcs = NpcStore::new();
+        let players = one_player(&world);
+
+        let ordinary = JourneyPowers::default(); // 0.5 -> 1x, the default
+        let mut boosted = JourneyPowers::default();
+        boosted.set_spawn_rate_slider(0, 1.0); // the top of the slider -> 10x
+
+        const TICKS: usize = 200_000;
+        let mut ordinary_seen = 0;
+        let mut rng = SmallRng::seed_from_u64(21);
+        for _ in 0..TICKS {
+            ordinary_seen +=
+                try_spawn(&world, &npcs, &players, &quiet(), &ordinary, &mut rng, 0).len();
+        }
+        let mut boosted_seen = 0;
+        let mut rng = SmallRng::seed_from_u64(21);
+        for _ in 0..TICKS {
+            boosted_seen +=
+                try_spawn(&world, &npcs, &players, &quiet(), &boosted, &mut rng, 0).len();
+        }
+        assert!(
+            boosted_seen > ordinary_seen * 5,
+            "10x should spawn noticeably more often than 1x over {TICKS} ticks: \
+             {boosted_seen} boosted vs {ordinary_seen} ordinary"
+        );
     }
 }
 

@@ -2687,6 +2687,20 @@ fn creative_slider_request(power_id: u16, value: f32) -> Vec<u8> {
     frame(id::NET_MODULES, &body)
 }
 
+/// A per-player toggle request (`Godmode`/`FarPlacementRange`) — `APerPlayerTogglePower`'s
+/// `SyncOnePlayer` sub-message. `claimed_player_index` is exactly what a real client would put on
+/// the wire, faithfully honest or not — the whole point of the security test this exists for is
+/// that a dedicated server must never trust it.
+fn per_player_toggle_request(power_id: u16, claimed_player_index: u8, state: bool) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&terrustia_proto::net_module::MODULE_CREATIVE_POWERS.to_le_bytes());
+    body.extend_from_slice(&power_id.to_le_bytes());
+    body.push(1); // SubMessageType::SyncOnePlayer
+    body.push(claimed_player_index);
+    body.push(u8::from(state));
+    frame(id::NET_MODULES, &body)
+}
+
 /// All four of Journey mode's time-skip buttons set the clock to exactly the values vanilla's own
 /// `SpawnSkeletron`-adjacent `SkipToTime` calls use (`CreativePowers.cs`'s `StartDayImmediately`/
 /// `StartNoonImmediately`/`StartNightImmediately`/`StartMidnightImmediately`) — the same values
@@ -2933,6 +2947,55 @@ async fn only_the_time_rate_slider_syncs_to_a_late_joiner() {
     assert!(
         never_wind_or_rain.is_none(),
         "wind/rain must not be sent on join, only requested-and-relayed live"
+    );
+}
+
+/// A client cannot toggle Godmode for somebody else by lying about the player index on the wire —
+/// `APerPlayerTogglePower::DeserializeNetMessage`'s own dedicated-server substitution
+/// (`Main.netMode == 2`), proven end to end over a real socket rather than only at the unit level:
+/// `alice` claims to be toggling player 99, and the confirmation everyone actually sees names
+/// `alice`'s own real slot instead.
+#[tokio::test]
+async fn a_client_cannot_claim_to_be_a_different_player_when_toggling_godmode() {
+    let addr = start().await;
+    let mut alice = join(addr, "alice").await;
+    let mut witness = join(addr, "witness").await;
+    let real_slot = alice.slot();
+
+    alice
+        .send(&per_player_toggle_request(
+            terrustia_proto::net_module::power::GODMODE,
+            99, // a lie — not alice's real slot, and not a slot anyone occupies
+            true,
+        ))
+        .await
+        .unwrap();
+
+    let expected = terrustia_proto::net_module::CreativePowerMessage::PerPlayerToggle(
+        terrustia_proto::net_module::power::GODMODE,
+        true,
+    );
+    // `PerPlayerToggle` itself carries no player index — the confirmation's *own* wire player-index
+    // byte (not exposed through the decoded enum, so read directly here) is what this test is
+    // really about; matching the decoded variant first is enough to find the right frame.
+    let event = witness
+        .wait_for("the godmode toggle to relay", |e| {
+            matches!(
+                e,
+                Event::Other(f) if f.id == id::NET_MODULES
+                    && terrustia_proto::net_module::decode_creative_power(&f.payload) == Ok(Some(expected))
+            )
+        })
+        .await
+        .unwrap();
+    let Event::Other(f) = event else {
+        unreachable!()
+    };
+    // payload: module(2) + power_id(2) + sub_type(1) + player_index(1) + state(1)
+    let confirmed_slot = f.payload[5];
+    assert_eq!(
+        confirmed_slot, real_slot,
+        "the confirmation should name alice's own real slot ({real_slot}), not the claimed 99"
     );
 }
 

@@ -59,12 +59,18 @@ pub fn moon_points(npc_type: u16) -> i32 {
     }
 }
 
-/// Expert doubles what a kill is worth, master two and a half times it.
-pub fn moon_point_scale(game_mode: u8) -> f32 {
-    match game_mode {
-        2.. => 2.5,
-        1 => 2.0,
-        _ => 1.0,
+/// Expert doubles what a kill is worth, master two and a half times it —
+/// `NPC.GetMoonEventPointScalar`'s own `Main.masterMode`/`Main.expertMode` checks, not a raw
+/// `game_mode` read: both booleans are `Difficulty >= 3`/`>= 2` in real vanilla, so a Journey
+/// world's `DifficultySlider` reaches this the same way it reaches everything else that reads
+/// them (`server.rs`'s `is_expert()`/`is_master()`).
+pub fn moon_point_scale(expert: bool, master: bool) -> f32 {
+    if master {
+        2.5
+    } else if expert {
+        2.0
+    } else {
+        1.0
     }
 }
 
@@ -475,11 +481,11 @@ impl MoonState {
     ///
     /// A kill is worth points rather than one, and most of what is on the field during a moon is
     /// worth nothing at all — so what you choose to fight is what decides how far the night gets.
-    pub fn note_kill(&mut self, npc_type: u16, game_mode: u8) -> Option<i32> {
+    pub fn note_kill(&mut self, npc_type: u16, expert: bool, master: bool) -> Option<i32> {
         if !self.running() || self.wave >= MOON_LAST_WAVE {
             return None;
         }
-        let worth = moon_points(npc_type) as f32 * moon_point_scale(game_mode);
+        let worth = moon_points(npc_type) as f32 * moon_point_scale(expert, master);
         if worth <= 0.0 {
             return None;
         }
@@ -654,7 +660,7 @@ mod tests {
         let mut moon = MoonState::default();
         moon.start(Moon::Pumpkin);
         for _ in 0..24 {
-            moon.note_kill(305, 0);
+            moon.note_kill(305, false, false);
         }
         assert_eq!(moon.moon, Some(Moon::Pumpkin));
         assert!(moon.points > 0.0);
@@ -670,7 +676,7 @@ mod tests {
     fn a_moon_advances_on_points() {
         let mut moon = MoonState::default();
         assert!(
-            moon.note_kill(327, 0).is_none(),
+            moon.note_kill(327, false, false).is_none(),
             "nothing happens before it starts"
         );
 
@@ -678,10 +684,10 @@ mod tests {
         assert_eq!(moon.wave, 1);
         // Wave one asks for twenty-five points, and a scarecrow is worth one.
         for _ in 0..24 {
-            assert_eq!(moon.note_kill(305, 0), None);
+            assert_eq!(moon.note_kill(305, false, false), None);
         }
         assert_eq!(
-            moon.note_kill(305, 0),
+            moon.note_kill(305, false, false),
             Some(2),
             "the twenty-fifth turns it over"
         );
@@ -694,7 +700,7 @@ mod tests {
         let mut moon = MoonState::default();
         moon.start(Moon::Frost);
         for _ in 0..1000 {
-            moon.note_kill(3, 0);
+            moon.note_kill(3, false, false);
         }
         assert_eq!(moon.wave, 1);
         assert_eq!(moon.points, 0.0);
@@ -706,7 +712,7 @@ mod tests {
         let mut moon = MoonState::default();
         moon.start(Moon::Pumpkin);
         // A hundred and fifty points takes it from wave one straight through four.
-        let reached = moon.note_kill(327, 0);
+        let reached = moon.note_kill(327, false, false);
         assert_eq!(reached, Some(2), "a wave at a time, however big the kill");
         assert_eq!(moon.points, 0.0);
     }
@@ -718,16 +724,24 @@ mod tests {
         moon.start(Moon::Frost);
         moon.wave = MOON_LAST_WAVE;
         for _ in 0..500 {
-            assert_eq!(moon.note_kill(345, 1), None);
+            assert_eq!(moon.note_kill(345, true, false), None);
         }
         assert_eq!(moon.wave, MOON_LAST_WAVE);
     }
 
-    /// Expert doubles what a kill is worth, so a moon runs twice as far in one night.
+    /// Expert doubles what a kill is worth, master two and a half times it, so a moon runs
+    /// further in one night — and a Journey world's continuous `DifficultySlider` still only ever
+    /// reaches this as one of these two booleans (`is_expert()`/`is_master()`), never a raw
+    /// `game_mode`, which is exactly why this function takes bools and not a difficulty number.
     #[test]
     fn expert_doubles_the_score() {
-        assert_eq!(moon_point_scale(0), 1.0);
-        assert_eq!(moon_point_scale(1), 2.0);
-        assert_eq!(moon_point_scale(2), 2.5);
+        assert_eq!(moon_point_scale(false, false), 1.0, "classic");
+        assert_eq!(moon_point_scale(true, false), 2.0, "expert");
+        assert_eq!(moon_point_scale(true, true), 2.5, "master");
+        assert_eq!(
+            moon_point_scale(false, true),
+            2.5,
+            "master alone (unreachable via is_expert/is_master, but the function's own contract)"
+        );
     }
 }
