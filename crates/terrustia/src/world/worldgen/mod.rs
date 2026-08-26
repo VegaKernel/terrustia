@@ -25,11 +25,14 @@
 //! Ordering is load-bearing rather than tidy. Ore seeded before the caves would be hollowed back
 //! out; chests placed before the caves would have nowhere to stand.
 
+pub mod cave_flood;
 pub mod fallen_logs;
+pub mod gem_caves;
 pub mod lakes;
 pub mod layout;
 pub mod liquid_settle;
 pub mod manifest;
+pub mod oasis;
 pub mod passes;
 pub mod piles;
 pub mod place_object;
@@ -38,6 +41,7 @@ pub mod rand;
 pub mod scenery;
 pub mod shape_data;
 pub mod smooth;
+pub mod spider_caves;
 pub mod statue_gen;
 pub mod structure_map;
 pub mod structures;
@@ -96,6 +100,10 @@ pub struct Built {
     /// Tiles the closing smoothing pass turned into slopes, pounded half-tiles or cleared away.
     /// See [`smooth::Report`] for the breakdown; this is [`smooth::Report::total`].
     pub smoothed: usize,
+    /// The first Tier 2 batch: gem-lined pockets, desert oases, cobweb-lined spider caves.
+    pub gem_caves: usize,
+    pub oases: usize,
+    pub spider_caves: usize,
 }
 
 /// Generate a world of the given size.
@@ -184,6 +192,19 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         "liquid settling did not converge; a generated world would ship with moving water"
     );
 
+    // Desert oases, before anything below gets a chance to drop a decoration onto the desert
+    // surface. Its own siting check requires every active tile in a wide scan window to be plain
+    // sand, faithful to vanilla — where the same check works because vanilla's own `Oasis` pass
+    // (`WorldGen.cs:16339`) runs before essentially every decorative pass, including `Statues`
+    // (16962), `PotsGraveyardsAndBoulderPiles` (18123) and, notably, cacti themselves
+    // (`CactusPalmTreesAndCoral`, 21488 — the very end of vanilla's own pass list). This module
+    // first ran after `plant_undergrowth` (which plants cacti) and, later, after pots/statues too
+    // — both left desert columns carrying a decoration the scan window's "must be plain sand"
+    // check would fail on, and oases placed zero on every real world tried either way. Moving it
+    // here, before any of that runs, matches vanilla's own order and is the actual fix; nothing
+    // about `try_place` itself was wrong.
+    let oases = oasis::scatter(&mut world, &plan, &mut rand);
+
     // The jungle first: vines hang from grass, and until its mud was lined there was almost none.
     crate::world::trees::grass_the_jungle(&mut world);
     let trees = crate::world::trees::plant_forest(&mut world, &mut forest_rng);
@@ -212,6 +233,14 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // that outranks it for the same floor tile — same relative order vanilla's own `Traps` pass
     // has against `Piles`.
     let traps = traps::scatter(&mut world, &plan, &mut forest_rng);
+
+    // The rest of Tier 2's first batch: gem-lined pockets and cobweb-lined spider caves both site
+    // into the caves `structures::caves()` already carved (and, since that pass's own fix, left
+    // genuinely unwalled) — after every other cave decoration above so they don't overwrite a
+    // pot, statue or pile that got there first, matching the same reasoning traps' own ordering
+    // comment gives. Oases are placed earlier, above, alongside their own ordering rationale.
+    let gem_caves = gem_caves::scatter(&mut world, &plan, &mut rand);
+    let spider_caves = spider_caves::scatter(&mut world, &plan, &mut forest_rng);
 
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
@@ -253,6 +282,9 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         boulder_traps: traps.boulder_traps,
         sand_traps: traps.sand_traps,
         smoothed,
+        gem_caves,
+        oases,
+        spider_caves,
     };
     (world, built)
 }

@@ -138,7 +138,9 @@ fn large_pile_roll(ground: u16, y: i32, world_height: i32, rng: &mut SmallRng) -
 /// for a 2×1 pair. The two sizes use different floor checks in source: the 2×1 case requires
 /// `SolidTile2` under both tiles and refuses a boulder floor; the 1×1 case only requires
 /// `SolidTile2` under itself, with no boulder check at all.
-fn place_small_pile(world: &mut World, x: i32, y: i32, style: i32, size: i32) -> bool {
+/// `pub(crate)` rather than private: `spider_caves.rs` reuses this directly for the small piles
+/// `Spread.Spider` (`WorldGen.cs:3697`) scatters inside a spider cave.
+pub(crate) fn place_small_pile(world: &mut World, x: i32, y: i32, style: i32, size: i32) -> bool {
     if world.tile(x, y).liquid > 0 {
         return false;
     }

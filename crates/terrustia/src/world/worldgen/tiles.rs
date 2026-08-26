@@ -73,4 +73,8 @@ pub mod walls {
     pub const SANDSTONE: u16 = 187;
     pub const LIHZAHRD_BRICK: u16 = 87;
     pub const HARDENED_SAND: u16 = 216;
+    /// The six gem walls `Spread.Gem` (`WorldGen.cs:3592`) rolls from, `48 + randGem()` — in the
+    /// same 0-5 index order `randGemTile` (`WorldGen.cs:9707`) uses for its matching tile: 0
+    /// amethyst, 1 topaz, 2 sapphire, 3 emerald, 4 ruby, 5 diamond.
+    pub const GEM_WALLS: [u16; 6] = [48, 49, 50, 51, 52, 53];
 }

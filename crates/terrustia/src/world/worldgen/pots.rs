@@ -66,7 +66,10 @@ fn is_dungeon_wall(wall: u16) -> bool {
 ///
 /// `PlacePot`'s own clearance rule: both columns clear from `y-1` to `y`, and both columns solid,
 /// unsloped and not half-bricked at `y+1`.
-fn place_pot(world: &mut World, x: i32, y: i32, style: i32, rng: &mut SmallRng) -> bool {
+/// `pub(crate)` rather than private: `spider_caves.rs` reuses this directly for the pot
+/// `Spread.Spider` (`WorldGen.cs:3681`) scatters inside a spider cave, rather than re-deriving the
+/// same frame arithmetic a second time.
+pub(crate) fn place_pot(world: &mut World, x: i32, y: i32, style: i32, rng: &mut SmallRng) -> bool {
     for dx in 0..2 {
         for dy in -1..=0 {
             if world.tile(x + dx, y + dy).is_active() {

@@ -1,0 +1,326 @@
+//! Spider caves: a cobweb-lined pocket deep underground, with a scatter of pots, small piles and
+//! ceiling stalactites inside it.
+//!
+//! Transcribed from the `SpiderCaves` generation pass (`WorldGen.cs:17470-17542`) and
+//! `Spread.Spider` (`WorldGen.cs:3622-3729`), the wave flood-fill that decorates the pocket once a
+//! candidate site passes [`super::cave_flood::count`]'s size check — the same siting mechanism
+//! `gem_caves.rs` uses, with `lava_ok: true` here (vanilla's own `lavaOk: true` argument) since a
+//! spider cave is allowed to run into lava rather than being blocked by it outright.
+//!
+//! Uses `SmallRng` throughout rather than the shared `UnifiedRandom` other structural passes in
+//! this module take, because it calls straight into `pots::place_pot`/`piles::place_small_pile`,
+//! which already commit to `SmallRng` — this project's own convention already splits generation
+//! random state across the two (see `worldgen/mod.rs::build`'s own comment on `forest_rng`), since
+//! parity with vanilla's single shared `genRand` was never the goal here.
+//!
+//! **One real gap, disclosed rather than silently dropped**: vanilla's `Spread.Spider` has a
+//! 1-in-15 chance, when the floor-solid roll lands, of placing a buried chest (item 939, style 15)
+//! instead of the ordinary pot (`WorldGen.cs:3677`, `AddBuriedChest`). This project's chest
+//! placement (`structures::chests`) is a whole-world scatter pass, not a single-site placer, and
+//! building one just for this rare sub-case is out of scope for this pass — noted here for
+//! whoever next touches chest placement, not silently omitted. Everything else — the cobweb wall,
+//! the pot, the large and small piles, the stalactites — is transcribed.
+//!
+//! **Site-acceptance and `spread_spider`'s footprint both deviate from vanilla, for the same
+//! reason `gem_caves.rs` documents in full.** `structures::caves()` produces one large
+//! interconnected tunnel network, not vanilla's mix of small isolated pockets — so a candidate
+//! site here almost always saturates `cave_flood::count`'s 3500-tile search cap, and vanilla's own
+//! upper-bound rejection (reject anything that large) would reject nearly everywhere. Only the
+//! lower bound (500 tiles) and the mushroom-contamination check still gate acceptance.
+//! `spread_spider` itself is capped at the same 3500 tiles for the same reason `spread_gem` is:
+//! vanilla's wave has no cap of its own because vanilla's topology bounds it naturally, and that
+//! assumption doesn't hold here.
+
+use std::collections::HashSet;
+
+use rand::{Rng, rngs::SmallRng};
+use terrustia_proto::{Tile, tile_solid};
+
+use super::cave_flood;
+use super::layout::Layout;
+use super::piles::place_small_pile;
+use super::pots::place_pot;
+use crate::world::World;
+
+/// `WallID.CaveUnsafe` — the cobweb-adjacent cave wall `Spread.Spider` paints (`byte wall = 62;`,
+/// `WorldGen.cs:3628`). Not in `tiles::walls` yet; only this pass uses it so far.
+const SPIDER_WALL: u16 = 62;
+
+/// Tile 165, the stalactite `PlaceUncheckedStalactite` places — hangs from a solid ceiling, one
+/// tile wide, two tall.
+const STALACTITE: u16 = 165;
+
+/// `TileID.LargePiles2` — a *tile* id, not to be confused with the wall id `WallID.Sandstone`,
+/// which happens to share the same number (187) in a completely different id space. Vanilla's own
+/// `PlaceTile(item.X, item.Y, 187, ...)` call is placing this tile. `piles.rs` has its own private
+/// `LARGE_PILE_B` for the same id; not exported, so this is its own copy rather than a dependency
+/// on piles.rs's internals.
+const LARGE_PILE_TILE: u16 = 187;
+
+/// The `SpiderCaves` pass: scatter cobweb-lined pockets through the rock and cavern layers.
+///
+/// Returns how many were placed.
+pub fn scatter(world: &mut World, layout: &Layout, rng: &mut SmallRng) -> usize {
+    // The search bands below are `200..width-200` and `layout.rock+30..height-230`. Real,
+    // full-size worlds always clear both by a wide margin, but the small synthetic worlds several
+    // unrelated tests build (to keep persistence/gameplay tests fast) do not — the same shape of
+    // guard `oasis.rs::scatter` and `gem_caves.rs::scatter` need for their own search bands. Skip
+    // rather than let `random_range` panic on an inverted or empty range.
+    if layout.width <= 400 || world.height() <= layout.rock + 260 {
+        return 0;
+    }
+
+    let attempts = ((layout.width as f64) * 0.005) as i32;
+    let mut placed = 0usize;
+
+    for _ in 0..attempts {
+        let mut tries = 0;
+        let max_tries = layout.width / 2;
+        let mut x = rng.random_range(200..layout.width - 200);
+        let mut y = rng.random_range(layout.rock + 30..world.height() - 230);
+        let mut found = cave_flood::count(world, x, y, 3500, true);
+        while (found.tiles < 500 || found.shroom > 1) && tries < max_tries {
+            tries += 1;
+            x = rng.random_range(200..layout.width - 200);
+            y = rng.random_range(layout.rock + 30..world.height() - 230);
+            found = cave_flood::count(world, x, y, 3500, true);
+        }
+        if tries < max_tries {
+            spread_spider(world, x, y, rng);
+            placed += 1;
+        }
+    }
+    placed
+}
+
+/// `Spread.Spider`, transcribed. See the module doc for why this caps its own footprint rather
+/// than spreading until it meets solid rock, the way vanilla's does.
+fn spread_spider(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) {
+    const SPREAD_CAP: usize = 3500;
+    let mut seen: HashSet<(i32, i32)> = HashSet::new();
+    let mut wave = vec![(x, y)];
+
+    while !wave.is_empty() {
+        if seen.len() >= SPREAD_CAP {
+            break;
+        }
+        let this_wave = std::mem::take(&mut wave);
+        for (cx, cy) in this_wave {
+            if seen.len() >= SPREAD_CAP {
+                break;
+            }
+            if cx < 1 || cx >= world.width() - 1 || cy < 1 || cy >= world.height() - 1 {
+                continue;
+            }
+            if !seen.insert((cx, cy)) {
+                continue;
+            }
+            let tile = world.tile(cx, cy);
+            let solid_or_walled =
+                (tile.is_active() && tile_solid::solid(tile.block)) || tile.wall != 0;
+            if solid_or_walled {
+                if tile.is_active() && tile.wall == 0 {
+                    let mut t = tile;
+                    t.wall = SPIDER_WALL;
+                    world.set_tile(cx, cy, t);
+                }
+                continue;
+            }
+
+            let mut t = tile;
+            t.wall = SPIDER_WALL;
+            if !t.is_active() {
+                // `liquid_kind` is only meaningful once `liquid` is non-zero (see its own doc
+                // comment), so clearing `liquid` alone is enough to drain whatever was here.
+                t.liquid = 0;
+            }
+            world.set_tile(cx, cy, t);
+
+            if !world.tile(cx, cy).is_active() {
+                let floor = world.tile(cx, cy + 1);
+                let floor_solid = floor.is_active() && tile_solid::solid(floor.block);
+                if floor_solid && rng.random_range(0..3) == 0 {
+                    // Vanilla's 1-in-15 roll here is a buried chest instead of a pot
+                    // (`AddBuriedChest`, item 939, style 15) — not built here, see the module doc.
+                    if rng.random_range(0..15) != 0 {
+                        place_pot(world, cx, cy, 19 + rng.random_range(0..2), rng);
+                    }
+                }
+                if !world.tile(cx, cy).is_active() {
+                    let ceiling = world.tile(cx, cy - 1);
+                    let ceiling_solid = ceiling.is_active() && tile_solid::solid(ceiling.block);
+                    if ceiling_solid && rng.random_range(0..3) == 0 {
+                        place_stalactite(world, cx, cy, rng);
+                    } else if floor_solid {
+                        let style = 9 + rng.random_range(0..5);
+                        world.set_tile(cx, cy, Tile::framed(LARGE_PILE_TILE, style as i16 * 18, 0));
+                        if rng.random_range(0..3) == 0 {
+                            if !world.tile(cx, cy).is_active() {
+                                place_small_pile(world, cx, cy, 34 + rng.random_range(0..4), 1);
+                            }
+                            if !world.tile(cx, cy).is_active() {
+                                place_small_pile(world, cx, cy, 48 + rng.random_range(0..6), 0);
+                            }
+                        }
+                    }
+                }
+            }
+            for n in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
+                if !seen.contains(&n) {
+                    wave.push(n);
+                }
+            }
+        }
+    }
+}
+
+/// `PlaceUncheckedStalactite`, the `spiders: true` branch only (`WorldGen.cs:38735-38748`) —
+/// nothing in `Spread.Spider` calls the non-spider branch, so it is not transcribed here.
+fn place_stalactite(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) {
+    if world.tile(x, y).is_active() || world.tile(x, y + 1).is_active() {
+        return;
+    }
+    let variation = rng.random_range(0..3);
+    let frame_x = (108 + variation * 18) as i16;
+    let top = Tile::framed(STALACTITE, frame_x, 0);
+    let bottom = Tile::framed(STALACTITE, frame_x, 18);
+    world.set_tile(x, y, top);
+    world.set_tile(x, y + 1, bottom);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::rand::UnifiedRandom;
+    use super::super::tiles;
+    use super::*;
+    use rand::SeedableRng;
+
+    fn rock_block(width: i32, height: i32, rock: i32) -> (World, Layout) {
+        let mut world = World::empty(width, height, "spider-caves");
+        for x in 0..width {
+            for y in 0..height {
+                world.set_tile(x, y, Tile::block(tiles::STONE));
+            }
+        }
+        let mut layout_rand = UnifiedRandom::new(1);
+        let mut layout = Layout::plan(width, height, &mut layout_rand);
+        layout.rock = rock;
+        (world, layout)
+    }
+
+    #[test]
+    fn a_large_hollow_pocket_in_rock_gets_cobweb_walls() {
+        let (mut world, layout) = rock_block(1400, 1000, 300);
+        for x in 690..730 {
+            for y in 690..720 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(3);
+        let placed = scatter(&mut world, &layout, &mut rng);
+        assert!(
+            placed > 0,
+            "a well-formed 1200-tile pocket should take a spider cave"
+        );
+
+        let walled = (0..world.width())
+            .flat_map(|x| (0..world.height()).map(move |y| (x, y)))
+            .filter(|&(x, y)| world.tile(x, y).wall == SPIDER_WALL)
+            .count();
+        assert!(
+            walled > 0,
+            "a placed spider cave should leave cobweb walls behind"
+        );
+    }
+
+    #[test]
+    fn no_spider_cave_forms_where_every_pocket_is_too_small() {
+        let (mut world, layout) = rock_block(600, 500, 200);
+        let mut rng = SmallRng::seed_from_u64(9);
+        assert_eq!(scatter(&mut world, &layout, &mut rng), 0);
+    }
+
+    /// A real regression: the small synthetic worlds several unrelated tests build via the full
+    /// `build()` pipeline are smaller than this pass's own search bands assume, and
+    /// `random_range` panics on an inverted or empty range rather than returning something —
+    /// `world.height() - 230` going below `layout.rock + 30` (or `layout.width - 200` below
+    /// `200`) took down `world::wld_save`/`world::world::flag_tests` tests that never touch
+    /// spider caves directly, just by calling `build()` on a small world. Fails on the pre-fix
+    /// code (panics rather than returning `0`).
+    #[test]
+    fn a_world_too_small_for_the_search_bands_does_not_panic() {
+        // Width 1000 keeps `attempts` (`width * 0.005`) at 5, not 0 — a width small enough to
+        // zero out `attempts` would skip the loop entirely and never reach the panicking call,
+        // proving nothing. `height=200, rock=50` makes `layout.rock + 30` (80) exceed
+        // `world.height() - 230` (-30), the actual inverted-range shape that panicked.
+        let (mut world, layout) = rock_block(1000, 200, 50);
+        let mut rng = SmallRng::seed_from_u64(1);
+        assert_eq!(scatter(&mut world, &layout, &mut rng), 0);
+    }
+
+    /// The actual defect this module shipped with: `structures::caves()` produces one large,
+    /// genuinely-connected tunnel network rather than vanilla's small isolated pockets, so a
+    /// pocket this large is what a real generated world's candidate sites actually look like. Fails
+    /// on the pre-fix code (restoring the `>= 3500` check makes `placed` come back `0`).
+    #[test]
+    fn a_pocket_far_larger_than_the_old_upper_bound_is_still_accepted() {
+        let (mut world, layout) = rock_block(4200, 1000, 300);
+        for x in 100..4100 {
+            for y in 690..705 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(3);
+        let placed = scatter(&mut world, &layout, &mut rng);
+        assert!(
+            placed > 0,
+            "a large, well-connected, otherwise-valid pocket must not be rejected for its size \
+             alone — that rejection is what made every real generated world place zero"
+        );
+    }
+
+    /// [`spread_spider`]'s own cap: painting an unbounded distance down a long open corridor would
+    /// be the same bug relocated from siting to decoration.
+    #[test]
+    fn spread_spider_does_not_paint_an_unbounded_distance_down_a_long_corridor() {
+        let (mut world, layout) = rock_block(4200, 1000, 300);
+        for x in 100..4100 {
+            for y in 690..705 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(5);
+        let placed = scatter(&mut world, &layout, &mut rng);
+        assert!(
+            placed > 0,
+            "expected at least one spider cave in a long corridor"
+        );
+
+        let walled = (0..world.width())
+            .flat_map(|x| (0..world.height()).map(move |y| (x, y)))
+            .filter(|&(x, y)| world.tile(x, y).wall == SPIDER_WALL)
+            .count();
+        assert!(
+            walled > 0 && walled <= 3500 * placed,
+            "{walled} cobweb-walled tiles across {placed} pocket(s) — spread_spider's cap should \
+             keep each pocket's footprint at or under 3500 tiles, not paint the whole corridor"
+        );
+    }
+
+    #[test]
+    fn a_stalactite_needs_solid_rock_above_and_open_space_below() {
+        let mut world = World::empty(50, 50, "stalactite");
+        world.set_tile(10, 9, Tile::block(tiles::STONE));
+        let mut rng = SmallRng::seed_from_u64(1);
+        place_stalactite(&mut world, 10, 10, &mut rng);
+        assert!(
+            world.tile(10, 10).is_active(),
+            "should place with solid rock above"
+        );
+        assert!(
+            world.tile(10, 11).is_active(),
+            "the stalactite is two tiles tall"
+        );
+        assert_eq!(world.tile(10, 10).block, STALACTITE);
+    }
+}
