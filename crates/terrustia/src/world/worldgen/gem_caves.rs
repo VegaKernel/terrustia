@@ -184,12 +184,12 @@ pub fn scatter(
         let mut tries = 0;
         let mut x = rand.next_range(200, layout.width - 200);
         let mut y = rand.next_range(layout.rock + 30, world.height() - 230);
-        let mut found = cave_flood::count(world, x, y, 300, false);
+        let mut found = cave_flood::count(world, x, y, 300, false, false);
         while (found.tiles < 50 || found.lava > 0 || found.ice > 0) && tries < 1000 {
             tries += 1;
             x = rand.next_range(200, layout.width - 200);
             y = rand.next_range(layout.rock + 30, world.height() - 230);
-            found = cave_flood::count(world, x, y, 300, false);
+            found = cave_flood::count(world, x, y, 300, false, false);
         }
         if tries < 1000 {
             // `gemCave`: always one random gem, then each of the other five independently has a

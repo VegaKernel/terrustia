@@ -111,7 +111,7 @@ fn is_plain_block(t: Tile) -> bool {
 
 /// `WorldGen.SolidTile(int, int, bool noDoors = false)`, with `noDoors` always false — no call
 /// site in this pass ever passes `true`.
-fn solid_tile(world: &World, x: i32, y: i32) -> bool {
+pub(super) fn solid_tile(world: &World, x: i32, y: i32) -> bool {
     let t = world.tile(x, y);
     t.is_active()
         && solid(t.block)
@@ -123,7 +123,7 @@ fn solid_tile(world: &World, x: i32, y: i32) -> bool {
 
 /// `WorldGen.SolidOrSlopedTile`, `includePlatforms: false`: like [`solid_tile`], but a half-brick
 /// or sloped tile still counts.
-fn solid_or_sloped(world: &World, x: i32, y: i32) -> bool {
+pub(super) fn solid_or_sloped(world: &World, x: i32, y: i32) -> bool {
     let t = world.tile(x, y);
     t.is_active() && solid(t.block) && !solid_top(t.block) && !t.flags.has(TileFlags::ACTUATED)
 }
@@ -177,7 +177,7 @@ fn slope_tile(world: &mut World, x: i32, y: i32, slope: u8) -> bool {
 }
 
 /// `WorldGen.PoundTile`, generation-time behaviour only.
-fn pound_tile(world: &mut World, x: i32, y: i32) -> bool {
+pub(super) fn pound_tile(world: &mut World, x: i32, y: i32) -> bool {
     if !can_pound_tile(world, x, y) {
         return false;
     }
@@ -192,7 +192,7 @@ fn pound_tile(world: &mut World, x: i32, y: i32) -> bool {
 /// liquid untouched (vanilla's `KillTile` never touches either), and replicates the one
 /// generation-relevant side effect vanilla's version has — breaking hellstone below the underworld
 /// line fills the gap with lava.
-fn kill_tile(world: &mut World, layout: &Layout, x: i32, y: i32) -> bool {
+pub(super) fn kill_tile(world: &mut World, layout: &Layout, x: i32, y: i32) -> bool {
     let t = world.tile(x, y);
     if !t.is_active() || t.wall == UNBREAKABLE_BLOCK_WALL {
         return false;

@@ -26,6 +26,7 @@
 //! out; chests placed before the caves would have nowhere to stand.
 
 pub mod cave_flood;
+pub mod dirt_wall_cleanup;
 pub mod fallen_logs;
 pub mod floating_islands;
 pub mod gem_caves;
@@ -36,6 +37,7 @@ pub mod liquid_settle;
 pub mod living_trees;
 pub mod manifest;
 pub mod micro_biomes;
+pub mod moss;
 pub mod oasis;
 pub mod passes;
 pub mod piles;
@@ -52,10 +54,13 @@ pub mod structure_map;
 pub mod structures;
 pub mod surface_plants;
 pub mod terrain;
+pub mod thin_ice;
 pub mod tiles;
 pub mod traps;
 pub mod underground_cabins;
 pub mod underworld_ruins;
+pub mod wall_variety;
+pub mod waterfalls;
 
 pub use passes::compare_against;
 
@@ -144,6 +149,24 @@ pub struct Built {
     /// Granite-painted cavern pockets (a disclosed structural stand-in, not vanilla's real
     /// algorithm — see `micro_biomes`'s own module doc).
     pub granite: usize,
+    /// Wall cells stripped from the surface crust above open cave space (`DirtWallCleanup`).
+    pub dirt_wall_cleared: usize,
+    /// Tiles pounded into a half-brick lip by `Waterfalls`.
+    pub waterfalls: usize,
+    /// Breakable-ice tiles crusted over ice-biome pond surfaces (`FragileIceOverIceBiomeWater` —
+    /// distinct from [`Built::thin_ice`] above, which is the Tier 2 `ThinIceBiome` micro-biome
+    /// count; see `thin_ice.rs`'s own module doc on why the two are not the same pass).
+    pub fragile_ice: usize,
+    /// Cavern pockets painted with depth/biome wall variety (`CaveWallVariety`).
+    pub cave_wall_variety: usize,
+    /// Enclosed pockets filled with wall so they don't read as bottomless voids
+    /// (`CaveWallsInEnclosedSpaces`).
+    pub cave_walls_enclosed: usize,
+    /// Pockets flood-painted with moss plus isolated stone tiles converted to moss stone
+    /// (`MossAndMossCaves`).
+    pub moss_changed: usize,
+    /// Decorative overlay tiles hung off exposed moss surfaces (`LongMoss`).
+    pub long_moss: usize,
 }
 
 /// Generate a world of the given size.
@@ -191,6 +214,13 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
 
     structures::caves(&mut world, &plan, &mut rand);
     structures::ores(&mut world, &plan, &mut rand);
+
+    // Tier 3's `DirtWallCleanup` (`WorldGen.cs:15322`) runs here in vanilla's own pass order too —
+    // generation pass 39 of 105, well before `SmoothWorld` (53) and every decorative pass after it.
+    // It only strips wall near the surface crust above genuinely open cave space, so running it
+    // this early (right after the caves that create that open space, and the terrain fill that
+    // painted the wall in the first place) matches vanilla and needs nothing placed later.
+    let dirt_wall_cleared = dirt_wall_cleanup::scrub(&mut world, &plan, &mut rand);
 
     let orbs = structures::evil_chasms(&mut world, &plan, &heights, &mut rand);
     structures::dungeon(&mut world, &plan, &heights, &mut rand);
@@ -348,6 +378,23 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // before it decorates) and how `protects_tile_below` covers the difference.
     let smoothed = smooth::smooth(&mut world, &plan, &mut rand).total();
 
+    // A second Tier 3 wave, run after smoothing rather than before every other decorative pass:
+    // vanilla's own pass order puts every one of these *after* `SmoothWorld` (generation pass 53 of
+    // 105) — `Waterfalls` is 54, `FragileIceOverIceBiomeWater` 55, `CaveWallVariety` 56,
+    // `MossAndMossCaves` 65, `CaveWallsInEnclosedSpaces` 67, `LongMoss` 94 — unlike
+    // `DirtWallCleanup`/`GravitatingSandCleanup` (39/36), which run *before* it and are wired in
+    // above, near `terrain`/`structures::caves`. Since this project's own `smooth()` is already a
+    // deliberate reversal of vanilla's order (see its own doc comment just above), the honest
+    // choice is to keep it the true last *decorative-adjacent* step and run everything vanilla
+    // itself places after `SmoothWorld` in this same trailing wave, rather than interleaving these
+    // with the Tier 1/2 passes above and re-litigating where `smooth()` belongs.
+    let waterfalls = waterfalls::scatter(&mut world, &plan, &mut rand);
+    let fragile_ice = thin_ice::crust(&mut world, &plan);
+    let cave_wall_variety = wall_variety::variety(&mut world, &plan, &mut rand);
+    let cave_walls_enclosed = wall_variety::enclosed_spaces(&mut world, &plan, &mut rand);
+    let moss_changed = moss::scatter(&mut world, &plan, &mut rand);
+    let long_moss = moss::hang_long_moss(&mut world);
+
     let built = Built {
         lakes,
         trees,
@@ -393,6 +440,13 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         campsites: micro_biomes.campsites,
         marble: micro_biomes.marble,
         granite: micro_biomes.granite,
+        dirt_wall_cleared,
+        waterfalls,
+        fragile_ice,
+        cave_wall_variety,
+        cave_walls_enclosed,
+        moss_changed,
+        long_moss,
     };
     (world, built)
 }
@@ -436,6 +490,31 @@ mod tests {
 
     fn small() -> (World, Built) {
         build(2400, 900, "test", 1234)
+    }
+
+    /// Real Tier 3 counts on real generated worlds — not asserted, just printed, matching
+    /// `pyramids.rs`'s own `measure_on_real_worlds` precedent. Run with
+    /// `cargo test -p terrustia --lib worldgen::tests::measure_tier3_on_real_worlds -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_tier3_on_real_worlds() {
+        for seed in [999u64, 4242, 12345] {
+            let start = std::time::Instant::now();
+            let (_world, built) = build(SMALL_WIDTH, SMALL_HEIGHT, "measure-tier3", seed);
+            eprintln!(
+                "seed {seed}: dirt_wall_cleared={} waterfalls={} fragile_ice={} \
+                 cave_wall_variety={} cave_walls_enclosed={} moss_changed={} long_moss={} ({:?})",
+                built.dirt_wall_cleared,
+                built.waterfalls,
+                built.fragile_ice,
+                built.cave_wall_variety,
+                built.cave_walls_enclosed,
+                built.moss_changed,
+                built.long_moss,
+                start.elapsed()
+            );
+        }
     }
 
     /// A world has to hold every structure a playthrough needs, or the game cannot be finished

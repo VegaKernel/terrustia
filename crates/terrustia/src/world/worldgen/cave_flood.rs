@@ -13,6 +13,14 @@
 //! flood fill that decorates a pocket rather than just measuring it — see `gem_caves.rs` and
 //! `spider_caves.rs`, which each carry their own transcription of those rather than sharing this
 //! module, since the two do genuinely different work per tile.
+//!
+//! **`jungle` widened in for `wall_variety.rs`'s own second caller.** This doc comment used to say
+//! "no caller passes `jungle: true` for anything built so far" — `CaveWallsInEnclosedSpaces`'
+//! second loop (Tier 3) is the first that does. In vanilla's own `nextCount`, `jungle: true` skips
+//! the wall-blocks-the-fill and lava-blocks-the-fill checks entirely (both live inside
+//! `if (!jungle) { ... }` in source) — so with `jungle: true`, a walled or lava tile neither halts
+//! the fill nor saturates it to the cap; `lava_ok` becomes moot in that mode. Every pre-existing
+//! call site passes `jungle: false`, so nothing about their behaviour changes.
 
 use terrustia_proto::tile_solid;
 
@@ -36,7 +44,14 @@ pub struct CaveCount {
 /// this (300 for gem caves, 3500 for spider caves) — so an open pocket (an ocean, the underworld)
 /// cannot make this scan the whole world looking for a bound. Hitting the cap is itself the
 /// "reject this site" signal every caller reads off `.tiles`.
-pub fn count(world: &World, x: i32, y: i32, max_tiles: usize, lava_ok: bool) -> CaveCount {
+pub fn count(
+    world: &World,
+    x: i32,
+    y: i32,
+    max_tiles: usize,
+    lava_ok: bool,
+    jungle: bool,
+) -> CaveCount {
     let mut found = CaveCount::default();
     let mut seen: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
     let mut stack = vec![(x, y)];
@@ -55,14 +70,12 @@ pub fn count(world: &World, x: i32, y: i32, max_tiles: usize, lava_ok: bool) -> 
             continue;
         }
         let tile = world.tile(cx, cy);
-        if tile.wall != 0 {
-            // Only checked when not searching a jungle pocket — this fill never does (no caller
-            // passes `jungle: true` for anything built so far), so it is unconditional here.
+        if !jungle && tile.wall != 0 {
             found.tiles = max_tiles;
             break;
         }
         let is_lava = tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Lava;
-        if is_lava {
+        if is_lava && !jungle {
             found.lava += 1;
             if !lava_ok {
                 found.tiles = max_tiles;
@@ -111,7 +124,7 @@ mod tests {
                 world.set_tile(x, y, Tile::AIR);
             }
         }
-        let found = count(&world, 97, 97, 300, false);
+        let found = count(&world, 97, 97, 300, false, false);
         assert_eq!(
             found.tiles, 25,
             "a 5x5 open pocket should count all 25 tiles"
@@ -122,7 +135,7 @@ mod tests {
     fn a_pocket_touching_the_world_edge_saturates_to_the_cap() {
         let world = World::empty(50, 50, "flood-edge");
         // Everything open, so the fill runs straight off the edge of the world.
-        let found = count(&world, 25, 25, 300, false);
+        let found = count(&world, 25, 25, 300, false, false);
         assert_eq!(
             found.tiles, 300,
             "a fill that reaches the world edge must hit the cap"
@@ -135,7 +148,7 @@ mod tests {
         let mut walled = Tile::AIR;
         walled.wall = 1;
         world.set_tile(100, 100, walled);
-        let found = count(&world, 100, 100, 300, false);
+        let found = count(&world, 100, 100, 300, false, false);
         assert_eq!(
             found.tiles, 300,
             "a walled seed tile must saturate to the cap, per vanilla"
@@ -163,13 +176,13 @@ mod tests {
         lava.liquid_kind = terrustia_proto::Liquid::Lava;
         world.set_tile(100, 100, lava);
 
-        let blocked = count(&world, 97, 97, 300, false);
+        let blocked = count(&world, 97, 97, 300, false, false);
         assert_eq!(
             blocked.tiles, 300,
             "lava must saturate the fill when lava_ok is false"
         );
 
-        let allowed = count(&world, 97, 97, 300, true);
+        let allowed = count(&world, 97, 97, 300, true, false);
         assert!(
             allowed.tiles < 300 && allowed.lava >= 1,
             "lava_ok should let the fill continue through lava and still count it: {allowed:?}"

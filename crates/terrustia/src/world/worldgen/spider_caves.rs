@@ -78,12 +78,12 @@ pub fn scatter(world: &mut World, layout: &Layout, rng: &mut SmallRng) -> usize 
         let max_tries = layout.width / 2;
         let mut x = rng.random_range(200..layout.width - 200);
         let mut y = rng.random_range(layout.rock + 30..world.height() - 230);
-        let mut found = cave_flood::count(world, x, y, 3500, true);
+        let mut found = cave_flood::count(world, x, y, 3500, true, false);
         while (found.tiles < 500 || found.shroom > 1) && tries < max_tries {
             tries += 1;
             x = rng.random_range(200..layout.width - 200);
             y = rng.random_range(layout.rock + 30..world.height() - 230);
-            found = cave_flood::count(world, x, y, 3500, true);
+            found = cave_flood::count(world, x, y, 3500, true, false);
         }
         if tries < max_tries {
             spread_spider(world, x, y, rng);

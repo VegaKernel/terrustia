@@ -329,7 +329,15 @@ mod tests {
     /// most of `terrain.rs` — the real pipeline already has both.
     #[test]
     fn a_tree_grows_a_real_tall_trunk_with_walls_behind_it() {
-        let (world, built) = super::super::build(4200, 1200, "living-trees-test", 4242);
+        // Seed 999, not 4242: Tier 3 (`DirtWallCleanup`, wired into `build()` early, before every
+        // Tier 2 decorative pass) consumes real `rand` draws ahead of this pass, shifting the whole
+        // downstream sequence — the same kind of drift this project's own module doc already
+        // discloses as expected ("the same seed here and in Terraria produce different maps... not
+        // seed-identical"). Measured directly rather than assumed: seed 4242 now legitimately rolls
+        // zero living trees (itself a real, already-documented possible outcome — see this file's
+        // own Done-row measurement "0, 2, 1... an ordinary world can reasonably have none at all"),
+        // while seed 999 still reliably rolls two. Not a regression in `living_trees.rs` itself.
+        let (world, built) = super::super::build(4200, 1200, "living-trees-test", 999);
         assert!(
             built.living_trees > 0,
             "a real generated world should take at least one living tree at this seed"

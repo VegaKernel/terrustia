@@ -1012,8 +1012,13 @@ mod cave_wall_tests {
         );
     }
 
-    /// The same property, on a real generated world rather than a synthetic one — this is the
-    /// actual check that found the bug, not a stand-in for it.
+    /// The same property, at real world size with a real seed rather than the small hand-built
+    /// fixture above — this is the actual check that found the bug, not a stand-in for it.
+    /// **Updated for Tier 3**: originally ran the full `generate()` pipeline and sampled its final
+    /// output; now stops right after `terrain::fill` + `caves()`, the same two steps in the same
+    /// order `build()` itself runs — see the test's own body comment for why the full pipeline is
+    /// no longer the right thing to sample once `CaveWallVariety`/`CaveWallsInEnclosedSpaces`/
+    /// `MossAndMossCaves` exist.
     ///
     /// **This fix alone does not unblock `GemCaves`/`SpiderCaves`'s siting, and this test does not
     /// claim it does — see the module-level note above `hollow_no_wall` and the caller's own
@@ -1034,8 +1039,28 @@ mod cave_wall_tests {
     /// this task's scope — flagged, not attempted.
     #[test]
     fn a_real_generated_world_has_real_unwalled_open_cave_tiles() {
-        let world = super::super::generate(4200, 1200, "cave-wall-real", 4242);
-        let (from, to) = (i32::from(world.rock_layer) + 30, world.height() - 200);
+        // Sampled right after `terrain::fill` + `caves()` — the same two steps `build()` itself
+        // runs in this order — rather than the full `generate()` pipeline. Tier 3 landed since this
+        // test was first written (`CaveWallVariety`/`CaveWallsInEnclosedSpaces`/`MossAndMossCaves`,
+        // all wired in after `smooth()`, near the end of `build()`) legitimately re-walls a real
+        // fraction of the open cave network by design — that is the whole point of those three
+        // passes, not a regression of the fix this test guards. Sampling the *final* world would
+        // now measure Tier 3 working correctly and mistake it for `caves()` regressing. What this
+        // test actually guards — `caves()` itself leaving no wall behind on what it carves — is
+        // only ever true immediately after `caves()` runs, before anything downstream paints a wall
+        // back on; on the real, full pipeline that is a fact about *this specific ordering*, not
+        // about the finished world.
+        let seed = 4242;
+        let (width, height) = (4200, 1200);
+        let mut rand = UnifiedRandom::new(seed);
+        let plan = Layout::plan(width, height, &mut rand);
+        let mut world = World::empty(width, height, "cave-wall-real");
+        world.crimson = plan.evil == crate::world::worldgen::layout::Evil::Crimson;
+        let heights = crate::world::worldgen::terrain::heightmap(&plan, &mut rand);
+        crate::world::worldgen::terrain::fill(&mut world, &plan, &heights, &mut rand);
+        caves(&mut world, &plan, &mut rand);
+
+        let (from, to) = (plan.rock + 30, world.height() - 200);
         let mut rng = 12345u64;
         let mut open_samples = 0u32;
         let mut walled_samples = 0u32;

@@ -131,4 +131,31 @@ pub mod walls {
     pub const GRANITE: u16 = 180;
     /// `WallID.CorruptGrassUnsafe` — `CorruptionPitBiome`'s own interior wall.
     pub const CORRUPT_GRASS: u16 = 69;
+
+    /// `WallID.DirtUnsafe1..4` — `CaveWallVariety`'s own wall texture for a plain-stone pocket
+    /// above the rock layer.
+    pub const DIRT_UNSAFE: [u16; 4] = [196, 197, 198, 199];
+    /// `WallID.JungleUnsafe1..4` — `CaveWallVariety`'s texture for a pocket found via jungle-grass
+    /// surface tile, at any depth.
+    pub const JUNGLE_UNSAFE: [u16; 4] = [204, 205, 206, 207];
+    /// `WallID.LavaUnsafe1..4` — `CaveWallVariety`'s texture for a plain-stone pocket at or below
+    /// the lava line.
+    pub const LAVA_UNSAFE: [u16; 4] = [208, 209, 210, 211];
+    /// `WallID.RocksUnsafe1..4` — `CaveWallVariety`'s texture for a plain-stone pocket between the
+    /// rock layer and the lava line. `WallID.HallowUnsafe1..4` (200-203) sits between Jungle and
+    /// Lava in this id range but is never rolled on an ordinary world's own generation path —
+    /// vanilla's own `CaveWallVariety` only ever produces Hallow wall variety on `remixWorldGen`,
+    /// and this generator has no Hallow biome at generation time at all (Hallow only exists after
+    /// hardmode). Not transcribed for the same reason `SnowCloudIsland`/`DesertCloudIsland` were
+    /// found dead on an ordinary world's path for `floating_islands.rs`.
+    pub const ROCKS_UNSAFE: [u16; 4] = [212, 213, 214, 215];
+
+    /// `WallID.MushroomUnsafe` — `CaveWallsInEnclosedSpaces`' texture for a shroom-heavy pocket.
+    pub const MUSHROOM_UNSAFE: u16 = 80;
+    /// `WallID.Cave6Unsafe`/`Cave7Unsafe`/`CaveWall`/`CaveWall2` — the plain four-way roll
+    /// `CaveWallsInEnclosedSpaces` makes for a pocket that isn't shroom/ice/lava-heavy.
+    pub const CAVE6: u16 = 59;
+    pub const CAVE7: u16 = 61;
+    pub const CAVE_WALL: u16 = 170;
+    pub const CAVE_WALL2: u16 = 171;
 }
