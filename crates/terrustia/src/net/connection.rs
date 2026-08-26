@@ -33,12 +33,41 @@ const OUTBOUND_BASE: usize = 8192;
 
 /// Extra room per player slot the server is configured for.
 ///
-/// Every other player already in the world costs the newcomer their presence frames *and* one
-/// frame per relayed inventory slot, because equipment sent before they arrived is replayed for
-/// them — around two hundred frames each. Sizing the queue off `max_players` is what keeps a busy
-/// server from silently dropping people as they join: a full queue removes the player outright,
-/// mid-load, with no message.
-const OUTBOUND_PER_PLAYER: usize = 256;
+/// This constant used to be 256, sized against a theory that turned out to be only half right:
+/// "every other player already in the world costs the newcomer their presence frames and one
+/// relayed inventory slot each, ~200 frames" — a one-off *join-time* cost, paid once per newcomer.
+/// A synchronized 255-player join (`examples/crowd`, the same shape `docs/performance.md`'s "Large
+/// world, 16 and 255 players" section measured) dropped roughly half the crowd within 5-30 seconds
+/// of joining even though that theory's own numbers fit comfortably inside the old queue. Reading
+/// the drop log's own `packet`/`name` fields — which were sitting right there and unchecked —
+/// shows why: the drops are almost entirely `PlayerControls` (movement) and a handful of
+/// `SyncNPC`, and the dropped slots spread uniformly across the whole range rather than clustering
+/// among the earliest joiners the way an unread join-time backlog would.
+///
+/// The real mechanism is `on_player_controls`'s unconditional broadcast in `game/server.rs`: once
+/// everyone is moving, every one of up to `max_players - 1` peers relays a control packet to every
+/// other peer roughly once a tick — genuinely O(n²) in player count, and nothing to do with *how*
+/// the population got there, only how big it is. At `max_players = 255` that is up to 254 frames
+/// landing in one already-established client's queue every ~16ms the moment the server's own
+/// scheduling falls behind for even a few seconds — a loaded machine, a burst of `SyncNPC` while
+/// wildlife spawns in — which 256 per player could not absorb at all. 4,096 survived every
+/// `examples/crowd` trial at this player count (including a full 90-second run under real,
+/// independently-confirmed machine contention, worst case 5 drops out of 255 at a quarter of this
+/// number) with tick cost unaffected — this is a queue-sizing constant, not tick-cost work, and
+/// `docs/performance.md`'s own re-measurement after this change confirms that directly rather than
+/// assuming it. `OUTBOUND_BASE` above was not touched: no join-time packet (a section, a chest
+/// slot, an item, a newcomer's own NPC burst) ever showed up in a drop log across any trial, so it
+/// was never what overflowed here.
+///
+/// This is a mitigation, not a cure. The O(n²) relay cost is real and is vanilla's own behaviour —
+/// this project transcribes it rather than inventing a throttle vanilla does not have — so a
+/// deeper queue buys headroom without removing the underlying cost, and a big enough contention
+/// spike could still in principle outrun any finite number. A genuine fix would look like NPC
+/// sync's own answer to the same shape of problem (skip a client whose loaded sections cannot see
+/// the thing being synced) applied to `on_player_controls`'s broadcast instead of widening this
+/// queue further — but that is a change to `game/server.rs`'s broadcast logic, out of this file's
+/// scope, and left for whoever owns that file next.
+const OUTBOUND_PER_PLAYER: usize = 4096;
 
 /// The queue depth to give one connection on a server configured for `max_players`.
 pub fn outbound_queue(max_players: usize) -> usize {

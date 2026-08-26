@@ -37,27 +37,78 @@ The measurement above is on this project's usual 4200×1200 world — every prio
 is. To find an actual ceiling rather than re-measure the same size again, this ran against a real
 8400×2400 world instead (vanilla Terraria's own "Large" preset, 20.16M tiles — this codebase has no
 named `LARGE_WIDTH`/`HEIGHT` constant, only `SMALL_WIDTH`/`HEIGHT`, so this is the first time it has
-generated one): 28.171 s to generate, `--release`, seed 999. `examples/crowd` against it, real
-connections, `autosave_secs = 0` so the number reflects player count rather than the separately-
-documented autosave cost below:
+generated one), `--release`, seed 999. `examples/crowd` against it, real connections, `autosave_secs
+= 0` so the number reflects player count rather than the separately-documented autosave cost below.
+
+**Original pass** (world generation: 28.171 s):
 
 | Players | Worst tick (cpu_us) | % of budget | Dropped connections |
 |---:|---:|---:|---:|
 | 16 | 363–658 µs | 3.9% | 0 |
 | 255 (the real protocol max) | 410–2,219 µs | 13.3% | 88 of 255 (34.5%) |
 
-Tick cost passes cleanly even at the real 255-player ceiling, with better than 7× headroom.
+Tick cost passed cleanly even at the real 255-player ceiling — but 88 of the 255 connections were
+dropped with `outbound queue full; dropping a client that cannot keep up`, all within the first
+several seconds after the join burst. That pass disclosed the ceiling rather than fixing it (see
+`net/connection.rs`'s `outbound_queue` sizing, `8,192 + 256 × max_players`) and guessed the cause
+was a join-time presence-and-inventory relay burst compounding across 255 simultaneous newcomers.
 
-The 88 drops are a different ceiling, not a tick-budget one: every one of them landed within the
-first several seconds of the run, immediately after all 255 real connections completed their
-handshake in under a second (`crowd.rs`'s own unmodified sequential join loop, against localhost's
-near-zero latency) — a synchronized mass-join burst, not steady gameplay. `net/connection.rs`'s
-outbound queue (`8,192 + 256 × max_players` = 73,472 frames at `max_players = 255`) is sized against
-*one* newcomer's burst joining an already-settled population (see "outbound queue" below) — not
-against 255 newcomers each triggering a presence-and-inventory relay on every other already-
-connected client within the same second, which compounds far faster. Left for whoever next owns
-`net/connection.rs` — this page exists so the reproduction (255 simultaneous joins, `autosave_secs
-= 0`, watch for `outbound queue full`) does not have to be rediscovered.
+**That guess was wrong, or at least badly incomplete.** The drop log already carried a
+`packet`/`name` field naming exactly which packet overflowed each queue — it was sitting right
+there, unchecked. Reading it: the drops are almost entirely `PlayerControls` (id 13, ordinary
+movement) and a handful of `SyncNPC`, not the presence/equipment frames a join sends, and the
+dropped slots spread uniformly across the whole 0-254 slot range rather than clustering among the
+earliest joiners, which is what an unread join-time backlog would produce. The real mechanism: once
+everyone is moving, `on_player_controls`'s broadcast relays every control packet to every other
+player, unconditionally, roughly once a tick — genuinely O(n²) in player count, and unrelated to
+*how* the population arrived. `OUTBOUND_PER_PLAYER` (256) was sized against the join-time theory's
+own numbers (~200 frames per peer, paid once) — comfortably inside the old 73,472-frame queue — not
+against steady-state movement relay, which is what actually overflowed it. See
+`net/connection.rs`'s own doc comment on `OUTBOUND_PER_PLAYER` and `plan.md`'s corrections section
+for the full account.
+
+**The fix**: `OUTBOUND_PER_PLAYER` is now 4,096. The depth formula's shape did not need to change,
+only its per-player calibration — real, disclosed simplicity over cleverness. This is a mitigation,
+not a cure: the O(n²) relay cost is real and is vanilla's own behaviour (this project transcribes
+it rather than inventing a throttle vanilla does not have), so a deeper queue buys headroom without
+removing the underlying cost. A genuine root-cause fix — not relaying movement to a peer who cannot
+possibly render it, the way NPC sync already skips a client whose loaded sections do not cover it —
+would touch `on_player_controls`'s own broadcast in `game/server.rs`, out of scope for a
+`net/connection.rs` queue-sizing fix; left for whoever owns that file next.
+
+**Re-measured after the fix**, same world (seed 999, `--release`, `autosave_secs = 0`; this
+particular re-run generated the world in 8.9 s rather than 28.171 s — this machine was measurably
+less loaded this time, the same kind of environmental variance this page discloses in the other
+direction below):
+
+| Players | Worst tick (cpu_us) | % of budget | Dropped connections |
+|---:|---:|---:|---:|
+| 16 | 339–937 µs | 5.6% | 0 |
+| 255 (the real protocol max) | 295–3,451 µs | 20.7% | 0 |
+
+Zero drops at the real 255-player ceiling. Tick cost is still a clean pass, with better than 4.8×
+headroom — worse than the original pass's "7×", because that number was computed only from windows
+*after* 88 connections had already been dropped and the surviving population had thinned to ~167;
+this number is the honest one, measured across the full, undiminished 255-player run. Real stall
+was as high as 107,809 µs on some windows; this machine was independently confirmed via `ps`,
+mid-run, to be running a second concurrent agent session's own `cargo test` — so, as with every
+other stall number on this page, the `cpu_us` figures above are the ones a quiet machine would also
+show, and are what the pass/fail verdict rests on.
+
+Calibration, not a blind guess: measured on a small 800×600 world across repeated real `--release`
+two-process `examples/crowd` runs, `OUTBOUND_PER_PLAYER = 1,024` (4×) still left occasional drops
+under real contention (5 of 255 over one 90-second run); `4,096` (16×) measured zero drops across
+every trial, including a full 90-second run under real machine contention and the official
+255-player large-world re-run above.
+
+A regression test, `tests/queue_capacity.rs`, reproduces this against a real `terrustia`
+subprocess — not an in-process mock, which was tried first and measured not to reproduce the drop
+at all, because sharing one `tokio` runtime between the server and 255 simulated clients does not
+recreate two independently-scheduled OS processes competing for the same cores the way a real
+deployment does — using a deterministic packet-count burst rather than wall-clock-paced movement
+(also measured to matter: real-time pacing was unreliable specifically under `cargo test`'s own,
+differently-loaded profile). Verified failing on the unfixed code (31 of 255 dropped) and passing
+on the fix (zero drops, repeatedly).
 
 ## The autosave stall, and how it was found
 
@@ -203,6 +254,13 @@ intermittently, and looking exactly like a network problem at their end.
 The depth is now `1024 + 256 × max_players`, sized from the config rather than guessed. The real
 bound is memory rather than count — the sections dominate at tens of kilobytes each while the rest
 are tens of bytes — but a count is what a channel takes.
+
+This section is the history of the *first* fix to this queue, kept as the record of what was
+known and why at the time — both the base term (now `OUTBOUND_BASE = 8192`, raised again since to
+cover chest-heavy sections; see that constant's own doc comment) and the per-player term (now
+`OUTBOUND_PER_PLAYER = 4096`, not 256) have moved on since. The per-player term's own move is a
+*different* mechanism than anything described above — steady-state movement broadcast, not a
+join-time burst — see "Large world, 16 and 255 players" above for the full account.
 
 ## A section that failed to encode was lost for good
 
