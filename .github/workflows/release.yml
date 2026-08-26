@@ -37,16 +37,14 @@ jobs:
 
       # A signed release with an empty embedded panel is a broken deliverable someone might
       # actually enable and find nothing — build the real frontend before Rust compiles.
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: crates/terrustia/web-panel/package-lock.json
+          bun-version: latest
       - name: Build the web panel frontend
         working-directory: crates/terrustia/web-panel
         run: |
-          npm ci
-          npm run build
+          bun install --frozen-lockfile
+          bun run build
 
       - name: Use rust-lld for musl
         if: endsWith(matrix.target, '-musl')

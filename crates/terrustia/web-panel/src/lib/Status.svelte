@@ -7,6 +7,12 @@
   let status = $state<StatusResponse | null>(null);
   let live = $state(false);
 
+  // `session` is read once, here, on purpose: `watchStatus` takes a plain string and opens one
+  // socket for this component's whole lifetime (closed in `onDestroy` below) — it was never meant
+  // to react to a later change, and this app never re-issues a session into an already-mounted
+  // `Status` anyway (a new login remounts the whole view). The compiler can't know that from the
+  // call site alone.
+  // svelte-ignore state_referenced_locally
   const stop = watchStatus(
     session,
     (s) => {

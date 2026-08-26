@@ -6,10 +6,10 @@ built output (`dist/`) is embedded into the `terrustia` binary via `rust-embed`;
 citation.
 
 ```sh
-npm install
-npm run dev      # local dev server against a running terrustia panel backend
-npm run build    # writes dist/, which the Rust build embeds
-npm run check    # svelte-check + tsc, no build
+bun install
+bun run dev      # local dev server against a running terrustia panel backend
+bun run build    # writes dist/, which the Rust build embeds
+bun run check    # svelte-check + tsc, no build
 ```
 
 Design language: TUI-inspired, echoing the sticky console's own aesthetic rather than a generic
