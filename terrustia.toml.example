@@ -33,3 +33,10 @@ max_chat_len = 500
 # Drop a connection that sends nothing at all for this long. A playing client sends control
 # updates continuously, so this only catches dead sockets and stalled handshakes.
 idle_timeout_secs = 60
+
+# The web admin panel. Off by default. `panel_listen` must be loopback (127.0.0.1 or ::1) — the
+# server refuses to start otherwise. Remote panel access needs a deliberate step (an SSH tunnel,
+# for example), not an accident of opening this up. Sign in with the same accounts `/register`
+# creates.
+panel_enabled = false
+panel_listen = "127.0.0.1:7778"

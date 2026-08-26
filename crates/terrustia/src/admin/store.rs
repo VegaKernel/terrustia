@@ -147,6 +147,15 @@ impl Admin {
         true
     }
 
+    /// An account's hash and group in one lookup, for a caller (the web panel) that needs both to
+    /// verify a login off the game task and then know what the signed-in account may do.
+    pub fn account_hash_and_group(&self, name: &str) -> Option<(String, String)> {
+        self.accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .map(|a| (a.hash.clone(), a.group.clone()))
+    }
+
     /// The stored hash for an account, so it can be verified somewhere other than the game task.
     ///
     /// Argon2 is deliberately expensive — tens of milliseconds against a 16.67 ms tick — so a

@@ -52,6 +52,13 @@ pub struct Config {
     /// connection trickling one byte a minute stays open for ever and costs a slot the whole time.
     /// This is the backstop that makes the slot finite.
     pub handshake_timeout_secs: u64,
+    /// Whether the web admin panel is running. Off by default — a new HTTP port is attack surface
+    /// a CLI/systemd/Docker host did not ask for.
+    pub panel_enabled: bool,
+    /// Must be loopback (127.0.0.1 or ::1) — [`Config::validate`] refuses anything else. The panel
+    /// is a materially more sensitive surface (account/server control) than gameplay traffic, so
+    /// unlike `listen`, this is never allowed to face the network by configuration alone.
+    pub panel_listen: SocketAddr,
 }
 
 impl Default for Config {
@@ -75,6 +82,8 @@ impl Default for Config {
             max_connections: 512,
             max_connections_per_address: 8,
             handshake_timeout_secs: 30,
+            panel_enabled: false,
+            panel_listen: "127.0.0.1:7778".parse().expect("valid default address"),
         }
     }
 }
@@ -99,6 +108,14 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        // The panel is account/server control, not gameplay — it never gets to face the network
+        // just because someone typed a non-loopback address into `panel_listen`.
+        if self.panel_enabled && !self.panel_listen.ip().is_loopback() {
+            return Err(ConfigError::Invalid(format!(
+                "panel_listen must be loopback (127.0.0.1 or ::1), got {}",
+                self.panel_listen.ip()
+            )));
+        }
         // A loaded world brings its own dimensions, so the size limits below do not apply to it.
         if self.world_file.is_some() {
             if self.max_players == 0 || self.max_players > MAX_PLAYERS {

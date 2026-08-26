@@ -560,6 +560,45 @@ pub enum ServerEvent {
     ConsoleContext {
         reply: oneshot::Sender<ConsoleContext>,
     },
+    /// The web panel asking what it needs to resolve a login, for one account name.
+    ///
+    /// Never carries a password: argon2 is deliberately expensive (see
+    /// `Admin::account_hash_and_group`'s own doc comment) and must run on the panel's own task,
+    /// off the game task's tick — this only hands back what that verification needs.
+    PanelAuthLookup {
+        name: String,
+        reply: oneshot::Sender<PanelAuthLookup>,
+    },
+    /// The web panel inserting an account it already hashed off the game task (claiming an
+    /// unclaimed server). Cheap — no hashing happens here, only the push into the store.
+    PanelInsertAccount {
+        account: crate::admin::Account,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The web panel asking for a snapshot to show on its status view.
+    PanelStatus {
+        reply: oneshot::Sender<PanelStatus>,
+    },
+}
+
+/// What [`ServerEvent::PanelAuthLookup`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelAuthLookup {
+    pub unclaimed: bool,
+    /// The currently-active one-time claim token, if the server is unclaimed and one has been
+    /// printed to the console. `None` means either the server is claimed, or nobody has connected
+    /// yet to trigger `announce_claim_token`.
+    pub claim_token: Option<String>,
+    /// `(hash, group)` for the named account, if one exists.
+    pub hash_and_group: Option<(String, String)>,
+}
+
+/// What [`ServerEvent::PanelStatus`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelStatus {
+    pub player_count: usize,
+    pub max_players: usize,
+    pub world_name: String,
 }
 
 /// What the console can offer to complete a command's second argument with.
@@ -2185,6 +2224,29 @@ impl GameServer {
                     .collect();
                 let groups = self.admin.groups.iter().map(|g| g.name.clone()).collect();
                 let _ = reply.send(ConsoleContext { players, groups });
+            }
+            ServerEvent::PanelAuthLookup { name, reply } => {
+                let _ = reply.send(PanelAuthLookup {
+                    unclaimed: self.admin.unclaimed(),
+                    claim_token: self.claim_token.clone(),
+                    hash_and_group: self.admin.account_hash_and_group(&name),
+                });
+            }
+            ServerEvent::PanelInsertAccount { account, reply } => {
+                let _ = reply.send(self.admin.insert_account(account));
+            }
+            ServerEvent::PanelStatus { reply } => {
+                let player_count = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| p.is_playing())
+                    .count();
+                let _ = reply.send(PanelStatus {
+                    player_count,
+                    max_players: self.config.max_players,
+                    world_name: self.world.name.clone(),
+                });
             }
         }
     }

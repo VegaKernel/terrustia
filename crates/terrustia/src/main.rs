@@ -143,6 +143,15 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
     let mut game = tokio::spawn(GameServer::new(config.clone(), world).run(events_rx));
+
+    // Foundation only — see `panel/mod.rs`'s module doc. Opt-in, so a bind failure here is a
+    // configuration mistake worth failing loudly on rather than silently running without it.
+    let _panel = if config.panel_enabled {
+        Some(terrustia::panel::run(config.clone(), events_tx.clone()).await?)
+    } else {
+        None
+    };
+
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
 
     // Whoever has the terminal already has the world file, so the console is not gated. Reading

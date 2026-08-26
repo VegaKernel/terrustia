@@ -15,6 +15,7 @@ bytes.workspace = true
 libc.workspace = true
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -23,9 +24,17 @@ argon2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 crossterm.workspace = true
+axum.workspace = true
+rust-embed.workspace = true
 
 [dev-dependencies]
 terrustia-client = { path = "../terrustia-client" }
+
+[features]
+default = ["embed-web"]
+# Embed the built frontend into the binary. Disabled, `panel/mod.rs` serves straight from
+# `web-panel/dist/` on disk instead — for iterating on the frontend without a full rebuild.
+embed-web = []
 
 [lints]
 workspace = true

@@ -1,0 +1,96 @@
+/* terrustia panel — echoes the sticky console's own look: dark, monospace, unadorned.
+   No web fonts, no icon fonts — system monospace only, so the embedded bundle needs no font
+   assets and the panel never depends on a network fetch to render correctly. */
+
+:root {
+  --bg: #0a0d10;
+  --bg-raised: #10151a;
+  --border: #1f2a30;
+  --text: #d7dde1;
+  --text-dim: #7c8791;
+  --accent: #59d499;
+  --accent-dim: #2c5b45;
+  --warn: #e0b34d;
+  --danger: #e0645a;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas, "Liberation Mono",
+    Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a {
+  color: var(--accent);
+}
+
+button,
+input {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.5rem 0.6rem;
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--accent-dim);
+}
+
+button {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 2px;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+.warn {
+  color: var(--warn);
+}
