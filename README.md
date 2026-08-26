@@ -357,6 +357,12 @@ Results at the time of writing, against Terraria 1.4.5.8:
 - The `crowd` example joins **twenty-four players**, spreads them across the world and walks them at
   the rate a real client reports at. The worst tick over the whole run — bestiary, fuzz, crowd and
   stress against one server — is **520 microseconds against a budget of 16,666**, at 50 MB.
+- Against a real 8400×2400 world (vanilla's own "Large" preset, 4× the tile count of everything
+  above) and **255 players — the real protocol maximum**, the worst tick still costs only **2,219
+  microseconds of the 16,666 budget**, better than 7× headroom. A different ceiling was found and
+  left disclosed rather than fixed: 88 of those 255 connections were dropped for a full outbound
+  queue during the initial synchronized join burst — see `docs/performance.md` for the full account
+  and reproduction.
 - The `fuzz` example throws **fifty thousand malformed packets** at a running server and checks it
   is still answering afterwards, with the world uncorrupted and nothing in the log.
 

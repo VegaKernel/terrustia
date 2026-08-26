@@ -31,6 +31,34 @@ Phases, in order: `World`, `Sections`, `Items`, `Npcs`, `Projectiles`, `Damage`,
 With 24 players and a busy world, the worst tick sits around **350–520 µs** — about 3% of budget.
 The roster is not the problem and has not been.
 
+## Large world, 16 and 255 players
+
+The measurement above is on this project's usual 4200×1200 world — every prior number on this page
+is. To find an actual ceiling rather than re-measure the same size again, this ran against a real
+8400×2400 world instead (vanilla Terraria's own "Large" preset, 20.16M tiles — this codebase has no
+named `LARGE_WIDTH`/`HEIGHT` constant, only `SMALL_WIDTH`/`HEIGHT`, so this is the first time it has
+generated one): 28.171 s to generate, `--release`, seed 999. `examples/crowd` against it, real
+connections, `autosave_secs = 0` so the number reflects player count rather than the separately-
+documented autosave cost below:
+
+| Players | Worst tick (cpu_us) | % of budget | Dropped connections |
+|---:|---:|---:|---:|
+| 16 | 363–658 µs | 3.9% | 0 |
+| 255 (the real protocol max) | 410–2,219 µs | 13.3% | 88 of 255 (34.5%) |
+
+Tick cost passes cleanly even at the real 255-player ceiling, with better than 7× headroom.
+
+The 88 drops are a different ceiling, not a tick-budget one: every one of them landed within the
+first several seconds of the run, immediately after all 255 real connections completed their
+handshake in under a second (`crowd.rs`'s own unmodified sequential join loop, against localhost's
+near-zero latency) — a synchronized mass-join burst, not steady gameplay. `net/connection.rs`'s
+outbound queue (`8,192 + 256 × max_players` = 73,472 frames at `max_players = 255`) is sized against
+*one* newcomer's burst joining an already-settled population (see "outbound queue" below) — not
+against 255 newcomers each triggering a presence-and-inventory relay on every other already-
+connected client within the same second, which compounds far faster. Left for whoever next owns
+`net/connection.rs` — this page exists so the reproduction (255 simultaneous joins, `autosave_secs
+= 0`, watch for `outbound queue full`) does not have to be rediscovered.
+
 ## The autosave stall, and how it was found
 
 The crowd test reported this:
