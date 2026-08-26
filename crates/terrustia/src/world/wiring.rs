@@ -75,8 +75,8 @@ impl Wire {
 pub fn is_trigger(block: u16) -> bool {
     matches!(
         block,
-        // Switch, lever, a track switch, and the pressure plates.
-        135 | 136 | 144 | MINECART_TRACK | 423 | 428 | 440 | 442 | 476
+        // Switch, lever, a track switch, the pressure plates, and the Party Monolith.
+        135 | 136 | 144 | MINECART_TRACK | 423 | 428 | 440 | 442 | 476 | PARTY_MONOLITH
     )
 }
 
@@ -135,6 +135,10 @@ pub struct Fired {
     pub timers_started: Vec<(i32, i32)>,
     /// ...and the ones it switched off.
     pub timers_stopped: Vec<(i32, i32)>,
+    /// Whether the current reached a Party Monolith — every placed monolith reflects the same
+    /// single world-level toggle rather than having state of its own, so this is a `bool`, not a
+    /// list of positions the way `statues`/`teleporters` are.
+    pub party_monolith: bool,
     /// How many tiles the current reached, for the record.
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
@@ -179,6 +183,13 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         flipped.frame_y = if tile.frame_y == 0 { 18 } else { 0 };
         world.set_tile(x, y, flipped);
         out.changed.push((x, y));
+    }
+
+    // A Party Monolith has no frame of its own to flip — the toggle is the world-level state a
+    // direct click reaches immediately, matching `Player.cs`'s own click branch rather than
+    // needing the flood below to reach it the way a wire-triggered one does.
+    if tile.block == PARTY_MONOLITH {
+        out.party_monolith = true;
     }
 
     let (w, h) = footprint(tile.block);
@@ -378,6 +389,14 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
             }
         }
     }
+    if tile.is_active() && tile.block == PARTY_MONOLITH {
+        // Reached by a wire signal rather than clicked directly — `hit_switch`'s own direct-click
+        // case above already covers the tile the flood started from (pre-skipped like any other
+        // trigger, `run_from`'s own comment on why), so this is only a *different* monolith the
+        // same circuit happens to also run through.
+        out.party_monolith = true;
+        return;
+    }
     if tile.is_active() && tile.block == STATUE {
         // A statue is six tiles and the flood reaches all six; what it does belongs to the statue,
         // not to the tile, so it is reported once by its anchor.
@@ -403,6 +422,14 @@ const STATUE: u16 = 105;
 /// by hand too), but its wired behaviour, [`act`]'s own case for it, is a different mechanism from
 /// [`hit_switch`]'s frame toggle — see that block's own comment for why.
 const MINECART_TRACK: u16 = 314;
+/// `TileID.PartyMonolith` (`TileID.cs:1347`) — real vanilla toggles the world's manually-forced
+/// birthday party both by a direct click (`Player.cs`'s own `tile.type == 455` branch, a sibling of
+/// the celestial pillar monoliths right above it, not something `Wiring.HitSwitch` touches at all
+/// in source) and by a wire signal reaching one (`Wiring.cs:2037`, inside the same per-tile
+/// dispatch [`act`] is transcribed from). This project folds both paths through the same `hit_switch`
+/// a lever or switch already uses, since a direct click already arrives as the same `HIT_SWITCH`
+/// packet either way — see [`is_trigger`]'s own entry for it and [`Fired::party_monolith`].
+const PARTY_MONOLITH: u16 = 455;
 
 /// `Minecart._trackType`'s own frame classification (`Minecart.cs::Initialize`): `0` (vanilla's own
 /// array default, so every frame not explicitly listed below is this) is ordinary track — the only
@@ -1506,5 +1533,51 @@ mod tests {
             vec![(420, 319)],
             "and the gate reached the trap"
         );
+    }
+
+    /// A direct click on a Party Monolith toggles it — `Player.cs`'s own `tile.type == 455`
+    /// branch, folded here into the same `HIT_SWITCH` packet a lever or switch uses. No wire
+    /// needed at all: `is_trigger` alone is what makes it reachable by a bare click.
+    #[test]
+    fn clicking_a_party_monolith_toggles_it() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, Tile::framed(PARTY_MONOLITH, 0, 0));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert!(fired.party_monolith, "a direct click should reach it");
+        assert!(
+            fired.changed.is_empty(),
+            "a monolith has no frame of its own to flip"
+        );
+    }
+
+    /// A wire signal reaching a *different* Party Monolith than the one directly clicked also
+    /// toggles it — `Wiring.cs:2037`'s own `act`-equivalent case, a separate path from the direct
+    /// click above.
+    #[test]
+    fn a_wire_signal_reaching_a_party_monolith_toggles_it() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red)); // a lever
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut monolith = Tile::framed(PARTY_MONOLITH, 0, 0);
+        monolith.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(105, 100, monolith);
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert!(fired.party_monolith, "the current should have reached it");
+    }
+
+    /// Hitting anything else at all leaves the flag alone, so a caller never has to guess whether
+    /// an unrelated switch's own `Fired` happens to carry a stale `true` from elsewhere.
+    #[test]
+    fn an_unrelated_switch_does_not_report_a_party_monolith() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        let fired = hit_switch(&mut board, 100, 100);
+        assert!(!fired.party_monolith);
     }
 }

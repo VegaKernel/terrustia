@@ -948,6 +948,8 @@ pub struct GameServer {
     /// is one: `main` needs to keep writing to it from outside after `self` is moved into the
     /// spawned game task, so a handle cloned out before that move is the only way in.
     update_notice: Option<Arc<Mutex<Option<String>>>>,
+    /// The birthday party — see [`crate::game::party`]'s own module doc.
+    party: crate::game::party::PartyState,
 }
 
 impl GameServer {
@@ -1056,6 +1058,7 @@ impl GameServer {
             pending_world_switch: Arc::new(Mutex::new(None)),
             journey: crate::game::journey::JourneyPowers::default(),
             update_notice: None,
+            party: crate::game::party::PartyState::default(),
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -1864,6 +1867,7 @@ impl GameServer {
             self.announce("The solar eclipse is over.");
             self.broadcast_world_data();
         }
+        self.tick_party();
 
         if let Some(every) = self.autosave_ticks
             && self.ticks.is_multiple_of(every)
@@ -3333,7 +3337,7 @@ impl GameServer {
     }
 
     fn on_request_world_data(&mut self, slot: u8) -> terrustia_proto::Result<()> {
-        let frame = self.world.world_data().encode()?;
+        let frame = self.world_data().encode()?;
         self.send(slot, frame);
         if let Some(player) = self.player_mut(slot) {
             player.advance_to(ConnState::WorldSent);
@@ -3346,7 +3350,7 @@ impl GameServer {
 
         // Vanilla re-sends world data here before the tiles; mirroring it keeps the client's
         // loading sequence identical to the one it was written against.
-        let world_data = self.world.world_data().encode()?;
+        let world_data = self.world_data().encode()?;
         self.send(slot, world_data);
 
         let sections = self.sections_for(request);
@@ -4257,9 +4261,24 @@ impl GameServer {
         Ok(())
     }
 
+    /// `World::world_data`, with the ambient events that live on `GameServer` rather than `World`
+    /// patched in — `PartyIsUp` (`self.party`), the same shape `self.army`'s own tier flags would
+    /// need if `ArmyOngoing` were wired up (it is not, a real pre-existing gap this project already
+    /// disclosed — `World::world_data`'s own comment on `DownedArmyTier1..3`). Every caller that
+    /// sends packet 7 should go through this rather than `self.world.world_data()` directly, or a
+    /// joining client learns everything about the world except whether a party is happening in it
+    /// right now.
+    fn world_data(&self) -> terrustia_proto::packets::WorldData {
+        use terrustia_proto::packets::WorldFlag;
+        let mut data = self.world.world_data();
+        data.flags
+            .set_flag(WorldFlag::PartyIsUp, self.party.is_up());
+        data
+    }
+
     /// Tell everyone the world itself has changed — an eclipse begun, a blood moon risen.
     fn broadcast_world_data(&mut self) {
-        if let Ok(frame) = self.world.world_data().encode() {
+        if let Ok(frame) = self.world_data().encode() {
             self.broadcast(frame, None);
         }
     }
@@ -8918,9 +8937,19 @@ impl GameServer {
             let world = &mut self.world;
             crate::world::wiring::hit_switch(world, x, y)
         };
+        let party_monolith = fired.party_monolith;
         self.apply_circuit(fired, (x, y));
 
         self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
+
+        // `BirthdayParty::ToggleManualParty` — a direct click or a wire signal reaching a Party
+        // Monolith (`wiring.rs`'s own `PARTY_MONOLITH`). Real vanilla has no chat message for
+        // this at all, unlike a natural party starting or any party ending at night — only the
+        // world-data resync (`NetMessage.SendData(7)`) that lets clients react to it.
+        if party_monolith {
+            self.party.toggle_manual();
+            self.broadcast_world_data();
+        }
         Ok(())
     }
 
@@ -9808,6 +9837,62 @@ impl GameServer {
             self.land_meteor();
         }
         self.roll_angler_quest();
+        self.roll_natural_party();
+    }
+
+    /// `BirthdayParty::NaturalAttempt`, called once at dawn (`Main.UpdateTime_StartDay` calling
+    /// `BirthdayParty.CheckMorning`) — see `game/party.rs`'s own module doc for the mechanism.
+    fn roll_natural_party(&mut self) {
+        use crate::game::party::{PARTY_GIRL, PartyState};
+        let party_girl_present = self.npcs.iter().any(|(_, n)| n.npc_type == PARTY_GIRL);
+        let eligible: Vec<u8> = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| {
+                terrustia_proto::npc_data::npc_stats(n.npc_type)
+                    .is_some_and(|s| PartyState::can_party(n.npc_type, s.town_npc, s.ai_style))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let Some(chosen) = self
+            .party
+            .natural_attempt(party_girl_present, &eligible, &mut self.rng)
+        else {
+            return;
+        };
+        let names: Vec<String> = chosen
+            .iter()
+            .filter_map(|&i| self.npcs.get(i))
+            .map(|n| n.given_name.clone())
+            .collect();
+        // `Game.BirthdayParty_1`/`_2`/`_3` (`Terraria.Localization.Content.en-US.json:825-827`).
+        let text = match names.as_slice() {
+            [a] => format!("Looks like {a} is throwing a party"),
+            [a, b] => format!("Looks like {a} & {b} are throwing a party"),
+            [a, b, c, ..] => format!("Looks like {a}, {b}, and {c} are throwing a party"),
+            [] => return, // cannot happen: natural_attempt only returns Some with 1-3 names
+        };
+        self.announce(&text);
+        info!(?chosen, "birthday party");
+        self.broadcast_world_data();
+    }
+
+    /// `BirthdayParty::UpdateTime`'s own per-tick prune: an NPC that stops being eligible mid-day
+    /// (killed, evicted, whatever) is dropped from the celebration, and a genuine party with
+    /// nobody left to celebrate ends early.
+    fn tick_party(&mut self) {
+        let npcs = &self.npcs;
+        let ended = self.party.prune(|index| {
+            npcs.get(index).is_some_and(|n| {
+                terrustia_proto::npc_data::npc_stats(n.npc_type).is_some_and(|s| {
+                    crate::game::party::PartyState::can_party(n.npc_type, s.town_npc, s.ai_style)
+                })
+            })
+        });
+        if ended {
+            self.announce("Party time's over!");
+            self.broadcast_world_data();
+        }
     }
 
     /// Pick the fish the Angler wants today, and let everybody try again.
@@ -9961,6 +10046,12 @@ impl GameServer {
     /// ...and at nightfall: a blood moon, which will not rise on a new moon and will not rise for
     /// a party of characters who have not found a life crystal between them.
     fn roll_dusk_events(&mut self) {
+        // `BirthdayParty::CheckNight` — a party, genuine or manually forced, never survives past
+        // one day. Called first, matching `Main.UpdateTime_StartNight`'s own order.
+        if self.party.end_for_the_night() {
+            self.announce("Party time's over!");
+            self.broadcast_world_data();
+        }
         if self.world.blood_moon || self.moon.running() || self.world.moon_phase == 4 {
             return;
         }
@@ -11966,6 +12057,121 @@ mod difficulty_slider {
         fierce.moon.start(crate::game::moons::Moon::Pumpkin);
         fierce.note_moon_kill(A_PUMPKIN_MOON_SCARECROW);
         assert_eq!(fierce.moon.points, 2.5, "master scale is 2.5x");
+    }
+}
+
+/// The birthday party — see `game/party.rs`'s own module doc for the real vanilla mechanism this
+/// wires up: `roll_dawn_events`'s own natural roll, `roll_dusk_events`'s own end-of-day clear,
+/// `tick_party`'s own mid-day prune, and `on_hit_switch`'s own reaction to a Party Monolith.
+#[cfg(test)]
+mod party {
+    use super::*;
+    use crate::config::Config;
+    use rand::SeedableRng;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "party probe")
+    }
+
+    /// Real town NPC types (`npc_data.rs`'s own table) — five ordinary residents plus Party Girl,
+    /// which is exactly enough for a natural party to have somewhere to start.
+    const A_TOWN: [u16; 5] = [17, 18, 19, 20, 22];
+
+    fn a_town_and_party_girl(server: &mut GameServer) {
+        for npc_type in A_TOWN {
+            server.npcs.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+        }
+        server
+            .npcs
+            .spawn(crate::game::party::PARTY_GIRL, (0.0, 0.0))
+            .expect("a slot");
+    }
+
+    /// `roll_dawn_events`'s own `roll_natural_party` call, run against a real `NpcStore` rather
+    /// than a hand-built eligible list — proves the real `npc_data` lookup and the exclusion
+    /// list actually connect to a live server, not just `PartyState`'s own already-tested logic.
+    #[test]
+    fn a_natural_party_eventually_starts_with_a_real_town_present() {
+        for seed in 0..500u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            a_town_and_party_girl(&mut server);
+            server.roll_natural_party();
+            if server.party.genuine {
+                assert!(!server.party.celebrating.is_empty());
+                assert!(server.party.celebrating.len() <= 3);
+                return;
+            }
+        }
+        panic!("a party should have started at least once across 500 seeds");
+    }
+
+    /// Without Party Girl having moved in, no amount of trying starts a natural party — real
+    /// vanilla's own `NPC.AnyNPCs(208)` gate.
+    #[test]
+    fn no_party_girl_means_no_natural_party_at_the_server_level() {
+        for seed in 0..500u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            for npc_type in A_TOWN {
+                server.npcs.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+            }
+            server.roll_natural_party();
+            assert!(!server.party.genuine);
+        }
+    }
+
+    #[test]
+    fn a_party_ends_at_dusk() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.party.manual = true;
+        server.roll_dusk_events();
+        assert!(!server.party.is_up(), "manual parties end at night too");
+    }
+
+    /// A celebrating NPC that stops being eligible (evicted, its slot reused by something else)
+    /// is pruned on the next tick, and the party ends once none are left.
+    #[test]
+    fn a_party_ends_early_once_its_last_celebrant_is_gone() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(crate::game::party::PARTY_GIRL, (0.0, 0.0))
+            .expect("a slot");
+        server.party.genuine = true;
+        server.party.celebrating = vec![index];
+
+        server.npcs.remove(index);
+        server.tick_party();
+
+        assert!(!server.party.genuine, "nobody left to celebrate");
+        assert!(server.party.celebrating.is_empty());
+    }
+
+    /// A direct click on a Party Monolith toggles the world's manually-forced party and resyncs
+    /// world data — `on_hit_switch`'s own reaction to `Fired::party_monolith`.
+    #[test]
+    fn clicking_a_party_monolith_toggles_the_manual_party() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (out_tx, _out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+
+        server
+            .world
+            .set_tile(50, 50, terrustia_proto::Tile::framed(455, 0, 0));
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&50i16.to_le_bytes());
+        payload.extend_from_slice(&50i16.to_le_bytes());
+
+        assert!(!server.party.manual);
+        server.on_hit_switch(0, &payload).unwrap();
+        assert!(server.party.manual, "the click should have toggled it on");
+
+        server.on_hit_switch(0, &payload).unwrap();
+        assert!(!server.party.manual, "and off again");
     }
 }
 

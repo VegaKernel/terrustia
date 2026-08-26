@@ -11,6 +11,7 @@ pub mod lunar;
 pub mod moons;
 pub mod npc;
 pub mod npc_ai;
+pub mod party;
 pub mod player;
 pub mod projectile;
 pub mod rescues;
