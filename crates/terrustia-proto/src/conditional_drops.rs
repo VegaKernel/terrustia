@@ -33,6 +33,26 @@ pub struct Conditions {
     /// The game gates their whole loot on `Conditions.MissingTwin`, so killing one while its
     /// sibling still lives gives nothing. Without this the pair would drop twice over.
     pub other_twin_dead: bool,
+    /// A blood moon, for `Conditions.IsBloodMoonAndNotFromStatue` — combined with `npc_from_statue`
+    /// below rather than pre-combined here, so each stays what it actually is: a fact about the
+    /// world, and a fact about the one NPC.
+    pub blood_moon: bool,
+    /// Whether *this* NPC came from a statue rather than an ordinary spawn. A statue farm must not
+    /// be able to grind the blood-moon-exclusive drops below — that is the entire reason the game
+    /// checks it at all.
+    pub npc_from_statue: bool,
+    /// A solar eclipse. Every NPC this gates (`Conditions.RegisterEclipse`'s own drops) can only be
+    /// alive during one anyway, so this exists for completeness rather than because any of them
+    /// could otherwise be reached outside an eclipse.
+    pub eclipse: bool,
+    /// `Conditions.BeatAnyMechBoss`: any one of the Destroyer, the Twins or Skeletron Prime.
+    pub downed_mech_any: bool,
+    /// `Conditions.DownedAllMechBosses`: all three, not just one.
+    pub downed_all_mech_bosses: bool,
+    /// The pumpkin moon's current wave, if one is running — `None` covers "no pumpkin moon at
+    /// all" and "a frost moon is running instead" alike, since `PumpkinMoonDropGatingChance` only
+    /// ever applies to the pumpkin moon's own NPCs, which cannot be alive during the other event.
+    pub pumpkin_moon_wave: Option<i32>,
 }
 
 /// One conditional drop.
@@ -260,7 +280,142 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         // neither this function (independent per-item rolls, no fallback ordering) nor
         // `npc_drops.rs` (flat chains, no pool inside one) can represent — left out rather than
         // approximated; item 118 itself is already covered by `npc_drops.rs`.
+        //
+        // Red Devil (156) is the same shape as Cave Bat/Clown above: `NotRemixSeedHardmode` gives
+        // item 683, `RemixSeed` gives a *different* item (112) — not the same drop at two rates.
+        // Only the ordinary-world branch is in scope (`ItemDropDatabase.cs:945-946`).
+        156 if at.hard_mode => out.push(sometimes(683, 30)),
+        // Chaos Elemental: `LeadingConditionRule(TenthAnniversaryIsUp/TenthAnniversaryIsNotUp)`
+        // (`ItemDropDatabase.cs:939-940`) picks between a real-world-date anniversary item and the
+        // ordinary one. This project has no calendar awareness of that event at all — it is never
+        // "up" here — so the `TenthAnniversaryIsNotUp` branch is the only one that can ever apply
+        // and is modelled unconditionally.
+        120 => out.push(if at.expert {
+            sometimes(1326, 400)
+        } else {
+            sometimes(1326, 500)
+        }),
         _ => {}
+    }
+
+    // Solar-eclipse-only NPCs (`RegisterEclipse`, `ItemDropDatabase.cs:185-236`). Every one of
+    // these can only be alive during an eclipse in the first place, so — same reasoning as the
+    // pumpkin/frost moon rosters — nothing here re-checks `at.eclipse`; it exists on `Conditions`
+    // for completeness, not because any of these could otherwise be reached.
+    match npc_type {
+        // Creature from the Deep.
+        461 => out.push(sometimes(497, 50)),
+        // Vampire / Vampire Bat, both.
+        158 | 159 => out.push(sometimes(900, 35)),
+        // Eyezor.
+        251 => out.push(sometimes(1311, 15)),
+        // The Butcher: three chainsaw parts, flat and unconditioned.
+        460 => {
+            out.push(sometimes(4740, 50));
+            out.push(sometimes(4741, 50));
+            out.push(sometimes(4742, 50));
+        }
+        // Dr. Man Fly: two drill parts, same shape.
+        468 => {
+            out.push(sometimes(4738, 50));
+            out.push(sometimes(4739, 50));
+        }
+        // Black Recluse, wall-mounted or not: `DropBasedOnExpertMode(Common(2607, 2, 1, 3),
+        // CommonDrop(2607, 10, 1, 3, 9))` (`ItemDropDatabase.cs:959`) — expert's own branch is
+        // 9-in-10, not 1-in-10 (`CommonDrop`'s fifth parameter is a numerator this project's
+        // `Conditional` has no field for). Modelled as the flat classic rate in every mode, the
+        // same documented simplification the dungeon-guardian family already uses just above.
+        163 | 238 => out.push(a_few(2607, 2, 1, 3)),
+        // Zombie Merman / Eyeball Flying Fish: three single-item pools, each really just a flat
+        // 1-in-8 (`RegisterBloodMoonFishing`, `ItemDropDatabase.cs:168-170`) — both NPCs are
+        // themselves only ever caught blood-moon fishing, so nothing here re-checks `at.blood_moon`
+        // for the same reason the eclipse-exclusive block above does not re-check `at.eclipse`.
+        586 | 587 => {
+            out.push(sometimes(4273, 8));
+            out.push(sometimes(4381, 8));
+            out.push(sometimes(4325, 8));
+        }
+        _ => {}
+    }
+    // DD2 mage/ogre flat items (`ItemDropDatabase.cs:745-777`): the `OneFromOptions` pools these
+    // NPCs also drop live in `chance_pools`, not here — this is only the plain `DropBasedOnExpertMode`
+    // items, mode-scaled and, per `NotScalingWithLuck`, already ignoring the luck this project
+    // has no state for anywhere.
+    match npc_type {
+        564 if at.expert => {
+            out.push(always(3814));
+            out.push(a_few(3815, 1, 4, 4));
+        }
+        564 => {
+            out.push(sometimes(3814, 2));
+            out.push(a_few(3815, 2, 4, 4));
+        }
+        565 | 577 if at.expert => {
+            out.push(sometimes(3814, 4));
+            out.push(a_few(3815, 4, 4, 4));
+        }
+        565 | 577 => {
+            out.push(sometimes(3814, 8));
+            out.push(a_few(3815, 8, 4, 4));
+        }
+        576 if at.expert => {
+            out.push(sometimes(3814, 2));
+            out.push(a_few(3815, 2, 4, 4));
+            out.push(sometimes(3856, 4));
+        }
+        576 => {
+            out.push(sometimes(3814, 4));
+            out.push(a_few(3815, 4, 4, 4));
+            out.push(sometimes(3856, 5));
+        }
+        _ => {}
+    }
+    // Eclipse-exclusive NPCs gated on `Conditions.DownedPlantera` specifically, distinct from the
+    // unconditioned eclipse drops just above (`ItemDropDatabase.cs:207-215`).
+    if at.downed_plantera {
+        match npc_type {
+            460 => out.push(sometimes(3098, 40)), // The Butcher: chainsaw.
+            468 => out.push(sometimes(3105, 40)), // Dr. Man Fly: drill.
+            466 => out.push(sometimes(3106, 40)), // Psycho: hatchet.
+            467 => out.push(sometimes(3249, 30)), // Deadly Sphere: staff.
+            _ => {}
+        }
+    }
+    // Gated on having downed *all three* mechanical bosses, not just one — the Reaper's own
+    // `LeadingConditionRule(DownedAllMechBosses)` (`ItemDropDatabase.cs:203`), inside the eclipse
+    // registration above but a genuinely separate condition from "an eclipse is running."
+    if npc_type == 253 && at.downed_all_mech_bosses {
+        out.push(sometimes(1327, 40));
+    }
+    // Pixie: `Conditions.BeatAnyMechBoss` (`ItemDropDatabase.cs:75`) — any *one*, not all three,
+    // the weaker sibling of the Reaper's gate just above.
+    if npc_type == 75 && at.downed_mech_any {
+        out.push(sometimes(5662, 200));
+    }
+    // `Conditions.IsBloodMoonAndNotFromStatue` (`ItemDropDatabase.cs:179-182`) — a statue farm must
+    // not be able to grind these, which is the entire reason the game checks the NPC's own origin
+    // rather than just the world's.
+    if at.blood_moon && !at.npc_from_statue {
+        match npc_type {
+            489 | 490 => out.push(sometimes(4271, 100)),
+            586 | 587 | 620 | 621 => out.push(sometimes(4271, 25)),
+            _ => {}
+        }
+    }
+    // The Headless Horseman's Pumpkin Medallion: `ByCondition(PumpkinMoonDropGatingChance, 1857,
+    // 20)` (`ItemDropDatabase.cs:342`) — the wave gate and this rule's own `chanceDenominator: 20`
+    // are two independent rolls, same as the scarecrow pool in `chance_pools` (see its own comment
+    // for why they combine by multiplying rather than either alone).
+    if npc_type == 315
+        && let Some(wave) = at.pumpkin_moon_wave
+    {
+        let gate = pumpkin_moon_gate_denominator(wave, at.expert);
+        out.push(Conditional {
+            item: 1857,
+            one_in: gate * 20,
+            min: 1,
+            max: 1,
+        });
     }
 
     out.extend(by_mode(npc_type, at));
@@ -318,7 +473,119 @@ pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
         668 => &[&[5117, 5118, 5119, 5095]],
         // The Martian Saucer's weapon: one of six.
         395 => &[&[2797, 2749, 2795, 2796, 2880, 2769]],
+        // The three Big Mimics: each drops one of its own five accessories, guaranteed
+        // (`ItemDropRule.OneFromOptions(1, ...)` — a bare `1` denominator, unlike every gated pool
+        // in `chance_pools`, is what makes this belong here instead) — `ItemDropDatabase.cs:987-989`.
+        473 => &[&[3008, 3014, 3012, 3015, 3023]],
+        474 => &[&[3006, 3007, 3013, 3016, 3020]],
+        475 => &[&[3029, 3030, 3051, 6168, 3022]],
+        // The Flying Dutchman's own ship: nineteen banners/decorations, one guaranteed per kill
+        // (`ItemDropDatabase.cs:866`; each also has its own independent 1-in-300 roll elsewhere in
+        // source, not modelled — the guaranteed pick alone already makes every one obtainable).
+        491 => &[&[
+            1704, 1705, 1710, 1716, 1720, 2379, 2389, 2405, 2843, 3885, 2663, 3910, 2238, 2133,
+            2137, 2143, 2147, 2151, 2155,
+        ]],
+        // Moss Zombie: one of ten fossil-ore-family drops, guaranteed (`ItemDropDatabase.cs:1146`).
+        691 => &[&[4352, 4350, 4349, 4353, 4351, 4354, 5127, 4378, 4377, 4389]],
         _ => &[],
+    }
+}
+
+/// One `OneFromOptions(chanceDenominator, ...)`-shaped pool: unlike [`one_from`]'s pools, which
+/// always succeed and only pick *which* item, this first rolls `1` in `one_in` and only then picks
+/// one from `options` — the caller must roll the gate itself, not just the pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChancePool {
+    pub one_in: u32,
+    pub options: &'static [u16],
+}
+
+const fn pool(one_in: u32, options: &'static [u16]) -> ChancePool {
+    ChancePool { one_in, options }
+}
+
+/// `(24 - wave - expertBump) / 2.5`, floored toward zero the way the game's own `(int)` cast does,
+/// minus one more in expert, floored at `1` — `Conditions.PumpkinMoonDropGatingChance.CanDrop`
+/// (`ItemDropDatabase.cs:91-113`) with `info.player.RollLuck(n) == 0` read as the unscaled `1/n`
+/// this project already uses everywhere luck would otherwise apply. Shared by every pumpkin-moon
+/// drop gated on it, both here and in [`conditional`].
+fn pumpkin_moon_gate_denominator(wave: i32, expert: bool) -> u32 {
+    let adjusted = wave + if expert { 5 } else { 0 };
+    let mut denominator = f64::from(24 - adjusted) / 2.5;
+    if expert {
+        denominator -= 1.0;
+    }
+    (denominator as i64).max(1) as u32
+}
+
+/// Chance-gated pools: a kill rolls `1` in `one_in` first, and only on success draws one item from
+/// `options`. Distinct from [`one_from`], whose pools always succeed — vanilla writes both under
+/// the same `OneFromOptions` call, with the gate as its first argument; a bare `1` there means
+/// "always", which is exactly what makes a pool belong in `one_from` instead of here.
+///
+/// Empty for anything with no such rule, which is most things. Returns an owned `Vec` rather than
+/// a `'static` slice — unlike every other table in this module, the pumpkin-moon arm below needs a
+/// denominator computed from the live wave number, which cannot be a compile-time constant.
+pub fn chance_pools(npc_type: u16, at: Conditions) -> Vec<ChancePool> {
+    match npc_type {
+        // Eater of Souls: a Sunglasses-family vanity, `ItemDropDatabase.cs:1050`.
+        6 => vec![pool(175, &[956, 957, 958])],
+        // The whole hornet family (`npcNetIds8`, `ItemDropDatabase.cs:1051-1052`): Hornet, Man
+        // Eater, and the five hardmode Honey Comb hornets. A Hive Pack piece.
+        42 | 43 | 231 | 232 | 233 | 234 | 235 => vec![pool(100, &[960, 961, 962])],
+        // Zombie Elf trio, the Frost Moon's own (`ItemDropDatabase.cs:389`).
+        338..=340 => vec![pool(200, &[1943, 1944, 1945])],
+        // Corrupt/Crimson Penguin (`ItemDropDatabase.cs:1137`).
+        168 | 470 => vec![pool(50, &[3757, 3758, 3759])],
+        // Zombie Eskimo, armed or not (`ItemDropDatabase.cs:1005`).
+        161 | 431 => vec![pool(20, &[803, 804, 805])],
+        // Zombie (Raincoat) (`ItemDropDatabase.cs:1112`).
+        223 => vec![pool(20, &[1135, 1136])],
+        // Greek Skeleton, a Golden Slime enemy — `ItemDropDatabase.cs:1148`.
+        481 => vec![pool(7, &[3187, 3188, 3189])],
+        // Light/Dark Mummy (Desert Lamia), `ItemDropDatabase.cs:1031`.
+        528 | 529 => vec![pool(40, &[3786, 3785, 3784])],
+        // Goblin Summoner's staff pool: `NormalvsExpertOneFromOptions(2, 1, ...)`
+        // (`ItemDropDatabase.cs:935`) — expert halves the gate rather than swapping the pool.
+        471 => vec![pool(if at.expert { 1 } else { 2 }, &[3052, 3053, 3054])],
+        // DD2 Dark Mage, tiers 1 and 3 (`ItemDropDatabase.cs:767-777`): two independent
+        // `NormalvsExpertOneFromOptionsNotScalingWithLuck` pools each, mode-scaled. Luck-scaling is
+        // out of scope project-wide already (see `by_mode`'s own precedent); everything else here
+        // is a plain mode-based gate on an otherwise-ordinary pool.
+        564 if at.expert => vec![pool(1, &[3810, 3809]), pool(2, &[3857, 3855])],
+        564 => vec![pool(2, &[3810, 3809]), pool(3, &[3857, 3855])],
+        565 => vec![pool(6, &[3810, 3809]), pool(6, &[3857, 3855])],
+        // DD2 Ogre, tiers 2 and 3 (`ItemDropDatabase.cs:751-763`): same shape as the Dark Mage
+        // above, two mode-scaled pools each.
+        576 if at.expert => {
+            vec![
+                pool(2, &[3811, 3812]),
+                pool(1, &[3852, 3854, 3823, 3835, 3836]),
+            ]
+        }
+        576 => vec![
+            pool(3, &[3811, 3812]),
+            pool(2, &[3852, 3854, 3823, 3835, 3836]),
+        ],
+        577 => vec![
+            pool(6, &[3811, 3812]),
+            pool(4, &[3852, 3854, 3823, 3835, 3836]),
+        ],
+        // The pumpkin moon's scarecrow family (`npcNetIds`, `ItemDropDatabase.cs:341-345`): the
+        // wave gate and the pool's own `OneFromOptions(10, ...)` gate are two independent rolls
+        // stacked (`ByCondition`/`LeadingConditionRule` wrapping a nested rule each roll their own
+        // chance), which combine to exactly `1 / (wave_gate * 10)` — the Headless Horseman's single
+        // item gets the same wave gate in `conditional`, combined with its own separate 1-in-20.
+        305..=314 => {
+            if let Some(wave) = at.pumpkin_moon_wave {
+                let gate = pumpkin_moon_gate_denominator(wave, at.expert);
+                vec![pool(gate * 10, &[1788, 1789, 1790])]
+            } else {
+                vec![]
+            }
+        }
+        _ => vec![],
     }
 }
 
@@ -800,6 +1067,12 @@ mod tests {
             in_crimson: false,
             underground: false,
             other_twin_dead: true,
+            blood_moon: true,
+            npc_from_statue: false,
+            eclipse: true,
+            downed_mech_any: true,
+            downed_all_mech_bosses: true,
+            pumpkin_moon_wave: Some(1),
         };
         // A bunny, a goldfish, a guide.
         for ordinary in [46u16, 1, 22] {
@@ -808,5 +1081,153 @@ mod tests {
                 "{ordinary} dropped something conditional"
             );
         }
+    }
+
+    /// A `chance_pools` gate is a real gate: a pool with `one_in: 1` is `always` (matches
+    /// `one_from`'s territory in spirit, but this is `chance_pools`' own contract, not a promise
+    /// `1` never appears there) and `one_in: 0` would divide by zero in the caller's
+    /// `random_ratio` — this project's own tables never emit that, but the type does not forbid
+    /// it, so the shape itself is what is pinned here.
+    #[test]
+    fn chance_pools_are_empty_for_ordinary_enemies() {
+        assert!(chance_pools(1, plain()).is_empty(), "a bunny");
+        assert!(chance_pools(46, plain()).is_empty(), "a goldfish");
+    }
+
+    #[test]
+    fn the_eater_of_souls_pool_is_the_real_one_in_one_hundred_seventy_five() {
+        let pools = chance_pools(6, plain());
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0], pool(175, &[956, 957, 958]));
+    }
+
+    /// The whole hornet family shares one pool — `npcNetIds8` in source, seven NPCs, not six or
+    /// eight.
+    #[test]
+    fn every_hornet_variant_shares_the_same_pool() {
+        let expected = pool(100, &[960, 961, 962]);
+        for npc in [42u16, 43, 231, 232, 233, 234, 235] {
+            assert_eq!(chance_pools(npc, plain()), vec![expected], "npc {npc}");
+        }
+    }
+
+    /// The goblin summoner's pool tightens in expert (2 -> 1) rather than swapping which items are
+    /// in it — the mode axis and the pool axis are independent.
+    #[test]
+    fn the_goblin_summoners_pool_tightens_in_expert_without_changing_its_items() {
+        let classic = chance_pools(471, plain());
+        let expert = chance_pools(
+            471,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        assert_eq!(classic, vec![pool(2, &[3052, 3053, 3054])]);
+        assert_eq!(expert, vec![pool(1, &[3052, 3053, 3054])]);
+    }
+
+    /// No pumpkin moon running: the scarecrow family's pool does not exist at all, not a pool with
+    /// an infinite or nonsensical denominator.
+    #[test]
+    fn the_scarecrow_pool_is_absent_without_a_running_pumpkin_moon() {
+        assert!(chance_pools(305, plain()).is_empty());
+    }
+
+    /// `PumpkinMoonDropGatingChance`'s own formula (`ItemDropDatabase.cs:91-113`), worked by hand
+    /// for a classic wave 1 and an expert wave 15: `(24 - wave) / 2.5`, floored, minus one more in
+    /// expert, floored at `1` — then the scarecrow pool's own `1-in-10` multiplies in on top.
+    #[test]
+    fn the_pumpkin_moon_wave_gate_matches_the_games_own_formula() {
+        // Wave 1, classic: (24 - 1) / 2.5 = 9.2 -> 9. Combined with the pool's own 1-in-10: 90.
+        let classic_wave_1 = Conditions {
+            pumpkin_moon_wave: Some(1),
+            ..plain()
+        };
+        assert_eq!(
+            chance_pools(305, classic_wave_1),
+            vec![pool(90, &[1788, 1789, 1790])]
+        );
+
+        // Wave 15, expert: adjusted = 15 + 5 = 20; (24 - 20) / 2.5 = 1.6 -> 1; minus one more for
+        // expert = 0, floored at 1. Combined with the pool: 10.
+        let expert_wave_15 = Conditions {
+            pumpkin_moon_wave: Some(15),
+            expert: true,
+            ..plain()
+        };
+        assert_eq!(
+            chance_pools(315, expert_wave_15).len(),
+            0,
+            "315 has no chance_pools entry — its item lives in conditional() instead"
+        );
+        assert_eq!(
+            chance_pools(305, expert_wave_15),
+            vec![pool(10, &[1788, 1789, 1790])]
+        );
+    }
+
+    /// The Headless Horseman's own Pumpkin Medallion: same wave gate as the scarecrows, combined
+    /// with its own separate 1-in-20 — `24` (its own gate's item, not a pool) rather than `230`
+    /// would be the bug this pins against (multiplying wrongly, or not gating on the wave at all).
+    #[test]
+    fn the_headless_horseman_drops_the_medallion_only_while_a_pumpkin_moon_runs() {
+        assert!(
+            conditional(315, plain()).is_empty(),
+            "no pumpkin moon running at all"
+        );
+        let wave_1 = Conditions {
+            pumpkin_moon_wave: Some(1),
+            ..plain()
+        };
+        let drops = conditional(315, wave_1);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].item, 1857);
+        // (24 - 1) / 2.5 = 9.2 -> 9, times the rule's own 20: 180.
+        assert_eq!(drops[0].one_in, 180);
+    }
+
+    /// A statue farm must not be able to grind the blood-moon fish drops.
+    #[test]
+    fn blood_moon_drops_need_a_real_spawn_not_a_statue() {
+        let farmed = Conditions {
+            blood_moon: true,
+            npc_from_statue: true,
+            ..plain()
+        };
+        assert!(
+            conditional(489, farmed).is_empty(),
+            "a statue-spawned zombie should give nothing extra"
+        );
+
+        let wild = Conditions {
+            blood_moon: true,
+            npc_from_statue: false,
+            ..plain()
+        };
+        assert!(conditional(489, wild).iter().any(|d| d.item == 4271));
+    }
+
+    /// Pixie needs any one mechanical boss; the Reaper (an eclipse-only NPC) needs all three — the
+    /// weaker and stronger versions of the same underlying condition must not be conflated.
+    #[test]
+    fn beat_any_mech_boss_and_downed_all_mech_bosses_are_genuinely_different_gates() {
+        let only_one = Conditions {
+            downed_mech_any: true,
+            downed_all_mech_bosses: false,
+            ..plain()
+        };
+        assert!(conditional(75, only_one).iter().any(|d| d.item == 5662));
+        assert!(
+            conditional(253, only_one).is_empty(),
+            "one mech boss down should not be enough for the Reaper"
+        );
+
+        let all_three = Conditions {
+            downed_mech_any: true,
+            downed_all_mech_bosses: true,
+            ..plain()
+        };
+        assert!(conditional(253, all_three).iter().any(|d| d.item == 1327));
     }
 }

@@ -241,6 +241,12 @@ fn in_the_tables(link: &Link) -> bool {
         in_corruption: false,
         in_crimson: false,
         underground: false,
+        blood_moon: false,
+        npc_from_statue: false,
+        eclipse: false,
+        downed_mech_any: true,
+        downed_all_mech_bosses: true,
+        pumpkin_moon_wave: None,
     };
     let wanted = |item: i32| {
         conditional(link.boss, at)

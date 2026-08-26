@@ -3673,6 +3673,66 @@ async fn an_eater_of_worlds_drops_its_ore() {
     );
 }
 
+/// A chance-gated `OneFromOptions` pool, driven over a real socket rather than only unit-tested
+/// against the table itself. Deliberately picked because its expert-mode rate is `1`-in-`1`: the
+/// Goblin Summoner's staff pool is `pool(if at.expert { 1 } else { 2 }, ...)`
+/// (`conditional_drops.rs`, `chance_pools`) — in expert this always fires, so one kill is a
+/// deterministic assertion rather than a retry loop hoping to clear a real dice roll.
+#[tokio::test]
+async fn a_goblin_summoner_always_drops_its_staff_pool_in_expert_mode() {
+    let addr = start_with(Config::default(), |world| {
+        world.game_mode = 1; // expert
+        for x in 380..420 {
+            for y in 300..320 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+            for y in 320..332 {
+                world.set_tile(x, y, Tile::block(1));
+            }
+        }
+    })
+    .await;
+
+    let mut client = join(addr, "summoner").await;
+    client.set_timeout(Duration::from_secs(15));
+    client.move_to(400.0 * 16.0, 318.0 * 16.0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    client.say("/spawn Goblin Summoner").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        let Ok(event) = client.next_event().await else {
+            break;
+        };
+        match event {
+            Event::NpcSynced(n) if n.npc_type() == 471 && n.life > 0 => {
+                client
+                    .hit_npc(n.index, n.generation, 9999, 0.0, 1)
+                    .await
+                    .ok();
+            }
+            // Coins drop first (`npc_died` calls `drop_coins` before `drop_loot`) and are their
+            // own `ItemSynced` events too — only the pool's own three items matter here.
+            Event::ItemSynced(item) if [3052, 3053, 3054].contains(&item.item.id) => {
+                seen.insert(item.item.id);
+            }
+            _ => {}
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        seen.len(),
+        1,
+        "a guaranteed pool should give exactly one item from its own pool, got {seen:?}"
+    );
+}
+
 /// A player is only told about the NPCs in their own part of the world.
 ///
 /// Sending every NPC to every player is what a server can least afford: the cost grows with

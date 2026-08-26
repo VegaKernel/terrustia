@@ -7381,10 +7381,12 @@ impl GameServer {
     /// a debuff can finish something off between two ticks, with no player credited, and every
     /// one of these still has to happen.
     fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
-        self.npcs.remove(index);
+        // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
+        // *this* NPC came from a statue, not just whether one exists somewhere in the world.
+        let from_statue = self.npcs.remove(index).is_some_and(|npc| npc.from_statue);
         self.broadcast_npc_death(index);
         self.drop_coins(value, center);
-        self.drop_loot(npc_type, center);
+        self.drop_loot(npc_type, center, from_statue);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
         self.note_army_kill(npc_type);
@@ -7402,7 +7404,7 @@ impl GameServer {
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
     /// has fallen.
-    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32)) {
+    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32), from_statue: bool) {
         let (tx, ty) = (
             (center.0 / crate::game::npc::TILE) as i32,
             (center.1 / crate::game::npc::TILE) as i32,
@@ -7434,11 +7436,31 @@ impl GameServer {
                 .npcs
                 .iter()
                 .any(|(_, n)| matches!(n.npc_type, 125 | 126) && n.is_alive()),
+            blood_moon: self.world.blood_moon,
+            npc_from_statue: from_statue,
+            eclipse: self.world.eclipse,
+            downed_mech_any: p.downed_mech_any,
+            downed_all_mech_bosses: p.downed_mech1 && p.downed_mech2 && p.downed_mech3,
+            pumpkin_moon_wave: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin))
+                .then_some(self.moon.wave),
         };
 
         // Pools that give exactly one of their options.
         for pool in terrustia_proto::conditional_drops::one_from(npc_type, at) {
             let pick = pool[rand::Rng::random_range(&mut self.rng, 0..pool.len())];
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(i32::from(pick), 1, 0), center)
+            {
+                self.broadcast_item(index);
+            }
+        }
+        // Chance-gated pools: roll the gate first, and only on success pick which option.
+        for pool in terrustia_proto::conditional_drops::chance_pools(npc_type, at) {
+            if pool.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, pool.one_in) {
+                continue;
+            }
+            let pick = pool.options[rand::Rng::random_range(&mut self.rng, 0..pool.options.len())];
             if let Some(index) = self
                 .items
                 .spawn(ItemStack::new(i32::from(pick), 1, 0), center)

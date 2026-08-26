@@ -228,6 +228,13 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
     # correctly implemented and tested, but invisible to the scan above since it is not a `vec!`
     # arm at all. Brace-matched by hand because the block can nest (an `if/else` inside it, in
     # EoC's case) and a regex cannot balance that reliably.
+    #
+    # The Mimic (85) in `one_from()` is the same shape with a different body: its two pools differ
+    # by `at.hard_mode`, so it is handled ahead of that function's own match as an early-return
+    # `if`/`else`, each branch a bare `&[&[items]]` array rather than an `always/sometimes/a_few`
+    # call — a second call shape this scan needs to recognise on top of the first. The Headless
+    # Horseman (315) is a third: its rate is computed at runtime (the pumpkin moon's wave gate), so
+    # it is a `Conditional { item: N, ... }` struct literal rather than any of the above.
     for m in re.finditer(r"if npc_type == (\d+)[^{]*\{", cond):
         npc = int(m.group(1))
         depth, i = 1, m.end()
@@ -239,6 +246,9 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
             i += 1
         body = cond[m.end() : i]
         items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", body)}
+        for arr in re.finditer(r"&\[([\d,\s]+)\]", body):
+            items.update(int(n) for n in re.findall(r"\d+", arr.group(1)))
+        items.update(int(n) for n in re.findall(r"item:\s*(\d+)", body))
         ours.setdefault(npc, set()).update(items)
     # `conditional()`'s own dominant style is neither of the above: `match npc_type { N =>
     # out.push(...), N2 => { out.push(...); out.push(...); } ... }`, imperative pushes into `out`
@@ -250,7 +260,17 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
     # balance to its closing brace, then split the block on arm markers (reusing the same
     # `NUM (| NUM)*` / `NUM..=NUM` marker shape gen_drops.py's own npc_drops.rs scan uses) so each
     # arm's items are attributed only to that arm's own NPCs, not smeared across the whole match.
-    arm_marker = re.compile(r"(?:^|\n)\s*(\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*)\s*=>", re.M)
+    #
+    # Two more real blind spots, found closing the 66-gap drop-table pass: a guard clause
+    # (`156 if at.hard_mode =>`) fell entirely outside the old marker regex, which required `=>`
+    # right after the pattern — the whole arm, guard included, was invisible, not just missed. And
+    # `chance_pools()` (a chance-gated `OneFromOptions` pool: roll `1` in `one_in` first, then draw
+    # one item) writes its items through `pool(one_in, &[items])`, a call shape this scanner never
+    # looked for — it walked `chance_pools()`'s own `match npc_type {}` block same as any other
+    # (nothing here is specific to `conditional()`) but found nothing worth keeping in it.
+    arm_marker = re.compile(
+        r"(?:^|\n)\s*(\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*)(?:\s+if\s+[^=\n]*)?\s*=>", re.M
+    )
     for m in re.finditer(r"match npc_type \{", cond):
         depth, i = 1, m.end()
         while depth > 0 and i < len(cond):
@@ -265,6 +285,16 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
             arm_end = arm_starts[nth + 1][0] if nth + 1 < len(arm_starts) else len(block)
             arm_body = block[body_at:arm_end]
             items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", arm_body)}
+            # `pool`'s own first argument is a chance denominator, not an item — sometimes a
+            # literal, sometimes (the pumpkin moon's wave-scaled gate, the goblin summoner's
+            # mode-scaled one) an expression computed at runtime. Either way this scan cannot and
+            # need not evaluate it: only the `&[...]` item list after the comma is a drop.
+            for pool_call in re.finditer(r"pool\([^,]+,\s*&\[([\d,\s]+)\]\)", arm_body):
+                items.update(int(n) for n in re.findall(r"\d+", pool_call.group(1)))
+            # A `Conditional { item: N, ... }` struct literal — needed when the rate itself is
+            # computed at runtime (the same pumpkin-moon gate above) and so cannot go through the
+            # `sometimes`/`a_few` constructors, which take a compile-time rate.
+            items.update(int(n) for n in re.findall(r"item:\s*(\d+)", arm_body))
             if not items:
                 continue
             for npc in _expand_npcs(label):
@@ -272,8 +302,10 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
     # The bag, trophy and mask maps, and the one-from pools.
     for pattern in (
         r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => (\d+),",
-        # `one_from` pools, which may be one list or several on a line.
-        r"^        (\d+) => &\[((?:&\[[\d, ]+\],?\s*)+)\],",
+        # `one_from` pools, which may be one list or several on a line — or, once `rustfmt` wraps a
+        # long enough one (the Flying Dutchman's nineteen-item pool does), several lines. `\s` in
+        # place of a literal space covers that; `re.S` lets `.` span the newlines within.
+        r"^        (\d+) => &\[((?:&\[[\d,\s]+\],?\s*)+)\],",
     ):
         for m in re.finditer(pattern, cond, re.M):
             npcs = _expand_npcs(m.group(1))
