@@ -323,3 +323,28 @@ Kept because they are the reason the bugs above went unnoticed for so long.
     the fix's own disclosure comment claimed this was correct ("reframed by a hammer, not wire"),
     which is factually wrong: `Minecart.cs:1320-1323`'s real `FlipSwitchTrack` has a `case 2` too.
     See the new Done row above for the real mechanism and what was implemented.
+13. The Block B row above (`cargo-fuzz` over the decoder found a real OOM within 90 seconds) and
+    the Block B tracker's own "`cargo-fuzz` over the decoder; commit `.trcap` fixtures and replay in
+    CI" item were both true as far as they went, but `fuzz/fuzz_targets/packet_decoders.rs`'s own
+    doc comment claim — fuzzing "every other hand-parsed packet decoder" — was genuinely misleading
+    about total coverage. A parallel audit this session counted the decoders `game/server.rs`'s
+    inbound dispatch actually calls on raw, untrusted client bytes: 22 distinct `T::decode(payload)`
+    method calls, of which the fuzz target's own 14 covered functions matched only 9 by that exact
+    counting (`items::ItemOwner`, `npc::SyncNpc`, and `net_module::decode_liquid_changes` are real
+    decoders too, but decode bytes only `terrustia-client` parses, never bytes the server's own
+    dispatch touches; `decode_item_despawn` and `decode_pylon_message` are dispatch decoders the fuzz
+    target already covered, just as free functions rather than `T::decode()` methods, so the audit's
+    own count did not include them). 13 dispatch decoders were never fuzzed at all, including packet 13
+    (`PlayerControls`, sent roughly once a tick per player — the single highest-frequency inbound
+    packet) and packet 17 (`TileManipulation`, the packet behind this project's own headline
+    section-ownership fix). Confirmed each missing decoder's exact signature against the source
+    before adding it rather than trusting the audit's own table blindly. All 13, plus
+    `player_info::PlayerAppearance::decode` (reached via `.ok()` on client-supplied bytes at one call
+    site, a 14th minor case the audit also found), are now in the target — 28 `decode` calls in
+    total — and the doc comment is corrected to describe what it actually covers rather than the
+    five files it happened to originally be scoped to. Verified: `cargo build -p terrustia-proto-fuzz`
+    clean; two full bounded runs at `cargo fuzz run packet_decoders -- -max_total_time=60` (the exact
+    incantation `.github/workflows/ci.yml`'s own `fuzz` job runs), ~2.9 million total executions
+    across both (1,628,072 + 1,278,163), no crash in either — disclosed as a clean bounded run, not
+    proof the newly-added decoders are panic-free; the OOM row above is itself the reason not to read
+    a quiet short run as more than that.
