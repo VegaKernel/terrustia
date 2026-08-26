@@ -52,6 +52,7 @@ pub mod terrain;
 pub mod tiles;
 pub mod traps;
 pub mod underground_cabins;
+pub mod underworld_ruins;
 
 pub use passes::compare_against;
 
@@ -113,6 +114,10 @@ pub struct Built {
     pub pyramids: usize,
     /// Small furnished houses found underground, in whichever material dominates the site.
     pub underground_cabins: usize,
+    /// Ruined ash/hellstone-brick rooms scattered along the underworld surface.
+    pub underworld_ruins: usize,
+    /// Real Hellforges, each sited against a ruin's own background wall.
+    pub hellforges: usize,
 }
 
 /// Generate a world of the given size.
@@ -273,6 +278,13 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let underground_cabins =
         underground_cabins::scatter(&mut world, &plan, &mut structures, &mut rand);
 
+    // Underworld ruins, same "after the terrain that carries them already exists" reasoning —
+    // `structures::underworld` (the ash/lava fill) already ran, above. Hellforges site directly
+    // onto a ruin's own background wall, so it has to run after `scatter_ruins`, not just after
+    // the terrain.
+    let underworld_ruins = underworld_ruins::scatter_ruins(&mut world, &plan, &mut rand);
+    let hellforges = underworld_ruins::scatter_hellforges(&mut world, &plan, &mut rand);
+
     // Spawn goes on the surface in the middle, in a pocket cleared for it.
     let spawn_y = heights[plan.spawn_x as usize];
     world.spawn_x = plan.spawn_x as i16;
@@ -319,6 +331,8 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         jungle_shrines,
         pyramids,
         underground_cabins,
+        underworld_ruins,
+        hellforges,
     };
     (world, built)
 }

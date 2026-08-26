@@ -539,9 +539,9 @@ pub fn scatter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terrustia_proto::TileFlags;
     use crate::world::World;
     use crate::world::worldgen::rand::UnifiedRandom as Rand;
+    use terrustia_proto::TileFlags;
 
     /// Solid stone from `ground_y` down, except for one big hollow cavern in the middle — a
     /// real cave void with real walls/floor/ceiling to site into, not an undifferentiated solid
