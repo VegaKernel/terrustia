@@ -890,11 +890,17 @@ pub fn scatter(
     if secret == Some(SecretSeed::NoTraps) {
         return result;
     }
-    // The search bands below are `200..width-200` and `surface..height-210` — real, full-size
-    // worlds always clear this by a wide margin, but the small synthetic worlds several unrelated
-    // tests build (to keep persistence/header tests fast) do not. Skip rather than let
-    // `random_range` panic on an inverted or empty range.
-    if layout.width <= 400 || layout.height <= layout.surface + 210 {
+    // The search bands below are `200..width-200`, `surface..height-210`, and — tighter than
+    // either — the sand-trap loop's own `surface+20..height-210`. Real, full-size worlds always
+    // clear all three by a wide margin, but a small world (the synthetic ones several unrelated
+    // tests build to keep persistence/header tests fast, or a real but modestly-sized
+    // `world_width`/`world_height` a config file legitimately requests — `Config::validate` only
+    // floors `world_width`, not `world_height` against what this pass itself needs) can clear the
+    // first two margins while still landing inside the 20-tile gap the third one leaves, which
+    // used to reach `random_range` with an inverted range and panic instead of being skipped like
+    // every other too-small case. Guarding against the tightest of the three bands (`+230`, not
+    // `+210`) covers all of them.
+    if layout.width <= 400 || layout.height <= layout.surface + 230 {
         return result;
     }
     let mut boulder_pets_placed = 0;
@@ -1133,6 +1139,27 @@ mod tests {
         assert!(
             result.total() > 0,
             "a 200-wide corridor should get at least one trap"
+        );
+    }
+
+    /// A world whose height clears the outer-loop margin (`surface..height-210`) but not the
+    /// sand-trap loop's tighter one (`surface+20..height-210`) used to reach `random_range` with
+    /// an inverted range and panic, instead of being skipped like every other too-small case —
+    /// `surface = 10`, `height = 230` sits exactly in that 20-tile gap (`10+210=220 < 230 <=
+    /// 10+230=240`). Real, reachable through ordinary world generation at any valid
+    /// `world_width`/`world_height` whose surface lands there, not just synthetic test worlds:
+    /// `Config::validate` floors `world_width` but not `world_height` against what this pass
+    /// itself needs.
+    #[test]
+    fn a_world_too_short_for_the_sand_trap_range_is_skipped_not_panicked() {
+        let mut world = World::empty(500, 230, "traps");
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let result = scatter(&mut world, &layout, &mut rng, None);
+        assert_eq!(
+            result.total(),
+            0,
+            "a world this short should place nothing, not panic"
         );
     }
 

@@ -189,7 +189,7 @@ impl Config {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         // The panel is account/server control, not gameplay — it never gets to face the network
         // just because someone typed a non-loopback address into `panel_listen`.
         if self.panel_enabled && !self.panel_listen.ip().is_loopback() {

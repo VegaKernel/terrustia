@@ -115,6 +115,124 @@ fn new_generates_a_world_into_the_platforms_terraria_world_directory() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `--new` must generate a fresh world even when `terrustia.toml` already sets `world_file` to a
+/// different, existing world — that config-file value is layered in (`Config::load`, then
+/// `apply_env`) before any CLI flag is read, and `--new` used to only redirect where the result is
+/// *saved* without ever clearing `world_file`, so the server would silently load and re-save the
+/// stale world under the new name instead of generating one. Proven here by size, not just file
+/// existence: the stale world and the freshly-requested one are given different dimensions, and
+/// the resulting file is loaded back and checked against the *new* config's width, not the stale
+/// file's.
+#[test]
+fn new_ignores_a_stale_world_file_left_in_the_config() {
+    let home = scratch_home();
+    std::fs::create_dir_all(&home).expect("scratch home");
+
+    // First, generate the "stale" world `terrustia.toml` will point at. A generous timeout: this
+    // is the only test in this file that generates two worlds in sequence, each waiting on top of
+    // whatever the other tests' own concurrently-running server subprocesses are costing it.
+    let mut stale = run_new(&home, "Stale World", "127.0.0.1:17782");
+    let stale_found = wait_for_file(&home, "Stale_World.wld", Duration::from_secs(60));
+    let _ = stale.kill();
+    let _ = stale.wait();
+    assert_eq!(
+        stale_found.len(),
+        1,
+        "the stale world should have been written first"
+    );
+    let stale_path = stale_found[0]
+        .to_str()
+        .expect("utf8 path")
+        .replace('\\', "\\\\");
+
+    // Now point the config at it directly, with a different width, and ask for a new world.
+    std::fs::write(
+        home.join("terrustia.toml"),
+        format!(
+            "autosave_secs = 1\nworld_width = 600\nworld_height = 300\nworld_file = \"{stale_path}\"\n"
+        ),
+    )
+    .expect("write config");
+    let mut fresh = Command::new(env!("CARGO_BIN_EXE_terrustia"))
+        .args(["--new", "Fresh World", "--listen", "127.0.0.1:17783"])
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join("xdg"))
+        .env("USERPROFILE", &home)
+        .env_remove("TERRUSTIA_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn terrustia");
+    let fresh_found = wait_for_file(&home, "Fresh_World.wld", Duration::from_secs(60));
+    let _ = fresh.kill();
+    let _ = fresh.wait();
+    assert_eq!(
+        fresh_found.len(),
+        1,
+        "the fresh world should have been written"
+    );
+
+    let loaded = terrustia::world::wld::load(&fresh_found[0]).expect("load the generated world");
+    assert_eq!(
+        loaded.width(),
+        600,
+        "--new should generate at the new config's width, not silently load+re-save the stale \
+         world_file (which was generated at the old, smaller default width)"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `Config::validate` skips its own width/height/section-alignment checks entirely whenever
+/// `world_file.is_some()` — correct for `--world`, where a loaded world brings its own dimensions,
+/// but `Config::load` runs `validate` once *before* `--new` can clear `world_file`, so an
+/// out-of-range `world_width`/`world_height` sitting in a config file that also sets `world_file`
+/// used to reach real generation completely unvalidated. Proven by giving `--new` a config whose
+/// `world_file` would have suppressed the check and whose dimensions are genuinely invalid (below
+/// the documented 400x300 floor): this must fail fast with a clear message, not attempt
+/// generation at an unvalidated size.
+#[test]
+fn new_still_validates_dimensions_even_with_a_world_file_set() {
+    let home = scratch_home();
+    std::fs::create_dir_all(&home).expect("scratch home");
+    std::fs::write(
+        home.join("terrustia.toml"),
+        "world_width = 50\nworld_height = 20\nworld_file = \"anything.wld\"\n",
+    )
+    .expect("write config");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_terrustia"))
+        .args(["--new", "Too Small World", "--listen", "127.0.0.1:17784"])
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join("xdg"))
+        .env("USERPROFILE", &home)
+        .env_remove("TERRUSTIA_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn terrustia");
+    let status = child.wait().expect("wait for terrustia");
+    assert!(
+        !status.success(),
+        "an out-of-range world_width/world_height must be refused, not silently generated"
+    );
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .expect("captured stdout")
+        .read_to_string(&mut stdout)
+        .expect("read stdout");
+    assert!(
+        stdout.contains("must be at least 400x300"),
+        "expected a clear size-refusal message on stdout, got: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn new_refuses_a_name_that_already_exists() {
     let home = scratch_home();

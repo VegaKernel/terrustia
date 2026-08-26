@@ -132,12 +132,28 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
         }
+        // `--new` means "generate fresh", full stop — it must win even over a `world_file` that
+        // came from the config file or environment (layered in above, before any CLI flag is
+        // read), or the match below would silently load that stale world instead of generating
+        // one, only redirecting where the result gets saved. `args.world` can never be the reason
+        // `config.world_file` is set here: `Args::parse` already rejects `--world` and `--new`
+        // together, so the `if let Some(world_file) = args.world` block above never ran when this
+        // one did.
+        config.world_file = None;
         config.world_name = name;
         config.save_file = Some(destination);
     }
     if let Some(save_file) = args.save {
         config.save_file = Some(save_file);
     }
+    // `Config::load` already ran `validate` once, but only against whatever `world_file` the file
+    // and environment layers left in place — `validate` skips width/height/section-alignment
+    // checks entirely whenever `world_file.is_some()` (a loaded world brings its own dimensions,
+    // so those checks don't apply to it). `--new`, just above, can clear `world_file` after that
+    // first validation already ran, which would otherwise let a stale config's own out-of-range
+    // `world_width`/`world_height` reach real generation completely unvalidated — re-run it now
+    // against the final, fully-layered config so that case is covered too.
+    config.validate()?;
 
     let started = Instant::now();
     let loaded_from = config.world_file.clone();
