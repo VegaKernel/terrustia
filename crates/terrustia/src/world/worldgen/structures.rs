@@ -118,6 +118,45 @@ fn hollow_blob(world: &mut World, cx: i32, cy: i32, radius: i32, rand: &mut Unif
     }
 }
 
+/// Hollow out a tile the way [`hollow`] does, but clear its wall too.
+///
+/// `caves()` is the one carver that needs this. Every other structure here keeps `hollow`'s wall
+/// as-is on purpose — a dungeon room or a chasm reads as a built space, not a hole into the void,
+/// precisely because something is still behind it. Vanilla's own wandering cave tunnels are
+/// different: `WorldGen.cs` registers `CaveWallsInEnclosedSpaces`/`CaveWallVariety` (the passes
+/// that put wall behind a cave) as **Tier 3** work, run only after `GemCaves`/`SpiderCaves`/
+/// `LivingTrees` (Tier 2) have already sited into the unwalled space those earlier passes carved —
+/// so at the point in vanilla's own pipeline that matters here, a freshly-dug cave tunnel has no
+/// wall at all. `caves()` carrying wall forward from the terrain pass that ran before it skipped
+/// straight past that intermediate state, and it is exactly the state `cave_flood::count`'s own
+/// wall check (transcribed from vanilla's `nextCount`) is built to search for: measured on a real
+/// generated world, every sampled pocket saturated to the search cap before this fix, because
+/// there was no unwalled pocket anywhere to find.
+fn hollow_no_wall(world: &mut World, x: i32, y: i32) {
+    if !world.in_bounds(x, y) {
+        return;
+    }
+    let was = world.tile(x, y);
+    let mut tile = Tile::AIR;
+    tile.liquid = was.liquid;
+    tile.liquid_kind = was.liquid_kind;
+    world.set_tile(x, y, tile);
+}
+
+/// [`hollow_blob`], but through [`hollow_no_wall`] — see its doc comment for why `caves()` alone
+/// needs this and nothing else here does.
+fn hollow_blob_no_wall(world: &mut World, cx: i32, cy: i32, radius: i32, rand: &mut UnifiedRandom) {
+    let wobble = rand.next_range(-1, 2);
+    for x in cx - radius - 1..=cx + radius + 1 {
+        for y in cy - radius - 1..=cy + radius + 1 {
+            let (dx, dy) = (x - cx, y - cy);
+            if dx * dx + dy * dy <= (radius + wobble) * (radius + wobble) {
+                hollow_no_wall(world, x, y);
+            }
+        }
+    }
+}
+
 /// ...and the same in a material.
 fn fill_blob(world: &mut World, cx: i32, cy: i32, radius: i32, block: u16) {
     for x in cx - radius..=cx + radius {
@@ -159,7 +198,7 @@ pub fn caves(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) {
             if y > f64::from(layout.underworld - 10) {
                 break;
             }
-            hollow_blob(world, x as i32, y as i32, radius, rand);
+            hollow_blob_no_wall(world, x as i32, y as i32, radius, rand);
         }
     }
 }
@@ -908,5 +947,119 @@ mod temple_altar_tests {
                  unreachable in a world generated from this seed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cave_wall_tests {
+    use super::*;
+
+    /// `caves()` carves through solid, walled terrain. If it leaves the wall in place behind what
+    /// it hollows out, every cave in a generated world ends up walled — so `cave_flood::count`
+    /// (used to site `GemCaves`/`SpiderCaves`/`LivingTrees`, all of which reject any walled tile,
+    /// matching vanilla's own `nextCount`) can never find a pocket to build in at all. Measured
+    /// directly on a real generated world before this fix: every sampled deep-rock point saturated
+    /// to the search cap.
+    #[test]
+    fn a_carved_cave_tile_has_no_wall() {
+        let mut rand = UnifiedRandom::new(7);
+        let mut layout_rand = UnifiedRandom::new(7);
+        let mut world = World::empty(400, 300, "cave-wall");
+        let layout = Layout::plan(400, 300, &mut layout_rand);
+
+        // Solid, fully-walled ground everywhere first — the same state `terrain::fill` leaves
+        // underground tiles in, which is exactly what `caves()` carves into during real
+        // generation.
+        for x in 0..400 {
+            for y in 0..300 {
+                let mut tile = Tile::block(tiles::STONE);
+                tile.wall = walls::STONE;
+                world.set_tile(x, y, tile);
+            }
+        }
+
+        caves(&mut world, &layout, &mut rand);
+
+        let mut carved = 0usize;
+        let mut still_walled = 0usize;
+        for x in 0..400 {
+            for y in 0..300 {
+                let tile = world.tile(x, y);
+                if !tile.is_active() {
+                    carved += 1;
+                    if tile.wall != 0 {
+                        still_walled += 1;
+                    }
+                }
+            }
+        }
+        assert!(carved > 0, "caves() carved nothing on a fully solid world");
+        assert_eq!(
+            still_walled, 0,
+            "{still_walled} of {carved} carved cave tiles still have a wall — a pass that sites \
+             into unwalled pockets (gem caves, spider caves, living trees) can never find one"
+        );
+    }
+
+    /// The same property, on a real generated world rather than a synthetic one — this is the
+    /// actual check that found the bug, not a stand-in for it.
+    ///
+    /// **This fix alone does not unblock `GemCaves`/`SpiderCaves`'s siting, and this test does not
+    /// claim it does — see the module-level note above `hollow_no_wall` and the caller's own
+    /// report for the second, separate issue.** What this fix delivers, and what this test
+    /// actually pins: real, open cave interiors are genuinely unwalled now, matching vanilla's own
+    /// pre-`CaveWallsInEnclosedSpaces` pipeline state. Measured before this fix: nearly every open
+    /// tile sampled from a real generated world still carried the wall painted by `terrain::fill`
+    /// before caves were ever carved through it. That specific defect is what this asserts against.
+    ///
+    /// A *second*, independent defect was found while building this test and is not fixed here:
+    /// even with walls correctly cleared, `cave_flood`-style pocket measurement from real sampled
+    /// points still saturates to the 3500-tile search cap almost universally — terrustia's own
+    /// cave carver (`caves()`, a wandering-tunnel algorithm, not vanilla's) produces caves that
+    /// read as one large interconnected network rather than vanilla's mix of small isolated
+    /// pockets and large caverns, the same shape of siting mismatch `lakes.rs`'s own doc comment
+    /// already discloses for lake placement. Fixing *that* means reworking `caves()`'s own
+    /// topology, a materially bigger and riskier change to already-shipped Tier 1 generation than
+    /// this task's scope — flagged, not attempted.
+    #[test]
+    fn a_real_generated_world_has_real_unwalled_open_cave_tiles() {
+        let world = super::super::generate(4200, 1200, "cave-wall-real", 4242);
+        let (from, to) = (i32::from(world.rock_layer) + 30, world.height() - 200);
+        let mut rng = 12345u64;
+        let mut open_samples = 0u32;
+        let mut walled_samples = 0u32;
+        for _ in 0..300 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let x = 20 + (((rng >> 16) as u32) % (world.width() as u32 - 40)) as i32;
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let y = from + (((rng >> 16) as u32) % (to - from).max(1) as u32) as i32;
+            if world.tile(x, y).is_active() {
+                continue;
+            }
+            open_samples += 1;
+            if world.tile(x, y).wall != 0 {
+                walled_samples += 1;
+            }
+        }
+        assert!(
+            open_samples > 20,
+            "too few open samples ({open_samples}) to say anything about this world"
+        );
+        // Not zero: a blind sample across the whole deep-rock band also lands inside the
+        // dungeon, the hive, the evil chasms and the jungle temple — every one of those still
+        // uses `hollow`/`hollow_blob` and keeps its wall on purpose (see that function's own doc
+        // comment), and this sampling has no way to tell "inside the dungeon" from "inside a
+        // cave" without inspecting more than wall state. `caves()` carves far more of the deep
+        // band than every other structure combined, so a large majority unwalled is the real
+        // signal; a small minority walled is those other structures working as intended, not a
+        // regression in this fix.
+        let walled_fraction = f64::from(walled_samples) / f64::from(open_samples);
+        assert!(
+            walled_fraction < 0.2,
+            "{walled_samples} of {open_samples} open points sampled from a real generated world \
+             ({:.0}%) still carry a wall — too many to be only the dungeon/hive/chasms/temple; \
+             caves() looks like it is leaving wall behind again",
+            walled_fraction * 100.0
+        );
     }
 }
