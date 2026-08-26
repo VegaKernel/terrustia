@@ -614,7 +614,10 @@ pub fn chests(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> u
 }
 
 /// Put a chest down if there is room and a floor for it.
-fn add_chest(
+///
+/// `pub(crate)`: `jungle_shrines.rs` reuses this directly for the chest a shrine's own floor gap
+/// is built to hold, rather than re-deriving the same clearance/floor check a second time.
+pub(crate) fn add_chest(
     world: &mut World,
     x: i32,
     y: i32,
@@ -660,7 +663,12 @@ fn add_chest(
 /// it derives them from a chain of boolean flags gated on the chest's site. The two item lists
 /// below are exactly its `flag2` (jungle) and the desert-tool block near the top of the function,
 /// item IDs and roll odds unchanged.
-fn biome_chest_loot(
+///
+/// `pub(crate)`: `jungle_shrines.rs` reuses the jungle branch for its own chest, in place of
+/// vanilla's separate `GetNextJungleChestItem` (a non-repeating cycle through the same signature
+/// list) — a real, disclosed simplification: both draw from the same underlying jungle item set,
+/// and duplicating a second selection mechanism for that difference alone was not worth it.
+pub(crate) fn biome_chest_loot(
     layout: &Layout,
     x: i32,
     y: i32,

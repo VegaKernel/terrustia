@@ -8,6 +8,7 @@ pub const DIRT: u16 = 0;
 pub const STONE: u16 = 1;
 pub const GRASS: u16 = 2;
 pub const PLANTS: u16 = 3;
+pub const TORCH: u16 = 4;
 pub const IRON: u16 = 6;
 pub const COPPER: u16 = 7;
 pub const GOLD: u16 = 8;
@@ -24,6 +25,8 @@ pub const BLUE_DUNGEON_BRICK: u16 = 41;
 pub const GREEN_DUNGEON_BRICK: u16 = 43;
 pub const PINK_DUNGEON_BRICK: u16 = 44;
 pub const SPIKES: u16 = 48;
+/// `GoldBrick` — one of the five jungle-shrine wood/brick materials `GenVars.jungleHut` rolls.
+pub const GOLD_BRICK: u16 = 45;
 pub const COBWEB: u16 = 51;
 pub const SAND: u16 = 53;
 pub const OBSIDIAN: u16 = 56;
@@ -39,15 +42,21 @@ pub const AMETHYST: u16 = 67;
 pub const DIAMOND: u16 = 68;
 pub const MUSHROOM_GRASS: u16 = 70;
 pub const EBONSAND: u16 = 112;
+/// The other four jungle-shrine materials `GenVars.jungleHut` rolls, alongside [`GOLD_BRICK`].
+pub const IRIDESCENT_BRICK: u16 = 119;
+pub const MUDSTONE: u16 = 120;
 pub const SILT: u16 = 123;
 pub const SNOW: u16 = 147;
 pub const ICE: u16 = 161;
 pub const CRIMSON_GRASS: u16 = 199;
 pub const CRIMSTONE: u16 = 203;
 pub const CRIMTANE: u16 = 204;
+pub const RICH_MAHOGANY: u16 = 158;
+pub const TIN_BRICK: u16 = 175;
 pub const LARVA: u16 = 231;
 pub const CRIMSAND: u16 = 234;
 pub const HIVE: u16 = 225;
+pub const HONEY_BLOCK: u16 = 229;
 pub const LIHZAHRD_BRICK: u16 = 226;
 pub const MARBLE: u16 = 367;
 pub const GRANITE: u16 = 368;
@@ -72,7 +81,17 @@ pub mod walls {
     pub const CAVE: u16 = 61;
     pub const SANDSTONE: u16 = 187;
     pub const LIHZAHRD_BRICK: u16 = 87;
+    /// The unsafe hive wall — `WallID.HiveUnsafe`, used only as a clearance-scan exclusion (a
+    /// jungle shrine refuses to site near it) alongside [`LIHZAHRD_BRICK`] above.
+    pub const HIVE: u16 = 86;
     pub const HARDENED_SAND: u16 = 216;
+    /// The five wall materials matching `tiles::GOLD_BRICK`/`IRIDESCENT_BRICK`/`MUDSTONE`/
+    /// `RICH_MAHOGANY`/`TIN_BRICK`, in `GenVars.jungleHut`'s own roll order (`WorldGen.cs:11345`).
+    pub const GOLD_BRICK: u16 = 10;
+    pub const IRIDESCENT_BRICK: u16 = 23;
+    pub const MUDSTONE_BRICK: u16 = 24;
+    pub const RICH_MAHOGANY: u16 = 42;
+    pub const TIN_BRICK: u16 = 45;
     /// The six gem walls `Spread.Gem` (`WorldGen.cs:3592`) rolls from, `48 + randGem()` — in the
     /// same 0-5 index order `randGemTile` (`WorldGen.cs:9707`) uses for its matching tile: 0
     /// amethyst, 1 topaz, 2 sapphire, 3 emerald, 4 ruby, 5 diamond.

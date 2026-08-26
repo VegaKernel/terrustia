@@ -28,6 +28,7 @@
 pub mod cave_flood;
 pub mod fallen_logs;
 pub mod gem_caves;
+pub mod jungle_shrines;
 pub mod lakes;
 pub mod layout;
 pub mod liquid_settle;
@@ -104,6 +105,8 @@ pub struct Built {
     pub gem_caves: usize,
     pub oases: usize,
     pub spider_caves: usize,
+    /// Small hollow jungle-grass huts, each holding a chest and a torch.
+    pub jungle_shrines: usize,
 }
 
 /// Generate a world of the given size.
@@ -118,6 +121,10 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     let mut rand = UnifiedRandom::new(seed as i32);
 
     let plan = Layout::plan(width, height, &mut rand);
+    // Shared across every Tier 2 pass that sites a set-piece structure — `GenVars.structures` in
+    // vanilla, one session-global instance so a jungle shrine and an underground cabin (once that
+    // lands) never overlap each other, the same way they cannot in a real generated world.
+    let mut structures = structure_map::StructureMap::new();
     world.id = rand.next();
     for byte in &mut world.unique_id {
         *byte = rand.next_max(256) as u8;
@@ -212,6 +219,11 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
     // vines reads as a green cave.
     let (vines, cacti) = crate::world::trees::plant_undergrowth(&mut world, &mut forest_rng);
 
+    // Jungle shrines need real jungle grass under a candidate site, so this runs right after the
+    // jungle itself is grassed — and before pots/statues/piles below get a chance to clutter a
+    // floor tile a shrine's own clearance scan would then refuse.
+    let jungle_shrines = jungle_shrines::scatter(&mut world, &plan, &mut structures, &mut rand);
+
     // Pots, statues, piles and fallen logs: the small object-placement passes built on
     // `place_object`. Ground-truth loot and decoration that makes a cave look excavated rather
     // than merely hollow.
@@ -285,6 +297,7 @@ pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (Wo
         gem_caves,
         oases,
         spider_caves,
+        jungle_shrines,
     };
     (world, built)
 }
