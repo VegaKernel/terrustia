@@ -500,6 +500,150 @@ fn is_immortal(npc: &crate::game::npc::Npc) -> bool {
     npc.stats.ai_style == TARGET_DUMMY_AI || npc.npc_type == IMMORTAL_TYPE
 }
 
+/// A hostile NPC candidate for a town resident to fight back against: (slot, center, velocity).
+type Hostile = (u8, (f32, f32), (f32, f32));
+
+/// The nearest hostile a town resident can actually see, from among the candidates it might fight
+/// back against.
+///
+/// Real vanilla (`AI_007_TownEntities`, `NPC.cs:54029-54101`) filters its own equivalent
+/// nearest-candidate scan on `Collision.CanHit` *before* comparing distance at all
+/// (`NPC.cs:54033`) — a closer hostile behind a wall never becomes a candidate to begin with, so a
+/// farther one actually in view is who ends up selected. Filtering here before `min_by` is what
+/// reproduces that: without it, a wall-blocked hostile nearer than an open one would always win the
+/// distance comparison and — now that `try_combat` refuses to fire at a target it cannot see —
+/// leave the resident with nothing it is willing to fight, for as long as the blocked hostile stays
+/// alive and nearest.
+fn nearest_visible_hostile(
+    tiles: &impl TileView,
+    npc: &crate::game::npc::Npc,
+    hostiles: &[Hostile],
+) -> Option<Target> {
+    let here = npc.center();
+    hostiles
+        .iter()
+        .filter(|h| {
+            crate::game::ai::can_see(
+                tiles,
+                npc,
+                Target {
+                    slot: h.0,
+                    center: h.1,
+                    velocity: h.2,
+                    alive: true,
+                },
+            )
+        })
+        .min_by(|a, b| {
+            let da = (a.1.0 - here.0).powi(2) + (a.1.1 - here.1).powi(2);
+            let db = (b.1.0 - here.0).powi(2) + (b.1.1 - here.1).powi(2);
+            da.total_cmp(&db)
+        })
+        .map(|&(slot, center, velocity)| Target {
+            slot,
+            center,
+            velocity,
+            alive: true,
+        })
+}
+
+#[cfg(test)]
+mod nearest_visible_hostile_tests {
+    use super::nearest_visible_hostile;
+    use crate::game::npc::{Npc, TILE, TileView};
+    use std::collections::HashMap;
+    use terrustia_proto::tile::Tile;
+
+    #[derive(Default)]
+    struct Ground(HashMap<(i32, i32), Tile>);
+
+    impl TileView for Ground {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+        }
+    }
+
+    fn wall_at(tiles: &mut Ground, x: i32) {
+        for y in 85..=110 {
+            tiles.0.insert((x, y), Tile::block(1));
+        }
+    }
+
+    fn merchant_at(tile_x: i32) -> Npc {
+        let mut n = Npc::new(17, (0.0, 0.0), 1).expect("a real town npc type");
+        n.position = (tile_x as f32 * TILE, 100.0 * TILE - n.height());
+        n
+    }
+
+    /// Before this fix, the scan compared every candidate purely by distance — a wall between the
+    /// resident and its nearest hostile never disqualified that hostile from being picked, it just
+    /// meant `try_combat` would then refuse to fire at it, leaving a visible, fightable hostile
+    /// close by completely ignored.
+    #[test]
+    fn a_farther_visible_hostile_is_picked_over_a_nearer_hidden_one() {
+        let mut tiles = Ground::default();
+        wall_at(&mut tiles, 203);
+        let merchant = merchant_at(200);
+        let hostiles = [
+            // Nearer, but behind the wall at tile 203.
+            (
+                1u8,
+                (merchant.center().0 + 60.0, merchant.center().1),
+                (0.0, 0.0),
+            ),
+            // Farther, but with a clear line to it.
+            (
+                2u8,
+                (merchant.center().0 - 150.0, merchant.center().1),
+                (0.0, 0.0),
+            ),
+        ];
+        let picked = nearest_visible_hostile(&tiles, &merchant, &hostiles)
+            .expect("the farther, visible hostile should still be a valid candidate");
+        assert_eq!(
+            picked.slot, 2,
+            "should have skipped the blocked, nearer one"
+        );
+    }
+
+    #[test]
+    fn the_nearest_hostile_is_picked_when_nothing_blocks_the_view() {
+        let tiles = Ground::default();
+        let merchant = merchant_at(200);
+        let hostiles = [
+            (
+                1u8,
+                (merchant.center().0 + 200.0, merchant.center().1),
+                (0.0, 0.0),
+            ),
+            (
+                2u8,
+                (merchant.center().0 + 50.0, merchant.center().1),
+                (0.0, 0.0),
+            ),
+        ];
+        let picked = nearest_visible_hostile(&tiles, &merchant, &hostiles)
+            .expect("an unobstructed hostile should be picked");
+        assert_eq!(
+            picked.slot, 2,
+            "the ordinary unobstructed case: nearest wins"
+        );
+    }
+
+    #[test]
+    fn nothing_is_picked_when_every_candidate_is_hidden() {
+        let mut tiles = Ground::default();
+        wall_at(&mut tiles, 203);
+        let merchant = merchant_at(200);
+        let hostiles = [(
+            1u8,
+            (merchant.center().0 + 60.0, merchant.center().1),
+            (0.0, 0.0),
+        )];
+        assert!(nearest_visible_hostile(&tiles, &merchant, &hostiles).is_none());
+    }
+}
+
 /// The count a running timer is set back to whenever it fires.
 ///
 /// Five minutes of ticks, and a multiple of every timer period, which is what keeps two timers of
@@ -6438,8 +6582,7 @@ impl GameServer {
             };
             // Where hostile NPCs are, for town residents fighting back — built once here rather
             // than scanning the whole table per resident, the same reasoning `hurt` above uses
-            // for the Dark Mage. (slot, center, velocity).
-            type Hostile = (u8, (f32, f32), (f32, f32));
+            // for the Dark Mage.
             let hostiles: Vec<Hostile> = if self.npcs.iter().any(|(_, n)| {
                 n.stats.town_npc && crate::game::ai::town_combat::town_combat(n.npc_type).is_some()
             }) {
@@ -6557,22 +6700,12 @@ impl GameServer {
                                 *ty == npc.npc_type
                                     && Some(*slot) == targets.first().map(|t| t.slot)
                             }),
-                        // The nearest hostile a resident might fight back against.
+                        // The nearest *visible* hostile a resident might fight back against — see
+                        // `nearest_visible_hostile`'s own doc comment for why this is filtered on
+                        // line of sight before distance is compared, not merely left for
+                        // `try_combat` to refuse later.
                         hostile: if npc.stats.town_npc {
-                            let here = npc.center();
-                            hostiles
-                                .iter()
-                                .min_by(|a, b| {
-                                    let da = (a.1.0 - here.0).powi(2) + (a.1.1 - here.1).powi(2);
-                                    let db = (b.1.0 - here.0).powi(2) + (b.1.1 - here.1).powi(2);
-                                    da.total_cmp(&db)
-                                })
-                                .map(|&(slot, center, velocity)| npc_ai::Target {
-                                    slot,
-                                    center,
-                                    velocity,
-                                    alive: true,
-                                })
+                            nearest_visible_hostile(&tiles, npc, &hostiles)
                         } else {
                             None
                         },

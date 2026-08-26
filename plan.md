@@ -430,3 +430,84 @@ Kept because they are the reason the bugs above went unnoticed for so long.
     entries against their own `NPC.cs` blocks and all 27 matched. Fixed: `town_combat.rs`'s Stylist
     entry now reads `damage: 10`, with a comment at the match site naming the two nearby locals so
     the same slip is harder to repeat.
+16. Both "Town NPCs fight back" and "Town NPC combat: all 28 real vanilla `AttackType` NPCs now
+    covered" (Done, above) shipped a resident that would open fire or swing at a hostile through a
+    solid wall — line of sight was never checked anywhere on the combat path, and neither row said
+    so. `town_combat.rs`'s own module doc is otherwise thorough about disclosing exactly what each
+    entry simplifies (hardmode upgrades, Pirate's burst, Cyborg's projectile roll, Truffle/
+    Princess's spawn point, Dryad's zero damage); this gap was not on that list, because it was not
+    known, not because it was judged out of scope. A parallel audit this session found it and traced
+    it end to end before anything was changed, not taken on the audit's word: `town.rs`'s
+    `try_combat` (the commit-to-fight decision) and `server.rs`'s own nearest-hostile candidate scan
+    (upstream of it, feeding `world.hostile`) both picked and fired on distance alone, and `can_see`
+    — the line-of-sight check every boss AI file already gates its own targeting on (`destroyer.rs`,
+    `plantera.rs`, `golem.rs`) — was never called from either.
+
+    Real vanilla (`AI_007_TownEntities`, `NPC.cs`) gates line of sight in exactly two places, not
+    one, and they are not the same check. First, its own nearest-candidate scan
+    (`NPC.cs:54029-54101`) filters every hostile on `Collision.CanHit` *before* distance is even
+    compared (`NPC.cs:54033`) — a closer hostile behind a wall never becomes a candidate at all
+    (unless it has `noTileCollide`, e.g. a ghost), so a farther one actually in view is what ends up
+    nearest among the survivors. Second, right before the state transition into an actual combat
+    state (10/12/14/15), the chosen candidate is re-verified — `Collision.CanHit` for `AttackType`
+    0 and 3, `Collision.CanHitLine` for `AttackType` 1 and 2, two genuinely different algorithms
+    (`Collision.cs:388` vs `:590`), with a fallback to the other side's candidate if the preferred
+    one fails (`NPC.cs:56012-56109`). Past that point ranged states (10/12/14) never check again —
+    their firing loops (`NPC.cs:54892-55087` and neighbours) have no `CanHit` call anywhere in them,
+    confirmed by grep across each state's full body — so a target that ducks behind cover mid-fight
+    still gets shot at until the state times out. Melee (state 15, Dye Trader/Tax Collector/town
+    pets) is the one exception: every tick of the swing it re-checks `CanHit` per potential victim
+    as part of applying damage, scanning *any* qualifying hostile the swing hitbox overlaps rather
+    than only the original target (`NPC.cs:55632-55641`), and re-checks again at the end of each
+    swing to decide whether to keep swinging (`NPC.cs:55645-55676`).
+
+    Fixed, using the established `can_see` (`game/ai/mod.rs`, wrapping `sight::can_hit` — the same
+    `Collision.CanHit` port every boss file already shares) rather than inventing a new check:
+    `try_combat` now refuses to transition into a combat state at all if it cannot see the hostile
+    it is about to engage — the same point in the state machine vanilla's own commit-time check
+    sits at, so a ranged attacker already fighting still does not re-check on every shot, faithfully
+    matching vanilla rather than narrowing it further. `server.rs`'s nearest-hostile scan (pulled
+    out into a new, directly-tested `nearest_visible_hostile`) now filters on the same `can_see`
+    before picking the nearest candidate, matching vanilla's own initial-scan filter — without it, a
+    closer blocked hostile would keep winning the distance comparison and permanently starve a
+    resident of a target it could actually fight, since this project's own targeting is a single
+    nearest-candidate design, not vanilla's real two-sided left/right-plus-fallback one; gating only
+    at the commit-time layer would have left that starvation case unfixed.
+
+    Three real, disclosed narrowings from full vanilla fidelity, matching this module doc's own
+    habit of naming exactly what is simplified rather than folding it into a general disclaimer:
+    melee's real per-tick, per-victim swing-rectangle scan and end-of-swing recheck are not
+    replicated — `town_combat.rs`'s own melee shape was already a single tracked target before this
+    fix, not vanilla's rectangle-over-every-nearby-hostile, so the gate here is one check at the
+    same commit point ranged uses, not a per-tick one; vanilla's `CanHit`/`CanHitLine` split by
+    `AttackType` is not replicated — this uses the one `can_see` every boss file already shares,
+    since no `CanHitLine` port exists anywhere in this codebase and this fix did not warrant adding
+    a second, otherwise-unused one; and vanilla's `noTileCollide` bypass at the initial scan (a
+    flying or ghostly hostile skips the `CanHit` filter entirely) is not replicated in
+    `nearest_visible_hostile`, since it is orthogonal to "attacks through solid walls" and not
+    central to this fix.
+
+    **Verified**: two new tests in `game/ai/town.rs`, `a_hostile_behind_a_wall_does_not_draw_fire`
+    (ranged) and `a_hostile_behind_a_wall_is_not_swung_at` (melee), each **verified failing on the
+    unfixed code** (a real run with the `can_see` gate in `try_combat` removed: both panicked,
+    firing/swinging straight through the wall) and passing with it restored; the pre-existing
+    positive-case tests in the same file (`a_merchant_fights_back_against_a_nearby_hostile`,
+    `a_dye_trader_swings_at_a_hostile_within_reach`) still pass, so the unobstructed case was not
+    broken chasing this. Three new tests for `nearest_visible_hostile` in `game/server.rs`
+    (`a_farther_visible_hostile_is_picked_over_a_nearer_hidden_one`,
+    `the_nearest_hostile_is_picked_when_nothing_blocks_the_view`,
+    `nothing_is_picked_when_every_candidate_is_hidden`) — the first and third **verified failing on
+    the unfixed code** (real run: picked the blocked candidate; found a candidate when none should
+    have been visible), the second passes either way by design, since it is the ordinary-case
+    regression check. The two pre-existing live two-client socket tests that already covered the
+    unobstructed case end to end (`a_town_npc_fights_back_against_a_nearby_hostile`,
+    `a_town_npcs_shot_actually_damages_the_hostile_it_targeted`) were re-run against the fixed code
+    and still pass. A live two-hostile integration test (one nearer and wall-blocked, one farther
+    and visible, over a real socket) was attempted first, to prove `nearest_visible_hostile`'s
+    effect end to end rather than only at the unit level — abandoned as genuinely unreliable, not
+    silently dropped: the spawned zombies' own ordinary AI wanders during the seconds a shot takes
+    to travel and land, which drove the assertion on which NPC actually took damage past its
+    timeout even once the debug trace confirmed the merchant *had* fired toward the correct,
+    visible zombie (a negative-velocity shot aimed at the farther target, not the near blocked one).
+    The deterministic unit test on the extracted function proves the same claim without that
+    flakiness.

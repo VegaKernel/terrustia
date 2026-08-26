@@ -35,7 +35,7 @@ use terrustia_proto::tile::TileFlags;
 use terrustia_proto::tile_solid::{solid, solid_top};
 
 use super::town_combat::{self, AttackKind};
-use super::{Conditions, MeleeHit, Shot, World};
+use super::{Conditions, MeleeHit, Shot, World, can_see};
 use crate::game::npc::{Npc, TILE, TileView};
 
 /// Door and tall-gate tile types.
@@ -498,8 +498,28 @@ pub fn update<T: TileView>(
 ///
 /// `Some` means combat owned this tick — either just opened fire, is mid-cooldown, or just
 /// finished a swing — and `update` should not also try to walk or stand it this tick. `None` means
-/// there is nothing to fight (no profile, no target in range, or airborne — vanilla's own attack
-/// branches all gate on `velocity.Y == 0f` too) and the ordinary dispatch should run instead.
+/// there is nothing to fight (no profile, no target in range, airborne — vanilla's own attack
+/// branches all gate on `velocity.Y == 0f` too — or blocked, see below) and the ordinary dispatch
+/// should run instead.
+///
+/// **Line of sight is checked once, at the moment combat is entered — not on every firing tick.**
+/// That is deliberate, not an oversight: real vanilla (`AI_007_TownEntities`, `NPC.cs:56012-56109`)
+/// re-verifies `Collision.CanHit`/`CanHitLine` on the chosen candidate right before the state
+/// transition into its combat states (10/12/14/15), the same point this gate sits at — but once a
+/// ranged attacker (state 10/12/14) is actually in that state, its firing loop
+/// (`NPC.cs:54892-55087` and neighbours) never rechecks `CanHit` again for as long as the state
+/// lasts. `hostile` itself (the caller's own nearest-candidate scan, `game/server.rs`) is filtered
+/// on `can_see` too, matching vanilla's own initial scan (`NPC.cs:54033`), so a hostile behind a
+/// wall never reaches here as a candidate in the first place; this is the second, commit-time gate
+/// vanilla also has, not a substitute for the first. Two real, disclosed narrowings from full
+/// vanilla fidelity: vanilla's melee state (15) uniquely re-checks `CanHit` per potential victim on
+/// every tick of the swing, including at the end of each swing to decide whether to keep swinging
+/// (`NPC.cs:55632-55676`) — not modelled here, since `town_combat`'s own melee shape is already a
+/// single tracked target rather than vanilla's real swing-rectangle scan over every nearby hostile;
+/// and vanilla splits the check itself by `AttackType` (`CanHit` for types 0/3, `CanHitLine` for
+/// types 1/2, two genuinely different algorithms — `Collision.cs`), while this uses the one
+/// `can_see`/`Collision.CanHit` port every boss AI file already shares, rather than porting a
+/// second, otherwise-unused `CanHitLine`.
 fn try_combat<T: TileView>(
     npc: &mut Npc,
     world: &World<'_, T>,
@@ -518,6 +538,9 @@ fn try_combat<T: TileView>(
             hostile.center.1 - npc.center().1,
         );
         if (dx * dx + dy * dy).sqrt() > combat.range {
+            return None;
+        }
+        if !can_see(world.tiles, npc, hostile) {
             return None;
         }
         npc.ai[0] = combat.state;
@@ -672,6 +695,65 @@ mod tests {
         assert!(
             shot.velocity.0 > 0.0,
             "the hostile is to the right; the shot should aim there"
+        );
+    }
+
+    /// A solid wall, floor to well above head height, at one tile column. Contiguous with no
+    /// gaps, so `can_hit`'s own "two-tile hole" leniency (see `sight.rs`) cannot thread it.
+    fn wall_at(tiles: &mut Ground, x: i32) {
+        for y in 85..=110 {
+            tiles.0.insert((x, y), Tile::block(1));
+        }
+    }
+
+    #[test]
+    fn a_hostile_behind_a_wall_does_not_draw_fire() {
+        // Before this fix, `try_combat` never called `can_see` at all — a town NPC with a
+        // hostile in range would open fire straight through a solid wall. Same scenario as
+        // `a_merchant_fights_back_against_a_nearby_hostile` above, with a wall dropped between
+        // them: everything else about the setup (type, distance, direction) is unchanged, so a
+        // regression back to firing through it would be caught here, not just by omission.
+        let mut tiles = flat(0, 400);
+        wall_at(&mut tiles, 203);
+        let mut merchant = stand_on(17, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 9,
+            center: (merchant.center().0 + 100.0, merchant.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut merchant, &w, None, &mut rng());
+        assert!(
+            result.shot.is_none(),
+            "a wall stands between the merchant and the hostile; it should not fire through it"
+        );
+    }
+
+    #[test]
+    fn a_hostile_behind_a_wall_is_not_swung_at() {
+        // The melee counterpart of the test above, covering `AttackKind::Melee` rather than
+        // `AttackKind::Ranged` — a different match arm in `try_combat`, so the ranged case
+        // passing does not prove this one does. The Dye Trader's own 32px reach (`town_combat.rs`)
+        // means the hostile has to be genuinely close (24px, not 100) for the *reach* check inside
+        // the melee arm to still pass once line of sight is fixed — otherwise a failure there would
+        // prove nothing about the line-of-sight gate specifically. At that spacing there is exactly
+        // one tile column between the trader (tile 200) and the hostile (tile 202): tile 201, which
+        // is where the wall goes.
+        let mut tiles = flat(0, 400);
+        wall_at(&mut tiles, 201);
+        let mut trader = stand_on(207, 200);
+        let mut w = day(&tiles);
+        w.hostile = Some(crate::game::npc_ai::Target {
+            slot: 5,
+            center: (trader.center().0 + 24.0, trader.center().1),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let result = update(&mut trader, &w, None, &mut rng());
+        assert!(
+            result.melee.is_none(),
+            "a wall stands between the trader and the hostile; it should not swing through it"
         );
     }
 
