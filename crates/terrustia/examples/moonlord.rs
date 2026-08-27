@@ -691,14 +691,36 @@ async fn gather(bot: &mut Bot, candidates: &[(i32, i32)], goal: usize, what: &st
 /// regardless of how the escort came to exist, and every kill here is still a real, paced
 /// `hit_npc` against a real health pool, not a scripted instant kill.
 /// Visit each of the four real sites a lunar pillar could have landed on
-/// (`LunarState::trigger`'s own "a fifth of the world apart" placement, `game/lunar.rs`), so
-/// whichever one this pillar actually occupies gets its sections requested before the dedicated
-/// fight begins.
-async fn visit_pillar_sites(bot: &mut Bot, map: &Map) {
+/// (`LunarState::trigger`'s own "a fifth of the world apart" placement, `game/lunar.rs`), stopping
+/// at whichever one actually shows `pillar_type` rather than sweeping through all four regardless.
+///
+/// A fixed, brief glance at each of the four sites (the original shape of this fix) left the bot
+/// parked at the *last* site visited by the time the dedicated fight began, with no way to tell
+/// whether the real pillar had actually landed at any of the other three — `fight()` only ever
+/// walks toward a target its own client has already seen at least once (`alive.is_empty()` gates
+/// its own movement), so a bot standing at the wrong site could never find its way to the pillar
+/// at all, for the whole of its own 180-second patience. Watching each site for a real stretch
+/// before moving on, rather than a single glance, also matters on its own: real vanilla sinks a
+/// freshly-placed pillar toward the surface gradually over several real seconds rather than
+/// starting there already settled (`NPC.cs:39519-39541`'s own `position.Y` adjustment, transcribed
+/// faithfully in `game/ai/hardmode/pillar.rs`) — a single instant is genuinely not always enough to
+/// catch it mid-descent even while standing at the right site.
+async fn visit_pillar_sites(bot: &mut Bot, map: &Map, pillar_type: u16) {
     let step = map.width / 5;
     for i in 1..=4 {
         bot.walk_to_tile(step * i, (map.surface - 40).max(10)).await;
-        bot.drain_briefly(200).await;
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline {
+            if bot
+                .client
+                .world()
+                .npcs()
+                .any(|n| n.npc_type() == pillar_type)
+            {
+                return;
+            }
+            bot.drain_briefly(200).await;
+        }
     }
 }
 
@@ -1611,7 +1633,7 @@ async fn main() -> ExitCode {
         // sections there, so whichever one this pillar actually landed on gets covered before the
         // dedicated fight starts, rather than leaving the bot standing wherever the last escort
         // died with no idea which direction to walk.
-        visit_pillar_sites(&mut bot, &map).await;
+        visit_pillar_sites(&mut bot, &map, pillar_type).await;
         let ok = fight(&mut bot, &[pillar_type], human_name, 180).await;
         pillars_ok &= ok;
         if should_stop(stage_name, &stop) {
