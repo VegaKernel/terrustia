@@ -8208,7 +8208,7 @@ impl GameServer {
         // Acknowledge first, as vanilla does, so the client stops resending the hit.
         self.send(slot, damage_ack()?);
 
-        let Some(npc) = self.npcs.get_mut(hit.index) else {
+        let Some(npc) = self.npcs.get(hit.index) else {
             return Ok(());
         };
         // A stale hit aimed at whoever used to hold this slot must not land on its new occupant.
@@ -8220,7 +8220,21 @@ impl GameServer {
             );
             return Ok(());
         }
+        // The Solar Crawltipede's tail is its only directly-damageable segment (`npc_data.rs`'s
+        // own 412/413 entries are `dont_take_damage: true`, matching real vanilla exactly), but a
+        // hit against it does not reduce its own life at all in source — `NPC.cs`'s own `realLife`
+        // redirects every segment's health to the *head*'s shared pool (`statLife =
+        // Main.npc[realLife].life`), and `checkDead` only ever processes death for the segment
+        // whose own `realLife == whoAmI` — every other segment's own death is silently skipped
+        // entirely. This project has no general `realLife` field; scoped narrowly here to the one
+        // chain that needs it, walking the already-existing `follows` link instead of adding one.
+        if npc.npc_type == terrustia_proto::npc_params::SOLAR_CRAWLTIPEDE_TAIL {
+            return self.on_damage_crawltipede_tail(slot, hit);
+        }
 
+        let Some(npc) = self.npcs.get_mut(hit.index) else {
+            return Ok(());
+        };
         // Live armour, not the type's: a rolling tortoise really is twice as hard to hurt.
         let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
         let mut killed = npc.take_damage(amount, hit.knockback, hit.direction);
@@ -8250,6 +8264,77 @@ impl GameServer {
             debug!(slot, npc_type, "npc killed");
         } else {
             self.broadcast_npc(hit.index);
+        }
+        Ok(())
+    }
+
+    /// A hit against a Solar Crawltipede's tail — the redirect `on_damage_npc` hands off to. See
+    /// its own comment there for why this exists at all.
+    fn on_damage_crawltipede_tail(
+        &mut self,
+        slot: u8,
+        hit: DamageNpc,
+    ) -> terrustia_proto::Result<()> {
+        // Walk `follows` back to the root: the head, which is where the whole chain's shared life
+        // actually lives.
+        let mut head_index = hit.index;
+        while let Some(ahead) = self.npcs.get(head_index).and_then(|n| n.follows) {
+            head_index = ahead;
+        }
+        let Some(head) = self.npcs.get_mut(head_index) else {
+            self.broadcast(hit.encode()?, Some(slot));
+            return Ok(());
+        };
+        let amount = damage_taken(i32::from(hit.damage), head.defense, hit.crit);
+        head.life = (head.life - amount.max(0)).max(0);
+        head.was_hurt = true;
+        head.dirty = true;
+        let killed = head.life <= 0;
+        let (npc_type, center, value) = (
+            head.npc_type,
+            head.center(),
+            if head.from_statue {
+                0.0
+            } else {
+                head.stats.value
+            },
+        );
+
+        self.broadcast(hit.encode()?, Some(slot));
+
+        if killed {
+            // The whole chain goes together (`CheckActive_WormSegments`'s own real mechanism):
+            // every segment still `follows`ing this head, transitively, is removed, but only the
+            // head's own death is processed (loot, the shield credit, everything `npc_died`
+            // does) — matching real vanilla's own `checkDead` gate, which skips death processing
+            // entirely for any segment whose `realLife` points elsewhere.
+            let follows: std::collections::HashMap<u8, Option<u8>> = self
+                .npcs
+                .iter()
+                .map(|(index, n)| (index, n.follows))
+                .collect();
+            let chain: Vec<u8> = follows
+                .iter()
+                .filter(|&(_, &leader)| {
+                    let mut at = leader;
+                    while let Some(ahead) = at {
+                        if ahead == head_index {
+                            return true;
+                        }
+                        at = follows.get(&ahead).copied().flatten();
+                    }
+                    false
+                })
+                .map(|(&index, _)| index)
+                .collect();
+            for index in chain {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+            }
+            self.npc_died(head_index, npc_type, center, value);
+            debug!(slot, npc_type, "npc killed (crawltipede chain)");
+        } else {
+            self.broadcast_npc(head_index);
         }
         Ok(())
     }

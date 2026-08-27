@@ -2563,6 +2563,68 @@ async fn a_solar_crawltipede_head_grows_its_own_body() {
     );
 }
 
+/// Hitting the Crawltipede's tail — its only directly-damageable segment — has to actually kill
+/// the chain, or growing a real body (the test above) does not itself close the gap: real
+/// vanilla's own `realLife` redirects every hit against the tail to the *head*'s shared life pool
+/// (`NPC.cs`'s own `statLife = Main.npc[realLife].life`), and `checkDead` only ever processes
+/// death for the head — the tail dying "on its own" does nothing at all. Found live: even with a
+/// real, grown body, a real bot's own combat against `[413, 414]` still never confirmed a single
+/// kill, because 413 (the body) is *also* `dont_take_damage`, and hits against 414 (the tail) were
+/// simply discarded rather than reducing the head's own life. `game/server.rs`'s new
+/// `on_damage_crawltipede_tail` is what this test proves closes that.
+#[tokio::test]
+async fn hitting_the_crawltipedes_tail_kills_the_whole_chain() {
+    let addr = start().await;
+    let mut alice = join(addr, "crawltipede-slayer").await;
+    alice.say("/spawn 412").await.unwrap();
+
+    let mut head: Option<(u8, u8)> = None;
+    let mut tail: Option<(u8, u8)> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while head.is_none() || tail.is_none() {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "the Crawltipede never fully grew in time");
+        match tokio::time::timeout(left, alice.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if n.npc_type() == 412 => {
+                head = Some((n.index, n.generation));
+            }
+            Ok(Ok(Event::NpcSynced(n))) if n.npc_type() == 414 => {
+                tail = Some((n.index, n.generation));
+            }
+            Ok(Ok(_)) => {}
+            Err(_) => panic!("timed out waiting for the Crawltipede to grow"),
+            _ => {}
+        }
+    }
+    let (head_index, _) = head.unwrap();
+    let (tail_index, tail_gen) = tail.unwrap();
+
+    // Comfortably more than the head's own 10,000 life, even after its 1,000 defense.
+    alice
+        .hit_npc(tail_index, tail_gen, 30_000, 0.0, 1)
+        .await
+        .unwrap();
+
+    // Tight on purpose: the head (`boss: false`) is also subject to the ordinary despawn timer
+    // (~12.5s), which a loose deadline here could satisfy by coincidence and make this test pass
+    // for the wrong reason — found live doing exactly that against the unfixed code. A real
+    // redirect-driven death happens essentially the same tick as the hit; three seconds leaves
+    // no room for the despawn timer to be what actually closed this out.
+    alice.set_timeout(Duration::from_secs(3));
+    let died = alice
+        .wait_for(
+            "the head dying from a hit against the tail",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == head_index && n.net_id == 0),
+        )
+        .await;
+    assert!(
+        died.is_ok(),
+        "the head should have died promptly once the shared life pool a hit against its tail \
+         feeds ran out — a death this long after the hit would be the ordinary despawn timer \
+         coincidentally firing, not the redirect actually working"
+    );
+}
+
 /// Using a summoning item is the only way a boss enters the world, so it had better work.
 #[tokio::test]
 async fn a_player_can_summon_a_boss() {
