@@ -2057,6 +2057,62 @@ async fn king_slime_hops_toward_a_player() {
     assert!(moved, "King Slime never moved");
 }
 
+/// A lunar pillar must not be culled by the ordinary despawn timer, no matter how far away every
+/// player is standing.
+///
+/// Real vanilla's `NPC.CheckActive`/`UpdateNPC` exempt `npc.boss` from the "nobody near, count
+/// down `timeLeft`, then remove" rule every ordinary hostile mob is subject to — a Lunar Pillar
+/// registers as a boss (boss health bar, `npc.boss = true` in `NPCID.SetDefaults`) for exactly
+/// this reason: it is a stationary structure meant to sit far from the player fighting its escort,
+/// not a wandering mob that should vanish the moment nobody is looking at it. `game/npc_ai.rs`'s
+/// own `tick_life` already carries that exemption (`if npc.stats.town_npc || npc.stats.boss {
+/// return; }`) — the bug was in the data, not the logic: all four pillar entries in
+/// `terrustia_proto::npc_data` (517/422/507/493) were transcribed with `boss: false`, the one
+/// field every other real boss in that table sets `true`. With it false, `tick_life` decremented
+/// `time_left` every tick nobody was within `DESPAWN_HALF_WIDTH`/`DESPAWN_HALF_HEIGHT`
+/// (960x600px) of the pillar, and `DEFAULT_TIME_LEFT` is only 750 ticks — 12.5 real seconds — so a
+/// pillar left standing while a player fights its escort elsewhere (exactly what a real Lunar
+/// Apocalypse fight looks like: you clear the shield first, then come back to the pillar itself)
+/// was being silently removed from the server's own NPC table within seconds of the event
+/// starting, and told to every client as an ordinary death (packet 23, zero health) — the pillar
+/// was never "failing to sync", it had already been killed by its own despawn timer, long before
+/// anybody got near it. This is `crates/terrustia/examples/moonlord.rs`'s own disclosed "Lunar
+/// Pillars" gap: `clear_shield` fights each pillar's hundred-strong escort standing wherever the
+/// bot happens to be, not beside the pillar itself, so by the time the bot arrives for the
+/// dedicated pillar fight the real pillar has been gone for however long the escort took.
+#[tokio::test]
+async fn a_lunar_pillar_does_not_despawn_while_no_player_is_near_it() {
+    let addr = start().await;
+    let mut client = join(addr, "stargazer").await;
+    client.set_timeout(Duration::from_secs(20));
+
+    // 517 = `terrustia::game::lunar::SOLAR`, the Solar Pillar — spawned right beside the player,
+    // as `/spawn` always places things.
+    let pillar = spawn_npc(&mut client, "517").await;
+    assert_eq!(pillar.npc_type(), 517);
+
+    // Walk far enough away that nothing keeps the pillar "near" a player any more: the despawn
+    // box reaches 960px/60 tiles horizontally either side, and this world is 800 tiles wide, so
+    // moving to its far edge clears that many times over regardless of where spawn placed us.
+    client.move_to(20.0 * 16.0, 20.0 * 16.0).await.unwrap();
+
+    // Nobody hit it and nobody is anywhere near it, so a real client should never see it die.
+    // `DEFAULT_TIME_LEFT` is 12.5 real seconds on the unfixed code; this waits comfortably past
+    // that with margin for the sync's own rate limiting.
+    let died = client
+        .try_wait_for(
+            "the pillar despawning on its own",
+            |e| matches!(e, Event::NpcSynced(n) if n.index == pillar.index && n.life == 0),
+            Duration::from_secs(18),
+        )
+        .await;
+    assert!(
+        died.is_none(),
+        "a lunar pillar despawned with nobody near it — it should be exempt from the ordinary \
+         despawn timer the same way every other boss is"
+    );
+}
+
 #[tokio::test]
 async fn a_zombie_works_at_a_door_and_opens_it() {
     // A door standing on flat ground, with a zombie spawned beside it.
