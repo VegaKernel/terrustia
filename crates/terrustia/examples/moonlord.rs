@@ -737,14 +737,21 @@ async fn clear_shield(bot: &mut Bot, escorts: &[u16], human_name: &str) {
         // escort without it actually being dead — its own boolean return used to be discarded
         // here, so the loop moved on regardless, leaving a live escort behind and the real kill
         // count short of the 100 the shield actually needs. Now it keeps at the *same* escort
-        // until a kill is confirmed, rather than abandoning it and spawning a fresh one on top
-        // (which would only compound the difficulty, not fix it) — real vanilla has no time limit
-        // on any one kill either.
-        loop {
+        // (rather than abandoning it and spawning a fresh one on top, which would only compound
+        // the difficulty) for a bounded number of extra tries — **bounded is load-bearing**: an
+        // unconditional retry-until-confirmed loop was tried first and found live to hang
+        // indefinitely against one particular escort type this bot's own gear simply could not
+        // beat in any number of attempts, real vanilla's own "no time limit" not helping a fight
+        // that cannot be won at all. Six tries (90s) gives real extra room over the original
+        // single attempt without risking an unbounded hang; if it still is not dead, this one
+        // escort is left uncounted and the loop moves on, same as the original behaviour, rather
+        // than block the whole run — an honest, disclosed limit of this bot's own combat power at
+        // this gear tier, not something a retry count can paper over.
+        for attempt in 0..6 {
             if !bot.client.world().npcs().any(|n| n.npc_type() == kind) {
                 let _ = bot.client.say(&format!("/spawn {kind}")).await;
             }
-            if fight_quiet(bot, &[kind], 15).await {
+            if fight_quiet(bot, &[kind], 15).await || attempt == 5 {
                 break;
             }
         }

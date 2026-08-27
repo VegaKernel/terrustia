@@ -668,6 +668,24 @@ impl NpcStore {
         position: (f32, f32),
     ) -> Option<u8> {
         let head_index = self.spawn(head, position)?;
+        self.grow_worm_body(head_index, body, tail, segments, position);
+        Some(head_index)
+    }
+
+    /// Attach a run of body segments and a tail to a head that already exists, each linked to the
+    /// one ahead — [`Self::spawn_worm`]'s own segment loop, reusable for a head that grows its own
+    /// body on its own first AI tick rather than all at once at creation (`NPC.cs:51913-51936`'s
+    /// own `type == 412 && ai[0] == 0f` gate, the Solar Crawltipede's real mechanism: `dontTakeDamage`
+    /// is set on the head by design — it is genuinely not the target — so a head with no body
+    /// attached is not merely incomplete, it is unkillable).
+    pub fn grow_worm_body(
+        &mut self,
+        head_index: u8,
+        body: u16,
+        tail: u16,
+        segments: usize,
+        position: (f32, f32),
+    ) {
         let mut previous = head_index;
         for i in 0..segments {
             let part = if i + 1 == segments { tail } else { body };
@@ -679,7 +697,6 @@ impl NpcStore {
             }
             previous = index;
         }
-        Some(head_index)
     }
 
     pub fn spawn(&mut self, npc_type: u16, position: (f32, f32)) -> Option<u8> {

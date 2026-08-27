@@ -6636,6 +6636,8 @@ impl GameServer {
         let mut raisable: Vec<(f32, f32)>;
         let mut escaped_probe = false;
         let mut carrying = Vec::new();
+        // Solar Crawltipede heads that need their own body grown — see the loop below.
+        let mut crawltipedes_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
         {
             // What the timid critters flee from. Only two styles read it, so the list is only
@@ -6853,6 +6855,17 @@ impl GameServer {
                     npc.ai[2] = bx;
                     npc.ai[3] = by;
                 }
+                // A Solar Crawltipede head grows its own body on its own first tick
+                // (`NPC.cs:51913-51936`) — its head is `dontTakeDamage` by design (npc_data.rs's
+                // own 412 entry), genuinely not the target, so one with no body attached is not
+                // merely incomplete, it is unkillable. `self.npcs` cannot be borrowed mutably
+                // again from inside this loop, so the actual growth happens once the loop ends.
+                if npc.npc_type == terrustia_proto::npc_params::SOLAR_CRAWLTIPEDE_HEAD
+                    && npc.ai[0] == 0.0
+                {
+                    npc.ai[0] = 1.0;
+                    crawltipedes_to_grow.push((index, npc.position));
+                }
                 // A part reads its parent through this; it cannot see the table itself.
                 let parent = npc
                     .follows_boss
@@ -7031,6 +7044,20 @@ impl GameServer {
                     expired.push(index);
                 }
             }
+        }
+
+        // A Solar Crawltipede head raised its own body this tick — see the loop above.
+        for (head_index, at) in crawltipedes_to_grow {
+            use terrustia_proto::npc_params::{
+                SOLAR_CRAWLTIPEDE_BODY, SOLAR_CRAWLTIPEDE_SEGMENTS, SOLAR_CRAWLTIPEDE_TAIL,
+            };
+            self.npcs.grow_worm_body(
+                head_index,
+                SOLAR_CRAWLTIPEDE_BODY,
+                SOLAR_CRAWLTIPEDE_TAIL,
+                SOLAR_CRAWLTIPEDE_SEGMENTS,
+                at,
+            );
         }
 
         // Each load goes to the most hurt part still standing.

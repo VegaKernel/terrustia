@@ -2493,7 +2493,7 @@ async fn private_storage_is_not_relayed() {
 /// `self.npcs.spawn(npc_type, at)` every other boss does, unlike the admin `/spawn` command, which
 /// already special-cased the four ordinary worm monsters so a bare head would not float there
 /// alone. The Destroyer shares that exact shape and was never special-cased anywhere: found live,
-/// summoning it for real produced only npc 134 and neither of its own 80 real body segments (135,
+/// summoning it for real produced only npc 134 and none of its own 81 real trailing segments (135,
 /// 136) — not a cosmetic gap, since the whole fight ("its damage is a function of how much of its
 /// length has a line to you", `destroyer.rs`'s own module doc) depends on a body existing at all.
 #[tokio::test]
@@ -2521,6 +2521,45 @@ async fn a_summoned_worm_boss_comes_with_its_body() {
         seen,
         std::collections::HashSet::from([134, 135, 136]),
         "expected the Destroyer's head, body and tail all real-summoned, only saw {seen:?}"
+    );
+}
+
+/// A Solar Crawltipede head grows its own body on its own first AI tick, the way Skeletron's
+/// hands and Skeletron Prime's arms do (`NPC.cs:51913-51936`, `ai[0]==0 && type==412` raising 30
+/// trailing segments) — a genuinely different mechanism from `a_summoned_worm_boss_comes_with_its_
+/// body`'s own spawn-time fix, and deliberately so: a Crawltipede head can appear from this
+/// project's own ambient hostile spawning during the Lunar Apocalypse, a path neither `/spawn` nor
+/// a real summon packet ever sees. Found live investigating why the Solar Pillar's own shield
+/// would not clear on a real run even after the pillar-visibility sync gap was fixed: its own
+/// npc_data entry sets `dont_take_damage: true` on the head by real vanilla design — hitting the
+/// head was never how you kill this thing — so a head with no body attached (the previous state
+/// here) was not merely incomplete, it was flatly unkillable, and a bot (or a real player) trying
+/// to fight one alone could do so forever without ever landing a real hit.
+#[tokio::test]
+async fn a_solar_crawltipede_head_grows_its_own_body() {
+    let addr = start().await;
+    let mut alice = join(addr, "crawltipede-watcher").await;
+    alice.say("/spawn 412").await.unwrap();
+
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, alice.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if matches!(n.npc_type(), 412..=414) => {
+                seen.insert(n.npc_type());
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        std::collections::HashSet::from([412, 413, 414]),
+        "expected the Crawltipede's head, body and tail all real-grown, only saw {seen:?}"
     );
 }
 

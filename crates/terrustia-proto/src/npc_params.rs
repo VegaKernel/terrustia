@@ -2046,22 +2046,37 @@ pub fn splitting_worm(npc_type: u16) -> Option<(u16, u16, u16)> {
     matches!(npc_type, 13..=15).then_some(EATER_OF_WORLDS)
 }
 
-/// A worm-headed type's own body, tail and real segment count, if `head_type` is one.
+/// A worm-headed type's own body, tail and real segment count, if `head_type` is one — for the
+/// types created all at once by a spawn-time path (the admin `/spawn` command,
+/// `summon_on_player`). The Solar Crawltipede needs the same idea but is deliberately not here —
+/// see [`SOLAR_CRAWLTIPEDE_HEAD`]'s own doc comment for why.
 ///
 /// A worm head spawned alone is a floating face: the body has to be created alongside it, every
-/// segment linked to the one ahead. Covers every worm this project models — the four ordinary
-/// worm monsters `NPC.cs`'s own spawn code gives 20/8/6/12 segments respectively, and the
-/// Destroyer, whose own module doc already counts "eighty body segments".
+/// segment linked to the one ahead. Covers the four ordinary worm monsters `NPC.cs`'s own spawn
+/// code gives 20/8/6/12 segments respectively, and the Destroyer (`DESTROYER_SEGMENTS`).
 pub fn worm_body(head_type: u16) -> Option<(u16, u16, usize)> {
     match head_type {
-        13 => Some((14, 15, 20)),    // Eater of Worlds
-        7 => Some((8, 9, 8)),        // Devourer
-        10 => Some((11, 12, 6)),     // Giant Worm
-        39 => Some((40, 41, 12)),    // Bone Serpent
-        134 => Some((135, 136, 80)), // The Destroyer
+        13 => Some((14, 15, 20)), // Eater of Worlds
+        7 => Some((8, 9, 8)),     // Devourer
+        10 => Some((11, 12, 6)),  // Giant Worm
+        39 => Some((40, 41, 12)), // Bone Serpent
+        DESTROYER_HEAD => Some((DESTROYER_BODY, DESTROYER_TAIL, DESTROYER_SEGMENTS)),
         _ => None,
     }
 }
+
+/// The Solar Crawltipede: a Solar Pillar escort with the same "head grows its own body on its own
+/// first AI tick" mechanism as the Destroyer (`NPC.cs:51913-51936`, `ai[0]==0 && type==412`, 30
+/// trailing segments — the loop there is exclusive, `num36 < 30`, so 30 really is the total). Kept
+/// out of [`worm_body`] deliberately: that table is only consulted by spawn-time paths
+/// (`summon_on_player`, the admin `/spawn` command), but a Crawltipede head can also appear from
+/// this project's own ambient hostile spawning during the Lunar Apocalypse, which neither of those
+/// paths sees — the tick-loop check this constant feeds (`game/server.rs`) catches every path
+/// uniformly, the same way real vanilla's own AI-driven self-growth does.
+pub const SOLAR_CRAWLTIPEDE_HEAD: u16 = 412;
+pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
+pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
+pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
 
 /// How long a Mothron egg takes to hatch, and what it hatches into.
 pub const MOTHRON_EGG_TICKS: f32 = 900.0;
@@ -3139,8 +3154,11 @@ pub const TWIN_FLEE_CLIMB: f32 = -0.04;
 pub const DESTROYER_HEAD: u16 = 134;
 pub const DESTROYER_BODY: u16 = 135;
 pub const DESTROYER_TAIL: u16 = 136;
-/// How many body segments it is built from.
-pub const DESTROYER_SEGMENTS: usize = 79;
+/// How many trailing segments (body + tail) it is built from — `GetDestroyerSegmentsCount()`
+/// returns 80, but the loop that actually spawns them is `for (j = 0; j <= destroyerSegmentsCount;
+/// j++)` (`NPC.cs:50358-50365`), inclusive, so it runs 81 times, not 80 — corrected here from an
+/// earlier, unused, off-by-one guess this constant held before anything actually consumed it.
+pub const DESTROYER_SEGMENTS: usize = 81;
 
 /// It burrows faster than anything else in the game, and turns no more sharply for it.
 pub const DESTROYER_SPEED: f32 = 16.0;
