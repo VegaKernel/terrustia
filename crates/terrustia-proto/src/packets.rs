@@ -315,6 +315,12 @@ impl PlayerControls {
     pub fn facing_right(&self) -> bool {
         self.control_flags[0] & 0x40 != 0
     }
+
+    /// Bit 2 of the third control byte (`MessageBuffer.cs`'s own `bitsByte26[2]`,
+    /// `player13.sitting.isSitting = bitsByte26[2]`).
+    pub fn sitting(&self) -> bool {
+        self.control_flags[2] & 0x04 != 0
+    }
 }
 
 /// Rewrite the leading player-slot byte of a payload so a relayed packet is attributed to the

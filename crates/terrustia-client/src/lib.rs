@@ -303,6 +303,23 @@ impl Client {
         self.send(&w.finish()?).await
     }
 
+    /// Sit down at a position with a given hotbar slot selected — the same packet 13 as
+    /// [`Client::move_to`], but with the sitting bit set (`bitsByte26[2]`, this project's own
+    /// `PlayerControls::sitting`) and a real selected-item byte, both of which `move_to` always
+    /// sends zeroed.
+    pub async fn sit_at(&mut self, x: f32, y: f32, selected_item: u8) -> Result<()> {
+        self.position = (x, y);
+        let mut w = PacketWriter::new(id::PLAYER_CONTROLS);
+        w.u8(self.slot)
+            .u8(0x40) // facing right
+            .u8(0) // no velocity block follows
+            .u8(0x04) // sitting
+            .u8(0)
+            .u8(selected_item)
+            .vec2(x, y);
+        self.send(&w.finish()?).await
+    }
+
     /// Walk to a tile position, pulling in any sections needed along the way.
     ///
     /// This is what a real client does as it moves: the server no longer pushes sections, so a

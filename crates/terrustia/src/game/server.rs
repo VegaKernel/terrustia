@@ -4062,6 +4062,8 @@ impl GameServer {
             // Which way they are looking. Only one thing reads it — a wiring tool's L turns the
             // other way depending on it — but that one thing is visible the moment it is wrong.
             player.facing_right = controls.facing_right();
+            player.sitting = controls.sitting();
+            player.selected_item = controls.selected_item;
             player.last_controls = Some(Bytes::copy_from_slice(payload));
             if !player.is_playing() {
                 return Ok(());
@@ -4073,7 +4075,103 @@ impl GameServer {
         // Relayed verbatim: the payload has optional trailing blocks the server does not model.
         let frame = packets::rewrite_owner(id::PLAYER_CONTROLS, payload, slot)?;
         self.broadcast(frame, Some(slot));
+
+        // Checked every real control update while sitting, matching real vanilla's own cadence
+        // (`PlayerSittingHelper.UpdateSitting`, called every frame a player sits) rather than a
+        // periodic tick — the whole point is that it responds the moment a player who is already
+        // sitting selects the doll, not up to `OLD_MAN_CHECK_INTERVAL` seconds later.
+        if controls.sitting() {
+            self.check_red_hat_skeletron(slot);
+        }
         Ok(())
+    }
+
+    /// The Clothier's own red-hatted Skeletron: a repeatable, vanity-only re-fight available once
+    /// Skeletron has been defeated for real at least once (`NPC.cs:81216-81241`,
+    /// `RegisterBoss_Skeletron`'s own five `RedHatSkeletronAdjustmentsEnabled`-gated items).
+    ///
+    /// Real vanilla's own condition, transcribed exactly rather than approximated now that both
+    /// prerequisites this project was once missing — which hotbar slot is selected, and what the
+    /// player is sitting on — are both tracked: the sitting player's own currently-selected item
+    /// is the Clothier Voodoo Doll (`Player.killClothier`, reset every frame and set true only
+    /// while that item is selected — modelled here as a direct check rather than a persisted flag,
+    /// since nothing else needs the intermediate state), it is night, they are seated on the one
+    /// specific chair frame the event uses (`tile.type == 89`, `frameX` in `2322..=2358`), and a
+    /// real, active Clothier (54) — not the Old Man, who only stands in for him before Skeletron's
+    /// first, real defeat — is close enough to see them.
+    fn check_red_hat_skeletron(&mut self, slot: u8) {
+        const CHAIR: u16 = 89;
+        const CHAIR_FRAME_MIN: i16 = 2322;
+        const CHAIR_FRAME_MAX: i16 = 2358;
+        const CLOTHIER_VOODOO_DOLL: i32 = 1307;
+        const CLOTHIER: u16 = 54;
+        const SKELETRON: u16 = 35;
+        /// How close the Clothier has to be — real vanilla's own `Collision.CanHit` is a
+        /// line-of-sight check this project has no equivalent for on an NPC-to-player pair; a
+        /// flat distance is the same narrowing this project's own `RedHatSkeletron` plan.md entry
+        /// already flagged as the honest substitute, not a silent approximation.
+        const CLOTHIER_REACH: f32 = 400.0;
+
+        if self.world.day_time || !self.world.progress.downed_boss3 {
+            return;
+        }
+        if self.npcs.iter().any(|(_, n)| n.npc_type == SKELETRON) {
+            return;
+        }
+        let Some(player) = self.player(slot) else {
+            return;
+        };
+        let holding_doll = player
+            .inventory
+            .get(&u16::from(player.selected_item))
+            .is_some_and(|e| e.item.id == CLOTHIER_VOODOO_DOLL && e.item.stack > 0);
+        if !holding_doll {
+            return;
+        }
+        let (px, py) = player.position;
+        // Real vanilla checks the tile under `player.Bottom + (0, -2)`
+        // (`PlayerSittingHelper.UpdateSitting`), not the hitbox's own top-left corner: `position`
+        // here is that top-left corner (matching every other tile lookup against it in this file),
+        // so it needs the same width/2 and height-2 offsets vanilla's own `Bottom` applies before
+        // either coordinate means anything as a tile index.
+        let (tx, ty) = (
+            ((px + crate::game::ai::PLAYER_WIDTH as f32 / 2.0) / crate::game::npc::TILE) as i32,
+            ((py + crate::game::ai::PLAYER_HEIGHT as f32 - 2.0) / crate::game::npc::TILE) as i32,
+        );
+        let tile = self.world.tile(tx, ty);
+        if tile.block != CHAIR || tile.frame_x < CHAIR_FRAME_MIN || tile.frame_x > CHAIR_FRAME_MAX {
+            return;
+        }
+        let clothier = self.npcs.iter().find(|(_, n)| {
+            n.npc_type == CLOTHIER
+                && n.is_alive()
+                && (n.center().0 - px).abs() < CLOTHIER_REACH
+                && (n.center().1 - py).abs() < CLOTHIER_REACH
+        });
+        let Some((index, at)) = clothier.map(|(index, n)| (index, n.center())) else {
+            return;
+        };
+
+        self.spawn_skeletron_from(index, at, true);
+    }
+
+    /// Shared by both real triggers: consume the cursed NPC at `index` and raise Skeletron in its
+    /// place — the ordinary Old Man/Clothier curse (`red_hat = false`) and the Clothier's own
+    /// repeatable vanity re-fight (`red_hat = true`, `SpawnSkeletron`'s own `redHatMode` argument,
+    /// `NPC.cs:81232-81233`) differ only in that one flag.
+    fn spawn_skeletron_from(&mut self, index: u8, at: (f32, f32), red_hat: bool) {
+        const SKELETRON: u16 = 35;
+
+        self.npcs.remove(index);
+        self.broadcast_npc_death(index);
+        if let Some(spawned) = self.npcs.spawn(SKELETRON, at) {
+            if red_hat && let Some(npc) = self.npcs.get_mut(spawned) {
+                // What `RedHatSkeletronAdjustmentsEnabled` reads back at drop time.
+                npc.ai[3] = 1.0;
+            }
+            self.announce("Skeletron has awoken!");
+            self.broadcast_npc(spawned);
+        }
     }
 
     fn on_health(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
@@ -11263,12 +11361,7 @@ impl GameServer {
             return;
         };
 
-        self.npcs.remove(index);
-        self.broadcast_npc_death(index);
-        if let Some(spawned) = self.npcs.spawn(SKELETRON, at) {
-            self.announce("Skeletron has awoken!");
-            self.broadcast_npc(spawned);
-        }
+        self.spawn_skeletron_from(index, at, false);
     }
 
     /// A sundial or moondial: jump the clock to the next dawn or dusk.

@@ -55,6 +55,18 @@ pub struct Player {
     pub appearance: Option<Bytes>,
     /// The most recent packet 13 payload, so a joining player sees everyone in their real pose.
     pub last_controls: Option<Bytes>,
+    /// Whether this player is currently sitting (packet 13's own `bitsByte26[2]`).
+    ///
+    /// Real vanilla checks this every frame a player sits (`PlayerSittingHelper.UpdateSitting`) to
+    /// see whether they are on the one specific chair that turns the nearby Clothier into a
+    /// red-hatted Skeletron; nothing else in this project reads it yet.
+    pub sitting: bool,
+    /// Which hotbar slot (0-9) is currently selected, from the same packet.
+    ///
+    /// Paired with `inventory` to answer "what item is this player currently holding" — needed for
+    /// the same red-hat Skeletron check above, which only fires while the selected item is the
+    /// Clothier Voodoo Doll.
+    pub selected_item: u8,
     /// Which town NPC this player has open, if any. A shop needs to know.
     pub talking_to: Option<u8>,
     /// Which way this player is looking.
@@ -145,6 +157,8 @@ impl Player {
             team: 0,
             appearance: None,
             last_controls: None,
+            sitting: false,
+            selected_item: 0,
             talking_to: None,
             facing_right: true,
             angler_quests: 0,

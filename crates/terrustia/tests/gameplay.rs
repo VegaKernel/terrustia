@@ -4834,6 +4834,63 @@ async fn the_old_man_becomes_skeletron() {
     assert!(skeletron.is_some(), "the old man did not become Skeletron");
 }
 
+/// The Clothier's own repeatable vanity re-fight: once Skeletron has been beaten for real, sitting
+/// on the one specific chair frame the event uses, at night, holding the Clothier Voodoo Doll,
+/// with the Clothier close enough to see, raises a red-hatted Skeletron in his place.
+///
+/// `PlayerSittingHelper.UpdateSitting` runs this check every frame a player sits — there is no
+/// separate summon item, and unlike the very first Skeletron this one never blocked on anything
+/// but being asked correctly. Ported from `NPC.RedHatSkeletron` (`NPC.cs:81216-81241`).
+#[tokio::test]
+async fn sitting_with_the_doll_near_the_clothier_raises_a_red_hat_skeletron() {
+    const CHAIR_X: i32 = 60;
+    const CHAIR_Y: i32 = 60;
+    const CLOTHIER_VOODOO_DOLL: i32 = 1307;
+    const SKELETRON: u16 = 35;
+
+    let addr = start_with(Config::default(), |world| {
+        clear_with_floor(world, CHAIR_X, CHAIR_Y, 6, 3);
+        // The exact frame range `NPC.RedHatSkeletron` checks — real vanilla's own literal
+        // `frameX >= 2322 && frameX <= 2358` on tile type 89.
+        world.set_tile(CHAIR_X, CHAIR_Y, Tile::framed(89, 2322, 0));
+        world.progress.downed_boss3 = true;
+        world.day_time = false;
+    })
+    .await;
+
+    let mut client = join(addr, "seated").await;
+    client.set_timeout(Duration::from_secs(20));
+
+    // Where a sitting player's own `Bottom - 2` lands exactly on the chair tile (see
+    // `check_red_hat_skeletron`'s own comment on this same width/2, height-2 math).
+    let sit_x = CHAIR_X as f32 * 16.0;
+    let sit_y = CHAIR_Y as f32 * 16.0 - 40.0;
+    client.move_to(sit_x, sit_y).await.unwrap();
+
+    spawn_npc(&mut client, "Clothier").await;
+    client
+        .set_equipment(0, ItemStack::new(CLOTHIER_VOODOO_DOLL, 1, 0))
+        .await
+        .unwrap();
+
+    client.sit_at(sit_x, sit_y, 0).await.unwrap();
+
+    let event = client
+        .try_wait_for(
+            "a red-hat Skeletron",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == SKELETRON),
+            Duration::from_secs(10),
+        )
+        .await;
+    let Some(Event::NpcSynced(skeletron)) = event else {
+        panic!("no Skeletron rose from the sitting player's Clothier");
+    };
+    assert_eq!(
+        skeletron.ai[3], 1.0,
+        "Skeletron spawned but not in red-hat mode (ai[3] should be 1.0)"
+    );
+}
+
 /// Mining furniture gives the furniture back.
 ///
 /// A framed object stores only a frame; which chair it is lives in the style that frame names.
