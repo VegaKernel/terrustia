@@ -666,6 +666,7 @@ mod tests {
             army: crate::game::ai::ArmyView::default(),
             treasure: None,
             mage: Default::default(),
+            slot: 0,
         }
     }
 

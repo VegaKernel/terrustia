@@ -17,12 +17,16 @@
 
 use rand::rngs::SmallRng;
 use terrustia_proto::npc_params::{
-    HUNGRY_ACCEL, HUNGRY_LEASH, HUNGRY_LEASH_DYING, HUNGRY_LEASH_WOUNDED, HUNGRY_RECOIL,
-    HUNGRY_SPEED, WALL_EXPERT_SPEED_BONUS, WALL_EXPERT_SPEED_SCALE, WALL_EYE, WALL_EYE_CADENCE,
-    WALL_EYE_CHARGE, WALL_EYE_VOLLEY, WALL_FADE_TICKS, WALL_HUNGRY, WALL_HUNGRY_COUNT, WALL_LASER,
-    WALL_LASER_DAMAGE, WALL_LASER_SPEED, WALL_LEECH, WALL_LEECH_AFTER, WALL_LEECH_CAP,
-    WALL_LEECH_EVERY, WALL_MIN_HEIGHT, WALL_SPEED, WALL_SPEED_BONUS, WALL_SPEED_RAGE,
-    WALL_SPEED_RAGE_EXPERT, WALL_SPEED_SCALE,
+    HUNGRY_ACCEL, HUNGRY_DEFENSE_DYING, HUNGRY_DEFENSE_WOUNDED, HUNGRY_EXPERT_ACCEL_DYING,
+    HUNGRY_EXPERT_ACCEL_WOUNDED, HUNGRY_EXPERT_LEASH_SCALE, HUNGRY_EXPERT_SPEED_BASE,
+    HUNGRY_EXPERT_SPEED_BONUS, HUNGRY_EXPERT_SPEED_CATCHUP, HUNGRY_EXPERT_SPEED_FACTOR,
+    HUNGRY_EXPERT_SPEED_RAGE, HUNGRY_EXPERT_SPEED_SCALE, HUNGRY_LEASH, HUNGRY_LEASH_DYING,
+    HUNGRY_LEASH_WOUNDED, HUNGRY_RECOIL, HUNGRY_SPEED, WALL_EXPERT_SPEED_BONUS,
+    WALL_EXPERT_SPEED_SCALE, WALL_EYE, WALL_EYE_CADENCE, WALL_EYE_CHARGE, WALL_EYE_VOLLEY,
+    WALL_FADE_TICKS, WALL_HUNGRY, WALL_HUNGRY_COUNT, WALL_LASER, WALL_LASER_DAMAGE,
+    WALL_LASER_SPEED, WALL_LEECH, WALL_LEECH_AFTER, WALL_LEECH_CAP, WALL_LEECH_EVERY,
+    WALL_MIN_HEIGHT, WALL_SPEED, WALL_SPEED_BONUS, WALL_SPEED_RAGE, WALL_SPEED_RAGE_EXPERT,
+    WALL_SPEED_SCALE,
 };
 
 use crate::game::ai::{Shot, World};
@@ -289,15 +293,20 @@ pub fn eye<T: TileView>(
 /// Drive one Hungry for a tick.
 ///
 /// Each hangs at a fixed fraction `ai[0]` down the Wall and strays no further than its leash.
+///
+/// `slot` is this Hungry's own NPC table slot (`NPC.whoAmI`) — Expert Mode's own leash formula is
+/// keyed to it directly, not to the Wall's health at all (`NPC.cs:26406-26430`).
 pub fn hungry<T: TileView>(
     npc: &mut Npc,
     world: &World<'_, T>,
     wall_at: Option<super::skeletron::Parent>,
     wall_health: f32,
+    slot: u8,
 ) -> bool {
     let Some(super::skeletron::Parent {
         position: wall_position,
         size: wall_size,
+        velocity: wall_velocity,
         ..
     }) = wall_at
     else {
@@ -308,14 +317,51 @@ pub fn hungry<T: TileView>(
         npc.ai[1] = HUNGRY_RECOIL;
     }
 
-    // Its leash lengthens as the Wall dies, so the safe distance keeps shrinking.
+    let expert = world.conditions.expert;
+
+    // Its leash lengthens as the Wall dies, so the safe distance keeps shrinking — and it takes on
+    // 30/20 defence doing it. Both are Normal Mode only (`NPC.cs:26372-26400`): Expert Mode leaves
+    // the leash at its own formula below and speeds the pull up instead, and its own
+    // `if (Main.expertMode) { defense = defDefense; ... }` (`:26406-26408`) runs unconditionally
+    // just below and discards the bump regardless of health. Both write the live `defense` field
+    // combat actually reads, not the type's own baseline stats — the same bug already fixed in
+    // `eye.rs`/`queen_bee.rs`.
     let mut leash = HUNGRY_LEASH;
+    let mut accel = HUNGRY_ACCEL;
     if wall_health < 0.5 {
-        leash = HUNGRY_LEASH_DYING;
-        npc.stats.defense = 30;
+        npc.defense = HUNGRY_DEFENSE_DYING;
+        if expert {
+            accel += HUNGRY_EXPERT_ACCEL_DYING;
+        } else {
+            leash = HUNGRY_LEASH_DYING;
+        }
     } else if wall_health < 0.75 {
-        leash = HUNGRY_LEASH_WOUNDED;
-        npc.stats.defense = 20;
+        npc.defense = HUNGRY_DEFENSE_WOUNDED;
+        if expert {
+            accel += HUNGRY_EXPERT_ACCEL_WOUNDED;
+        } else {
+            leash = HUNGRY_LEASH_WOUNDED;
+        }
+    }
+
+    // Expert Mode's own leash: no health-tiered override above, but a multiplier keyed to which of
+    // the world's live NPC slots this particular Hungry occupies (`:26406-26430`, `whoAmI % 4` then
+    // `whoAmI % 3`, applied in turn, then a flat scale) — and the defence bump above never applies
+    // here either, reverting to the type's own baseline instead.
+    if expert {
+        npc.defense = npc.stats.defense;
+        leash *= match slot % 4 {
+            0 => 1.75,
+            1 => 1.5,
+            2 => 1.25,
+            _ => 1.0,
+        };
+        leash *= match slot % 3 {
+            0 => 1.5,
+            1 => 1.25,
+            _ => 1.0,
+        };
+        leash *= HUNGRY_EXPERT_LEASH_SCALE;
     }
 
     // Where its tether is anchored: the Wall's column, at its own height along it.
@@ -351,29 +397,53 @@ pub fn hungry<T: TileView>(
         }
         // Accelerating toward that point, and much harder while still moving the wrong way.
         if npc.position.0 < anchor.0 + dx {
-            npc.velocity.0 += HUNGRY_ACCEL;
+            npc.velocity.0 += accel;
             if npc.velocity.0 < 0.0 && dx > 0.0 {
-                npc.velocity.0 += HUNGRY_ACCEL * 2.5;
+                npc.velocity.0 += accel * 2.5;
             }
         } else if npc.position.0 > anchor.0 + dx {
-            npc.velocity.0 -= HUNGRY_ACCEL;
+            npc.velocity.0 -= accel;
             if npc.velocity.0 > 0.0 && dx < 0.0 {
-                npc.velocity.0 -= HUNGRY_ACCEL * 2.5;
+                npc.velocity.0 -= accel * 2.5;
             }
         }
         if npc.position.1 < anchor.1 + dy {
-            npc.velocity.1 += HUNGRY_ACCEL;
+            npc.velocity.1 += accel;
             if npc.velocity.1 < 0.0 && dy > 0.0 {
-                npc.velocity.1 += HUNGRY_ACCEL * 2.5;
+                npc.velocity.1 += accel * 2.5;
             }
         } else if npc.position.1 > anchor.1 + dy {
-            npc.velocity.1 -= HUNGRY_ACCEL;
+            npc.velocity.1 -= accel;
             if npc.velocity.1 > 0.0 && dy < 0.0 {
-                npc.velocity.1 -= HUNGRY_ACCEL * 2.5;
+                npc.velocity.1 -= accel * 2.5;
             }
         }
-        npc.velocity.0 = npc.velocity.0.clamp(-HUNGRY_SPEED, HUNGRY_SPEED);
-        npc.velocity.1 = npc.velocity.1.clamp(-HUNGRY_SPEED, HUNGRY_SPEED);
+
+        // Its top speed, too, is higher in Expert Mode — unconditionally, and more again as the
+        // Wall's own health crosses its own four thresholds, plus a further flat bonus while this
+        // Hungry trails behind the Wall's own direction of travel, so it can catch back up
+        // (`:26488-26520`).
+        let mut cap = HUNGRY_SPEED;
+        if expert {
+            let mut bonus = HUNGRY_EXPERT_SPEED_BASE
+                + HUNGRY_EXPERT_SPEED_RAGE
+                    .iter()
+                    .filter(|(threshold, _)| wall_health < *threshold)
+                    .map(|(_, extra)| extra)
+                    .sum::<f32>();
+            bonus = bonus * HUNGRY_EXPERT_SPEED_SCALE + HUNGRY_EXPERT_SPEED_BONUS;
+            cap += bonus * HUNGRY_EXPERT_SPEED_FACTOR;
+            let wall_center_x = wall_position.0 + wall_size.0 / 2.0;
+            let npc_center_x = npc.center().0;
+            if npc_center_x < wall_center_x && wall_velocity.0 > 0.0 {
+                cap += HUNGRY_EXPERT_SPEED_CATCHUP;
+            }
+            if npc_center_x > wall_center_x && wall_velocity.0 < 0.0 {
+                cap += HUNGRY_EXPERT_SPEED_CATCHUP;
+            }
+        }
+        npc.velocity.0 = npc.velocity.0.clamp(-cap, cap);
+        npc.velocity.1 = npc.velocity.1.clamp(-cap, cap);
     } else {
         npc.ai[1] -= 1.0;
     }
@@ -678,7 +748,7 @@ mod tests {
     fn a_hungry_without_a_wall_is_finished() {
         let tiles = Hell;
         let mut h = a_hungry();
-        assert!(!hungry(&mut h, &hell(&tiles, None), None, 1.0));
+        assert!(!hungry(&mut h, &hell(&tiles, None), None, 1.0, 0));
     }
 
     #[test]
@@ -689,7 +759,7 @@ mod tests {
         // Someone way beyond its leash.
         let t = Some(player_at(10_000.0 + HUNGRY_LEASH * 6.0, 20_000.0));
         for _ in 0..600 {
-            hungry(&mut h, &hell(&tiles, t), at, 1.0);
+            hungry(&mut h, &hell(&tiles, t), at, 1.0, 0);
             h.position.0 += h.velocity.0;
             h.position.1 += h.velocity.1;
         }
@@ -710,7 +780,7 @@ mod tests {
             let t = Some(player_at(10_000.0 + HUNGRY_LEASH * 6.0, 20_000.0));
             let mut furthest: f32 = 0.0;
             for _ in 0..900 {
-                hungry(&mut h, &hell(&tiles, t), at, wall_health);
+                hungry(&mut h, &hell(&tiles, t), at, wall_health, 0);
                 h.position.0 += h.velocity.0;
                 furthest = furthest.max(h.position.0 - 10_000.0);
             }
@@ -730,11 +800,173 @@ mod tests {
         let t = Some(player_at(10_500.0, 20_000.0));
         let mut hit = hell(&tiles, t);
         hit.was_hurt = true;
-        hungry(&mut h, &hit, at, 1.0);
+        hungry(&mut h, &hit, at, 1.0, 0);
         // Set on the hit and immediately begins counting down, so it reads one short.
         assert_eq!(h.ai[1], HUNGRY_RECOIL - 1.0);
         let held = h.velocity;
-        hungry(&mut h, &hell(&tiles, t), at, 1.0);
+        hungry(&mut h, &hell(&tiles, t), at, 1.0, 0);
         assert_eq!(h.velocity, held, "it coasts while it recovers");
+    }
+
+    /// Real vanilla (`NPC.cs:26372-26408`): `defense = 30`/`20` at the two health thresholds is
+    /// written to the live field, but Normal Mode only — Expert Mode's own
+    /// `if (Main.expertMode) { defense = defDefense; ... }` runs unconditionally afterward and
+    /// discards it, reverting to the type's own baseline regardless of health. The unfixed code
+    /// wrote `npc.stats.defense` (never read by combat) regardless of difficulty, so this fails on
+    /// it twice over: Normal Mode's `npc.defense` never moved, and Expert Mode got the same 30
+    /// Normal Mode does instead of reverting to base.
+    #[test]
+    fn expert_mode_does_not_apply_the_ordinary_defence_bump() {
+        let tiles = Hell;
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
+        let t = Some(player_at(10_000.0, 20_100.0));
+        let base_defense = a_hungry().stats.defense;
+
+        let mut normal = a_hungry();
+        let mut world = hell(&tiles, t);
+        world.conditions.expert = false;
+        hungry(&mut normal, &world, at, 0.3, 0);
+        assert_eq!(
+            normal.defense, HUNGRY_DEFENSE_DYING,
+            "Normal Mode's own 30 bump, on the live field"
+        );
+
+        let mut expert = a_hungry();
+        world.conditions.expert = true;
+        hungry(&mut expert, &world, at, 0.3, 0);
+        assert_eq!(
+            expert.defense, base_defense,
+            "Expert Mode reverts to defDefense, no bump at all"
+        );
+    }
+
+    /// Real vanilla (`NPC.cs:26406-26430`): Expert Mode's leash is not the 300/500/700
+    /// health-tiered range at all — it is `300 * (whoAmI % 4 factor) * (whoAmI % 3 factor) *
+    /// 0.75`, keyed to which of the world's live NPC slots this particular Hungry occupies. Slot 0
+    /// (`%4==0`, `%3==0`): `300 * 1.75 * 1.5 * 0.75 = 590.625`. Slot 11 (`%4==3`, `%3==2`, neither
+    /// multiplier applies): `300 * 1.0 * 1.0 * 0.75 = 225`. The unfixed code had no slot parameter
+    /// at all and could not have computed either.
+    #[test]
+    fn expert_mode_computes_its_leash_from_its_own_npc_slot() {
+        let tiles = Hell;
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
+        let stray = |slot: u8| {
+            let mut h = a_hungry();
+            let t = Some(player_at(10_000.0 + 2_000.0, 20_100.0));
+            let mut world = hell(&tiles, t);
+            world.conditions.expert = true;
+            let mut furthest: f32 = 0.0;
+            for _ in 0..300 {
+                hungry(&mut h, &world, at, 1.0, slot);
+                h.position.0 += h.velocity.0;
+                furthest = furthest.max(h.position.0 - 10_000.0);
+            }
+            furthest
+        };
+        let slot0 = stray(0);
+        let slot11 = stray(11);
+        // A loose comparison rather than a bound on either exact number, like
+        // `its_leash_lengthens_as_the_wall_dies` above: the bang-bang pursuit overshoots its
+        // target by an amount tied to how fast it was already moving when it got there, so a
+        // tighter bound on the wandering distance itself is not reliable — but which of two
+        // slots' Hungry gets further, when one's own leash is more than twice the other's, is.
+        assert!(
+            slot0 > slot11,
+            "slot 0's leash (590.625) should let it stray further than slot 11's (225): \
+             {slot0} against {slot11}"
+        );
+    }
+
+    /// Real vanilla (`NPC.cs:26380-26400`): at the same two health thresholds where Normal Mode
+    /// lengthens the leash, Expert Mode instead leaves the leash at its own formula and bumps the
+    /// acceleration by 0.033/0.066 (`num414 += ...`). One tick, starting from rest, moving toward
+    /// a target far to the right: velocity becomes exactly the tick's acceleration.
+    #[test]
+    fn expert_mode_speeds_up_the_pull_instead_of_lengthening_the_leash() {
+        let tiles = Hell;
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
+        let after_one_tick = |expert: bool, wall_health: f32| {
+            let mut h = a_hungry();
+            let t = Some(player_at(20_000.0, 20_100.0));
+            let mut world = hell(&tiles, t);
+            world.conditions.expert = expert;
+            hungry(&mut h, &world, at, wall_health, 0);
+            h.velocity.0
+        };
+        assert!(
+            (after_one_tick(false, 0.3) - HUNGRY_ACCEL).abs() < 1e-6,
+            "Normal Mode's own base accel, unchanged below 50% wall health"
+        );
+        assert!(
+            (after_one_tick(true, 0.3) - (HUNGRY_ACCEL + HUNGRY_EXPERT_ACCEL_DYING)).abs() < 1e-6,
+            "Expert Mode's own bump below 50% wall health"
+        );
+        assert!(
+            (after_one_tick(true, 0.6) - (HUNGRY_ACCEL + HUNGRY_EXPERT_ACCEL_WOUNDED)).abs() < 1e-6,
+            "and its smaller bump below 75%"
+        );
+    }
+
+    /// Real vanilla (`NPC.cs:26488-26511`): Expert Mode gives the Hungry's own top speed (4 in
+    /// Normal Mode, always) an unconditional bonus — `((1.5*1.25+0.3)*0.35)`, 0.76125 — even at
+    /// full wall health, and more again as the wall itself weakens, at its own four thresholds
+    /// (75/50/25/10%): at 5% wall health, `(((1.5+0.7+0.7+0.9+0.9)*1.25+0.3)*0.35)`, 2.16125.
+    /// Saturated by running far more ticks than it takes to reach top speed, since the clamp pins
+    /// velocity to exactly the cap once reached.
+    #[test]
+    fn expert_mode_raises_the_hungrys_own_top_speed() {
+        let tiles = Hell;
+        let at = Some(wall_at((10_000.0, 20_000.0), (16.0, 200.0)));
+        let saturated = |expert: bool, wall_health: f32| {
+            let mut h = a_hungry();
+            let t = Some(player_at(1_000_000.0, 20_100.0));
+            let mut world = hell(&tiles, t);
+            world.conditions.expert = expert;
+            for _ in 0..300 {
+                hungry(&mut h, &world, at, wall_health, 0);
+            }
+            h.velocity.0
+        };
+        assert!(
+            (saturated(false, 1.0) - HUNGRY_SPEED).abs() < 1e-4,
+            "Normal Mode's own flat cap, unaffected by wall health"
+        );
+        assert!(
+            (saturated(true, 1.0) - 4.761_25).abs() < 1e-3,
+            "Expert Mode's own unconditional bonus, even at full wall health"
+        );
+        assert!(
+            (saturated(true, 0.05) - 6.161_25).abs() < 1e-3,
+            "and more again as the wall weakens"
+        );
+    }
+
+    /// Real vanilla (`NPC.cs:26512-26519`): a further flat 6 on top of everything else, only while
+    /// this Hungry sits behind the Wall relative to the direction the Wall itself is moving — so
+    /// it can catch back up rather than being left behind as the Wall advances.
+    #[test]
+    fn expert_mode_gives_it_extra_top_speed_while_trailing_the_wall() {
+        let tiles = Hell;
+        let leading = wall_at((10_000.0, 20_000.0), (16.0, 200.0));
+        let mut trailing_wall = leading;
+        // Moving right, away from a Hungry riding at its rear.
+        trailing_wall.velocity = (5.0, 0.0);
+        let cap = |wall: crate::game::ai::boss::skeletron::Parent| {
+            let mut h = a_hungry();
+            h.position.0 = 9_000.0; // to the Wall's left: behind it, since it is moving right.
+            let t = Some(player_at(1_000_000.0, 20_100.0));
+            let mut world = hell(&tiles, t);
+            world.conditions.expert = true;
+            for _ in 0..300 {
+                hungry(&mut h, &world, Some(wall), 1.0, 0);
+            }
+            h.velocity.0
+        };
+        let without = cap(leading);
+        let with = cap(trailing_wall);
+        assert!(
+            (with - without - HUNGRY_EXPERT_SPEED_CATCHUP).abs() < 1e-3,
+            "exactly the flat 6 bonus, {with} against {without}"
+        );
     }
 }

@@ -65,6 +65,9 @@ pub struct Surroundings<'a> {
     pub parent_state: f32,
     /// ...and what fraction of its health it has left.
     pub parent_health: f32,
+    /// This NPC's own table slot — `NPC.whoAmI`. A routine cannot see the table it lives in, so
+    /// the caller, which is iterating it, fills this in. Only the Wall's Hungry reads it.
+    pub slot: u8,
 }
 
 impl Spawn {
@@ -254,6 +257,7 @@ pub fn update_with(
             parent: around.parent,
             parent_state: around.parent_state,
             parent_health: around.parent_health,
+            slot: around.slot,
         };
         let effects = super::ai::run(npc, &world, rng);
         out.spawn.extend(effects.spawn);

@@ -1995,6 +1995,9 @@ pub const WALL_EYE_CADENCE: f32 = 45.0;
 pub const WALL_EYE_VOLLEY: i32 = 4;
 
 /// How far a Hungry will stray from the wall, and how that leash grows as the wall dies.
+///
+/// Normal Mode only (`NPC.cs:26372-26400`): Expert Mode never applies either of these two
+/// overrides, using its own formula below instead.
 pub const HUNGRY_LEASH: f32 = 300.0;
 pub const HUNGRY_LEASH_WOUNDED: f32 = 500.0;
 pub const HUNGRY_LEASH_DYING: f32 = 700.0;
@@ -2003,6 +2006,34 @@ pub const HUNGRY_ACCEL: f32 = 0.1;
 pub const HUNGRY_SPEED: f32 = 4.0;
 /// How long a hit knocks it out of its chase.
 pub const HUNGRY_RECOIL: f32 = 10.0;
+/// The 30/20 defence it takes on below 50%/75% wall health — Normal Mode only. Expert Mode's own
+/// `if (Main.expertMode) { defense = defDefense; ... }` (`NPC.cs:26406-26408`) runs unconditionally
+/// afterward and discards it, reverting to the type's own baseline regardless of health.
+pub const HUNGRY_DEFENSE_DYING: i32 = 30;
+pub const HUNGRY_DEFENSE_WOUNDED: i32 = 20;
+/// Expert Mode's own acceleration bonus at the same two thresholds where Normal Mode instead
+/// lengthens the leash above — Expert Mode leaves the leash at its own formula below and speeds
+/// the pull up instead (`NPC.cs:26380-26400`, `num414 += ...`).
+pub const HUNGRY_EXPERT_ACCEL_DYING: f32 = 0.066;
+pub const HUNGRY_EXPERT_ACCEL_WOUNDED: f32 = 0.033;
+/// Expert Mode's own leash: not the health-tiered range above at all, but `HUNGRY_LEASH` times a
+/// multiplier keyed to which of the world's live NPC slots this particular Hungry occupies
+/// (`NPC.cs:26406-26430`, `whoAmI % 4` then `whoAmI % 3`, applied in turn) and then this flat
+/// scale — twelve distinct multipliers in all, since 4 and 3 are coprime.
+pub const HUNGRY_EXPERT_LEASH_SCALE: f32 = 0.75;
+/// Expert Mode's own top-speed bonus (`NPC.cs:26488-26520`): unconditional whenever Expert Mode is
+/// on, and larger again at each of the wall's own four health thresholds — a separate table from
+/// every other health-tiered scaling in this file, keyed to the *wall's* health, not this NPC's
+/// own.
+pub const HUNGRY_EXPERT_SPEED_RAGE: [(f32, f32); 4] =
+    [(0.75, 0.7), (0.5, 0.7), (0.25, 0.9), (0.1, 0.9)];
+pub const HUNGRY_EXPERT_SPEED_BASE: f32 = 1.5;
+pub const HUNGRY_EXPERT_SPEED_SCALE: f32 = 1.25;
+pub const HUNGRY_EXPERT_SPEED_BONUS: f32 = 0.3;
+pub const HUNGRY_EXPERT_SPEED_FACTOR: f32 = 0.35;
+/// A further flat bonus while this Hungry sits behind the wall relative to the way the wall
+/// itself is moving, so it can catch back up rather than being left behind as the wall advances.
+pub const HUNGRY_EXPERT_SPEED_CATCHUP: f32 = 6.0;
 
 /// The Eater of Worlds' three parts, in order: head, body, tail.
 pub const EATER_OF_WORLDS: (u16, u16, u16) = (13, 14, 15);

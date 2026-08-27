@@ -6778,6 +6778,7 @@ impl GameServer {
                         parent,
                         parent_state,
                         parent_health,
+                        slot: index,
                     },
                 );
                 // A part raised this tick belongs to the NPC that raised it, which only the

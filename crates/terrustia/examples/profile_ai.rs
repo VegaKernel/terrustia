@@ -101,6 +101,7 @@ fn main() -> ExitCode {
                     parent: None,
                     parent_state: 0.0,
                     parent_health: 1.0,
+                    slot: 0,
                 },
             );
             out.spawn.clear();

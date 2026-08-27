@@ -392,6 +392,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
             wounded: 0,
             can_raise: false,
         },
+        slot: 0,
     }
 }
 
@@ -482,6 +483,12 @@ pub struct World<'a, T: TileView> {
     /// [`town_combat`](town_combat::town_combat). `slot` is an NPC table index here, not a player
     /// slot — the caller builds this from the NPC table, not from `targets`.
     pub hostile: Option<Target>,
+    /// This NPC's own table slot — `NPC.whoAmI`.
+    ///
+    /// A routine cannot know its own slot any more than `Spawn::OWN_PARENT`'s own doc comment says
+    /// it can; the caller, which owns the table, fills it in. Only the Wall's Hungry reads it, for
+    /// a leash multiplier keyed to which of the world's live NPC slots it happens to occupy.
+    pub slot: u8,
 }
 
 /// What the Old One's Army's fixtures need to know about the event around them.
@@ -639,7 +646,8 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = world.parent.is_none();
         }
         29 => {
-            effects.expired = !boss::wall::hungry(npc, world, world.parent, world.parent_health);
+            effects.expired =
+                !boss::wall::hungry(npc, world, world.parent, world.parent_health, world.slot);
         }
         123 => {
             let rampage = boss::deerclops::update(npc, world, rng);
@@ -1206,6 +1214,7 @@ mod tests {
                 army: ArmyView::default(),
                 treasure: None,
                 mage: Default::default(),
+                slot: 0,
             };
             unwired.extend(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
