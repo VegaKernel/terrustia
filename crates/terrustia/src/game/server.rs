@@ -8512,11 +8512,26 @@ impl GameServer {
             return;
         }
 
-        // House any resident that does not have one yet.
+        // House any resident that does not have one yet — but never the Old Man, the Travelling
+        // Merchant or the Skeleton Merchant, none of whom ever seek a house in real vanilla
+        // (`WorldGen.FindAnyHomelessTownNPC`'s own exclusion list, `nPC.type != 37 && != 453 &&
+        // != 368`). Without this, a real, reproducible bug: the Old Man is a real, already-
+        // homeless town NPC by design (he haunts the dungeon entrance, never moves in anywhere),
+        // so any tick where he happens to be nearby when a freshly-built house first becomes
+        // findable, he claims it ahead of whichever real newcomer that house was built for — found
+        // live when `moonlord.rs`'s own Guide-house trigger lost this exact race to the Old Man,
+        // 2-for-2, on real full runs.
         let homeless: Vec<u8> = self
             .npcs
             .iter()
-            .filter(|(_, npc)| npc.stats.town_npc && npc.home.is_none())
+            .filter(|(_, npc)| {
+                npc.stats.town_npc
+                    && npc.home.is_none()
+                    && !matches!(
+                        npc.npc_type,
+                        OLD_MAN | TRAVELLING_MERCHANT | SKELETON_MERCHANT
+                    )
+            })
             .map(|(index, _)| index)
             .collect();
 

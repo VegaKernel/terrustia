@@ -1150,6 +1150,51 @@ async fn skeletron_prime_gives_up_once_its_daytime_rampage_kills_its_only_target
         );
 }
 
+/// THROWAWAY diagnostic, not a permanent test: does a `/spawn`ed Solar Pillar sync reliably to a
+/// stationary nearby client over an extended window? To be deleted after this check either way.
+#[tokio::test]
+async fn zzz_throwaway_pillar_sync_probe() {
+    let addr = start().await;
+    let mut client = join(addr, "pillar-watcher").await;
+
+    let head = spawn_npc(&mut client, "517").await;
+    println!(
+        "spawned pillar: index={} ai={:?} life={} position={:?}",
+        head.index, head.ai, head.life, head.position
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let mut samples = 0;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, client.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if n.npc_type() == 517 => {
+                samples += 1;
+                if samples <= 5 || samples % 20 == 0 {
+                    println!(
+                        "t+ sample {samples}: index={} gen={} target={} ai={:?} life={} position={:?}",
+                        n.index, n.generation, n.target, n.ai, n.life, n.position
+                    );
+                }
+            }
+            Ok(Ok(Event::PlayerHurt(h))) => println!("PLAYER HURT: {h:?}"),
+            Ok(Ok(Event::PlayerDied(d))) => println!("PLAYER DIED: {d:?}"),
+            Ok(Ok(_)) => {}
+            Err(_) => break,
+            _ => {}
+        }
+        let in_local_view = client.world().npcs().any(|n| n.npc_type() == 517);
+        if samples % 30 == 1 {
+            println!("  local world().npcs() currently has it: {in_local_view}");
+        }
+    }
+    let still_present = client.world().npcs().any(|n| n.npc_type() == 517);
+    println!("total pillar samples: {samples}, present in local world() at end: {still_present}");
+}
+
 /// Skeletron Prime's own real fight is a four-part boss: a head that spawns a saw, a vice, a
 /// cannon and a laser arm on its own first AI tick (`NPC.cs:27806-27832`). Nothing anywhere in
 /// this project ever created those arms — the admin `/spawn` command, the only way to encounter
@@ -1440,6 +1485,50 @@ async fn a_house_gets_a_guide() {
         (guide.position.0 / 16.0 - hx as f32).abs() < 20.0,
         "the Guide moved in somewhere else: {:?}",
         guide.position
+    );
+}
+
+/// The Old Man is a real, permanently homeless town NPC by design — he haunts the dungeon entrance
+/// and never moves into a house in real vanilla (`WorldGen.FindAnyHomelessTownNPC`'s own exclusion
+/// list, `nPC.type != 37 && != 453 && != 368`). Without the matching exclusion in
+/// `tick_town_npcs`, its own "an already-homeless resident claims the next free house before a
+/// newcomer does" priority rule let him steal a house from the real newcomer it was meant for —
+/// found live, 2-for-2, in `moonlord.rs`'s own real full runs (`plan.md`'s "Real spawn triggers for
+/// the Wall of Flesh..." Done row): the Guide's own freshly-built house went to a wandering-by Old
+/// Man instead, both times.
+#[tokio::test]
+async fn the_old_man_never_steals_a_house_from_a_real_newcomer() {
+    let inside = std::cell::Cell::new((0, 0));
+    let addr = start_with(Config::default(), |world| {
+        inside.set(build_house(world, 300, 300));
+    })
+    .await;
+    let mut client = join(addr, "landlord").await;
+    let (hx, hy) = inside.get();
+    client
+        .move_to(hx as f32 * 16.0, hy as f32 * 16.0)
+        .await
+        .unwrap();
+
+    // Present well before the first housing scan has any chance to run, standing right next to
+    // the newly-buildable house — the exact shape of the real collision this test closes.
+    let old_man = spawn_npc(&mut client, "OldMan").await;
+    assert_eq!(old_man.npc_type(), 37);
+
+    client.set_timeout(Duration::from_secs(20));
+    let moved_in = client
+        .wait_for(
+            "someone announced moving into the house",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("has moved in")),
+        )
+        .await
+        .expect("a resident should have moved into the finished house");
+    let Event::Chat { text, .. } = moved_in else {
+        unreachable!("matched on it")
+    };
+    assert_eq!(
+        text, "The Guide has moved in.",
+        "the Old Man should never be eligible to claim a house at all — got: {text:?}"
     );
 }
 
