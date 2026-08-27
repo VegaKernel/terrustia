@@ -173,7 +173,7 @@ real-world round trip      faithful; every field survives
 | ✓ | `AUDIT.md` + question round |
 | ✓ | Section-ownership check on tile edits (vanilla parity) |
 | ✓ | `cargo-fuzz` over the decoder; commit `.trcap` fixtures and replay in CI |
-| — | **Tag v0.0.1** |
+| ✓ | **Tag v0.0.1** — pushed at `5b14695`, with every other remaining item in this file either done or an already-disclosed, deliberately-scoped-out gap (section encoding off the tick, 6 remix-seed-gated drop-table entries, RedHatSkeletron's own player-sitting prerequisite) — see the tag's own annotated message for the full release summary |
 
 ### Block C — make it fast, honestly
 
