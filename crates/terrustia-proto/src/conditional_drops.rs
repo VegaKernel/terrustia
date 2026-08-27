@@ -56,10 +56,18 @@ pub struct Conditions {
 }
 
 /// One conditional drop.
+///
+/// `one_in` is the roll's denominator — real vanilla's own `chanceDenominator` — and the actual
+/// chance is `numerator / one_in`, not always `1 / one_in`: `CommonDrop`/`ByCondition`'s own fifth
+/// constructor argument (`chanceNumerator`) is usually `1`, but not always, and a handful of real
+/// rules in `ItemDropDatabase.cs` roll `2`-in-`3` or `3`-in-`4` rather than a flat `1`-in-`N`. Every
+/// constructor below except [`m_in_n`] defaults `numerator` to `1`, so nothing already using
+/// `always`/`sometimes`/`a_few` changes rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Conditional {
     pub item: u16,
     pub one_in: u32,
+    pub numerator: u32,
     pub min: i16,
     pub max: i16,
 }
@@ -68,6 +76,7 @@ const fn always(item: u16) -> Conditional {
     Conditional {
         item,
         one_in: 1,
+        numerator: 1,
         min: 1,
         max: 1,
     }
@@ -77,6 +86,7 @@ const fn sometimes(item: u16, one_in: u32) -> Conditional {
     Conditional {
         item,
         one_in,
+        numerator: 1,
         min: 1,
         max: 1,
     }
@@ -86,6 +96,22 @@ const fn a_few(item: u16, one_in: u32, min: i16, max: i16) -> Conditional {
     Conditional {
         item,
         one_in,
+        numerator: 1,
+        min,
+        max,
+    }
+}
+
+/// An `M`-in-`N` roll — for the rules that use it, real vanilla's own `chanceNumerator`
+/// (`CommonDrop`'s fifth constructor argument, `ByCondition`'s sixth) is not `1`. Only reach for
+/// this when source actually passes a numerator other than the default; every other rule stays on
+/// `sometimes`/`a_few` so a reader can tell "M in N" apart from the far more common "1 in N" at a
+/// glance.
+const fn m_in_n(item: u16, numerator: u32, one_in: u32, min: i16, max: i16) -> Conditional {
+    Conditional {
+        item,
+        one_in,
+        numerator,
         min,
         max,
     }
@@ -322,11 +348,18 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
             out.push(sometimes(4739, 50));
         }
         // Black Recluse, wall-mounted or not: `DropBasedOnExpertMode(Common(2607, 2, 1, 3),
-        // CommonDrop(2607, 10, 1, 3, 9))` (`ItemDropDatabase.cs:959`) — expert's own branch is
-        // 9-in-10, not 1-in-10 (`CommonDrop`'s fifth parameter is a numerator this project's
-        // `Conditional` has no field for). Modelled as the flat classic rate in every mode, the
-        // same documented simplification the dungeon-guardian family already uses just above.
-        163 | 238 => out.push(a_few(2607, 2, 1, 3)),
+        // CommonDrop(2607, 10, 1, 3, 9))` (`ItemDropDatabase.cs:959`) — classic is the plain 1-in-2
+        // `a_few` already had; expert's own branch is 9-in-10, not 1-in-10, which needed both a
+        // real mode branch (there was none before — every mode got the classic rate) and the
+        // numerator `Conditional` had no field for until `m_in_n` above. Found while auditing every
+        // `chanceNumerator != 1` site in `ItemDropDatabase.cs` against this module for the
+        // Brain-of-Cthulhu/Queen-Bee numerator fix below; this file's own prior comment already
+        // named the gap but left it unfixed — now fixed alongside it.
+        163 | 238 => out.push(if at.expert {
+            m_in_n(2607, 9, 10, 1, 3)
+        } else {
+            a_few(2607, 2, 1, 3)
+        }),
         // Zombie Merman / Eyeball Flying Fish: three single-item pools, each really just a flat
         // 1-in-8 (`RegisterBloodMoonFishing`, `ItemDropDatabase.cs:168-170`) — both NPCs are
         // themselves only ever caught blood-moon fishing, so nothing here re-checks `at.blood_moon`
@@ -414,6 +447,7 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         out.push(Conditional {
             item: 1857,
             one_in: gate * 20,
+            numerator: 1,
             min: 1,
             max: 1,
         });
@@ -734,17 +768,17 @@ fn classic_only(npc_type: u16) -> Vec<Conditional> {
         // (mutually exclusive, not two independent rolls), which this function's independent
         // per-item rolls cannot express.
         //
-        // A further, real find while verifying this block against source, left unfixed as
-        // out of scope for the same reason as the Creeper's own note above: 1130's real
+        // A further, real find while verifying this block against source, now fixed alongside
+        // the Creeper's own numerator fix above rather than left disclosed-only: 1130's real
         // `ByCondition(condition, 1130, 4, 10, 30, 3)` has `chanceNumerator: 3`, so the true rate
-        // is 3-in-4, not the 1-in-4 kept here — `Conditional` has no numerator field.
+        // is 3-in-4, not the 1-in-4 this project previously kept.
         222 => vec![
             a_few(2108, 7, 1, 1),
             a_few(1132, 3, 1, 1),
             a_few(1170, 15, 1, 1),
             a_few(2502, 20, 1, 1),
             a_few(5483, 15, 1, 1),
-            a_few(1130, 4, 10, 30),
+            m_in_n(1130, 3, 4, 10, 30),
             a_few(2431, 1, 17, 30),
         ],
         245 => vec![
@@ -901,26 +935,25 @@ fn by_mode(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         // of the mistake, describing the wrong NPC — found by a parallel audit and independently
         // confirmed here directly against source.
         //
-        // A second, real finding along the way, left unfixed: every one of these six branches'
-        // real `chanceNumerator` is **2**, not the implicit `1` this project's `Conditional` can
-        // represent (`new CommonDrop(1329, 3, 2, 5, 2)` etc. — the fifth constructor argument).
-        // True classic/expert odds are 2-in-3 for both items, not the 1-in-3 kept here; master's
-        // 1329 branch is 2-in-4 (an exact 1-in-2, also not corrected, to keep this fix to the
-        // assigned npc-id bug alone). Same class of gap already disclosed for the dungeon-guardian
-        // family and the Black Recluse above — `Conditional` has no numerator field project-wide,
-        // not something introduced or silently accepted new here.
+        // A second, real finding along the way, now fixed rather than left disclosed-only: every
+        // one of these six branches' real `chanceNumerator` is **2** (`new CommonDrop(1329, 3, 2,
+        // 5, 2)` etc. — the fifth constructor argument), not the implicit `1` `Conditional` could
+        // represent at the time this was first found. True classic/expert odds are 2-in-3 for both
+        // items; master's 1329 branch is 2-in-4 (an exact 1-in-2). `m_in_n` (above) now carries the
+        // numerator generally, so this — and the same class of gap on the Black Recluse and Queen
+        // Bee's own 1130 roll — is fixed rather than only disclosed.
         267 => vec![
             pick(
                 at,
-                a_few(1329, 3, 2, 5),
-                a_few(1329, 3, 1, 3),
-                a_few(1329, 4, 1, 2),
+                m_in_n(1329, 2, 3, 2, 5),
+                m_in_n(1329, 2, 3, 1, 3),
+                m_in_n(1329, 2, 4, 1, 2),
             ),
             pick(
                 at,
-                a_few(880, 3, 5, 12),
-                a_few(880, 3, 5, 7),
-                a_few(880, 3, 2, 4),
+                m_in_n(880, 2, 3, 5, 12),
+                m_in_n(880, 2, 3, 5, 7),
+                m_in_n(880, 2, 3, 2, 4),
             ),
         ],
         // A wyvern's souls of flight, which are more generous in expert.
@@ -937,11 +970,18 @@ fn by_mode(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         }],
         // Giant worms and their kin: the whoopie cushion.
         10 | 11 | 12 | 95 | 96 | 97 => vec![sometimes(215, 50)],
-        // Hornets and their variants: the stinger.
+        // Hornets and their variants: the stinger. `DropBasedOnExpertMode(CommonDrop(209, 3, 1, 1,
+        // 2), Common(209))` (`ItemDropDatabase.cs:1170`) — expert's plain `Common(209)` really is
+        // unconditional, but classic's own `CommonDrop` has `chanceNumerator: 2`, so the real rate
+        // is 2-in-3, not the 1-in-3 kept here before. A genuinely new find, not one of the two
+        // already known when this numerator audit started (Brain of Cthulhu/Creeper's tissue
+        // sample, Queen Bee's 1130 roll) or the already-disclosed Black Recluse gap above — nothing
+        // in this module had flagged this site before this pass checked every `chanceNumerator`
+        // literal in `ItemDropDatabase.cs` against what this file actually models.
         42 | 231 | 232 | 233 | 234 | 235 => vec![if at.expert {
             always(209)
         } else {
-            sometimes(209, 3)
+            m_in_n(209, 2, 3, 1, 1)
         }],
         _ => Vec::new(),
     }
@@ -1569,5 +1609,207 @@ mod tests {
         for item in [1122, 899, 1248, 1295, 1296, 1297] {
             assert_eq!(bundled_with(item), None, "item {item} should not bundle");
         }
+    }
+
+    /// A numerator audit over every `chanceNumerator` literal in `ItemDropDatabase.cs`, run after
+    /// the Brain of Cthulhu/Creeper npc-id fix and the Queen Bee chain fix above disclosed (but did
+    /// not fix) two `Conditional` entries whose real numerator was not `1`. Adding `m_in_n` closes
+    /// those two, plus two more the audit itself found: the Black Recluse's expert branch (already
+    /// named in a comment as a known gap, just never wired to `m_in_n` before it existed) and the
+    /// hornet family's stinger roll (not previously flagged anywhere in this module).
+    ///
+    /// The Creeper's own six branches: `new CommonDrop(1329, 3, 2, 5, 2)`,
+    /// `new CommonDrop(1329, 3, 1, 3, 2)`, `new CommonDrop(1329, 4, 1, 2, 2)`,
+    /// `new CommonDrop(880, 3, 5, 12, 2)`, `new CommonDrop(880, 3, 5, 7, 2)`,
+    /// `new CommonDrop(880, 3, 2, 4, 2)` (`ItemDropDatabase.cs:502-503`) — every one has
+    /// `chanceNumerator: 2`. Fails on the pre-fix code, which had no numerator field at all and so
+    /// modelled every branch here at the wrong (too-low) 1-in-N rate.
+    #[test]
+    fn the_creepers_tissue_sample_and_crimtane_rolls_are_two_in_three_or_one_in_two_not_one_in_three_or_one_in_four()
+     {
+        const CREEPER: u16 = 267;
+
+        let classic = conditional(CREEPER, plain());
+        let tissue = classic
+            .iter()
+            .find(|d| d.item == 1329)
+            .expect("classic tissue sample");
+        assert_eq!(
+            (tissue.numerator, tissue.one_in, tissue.min, tissue.max),
+            (2, 3, 2, 5),
+            "classic tissue sample must be 2-in-3, not 1-in-3: {tissue:?}"
+        );
+        let crimtane = classic
+            .iter()
+            .find(|d| d.item == 880)
+            .expect("classic crimtane");
+        assert_eq!(
+            (
+                crimtane.numerator,
+                crimtane.one_in,
+                crimtane.min,
+                crimtane.max
+            ),
+            (2, 3, 5, 12),
+            "classic crimtane must be 2-in-3, not 1-in-3: {crimtane:?}"
+        );
+
+        let expert = conditional(
+            CREEPER,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        let tissue = expert
+            .iter()
+            .find(|d| d.item == 1329)
+            .expect("expert tissue sample");
+        assert_eq!(
+            (tissue.numerator, tissue.one_in, tissue.min, tissue.max),
+            (2, 3, 1, 3),
+            "expert tissue sample must be 2-in-3, not 1-in-3: {tissue:?}"
+        );
+        let crimtane = expert
+            .iter()
+            .find(|d| d.item == 880)
+            .expect("expert crimtane");
+        assert_eq!(
+            (
+                crimtane.numerator,
+                crimtane.one_in,
+                crimtane.min,
+                crimtane.max
+            ),
+            (2, 3, 5, 7),
+            "expert crimtane must be 2-in-3, not 1-in-3: {crimtane:?}"
+        );
+
+        let master = conditional(
+            CREEPER,
+            Conditions {
+                expert: true,
+                master: true,
+                ..plain()
+            },
+        );
+        let tissue = master
+            .iter()
+            .find(|d| d.item == 1329)
+            .expect("master tissue sample");
+        assert_eq!(
+            (tissue.numerator, tissue.one_in, tissue.min, tissue.max),
+            (2, 4, 1, 2),
+            "master tissue sample must be 2-in-4 (1-in-2), not 1-in-4: {tissue:?}"
+        );
+        let crimtane = master
+            .iter()
+            .find(|d| d.item == 880)
+            .expect("master crimtane");
+        assert_eq!(
+            (
+                crimtane.numerator,
+                crimtane.one_in,
+                crimtane.min,
+                crimtane.max
+            ),
+            (2, 3, 2, 4),
+            "master crimtane must be 2-in-3, not 1-in-3: {crimtane:?}"
+        );
+    }
+
+    /// Queen Bee's own `ByCondition(condition, 1130, 4, 10, 30, 3)` (`ItemDropDatabase.cs:551`) —
+    /// `chanceNumerator: 3`, so the real rate is 3-in-4, not the 1-in-4 this project kept before
+    /// `m_in_n` existed. Fails on the pre-fix code (`a_few(1130, 4, 10, 30)`, an implicit
+    /// numerator of 1).
+    #[test]
+    fn queen_bees_1130_roll_is_three_in_four_not_one_in_four() {
+        const QUEEN_BEE: u16 = 222;
+        let honey = classic_only(QUEEN_BEE)
+            .into_iter()
+            .find(|d| d.item == 1130)
+            .expect("item 1130");
+        assert_eq!(
+            (honey.numerator, honey.one_in, honey.min, honey.max),
+            (3, 4, 10, 30),
+            "must be 3-in-4, not 1-in-4: {honey:?}"
+        );
+    }
+
+    /// The Black Recluse's own `DropBasedOnExpertMode(Common(2607, 2, 1, 3), CommonDrop(2607, 10,
+    /// 1, 3, 9))` (`ItemDropDatabase.cs:959`) — classic is a plain 1-in-2, but expert's own branch
+    /// is 9-in-10, not the flat 1-in-2 kept in every mode before this fix (this project's own prior
+    /// comment already named the gap, but left both the mode branch and the numerator unfixed).
+    /// Fails on the pre-fix code, which returned `a_few(2607, 2, 1, 3)` regardless of `at.expert`.
+    #[test]
+    fn black_recluses_web_is_mode_branched_not_a_flat_rate_in_every_mode() {
+        const BLACK_RECLUSE: u16 = 163;
+        let classic = conditional(BLACK_RECLUSE, plain());
+        let web = classic
+            .iter()
+            .find(|d| d.item == 2607)
+            .expect("classic web");
+        assert_eq!(
+            (web.numerator, web.one_in, web.min, web.max),
+            (1, 2, 1, 3),
+            "classic stays 1-in-2: {web:?}"
+        );
+
+        let expert = conditional(
+            BLACK_RECLUSE,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        let web = expert.iter().find(|d| d.item == 2607).expect("expert web");
+        assert_eq!(
+            (web.numerator, web.one_in, web.min, web.max),
+            (9, 10, 1, 3),
+            "expert must be 9-in-10, not the classic 1-in-2: {web:?}"
+        );
+
+        // The wall-mounted variant (238) shares the same rule.
+        let mounted = conditional(238, plain());
+        assert!(mounted.iter().any(|d| d.item == 2607 && d.numerator == 1));
+    }
+
+    /// The hornet family's own `DropBasedOnExpertMode(CommonDrop(209, 3, 1, 1, 2), Common(209))`
+    /// (`ItemDropDatabase.cs:1170`) — classic's own branch has `chanceNumerator: 2`, so the real
+    /// rate is 2-in-3, not the 1-in-3 this project modelled before. Not one of the two numerator
+    /// gaps already disclosed in this module (Creeper, Queen Bee) or the Black Recluse's
+    /// already-named one — found fresh by this audit checking every `chanceNumerator` literal in
+    /// `ItemDropDatabase.cs` against what this module actually models. Fails on the pre-fix code
+    /// (`sometimes(209, 3)`, an implicit numerator of 1).
+    #[test]
+    fn hornet_stinger_is_two_in_three_in_classic_not_one_in_three() {
+        const HORNET: u16 = 42;
+        let classic = conditional(HORNET, plain());
+        let stinger = classic
+            .iter()
+            .find(|d| d.item == 209)
+            .expect("classic stinger");
+        assert_eq!(
+            (stinger.numerator, stinger.one_in),
+            (2, 3),
+            "must be 2-in-3, not 1-in-3: {stinger:?}"
+        );
+
+        let expert = conditional(
+            HORNET,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        let stinger = expert
+            .iter()
+            .find(|d| d.item == 209)
+            .expect("expert stinger");
+        assert_eq!(
+            (stinger.numerator, stinger.one_in),
+            (1, 1),
+            "expert stays unconditional: {stinger:?}"
+        );
     }
 }

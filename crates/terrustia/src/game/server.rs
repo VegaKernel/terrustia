@@ -8216,7 +8216,13 @@ impl GameServer {
             }
         }
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
-            if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+            // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
+            // rules (`CommonDrop`/`ByCondition`'s own `chanceNumerator`) roll `M`-in-`N` instead —
+            // `rule.numerator` is `1` for everything but those, so this is exactly the old roll for
+            // every rule that never needed the field.
+            if rule.one_in > 1
+                && !rand::Rng::random_ratio(&mut self.rng, rule.numerator, rule.one_in)
+            {
                 continue;
             }
             let stack = if rule.max > rule.min {
@@ -8238,7 +8244,9 @@ impl GameServer {
         // mode at all (see `conditional_chains`'s own doc for why).
         for chain in terrustia_proto::conditional_drops::conditional_chains(npc_type, at) {
             for rule in chain {
-                if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
+                if rule.one_in > 1
+                    && !rand::Rng::random_ratio(&mut self.rng, rule.numerator, rule.one_in)
+                {
                     continue;
                 }
                 let stack = if rule.max > rule.min {
@@ -14117,6 +14125,155 @@ mod boss_drop_table_fixes {
         assert!(
             saw_stynger,
             "300 trials never drew the Stynger — check the odds"
+        );
+    }
+}
+
+/// Real server-side coverage for the numerator fix in `conditional_drops.rs`: `Conditional` used
+/// to have no way to represent a real vanilla `chanceNumerator` other than `1`, so every rule with
+/// a real rate of `M`-in-`N` (`M != 1`) was modelled at the wrong, too-low `1`-in-`N` instead. The
+/// unit tests in `conditional_drops.rs` pin the exact numerator/denominator this module now
+/// carries; these drive the real `drop_loot` consumer over many trials to prove the roll it
+/// actually performs lands at the *real* rate rather than the old one — the same lesson the Queen
+/// Bee test in `boss_drop_table_fixes` already taught this project: a correct-looking data table
+/// can still be wrong if the consumer never reads the field.
+///
+/// Every trial count below is chosen so the real rate and the old (pre-fix) rate are each roughly
+/// ten standard deviations from the threshold — at that separation a false result from ordinary RNG
+/// variance is not a realistic concern.
+#[cfg(test)]
+mod conditional_numerator_fixes {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::items::ItemStore;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "numerator fix probe")
+    }
+
+    /// Every item id this one kill spawned, in allocation order — see the identical helper in
+    /// `boss_drop_table_fixes` for why resetting the store first makes this exact.
+    fn kill_and_collect_ids(server: &mut GameServer, npc_type: u16) -> Vec<i32> {
+        server.items = ItemStore::new();
+        server.drop_loot(npc_type, (0.0, 0.0), false);
+        let mut items: Vec<(i16, i32)> = server
+            .items
+            .iter()
+            .map(|(index, it)| (index, it.item.id))
+            .collect();
+        items.sort_unstable_by_key(|(index, _)| *index);
+        items.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// The Creeper's Tissue Sample (1329) and Crimtane Ore (880): real vanilla rolls both at
+    /// 2-in-3 in classic (`ItemDropDatabase.cs:502-503`), not the 1-in-3 this project modelled
+    /// before `Conditional` had a numerator field. 300 trials: 2-in-3 has a mean of 200 (sd ~8.2),
+    /// 1-in-3 a mean of 100 (sd ~8.2) — the 150 threshold below sits about six standard deviations
+    /// from either, so this distinguishes the two rates rather than just checking "something
+    /// dropped."
+    #[test]
+    fn the_creeper_drops_tissue_sample_and_crimtane_at_two_in_three_not_one_in_three() {
+        const CREEPER: u16 = 267;
+        const TRIALS: usize = 300;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut tissue_hits = 0usize;
+        let mut crimtane_hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = kill_and_collect_ids(&mut server, CREEPER);
+            tissue_hits += dropped.iter().filter(|&&id| id == 1329).count();
+            crimtane_hits += dropped.iter().filter(|&&id| id == 880).count();
+        }
+        assert!(
+            tissue_hits > 150,
+            "tissue sample landed {tissue_hits}/{TRIALS} — real rate is 2-in-3 (~200), not 1-in-3 (~100)"
+        );
+        assert!(
+            crimtane_hits > 150,
+            "crimtane landed {crimtane_hits}/{TRIALS} — real rate is 2-in-3 (~200), not 1-in-3 (~100)"
+        );
+    }
+
+    /// Queen Bee's own `ByCondition(condition, 1130, 4, 10, 30, 3)` (`ItemDropDatabase.cs:551`):
+    /// real rate is 3-in-4 (mean 225 of 300, sd ~7.5), not the 1-in-4 this project modelled before
+    /// (mean 75). The 150 threshold sits ten standard deviations from either.
+    #[test]
+    fn queen_bee_drops_item_1130_at_three_in_four_not_one_in_four() {
+        const QUEEN_BEE: u16 = 222;
+        const TRIALS: usize = 300;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = kill_and_collect_ids(&mut server, QUEEN_BEE);
+            hits += dropped.iter().filter(|&&id| id == 1130).count();
+        }
+        assert!(
+            hits > 150,
+            "item 1130 landed {hits}/{TRIALS} — real rate is 3-in-4 (~225), not 1-in-4 (~75)"
+        );
+    }
+
+    /// The hornet family's own `DropBasedOnExpertMode(CommonDrop(209, 3, 1, 1, 2), Common(209))`
+    /// (`ItemDropDatabase.cs:1170`): classic's real rate is 2-in-3 (mean 200 of 300, sd ~8.2), not
+    /// the 1-in-3 this project modelled before — a gap this numerator audit found fresh, not one of
+    /// the two already known when it started. Expert stays unconditional (100%), unaffected by this
+    /// fix and checked here as a same-test regression guard.
+    #[test]
+    fn hornet_stinger_drops_at_two_in_three_in_classic_not_one_in_three() {
+        const HORNET: u16 = 42;
+        const TRIALS: usize = 300;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let mut hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = kill_and_collect_ids(&mut server, HORNET);
+            hits += dropped.iter().filter(|&&id| id == 209).count();
+        }
+        assert!(
+            hits > 150,
+            "stinger landed {hits}/{TRIALS} — real classic rate is 2-in-3 (~200), not 1-in-3 (~100)"
+        );
+
+        server.world.game_mode = 1; // expert
+        for _ in 0..30 {
+            let dropped = kill_and_collect_ids(&mut server, HORNET);
+            assert!(
+                dropped.contains(&209),
+                "expert's stinger roll is unconditional (chanceDenominator: 1)"
+            );
+        }
+    }
+
+    /// The Black Recluse's own `DropBasedOnExpertMode(Common(2607, 2, 1, 3), CommonDrop(2607, 10,
+    /// 1, 3, 9))` (`ItemDropDatabase.cs:959`): before this fix, every mode gave the same flat
+    /// 1-in-2 (mean 150 of 300) because the rule was never mode-branched at all — real expert is
+    /// 9-in-10 (mean 270, sd ~5.2), a real, material difference from classic this test proves the
+    /// consumer now actually rolls, not just that `conditional_drops.rs`'s own data table has two
+    /// different numbers in it.
+    #[test]
+    fn black_recluse_drops_its_own_item_far_more_often_in_expert_than_classic() {
+        const BLACK_RECLUSE: u16 = 163;
+        const TRIALS: usize = 300;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+
+        let mut classic_hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = kill_and_collect_ids(&mut server, BLACK_RECLUSE);
+            classic_hits += dropped.iter().filter(|&&id| id == 2607).count();
+        }
+
+        server.world.game_mode = 1; // expert
+        let mut expert_hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = kill_and_collect_ids(&mut server, BLACK_RECLUSE);
+            expert_hits += dropped.iter().filter(|&&id| id == 2607).count();
+        }
+
+        assert!(
+            (100..200).contains(&classic_hits),
+            "classic landed {classic_hits}/{TRIALS} — real classic rate is 1-in-2 (~150)"
+        );
+        assert!(
+            expert_hits > 230,
+            "expert landed {expert_hits}/{TRIALS} — real expert rate is 9-in-10 (~270), not the classic 1-in-2 (~150)"
         );
     }
 }

@@ -213,7 +213,25 @@ fn new_still_validates_dimensions_even_with_a_world_file_set() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn terrustia");
-    let status = child.wait().expect("wait for terrustia");
+    // A bounded poll, not a blocking `child.wait()` — every other subprocess test in this file
+    // already uses one (`wait_for_file`'s own deadline loop), and this one didn't, which is
+    // exactly what let a single contention-slow run on a shared machine hang the entire suite
+    // indefinitely instead of failing loudly with a clear message.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll terrustia") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "terrustia did not exit within 30s — an out-of-range world_width/world_height \
+                 should be refused immediately at startup, not left running"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(
         !status.success(),
         "an out-of-range world_width/world_height must be refused, not silently generated"
