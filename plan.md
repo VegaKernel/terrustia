@@ -5,6 +5,12 @@ approved plan; this file is what is done, what is next, and what was found on th
 
 **Legend:** `—` not started · `~` in progress · `✓` done and verified
 
+**Scope note (2026-08-27, user direction):** the six remaining secret seeds' own *generation-content*
+differences (Not the Bees, Drunk World, Remix, Celebrationmk10, "get fixed boi", Don't Starve —
+each individually sized in the "Secret seeds" rows below, once real source access made a genuine
+per-seed measurement possible) are explicitly **v0.1.0 scope, not a v0.0.1 blocker**. Everything
+else this file tracks remains in scope for v0.0.1.
+
 ## Rules this file is held to
 
 A row becomes `✓` only when all four hold, or it says which one does not apply:
@@ -292,10 +298,10 @@ Two more things this pass turned up, checked immediately rather than left as fla
 | ✓ | Real spawn triggers for the Wall of Flesh (a Guide Voodoo Doll thrown into lava) and the Lunatic Cultist's tablet (npc 437) — landed, see the Done row above ("Real spawn triggers for the Wall of Flesh and the Lunatic Cultist's tablet") for the confirmed mechanisms, what was built, and both verification passes |
 | ✓ | Town NPC happiness, price effects, moving out — confirmed already working, same shape as "Town NPC shops" (see Done, above) |
 | ✓ | All 3 missing events done — see Done: "The birthday party, one of the three missing events", "Slime Rain, the second of the three missing events", "Lantern Night, the third and last of the three missing events" |
-| — | 6 remaining drop-table gaps, down from 66 (see Done: "Closed 60 of the 66 remaining drop-table gaps") — each individually traced to a remix-seed-only branch or the pre-existing documented nested-fallback-chain shape (npc 44), none fixable without scope this project has already deliberately excluded |
+| — | 6 remaining drop-table gaps, down from 66 (see Done: "Closed 60 of the 66 remaining drop-table gaps") — each individually traced to a remix-seed-only branch or the pre-existing documented nested-fallback-chain shape (npc 44). **Explicitly deferred to v0.1.0** (user direction, 2026-08-27): 5 of the 6 need Remix's own generation-content work, which is itself deferred (see the "Secret seeds" row below) — not a v0.0.1 blocker |
 | ✓ | Pets/mounts: already client-authoritative and working (`a_pet_summon_item_equipped_in_the_misc_slot_relays_to_another_player`, `gameplay.rs`) — this row was a documentation gap, not open work. Minecart tracks: the track-switch bug is fixed (see Done, above); nothing else in this area is known to be broken |
 | ✓ | Skeletron's `RedHatSkeletron` vanity-set condition, task #44 — closed; see Done, above: "Skeletron's `RedHatSkeletron` vanity condition (task #44) — closed" |
-| ✓ | Secret seeds, task #43 — **see Done, above, for the full per-seed inventory and reasoning, and the later "Secret seeds, re-investigated with real source access restored" row for a real correction to every magic string this row originally shipped**: the real activation mechanism (`secret_seed.rs`) built and wired, now genuinely correct against source rather than reasoned inference; `--seed` free text; No Traps World landed complete and, since the correction, actually reachable by typing what real vanilla expects; the remaining *generation-content* differences (Not the Bees, Drunk World, Remix, Celebrationmk10, Don't Starve) individually sized, deferred with the evidence this session actually has for each — none fabricated from a guess |
+| ✓ | Secret seeds, task #43 — **see Done, above, for the full per-seed inventory and reasoning, and the later "Secret seeds, re-investigated with real source access restored" row for a real correction to every magic string this row originally shipped**: the real activation mechanism (`secret_seed.rs`) built and wired, now genuinely correct against source rather than reasoned inference; `--seed` free text; No Traps World landed complete and, since the correction, actually reachable by typing what real vanilla expects; detection and persistence for all nine real flags are done and v0.0.1-complete. **The remaining *generation-content* differences (Not the Bees, Drunk World, Remix, Celebrationmk10, "get fixed boi", Don't Starve, Skyblock) are explicitly deferred to v0.1.0** (user direction, 2026-08-27, after the re-investigation above measured real per-seed scope directly against source for the first time: Don't Starve alone touches 53+ scattered branch points across nearly the whole of `WorldGen.cs`, not a contained feature, and the others are comparable or larger — see that row's own numbers). Not a v0.0.1 blocker |
 
 ## Corrections to earlier claims
 

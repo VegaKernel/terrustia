@@ -54,9 +54,11 @@ settled water, pots, statues, piles, fallen logs, traps and rounded terrain, flo
 and gem caves, pyramids, living trees, jungle shrines, underground cabins, an oasis, and the full
 Tier 3 cosmetic/cleanup tail (moss, wall variety, waterfalls, thin ice, speleothems, exposed gems,
 lily pads, cacti, and the seven-pass tile-cleanup bundle) are all there now. Vanilla's seven secret
-seeds are now detected by name (a real `--seed "get fixed boi"` works), and one of the seven — No
-Traps World — is fully wired; the other six are sized and deferred. What's left of worldgen is 7 of
-15 real micro-biome classes and the other six secret seeds — sized and tracked in `plan.md`.
+seeds — plus two more real ones this project's earlier investigation had missed — are now detected
+by their real magic strings (a real `--seed "getfixedboi"` works and now persists), and one of the
+nine — No Traps World — is fully wired. What's left of worldgen is 7 of 15 real micro-biome classes
+and the other eight secret seeds' own generation-content differences — sized and tracked in
+`plan.md`, and explicitly deferred to v0.1.0.
 
 ### Protocol and connectivity
 
@@ -89,8 +91,8 @@ floating islands, spider and gem caves, pyramids, living trees, jungle shrines, 
 the oasis, the glowing mushroom biome) and Tier 3 (the cosmetic/cleanup tail — moss, wall variety,
 waterfalls, thin ice, speleothems, exposed gems, lily pads and beach decorations, the seven-pass
 tile-cleanup bundle) are all done. What's left: 7 of 15 real `MicroBiome` classes (each one sized and
-disclosed individually below), and six of the seven secret seeds (the seventh, No Traps World, is
-done — see below).
+disclosed individually below), and eight of the nine known secret seeds' own generation-content
+differences (the ninth, No Traps World, is done — see below). Both are v0.1.0 scope.
 
 | | Feature | Notes |
 |---|---|---|
@@ -111,7 +113,7 @@ done — see below).
 | ✅ | Floating islands, spider caves, gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | The ~200-line structure-overlap tracker (`StructureMap`) this project built instead of porting vanilla's heavy shape/structure DSL turned out to be enough for all nine — no DSL needed |
 | 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes: `CaveHouseBiome`, `ThinIceBiome`, `CorruptionPitBiome`, `SpikePitBiome`, `HoneyPatchBiome`, `CampsiteBiome`, and a shared painter standing in for both `MarbleBiome`/`GraniteBiome`. The other 7 — `DeadMansChestBiome`, `DesertBiome`, `DunesBiome`, `MahoganyTreeBiome`, `EnchantedSwordBiome`, `MiningExplosivesBiome`, `HiveBiome` — each need a genuinely separate subsystem this project doesn't have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape...); sized individually in `plan.md` |
 | ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads/cattails/coral/cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed. Each has its own disclosed narrowing where vanilla's version leans on a genuinely separate subsystem (`neonMossBiome`'s grass-diffusion machinery, gem trees, bamboo/seaweed/palm growth, vanilla's own defensive multi-tile-frame repair this project's placement code has no equivalent need for) — see `plan.md`'s own Done rows for the full, pass-by-pass account |
-| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve) | All seven are now detected by name (case-insensitive, matching real vanilla's own seed-field check — `--seed "get fixed boi"` works). **No Traps World is done**: real vanilla's own `noTrapsWorldGen` flag, which the already-landed traps pass's own doc comment had already named, now short-circuits `traps::scatter` to placing nothing — verified on a real 4200×1200 world (397 real trap tiles on an ordinary seed, 0 on this one, read back independently from the saved `.wld` file, not merely the pass's own counters). The other six are detected and recorded but not yet consumed — each individually sized in `plan.md`'s backlog: Not the Bees and Drunk World are both genuinely pipeline-wide once their real ripple effects are traced, Remix is the largest (mirrors the whole world), Celebrationmk10 and Don't Starve have too little disclosed evidence in this codebase to implement without guessing, and "get fixed boi" is reasoned to be a superset of several of the others at once |
+| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve, For the Worthy, Skyblock) | An earlier pass detected all seven originally-known seeds by name, but — checked directly against real source once decompiled access came back — every one of its seven magic strings turned out wrong except Celebrationmk10 (Remix's real trigger is `dontdigup`, not "remix"; Drunk World has no text trigger at all, only the numeric seed 5162020; four more similarly wrong). Fixed against source, along with two more real secret seeds the original investigation never named: For the Worthy (`fortheworthy`) and Skyblock (`skyblock`). All nine flags now also **persist** through a save/reload and reach a connecting client's own packet 7 (six of them have a real client-visible flag bit; a real Terraria client already knows how to render each seed's own atmosphere once told, with no rendering code needed in this project). **No Traps World is done**: real vanilla's own `noTrapsWorldGen` flag now short-circuits `traps::scatter` to placing nothing, including when reached via "get fixed boi"'s own real dependency cascade — verified on a real 4200×1200 world (397 real trap tiles on an ordinary seed, 0 on this one). The other eight seeds' own *generation-content* differences are detected and persisted correctly but not yet implemented — each individually sized in `plan.md`'s backlog, now with real per-seed call-site counts (Don't Starve 103, Not the Bees 138, Celebrationmk10 191, Drunk World 199, For the Worthy 261, Remix 554) — **explicitly deferred to v0.1.0** |
 | ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
 
 ### NPCs, bosses and events
@@ -369,11 +371,12 @@ Results at the time of writing, against Terraria 1.4.5.8:
   the rate a real client reports at. The worst tick over the whole run — bestiary, fuzz, crowd and
   stress against one server — is **520 microseconds against a budget of 16,666**, at 50 MB.
 - Against a real 8400×2400 world (vanilla's own "Large" preset, 4× the tile count of everything
-  above) and **255 players — the real protocol maximum**, the worst tick still costs only **2,219
-  microseconds of the 16,666 budget**, better than 7× headroom. A different ceiling was found and
-  left disclosed rather than fixed: 88 of those 255 connections were dropped for a full outbound
-  queue during the initial synchronized join burst — see `docs/performance.md` for the full account
-  and reproduction.
+  above) and **255 players — the real protocol maximum**, the worst tick still costs only **3,451
+  microseconds of the 16,666 budget**, better than 4.8× headroom. A separate capacity ceiling was
+  found and disclosed here first — 88 of 255 connections dropped for a full outbound queue during
+  the initial synchronized join burst — and has since been fixed and re-verified: **zero dropped
+  connections** across the same real scenario, with a regression test (`tests/queue_capacity.rs`)
+  confirmed failing against the unfixed queue size first. See `plan.md` for the root cause and fix.
 - The `fuzz` example throws **fifty thousand malformed packets** at a running server and checks it
   is still answering afterwards, with the world uncorrupted and nothing in the log.
 
