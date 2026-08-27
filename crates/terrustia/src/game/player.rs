@@ -1,4 +1,7 @@
-use std::{collections::HashSet, net::SocketAddr};
+use std::{
+    collections::{HashSet, VecDeque},
+    net::SocketAddr,
+};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -126,6 +129,11 @@ pub struct Player {
     /// pushing them from player positions. It re-asks freely, so this is what stops a walk back
     /// and forth from resending megabytes of tiles.
     pub sent_sections: HashSet<(i32, i32)>,
+    /// Sections still owed to this client from its initial world stream, drained a few at a time
+    /// off the tick by `drain_section_streams` rather than sent in one synchronous burst inside the
+    /// `SpawnTileData` packet handler — a first join can want up to ~39 of them, and sending them
+    /// all in one call used to block every other player's tick for the whole burst.
+    pub pending_sections: VecDeque<(i32, i32)>,
 }
 
 impl Player {
@@ -174,6 +182,7 @@ impl Player {
             zone: None,
             open_chest: -1,
             sent_sections: HashSet::new(),
+            pending_sections: VecDeque::new(),
         }
     }
 

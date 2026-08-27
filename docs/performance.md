@@ -220,7 +220,7 @@ injected into the band-boundary math failed the synthetic test immediately (206,
 tiles dropped), while the real-seed test — real "gravitating sand" sites are sparse — did *not*
 reliably catch the same injected bug, which is why both tests are kept rather than either alone.
 
-## Section encoding at join — measured, real, and out of this session's reach to fix
+## Section encoding at join — measured, real, and fixed
 
 `send_section` (`game/server.rs`) turns a section of tiles into the packet a client receives, and
 runs inline on the single-writer game task — the same task every tick runs on. It caches what it
@@ -247,22 +247,31 @@ close to the autosave's 71 ms. The real cost is the *burst*: multiplying a reali
 join by these real percentiles puts a cold join somewhere between roughly 15 ms (15 sections at the
 small world's p50) and 115 ms (39 sections at the large world's p99) of synchronous work on the
 single-writer task before that player sees a single tile — one to seven tick budgets, back to back.
-The same *shape* of problem the autosave stall was (real synchronous cost, paid worst on a cold
-cache), smaller in typical magnitude, genuinely real, and **not fixed this session**.
+The same *shape* of problem the autosave stall was: real synchronous cost, paid worst on a cold
+cache.
 
-Not fixed because it cannot honestly be fixed from here: the code that would need to change
-(`send_section`, `on_spawn_tile_data`, `sections_for`, all in `game/server.rs`) was explicitly out
-of this session's scope — that file was single-owner, with other in-flight work depending on it
-staying stable, and this session was told plainly not to touch it. Measured and disclosed instead
-of guessed at or silently skipped, with the fix's real shape written down so it does not have to be
-rediscovered: unlike the autosave, this cannot simply move to a background task, because encoding
-needs to read `World`, which the single-writer task owns for the whole tick — there is no
-snapshot-and-hand-off shortcut here the way there was for a save. The lower-risk fix is to *spread*
-a join's own section burst across several ticks instead of one synchronous loop: a joining player
-is already sitting on a loading screen for the whole burst regardless, so a few extra ticks of load
-time costs them nothing visible, unlike a stall that briefly freezes everyone else already playing.
-`section_cache` itself is not the problem — it does exactly what this page already documented it
-doing; the problem is only ever the first, uncached pass through a join burst.
+This row once said "not fixed this session," with the code that would need to change
+(`send_section`, `on_spawn_tile_data`, `sections_for`, all in `game/server.rs`) explicitly out of
+scope while that file was single-owner with other in-flight work depending on it staying stable.
+That constraint no longer applied once the session doing the work was the sole owner of the file
+again, so it was picked up rather than left open. Unlike the autosave, this could not simply move to
+a background task — encoding needs to read `World`, which the single-writer task owns for the whole
+tick, so there is no snapshot-and-hand-off shortcut here the way there was for a save. Fixed instead
+by *spreading* a join's own section burst across several ticks: `on_spawn_tile_data` now queues the
+wanted sections onto a new `Player::pending_sections` and returns, rather than looping over
+`send_section` inline; a new `drain_section_streams`, run from the tick loop in the same phase
+`flush_dirty_sections` already occupies, advances every streaming player's own queue by a
+time-boxed slice (`SECTION_STREAM_BUDGET`, 4,000µs) each tick, with the budget shared across every
+player streaming at once rather than given to each one separately — a per-player budget would let a
+burst of simultaneous joins reproduce the exact stall this fixes, just triggered by many joiners
+instead of one. The items/NPCs/`TilesSent`/`INITIAL_SPAWN` steps that used to run right after the
+loop now run once a player's own queue actually empties, in a new `finish_join_stream`. A joining
+player was already sitting on a loading screen for the whole burst regardless, so a few extra ticks
+of load time costs them nothing visible, in exchange for never freezing everyone else already
+playing. See `plan.md`'s own Done entry for this fix for the full writeup and its three pinned
+tests. `section_cache` itself was never the problem — it does exactly what this page already
+documented it doing; the problem was only ever the first, uncached pass through a join burst, now
+paced rather than synchronous.
 
 ## The autosave stall, and how it was found
 

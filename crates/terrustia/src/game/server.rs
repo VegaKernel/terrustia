@@ -5,7 +5,7 @@
 //! back through each player's outbound queue.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -72,6 +72,17 @@ const ITEM_GRAB_RANGE: f32 = 400.0;
 
 /// Vanilla runs at 60 ticks per second and the clock packets assume it.
 const TICK: Duration = Duration::from_nanos(16_666_667);
+
+/// How much of a tick a single player's queued section stream may spend before
+/// `drain_section_streams` picks it back up next tick, rather than draining it in one shot.
+///
+/// Set from the worst single-section encode this project has ever measured (`examples/
+/// sectioncost.rs`: ~2,976µs on an 8400×2400 world) with headroom, so this phase's own share of a
+/// tick stays bounded and predictable rather than reproducing the exact synchronous-burst problem
+/// it exists to fix, just moved from one packet handler into the tick loop. At least one section
+/// still goes out every tick a queue is non-empty, even past the budget, so a stream always makes
+/// forward progress.
+const SECTION_STREAM_BUDGET: Duration = Duration::from_micros(4_000);
 
 /// How often the world clock is pushed to clients.
 ///
@@ -2067,6 +2078,7 @@ impl GameServer {
         lap(&mut cost, Phase::World);
 
         self.flush_dirty_sections();
+        self.drain_section_streams();
         lap(&mut cost, Phase::Sections);
         self.tick_items();
         lap(&mut cost, Phase::Items);
@@ -3615,10 +3627,27 @@ impl GameServer {
         )?;
         self.send(slot, status);
 
-        for (sx, sy) in sections {
-            self.send_section(slot, sx, sy)?;
+        // Queued and drained a few at a time off the tick (`drain_section_streams`) rather than
+        // sent in one synchronous loop here: a first join can want up to ~39 sections, and this
+        // packet handler runs inline on the single-writer game task like everything else — sending
+        // them all in one call blocked every other player's tick for the whole burst.
+        let empty = sections.is_empty();
+        if let Some(player) = self.player_mut(slot) {
+            player.pending_sections = VecDeque::from(sections);
         }
+        if empty {
+            self.finish_join_stream(slot);
+        }
+        Ok(())
+    }
 
+    /// The rest of a client's initial world stream, run once every section it asked for has
+    /// actually gone out: the entities that were alive when it joined, and the packet that tells
+    /// the client the tile stream itself is done.
+    ///
+    /// Split out of `on_spawn_tile_data` so `drain_section_streams` can call it too, the moment a
+    /// player's own queue empties on whichever tick that happens to land on.
+    fn finish_join_stream(&mut self, slot: u8) {
         // Vanilla sends the live entities after the tiles and before StartPlaying; without this a
         // joining player sees an empty world where everyone else sees dropped loot.
         let existing: Vec<(i16, (f32, f32), ItemStack)> = self
@@ -3627,16 +3656,72 @@ impl GameServer {
             .map(|(index, item)| (index, item.position, item.item))
             .collect();
         for (index, position, stack) in existing {
-            self.send(slot, SyncItem::dropped(index, position, stack).encode()?);
+            match SyncItem::dropped(index, position, stack).encode() {
+                Ok(frame) => self.send(slot, frame),
+                Err(e) => {
+                    warn!(slot, error = %e, "could not encode a dropped item for a joining player");
+                    return;
+                }
+            }
         }
 
-        self.send_npcs(slot)?;
+        if let Err(e) = self.send_npcs(slot) {
+            warn!(slot, error = %e, "could not send npcs to a joining player");
+            return;
+        }
 
         if let Some(player) = self.player_mut(slot) {
             player.advance_to(ConnState::TilesSent);
         }
-        self.send(slot, packets::empty(id::INITIAL_SPAWN)?);
-        Ok(())
+        match packets::empty(id::INITIAL_SPAWN) {
+            Ok(frame) => self.send(slot, frame),
+            Err(e) => warn!(slot, error = %e, "could not encode InitialSpawn"),
+        }
+    }
+
+    /// Advance every player's own queued initial-join section stream by a bounded slice of a
+    /// tick's budget.
+    ///
+    /// This used to be a single synchronous loop inside `on_spawn_tile_data`'s own packet handler
+    /// — up to ~39 sections, each up to ~3ms on the largest world this project benchmarks, so one
+    /// player joining could block every other player's tick for 15–115ms straight. Running it here
+    /// instead spreads the same total work across many ticks, a few sections at a time, the same
+    /// way every other per-tick system already shares the budget.
+    ///
+    /// The budget is shared across every player still streaming, not given to each one
+    /// separately — a per-player budget would let a burst of simultaneous joins reproduce the
+    /// exact stall this exists to fix, just triggered by many joiners at once instead of one.
+    /// Slots are drained in ascending order each tick, so under a mass-simultaneous-join burst the
+    /// earlier-numbered ones finish loading first rather than everyone progressing in lockstep — a
+    /// disclosed ordering bias, not a fairness guarantee, since the problem this fixes (one join
+    /// stalling everyone already playing) does not depend on joiners being served evenly.
+    fn drain_section_streams(&mut self) {
+        let slots: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| !p.pending_sections.is_empty())
+            .map(|p| p.slot)
+            .collect();
+        let began = Instant::now();
+        for slot in slots {
+            while let Some((sx, sy)) = self
+                .player_mut(slot)
+                .and_then(|p| p.pending_sections.pop_front())
+            {
+                let _ = self.send_section(slot, sx, sy);
+                let drained = self
+                    .player(slot)
+                    .is_some_and(|p| p.pending_sections.is_empty());
+                if drained {
+                    self.finish_join_stream(slot);
+                    break;
+                }
+                if began.elapsed() >= SECTION_STREAM_BUDGET {
+                    return;
+                }
+            }
+        }
     }
 
     /// Stream one section, unless this client already has it.
@@ -12642,6 +12727,140 @@ mod modify_time_rate {
         assert_eq!(
             moved_sped, 24,
             "one tick at the slider's top should move the clock 24 real ticks' worth"
+        );
+    }
+}
+
+/// A join's own tile stream is spread across ticks (`drain_section_streams`) rather than sent in
+/// one synchronous loop inside `on_spawn_tile_data`'s own packet handler — see
+/// `SECTION_STREAM_BUDGET`'s own doc comment for the measured cost this bounds.
+#[cfg(test)]
+mod section_streaming {
+    use super::*;
+    use crate::config::Config;
+
+    /// A real generated world, not an empty one: the measured section-encode costs
+    /// `SECTION_STREAM_BUDGET` was set from (`examples/sectioncost.rs`, up to ~1,322µs on a
+    /// comparable size) come from real terrain, and an empty world's sections would encode to
+    /// almost nothing, proving nothing about pacing.
+    fn real_world() -> crate::world::World {
+        crate::world::worldgen::build(2400, 900, "section stream probe", 1234).0
+    }
+
+    /// A large outbound channel: this drains section frames without a live client reading them,
+    /// and `send_bytes` drops (removes) a player whose channel fills up — sized well past
+    /// anything one small world's own section count could produce.
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(100_000);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::WorldSent;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    fn all_sections(server: &GameServer) -> VecDeque<(i32, i32)> {
+        (0..server.world.sections_x())
+            .flat_map(|sx| (0..server.world.sections_y()).map(move |sy| (sx, sy)))
+            .collect()
+    }
+
+    /// The core architectural change: `SpawnTileData` used to stream every wanted section
+    /// synchronously inside its own packet handler, reaching `TilesSent` in the same call. Now it
+    /// only queues them — the state advance is deferred to whichever tick actually empties the
+    /// queue.
+    #[test]
+    fn a_join_does_not_reach_tiles_sent_until_its_whole_section_queue_has_drained() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), real_world()));
+
+        // What a real client's handshake sends: `x = -1, y = -1` (no extra requested position),
+        // `team = 0`.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(-1i32).to_le_bytes());
+        payload.extend_from_slice(&(-1i32).to_le_bytes());
+        payload.push(0);
+
+        server.on_spawn_tile_data(0, &payload).unwrap();
+
+        assert!(
+            !server.player(0).unwrap().pending_sections.is_empty(),
+            "a real world's own spawn block should always want at least one section"
+        );
+        assert_eq!(
+            server.player(0).unwrap().state,
+            ConnState::WorldSent,
+            "must not reach TilesSent before every queued section has actually gone out"
+        );
+
+        for _ in 0..10_000 {
+            if server.player(0).unwrap().pending_sections.is_empty() {
+                break;
+            }
+            server.drain_section_streams();
+        }
+
+        assert!(
+            server.player(0).unwrap().pending_sections.is_empty(),
+            "the queue never actually finished draining"
+        );
+        assert_eq!(
+            server.player(0).unwrap().state,
+            ConnState::TilesSent,
+            "should reach TilesSent once the queue actually empties"
+        );
+    }
+
+    /// The other half of the same change: draining is bounded per call, not "as many as fit."
+    /// Queuing every section a real world has and draining once must leave some behind —
+    /// regardless of how cheap any individual section happens to be, since there is always a
+    /// number of them large enough to blow a four-millisecond budget.
+    #[test]
+    fn one_drain_call_never_empties_a_large_enough_queue() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), real_world()));
+        let all = all_sections(&server);
+        let total = all.len();
+        assert!(total > 8, "world too small to prove anything about pacing");
+        server.player_mut(0).unwrap().pending_sections = all;
+
+        server.drain_section_streams();
+
+        let remaining = server.player(0).unwrap().pending_sections.len();
+        assert!(
+            remaining > 0,
+            "all {total} sections drained in a single call — the budget bounded nothing"
+        );
+    }
+
+    /// The budget is shared across every player streaming at once, not given to each one
+    /// separately: two simultaneous joiners must not be able to drain roughly twice what one
+    /// alone would in the same call — that would let a burst of simultaneous joins reproduce the
+    /// exact stall this whole mechanism exists to prevent, just triggered by many joiners instead
+    /// of one, exactly the scaling bug an earlier draft of this fix actually had (a `began`
+    /// per player rather than per call).
+    #[test]
+    fn the_drain_budget_is_shared_across_players_not_given_to_each_one() {
+        let (mut solo, _rx) = with_one_player(GameServer::new(Config::default(), real_world()));
+        let queued = all_sections(&solo).len();
+        solo.player_mut(0).unwrap().pending_sections = all_sections(&solo);
+        solo.drain_section_streams();
+        let solo_sent = queued - solo.player(0).unwrap().pending_sections.len();
+
+        let (mut paired, _rx_a) = with_one_player(GameServer::new(Config::default(), real_world()));
+        let (out_tx_b, _rx_b) = mpsc::channel(100_000);
+        let mut player_b = Player::new(1, "127.0.0.1:2".parse().unwrap(), out_tx_b);
+        player_b.state = ConnState::WorldSent;
+        paired.players[1] = Some(player_b);
+        paired.player_mut(0).unwrap().pending_sections = all_sections(&paired);
+        paired.player_mut(1).unwrap().pending_sections = all_sections(&paired);
+
+        paired.drain_section_streams();
+
+        let paired_sent = (queued - paired.player(0).unwrap().pending_sections.len())
+            + (queued - paired.player(1).unwrap().pending_sections.len());
+        assert!(
+            paired_sent <= solo_sent * 3 / 2,
+            "two simultaneous joiners together drained {paired_sent} sections in one call, \
+             vs {solo_sent} for one alone — the budget is being given to each player \
+             separately instead of shared across the whole call"
         );
     }
 }
