@@ -1,127 +1,193 @@
-//! Vanilla's seven "secret" seeds: magic strings typed into the world-creation seed field that
-//! flip extra world-generation (and, in real vanilla, gameplay) flags for that one world —
-//! Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", and Don't Starve.
+//! Vanilla's real secret world seeds: magic strings (or, in two cases, specific numbers) typed
+//! into the world-creation seed field that flip extra world-generation (and, in real vanilla,
+//! gameplay) flags for that one world.
 //!
-//! ## The real activation mechanism
+//! ## This module was rewritten once real source became available again
 //!
-//! Real Terraria's seed field is free text, not a bare number — a player can type a plain integer
-//! (which becomes the numeric seed directly), any other text (which gets hashed down to a number
-//! instead), or one of these seven specific strings. World creation checks the *typed string
-//! itself*, case-insensitively, against the seven magic strings; a match sets one or more
-//! `static bool` fields on `WorldGen`/`Main` (`notTheBees`, `drunkWorldGen`, `remixWorldGen`,
-//! `noTrapsWorldGen`, `getGoodWorldGen`, `dontStarveWorldGen`, `tenthAnniversaryWorldGen`) that
-//! stay set for the rest of that world's generation — separate from, and unrelated to, whatever
-//! number ends up seeding the RNG. An ordinary numeric seed and a magic-string seed both still
-//! need *some* number to drive generation; vanilla derives that separately (parses the string as
-//! a number if it is one, hashes it otherwise). This project's own [`super::rand::UnifiedRandom`]
-//! is already not seed-identical with vanilla's own generator (see `worldgen/mod.rs`'s own module
-//! doc), so the exact hash does not have to match vanilla's — only "the same text always produces
-//! the same numeric seed" has to hold, the same property [`numeric_seed`]'s own test checks.
+//! An earlier version of this module built the whole detection mechanism — correctly — from
+//! *reasoned inference*: the flag names and the general "typed text is checked against magic
+//! strings" mechanism were hard evidence (already found and disclosed by other worldgen passes
+//! reading real `WorldGen.cs`/`Main.cs` before the decompiled tree was reaped from `.scratch/`),
+//! but the *exact seven magic strings* were not — they were taken from public, well-documented
+//! community knowledge (the kind on the Terraria Wiki's "World creation" article), explicitly
+//! flagged at the time as lower-confidence than everything else in this file.
 //!
-//! ## Hard evidence vs. reasoned inference — read this before trusting a spelling below
+//! The decompiled tree is back. Checked directly against
+//! `Terraria.WorldBuilding/WorldSeedOption_*.cs` (each option's own `SpecialSeedNames`/
+//! `SpecialSeedValues` arrays — the literal comparison real vanilla's own `WorldGenerationOptions`
+//! performs) rather than trusted secondhand a second time, **every single one of the seven
+//! previously-guessed strings turned out to be wrong**, one of them (`"remix"` for the Remix seed,
+//! really `"dontdigup"`) not even close. A player who typed the real vanilla phrase for six of the
+//! seven seeds into this server would have gotten an ordinary world, silently — the mechanism was
+//! sound, the strings it matched against were not. See `plan.md`'s own note on this correction for
+//! the full comparison table.
 //!
-//! **Hard evidence**, already found and disclosed by name across this session's own landed
-//! worldgen passes, reading real decompiled `WorldGen.cs`/`Main.cs` source before it was reaped
-//! from `.scratch/` (see `plan.md`'s own note on where that tree went): the seven boolean flag
-//! names in the paragraph above are real, and every already-landed pass's own disclosed branch —
-//! collected in `plan.md`'s "Secret seeds" section — is a genuine, previously-read data point
-//! about what one specific flag changes in one specific pass. `traps.rs`'s own module doc, for
-//! instance, names `noTrapsWorldGen` as one of eight real flags gating almost every branch of
-//! `placeTrap`/`PlaceSandTrap`.
+//! Two more real secret seeds were also found this pass that the original seven-seed list never
+//! named at all: **For the Worthy** (`fortheworthy`) — the real name behind what this project's
+//! own `getGoodWorld`/`getGoodWorldGen` flag actually is, previously misattributed as an internal
+//! name for "get fixed boi" rather than its own separate seed — and **Skyblock** (`skyblock`),
+//! which changes generation so fundamentally (denies almost all ordinary terrain generation in
+//! favour of floating sky islands) that it is closer to a different generator entirely; detected
+//! and its own flag persisted, same as every other seed here, but not attempted beyond that.
 //!
-//! **Reasoned inference, not verified against source** — because no decompiled source tree exists
-//! in this environment (see the note above) — is the *exact magic strings* [`detect`] matches
-//! against. These are taken from public, well-documented community knowledge of the seven seeds
-//! (the kind collected on the Terraria Wiki's own "World creation" article), not from re-reading
-//! `WorldGen.cs`'s own string comparison directly. The mechanism itself — trim, case-fold, exact
-//! match, no fuzzy normalisation beyond that — is standard and high confidence. The exact
-//! punctuation of a few of the seven strings (an exclamation mark, an apostrophe, whether a word
-//! like "world" is part of the trigger) is lower confidence; each string below is commented with
-//! how confident this is. If a canonical spelling here is ever found to be wrong, only this one
-//! match statement needs correcting — the detection architecture, and everything downstream of
-//! [`SecretSeed`], does not depend on getting the spelling exactly right on the first try.
+//! ## Not a single choice — "get fixed boi" is a real combination of the other seven
+//!
+//! `WorldSeedOption_Everything`'s own `Dependencies` list (Remix, Drunk, NotTheBees, NoTraps,
+//! DontStarve, Anniversary, ForTheWorthy) and its `OnEnabledStateChanged` hook (`dependency.Enabled
+//! = base.Enabled` for every one of them) are what "get fixed boi" really is: typing it does not
+//! select an eighth, independent identity — it turns on six of the other seven flags simultaneously
+//! (Skyblock is not a dependency and is unaffected), on top of its own persisted `zenithWorld` bit.
+//! An earlier version of this module modelled a single `SecretSeed` enum, one variant active at a
+//! time — a real design defect once this combination is accounted for, not just an incomplete
+//! detail: it could not represent "get fixed boi" activating `noTrapsWorldGen` too, so a
+//! `getfixedboi` world would still have generated ordinary traps. [`SecretSeeds`] below is a set of
+//! independent flags for exactly this reason.
 //!
 //! ## What actually branches on this, and what does not (yet)
 //!
-//! Building the trigger is real, valuable, honest work on its own even before every pass consumes
-//! it — the same "narrower, disclosed" shape this project's own Tier 2/3 rows already use. Only
-//! [`SecretSeed::NoTraps`] is actually wired to a behavioural difference this session
-//! (`traps::scatter` short-circuits to placing nothing — see `traps.rs`'s own doc comment, which
-//! already named `noTrapsWorldGen` as real vanilla's own gate before this module existed). The
-//! other six are detected, recorded on [`super::Built::secret_seed`] so a caller (or a test) can
-//! see which one a given seed text named, and otherwise left exactly as ordinary generation —
-//! *not* silently ignored, disclosed here and in `plan.md`'s own sizing table with why each one
-//! is out of scope this pass.
+//! Persisting which flags are active — through generation, into the `.wld` file, and out again to
+//! every connecting client's own `WorldFlag` bits — is real, valuable, honest work on its own even
+//! before every worldgen pass consumes it, the same "narrower, disclosed" shape this project's own
+//! Tier 2/3 rows already use. Only [`SecretSeeds::no_traps`] is wired to an actual *generation*
+//! difference so far (`traps::scatter` short-circuits to placing nothing). The other real, per-seed
+//! generation differences named across this project's own already-landed worldgen passes' doc
+//! comments remain out of scope — see `plan.md`'s own sizing table, now backed by real call-site
+//! counts from this pass's own source check rather than the earlier estimate's guesswork.
 
-/// Which of vanilla's seven secret seeds a typed seed string names, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretSeed {
-    /// `tenthAnniversaryWorldGen` internally (see `floating_islands.rs`'s own disclosed
-    /// `islandStyle` branch) — the 10th-anniversary celebration seed.
-    Celebrationmk10,
-    /// `drunkWorldGen`.
-    DrunkWorld,
-    /// `notTheBees` — replaces the jungle with a Hive/bee theme.
-    NotTheBees,
-    /// `remixWorldGen` — mirrors the whole world (surface and underworld swap, among other
-    /// pipeline-wide flips). The single largest of the seven; see `plan.md`'s sizing note.
-    Remix,
-    /// `noTrapsWorldGen` — the one seed this session actually wires to a real behavioural
-    /// difference. See `traps.rs`.
-    NoTraps,
-    /// `getGoodWorldGen` internally, despite the "get fixed boi" surface text — real vanilla's
-    /// own `SpawnGraveyardBiomesEverywhere` gate (`dontStarveWorldGen && drunkWorldGen &&
-    /// getGoodWorldGen`, found and disclosed in `plan.md`) only makes sense if this seed also
-    /// implies Don't Starve and Drunk World are simultaneously active — reasoned inference from
-    /// that one gate plus general knowledge that this is the "everything at once" meme seed, not
-    /// independently re-verified against source.
-    GetFixedBoi,
-    /// `dontStarveWorldGen`.
-    DontStarve,
+/// Which of vanilla's real secret-seed flags a world has active — every field independent, since
+/// "get fixed boi" sets six of them at once (see [`SecretSeeds::detect`]'s own doc comment). Field
+/// names match this project's own already-established internal names where one already existed
+/// (`get_good` for `getGoodWorld`/"For the Worthy", `everything` for `zenithWorld`/"get fixed
+/// boi"), and vanilla's own `Main`-field name otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SecretSeeds {
+    /// `drunkWorld` — no text trigger in real vanilla at all, only the exact numeric seed
+    /// `5162020`; see [`SecretSeeds::detect`].
+    pub drunk: bool,
+    /// `getGoodWorld` — real vanilla's own "For the Worthy" seed (`fortheworthy`). Previously
+    /// misattributed in this module as the internal name for "get fixed boi"; it is its own,
+    /// separate, well-known Terraria seed, and also one of "get fixed boi"'s seven dependencies.
+    pub get_good: bool,
+    /// `tenthAnniversaryWorld` — Celebrationmk10. Three triggers: the string itself, or either of
+    /// two exact numeric seeds (`5162021`, `5162011`).
+    pub tenth_anniversary: bool,
+    /// `dontStarveWorld` — four real string triggers, none of them `"don't starve"` (the earlier
+    /// guess): `constant`, `theconstant`, `eye4aneye`, `eyeforaneye`.
+    pub dont_starve: bool,
+    /// `notTheBeesWorld` — `notthebees`, no space and no exclamation mark.
+    pub not_the_bees: bool,
+    /// `remixWorld` — `dontdigup`, not `"remix"`. Mirrors the whole world (surface and underworld
+    /// swap, among other pipeline-wide flips) — the single largest of these by real call-site
+    /// count; see `plan.md`'s sizing note.
+    pub remix: bool,
+    /// `noTrapsWorld` — the one flag this project actually wires to a real generation difference.
+    /// See `traps.rs`.
+    pub no_traps: bool,
+    /// `zenithWorld` — "get fixed boi" (`getfixedboi`) itself, real vanilla's own separate
+    /// persisted bit *in addition to* the six dependency flags it also sets.
+    pub everything: bool,
+    /// `skyblockWorld` — its own real secret seed (`skyblock`), detected and persisted like every
+    /// other flag here but not attempted further: real vanilla's own generation under this flag is
+    /// close to a different generator (near-total denial of ordinary terrain in favour of floating
+    /// islands), not a set of branches inside the ordinary one.
+    pub skyblock: bool,
 }
 
-impl SecretSeed {
-    /// Case-insensitive, trimmed match against real vanilla's seven magic seed strings.
-    ///
-    /// See this module's own doc comment for which of these are hard evidence (the mechanism,
-    /// the flag names) and which are a reasoned inference from community documentation rather
-    /// than decompiled source (the exact spelling below).
-    pub fn detect(seed_text: &str) -> Option<Self> {
-        match seed_text.trim().to_lowercase().as_str() {
-            // High confidence — this one is an unambiguous, widely-repeated literal string.
-            "celebrationmk10" => Some(Self::Celebrationmk10),
-            // Moderate confidence on the space — some sources give "drunk" alone as sufficient,
-            // but "drunk world" is the form most consistently documented.
-            "drunk world" => Some(Self::DrunkWorld),
-            // Moderate confidence on the exclamation mark — the seed's own name references the
-            // "not the bees!" meme, and the mark is usually included in documented spellings.
-            "not the bees!" => Some(Self::NotTheBees),
-            // High confidence — documented consistently as the bare word.
-            "remix" => Some(Self::Remix),
-            // High confidence.
-            "no traps" => Some(Self::NoTraps),
-            // High confidence — a well-known, exact meme phrase.
-            "get fixed boi" => Some(Self::GetFixedBoi),
-            // Moderate confidence on the apostrophe (a straight ASCII `'`, not a curly one — a
-            // typed seed field cannot easily produce a curly quote anyway).
-            "don't starve" => Some(Self::DontStarve),
-            _ => None,
-        }
+impl SecretSeeds {
+    /// No secret seed active — an ordinary world. Same as [`Default::default`], named for
+    /// readability at call sites that construct one explicitly rather than deriving it.
+    pub fn none() -> Self {
+        Self::default()
     }
 
-    /// A short, stable name for logging and the startup panel — not necessarily the exact typed
-    /// string (`GetFixedBoi` displays as "get fixed boi", matching what a player actually typed,
-    /// not the internal `getGoodWorldGen` flag name).
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Celebrationmk10 => "celebrationmk10",
-            Self::DrunkWorld => "drunk world",
-            Self::NotTheBees => "not the bees!",
-            Self::Remix => "remix",
-            Self::NoTraps => "no traps",
-            Self::GetFixedBoi => "get fixed boi",
-            Self::DontStarve => "don't starve",
+    /// Whether any flag is set.
+    pub fn any(self) -> bool {
+        self.drunk
+            || self.get_good
+            || self.tenth_anniversary
+            || self.dont_starve
+            || self.not_the_bees
+            || self.remix
+            || self.no_traps
+            || self.everything
+            || self.skyblock
+    }
+
+    /// Case-insensitive, trimmed match against real vanilla's own magic strings and the two
+    /// numeric-only triggers, read directly from every `WorldSeedOption_*.cs`'s own
+    /// `SpecialSeedNames`/`SpecialSeedValues` arrays.
+    ///
+    /// "get fixed boi" (`getfixedboi`) is the one case that sets more than its own flag: real
+    /// vanilla's `WorldSeedOption_Everything.OnEnabledStateChanged` turns on all seven of its own
+    /// `Dependencies` (Remix, Drunk, NotTheBees, NoTraps, DontStarve, Anniversary, ForTheWorthy) —
+    /// Skyblock is not among them and stays off. A world generated from the literal number
+    /// `5162020` gets only [`SecretSeeds::drunk`]; typing `"getfixedboi"` gets `drunk` too, but as
+    /// one of six dependency flags cascading from `everything`, not from the number.
+    pub fn detect(seed_text: &str) -> Self {
+        let trimmed = seed_text.trim();
+        let lower = trimmed.to_lowercase();
+        let numeric = trimmed.parse::<i64>().ok();
+
+        let mut flags = Self::none();
+        flags.tenth_anniversary =
+            lower == "celebrationmk10" || matches!(numeric, Some(5_162_021 | 5_162_011));
+        flags.drunk = numeric == Some(5_162_020);
+        flags.not_the_bees = lower == "notthebees";
+        flags.remix = lower == "dontdigup";
+        flags.no_traps = lower == "notraps";
+        flags.get_good = lower == "fortheworthy";
+        flags.dont_starve = matches!(
+            lower.as_str(),
+            "constant" | "theconstant" | "eye4aneye" | "eyeforaneye"
+        );
+        flags.skyblock = lower == "skyblock";
+
+        if lower == "getfixedboi" {
+            flags.everything = true;
+            flags.remix = true;
+            flags.drunk = true;
+            flags.not_the_bees = true;
+            flags.no_traps = true;
+            flags.dont_starve = true;
+            flags.tenth_anniversary = true;
+            flags.get_good = true;
         }
+        flags
+    }
+
+    /// Every active flag's own display name, for logging and the startup panel — real vanilla's
+    /// own seed name where the seed has one commonly-known name, the internal flag name otherwise.
+    /// Empty for an ordinary world.
+    pub fn active_names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.everything {
+            names.push("get fixed boi");
+        }
+        if self.remix {
+            names.push("remix");
+        }
+        if self.drunk {
+            names.push("drunk world");
+        }
+        if self.not_the_bees {
+            names.push("not the bees");
+        }
+        if self.no_traps {
+            names.push("no traps");
+        }
+        if self.dont_starve {
+            names.push("don't starve");
+        }
+        if self.tenth_anniversary {
+            names.push("celebrationmk10");
+        }
+        if self.get_good {
+            names.push("for the worthy");
+        }
+        if self.skyblock {
+            names.push("skyblock");
+        }
+        names
     }
 }
 
@@ -157,40 +223,99 @@ pub fn numeric_seed(seed_text: &str) -> u64 {
 mod tests {
     use super::*;
 
+    type FlagCheck = fn(SecretSeeds) -> bool;
+
     #[test]
-    fn all_seven_magic_strings_are_detected() {
-        let expect = [
-            ("celebrationmk10", SecretSeed::Celebrationmk10),
-            ("drunk world", SecretSeed::DrunkWorld),
-            ("not the bees!", SecretSeed::NotTheBees),
-            ("remix", SecretSeed::Remix),
-            ("no traps", SecretSeed::NoTraps),
-            ("get fixed boi", SecretSeed::GetFixedBoi),
-            ("don't starve", SecretSeed::DontStarve),
+    fn every_real_magic_string_sets_exactly_its_own_flag() {
+        let cases: &[(&str, FlagCheck)] = &[
+            ("celebrationmk10", |f| f.tenth_anniversary),
+            ("notthebees", |f| f.not_the_bees),
+            ("dontdigup", |f| f.remix),
+            ("notraps", |f| f.no_traps),
+            ("fortheworthy", |f| f.get_good),
+            ("constant", |f| f.dont_starve),
+            ("theconstant", |f| f.dont_starve),
+            ("eye4aneye", |f| f.dont_starve),
+            ("eyeforaneye", |f| f.dont_starve),
+            ("skyblock", |f| f.skyblock),
         ];
-        for (text, want) in expect {
+        for (text, own_flag) in cases {
+            let flags = SecretSeeds::detect(text);
+            assert!(own_flag(flags), "{text:?} should set its own flag");
             assert_eq!(
-                SecretSeed::detect(text),
-                Some(want),
-                "{text:?} should match"
+                flags.active_names().len(),
+                1,
+                "{text:?} should set exactly one flag, got {flags:?}"
             );
         }
     }
 
     #[test]
-    fn detection_is_case_insensitive_and_trims_whitespace() {
-        assert_eq!(
-            SecretSeed::detect("  GET FIXED BOI  "),
-            Some(SecretSeed::GetFixedBoi)
+    fn the_old_guessed_strings_no_longer_match_anything() {
+        // Every one of these was this module's own previous (wrong) guess for a real magic
+        // string. None of them are real vanilla triggers, and none should match now.
+        for text in [
+            "drunk world",
+            "not the bees!",
+            "remix",
+            "no traps",
+            "get fixed boi",
+            "don't starve",
+        ] {
+            assert!(
+                !SecretSeeds::detect(text).any(),
+                "{text:?} was a wrong guess and must not match"
+            );
+        }
+    }
+
+    #[test]
+    fn drunk_world_has_no_text_trigger_only_a_number() {
+        assert!(!SecretSeeds::detect("drunk").any());
+        assert!(!SecretSeeds::detect("drunk world").any());
+    }
+
+    #[test]
+    fn the_two_numeric_only_triggers_work() {
+        assert!(SecretSeeds::detect("5162020").drunk);
+        assert!(SecretSeeds::detect("5162021").tenth_anniversary);
+        assert!(SecretSeeds::detect("5162011").tenth_anniversary);
+        // Neighbouring numbers must not match.
+        assert!(!SecretSeeds::detect("5162019").any());
+        assert!(!SecretSeeds::detect("5162022").any());
+    }
+
+    #[test]
+    fn get_fixed_boi_turns_on_six_dependencies_and_itself_but_not_skyblock() {
+        let flags = SecretSeeds::detect("getfixedboi");
+        assert!(flags.everything);
+        assert!(flags.remix);
+        assert!(flags.drunk);
+        assert!(flags.not_the_bees);
+        assert!(flags.no_traps);
+        assert!(flags.dont_starve);
+        assert!(flags.tenth_anniversary);
+        assert!(flags.get_good);
+        assert!(
+            !flags.skyblock,
+            "Skyblock is not one of Everything's own Dependencies"
         );
-        assert_eq!(SecretSeed::detect("No Traps"), Some(SecretSeed::NoTraps));
-        assert_eq!(SecretSeed::detect("ReMiX"), Some(SecretSeed::Remix));
+    }
+
+    #[test]
+    fn detection_is_case_insensitive_and_trims_whitespace() {
+        assert!(SecretSeeds::detect("  GETFIXEDBOI  ").everything);
+        assert!(SecretSeeds::detect("NoTraps").no_traps);
+        assert!(SecretSeeds::detect("DontDigUp").remix);
     }
 
     #[test]
     fn ordinary_seeds_do_not_match() {
-        for text in ["", "12345", "my world", "traps", "boi", "get fixed"] {
-            assert_eq!(SecretSeed::detect(text), None, "{text:?} should not match");
+        for text in ["", "12345", "my world", "traps", "boi", "fixed"] {
+            assert!(
+                !SecretSeeds::detect(text).any(),
+                "{text:?} should not match anything"
+            );
         }
     }
 
@@ -203,9 +328,9 @@ mod tests {
 
     #[test]
     fn word_seeds_hash_deterministically_and_differ() {
-        let a = numeric_seed("get fixed boi");
-        let b = numeric_seed("get fixed boi");
-        let c = numeric_seed("remix");
+        let a = numeric_seed("getfixedboi");
+        let b = numeric_seed("getfixedboi");
+        let c = numeric_seed("dontdigup");
         assert_eq!(a, b, "the same text must hash to the same seed twice");
         assert_ne!(
             a, c,

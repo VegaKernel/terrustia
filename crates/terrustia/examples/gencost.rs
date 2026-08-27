@@ -267,7 +267,7 @@ fn main() {
 
     timed!(
         "traps::scatter",
-        traps::scatter(&mut world, &plan, &mut forest_rng, None)
+        traps::scatter(&mut world, &plan, &mut forest_rng, Default::default())
     );
 
     timed!(

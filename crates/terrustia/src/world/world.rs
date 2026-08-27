@@ -6,6 +6,7 @@ use terrustia_proto::{
 
 use super::objects::{Chest, MAX_CHESTS, MAX_SIGNS, PreservedWorld, Sign};
 use super::progress::Progress;
+use super::worldgen::secret_seed::SecretSeeds;
 
 /// Ticks of daylight, then of night, matching the vanilla clock.
 pub const DAY_LENGTH: i32 = 54_000;
@@ -144,6 +145,15 @@ pub struct World {
     /// Kept because it is the other half of the parity oracle: a reference world names both the
     /// seed it was built from and the state of the generator after every pass.
     pub seed_text: String,
+    /// Which of vanilla's real secret-seed flags this world has active, if any.
+    ///
+    /// Real vanilla persists these as their own bytes in the `.wld` header (`WorldFile.cs`'s own
+    /// `SaveWorldFlags`/`LoadWorldFlags`) rather than re-deriving them from `seed_text` on every
+    /// load — load-bearing for the two numeric-only triggers (Drunk World, one of Celebrationmk10's
+    /// two alternates), which have no literal string to re-derive from, and in general because the
+    /// flags a world was *actually generated with* are the ground truth, not whatever a fresh
+    /// re-match against `seed_text` would produce. See `worldgen::secret_seed`'s own module doc.
+    pub secret_seeds: SecretSeeds,
     pub moon_type: u8,
     pub tree_x: [i32; 3],
     pub tree_style: [u8; 4],
@@ -258,6 +268,7 @@ impl World {
             game_mode: 0,
             world_gen_version: 0,
             seed_text: String::new(),
+            secret_seeds: SecretSeeds::none(),
             moon_type: 0,
             // Anchor the parallax layers past the right edge so no tree or cave background is
             // drawn over the playfield.
@@ -727,6 +738,18 @@ impl World {
             (F::CombatBookUsed, p.combat_book),
             (F::CombatBookTwoUsed, p.combat_book_two),
             (F::Sandstorm, self.sandstorm),
+            // Every real secret-seed flag with its own client-visible `WorldFlag` bit (this
+            // project's own model has no bit for `NoTraps`/`Skyblock` — neither has a client-side
+            // rendering difference in real vanilla, only a generation-time one). Real vanilla
+            // clients already know how to render each of these on their own once told; nothing
+            // else in this server needs to change for a connecting client to get a special seed's
+            // own atmosphere (darkness, colour grading, sprite variants) for free.
+            (F::DrunkWorld, self.secret_seeds.drunk),
+            (F::GetGoodWorld, self.secret_seeds.get_good),
+            (F::TenthAnniversary, self.secret_seeds.tenth_anniversary),
+            (F::DontStarve, self.secret_seeds.dont_starve),
+            (F::NotTheBees, self.secret_seeds.not_the_bees),
+            (F::RemixWorld, self.secret_seeds.remix),
         ] {
             flags.set_flag(flag, on);
         }
@@ -850,6 +873,7 @@ mod persistence {
             game_mode,
             world_gen_version,
             seed_text,
+            secret_seeds,
             moon_type,
             tree_x,
             tree_style,
@@ -918,6 +942,7 @@ mod persistence {
             ("game_mode", Fate::Derived, game_mode),
             ("world_gen_version", Fate::Derived, world_gen_version),
             ("seed_text", Fate::Derived, seed_text),
+            ("secret_seeds", Fate::Derived, secret_seeds),
             ("moon_type", Fate::Derived, moon_type),
             ("tree_x", Fate::Derived, tree_x),
             ("tree_style", Fate::Derived, tree_style),
@@ -1104,6 +1129,50 @@ mod tests {
         assert_eq!(data.max_tiles_y, 1200);
         assert_eq!(data.world_name, "Terrustia");
         assert_eq!(data.flags.0[1] & 0x20, 0x20, "crimson flag");
+    }
+
+    /// Every secret-seed flag with a real client-visible `WorldFlag` bit reaches a connecting
+    /// client's own packet 7 — a generated (or loaded) special-seed world used to send an
+    /// ordinary-looking flag block regardless of `World::secret_seeds`, since nothing read the
+    /// field at all. `NoTraps`/`Everything`("get fixed boi")/`Skyblock` are deliberately not
+    /// checked here: they have no `WorldFlag` variant in this project's own packet model yet
+    /// (extending it would grow the flag block's own byte count, a larger, separate change) — see
+    /// `plan.md`'s own note on this fix for the disclosed reason.
+    #[test]
+    fn world_data_carries_every_client_visible_secret_seed_flag() {
+        use crate::world::worldgen::secret_seed::SecretSeeds;
+        let mut w = World::empty(400, 300, "t");
+        w.secret_seeds = SecretSeeds {
+            drunk: true,
+            get_good: true,
+            tenth_anniversary: true,
+            dont_starve: true,
+            not_the_bees: true,
+            remix: true,
+            ..SecretSeeds::none()
+        };
+        let data = w.world_data();
+        assert_eq!(data.flags.0[6] & 0x10, 0x10, "drunk world flag");
+        assert_eq!(
+            data.flags.0[6] & 0x80,
+            0x80,
+            "for the worthy (get_good) flag"
+        );
+        assert_eq!(data.flags.0[7] & 0x01, 0x01, "celebrationmk10 flag");
+        assert_eq!(data.flags.0[7] & 0x02, 0x02, "don't starve flag");
+        assert_eq!(data.flags.0[7] & 0x08, 0x08, "not the bees flag");
+        assert_eq!(data.flags.0[7] & 0x10, 0x10, "remix flag");
+    }
+
+    /// The converse: an ordinary world (no secret seed) must not spuriously set any of these six
+    /// bits — a wrong `position()` entry could set the right bit but in a byte shared with an
+    /// unrelated flag, which only a check against a real "nothing active" baseline would catch.
+    #[test]
+    fn an_ordinary_world_sets_none_of_the_secret_seed_flags() {
+        let w = World::empty(400, 300, "t");
+        let data = w.world_data();
+        assert_eq!(data.flags.0[6] & 0b1001_0000, 0, "byte 6 secret-seed bits");
+        assert_eq!(data.flags.0[7] & 0b0001_1011, 0, "byte 7 secret-seed bits");
     }
 }
 

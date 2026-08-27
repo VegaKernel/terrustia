@@ -157,16 +157,16 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let started = Instant::now();
     let loaded_from = config.world_file.clone();
-    // A loaded existing world has no `Built` to read a detected secret seed off — nothing here
-    // re-derives one from an existing `.wld`'s own header. Disclosed rather than guessed at: see
-    // `worldgen::secret_seed`'s own module doc for why persisting which secret seed (if any) made
-    // a saved world is out of scope this session.
-    let (world, secret_seed) = match &config.world_file {
-        Some(path) => (wld::load(path)?, None),
+    // `World::secret_seeds` is read straight off the world either way now — a loaded world's own
+    // real flag bytes (`wld.rs`'s own read path), or freshly detected here for a generated one —
+    // rather than threaded through as a separate `Built`-only value that a loaded world could
+    // never have. See `worldgen::secret_seed`'s own module doc for the real persistence mechanism.
+    let world = match &config.world_file {
+        Some(path) => wld::load(path)?,
         None => {
-            let (world, built) = match &args.seed {
+            let (world, _built) = match &args.seed {
                 // The one real entry point that actually reaches
-                // `worldgen::secret_seed::SecretSeed::detect` — every other caller of
+                // `worldgen::secret_seed::SecretSeeds::detect` — every other caller of
                 // `worldgen::build`/`generate` across this workspace never has real seed text to
                 // give it and is left alone.
                 Some(seed_text) => worldgen::build_from_text(
@@ -182,7 +182,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
                     config.seed,
                 ),
             };
-            (world, built.secret_seed)
+            world
         }
     };
     let mut world_rows = vec![
@@ -201,10 +201,11 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         ("chests", world.chests.len().to_string()),
         ("loaded in", format!("{} ms", started.elapsed().as_millis())),
     ];
-    // Only shown when one was actually detected — a plain numeric seed, or a loaded world, gets
-    // no row at all rather than a "none" filler on the common case.
-    if let Some(secret) = secret_seed {
-        world_rows.push(("secret seed", secret.display_name().to_string()));
+    // Only shown when one was actually detected — an ordinary world (numeric seed or otherwise)
+    // gets no row at all rather than a "none" filler on the common case.
+    if world.secret_seeds.any() {
+        let names = world.secret_seeds.active_names().join(", ");
+        world_rows.push(("secret seed", names));
     }
 
     // Bind before starting the game task so a port clash fails fast.
@@ -536,9 +537,9 @@ async fn stop_signal() -> &'static str {
 struct Args {
     config: PathBuf,
     listen: Option<std::net::SocketAddr>,
-    /// The raw text typed after `--seed` — a plain number, or one of vanilla's seven secret-seed
-    /// magic strings, or any other text. Kept as text (not pre-parsed to a number) because a
-    /// magic string has to reach `worldgen::secret_seed::SecretSeed::detect` unmodified; see
+    /// The raw text typed after `--seed` — a plain number, or one of vanilla's real secret-seed
+    /// magic strings/numbers, or any other text. Kept as text (not pre-parsed to a number) because
+    /// a magic string has to reach `worldgen::secret_seed::SecretSeeds::detect` unmodified; see
     /// `main`'s own use of it via `worldgen::generate_from_text`.
     seed: Option<String>,
     world: Option<PathBuf>,

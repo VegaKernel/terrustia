@@ -41,7 +41,7 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::{Tile, tile::TileFlags, tile_solid};
 
 use super::layout::Layout;
-use super::secret_seed::SecretSeed;
+use super::secret_seed::SecretSeeds;
 use super::tiles::walls;
 use crate::world::World;
 
@@ -875,19 +875,22 @@ impl TrapScatterResult {
 /// `secret`: the one flag this module's own doc comment already named as real vanilla's own gate
 /// on almost this entire pass — `noTrapsWorldGen`. This is the one secret seed this session
 /// actually wires to a behavioural difference (see `secret_seed.rs`'s own module doc for why the
-/// other six are detected but not yet consumed here): `SecretSeed::NoTraps` short-circuits the
+/// other flags are detected but not yet consumed here): `SecretSeeds::no_traps` short-circuits the
 /// whole pass to placing nothing, rather than gating each of the four trap kinds and the sand trap
 /// loop separately — real vanilla's own name for this seed ("No Traps World") is the same
 /// all-or-nothing claim, and every other flag this pass's own module doc lists alongside
-/// `noTrapsWorldGen` stays unmodelled, same as before this parameter existed.
+/// `noTrapsWorldGen` stays unmodelled, same as before this parameter existed. `no_traps` is also
+/// set when "get fixed boi" is active (one of its own seven real dependency flags), so this now
+/// correctly clears traps for that seed too, which the old single-variant `SecretSeed` enum could
+/// not represent.
 pub fn scatter(
     world: &mut World,
     layout: &Layout,
     rng: &mut SmallRng,
-    secret: Option<SecretSeed>,
+    secret: SecretSeeds,
 ) -> TrapScatterResult {
     let mut result = TrapScatterResult::default();
-    if secret == Some(SecretSeed::NoTraps) {
+    if secret.no_traps {
         return result;
     }
     // The search bands below are `200..width-200`, `surface..height-210`, and — tighter than
@@ -1135,7 +1138,7 @@ mod tests {
         let mut world = corridor();
         let layout = layout(&world);
         let mut rng = SmallRng::seed_from_u64(7);
-        let result = scatter(&mut world, &layout, &mut rng, None);
+        let result = scatter(&mut world, &layout, &mut rng, SecretSeeds::none());
         assert!(
             result.total() > 0,
             "a 200-wide corridor should get at least one trap"
@@ -1155,7 +1158,7 @@ mod tests {
         let mut world = World::empty(500, 230, "traps");
         let layout = layout(&world);
         let mut rng = SmallRng::seed_from_u64(7);
-        let result = scatter(&mut world, &layout, &mut rng, None);
+        let result = scatter(&mut world, &layout, &mut rng, SecretSeeds::none());
         assert_eq!(
             result.total(),
             0,
@@ -1164,15 +1167,23 @@ mod tests {
     }
 
     /// The "No Traps World" secret seed: the same corridor that always gets at least one trap on
-    /// an ordinary seed gets none at all once `SecretSeed::NoTraps` is threaded through — the one
-    /// real behavioural difference this session actually wires (see `secret_seed.rs`'s own module
-    /// doc for why the other six secret seeds are detected but left as ordinary generation).
+    /// an ordinary seed gets none at all once `SecretSeeds::no_traps` is set — the one real
+    /// behavioural difference this session actually wires (see `secret_seed.rs`'s own module doc
+    /// for why the other flags are detected but left as ordinary generation).
     #[test]
     fn no_traps_world_places_nothing() {
         let mut world = corridor();
         let layout = layout(&world);
         let mut rng = SmallRng::seed_from_u64(7);
-        let result = scatter(&mut world, &layout, &mut rng, Some(SecretSeed::NoTraps));
+        let result = scatter(
+            &mut world,
+            &layout,
+            &mut rng,
+            SecretSeeds {
+                no_traps: true,
+                ..SecretSeeds::none()
+            },
+        );
         assert_eq!(
             result,
             TrapScatterResult::default(),

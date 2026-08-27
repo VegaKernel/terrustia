@@ -521,11 +521,21 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
         .i32(world.height())
         .i32(world.width());
 
-    // The nine special world seeds, none of which a generated world has, then the skyblock flag.
+    // The nine special world seed flags, in real vanilla's own `SaveWorldFlags` order — see
+    // `wld.rs`'s own read path (`LoadWorldFlags`) for the matching gates on the load side; a fresh
+    // world writes unconditionally at `SAVE_VERSION`, same as real vanilla always writes all nine
+    // at whatever version it currently is.
+    let s = world.secret_seeds;
     w.i32(i32::from(world.game_mode));
-    for _ in 0..9 {
-        w.bool(false);
-    }
+    w.bool(s.drunk)
+        .bool(s.get_good)
+        .bool(s.tenth_anniversary)
+        .bool(s.dont_starve)
+        .bool(s.not_the_bees)
+        .bool(s.remix)
+        .bool(s.no_traps)
+        .bool(s.everything)
+        .bool(s.skyblock);
     // Created and last played, which the game stores as .NET tick counts. Zero is a valid one.
     w.i64(0).i64(0);
 

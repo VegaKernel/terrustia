@@ -15,6 +15,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use super::progress::Progress;
+use super::worldgen::secret_seed::SecretSeeds;
 use super::{
     World,
     objects::{Chest, PreservedWorld, Sign},
@@ -731,12 +732,43 @@ fn read_world_header(
         return Err(WldError::BadDimensions { width, height });
     }
 
-    // World flags, each gated on the version that introduced it.
+    // World flags, each gated on the version that introduced it — real vanilla's own
+    // `WorldFile.LoadWorldFlags`, transcribed field for field (same order, same gates). Real
+    // vanilla falls back to `zenithWorld = remixWorld && drunkWorld` for the one gap between
+    // `noTrapsWorld` (266) and its own `zenithWorld` field (267); this project's own `SAVE_VERSION`
+    // (325) is well past every one of these gates, so that fallback only matters for a save this
+    // old, kept anyway since a genuinely old real vanilla file is exactly what the preserved-header
+    // path exists to round-trip correctly.
     let game_mode = num(r.i32(), r)?;
-    for gate in [222, 227, 238, 239, 241, 249, 266, 267, 302] {
-        if version >= gate {
-            num(r.bool(), r)?;
-        }
+    let mut secret_seeds = SecretSeeds::none();
+    if version >= 222 {
+        secret_seeds.drunk = num(r.bool(), r)?;
+    }
+    if version >= 227 {
+        secret_seeds.get_good = num(r.bool(), r)?;
+    }
+    if version >= 238 {
+        secret_seeds.tenth_anniversary = num(r.bool(), r)?;
+    }
+    if version >= 239 {
+        secret_seeds.dont_starve = num(r.bool(), r)?;
+    }
+    if version >= 241 {
+        secret_seeds.not_the_bees = num(r.bool(), r)?;
+    }
+    if version >= 249 {
+        secret_seeds.remix = num(r.bool(), r)?;
+    }
+    if version >= 266 {
+        secret_seeds.no_traps = num(r.bool(), r)?;
+    }
+    if version >= 267 {
+        secret_seeds.everything = num(r.bool(), r)?;
+    } else {
+        secret_seeds.everything = secret_seeds.remix && secret_seeds.drunk;
+    }
+    if version >= 302 {
+        secret_seeds.skyblock = num(r.bool(), r)?;
     }
     num(r.i64(), r)?; // creation time
     if version >= 284 {
@@ -903,6 +935,7 @@ fn read_world_header(
     world.tree_tops = scenery.tree_tops;
     world.num_clouds = scenery.num_clouds;
     world.game_mode = game_mode.clamp(0, 3) as u8;
+    world.secret_seeds = secret_seeds;
     world.spawn_x = spawn_x.clamp(0, width - 1) as i16;
     world.spawn_y = spawn_y.clamp(0, height - 1) as i16;
     world.surface = (surface as i32).clamp(0, height - 1) as i16;

@@ -76,7 +76,7 @@ pub use passes::compare_against;
 
 use layout::{Evil, Layout};
 use rand::UnifiedRandom;
-use secret_seed::SecretSeed;
+use secret_seed::SecretSeeds;
 use tiles::{COPPER, GOLD, IRON, SILVER};
 
 use super::World;
@@ -221,13 +221,13 @@ pub struct Built {
     /// Tiles changed by `FinalCleanup` (the five fixups kept — see `tile_cleanup.rs`'s own module
     /// doc).
     pub final_cleanup: usize,
-    /// Which of vanilla's seven secret seeds the seed text named, if any — `None` for both an
-    /// ordinary numeric seed and a text seed that matched none of the seven. Only set by
+    /// Which of vanilla's real secret-seed flags the seed text named, if any — every flag `false`
+    /// for both an ordinary numeric seed and a text seed that matched nothing. Only set by
     /// [`build_from_text`]/[`generate_from_text`] and [`build_with_secret_seed`]; [`build`] and
-    /// [`generate`] always leave this `None`, the same as an ordinary vanilla numeric seed would.
-    /// See [`secret_seed`]'s own module doc for the real activation mechanism and exactly which of
-    /// the seven this actually changes generation for.
-    pub secret_seed: Option<SecretSeed>,
+    /// [`generate`] always leave this at [`SecretSeeds::none`], the same as an ordinary vanilla
+    /// numeric seed would. See [`secret_seed`]'s own module doc for the real activation mechanism
+    /// and exactly which of these actually change generation.
+    pub secret_seeds: SecretSeeds,
 }
 
 /// Generate a world of the given size.
@@ -244,14 +244,14 @@ pub fn generate(width: i32, height: i32, name: impl Into<String>, seed: u64) -> 
 /// growing a new required parameter for a feature only one of them (`main.rs`) can ever supply
 /// real text for.
 pub fn build(width: i32, height: i32, name: impl Into<String>, seed: u64) -> (World, Built) {
-    build_with_secret_seed(width, height, name, seed, None)
+    build_with_secret_seed(width, height, name, seed, SecretSeeds::none())
 }
 
 /// Generate a world from the exact text typed into a seed field, the way a real player (or a
 /// dedicated server's own `--seed` flag) would — a plain number reproduces that numeric seed,
 /// free text is hashed into one instead, and either way the text itself is checked against
-/// vanilla's seven real secret-seed magic strings. See [`secret_seed`]'s own module doc for the
-/// real mechanism and which parts of it are hard evidence vs. reasoned inference.
+/// vanilla's real secret-seed magic strings (and, for two of them, specific numbers). See
+/// [`secret_seed`]'s own module doc for the real mechanism, now checked directly against source.
 ///
 /// Unlike [`generate`], the generated [`World::seed_text`] is the trimmed *original text*, not
 /// the derived number — matching what real vanilla's own world-creation UI shows back afterward
@@ -273,7 +273,7 @@ pub fn build_from_text(
     name: impl Into<String>,
     seed_text: &str,
 ) -> (World, Built) {
-    let secret = SecretSeed::detect(seed_text);
+    let secret = SecretSeeds::detect(seed_text);
     let seed = secret_seed::numeric_seed(seed_text);
     let (mut world, built) = build_with_secret_seed(width, height, name, seed, secret);
     // Overwrite the numeric-seed text `build_with_secret_seed` already recorded below with the
@@ -288,17 +288,18 @@ pub fn build_from_text(
 /// The real integration point every other function on this page delegates to — split out so
 /// [`build`] (~40 existing callers across this workspace, none of which have real seed text to
 /// give it) can keep its exact original signature while [`build_from_text`] (the one real caller
-/// that does) gets a genuine hook to thread a detected [`SecretSeed`] through to whichever passes
+/// that does) gets a genuine hook to thread detected [`SecretSeeds`] through to whichever passes
 /// need to branch on it. See [`secret_seed`]'s own module doc for exactly which passes that is —
-/// currently only [`traps::scatter`], for [`SecretSeed::NoTraps`].
+/// currently only [`traps::scatter`], for [`SecretSeeds::no_traps`].
 pub fn build_with_secret_seed(
     width: i32,
     height: i32,
     name: impl Into<String>,
     seed: u64,
-    secret: Option<SecretSeed>,
+    secret: SecretSeeds,
 ) -> (World, Built) {
     let mut world = World::empty(width, height, name);
+    world.secret_seeds = secret;
     // The same generator the parity work uses, so a seed means the same thing in both.
     let mut rand = UnifiedRandom::new(seed as i32);
 
@@ -627,7 +628,7 @@ pub fn build_with_secret_seed(
         tile_cleanup: tile_cleanup_changed,
         broken_trap_cleanup,
         final_cleanup,
-        secret_seed: secret,
+        secret_seeds: secret,
     };
     (world, built)
 }
@@ -678,7 +679,7 @@ mod tests {
     #[test]
     fn build_never_sets_a_secret_seed() {
         let (_world, built) = small();
-        assert_eq!(built.secret_seed, None);
+        assert!(!built.secret_seeds.any());
     }
 
     /// `build_from_text` with an ordinary numeric string is identical to `build` with that same
@@ -687,8 +688,8 @@ mod tests {
     fn a_numeric_text_seed_matches_the_equivalent_numeric_seed() {
         let (from_number, built_number) = build(1600, 700, "numeric", 1234);
         let (from_text, built_text) = build_from_text(1600, 700, "numeric", "1234");
-        assert_eq!(built_number.secret_seed, None);
-        assert_eq!(built_text.secret_seed, None);
+        assert!(!built_number.secret_seeds.any());
+        assert!(!built_text.secret_seeds.any());
         let differing = (0..from_number.width())
             .step_by(7)
             .flat_map(|x| (0..from_number.height()).step_by(7).map(move |y| (x, y)))
@@ -701,12 +702,24 @@ mod tests {
     }
 
     /// `build_from_text` records the real typed text on `World::seed_text`, not the derived
-    /// number — what a player who typed "get fixed boi" should see reflected back.
+    /// number — what a player who typed "getfixedboi" should see reflected back.
     #[test]
     fn build_from_text_keeps_the_real_typed_text() {
-        let (world, built) = build_from_text(1600, 700, "text", "  get fixed boi  ");
-        assert_eq!(world.seed_text, "get fixed boi");
-        assert_eq!(built.secret_seed, Some(SecretSeed::GetFixedBoi));
+        let (world, built) = build_from_text(1600, 700, "text", "  getfixedboi  ");
+        assert_eq!(world.seed_text, "getfixedboi");
+        assert!(built.secret_seeds.everything);
+        assert!(built.secret_seeds.remix);
+        assert!(built.secret_seeds.no_traps);
+    }
+
+    /// `World::secret_seeds` — not just `Built`'s own copy — carries the detected flags too, since
+    /// that is what a save/load round trip and `world_data()`'s own `WorldFlag` bits both read from
+    /// (see `wld.rs`/`wld_save.rs`/`server.rs`'s own tests for those).
+    #[test]
+    fn world_itself_carries_the_detected_secret_seeds_not_just_built() {
+        let (world, built) = build_from_text(1600, 700, "text", "notthebees");
+        assert_eq!(world.secret_seeds, built.secret_seeds);
+        assert!(world.secret_seeds.not_the_bees);
     }
 
     /// The one secret seed this session actually wires to a behavioural difference: "No Traps
@@ -727,8 +740,8 @@ mod tests {
             "the control seed should place at least one trap of some kind"
         );
 
-        let (world, built) = build_from_text(SMALL_WIDTH, SMALL_HEIGHT, "no traps", "no traps");
-        assert_eq!(built.secret_seed, Some(SecretSeed::NoTraps));
+        let (world, built) = build_from_text(SMALL_WIDTH, SMALL_HEIGHT, "no traps", "notraps");
+        assert!(built.secret_seeds.no_traps);
         assert_eq!(built.dart_traps, 0);
         assert_eq!(built.mines, 0);
         assert_eq!(built.geysers, 0);
@@ -748,25 +761,42 @@ mod tests {
         );
     }
 
-    /// Every one of the seven detected secret seeds still generates a real, playable world —
-    /// proof that threading `Option<SecretSeed>` through `build_with_secret_seed` doesn't panic
-    /// or corrupt anything for the six this session leaves as ordinary generation, even though
-    /// nothing downstream branches on them yet. See `secret_seed.rs`'s own module doc for exactly
-    /// which one (`NoTraps`) is the exception.
+    /// "get fixed boi" cascades `no_traps` true too (one of its own seven real dependency flags),
+    /// so it must place zero traps the same as typing "notraps" directly — the exact behavioural
+    /// difference the old single-variant `SecretSeed` enum could not represent (see
+    /// `secret_seed.rs`'s own module doc).
+    #[test]
+    fn get_fixed_boi_also_places_zero_traps() {
+        let (_world, built) =
+            build_from_text(SMALL_WIDTH, SMALL_HEIGHT, "get fixed boi", "getfixedboi");
+        assert_eq!(
+            built.dart_traps + built.mines + built.geysers + built.boulder_traps + built.sand_traps,
+            0,
+            "getfixedboi's own no_traps dependency should have cleared traps too"
+        );
+    }
+
+    /// Every real secret seed still generates a real, playable world — proof that threading
+    /// `SecretSeeds` through `build_with_secret_seed` doesn't panic or corrupt anything for the
+    /// flags this session leaves as ordinary generation, even though nothing downstream branches
+    /// on them yet. See `secret_seed.rs`'s own module doc for exactly which one (`no_traps`) is
+    /// the exception.
     #[test]
     fn every_secret_seed_still_generates_a_playable_world() {
         for text in [
             "celebrationmk10",
-            "drunk world",
-            "not the bees!",
-            "remix",
-            "no traps",
-            "get fixed boi",
-            "don't starve",
+            "5162020", // Drunk World's only real trigger
+            "notthebees",
+            "dontdigup", // Remix
+            "notraps",
+            "getfixedboi",
+            "constant", // Don't Starve
+            "fortheworthy",
+            "skyblock",
         ] {
             let (world, built) = build_from_text(1600, 700, "secret", text);
             assert!(
-                built.secret_seed.is_some(),
+                built.secret_seeds.any(),
                 "{text:?} should have been detected as a secret seed"
             );
             assert!(built.chests > 0, "{text:?}: no chests");
@@ -778,11 +808,12 @@ mod tests {
         }
     }
 
-    /// A seed string that matches none of the seven is just an ordinary (hashed) text seed.
+    /// A seed string that matches none of the real magic strings/numbers is just an ordinary
+    /// (hashed) text seed.
     #[test]
     fn an_unrecognised_text_seed_is_ordinary_generation() {
         let (_world, built) = build_from_text(1600, 700, "ordinary text", "my cool world");
-        assert_eq!(built.secret_seed, None);
+        assert!(!built.secret_seeds.any());
     }
 
     /// Real Tier 3 counts on real generated worlds — not asserted, just printed, matching
@@ -1036,6 +1067,7 @@ mod tests {
             game_mode,
             world_gen_version,
             seed_text,
+            secret_seeds,
             moon_type,
             tree_x,
             tree_style,
@@ -1054,6 +1086,40 @@ mod tests {
             "{width}x{height}: {} header field(s) changed across a save:\n  {}",
             wrong.len(),
             wrong.join("\n  "),
+        );
+    }
+
+    /// A generated secret-seed world's own active flags survive a real save and reload — the gap
+    /// this project's own generated-world header writer used to have on purpose (`wld_save.rs`'s
+    /// old comment: "the nine special world seeds, none of which a generated world has"), now that
+    /// a generated world genuinely can have some. Uses "getfixedboi" specifically because it
+    /// exercises the most flags at once (seven of nine), the case most likely to catch a
+    /// transposed bit or a dropped flag in either the write or the read side.
+    #[test]
+    fn a_generated_secret_seed_worlds_flags_survive_a_save() {
+        use crate::world::{wld, wld_save};
+        let (world, built) = build_from_text(1600, 700, "secret roundtrip", "getfixedboi");
+        assert!(built.secret_seeds.any(), "getfixedboi should have matched");
+
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+
+        assert_eq!(
+            back.secret_seeds, world.secret_seeds,
+            "the secret-seed flags did not survive a save and reload"
+        );
+
+        // A second round through the *preserved*-header path (`back.preserved` is now `Some`,
+        // since it was just loaded from a file) — the mutable-fields-patch path a real server
+        // actually uses on every later autosave, not the fresh-header path this test's first
+        // round exercised. The flag bytes are not among the offsets that path patches, so this
+        // should carry through untouched, but "should" is exactly what a save/load round trip
+        // is for checking.
+        let bytes_again = wld_save::serialize(&back).expect("the preserved path should save");
+        let back_again = wld::parse(&bytes_again).expect("it should load a second time");
+        assert_eq!(
+            back_again.secret_seeds, world.secret_seeds,
+            "the secret-seed flags did not survive a second, preserved-header save"
         );
     }
 
