@@ -81,13 +81,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Nothing in the dependency graph has a build script or wants a C compiler, so musl needs
-      # only a linker rather than `cross` and a container.
-      - name: Use rust-lld for musl
+      # `ring` (pulled in transitively through `rustls`, via `ureq`'s HTTPS client for the update
+      # checker) runs real C compiler-family detection in its build script — a linker alone is not
+      # enough for it, unlike everything else in this dependency graph. This installs an actual
+      # musl C cross-toolchain (and points CC/AR/the linker at it) for both musl targets, x86_64 and
+      # aarch64 alike, cross-compiling from this x86_64 runner.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
         if: endsWith(matrix.target, '-musl')
-        shell: bash
-        run: |
-          echo "CARGO_TARGET_$(echo ${{ matrix.target }} | tr 'a-z-' 'A-Z_')_LINKER=rust-lld" >> "$GITHUB_ENV"
+        with:
+          target: ${{ matrix.target }}
 
       - run: cargo check --workspace --target ${{ matrix.target }}
 
@@ -119,10 +121,16 @@ jobs:
           workspaces: fuzz -> target
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      # `rust-toolchain.toml` pins the workspace to a specific stable-ish release, and that pin
+      # wins over whatever `dtolnay/rust-toolchain@nightly` just installed for any cargo invocation
+      # run from inside this checkout — the exact same class of bug AUDIT.md already documents once
+      # for the release targets. `+nightly` here is not decoration, it is the fix: without it this
+      # job silently builds and "fuzzes" with the pinned stable toolchain, which cargo-fuzz's own
+      # sanitizer flags fail on immediately, before a single input runs.
       - name: Fuzz section_stream
-        run: cargo fuzz run section_stream -- -max_total_time=60
+        run: cargo +nightly fuzz run section_stream -- -max_total_time=60
       - name: Fuzz packet_decoders
-        run: cargo fuzz run packet_decoders -- -max_total_time=60
+        run: cargo +nightly fuzz run packet_decoders -- -max_total_time=60
 
   # The job most likely to earn its keep. Unit tests are self-consistent by construction: this
   # server once sent 18,165 door packets in five minutes — 48% of all its traffic — behind a

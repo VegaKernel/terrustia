@@ -96,8 +96,8 @@ that workflow only triggers on a version tag, and none has been cut yet.
 
 ## Open
 
-- Packet coverage: PvP buff spread (55), portal-gunning an NPC (100), spectating (150), and shop
-  price overrides (104) are the genuinely missing message ids, out of 163 total.
+- Packet coverage: portal-gunning an NPC (100), spectating (150), and shop price overrides (104)
+  are the genuinely missing message ids, out of 163 total.
 - Server-authoritative inventory and damage validation is not implemented. This is not an oversight
   — vanilla trusts the client for both, and diverging would change how the game plays. See
   `SECURITY.md` for the full reasoning.

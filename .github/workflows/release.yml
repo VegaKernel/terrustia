@@ -46,11 +46,15 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
-      - name: Use rust-lld for musl
+      # `ring` (pulled in transitively through `rustls`, via `ureq`'s HTTPS client for the update
+      # checker) runs real C compiler-family detection in its build script — a linker alone is not
+      # enough for it, unlike everything else in this dependency graph. This installs an actual
+      # musl C cross-toolchain (and points CC/AR/the linker at it) for both musl targets, x86_64 and
+      # aarch64 alike, cross-compiling from this x86_64 runner.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
         if: endsWith(matrix.target, '-musl')
-        shell: bash
-        run: |
-          echo "CARGO_TARGET_$(echo ${{ matrix.target }} | tr 'a-z-' 'A-Z_')_LINKER=rust-lld" >> "$GITHUB_ENV"
+        with:
+          target: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --locked -p terrustia --target ${{ matrix.target }}
