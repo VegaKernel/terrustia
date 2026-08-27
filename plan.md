@@ -535,3 +535,19 @@ Kept because they are the reason the bugs above went unnoticed for so long.
     diagnostic output fresh rather than trusting the page; each corrected number above was
     independently re-measured again before publishing this entry, not copied from the audit's own
     report.
+18. `deny.toml`'s own comment claimed "59 unique external crates, every one permissive, zero
+    copyleft" — true when written, stale by the time of the pre-tag verification pass that caught
+    it: `ureq`/`igd-next` (the update-check and UPnP dependencies, both landed earlier this
+    session) pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`, and `cargo deny check` genuinely
+    failed on three licenses the allow-list had never been widened for (MPL-2.0, ISC,
+    CDLA-Permissive-2.0) — not a false alarm to silence, a real gap between what shipped and what
+    the policy file described. Checked each before allowing it, not waved through: ISC and
+    CDLA-Permissive-2.0 (the latter is `webpki-roots`' own license for its root-certificate *data*,
+    not code) are both plain permissive; MPL-2.0 (`attohttpc`, via `igd-next`) is real file-level
+    copyleft, but was written specifically to be usable as-is inside a GPL-family work (Mozilla's
+    own "Secondary Licenses" clause) — exactly this project's own situation (AGPL server/client,
+    MIT proto crate) — so allowing it is a deliberate, informed choice, not an oversight, and the
+    file's own comment now says so explicitly rather than continuing to claim zero copyleft. Crate
+    count corrected to 203 (re-counted via `cargo metadata`, not estimated). `cargo deny check`
+    passes cleanly now; the one remaining line, a `winnow` dual-version notice, is a pre-configured
+    `warn`, not a failure, matching the file's own already-documented policy for exactly that case.

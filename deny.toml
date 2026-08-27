@@ -1,8 +1,17 @@
 # cargo-deny policy.
 #
 # Without a config, `cargo deny check licenses` falls back to an empty allow-list and rejects
-# every dependency — including plain MIT — which reads like a licence problem and is not one. The
-# actual position, audited: 59 unique external crates, every one permissive, zero copyleft.
+# every dependency — including plain MIT — which reads like a licence problem and is not one.
+#
+# Re-audited when this failed a pre-tag check: 203 unique external crates (up from an earlier
+# "59, zero copyleft" note here that went stale once `ureq`/`igd-next` — the update-check and
+# UPnP dependencies — pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`). One of the three
+# licenses that addition needed, MPL-2.0, is real, file-level copyleft — but MPL-2.0 was written
+# specifically to be usable as-is inside a GPL-family work (Mozilla's own "Secondary Licenses"
+# compatibility clause), which is exactly this project's own situation (AGPL server/client, MIT
+# proto crate), so allowing it here is a deliberate, informed choice, not an oversight. ISC and
+# CDLA-Permissive-2.0 (the latter is `webpki-roots`' license for its own root-certificate *data*,
+# not code) are both plain permissive, the same tier as MIT/BSD-3-Clause already below.
 #
 #   cargo deny check
 
@@ -18,6 +27,11 @@ allow = [
     "0BSD",
     "Zlib",
     "Unicode-3.0",
+    "ISC",
+    "CDLA-Permissive-2.0",
+    # File-level copyleft, deliberately allowed — see this file's own top comment for why it is
+    # safe alongside an AGPL workspace crate specifically.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.9
 
