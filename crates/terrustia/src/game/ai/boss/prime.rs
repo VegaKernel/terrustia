@@ -16,19 +16,21 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    PRIME_ABOVE_MAX, PRIME_ABOVE_MIN, PRIME_DRIFT, PRIME_DRIFT_CAP, PRIME_DRIFT_CAP_EXPERT,
-    PRIME_DRIFT_EXPERT, PRIME_ENRAGED_GAIN, PRIME_ENRAGED_MAX, PRIME_ENRAGED_MIN,
-    PRIME_ENRAGED_SPEED, PRIME_HOVER_TICKS, PRIME_LEAVE_CAP, PRIME_LEAVE_SINK, PRIME_LIFT,
-    PRIME_LIFT_CAP, PRIME_LIFT_CAP_EXPERT, PRIME_LIFT_EXPERT, PRIME_LIMB_FOUND, PRIME_LIMB_LOST,
-    PRIME_LIMB_RETURN_X, PRIME_LIMB_RETURN_X_CAP, PRIME_LIMB_RETURN_Y, PRIME_LIMB_RETURN_Y_CAP,
-    PRIME_LOSE_RANGE, PRIME_SHOT_SPREAD_STEPS, PRIME_SLACK, PRIME_SPIN_DAMAGE, PRIME_SPIN_DEFENSE,
+    PRIME_ABOVE_MAX, PRIME_ABOVE_MIN, PRIME_CANNON, PRIME_DRIFT, PRIME_DRIFT_CAP,
+    PRIME_DRIFT_CAP_EXPERT, PRIME_DRIFT_EXPERT, PRIME_ENRAGED_GAIN, PRIME_ENRAGED_MAX,
+    PRIME_ENRAGED_MIN, PRIME_ENRAGED_SPEED, PRIME_HOVER_TICKS, PRIME_LASER, PRIME_LEAVE_CAP,
+    PRIME_LEAVE_SINK, PRIME_LIFT, PRIME_LIFT_CAP, PRIME_LIFT_CAP_EXPERT, PRIME_LIFT_EXPERT,
+    PRIME_LIMB_FOUND, PRIME_LIMB_LOST, PRIME_LIMB_RETURN_X, PRIME_LIMB_RETURN_X_CAP,
+    PRIME_LIMB_RETURN_Y, PRIME_LIMB_RETURN_Y_CAP, PRIME_LOSE_RANGE, PRIME_SAW,
+    PRIME_SHOT_SPREAD_STEPS, PRIME_SLACK, PRIME_SPIN_DAMAGE, PRIME_SPIN_DEFENSE,
     PRIME_SPIN_RANGE_FROM, PRIME_SPIN_RANGE_GAIN, PRIME_SPIN_RANGE_STEP, PRIME_SPIN_SPEED,
-    PRIME_SPIN_SPEED_EXPERT, PRIME_SPIN_TICKS, PrimeLimb, prime_limb,
+    PRIME_SPIN_SPEED_EXPERT, PRIME_SPIN_TICKS, PRIME_VICE, PrimeLimb, prime_limb,
 };
 
 use super::skeletron::Parent;
 use crate::game::ai::{Shot, World};
 use crate::game::npc::{Npc, TileView};
+use crate::game::npc_ai::Spawn;
 
 /// The head's states, from `ai[1]`.
 pub mod head_state {
@@ -46,6 +48,8 @@ pub struct PrimeOutcome {
     pub leaving: bool,
     /// Set when this arm has lost its head and is coming apart.
     pub spent: bool,
+    /// The arms a fresh head raises on its own first tick — see [`prime_head`].
+    pub spawn: Vec<Spawn>,
 }
 
 /// Style 32: the head.
@@ -55,6 +59,39 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
     npc.damage_bonus = 1.0;
     npc.defense = npc.stats.defense;
     npc.invulnerable = false;
+
+    // First tick: a head raises its four arms (`NPC.cs:27806-27832`, `aiStyle==32`'s own
+    // `ai[0]==0` gate) — the same structural situation `skeletron::head` already handles for
+    // Skeletron's two hands, and the same `Spawn`/`OWN_PARENT` mechanism reused rather than
+    // reinvented. This was missing entirely until now: nothing anywhere else in this project ever
+    // created Prime's arms, so the admin `/spawn` command — the only way to encounter this boss at
+    // all today, since no in-game summon trigger exists yet either — produced a bare head with no
+    // weapons, unable to ever come apart or be fought as the real four-part boss it is. `ai[0]` is
+    // otherwise unused by the head (unlike an arm's own `ai[0]`, its station side), so it is safe
+    // to repurpose as this one-shot flag, matching real vanilla's own use of the field here.
+    if npc.ai[0] == 0.0 {
+        npc.ai[0] = 1.0;
+        let at = (
+            npc.position.0 + npc.width() / 2.0,
+            npc.position.1 + npc.height() / 2.0,
+        );
+        // Side matches vanilla exactly (`NewNPC(..., 128/129/130/131, ...)`, `ai[0]` per call);
+        // the consumer that fulfils `Spawn` requests reads a parented spawn's side from the sign
+        // of `velocity.0`, the same encoding `skeletron::head`'s own hands already use.
+        for (limb, side) in [
+            (PRIME_SAW, -1.0),
+            (PRIME_VICE, 1.0),
+            (PRIME_CANNON, -1.0),
+            (PRIME_LASER, 1.0),
+        ] {
+            out.spawn.push(Spawn {
+                npc_type: limb,
+                position: at,
+                velocity: (side, 0.0),
+                parent: Some(Spawn::OWN_PARENT),
+            });
+        }
+    }
 
     let target = world.target.filter(|t| {
         t.alive
@@ -367,7 +404,7 @@ mod tests {
     use crate::game::npc_ai::Target;
     use rand::SeedableRng;
     use std::collections::HashMap;
-    use terrustia_proto::npc_params::{PRIME_CANNON, PRIME_HEAD, PRIME_LASER, PRIME_SAW};
+    use terrustia_proto::npc_params::PRIME_HEAD;
     use terrustia_proto::tile::Tile;
 
     struct Sky(HashMap<(i32, i32), Tile>);
@@ -460,6 +497,42 @@ mod tests {
         prime_head(&mut h, &w);
         assert_eq!(h.damage_bonus, PRIME_SPIN_DAMAGE as f32);
         assert_eq!(h.defense, h.stats.defense * PRIME_SPIN_DEFENSE);
+    }
+
+    /// A fresh head raises its four arms on its first tick, and never again — the gap this fix
+    /// closes: nothing anywhere else in this project ever created Prime's arms at all, so the
+    /// admin `/spawn` command (the only way to encounter this boss today) produced a bare head.
+    #[test]
+    fn a_fresh_head_raises_all_four_arms_once() {
+        let tiles = Sky(HashMap::new());
+        let w = night(&tiles, Some((0.0, 600.0)));
+        let mut h = piece(PRIME_HEAD, 0.0, 0.0);
+
+        let out = prime_head(&mut h, &w);
+        let mut kinds: Vec<u16> = out.spawn.iter().map(|s| s.npc_type).collect();
+        kinds.sort_unstable();
+        let mut expected = vec![
+            terrustia_proto::npc_params::PRIME_SAW,
+            terrustia_proto::npc_params::PRIME_VICE,
+            terrustia_proto::npc_params::PRIME_CANNON,
+            terrustia_proto::npc_params::PRIME_LASER,
+        ];
+        expected.sort_unstable();
+        assert_eq!(kinds, expected, "all four arms, exactly once");
+        assert!(
+            out.spawn
+                .iter()
+                .all(|s| s.parent == Some(Spawn::OWN_PARENT)),
+            "every arm belongs to the head that raised it"
+        );
+
+        // Never again: a second tick with the flag now set must not raise a second set.
+        let again = prime_head(&mut h, &w);
+        assert!(
+            again.spawn.is_empty(),
+            "a head must only raise its arms once, got {:?}",
+            again.spawn
+        );
     }
 
     /// Daylight enrages it rather than sending it home, which is the opposite of the Twins.

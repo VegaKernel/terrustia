@@ -750,6 +750,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         32 => {
             let out = boss::prime::prime_head(npc, world);
             effects.expired = out.leaving && npc.time_left <= 0;
+            effects.spawn.extend(out.spawn);
         }
         33..=36 => {
             let out = boss::prime::prime_arm(npc, world, world.parent, rng);

@@ -1109,6 +1109,82 @@ async fn brain_of_cthulhus_creepers_are_told_where_the_brain_is() {
     );
 }
 
+/// The real explanation for what an earlier investigation disclosed as "Skeletron Prime's own
+/// sync is intermittent... stuck at its exact starting life for the full patience" — traced here
+/// with a real minimal reproduction, not guessed at. `/spawn`ing Prime by day (this suite's own
+/// default world state) puts the head straight into `ENRAGED` (`prime_head`'s own `world.conditions
+/// .day` check, matching real vanilla's "daylight does not send Prime home, it makes it worse"),
+/// where it is invulnerable and runs its target down at real, uncapped contact speed. A fresh
+/// character has nowhere near enough health to survive that: two real hits land here, 47 damage
+/// each, and a real `PlayerDied` follows within a few real ticks. With its only target now dead,
+/// the head's own target-loss check (`player9.dead`, `NPC.cs:27833-27842`) correctly finds nobody
+/// left and sets `ai[1] = 3` (`LEAVING`) — real, deliberate vanilla parity, not a sync failure. A
+/// dead-and-abandoning boss looks, from a passive watcher's own tracked view, exactly like "life
+/// pinned, nothing happening": no further hits ever land because there is no one left to land them
+/// on, and the head is genuinely leaving, not stuck.
+#[tokio::test]
+async fn skeletron_prime_gives_up_once_its_daytime_rampage_kills_its_only_target() {
+    let addr = start().await;
+    let mut client = join(addr, "prime-victim").await;
+
+    let head = spawn_npc(&mut client, "Skeletron Prime").await;
+    assert_eq!(head.npc_type(), 127);
+
+    client
+        .wait_for(
+            "the player's own death to Prime's enraged contact damage",
+            |e| matches!(e, Event::PlayerDied(d) if d.reason.npc == Some(i16::from(head.index))),
+        )
+        .await
+        .expect("a daytime-enraged Prime should run its only, undefended target down");
+
+    client
+        .wait_for(
+            "the head giving up on its now-dead target",
+            |e| matches!(e, Event::NpcSynced(n) if n.npc_type() == 127 && n.ai[1] == 3.0),
+        )
+        .await
+        .expect(
+            "Prime should abandon a dead target (real vanilla parity) rather than sit idle — if \
+             this never arrives, the target-loss check regressed",
+        );
+}
+
+/// Skeletron Prime's own real fight is a four-part boss: a head that spawns a saw, a vice, a
+/// cannon and a laser arm on its own first AI tick (`NPC.cs:27806-27832`). Nothing anywhere in
+/// this project ever created those arms — the admin `/spawn` command, the only way to encounter
+/// this boss at all today, produced a bare head with no weapons and no way to ever come apart.
+#[tokio::test]
+async fn skeletron_primes_head_raises_its_four_arms() {
+    let addr = start().await;
+    let mut client = join(addr, "prime-watcher").await;
+
+    let head = spawn_npc(&mut client, "Skeletron Prime").await;
+    assert_eq!(head.npc_type(), 127);
+
+    let mut arms: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() || arms.len() >= 4 {
+            break;
+        }
+        match tokio::time::timeout(left, client.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if (128..=131).contains(&n.npc_type()) => {
+                arms.insert(n.npc_type());
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    assert_eq!(
+        arms,
+        std::collections::HashSet::from([128, 129, 130, 131]),
+        "expected the saw, vice, cannon and laser (128-131) to all appear once the head's first \
+         AI tick ran; only saw {arms:?} — `game/ai/boss/prime.rs`'s arm-raising regressed"
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_npc_name_is_refused() {
     let addr = start().await;
