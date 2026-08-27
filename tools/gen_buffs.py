@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Generate crates/terrustia-proto/src/buffs.rs from the decompiled tables.
 
-Three things live here, all of them per-type data the hand-written buff code must not carry:
+Four things live here, all of them per-type data the hand-written buff code must not carry:
   * which buff ids are debuffs (Main.debuff), which decides what AddBuff may evict
   * which are whip marks (BuffID.Sets.IsAnNPCWhipDebuff), which immunity branches on
   * what each NPC type is immune to (NPCID.Sets.DebuffImmunitySets + ShimmerImmunity)
+  * which buffs a PvP-flagged player may spread to another (Main.pvpBuff), which gates packet 55
 """
 import re
 import sys
@@ -37,6 +38,11 @@ def bool_set(text, name):
 debuff = {int(m.group(1)) for m in re.finditer(r"\n\t\tdebuff\[(\d+)\] = true;", main_cs)}
 if not debuff:
     raise SystemExit("no debuff entries found")
+
+# --- Main.pvpBuff -----------------------------------------------------------
+pvp_buff = {int(m.group(1)) for m in re.finditer(r"\n\t\tpvpBuff\[(\d+)\] = true;", main_cs)}
+if not pvp_buff:
+    raise SystemExit("no pvpBuff entries found")
 
 whip = bool_set(buff_cs, "IsAnNPCWhipDebuff")
 removable = bool_set(buff_cs, "CanBeRemovedByNetMessage")
@@ -225,6 +231,20 @@ out.append(
     )
 )
 
+out.append(
+    bool_table(
+        "PVP_BUFF",
+        pvp_buff,
+        BUFF_COUNT,
+        """
+/// Buffs a PvP-flagged player may spread to another PvP-flagged player, from `Main.pvpBuff`.
+///
+/// Gates packet 55 (`AddPlayerBuffPvP`): a hostile-marked player who lands one of these on
+/// another hostile-marked player asks the server to relay it, rather than the target's own
+/// client trusting the attacker's client directly.""",
+    )
+)
+
 words_per = (BUFF_COUNT + 63) // 64
 out.append(
     f"""
@@ -277,9 +297,15 @@ pub fn npc_is_immune(npc_type: u16, buff: u16) -> bool {
 pub fn is_debuff(buff: u16) -> bool {
     DEBUFF.get(buff as usize).copied().unwrap_or(false)
 }
+
+/// Whether a PvP-flagged player may spread `buff` to another over packet 55.
+pub fn is_pvp_spreadable(buff: u16) -> bool {
+    PVP_BUFF.get(buff as usize).copied().unwrap_or(false)
+}
 """
 )
 
 OUT.write_text("\n".join(out) + "\n")
 print(f"wrote {OUT}: {BUFF_COUNT} buffs, {NPC_COUNT} npc types, {len(order)} distinct masks")
 print(f"  debuffs {len(debuff)}, whip marks {sorted(whip)}, removable {sorted(removable)}")
+print(f"  pvp-spreadable {sorted(pvp_buff)}")

@@ -68,7 +68,7 @@ and the other eight secret seeds' own generation-content differences — sized a
 | ✅ | Handshake, world data, section streaming | Checked against a real `TerrariaServer`, not only against our own client |
 | ✅ | Server password | |
 | ✅ | Localized announcements | Keys with substitutions, as the game sends — so a non-English client reads its own language |
-| 🟡 | Packet coverage | 109 of 163 message ids handled; most of the rest are outbound-only or dead in vanilla too. Genuinely missing: PvP buff spread (55), portal-gunning an NPC (100), spectating (150), shop overrides (104) |
+| 🟡 | Packet coverage | 111 of 163 message ids handled; most of the rest are outbound-only or dead in vanilla too. Genuinely missing: portal-gunning an NPC (100), spectating (150), shop overrides (104) |
 | ⬜ | Steam P2P / lobbies | Steamworks' licence is incompatible with AGPL |
 | ⬜ | Encryption | Terraria's protocol has none. `/login` sends a password as ordinary chat text — do not reuse a real one |
 

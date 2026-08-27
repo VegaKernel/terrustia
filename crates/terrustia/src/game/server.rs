@@ -3323,6 +3323,7 @@ impl GameServer {
             id::SEND_PASSWORD => self.on_password(slot, &payload),
             id::TEAM_CHANGE | id::TEAM_CHANGE_FROM_U_I => self.on_team(slot, &payload),
             id::TOGGLE_P_V_P => self.on_pvp(slot, &payload),
+            id::ADD_PLAYER_BUFF_PV_P => self.on_pvp_buff_spread(slot, &payload),
             id::PLAYER_BUFFS => self.on_buffs(slot, &payload),
             id::SYNC_PLAYER_ZONE => self.on_zone(slot, &payload),
             // Damage and death are not simulated; relaying keeps every client's view of another
@@ -4380,6 +4381,32 @@ impl GameServer {
             player.buffs = Some(Bytes::copy_from_slice(payload));
         }
         self.relay_player_packet(slot, id::PLAYER_BUFFS, payload)
+    }
+
+    /// Packet 55: a PvP-flagged player's own hit spreads a buff onto another PvP-flagged player.
+    ///
+    /// Unlike every other player packet on this page, this one is not a broadcast: real vanilla's
+    /// own server relays it to exactly the named target, and only that player's own client
+    /// actually calls `AddBuff` on receiving it — everyone else is never told. The payload itself
+    /// carries no sender identity to rewrite (`target: u8, buff: u16, duration: i32`, the whole of
+    /// it); the real sender is `slot`, read from the connection the way every other packet here
+    /// already trusts it, not from anything in the payload.
+    fn on_pvp_buff_spread(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        let mut r = PacketReader::new(payload);
+        let target = r.u8()?;
+        let buff = r.u16()?;
+
+        let both_hostile =
+            self.player(slot).is_some_and(|p| p.pvp) && self.player(target).is_some_and(|p| p.pvp);
+        if !both_hostile || !terrustia_proto::buffs::is_pvp_spreadable(buff) {
+            return Ok(());
+        }
+
+        self.send(
+            target,
+            packets::verbatim(id::ADD_PLAYER_BUFF_PV_P, payload)?,
+        );
+        Ok(())
     }
 
     fn on_zone(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
@@ -12861,6 +12888,110 @@ mod section_streaming {
             "two simultaneous joiners together drained {paired_sent} sections in one call, \
              vs {solo_sent} for one alone — the budget is being given to each player \
              separately instead of shared across the whole call"
+        );
+    }
+}
+
+/// Packet 55 (`AddPlayerBuffPvP`): a PvP-flagged player's own hit spreads one of `Main.pvpBuff`'s
+/// twenty — now generated as `terrustia_proto::buffs::PVP_BUFF` — real buffs onto another
+/// PvP-flagged player. Real vanilla's own server relays this to exactly the named target, not to
+/// everyone, and gates it on both players being hostile-flagged and the buff itself being one of
+/// the whitelisted twenty.
+#[cfg(test)]
+mod pvp_buff_spread {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "pvp buff spread probe")
+    }
+
+    /// Three players: the attacker, the real target, and a bystander who must never see this —
+    /// proof that this is a targeted relay, not `relay_player_packet`'s usual broadcast.
+    fn with_three_players(
+        mut server: GameServer,
+    ) -> (
+        GameServer,
+        mpsc::Receiver<Bytes>,
+        mpsc::Receiver<Bytes>,
+        mpsc::Receiver<Bytes>,
+    ) {
+        let (attacker_tx, attacker_rx) = mpsc::channel(16);
+        let (target_tx, target_rx) = mpsc::channel(16);
+        let (bystander_tx, bystander_rx) = mpsc::channel(16);
+        for (slot, tx) in [(0, attacker_tx), (1, target_tx), (2, bystander_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, attacker_rx, target_rx, bystander_rx)
+    }
+
+    /// Poisoned (20) — one of the real twenty, transcribed directly from `Main.pvpBuff`, not
+    /// guessed.
+    const REAL_PVP_BUFF: u16 = 20;
+    /// An ordinary, non-PvP-spreadable debuff — real vanilla's own `Main.debuff[21]`
+    /// (PotionSickness), never added to `pvpBuff`.
+    const ORDINARY_DEBUFF: u16 = 21;
+
+    /// Just the payload `on_pvp_buff_spread` reads — no length prefix or message id, which is
+    /// what a real dispatch has already stripped by the time a handler ever sees `payload`
+    /// (`PacketWriter::finish` builds the whole framed packet instead, one layer too many here).
+    fn packet_55(target: u8, buff: u16, duration: i32) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(7);
+        payload.push(target);
+        payload.extend_from_slice(&buff.to_le_bytes());
+        payload.extend_from_slice(&duration.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn both_hostile_and_a_real_pvp_buff_reaches_only_the_named_target() {
+        let (mut server, _attacker_rx, mut target_rx, mut bystander_rx) =
+            with_three_players(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().pvp = true;
+        server.player_mut(1).unwrap().pvp = true;
+
+        let payload = packet_55(1, REAL_PVP_BUFF, 300);
+        server.on_pvp_buff_spread(0, &payload).unwrap();
+
+        assert!(
+            target_rx.try_recv().is_ok(),
+            "the named target should have received the relayed buff"
+        );
+        assert!(
+            bystander_rx.try_recv().is_err(),
+            "nobody else should ever see this — it is a targeted relay, not a broadcast"
+        );
+    }
+
+    #[test]
+    fn neither_player_needs_to_be_hostile_for_nothing_to_happen() {
+        let (mut server, _attacker_rx, mut target_rx, _bystander_rx) =
+            with_three_players(GameServer::new(Config::default(), tiny_world()));
+        // Neither player.pvp is set — the ordinary, ungated case.
+        let payload = packet_55(1, REAL_PVP_BUFF, 300);
+        server.on_pvp_buff_spread(0, &payload).unwrap();
+
+        assert!(
+            target_rx.try_recv().is_err(),
+            "a non-hostile attacker must not be able to spread a buff at all"
+        );
+    }
+
+    #[test]
+    fn a_buff_outside_the_real_whitelist_is_refused_even_with_both_hostile() {
+        let (mut server, _attacker_rx, mut target_rx, _bystander_rx) =
+            with_three_players(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().pvp = true;
+        server.player_mut(1).unwrap().pvp = true;
+
+        let payload = packet_55(1, ORDINARY_DEBUFF, 300);
+        server.on_pvp_buff_spread(0, &payload).unwrap();
+
+        assert!(
+            target_rx.try_recv().is_err(),
+            "only the real twenty `Main.pvpBuff` ids may be spread this way"
         );
     }
 }

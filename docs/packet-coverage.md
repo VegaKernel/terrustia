@@ -18,9 +18,9 @@ receiving side.
 | | |
 |---|---:|
 | Live messages | 148 |
-| Referenced anywhere (sent or received) | 136 |
-| Dispatched inbound | 109 |
-| Never touched | 12 |
+| Referenced anywhere (sent or received) | 139 |
+| Dispatched inbound | 111 |
+| Never touched | 11 |
 | ...of those, ones a client actually sends | **1** |
 
 For comparison, the audit that started this work found **76 never touched**, including NPC
@@ -34,7 +34,7 @@ quest system, the invasion progress bar, the lunar pillar shields and the Grand 
 `DevCommands` (94), and it will stay unhandled. It is a channel for a client to ask the server to
 do developer things, and a public server that honours it is a public server anyone can rewrite.
 
-### Server-to-client only (11)
+### Server-to-client only (10)
 
 Every one of these needs a system this build does not have, or does not apply to a dedicated
 server at all.
@@ -43,14 +43,18 @@ server at all.
 Merchant's own stock (72) *is* implemented; this is the rest of them.
 
 **Not applicable to this build** — `TileFrameSection` (11) is legacy; `SocialHandshake` (93) is
-Steam; `SpectatePlayer` (150) and `HostToken` (161) are host migration;
-`SetCountsAsHostForGameplay` (139) and `ClientSyncedInventory` (138) are journey mode and
-server-side characters.
+Steam; `SpectatePlayer` (150) and `HostToken` (161) are host migration; `ClientSyncedInventory`
+(138) is server-side characters.
 
 **Client-side bookkeeping** — `SyncPlayerChestIndex` (80), `ExtraSpawnSectionLoaded` (158).
 
 **Other** — `ItemTweaker` (88) is a modding hook. `TeleportNPCThroughPortal` (100) needs NPCs to
 use portals, which they do not here.
+
+`SetCountsAsHostForGameplay` (139) — a loopback-connected player counts as the host, the game's
+own `DoesPlayerSlotCountAsAHost` rule — was already implemented (`introduce`'s own call to
+`packets::counts_as_host`, sent to a newly-spawned local player and nobody else) but this page had
+never been updated to say so.
 
 ## What was fixed, and in what order
 
@@ -83,6 +87,13 @@ Roughly by how much of the game each unblocked:
     skip, countdown and field-wipe (143/116/114), fished-up NPCs (130), the two made town slimes
     (140), Lucy (141), signs read aloud (107), item drift correction (160), and the cosmetic
     effects other clients would otherwise not see (77, 97, 98, 106, 108, 131, 132).
+13. **PvP buff spread** (55) — a hostile-flagged player's own hit spreading one of `Main.pvpBuff`'s
+    twenty real buffs onto another hostile-flagged player never reached anyone; every real
+    trigger for it (certain thrown potions and traps with a PvP-specific effect) was silently
+    inert in a real fight. Genuinely a relay, not a broadcast: sent to exactly the named target,
+    the same way real vanilla's own server does it. The whitelist itself is generated
+    (`terrustia_proto::buffs::PVP_BUFF`, from `Main.pvpBuff`) rather than hand-copied, matching
+    every other per-buff table on this page.
 
 ## A note on the audit's method
 

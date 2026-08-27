@@ -159,6 +159,45 @@ pub const TIME_DOES_NOT_DECREASE: [bool; 401] = [
     false, false, false, false, false, false, false, false, false, false,
 ];
 
+/// Buffs a PvP-flagged player may spread to another PvP-flagged player, from `Main.pvpBuff`.
+///
+/// Gates packet 55 (`AddPlayerBuffPvP`): a hostile-marked player who lands one of these on
+/// another hostile-marked player asks the server to relay it, rather than the target's own
+/// client trusting the attacker's client directly.
+pub const PVP_BUFF: [bool; 401] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, true, false, false, false, true, false, false,
+    false, false, false, true, true, false, false, false, false, true, false, false, true, false,
+    false, false, false, true, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, true, true, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, true, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, true, true,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, true, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, true, false, false, true, true, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, true, true, true, true,
+];
+
 /// The distinct immunity masks, as bitmaps over buff ids.
 ///
 /// Six hundred and ninety-one NPC types share far fewer than that many distinct sets of
@@ -520,4 +559,9 @@ pub fn npc_is_immune(npc_type: u16, buff: u16) -> bool {
 /// Whether a buff id is one the game counts as a debuff.
 pub fn is_debuff(buff: u16) -> bool {
     DEBUFF.get(buff as usize).copied().unwrap_or(false)
+}
+
+/// Whether a PvP-flagged player may spread `buff` to another over packet 55.
+pub fn is_pvp_spreadable(buff: u16) -> bool {
+    PVP_BUFF.get(buff as usize).copied().unwrap_or(false)
 }
