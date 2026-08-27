@@ -1047,6 +1047,68 @@ async fn spawning_by_name_and_by_id_both_work() {
     assert_eq!(by_id.npc_type(), 49, "cave bat by id");
 }
 
+/// `ai/mod.rs`'s ai_style 55 arm (the Brain of Cthulhu's own Creepers, npc 267) has always said,
+/// in its own comment, that "the Brain's position is threaded in through ai[2..3] by the server,
+/// which knows where every NPC is; a creeper with no Brain removes itself." Nothing ever did that
+/// threading (`game/server.rs` had no code anywhere that wrote to a Creeper's `ai[2]`/`ai[3]`), so
+/// every Creeper read its own untouched `ai == [0.0; 4]` spawn default as "no Brain" on every one
+/// of its own AI ticks and asked to be removed (`creeper::update`'s `BrainGone` branch sets
+/// `time_left = 0`) from the moment it spawned.
+///
+/// This was invisible in most ordinary play because `tick_life` (`npc_ai.rs`) resets a non-boss
+/// npc's `time_left` back up to its full despawn budget every tick a player stands nearby — which
+/// silently clobbers the Creeper's own self-removal *as long as a player stays close*, and lets it
+/// through the instant one does not (a player walking away, or the Brain teleporting its escort
+/// out of the player's own despawn box). From a connected client's own tracked view that looks
+/// exactly like an escort that "just doesn't sync" — indistinguishable, without reading the
+/// server's own tick internals, from a genuine broadcast/section gap. It is not one: the server
+/// really was killing its own Creepers, just unreliably, for a different reason than any escort
+/// sync issue.
+///
+/// Fixed in `game/server.rs`'s per-tick AI loop: the Brain's own live centre is now threaded into
+/// every alive Creeper's `ai[2]`/`ai[3]` every tick, exactly as the comment already promised.
+///
+/// This test isolates the actual mechanism rather than re-running a whole fight: it spawns a real
+/// Brain of Cthulhu (which arrives wrapped in its real twenty Creepers on its own first AI tick,
+/// `boss::brain::update`), and waits for a real, later sync — not the spawn broadcast, which is
+/// sent before any Creeper has had its first AI tick and so always carries the untouched `[0.0;
+/// 4]` default either way — to carry the Brain's own real, non-zero position in `ai[2..3]`. On the
+/// unfixed server this can never happen: nothing ever writes those fields, so `ai[2]` and `ai[3]`
+/// stay exactly `0.0` for the entire life of every Creeper, deterministically, forever.
+#[tokio::test]
+async fn brain_of_cthulhus_creepers_are_told_where_the_brain_is() {
+    let addr = start().await;
+    let mut client = join(addr, "watcher").await;
+
+    let brain = spawn_npc(&mut client, "Brain of Cthulhu").await;
+    assert_eq!(brain.npc_type(), 266);
+
+    let mut threaded: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() || threaded.len() >= 15 {
+            break;
+        }
+        match tokio::time::timeout(left, client.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if n.npc_type() == 267 && n.life > 0 => {
+                if n.ai[2] != 0.0 || n.ai[3] != 0.0 {
+                    threaded.insert(n.index);
+                }
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    assert!(
+        threaded.len() >= 15,
+        "expected most of the Brain's twenty Creepers to have the Brain's real position threaded \
+         into ai[2..3] (ai_style 55's own documented contract) within the patience; only {} did — \
+         `game/server.rs`'s per-tick Creeper/Brain threading regressed",
+        threaded.len()
+    );
+}
+
 #[tokio::test]
 async fn an_unknown_npc_name_is_refused() {
     let addr = start().await;

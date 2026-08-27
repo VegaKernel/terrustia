@@ -6594,6 +6594,28 @@ impl GameServer {
             } else {
                 Vec::new()
             };
+            // The Brain of Cthulhu's own centre, for its Creepers' `ai[2..3]` (ai_style 55 in
+            // `ai/mod.rs`, whose own comment already says this is the server's job: "The Brain's
+            // position is threaded in through ai[2..3] by the server, which knows where every NPC
+            // is"). Nothing ever did that threading, so every Creeper read `ai[2] == ai[3] ==
+            // 0.0` — its own untouched default — on every one of its own ticks and asked to be
+            // removed (`creeper::update`'s `BrainGone` branch) from the moment it spawned. It only
+            // ever looked alive because `tick_life`'s ordinary despawn timer resets right back
+            // over that removal for as long as a player stands nearby, and lets the removal
+            // through the instant one does not — indistinguishable, from a client's own tracked
+            // view, from a boss whose escort simply never reliably syncs. Scanned only when a
+            // Creeper actually exists, the same guard `hurt`/`hostiles` above use.
+            let brain_center: Option<(f32, f32)> = self
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == terrustia_proto::npc_params::CREEPER)
+                .then(|| {
+                    self.npcs
+                        .iter()
+                        .find(|(_, n)| n.npc_type == 266)
+                        .map(|(_, n)| n.center())
+                })
+                .flatten();
             raisable = std::mem::take(&mut self.army.corpses);
             // The event as its own fixtures see it. The arena is surveyed once, when the crystal
             // first asks for its gates, and kept: re-walking it every tick would let a player
@@ -6671,6 +6693,12 @@ impl GameServer {
                 // Segments are positioned by their leader, not by a routine of their own.
                 if npc.follows.is_some() {
                     continue;
+                }
+                // See `brain_center` above: a Creeper reads its own escort centre from here.
+                if npc.npc_type == terrustia_proto::npc_params::CREEPER {
+                    let (bx, by) = brain_center.unwrap_or((0.0, 0.0));
+                    npc.ai[2] = bx;
+                    npc.ai[3] = by;
                 }
                 // A part reads its parent through this; it cannot see the table itself.
                 let parent = npc
