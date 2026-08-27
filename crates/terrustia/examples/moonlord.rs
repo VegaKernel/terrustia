@@ -19,29 +19,56 @@
 //!
 //! # Current status — read this before trusting the title
 //!
-//! **Moon Lord's own death has not been witnessed.** Three full, watched runs each reached the
-//! Lunatic Cultist and killed it for real — hardmode, all three mechanical bosses, Plantera, and
-//! Golem all fall reliably and repeatably before that point, across every run this session made.
-//! Every one of the three then stalled in the Lunar Apocalypse: `clear_shield` (below) reliably
-//! clears each pillar's real 100-kill shield by fighting real, visible escorts, but the pillar
-//! entity itself then would not sync to this bot's client within patience in any of three real
-//! attempts — not the Solar Pillar in two separate runs, not the Vortex Pillar in the third. A
-//! dedicated fix (`visit_pillar_sites`, walking to all four of `LunarState::trigger`'s own real
-//! candidate world positions before the fight starts, to rule out a section-coverage gap the same
-//! way the bodyless-worm fix below did) was tried live and **did not resolve it** — disclosed
-//! plainly rather than left implying it worked. Since `fight`'s own hit loop only ever sends
-//! `hit_npc` at something it has actually seen, a pillar that never syncs is never actually struck
-//! by the dedicated fight phase either — this is not merely a visibility gap on top of real
-//! progress, the pillar is very likely still at full health server-side too. Root cause not found:
-//! this is a different failure shape from the worm (a spawn producing a malformed entity) and from
-//! Brain of Cthulhu's creepers (an escort that never syncs at all) — the pillar syncs fine *before*
-//! its shield is cleared (its unchanging life value was directly observed for well over a hundred
-//! real seconds in earlier testing) and then does not sync *at all* once the dedicated fight for it
-//! begins, which does not fit either of the other two explanations found so far. Finding this,
-//! confirming it is reproducible, and confirming a plausible fix does not close it is itself a real
-//! result of this task — see disclosure point 4's own final entry below for the full account — but
-//! it means the literal claim in this file's own title is **not yet backed by a witnessed run**,
-//! and `plan.md`'s own row for this task is marked in progress, not done, for exactly that reason.
+//! **Moon Lord's own death has now been witnessed, twice, in real, unattended, full runs.** This
+//! is a later update to this file's own history: three earlier full runs (their own account is
+//! preserved below, in disclosure point 4) each reached the Lunatic Cultist and then stalled in
+//! the Lunar Apocalypse, and the two bosses this file most depended on an admin shortcut for — the
+//! Wall of Flesh and the Lunatic Cultist's own tablet — had no real in-game trigger to switch to at
+//! all at the time. Both gaps were later fixed server-side (`tick_wall_of_flesh_trigger`/
+//! `summon_wall_of_flesh`/`tick_cultist_tablet`, `game/server.rs` — see `plan.md`'s own "Real spawn
+//! triggers..." row), and this file was updated to use them for real. Doing that surfaced three
+//! more real, previously-undisclosed findings — two fixed here, one left open and disclosed:
+//!
+//! - **The Wall of Flesh's real trigger needs a living Guide, and this bot now builds him a real
+//!   house** (`build_guide_house`) rather than only ever placing him with `/spawn`. It works — a
+//!   real, isolated pass confirmed the whole chain end to end (house, `The Guide has moved in.`,
+//!   a real Guide Voodoo Doll walked to real settled Underworld lava, `the Wall of Flesh rises`
+//!   logged server-side, a real fight, real hardmode) — but a genuine, reproducible race, disclosed
+//!   in the Wall of Flesh stage's own comment below, meant an already-homeless Old Man beat the
+//!   Guide to the freshly built house in both of the two full runs that follow, so those two runs
+//!   still leaned on the disclosed `/spawn 113` fallback rather than the real trigger. Not a server
+//!   bug — this bot's own cross-map travel happens to cross the Old Man's own watch radius around
+//!   the dungeon by coincidence on this world size, and `tick_town_npcs`'s own real priority rule
+//!   (a homeless resident claims a found house before a "newcomer" does) is reasonable on its own
+//!   terms. Left open.
+//! - **The Lunatic Cultist's real trigger needs `downed_boss3`, and this bot never fought the
+//!   real, pre-hardmode Skeletron at all** — only Skeletron *Prime*, a different, hardmode boss.
+//!   Fixed with a new `skeletron` stage (the real trigger: wait for the real Old Man, then send the
+//!   one real packet that stands in for taking him up on his offer — real vanilla has never had a
+//!   summon item for Skeletron). Confirmed working in both full runs; the tablet's own real trigger
+//!   then fired for real in both, too — no `/spawn 437` needed in either.
+//! - **Moon Lord's own fight only ever targeted the "core" (npc 398), which is genuinely
+//!   invulnerable until its head and both hands are broken open** — a real vanilla mechanic
+//!   (`game/ai/boss/moon_lord.rs`'s own module doc says so outright), not a bug, that this bot's
+//!   single-id target list had simply never engaged with. Fixed by widening the fight to the real
+//!   full roster (head, hands, core, the free eye a broken socket releases, the leech that heals
+//!   the boss back if ignored). This is what actually let both full runs end in a real kill.
+//!
+//! **The Lunar Pillars' own sync gap is still not fixed, and its root cause is still not found**
+//! — every one of eight real pillar-fight attempts (four pillars, two full runs) still had its own
+//! dedicated `fight()` call time out client-side exactly as this file's own history below describes.
+//! What *has* changed is the conclusion drawn from that: this file used to say a pillar that never
+//! syncs is "very likely still at full health server-side too" — that is now directly disproven.
+//! `game/server.rs`'s own `tick_lunar` counts real, currently-alive pillar npcs server-side to
+//! decide `LunarState::tick`'s `pillars_alive` gate, and that count reached zero and triggered a
+//! real Moon Lord spawn in both full runs — the pillars really do die for real, reliably, it is
+//! just not this bot's own dedicated fight phase that is doing it. The most likely mechanism,
+//! reasoned from the code rather than independently traced with per-tick instrumentation (that
+//! would mean reading deeper into `game/server.rs`'s own tick/sync internals than this file's own
+//! scope extends to): `Bot::defend` fires on every absorbed event throughout every later stage, not
+//! only during a dedicated fight, and a pillar is an ordinary hostile npc to it — a single brief,
+//! unlogged sync flicker at any point during the rest of a run would be enough for `defend` to land
+//! a hit no dedicated `fight()` call ever saw. Left as a reasoned hypothesis, not a confirmed one.
 //!
 //! # What is real
 //!
@@ -96,21 +123,27 @@
 //!    boss, Plantera's bulb — this bot does the real thing: it finds and breaks the real tile,
 //!    which is strictly *more* real than the summon-item path and is used whenever the game itself
 //!    offers it.
-//! 4. **Seven real, pre-existing gaps found while building and actually running this, disclosed
-//!    rather than routed around silently — and out of this task's own scope to fix
-//!    (`game/server.rs` is single-owner elsewhere right now):**
-//!    - **The Wall of Flesh has no in-game spawn trigger at all.** Real vanilla's trigger (a Guide
-//!      Voodoo Doll thrown into lava) has no equivalent anywhere in `game/server.rs` — grepped for
-//!      `113` (its npc id), `voodoo`, `Voodoo`: the only hit is the *death*-side hardmode flag.
-//!      There is no packet a real client could ever send that spawns it. Without a way around this,
-//!      hardmode — and everything after it — is unreachable through ordinary play on this server as
-//!      it stands today.
-//!    - **The Lunatic Cultist's tablet (npc 437, `CULTIST_TABLET`) is never spawned by anything.**
+//! 4. **Seven real, pre-existing gaps found while building and actually running this — the first
+//!    two later fixed server-side and switched to their real triggers here (see "Current status"
+//!    above); the rest disclosed rather than routed around silently and, at the time each was
+//!    found, out of the finding task's own scope to fix (`game/server.rs` was single-owner
+//!    elsewhere at the time):**
+//!    - **The Wall of Flesh had no in-game spawn trigger at all.** Real vanilla's trigger (a Guide
+//!      Voodoo Doll thrown into lava) had no equivalent anywhere in `game/server.rs` — grepped for
+//!      `113` (its npc id), `voodoo`, `Voodoo`: the only hit was the *death*-side hardmode flag.
+//!      There was no packet a real client could ever send that spawned it, so hardmode — and
+//!      everything after it — was unreachable through ordinary play. **Now fixed**:
+//!      `tick_wall_of_flesh_trigger`/`summon_wall_of_flesh` (`game/server.rs`) implement the real
+//!      mechanism, and this bot now drives it for real — see "Current status" above and the Wall
+//!      of Flesh stage's own comment in `main` for what that took and its own remaining caveat.
+//!    - **The Lunatic Cultist's tablet (npc 437, `CULTIST_TABLET`) was never spawned by anything.**
 //!      Its own AI (`game/ai/boss/tablet.rs`) is real and complete — gather four attendants, wait
-//!      for all four to die, shatter, raise the Cultist — but nothing places the tablet itself:
+//!      for all four to die, shatter, raise the Cultist — but nothing placed the tablet itself:
 //!      not the dungeon's ordinary or hardmode spawn pool (`game/spawn.rs`), not a periodic check
-//!      the way `tick_old_man` keeps Skeletron reachable. Golem can be beaten and the game simply
-//!      stops there.
+//!      the way `tick_old_man` keeps Skeletron reachable, so Golem could be beaten and the game
+//!      simply stopped there. **Now fixed**: `tick_cultist_tablet` (`game/server.rs`) places it for
+//!      real once `downed_golem && downed_boss3`, and this bot now drives it for real too — see
+//!      "Current status" above and the Lunatic Cultist stage's own comment in `main`.
 //!    - **Wood is not obtainable from a tree at all.**
 //!      `terrustia_proto::tile_drops::tile_drop` — the table `on_tile_manipulation` consults for
 //!      what a broken tile drops — has no entry for tile 5 (Tree), and `game/server.rs` has no
@@ -169,30 +202,51 @@
 //!      directly, repeatedly, for over a hundred real seconds in earlier testing, before
 //!      `clear_shield` existed) — something about entering that specific phase, not the entity
 //!      itself, seems to be the actual trigger, which fits none of the other three explanations.
-//!      Root cause not found — disclosed as unresolved rather than guessed at. Because `fight`'s hit
-//!      loop only ever attacks something it has actually seen, a pillar that never syncs during its
-//!      own dedicated fight call is very likely still at full health server-side too, not merely
-//!      hidden from view — so this is not "the kill happened but this bot couldn't tell", it is a
-//!      real, disclosed failure to actually kill the pillar, and without a pillar's real death,
-//!      `LunarState::tick`'s own `pillars_alive == 0` check never fires and Moon Lord is never
-//!      really summoned. See "Current status" at the top of this file for what that means for this
-//!      file's own title.
+//!      Root cause not found at the time — disclosed as unresolved rather than guessed at, and this
+//!      part is still true today: this specific client-side symptom, a pillar never once appearing
+//!      `alive` in this bot's own tracked view during its own dedicated fight call, still reproduced
+//!      in all eight further pillar-fight attempts made since (four pillars, two full runs). **What
+//!      is no longer true**: that this meant the pillar was "very likely still at full health
+//!      server-side too." It is not — `game/server.rs`'s own `tick_lunar` counts real, currently-
+//!      alive pillar npcs server-side, and that count reliably reached zero in both of the later
+//!      full runs, triggering a real Moon Lord spawn each time. The pillars really do die for real;
+//!      it is just demonstrably not this bot's own dedicated fight phase doing it. See "Current
+//!      status" at the top of this file for the fuller account, including a reasoned (not
+//!      independently confirmed) candidate mechanism.
+//!    - **An eighth, found later and fixed — squarely in this bot's own script, not in
+//!      `game/server.rs`/`game/ai/**`.** The first full run made after the fixes above targeted only
+//!      `lunar::MOON_LORD` (npc 398, "the core") for the Moon Lord fight, and watched its reported
+//!      life sit pinned at its exact starting 50,000 for the entire 600-second patience while the
+//!      bot kept taking real damage back from it — a different shape from every gap above, since the
+//!      core synced and stayed visible/tracked the whole time; this was never a sync gap. Root
+//!      cause, confirmed by reading `game/ai/boss/moon_lord.rs` directly: its own module doc says
+//!      outright that the core "cannot be hurt at all" until its head and both hands are open, and
+//!      `core()`'s own body backs it up in code, `npc.invulnerable = parts_open < 3` — a real,
+//!      deliberate, correct transcription of real vanilla's own three-part fight, not a bug. This
+//!      bot's single-id target list had simply never asked to fight any of the real, separate parts
+//!      the AI already spawns. Fixed by widening the Moon Lord stage's own fight target list to the
+//!      real full roster — see that stage's own comment in `main` for the detail and how it was
+//!      verified before being trusted in a 30-40-minute full run.
 //!
-//!    The first two are compensated for with the admin `/spawn <id>` console command — available to
-//!    any connected client on a server nobody has ever `/register`ed, exactly as
-//!    `terrustia-client/examples/playthrough.rs` already relies on for its own one-shot loot-spine
-//!    check. This is different in kind from that file's use of it: `playthrough.rs` uses `/spawn`
-//!    for *every* boss and then kills each with one scripted hit. This bot uses the real
-//!    [`Client::summon`] protocol action, or the real tile-break trigger, for everything that has
-//!    one, and reaches for `/spawn` only for these specific npc ids — recorded here, in `plan.md`,
-//!    and at each call site, as compensating for a genuine gap rather than a shortcut around
-//!    anything the server does enforce. The bodyless-worm gap gets the same `/spawn` compensation,
-//!    narrowly, right after the real trigger that found it (see the "evil biome's boss" stage). Each
-//!    lunar pillar's own escort gets the same treatment, at real, paced combat, for every one of the
-//!    real 100 the shield needs (see `clear_shield`). The rest are disclosed and left alone — the
-//!    tree gap because nothing needs it, the Creeper/Skeletron-Prime/pillar gaps because this task's
-//!    scope does not extend to root-causing them, and a tried, tested fix for the last of those three
-//!    did not work.
+//!    The first two used to be compensated for unconditionally with the admin `/spawn <id>` console
+//!    command; both now drive the real trigger described above instead, with `/spawn` kept only as
+//!    a disclosed fallback for when the real trigger's own precondition does not hold in a given run
+//!    (see each stage's own comment in `main` for exactly when that fallback fires and why). The
+//!    admin command itself is available to any connected client on a server nobody has ever
+//!    `/register`ed, exactly as `terrustia-client/examples/playthrough.rs` already relies on for its
+//!    own one-shot loot-spine check — but used differently: that file uses `/spawn` for *every* boss
+//!    and then kills each with one scripted hit, where this bot uses the real [`Client::summon`]
+//!    protocol action, a real tile-break trigger, or (now) a real npc-arrival/misc-data trigger for
+//!    everything that has one, reaching for `/spawn` only where a real trigger does not exist at all
+//!    or, for the two above, did not fire this particular run. The bodyless-worm gap gets the same
+//!    `/spawn` compensation, narrowly, right after the real trigger that found it (see the "evil
+//!    biome's boss" stage). Each lunar pillar's own escort gets the same treatment, at real, paced
+//!    combat, for every one of the real 100 the shield needs (see `clear_shield`). The rest are
+//!    disclosed and left alone — the tree gap because nothing needs it, and the Creeper/Skeletron-
+//!    Prime/pillar gaps because root-causing them means reading further into `game/server.rs`'s own
+//!    NPC-spawn/sync machinery than this task's scope extends to, and a tried, tested fix for the
+//!    last of those three did not close the specific client-side symptom either (see above for what
+//!    is now known about its actual practical impact).
 //! 5. **No day/night waiting turned out to be needed.** Real vanilla gates Eye of Cthulhu's natural
 //!    spawn and the Old Man's Skeletron dialogue on night specifically — but `on_summon`
 //!    (`game/server.rs`) does not check the clock at all before honouring packet 43, the same
@@ -253,6 +307,7 @@ const STAGES: &[&str] = &[
     "primt",
     "plantera",
     "golem",
+    "skeletron",
     "cultist",
     "solar",
     "vortex",
@@ -291,6 +346,11 @@ struct Map {
     /// underground y).
     jungle: Option<(i32, i32, i32)>,
     dungeon: Option<(i32, i32)>,
+    /// One real, settled Underworld lava tile — `tick_wall_of_flesh_trigger`'s own boundary for
+    /// "in the Underworld" (`world.height() - 200`, `game/server.rs`) is reused here rather than
+    /// guessed at separately, so a Guide Voodoo Doll dropped here lands somewhere the server's own
+    /// real trigger actually recognises.
+    underworld_lava: Option<(i32, i32)>,
     width: i32,
     surface: i32,
 }
@@ -313,10 +373,22 @@ fn scan_world(world: &World) -> Map {
     let mut jungle_y_sum: i64 = 0;
     let mut jungle_y_n: i64 = 0;
     let mut dungeon_xs: Vec<i32> = Vec::new();
+    let mut lava: Vec<(i32, i32)> = Vec::new();
+    let underworld_from = world.height() - 200;
 
     for x in 0..world.width() {
         for y in 0..world.height() {
             let tile = world.tile(x, y);
+            // Liquid lives independently of the foreground block (`tick_wall_of_flesh_trigger`'s
+            // own check has no `is_active` guard either — real settled lava sits in open space),
+            // so this has to run before the early-continue below or it would never see any.
+            if y >= underworld_from
+                && tile.liquid > 0
+                && tile.liquid_kind == terrustia_proto::Liquid::Lava
+                && lava.len() < 2000
+            {
+                lava.push((x, y));
+            }
             if !tile.is_active() {
                 continue;
             }
@@ -382,6 +454,14 @@ fn scan_world(world: &World) -> Map {
                 ))
             }
         });
+    // Well clear of either world edge, same margin `housing::check_room` itself refuses to build
+    // within — not load-bearing here (nothing about the lava trigger checks the world edge), just
+    // a safety margin against picking a tile some other edge-adjacent quirk might make unreliable.
+    let underworld_lava = lava
+        .iter()
+        .find(|&&(x, _)| x > 80 && x < world.width() - 80)
+        .or_else(|| lava.first())
+        .copied();
 
     Map {
         spawn,
@@ -392,6 +472,7 @@ fn scan_world(world: &World) -> Map {
         life_crystals,
         jungle,
         dungeon,
+        underworld_lava,
         width: world.width(),
         surface: i32::from(world.surface),
     }
@@ -782,6 +863,160 @@ async fn fight(bot: &mut Bot, targets: &[u16], name: &str, patience_secs: u64) -
     }
 }
 
+// --------------------------------------------------------------------------- real spawn triggers
+
+/// Real vanilla ids the now-real Wall of Flesh and Lunatic Cultist triggers need — see
+/// `game/server.rs`'s own `tick_wall_of_flesh_trigger`/`summon_wall_of_flesh`/`tick_old_man`/
+/// `tick_cultist_tablet` for the mechanisms these stages now actually drive, and plan.md's own
+/// "Real spawn triggers for the Wall of Flesh and the Lunatic Cultist's tablet" row for how they
+/// were confirmed against real vanilla.
+const GUIDE: u16 = 22;
+const OLD_MAN: u16 = 37;
+const SKELETRON: u16 = 35;
+const GUIDE_VOODOO_DOLL: i32 = 267;
+
+/// Real ids for the Guide's own real house (`game/housing.rs`'s own `check_room`, transcribed
+/// from `WorldGen.StartRoomCheck`/`CheckRoom`/`RoomNeeds`): a plain stone shell (block 1 — solid,
+/// confirmed by that module's own test fixture's own comment), a matching *built* background wall
+/// (wall 4, "stone wall" — one of the ids `housing::wall_encloses` confirms actually encloses a
+/// room; a natural dirt wall does not), and one of each piece of furniture
+/// `housing::counts_as_chair`/`counts_as_table`/`counts_as_torch`/`counts_as_door` recognise: a
+/// wooden chair (15), a wooden table (14), a torch (4), a wooden door (10).
+const HOUSE_SHELL_BLOCK: u16 = 1;
+const HOUSE_BACKGROUND_WALL: u16 = 4;
+const CHAIR: u16 = 15;
+const TABLE: u16 = 14;
+const TORCH: u16 = 4;
+const DOOR: u16 = 10;
+
+/// Build the Guide a real house so he actually arrives.
+///
+/// `tick_town_npcs`'s own doc comment (`game/server.rs`): "The Guide is the exception — it
+/// arrives as soon as there is somewhere to live"; nothing else gates him in this project (real
+/// vanilla's own per-resident inventory conditions are not modelled here at all). Every tile
+/// below goes over the real `place_tile`/`place_wall`/`place_object` wire actions a real client
+/// uses to build, and the result is checked by the same `housing::check_room` a human player's
+/// own build is judged against — an enclosed space of 60-750 open tiles, sealed by a *built*
+/// wall, furnished with a chair, a table, a light, and a door. No mined materials are required:
+/// `on_place_object`'s own body (`game/server.rs`) has no inventory check at all, the same shape
+/// as this bot's other equipment/summon-item calls (disclosure point 2 above).
+async fn build_guide_house(bot: &mut Bot, at: (i32, i32)) {
+    let (x0, y0) = at;
+    let (w, h) = (12, 9);
+    bot.walk_to_tile(x0 + w / 2, y0 + h / 2).await;
+    println!("  building a real house for the Guide at ({x0},{y0}), {w}x{h} ...");
+
+    // Real, found-not-assumed pacing: a first attempt fired every `place_tile`/`place_wall` call
+    // back to back with no delay and the server's own real anti-cheat tile-edit limiter
+    // (`note_tile_spam`, `game/server.rs` — transcribed from vanilla's own `Net.CheatingTileSpam`)
+    // kicked the bot mid-build for "placing tiles too fast": `SPAM_PLACE_MAX` is 100, decaying by
+    // only 0.3/tick, and this house alone needs 38 shell + 70 background-wall placements — 108,
+    // over the ceiling with no room to spare. This is not a server gap to route around; it is
+    // this bot's own build going faster than any real client's own hand-paced edits ever would,
+    // so the real fix is real pacing, not a workaround — a short drain after every place-counted
+    // edit (breaking is a separate, much larger budget and needs none). `break_tile` does not
+    // need it (a 500-ceiling, 5.0/tick-decay budget, still nowhere near tripped by 70 of them).
+    async fn paced_place_tile(bot: &mut Bot, x: i16, y: i16, block: u16) {
+        let _ = bot.client.place_tile(x, y, block).await;
+        bot.drain_briefly(25).await;
+    }
+    async fn paced_place_wall(bot: &mut Bot, x: i16, y: i16, wall: u16) {
+        let _ = bot.client.place_wall(x, y, wall).await;
+        bot.drain_briefly(25).await;
+    }
+
+    // A one-tile-thick solid shell — `place_tile` overwrites whatever real terrain was already
+    // there, so nothing needs clearing first.
+    for x in x0..x0 + w {
+        paced_place_tile(bot, x as i16, y0 as i16, HOUSE_SHELL_BLOCK).await;
+        paced_place_tile(bot, x as i16, (y0 + h - 1) as i16, HOUSE_SHELL_BLOCK).await;
+    }
+    for y in y0..y0 + h {
+        paced_place_tile(bot, x0 as i16, y as i16, HOUSE_SHELL_BLOCK).await;
+        paced_place_tile(bot, (x0 + w - 1) as i16, y as i16, HOUSE_SHELL_BLOCK).await;
+    }
+    // The interior: real open air (whatever real terrain was there before, actually broken for
+    // real), with a real background wall behind every tile — the surest way to satisfy
+    // `enclosed_at`'s own "sealed within two tiles on both axes" check regardless of what the real
+    // terrain at this site looked like before this bot got here.
+    for x in x0 + 1..x0 + w - 1 {
+        for y in y0 + 1..y0 + h - 1 {
+            let _ = bot.client.break_tile(x as i16, y as i16).await;
+            paced_place_wall(bot, x as i16, y as i16, HOUSE_BACKGROUND_WALL).await;
+        }
+    }
+    bot.drain_briefly(300).await;
+
+    // One of each required piece of furniture, laid out on the interior floor with no overlap
+    // (accounting for each object's own real, non-trivial origin offset — a door is 1x3 anchored
+    // at its top, a table 3x2 anchored one tile in from its bottom-left, a chair 1x2 anchored at
+    // its own base — `terrustia_proto::tile_object`'s own generated table).
+    let floor = y0 + h - 2;
+    let _ = bot
+        .client
+        .place_object((x0 + 2) as i16, floor as i16, CHAIR, 0)
+        .await;
+    let _ = bot
+        .client
+        .place_object((x0 + 5) as i16, floor as i16, TABLE, 0)
+        .await;
+    let _ = bot
+        .client
+        .place_object((x0 + 8) as i16, floor as i16, TORCH, 0)
+        .await;
+    let _ = bot
+        .client
+        .place_object((x0 + 1) as i16, (y0 + 1) as i16, DOOR, 0)
+        .await;
+    bot.drain_briefly(300).await;
+    println!("  house built for real; waiting for the real housing scan to find it");
+}
+
+/// Wait for a real NPC of the given type to actually sync to this bot's client — for real,
+/// server-driven arrivals (the Guide moving into a finished house, the Old Man returning to the
+/// dungeon, the cultist tablet appearing) that are not fights and so do not go through [`fight`].
+async fn wait_for_npc(bot: &mut Bot, npc_type: u16, name: &str, patience_secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(patience_secs);
+    let mut last_ping = Instant::now() - Duration::from_secs(1);
+    println!("  waiting for {name} (up to {patience_secs}s)...");
+    loop {
+        if bot.client.world().npcs().any(|n| n.npc_type() == npc_type) {
+            println!("  {name} is real and present.");
+            return true;
+        }
+        if Instant::now() >= deadline {
+            println!("  [timeout] {name} never arrived inside its patience");
+            return false;
+        }
+        if last_ping.elapsed() >= Duration::from_secs(1) {
+            last_ping = Instant::now();
+            // Still report a position so the connection does not idle out while nothing is
+            // happening yet — the same reasoning `fight`'s own "nothing to hit yet" branch gives.
+            let (x, y) = bot.client.position();
+            let _ = bot.client.move_to(x, y).await;
+        }
+        if let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(200), bot.client.next_event()).await
+        {
+            bot.absorb(&event).await;
+        }
+    }
+}
+
+/// Packet 51 (misc data), action 1 — the real trigger for Skeletron: `on_misc_data`'s own doc
+/// comment (`game/server.rs`), "the dialogue *is* the summon". Unlike every other boss this bot
+/// fights, Skeletron genuinely has no [`Client::summon`] path at all — 35 is deliberately absent
+/// from `npc_params::SUMMONABLE`, matching real vanilla exactly (there has never been a summon
+/// item for it) — so this sends the one real packet that stands in for taking the Old Man up on
+/// his offer, built directly here since no existing `terrustia_client::Client` method wraps it.
+async fn take_old_man_up_on_his_offer(bot: &mut Bot) {
+    let mut w = terrustia_proto::PacketWriter::new(terrustia_proto::id::MISC_DATA_SYNC);
+    w.u8(bot.slot()).u8(1);
+    if let Ok(frame) = w.finish() {
+        let _ = bot.client.send(&frame).await;
+    }
+}
+
 // ------------------------------------------------------------------------------------------ main
 
 #[tokio::main]
@@ -823,7 +1058,7 @@ async fn main() -> ExitCode {
     let map = scan_world(&world);
     println!(
         "  scanned in {:.2}s: ore tiers {}/{}/{}/{}, {} trees, {} orb tiles, {} altars, {} life \
-         crystals, jungle {:?}, dungeon {:?}",
+         crystals, jungle {:?}, dungeon {:?}, underworld lava {:?}",
         scan_started.elapsed().as_secs_f64(),
         map.ore[0].len(),
         map.ore[1].len(),
@@ -835,6 +1070,7 @@ async fn main() -> ExitCode {
         map.life_crystals.len(),
         map.jungle,
         map.dungeon,
+        map.underworld_lava,
     );
     if map.ore.iter().any(Vec::is_empty) || map.trees.is_empty() || map.orbs.is_empty() {
         println!(
@@ -1084,10 +1320,46 @@ async fn main() -> ExitCode {
         return finish(&bot, run_started, evil_boss_ok);
     }
 
-    // ---- stage: Wall of Flesh (disclosure point 4: /spawn compensates for a real, missing
-    // trigger) --------------------------------------------------------------------------------
-    println!("\n== stage: Wall of Flesh (disclosure point 4: no real trigger exists yet) ==");
-    let _ = bot.client.say("/spawn 113").await;
+    // ---- stage: Wall of Flesh (real trigger: a real house for the Guide, then a real Guide
+    // Voodoo Doll burned in real settled Underworld lava — `tick_wall_of_flesh_trigger`/
+    // `summon_wall_of_flesh`, `game/server.rs`; see plan.md's own "Real spawn triggers for the
+    // Wall of Flesh and the Lunatic Cultist's tablet" row for how both mechanisms were confirmed
+    // against real vanilla before being built) -----------------------------------------------
+    println!("\n== stage: Wall of Flesh (real house + real voodoo-doll-in-lava trigger) ==");
+    build_guide_house(&mut bot, (map.spawn.0 + 20, map.spawn.1)).await;
+    let guide_home = wait_for_npc(&mut bot, GUIDE, "the Guide", 45).await;
+    let mut used_real_wof_trigger = false;
+    if guide_home {
+        if let Some((lx, ly)) = map.underworld_lava {
+            println!(
+                "  the Guide is real and home; walking a real Guide Voodoo Doll (item 267 — a \
+                 real, RNG-gated Voodoo Demon drop this bot bookkeeps exactly like every other \
+                 summon item, disclosure point 3, not a Guide-crafted one: confirmed directly \
+                 against the decompiled `ItemDropDatabase.cs`, `RegisterToNPC(66, \
+                 ItemDropRule.Common(267))` — npc 66 is `VoodooDemon` — no recipe anywhere in \
+                 `Recipe.cs` creates item 267 at all) to real settled lava at ({lx},{ly})"
+            );
+            bot.walk_to_tile(lx, ly).await;
+            let _ = bot
+                .client
+                .drop_item(
+                    terrustia_proto::ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
+                    (lx as f32 * 16.0, ly as f32 * 16.0),
+                )
+                .await;
+            bot.drain_briefly(2000).await;
+            used_real_wof_trigger = true;
+        } else {
+            println!("  WARNING: no underworld lava found in this world's own scan");
+        }
+    }
+    if !used_real_wof_trigger {
+        println!(
+            "  the real trigger could not fire this run (see the WARNING above) — falling back \
+             to the disclosed /spawn 113 workaround"
+        );
+        let _ = bot.client.say("/spawn 113").await;
+    }
     let wof = fight(&mut bot, &[113], "the Wall of Flesh", 150).await;
     if should_stop("wof", &stop) {
         return finish(&bot, run_started, wof);
@@ -1229,10 +1501,58 @@ async fn main() -> ExitCode {
     }
     bot.power = 800;
 
-    // ---- stage: Lunatic Cultist (disclosure point 4: /spawn compensates for a real, missing
-    // trigger) ----------------------------------------------------------------------------------
-    println!("\n== stage: Lunatic Cultist (disclosure point 4: no natural trigger exists yet) ==");
-    let _ = bot.client.say("/spawn 437").await;
+    // ---- stage: Skeletron (a real, previously-undisclosed precondition this run's own stage
+    // order never satisfied: `tick_cultist_tablet`'s real trigger below is gated on
+    // `downed_boss3`, real vanilla's own Skeletron-kill flag, and nothing before this point in
+    // this file ever fought the real, pre-hardmode Skeletron — only Skeletron *Prime*, a
+    // different, hardmode npc. Real vanilla has no summon item for it at all — "the dialogue *is*
+    // the summon" (`on_misc_data`'s own doc comment) — so this walks to the dungeon, waits for
+    // `tick_old_man` to place the real Old Man there for real, then sends the one real packet
+    // that stands in for taking him up on his offer. -------------------------------------------
+    println!("\n== stage: Skeletron (real dungeon trigger: the Old Man's own offer) ==");
+    let mut skeletron_ok = false;
+    if let Some((dx, dy)) = map.dungeon {
+        bot.walk_to_tile(dx, dy).await;
+        let old_man_here = wait_for_npc(&mut bot, OLD_MAN, "the Old Man", 20).await;
+        if old_man_here {
+            take_old_man_up_on_his_offer(&mut bot).await;
+            skeletron_ok = fight(&mut bot, &[SKELETRON], "Skeletron", 150).await;
+        } else {
+            println!(
+                "  the Old Man never arrived at the dungeon — Skeletron cannot be triggered for \
+                 real this run; `downed_boss3` stays false, so the tablet's own real trigger \
+                 below will not fire either"
+            );
+        }
+    } else {
+        println!("  this world has no scanned dungeon — Skeletron cannot be triggered for real");
+    }
+    if should_stop("skeletron", &stop) {
+        return finish(&bot, run_started, skeletron_ok);
+    }
+
+    // ---- stage: Lunatic Cultist (real trigger: `tick_cultist_tablet`, `game/server.rs` — see
+    // plan.md's own "Real spawn triggers for the Wall of Flesh and the Lunatic Cultist's tablet"
+    // row) ----------------------------------------------------------------------------------------
+    println!("\n== stage: Lunatic Cultist (real dungeon-entrance tablet trigger) ==");
+    let mut tablet_up = false;
+    if let Some((dx, dy)) = map.dungeon {
+        bot.walk_to_tile(dx, dy).await;
+        tablet_up = wait_for_npc(
+            &mut bot,
+            npc_params::CULTIST_TABLET,
+            "the cultist tablet",
+            30,
+        )
+        .await;
+    }
+    if !tablet_up {
+        println!(
+            "  the real trigger needs downed_golem && downed_boss3 && !downed_ancient_cultist; \
+             it did not fire this run — falling back to the disclosed /spawn 437 workaround"
+        );
+        let _ = bot.client.say("/spawn 437").await;
+    }
     let attendants = fight(
         &mut bot,
         &[npc_params::CULTIST_ARCHER, npc_params::CULTIST_DEVOTE],
@@ -1300,9 +1620,42 @@ async fn main() -> ExitCode {
     }
 
     // ---- stage: Moon Lord ---------------------------------------------------------------------
+    // An eighth real, previously-undisclosed finding, in this bot's own script rather than in
+    // `game/server.rs`/`game/ai/**` (so within this task's own scope to fix directly): a first
+    // run targeted only `lunar::MOON_LORD` (npc 398, "the core") and watched its reported life
+    // sit pinned at its exact starting 50,000 for the full 600s patience — a different shape from
+    // every sync-failure gap above, since the core synced and stayed visible/tracked the entire
+    // time, and the bot was genuinely taking real damage back from it throughout. Root cause,
+    // confirmed by reading `game/ai/boss/moon_lord.rs` directly rather than guessed at: its own
+    // module doc says so outright — "The core is not the fight. It hangs a hundred and thirty
+    // pixels below you, cannot be hurt at all, and waits — its two hands and its head are the
+    // fight, and only once all three are open does the core become something you can attack" —
+    // and `core()`'s own body confirms it in code, not just prose: `npc.invulnerable = parts_open
+    // < 3`. This is not a server bug; it is a faithful, deliberate transcription of real vanilla's
+    // own three-part Moon Lord fight, and the AI already spawns the real separate parts
+    // (`MOON_LORD_HEAD`/`MOON_LORD_HAND`, `npc_params.rs`) — this bot's own single-id target list
+    // just never asked to fight any of them. Widened here to the real full roster: the head, both
+    // hands (one npc type, two live instances — `fight`'s own targets-by-type filter already
+    // covers both without change), the core itself (for once it actually opens), the free eye a
+    // broken socket releases ("breaking a socket does not remove it from the fight: the eye comes
+    // out and hunts you as a free eye" — the same module doc), and the leech the head puts out
+    // ("carries life back to whichever part is most hurt, so ignoring them undoes work you have
+    // already done" — killing it, not just avoiding it, is what a real fight actually requires).
     println!("\n== stage: MOON LORD ==");
     println!("  waiting up to a minute for the real post-pillar countdown, then fighting for real");
-    let moon_lord = fight(&mut bot, &[lunar::MOON_LORD], "MOON LORD", 600).await;
+    let moon_lord = fight(
+        &mut bot,
+        &[
+            npc_params::MOON_LORD_HEAD,
+            npc_params::MOON_LORD_HAND,
+            lunar::MOON_LORD,
+            npc_params::MOON_LORD_FREE_EYE,
+            npc_params::MOON_LORD_LEECH,
+        ],
+        "MOON LORD",
+        600,
+    )
+    .await;
 
     finish(&bot, run_started, moon_lord)
 }
