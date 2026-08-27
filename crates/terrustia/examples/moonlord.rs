@@ -733,8 +733,21 @@ async fn clear_shield(bot: &mut Bot, escorts: &[u16], human_name: &str) {
     use terrustia::game::lunar::SHIELD_STRENGTH;
     for i in 0..SHIELD_STRENGTH {
         let kind = escorts[i as usize % escorts.len()];
-        let _ = bot.client.say(&format!("/spawn {kind}")).await;
-        fight_quiet(bot, &[kind], 15).await;
+        // `fight_quiet`'s own 15s patience can time out against a genuinely dangerous hardmode
+        // escort without it actually being dead — its own boolean return used to be discarded
+        // here, so the loop moved on regardless, leaving a live escort behind and the real kill
+        // count short of the 100 the shield actually needs. Now it keeps at the *same* escort
+        // until a kill is confirmed, rather than abandoning it and spawning a fresh one on top
+        // (which would only compound the difficulty, not fix it) — real vanilla has no time limit
+        // on any one kill either.
+        loop {
+            if !bot.client.world().npcs().any(|n| n.npc_type() == kind) {
+                let _ = bot.client.say(&format!("/spawn {kind}")).await;
+            }
+            if fight_quiet(bot, &[kind], 15).await {
+                break;
+            }
+        }
         if i % 20 == 0 {
             println!("    ... {i}/{SHIELD_STRENGTH} of {human_name}'s shield cleared");
         }
