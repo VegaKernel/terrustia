@@ -2046,6 +2046,23 @@ pub fn splitting_worm(npc_type: u16) -> Option<(u16, u16, u16)> {
     matches!(npc_type, 13..=15).then_some(EATER_OF_WORLDS)
 }
 
+/// A worm-headed type's own body, tail and real segment count, if `head_type` is one.
+///
+/// A worm head spawned alone is a floating face: the body has to be created alongside it, every
+/// segment linked to the one ahead. Covers every worm this project models — the four ordinary
+/// worm monsters `NPC.cs`'s own spawn code gives 20/8/6/12 segments respectively, and the
+/// Destroyer, whose own module doc already counts "eighty body segments".
+pub fn worm_body(head_type: u16) -> Option<(u16, u16, usize)> {
+    match head_type {
+        13 => Some((14, 15, 20)),    // Eater of Worlds
+        7 => Some((8, 9, 8)),        // Devourer
+        10 => Some((11, 12, 6)),     // Giant Worm
+        39 => Some((40, 41, 12)),    // Bone Serpent
+        134 => Some((135, 136, 80)), // The Destroyer
+        _ => None,
+    }
+}
+
 /// How long a Mothron egg takes to hatch, and what it hatches into.
 pub const MOTHRON_EGG_TICKS: f32 = 900.0;
 pub const MOTHRON_SPAWN: u16 = 479;

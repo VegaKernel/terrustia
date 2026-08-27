@@ -4646,7 +4646,19 @@ impl GameServer {
         // Nowhere to stand — a Moon Lord, or a player in mid-air. Overhead it is.
         let at = at.unwrap_or((at_player.0, at_player.1 - SUMMON_ABOVE));
 
-        if let Some(index) = self.npcs.spawn(npc_type, at) {
+        // A worm head spawned alone is a floating face: this is the same real trigger the evil
+        // biome's own third-orb-break uses (`smash_orb`) and the one a real summon item's packet
+        // reaches (`on_summon`), so a bodyless Eater of Worlds or Destroyer here is not a cosmetic
+        // gap — it is the whole fight missing, since both bosses' own real damage/behaviour depend
+        // on having a body at all. `/spawn`'s own admin command already knew to do this for the
+        // four ordinary worm monsters; this was the one real path that never did.
+        let spawned = match terrustia_proto::npc_params::worm_body(npc_type) {
+            Some((body, tail, segments)) => {
+                self.npcs.spawn_worm(npc_type, body, tail, segments, at)
+            }
+            None => self.npcs.spawn(npc_type, at),
+        };
+        if let Some(index) = spawned {
             let name = self
                 .npcs
                 .get(index)
@@ -6139,13 +6151,11 @@ impl GameServer {
                 // Drop it a little to the side so it does not appear inside the player.
                 let at = (position.0 + 64.0, position.1 - 32.0);
                 // Worm heads come with a body: spawning a bare head would be a floating face.
-                let spawned = match npc_type {
-                    // EaterofWorldsHead, DevourerHead, GiantWormHead, BoneSerpentHead.
-                    13 => self.npcs.spawn_worm(13, 14, 15, 20, at),
-                    7 => self.npcs.spawn_worm(7, 8, 9, 8, at),
-                    10 => self.npcs.spawn_worm(10, 11, 12, 6, at),
-                    39 => self.npcs.spawn_worm(39, 40, 41, 12, at),
-                    _ => self.npcs.spawn(npc_type, at),
+                let spawned = match terrustia_proto::npc_params::worm_body(npc_type) {
+                    Some((body, tail, segments)) => {
+                        self.npcs.spawn_worm(npc_type, body, tail, segments, at)
+                    }
+                    None => self.npcs.spawn(npc_type, at),
                 };
                 match spawned {
                     Some(index) => {

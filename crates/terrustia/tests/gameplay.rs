@@ -2486,6 +2486,44 @@ async fn private_storage_is_not_relayed() {
     assert!(leaked.is_err(), "a piggy bank should not be broadcast");
 }
 
+/// A worm-headed boss summoned for real comes with its body.
+///
+/// `summon_on_player` — reached both by a real summon item's own packet (`on_summon`) and by the
+/// evil biome's own third-orb-break trigger (`smash_orb`) — used to call the same plain
+/// `self.npcs.spawn(npc_type, at)` every other boss does, unlike the admin `/spawn` command, which
+/// already special-cased the four ordinary worm monsters so a bare head would not float there
+/// alone. The Destroyer shares that exact shape and was never special-cased anywhere: found live,
+/// summoning it for real produced only npc 134 and neither of its own 80 real body segments (135,
+/// 136) — not a cosmetic gap, since the whole fight ("its damage is a function of how much of its
+/// length has a line to you", `destroyer.rs`'s own module doc) depends on a body existing at all.
+#[tokio::test]
+async fn a_summoned_worm_boss_comes_with_its_body() {
+    let addr = start().await;
+    let mut alice = join(addr, "destroyer-summoner").await;
+    alice.summon(134).await.unwrap();
+
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, alice.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if matches!(n.npc_type(), 134..=136) => {
+                seen.insert(n.npc_type());
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        std::collections::HashSet::from([134, 135, 136]),
+        "expected the Destroyer's head, body and tail all real-summoned, only saw {seen:?}"
+    );
+}
+
 /// Using a summoning item is the only way a boss enters the world, so it had better work.
 #[tokio::test]
 async fn a_player_can_summon_a_boss() {
