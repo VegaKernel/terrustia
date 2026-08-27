@@ -2209,6 +2209,10 @@ impl GameServer {
 
     /// Drop whatever a broken tile yields, if it is a block with a simple drop.
     fn spawn_tile_drop(&mut self, tile: u16, frame_x: i16, frame_y: i16, x: i32, y: i32) {
+        if is_tree_tile(tile) {
+            self.spawn_tree_drop(frame_x, frame_y, x, y);
+            return;
+        }
         let Some(item_id) = drop_of(tile, frame_x, frame_y) else {
             debug!(tile, "nothing known to drop for this tile type");
             return;
@@ -2219,6 +2223,100 @@ impl GameServer {
             return;
         };
         self.broadcast_item(index);
+    }
+
+    /// A tree tile's own drop: kept apart from [`drop_of`]'s static table because vanilla's real
+    /// mechanism (`WorldGen.KillTile_GetTreeDrops`) needs live world state a per-tile lookup
+    /// cannot see — which biome the tree is rooted in, found by walking down to the ground.
+    ///
+    /// Faithful to source with one disclosed simplification: vanilla's own "bonus wood" roll also
+    /// scales with the chopping player's currently-equipped axe's power (`genRand.Next(35) <=
+    /// axe`), which needs per-slot inventory-content tracking this project does not have yet (the
+    /// same missing prerequisite `plan.md`'s `RedHatSkeletron` gap already found and disclosed).
+    /// Only the roll's own item-independent term (`Main.rand.Next(3) == 0`, real vanilla data, not
+    /// invented) is transcribed here; the axe-scaling half is a real, narrower, disclosed gap.
+    fn spawn_tree_drop(&mut self, frame_x: i16, frame_y: i16, x: i32, y: i32) {
+        let species = self.tree_species_at(x, y);
+        // `WorldGen.cs`'s own literal condition, transcribed as-is rather than redesigned: it is
+        // the frame range vanilla actually uses to decide "is this the leafy top", quirks and all.
+        let is_top = frame_x >= 22 && frame_y >= 198;
+
+        let mut secondary = None;
+        if is_top && rand::Rng::random_range(&mut self.rng, 0..2) == 0 && tree_drops_acorns(species)
+        {
+            secondary = Some(ACORN);
+        }
+
+        let primary = match species {
+            TreeSpecies::Corrupt => Some(EBONWOOD),
+            TreeSpecies::Crimson => Some(SHADEWOOD),
+            TreeSpecies::Jungle => Some(RICH_MAHOGANY),
+            TreeSpecies::Hallowed => Some(PEARLWOOD),
+            TreeSpecies::Snow => Some(BOREAL_WOOD),
+            TreeSpecies::Mushroom => {
+                (rand::Rng::random_range(&mut self.rng, 0..2) == 0).then_some(GLOWING_MUSHROOM)
+            }
+            TreeSpecies::Forest | TreeSpecies::None => Some(WOOD),
+        };
+
+        let position = (x as f32 * 16.0, y as f32 * 16.0);
+        if let Some(item_id) = primary {
+            let mut stack: i16 = 1;
+            if rand::Rng::random_range(&mut self.rng, 0..3) == 0 {
+                stack += 1;
+            }
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(item_id, stack, 0), position)
+            {
+                self.broadcast_item(index);
+            }
+        }
+        if let Some(secondary_id) = secondary
+            && let Some(index) = self
+                .items
+                .spawn(ItemStack::new(secondary_id, 1, 0), position)
+        {
+            self.broadcast_item(index);
+        }
+    }
+
+    /// Which vanilla species a tree tile belongs to, found by walking down to the ground it is
+    /// rooted in — `WorldGen.GetTreeBottom` + `GetTreeType`. The broken tile itself is already
+    /// cleared by the time this runs, exactly as in source (`KillTile` clears the tile before
+    /// computing its drop): the walk tolerates that by treating "not active" the same as "still a
+    /// tree tile, keep walking", the same forgiving condition vanilla's own loop uses.
+    ///
+    /// Only the ground types this generator's own `trees::fit_for_tree` can actually grow a tree
+    /// on ever occur here — vanilla's desert-palm and underworld-ash branches are omitted as
+    /// genuinely unreachable rather than transcribed dead, since nothing in this project plants a
+    /// tree on sand or ash today.
+    fn tree_species_at(&self, x: i32, y: i32) -> TreeSpecies {
+        let mut y = y;
+        loop {
+            let here = self.world.tile(x, y);
+            if here.is_active() && !is_tree_tile(here.block) {
+                break;
+            }
+            if !self.world.in_bounds(x, y + 1) {
+                break;
+            }
+            y += 1;
+        }
+        let ground = self.world.tile(x, y);
+        if !ground.is_active() {
+            return TreeSpecies::None;
+        }
+        match ground.block {
+            2 => TreeSpecies::Forest,
+            23 => TreeSpecies::Corrupt,
+            60 => TreeSpecies::Jungle,
+            70 => TreeSpecies::Mushroom,
+            109 => TreeSpecies::Hallowed,
+            147 => TreeSpecies::Snow,
+            199 => TreeSpecies::Crimson,
+            _ => TreeSpecies::None,
+        }
     }
 
     /// The Travelling Merchant: whether he turns up today, and whether he has gone.
@@ -6223,6 +6321,51 @@ const SPREAD_EVERY: u64 = 10;
 const GROWTH_EVERY: u64 = 10;
 const SPREAD_TRIES: usize = 3;
 const SPREAD_RANGE: i32 = 120;
+
+/// Tree tile types that share vanilla's own `KillTile_GetTreeDrops` branch (`WorldGen.cs`, `case
+/// 5: case 596: case 616: case 634:`). Only 5 (ordinary trees) is ever worldgen-placed by this
+/// project today (`world::trees`); the vanity-tree and ash-tree variants are included anyway
+/// since it costs nothing and the item->tile placement table already knows their ids.
+const TREE_TILES: [u16; 4] = [5, 596, 616, 634];
+
+fn is_tree_tile(block: u16) -> bool {
+    TREE_TILES.contains(&block)
+}
+
+/// `WorldGen.GetTreeType`'s own enum, narrowed to the species this project's ground types can
+/// actually produce (see [`GameServer::tree_species_at`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeSpecies {
+    None,
+    Forest,
+    Corrupt,
+    Crimson,
+    Jungle,
+    Hallowed,
+    Snow,
+    Mushroom,
+}
+
+/// `WorldGen.TreeTypeDropsAcorns`: every species drops an acorn from its canopy except a tree with
+/// no resolved species, and the two whose canopy drops something else instead (a mushroom cap, a
+/// Rich Mahogany sapling players plant deliberately rather than find as a bonus).
+fn tree_drops_acorns(species: TreeSpecies) -> bool {
+    !matches!(
+        species,
+        TreeSpecies::None | TreeSpecies::Mushroom | TreeSpecies::Jungle
+    )
+}
+
+/// Item ids for tree drops (`ItemID.cs`): plain Wood, the six biome-specific woods, an Acorn, and
+/// what a Mushroom-biome tree gives instead of wood.
+const WOOD: i32 = 9;
+const ACORN: i32 = 27;
+const EBONWOOD: i32 = 619;
+const RICH_MAHOGANY: i32 = 620;
+const PEARLWOOD: i32 = 621;
+const SHADEWOOD: i32 = 911;
+const GLOWING_MUSHROOM: i32 = 183;
+const BOREAL_WOOD: i32 = 2503;
 
 /// The demon altar, which is a crafting station before hardmode and an ore mine after it.
 const DEMON_ALTAR: u16 = 26;
@@ -14303,6 +14446,193 @@ mod conditional_numerator_fixes {
         assert!(
             expert_hits > 230,
             "expert landed {expert_hits}/{TRIALS} — real expert rate is 9-in-10 (~270), not the classic 1-in-2 (~150)"
+        );
+    }
+}
+
+/// Wood, closed as a real gap this session: a freshly generated world had trees but no drop
+/// mapping for tile 5 at all — chopping one gave nothing, silently, the first material every
+/// crafting recipe in the game starts from. `moonlord.rs`'s own doc comment first found and
+/// disclosed this live. Fixed by [`GameServer::spawn_tree_drop`], transcribed from
+/// `WorldGen.KillTile_GetTreeDrops`.
+#[cfg(test)]
+mod wood_from_trees {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::items::ItemStore;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "tree drop probe")
+    }
+
+    /// Plants a one-tile trunk on top of `ground_block` at `(10, 100)` and returns a server ready
+    /// to break it — the trunk's own position, `(10, 99)`, is what `spawn_tile_drop` is called
+    /// with in each test below.
+    fn planted(ground_block: u16) -> GameServer {
+        let mut world = tiny_world();
+        world.set_tile(10, 100, Tile::block(ground_block));
+        world.set_tile(10, 99, Tile::framed(5, 0, 0));
+        GameServer::new(Config::default(), world)
+    }
+
+    fn broken_ids(server: &mut GameServer, frame_x: i16, frame_y: i16) -> Vec<i32> {
+        server.items = ItemStore::new();
+        server.spawn_tile_drop(5, frame_x, frame_y, 10, 99);
+        let mut items: Vec<(i16, i32)> = server
+            .items
+            .iter()
+            .map(|(index, it)| (index, it.item.id))
+            .collect();
+        items.sort_unstable_by_key(|(index, _)| *index);
+        items.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Ordinary forest grass (block 2, `GetTreeType`'s default) gives plain Wood (item 9), not
+    /// nothing — the exact gap this test closes.
+    #[test]
+    fn a_tree_rooted_in_forest_grass_drops_wood() {
+        let mut server = planted(2);
+        let dropped = broken_ids(&mut server, 0, 0);
+        assert!(
+            dropped.contains(&9),
+            "expected Wood (9) from a plain trunk segment, got {dropped:?}"
+        );
+    }
+
+    /// The five other real biome ground types each give their own named wood
+    /// (`WorldGen.GetTreeType`'s switch), not the plain forest item.
+    #[test]
+    fn each_biomes_ground_gives_that_biomes_own_wood() {
+        for (ground, expected, name) in [
+            (23u16, 619i32, "Ebonwood from Corruption grass"),
+            (199, 911, "Shadewood from Crimson grass"),
+            (60, 620, "Rich Mahogany from Jungle grass"),
+            (109, 621, "Pearlwood from Hallowed grass"),
+            (147, 2503, "Boreal Wood from Snow"),
+        ] {
+            let mut server = planted(ground);
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                dropped.contains(&expected),
+                "{name}: expected item {expected}, got {dropped:?}"
+            );
+        }
+    }
+
+    /// A tree with no resolvable ground under it (nothing planted below the trunk at all) still
+    /// gives plain Wood — vanilla's own fallback (`GetTreeType`'s `default: return TreeTypes.None`
+    /// still reaches `KillTile_GetTreeDrops`'s unconditional `dropItem = 9` before the species
+    /// switch), not a silently discarded drop.
+    #[test]
+    fn a_tree_with_unresolvable_ground_still_drops_plain_wood() {
+        let mut world = tiny_world();
+        // No ground tile placed at all under the trunk.
+        world.set_tile(10, 99, Tile::framed(5, 0, 0));
+        let mut server = GameServer::new(Config::default(), world);
+        let dropped = broken_ids(&mut server, 0, 0);
+        assert!(
+            dropped.contains(&9),
+            "expected the plain-Wood fallback, got {dropped:?}"
+        );
+    }
+
+    /// A Mushroom-grass-rooted tree gives a Glowing Mushroom about half the time and nothing the
+    /// other half, never wood (`KillTile_GetTreeDrops`'s `TreeTypes.Mushroom` arm: `dropItem =
+    /// (genRand.Next(2)==0) ? 183 : 0`). 300 trials, mean 150 (sd ~8.7) if the roll is real.
+    #[test]
+    fn a_tree_rooted_in_mushroom_grass_sometimes_gives_a_glowing_mushroom_never_wood() {
+        const TRIALS: usize = 300;
+        let mut server = planted(70);
+        let mut hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                !dropped.contains(&9),
+                "a Mushroom-biome tree should never give plain Wood, got {dropped:?}"
+            );
+            hits += dropped.iter().filter(|&&id| id == 183).count();
+        }
+        assert!(
+            (100..200).contains(&hits),
+            "glowing mushroom landed {hits}/{TRIALS} — real rate is 1-in-2 (~150)"
+        );
+    }
+
+    /// Breaking the canopy-top frame (`frameX >= 22 && frameY >= 198`, vanilla's own literal
+    /// condition) on acorn-capable ground gives an Acorn about half the time, alongside the wood —
+    /// not instead of it. 300 trials, mean 150 (sd ~8.7).
+    #[test]
+    fn the_canopy_top_sometimes_also_drops_an_acorn() {
+        const TRIALS: usize = 300;
+        let mut server = planted(2);
+        let mut acorns = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = broken_ids(&mut server, 22, 198);
+            assert!(
+                dropped.contains(&9),
+                "the canopy should still give Wood alongside any acorn, got {dropped:?}"
+            );
+            acorns += dropped.iter().filter(|&&id| id == 27).count();
+        }
+        assert!(
+            (100..200).contains(&acorns),
+            "acorn landed {acorns}/{TRIALS} — real rate off the canopy top is 1-in-2 (~150)"
+        );
+    }
+
+    /// Jungle trees never give an acorn even off the canopy top — `TreeTypeDropsAcorns` excludes
+    /// Jungle by name, since Rich Mahogany propagates by a sapling players plant, not a bonus item.
+    #[test]
+    fn jungle_trees_never_drop_an_acorn_even_off_the_canopy() {
+        let mut server = planted(60);
+        for _ in 0..40 {
+            let dropped = broken_ids(&mut server, 22, 198);
+            assert!(
+                !dropped.contains(&27),
+                "a Jungle tree's canopy should never give an acorn, got {dropped:?}"
+            );
+        }
+    }
+
+    /// A non-canopy frame never gives an acorn, on any ground — only the leafy top can.
+    #[test]
+    fn a_trunk_segment_never_drops_an_acorn() {
+        let mut server = planted(2);
+        for _ in 0..40 {
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                !dropped.contains(&27),
+                "a plain trunk segment should never give an acorn, got {dropped:?}"
+            );
+        }
+    }
+
+    /// "Bonus wood" (a second Wood in the same stack) lands about a third of the time — the one
+    /// real, item-independent term in vanilla's own roll (`Main.rand.Next(3) == 0`) this fix
+    /// transcribes; the axe-power-scaled term is a disclosed, separate gap (see
+    /// `spawn_tree_drop`'s own doc comment). 300 trials, mean 100 (sd ~8.2).
+    #[test]
+    fn bonus_wood_lands_about_a_third_of_the_time() {
+        const TRIALS: usize = 300;
+        let mut server = planted(2);
+        let mut bonus = 0usize;
+        for _ in 0..TRIALS {
+            server.items = ItemStore::new();
+            server.spawn_tile_drop(5, 0, 0, 10, 99);
+            let wood_stack: i16 = server
+                .items
+                .iter()
+                .filter(|(_, it)| it.item.id == 9)
+                .map(|(_, it)| it.item.stack)
+                .sum();
+            assert!(wood_stack == 1 || wood_stack == 2, "got stack {wood_stack}");
+            if wood_stack == 2 {
+                bonus += 1;
+            }
+        }
+        assert!(
+            (70..130).contains(&bonus),
+            "bonus wood landed {bonus}/{TRIALS} — real item-independent rate is 1-in-3 (~100)"
         );
     }
 }
