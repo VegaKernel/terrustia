@@ -747,11 +747,19 @@ async fn clear_shield(bot: &mut Bot, escorts: &[u16], human_name: &str) {
         // escort is left uncounted and the loop moves on, same as the original behaviour, rather
         // than block the whole run — an honest, disclosed limit of this bot's own combat power at
         // this gear tier, not something a retry count can paper over.
+        // The Solar Crawltipede head (412) is real-vanilla `dontTakeDamage` — genuinely not the
+        // target — and now grows its own real, killable 30-segment body on its own first tick
+        // (`game/server.rs`'s tick-loop fix). Fighting `[412]` itself would never succeed, no
+        // matter how many tries: the head cannot die by damage at all. Fight the segments it just
+        // grew instead; each one's own death still credits the shield individually
+        // (`LunarState::belongs_to` covers 412..=419, not just whichever type this loop happened
+        // to ask for), so this one spawn is worth thirty real kills toward the hundred, not one.
+        let real_targets: &[u16] = if kind == 412 { &[413, 414] } else { &[kind] };
         for attempt in 0..6 {
             if !bot.client.world().npcs().any(|n| n.npc_type() == kind) {
                 let _ = bot.client.say(&format!("/spawn {kind}")).await;
             }
-            if fight_quiet(bot, &[kind], 15).await || attempt == 5 {
+            if fight_quiet(bot, real_targets, 15).await || attempt == 5 {
                 break;
             }
         }
@@ -1617,7 +1625,12 @@ async fn main() -> ExitCode {
     let pillars: [(u16, &[u16], &str, &str); 4] = [
         (
             lunar::SOLAR,
-            &[412, 413, 414, 415, 416, 417, 418, 419, 518],
+            // Real vanilla's own roster (`NPC.cs:1363`, `Utils.SelectRandom(518, 419, 418, 412,
+            // 417, 416, 415)`) never independently picks 413/414 — they only ever exist attached
+            // to a 412 head, which now grows them itself (`game/server.rs`'s new tick-loop fix).
+            // `clear_shield`'s own special-casing of 412 below is what actually earns their
+            // shield credit.
+            &[412, 415, 416, 417, 418, 419, 518],
             "solar",
             "the Solar Pillar",
         ),
