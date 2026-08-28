@@ -396,12 +396,7 @@ mod tests {
         let hatches_by = |expert: bool, tick_cap: i32| {
             let mut r = rng();
             let mut e = npc(89);
-            for tick in 0..tick_cap {
-                if mothron_egg(&mut e, false, expert, &mut r).became.is_some() {
-                    return Some(tick);
-                }
-            }
-            None
+            (0..tick_cap).find(|_tick| mothron_egg(&mut e, false, expert, &mut r).became.is_some())
         };
         let normal = hatches_by(false, MOTHRON_EGG_TICKS as i32 + 5).expect("it should hatch");
         let expert = hatches_by(true, MOTHRON_EGG_TICKS as i32 + 5).expect("it should hatch");
