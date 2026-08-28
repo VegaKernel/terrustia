@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" width="900" height="250" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" xml:space="preserve">
+  <rect x="0" y="0" width="900" height="250" rx="14" fill="#0d1117"/>
+  <g font-size="22" font-weight="700" xml:space="preserve" letter-spacing="0.5">
+    <text x="40" y="58" fill="#5fffff">█████ █████ ████  ████  █   █ █████ █████ █████ █████</text>
+    <text x="40" y="86" fill="#00d7ff">  █   █     █   █ █   █ █   █ █       █     █   █   █</text>
+    <text x="40" y="114" fill="#00afff">  █   ████  ████  ████  █   █ █████   █     █   █████</text>
+    <text x="40" y="142" fill="#0087ff">  █   █     █  █  █  █  █   █     █   █     █   █   █</text>
+    <text x="40" y="170" fill="#005fff">  █   █████ █   █ █   █ █████ █████   █   █████ █   █</text>
+  </g>
+  <text x="450" y="212" text-anchor="middle" font-size="16" font-style="italic" fill="#8b949e">an async Terraria server, written from scratch in Rust</text>
+  <text x="450" y="235" text-anchor="middle" font-size="12.5" letter-spacing="1" fill="#4d5560">TERRARIA 1.4.5.8  ·  PROTOCOL 326  ·  NO GAME ASSETS SHIPPED</text>
+</svg>
