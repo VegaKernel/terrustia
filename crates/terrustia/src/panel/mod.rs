@@ -31,14 +31,15 @@
 //! **Every endpoint below `/api/` other than `/api/unclaimed` and `/api/login` requires a valid
 //! session**, checked the same way `/api/status` already did before this module grew: a bearer
 //! token (or, for the two WebSocket routes, a `session` query parameter — a browser cannot attach
-//! a custom header to a WebSocket upgrade) looked up in [`PanelState::sessions`]. There is
-//! deliberately no *further* permission check layered on top of that: a panel session already
-//! requires a real, password-verified account on this server, which is a strictly narrower group
-//! than "anyone who can reach the console" — the trust boundary `run_console`'s own doc comment
-//! already accepts for every admin command typed there. Kick, ban, whitelist and console/chat
-//! commands sent from the panel reuse exactly that: `run_admin_command`'s own logic, or (for raw
-//! console/chat lines) `ServerEvent::Console` itself, the very channel the sticky console sends
-//! down.
+//! a custom header to a WebSocket upgrade) looked up in [`PanelState::sessions`]. A session is only
+//! ever issued to an account whose group grants `Permission::Admin`: the panel runs *unrestricted*
+//! console commands (`ServerEvent::Console` → `run_console`), so holding a session is equivalent to
+//! full operator power and must require the credential for it. Authenticating any account is not
+//! enough — a `default` account (look-only in-game, and `/register` needs no permission to create
+//! one) authenticated but could then `group <self> owner` its way up through `/api/console`, so
+//! `login` refuses anything below admin. Kick, ban, whitelist and console/chat commands sent from
+//! the panel reuse `run_admin_command`'s own logic, or (for raw console/chat lines)
+//! `ServerEvent::Console` itself, the very channel the sticky console sends down.
 //!
 //! **Sessions** are an in-memory map owned by this module, not the account store: a session is a
 //! panel-HTTP concern, not core game state, and doesn't need to survive a panel restart.
@@ -362,14 +363,19 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
         }
         let name = req.name.clone();
         let password = req.password.clone();
-        let account =
-            match tokio::task::spawn_blocking(move || Account::new(&name, &password, "everything"))
-                .await
-            {
-                Ok(Ok(account)) => account,
-                Ok(Err(e)) => return err(StatusCode::BAD_REQUEST, e),
-                Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
-            };
+        // The claimant becomes the owner. This was "everything", which is not a real group name
+        // (the groups are default/moderator/owner; "everything" is only the display word for the
+        // owner group's `*`), so `group_of` fell back to `default` and the panel-claimed owner
+        // ended up with no in-game rights at all.
+        let account = match tokio::task::spawn_blocking(move || {
+            Account::new(&name, &password, "owner")
+        })
+        .await
+        {
+            Ok(Ok(account)) => account,
+            Ok(Err(e)) => return err(StatusCode::BAD_REQUEST, e),
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
+        };
         let (reply, rx) = oneshot::channel();
         if state
             .events
@@ -396,6 +402,16 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
         .unwrap_or(false);
     if !ok {
         return err(StatusCode::UNAUTHORIZED, "wrong name or password");
+    }
+    // Authenticating an account is not enough to drive the panel: every panel session can run
+    // unrestricted console commands, so only an account whose group grants `Permission::Admin` may
+    // hold one. Without this, a self-registered `default` account (look-only in-game, and `/register`
+    // needs no permission) could log in and `group <self> owner` its way to full control.
+    if !lookup.admin {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this account is not permitted to use the admin panel",
+        );
     }
     issue_session(&state, req.name)
 }

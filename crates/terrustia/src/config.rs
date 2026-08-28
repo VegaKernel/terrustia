@@ -214,8 +214,11 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         // The panel is account/server control, not gameplay — it never gets to face the network
-        // just because someone typed a non-loopback address into `panel_listen`.
-        if self.panel_enabled && !self.panel_listen.ip().is_loopback() {
+        // just because someone typed a non-loopback address into `panel_listen`. Checked
+        // unconditionally, not only when the panel is currently enabled: otherwise a config with
+        // `panel_enabled = false` + a public `panel_listen` passes validation, and the runtime
+        // `panel` toggle then binds that public address — exactly the exposure this refuses.
+        if !self.panel_listen.ip().is_loopback() {
             return Err(ConfigError::Invalid(format!(
                 "panel_listen must be loopback (127.0.0.1 or ::1), got {}",
                 self.panel_listen.ip()
@@ -339,6 +342,23 @@ mod tests {
         let config: Config =
             toml::from_str("world_file = \"/tmp/x.wld\"\nmax_players = 0").unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn a_public_panel_listen_is_refused_even_with_the_panel_off() {
+        // panel_enabled defaults false; a public panel_listen must still be rejected, because the
+        // runtime `panel` toggle could otherwise bind that public address to the network later.
+        let public: Config =
+            toml::from_str("panel_enabled = false\npanel_listen = \"0.0.0.0:7778\"").unwrap();
+        assert!(
+            public.validate().is_err(),
+            "a non-loopback panel address must never validate, enabled or not"
+        );
+
+        let loopback: Config = toml::from_str("panel_listen = \"127.0.0.1:7778\"").unwrap();
+        loopback
+            .validate()
+            .expect("a loopback panel address is fine");
     }
 
     #[test]

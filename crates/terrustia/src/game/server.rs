@@ -882,6 +882,10 @@ pub struct PanelAuthLookup {
     pub claim_token: Option<String>,
     /// `(hash, group)` for the named account, if one exists.
     pub hash_and_group: Option<(String, String)>,
+    /// Whether that account's group grants `Permission::Admin` — i.e. may drive the panel, which
+    /// runs unrestricted console commands. A self-registered `default` (look-only) account must
+    /// not, which is what stops it escalating to owner through `/api/console`.
+    pub admin: bool,
 }
 
 /// What [`ServerEvent::PanelStatus`] hands back.
@@ -2720,10 +2724,16 @@ impl GameServer {
                 let _ = reply.send(ConsoleContext { players, groups });
             }
             ServerEvent::PanelAuthLookup { name, reply } => {
+                let hash_and_group = self.admin.account_hash_and_group(&name);
+                let admin = hash_and_group.as_ref().is_some_and(|(_, group)| {
+                    self.admin
+                        .group_grants(group, crate::admin::Permission::Admin)
+                });
                 let _ = reply.send(PanelAuthLookup {
                     unclaimed: self.admin.unclaimed(),
                     claim_token: self.claim_token.clone(),
-                    hash_and_group: self.admin.account_hash_and_group(&name),
+                    hash_and_group,
+                    admin,
                 });
             }
             ServerEvent::PanelInsertAccount { account, reply } => {

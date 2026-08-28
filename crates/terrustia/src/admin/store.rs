@@ -130,6 +130,15 @@ impl Admin {
         self.unclaimed() || self.group_of(slot).may(permission)
     }
 
+    /// Whether the named group grants a permission. An unknown group name grants nothing — an
+    /// account tagged with a group that no longer exists must not be treated as privileged. Used by
+    /// the web panel to decide, off the game task, whether an account may drive it at all.
+    pub fn group_grants(&self, group_name: &str, permission: Permission) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.name == group_name && g.may(permission))
+    }
+
     /// Sign in, returning whether the password was right.
     pub fn sign_in(&mut self, slot: u8, name: &str, password: &str) -> bool {
         let Some(account) = self
@@ -311,6 +320,28 @@ mod tests {
         assert!(admin.unclaimed());
         assert!(admin.may(0, Permission::World));
         assert!(admin.may(0, Permission::Admin));
+    }
+
+    /// Only an admin-capable group may drive the web panel (which runs unrestricted console
+    /// commands). This is what stops a self-registered `default` account escalating through it — and
+    /// it also pins that the bogus `"everything"` group name grants nothing, since it is not a real
+    /// group (the owner group is named `"owner"`).
+    #[test]
+    fn only_an_admin_group_may_drive_the_panel() {
+        let admin = Admin::load(&temp("panel-authz.toml"));
+        assert!(admin.group_grants("owner", Permission::Admin), "owner may");
+        assert!(
+            !admin.group_grants("moderator", Permission::Admin),
+            "a moderator is not an admin"
+        );
+        assert!(
+            !admin.group_grants("default", Permission::Admin),
+            "a look-only default account must not reach the panel"
+        );
+        assert!(
+            !admin.group_grants("everything", Permission::Admin),
+            "\"everything\" is not a real group name, so it grants nothing"
+        );
     }
 
     /// The first account claims the server, and everyone else drops to the default group.
