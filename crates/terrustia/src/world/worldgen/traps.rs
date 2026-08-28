@@ -71,10 +71,9 @@ fn is_boulder(block: u16) -> bool {
     )
 }
 
-/// `Main.wallDungeon[wall]` — reusing the exact range `pots.rs` already transcribed and checked.
-fn is_dungeon_wall(wall: u16) -> bool {
-    matches!(wall, 9..=11)
-}
+/// `Main.wallDungeon[wall]` — the {7, 8, 9, 94..=99} set (`Main.cs:10737-10745`), shared with
+/// `pots.rs` so the two cannot drift.
+use super::pots::is_dungeon_wall;
 
 fn in_world(layout: &Layout, x: i32, y: i32, fluff: i32) -> bool {
     x >= fluff && x < layout.width - fluff && y >= fluff && y < layout.height - fluff

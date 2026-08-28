@@ -57,9 +57,11 @@ fn style_range(ground_type: u16, wall: u16, below_underworld: bool) -> (i32, i32
     range
 }
 
-/// `Main.wallDungeon[wall]` — every dungeon-brick wall variant.
-fn is_dungeon_wall(wall: u16) -> bool {
-    matches!(wall, 9..=11)
+/// `Main.wallDungeon[wall]` — every dungeon-brick wall variant. Vanilla sets exactly
+/// {7, 8, 9, 94..=99} (`Main.cs:10737-10745`); the old `9..=11` both missed 7/8 and 94-99 and
+/// wrongly matched GoldBrick(10)/SilverBrick(11) walls.
+pub(crate) fn is_dungeon_wall(wall: u16) -> bool {
+    matches!(wall, 7..=9 | 94..=99)
 }
 
 /// Try to place one pot at `(x, y)` — the bottom-left of its 2×2 footprint.
@@ -162,6 +164,18 @@ pub fn scatter(world: &mut World, layout: &Layout, rng: &mut SmallRng) -> usize 
 mod tests {
     use super::*;
     use rand::SeedableRng;
+
+    /// Pins the dungeon-wall set to vanilla's `Main.wallDungeon` = {7, 8, 9, 94..=99}. The old
+    /// `9..=11` matched Gold/Silver brick walls (10/11 — not dungeon) and missed 7, 8 and 94-99.
+    #[test]
+    fn the_dungeon_wall_set_is_the_vanilla_walldungeon_set() {
+        for w in [7, 8, 9, 94, 95, 96, 97, 98, 99] {
+            assert!(is_dungeon_wall(w), "wall {w} is a dungeon wall in vanilla");
+        }
+        for w in [0, 1, 6, 10, 11, 12, 93, 100] {
+            assert!(!is_dungeon_wall(w), "wall {w} is not a dungeon wall");
+        }
+    }
 
     /// A roof, an open room beneath it, and a floor beneath that — the shape vanilla's own
     /// algorithm actually looks for: it crosses the *first* solid surface it meets while

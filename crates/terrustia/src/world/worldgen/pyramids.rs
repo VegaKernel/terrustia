@@ -298,7 +298,7 @@ fn build_pyramid(
         let lo = exit_x - side_reach - rand.next_range(0, 2);
         let hi = exit_x + tunnel_half_height + side_reach + rand.next_range(0, 2);
         for col in lo..=hi {
-            let dungeon_wall = matches!(world.tile(col, ty).wall, 9..=11);
+            let dungeon_wall = super::pots::is_dungeon_wall(world.tile(col, ty).wall);
             if col >= exit_x && col <= exit_x + tunnel_half_height {
                 let mut t = world.tile(col, ty);
                 t.flags.set(TileFlags::ACTIVE, false);
@@ -313,7 +313,7 @@ fn build_pyramid(
             }
             if col >= exit_x - 1
                 && col <= exit_x + 1 + tunnel_half_height
-                && !matches!(world.tile(col, ty).wall, 9..=11)
+                && !super::pots::is_dungeon_wall(world.tile(col, ty).wall)
             {
                 let mut t = world.tile(col, ty);
                 t.wall = WALL;

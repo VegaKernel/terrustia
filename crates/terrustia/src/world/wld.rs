@@ -35,7 +35,11 @@ pub const MIN_VERSION: i32 = 279;
 /// ahead of those offsets does not fail to load — it loads, and then the next save writes the
 /// clock over whatever now lives at those bytes. Vanilla refuses a world newer than it knows
 /// (`StatusID.LaterVersion`) for exactly this reason, and so do we.
-pub const MAX_VERSION: i32 = 325;
+/// 326 is what real Terraria 1.4.5.8 writes and accepts (`WorldFile.cs:1180`; load guard
+/// `num2 > 326 ? LaterVersion`); no load-path layout gate exists above 323, so a 326 file is
+/// byte-for-byte a 325 file. This was 325, which refused every world a real 1.4.5.8 client saved,
+/// the round-trip-through-real-Terraria check included.
+pub const MAX_VERSION: i32 = 326;
 
 /// `"relogic"`, followed by a file-type byte.
 const MAGIC: &[u8; 7] = b"relogic";
@@ -1206,6 +1210,19 @@ fn num<T>(
 mod tests {
     use super::*;
     use terrustia_proto::Writer;
+
+    /// A world at version 326 — what real Terraria 1.4.5.8 writes — must load, not be refused as
+    /// `TooNew`. Serialise a generated world, stamp its leading version field to 326, and confirm
+    /// it parses. With the old ceiling of 325 this exact world was rejected outright, which is what
+    /// broke the round-trip-through-real-Terraria check the project depends on.
+    #[test]
+    fn a_world_at_version_326_loads_rather_than_being_refused() {
+        let world = crate::world::worldgen::generate(400, 300, "v326", 1);
+        let mut bytes = crate::world::wld_save::serialize(&world).expect("serialize");
+        bytes[0..4].copy_from_slice(&326i32.to_le_bytes());
+        let loaded = parse(&bytes).expect("a 1.4.5.8 (v326) world must load");
+        assert_eq!(loaded.width(), 400);
+    }
 
     /// The whole late header, as a world of `version` writes it.
     ///

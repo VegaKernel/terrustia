@@ -35,7 +35,10 @@ const FILE_TYPE_WORLD: u8 = 2;
 /// A world loaded from a file keeps whatever version it came with, because its header is copied
 /// verbatim and patched. A generated one has no header to copy, so it is written fresh at the
 /// version this server was transcribed from.
-pub const SAVE_VERSION: i32 = 325;
+// 326 is what real 1.4.5.8 writes; its section layout is byte-for-byte identical to 325 (no
+// write-path field is gated between 323 and 326), so a freshly generated world is marked as the
+// build this server transcribes rather than one release behind.
+pub const SAVE_VERSION: i32 = 326;
 
 /// How many sections the format has at [`SAVE_VERSION`].
 const SECTIONS: usize = 11;
