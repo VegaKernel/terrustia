@@ -131,7 +131,11 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
 
     // Expert mode: every living hand toughens the head, and once few enough are left (or it is
     // hurt enough) it starts throwing a skull barrage of its own (`NPC.cs:22059-22114`).
-    let living_hands = if guardian { 0 } else { world.count(SKELETRON_HAND) };
+    let living_hands = if guardian {
+        0
+    } else {
+        world.count(SKELETRON_HAND)
+    };
     if world.conditions.expert {
         npc.stats.defense += living_hands as i32 * SKELETRON_EXPERT_HAND_DEFENSE;
     }
@@ -163,7 +167,8 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
     if npc.ai[1] == HOVERING {
         npc.ai[2] += 1.0;
         if world.conditions.expert
-            && (living_hands < SKELETRON_BARRAGE_HANDS_THRESHOLD || health < SKELETRON_BARRAGE_HEALTH_AT)
+            && (living_hands < SKELETRON_BARRAGE_HANDS_THRESHOLD
+                || health < SKELETRON_BARRAGE_HEALTH_AT)
             && can_see(world.tiles, npc, target)
         {
             let interval = if living_hands == 0 {
@@ -617,7 +622,10 @@ mod tests {
     /// half).
     #[test]
     fn a_hand_docks_low_while_the_head_hovers_and_close_while_it_spins() {
-        assert!(HAND_DOCK_HIGH.1 < HAND_DOCK_LOW.1, "the close dock is the higher one");
+        assert!(
+            HAND_DOCK_HIGH.1 < HAND_DOCK_LOW.1,
+            "the close dock is the higher one"
+        );
         let mut hovering = a_hand();
         let mut spinning = a_hand();
         let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));

@@ -3534,6 +3534,14 @@ pub const PLANTERA_MIX_AT: f32 = 0.8;
 pub const PLANTERA_SECOND_DEFENSE: i32 = 10;
 pub const PLANTERA_SECOND_DAMAGE: i32 = 70;
 
+/// The second form also spits a Spore at the player every 350 ticks — faster the more it is
+/// hurt, one more tick shaved per threshold crossed at 40/30/20/10% health (`NPC.cs:32277-32315`).
+pub const PLANTERA_SPORE: u16 = 265;
+pub const PLANTERA_SPORE_AT: f32 = 350.0;
+pub const PLANTERA_SPORE_HEALTH_STEPS: [f32; 4] = [0.4, 0.3, 0.2, 0.1];
+pub const PLANTERA_SPORE_SPEED: f32 = 8.0;
+pub const PLANTERA_SPORE_JITTER: i32 = 10;
+
 /// A hook re-anchors somewhere new every five to ten seconds, sooner as Plantera weakens.
 pub const HOOK_REST: (u32, u32) = (300, 600);
 pub const HOOK_STAGGER: (u32, u32) = (60, 300);

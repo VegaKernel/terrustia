@@ -22,7 +22,8 @@ use terrustia_proto::npc_params::{
     PLANTERA_HOOKS, PLANTERA_LEASH, PLANTERA_LEASH_EXPERT, PLANTERA_MIX_AT, PLANTERA_SECOND_DAMAGE,
     PLANTERA_SECOND_DEFENSE, PLANTERA_SEED, PLANTERA_SEED_DAMAGE, PLANTERA_SEED_SPEED,
     PLANTERA_SEED_SPEED_EXPERT, PLANTERA_SPEED, PLANTERA_SPEED_HALF, PLANTERA_SPEED_QUARTER,
-    PLANTERA_SPIKY, PLANTERA_SPIKY_DAMAGE, PLANTERA_SPIKY_REST, PLANTERA_TENTACLE,
+    PLANTERA_SPIKY, PLANTERA_SPIKY_DAMAGE, PLANTERA_SPIKY_REST, PLANTERA_SPORE, PLANTERA_SPORE_AT,
+    PLANTERA_SPORE_HEALTH_STEPS, PLANTERA_SPORE_JITTER, PLANTERA_SPORE_SPEED, PLANTERA_TENTACLE,
     PLANTERA_TENTACLES, PLANTERA_THORN_BALL, PLANTERA_THORN_BALL_DAMAGE, PLANTERA_THORN_BALL_REST,
     TENTACLE_ACCEL, TENTACLE_ACCEL_EXPERT, TENTACLE_CAP, TENTACLE_DRIFT, TENTACLE_EXPERT_RADIUS,
     TENTACLE_RADIUS, TENTACLE_RADIUS_QUARTER, TENTACLE_RADIUS_TENTH, TENTACLE_SPREAD,
@@ -258,6 +259,31 @@ pub fn plantera(
                 parent: Some(Spawn::OWN_PARENT),
             });
         }
+    }
+
+    // The spore cloud: every 350 ticks it spits a Spore at the player, faster the more it is
+    // hurt — down to a fifth as long once past ten per cent health (`NPC.cs:32277-32315`).
+    npc.local_ai[1] += 1.0;
+    for step in PLANTERA_SPORE_HEALTH_STEPS {
+        if health < step {
+            npc.local_ai[1] += 1.0;
+        }
+    }
+    if npc.local_ai[1] >= PLANTERA_SPORE_AT {
+        npc.local_ai[1] = 0.0;
+        let dx = target.center.0 - cx
+            + rng.random_range(-PLANTERA_SPORE_JITTER..=PLANTERA_SPORE_JITTER) as f32;
+        let mut dy = target.center.1 - cy
+            + rng.random_range(-PLANTERA_SPORE_JITTER..=PLANTERA_SPORE_JITTER) as f32;
+        // It leans the shot upward toward you unless you are already above it.
+        let lean = if dy > 0.0 { 0.0 } else { (dx * 0.2).abs() };
+        dy -= lean;
+        out.spawn.push(Spawn {
+            npc_type: PLANTERA_SPORE,
+            position: (cx, cy),
+            velocity: unit((dx, dy), PLANTERA_SPORE_SPEED),
+            parent: None,
+        });
     }
     out
 }
@@ -606,6 +632,56 @@ mod tests {
             hurt.damage_bonus > 1.0,
             "and it hits far harder: {}",
             hurt.damage_bonus
+        );
+    }
+
+    /// B7: the second form also spits a Spore at you periodically — an attack the first form
+    /// never had at all.
+    #[test]
+    fn the_second_form_spits_spores() {
+        let tiles = cavern();
+        let mut rng = SmallRng::seed_from_u64(8);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        let mut p = plant(0.0, 0.0);
+        p.local_ai[0] = 2.0;
+        p.life = p.life_max / 4;
+        let mut spores = 0;
+        for _ in 0..1200 {
+            let out = plantera(&mut p, &w, home(Some((0.0, 0.0))), &mut rng);
+            spores += out
+                .spawn
+                .iter()
+                .filter(|s| s.npc_type == PLANTERA_SPORE)
+                .count();
+        }
+        assert!(spores > 0, "it should have spat at least one spore");
+    }
+
+    /// B7: the spore comes faster the more Plantera is hurt, same shape as the tentacles' reach.
+    #[test]
+    fn the_spore_comes_faster_as_it_dies() {
+        let tiles = cavern();
+        let w = world(&tiles, Some((300.0, 0.0)));
+        let spores_at = |health: f32| {
+            let mut rng = SmallRng::seed_from_u64(9);
+            let mut p = plant(0.0, 0.0);
+            p.local_ai[0] = 2.0;
+            p.life = (p.life_max as f32 * health) as i32;
+            (0..1200)
+                .map(|_| {
+                    plantera(&mut p, &w, home(Some((0.0, 0.0))), &mut rng)
+                        .spawn
+                        .iter()
+                        .filter(|s| s.npc_type == PLANTERA_SPORE)
+                        .count()
+                })
+                .sum::<usize>()
+        };
+        let healthy = spores_at(0.45);
+        let dying = spores_at(0.05);
+        assert!(
+            dying > healthy,
+            "a dying Plantera should spit spores faster: {dying} vs {healthy}"
         );
     }
 
