@@ -4208,6 +4208,23 @@ pub const MARTIAN_SAUCER_CANNON: u16 = 394;
 /// Its deathray, fired once at the start of each strafe of the last phase.
 pub const SAUCER_DEATHRAY: u16 = 447;
 pub const SAUCER_DEATHRAY_DAMAGE: i32 = 80;
+/// Whole, it is not toothless: a single, weaker deathray as the strafe of its circuit opens.
+pub const SAUCER_CIRCUIT_RAY_AT: f32 = 20.0;
+pub const SAUCER_CIRCUIT_RAY_DAMAGE: i32 = 50;
+/// Missiles, sprayed loosely outward through the whole overhead hover of an intact circuit.
+pub const SAUCER_MISSILE: u16 = 448;
+pub const SAUCER_MISSILE_DAMAGE: i32 = 50;
+pub const SAUCER_MISSILE_DAMAGE_EXPERT: i32 = 37;
+pub const SAUCER_MISSILE_SPEED: f32 = 8.0;
+pub const SAUCER_MISSILE_FROM: f32 = 440.0;
+pub const SAUCER_MISSILE_PERIOD: f32 = 20.0;
+/// Lasers, aimed at you, through the whole low hold of an intact circuit.
+pub const SAUCER_LASER: u16 = 449;
+pub const SAUCER_LASER_DAMAGE: i32 = 35;
+pub const SAUCER_LASER_DAMAGE_EXPERT: i32 = 30;
+pub const SAUCER_LASER_SPEED: f32 = 16.0;
+pub const SAUCER_LASER_FROM: f32 = 280.0;
+pub const SAUCER_LASER_PERIOD: f32 = 6.0;
 /// How far the parts sit from the core when it puts itself together.
 pub const SAUCER_PART_OUT: f32 = 150.0;
 /// Beyond this it gives up on you.
