@@ -184,29 +184,37 @@ fn work_at_door(
     }
     npc.ai[2] = 0.0;
 
-    // A type that opens doors does so outside a blood moon; on one, everything breaks through.
-    let opens = fighter_opens_doors(npc.npc_type) && !conditions.blood_moon;
-    if opens {
+    let is_opener = fighter_opens_doors(npc.npc_type);
+    npc.velocity.0 = 0.5 * f32::from(-npc.direction);
+
+    // Vanilla `AI_003`'s `flag28`: a polite opener outside a blood moon (and outside a graveyard,
+    // which this server does not model) resets its progress every tick, so it stands and pushes at
+    // the door but never gets it open. That is the whole "a closed door keeps zombies out at night,
+    // except on a blood moon" mechanic — the previous code had it backwards, opening on a normal
+    // night and destroying the door on a blood moon.
+    if is_opener && !conditions.blood_moon {
         npc.ai[1] = 0.0;
+        return DoorState::Busy(Action::None);
     }
 
-    npc.velocity.0 = 0.5 * f32::from(-npc.direction);
     npc.ai[1] += if door_type == TALL_GATE {
         TALL_GATE_DAMAGE
     } else {
         DOOR_DAMAGE
     };
-
-    if opens {
-        return DoorState::Busy(Action::OpenDoor {
-            x,
-            y: y - 1,
-            direction: npc.direction,
-        });
-    }
     if npc.ai[1] >= DOOR_BREAK_THRESHOLD {
         npc.ai[1] = 0.0;
-        return DoorState::Busy(Action::BreakDoor { x, y: y - 1 });
+        // Once it forces the door: a polite opener swings it open and the door survives (vanilla's
+        // `OpenDoor` branch); a door-breaker such as the Goblin Peon destroys it (`KillTile`).
+        return if is_opener {
+            DoorState::Busy(Action::OpenDoor {
+                x,
+                y: y - 1,
+                direction: npc.direction,
+            })
+        } else {
+            DoorState::Busy(Action::BreakDoor { x, y: y - 1 })
+        };
     }
     DoorState::Busy(Action::None)
 }
@@ -411,10 +419,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_zombie_opens_a_door_after_sixty_ticks_and_does_not_break_it() {
-        // Door directly ahead at head height.
-        let terrain = Terrain(|x: i32, y: i32| {
+    /// Door directly ahead at head height.
+    fn door_terrain() -> Terrain<impl Fn(i32, i32) -> Option<u16>> {
+        Terrain(|x: i32, y: i32| {
             if y >= GROUND_ROW {
                 Some(1)
             } else if x == 106 && y == GROUND_ROW - 2 {
@@ -422,34 +429,29 @@ mod tests {
             } else {
                 None
             }
-        });
-        let mut z = zombie_at(105.0);
-        z.direction = 1;
-
-        let mut action = Action::None;
-        for _ in 0..80 {
-            action = update(&mut z, &terrain, Some(player(130.0)), peaceful());
-            if action != Action::None {
-                break;
-            }
-        }
-        assert!(
-            matches!(action, Action::OpenDoor { .. }),
-            "a zombie opens doors outside a blood moon, got {action:?}"
-        );
+        })
     }
 
     #[test]
-    fn on_a_blood_moon_the_same_zombie_breaks_the_door_down() {
-        let terrain = Terrain(|x: i32, y: i32| {
-            if y >= GROUND_ROW {
-                Some(1)
-            } else if x == 106 && y == GROUND_ROW - 2 {
-                Some(DOOR)
-            } else {
-                None
-            }
-        });
+    fn a_zombie_cannot_open_a_door_on_a_normal_night() {
+        // The base-defense mechanic: a closed door keeps a zombie out on an ordinary night. It
+        // stands and pushes but never forces it — matching vanilla `flag28`.
+        let terrain = door_terrain();
+        let mut z = zombie_at(105.0);
+        z.direction = 1;
+
+        for _ in 0..400 {
+            let action = update(&mut z, &terrain, Some(player(130.0)), peaceful());
+            assert!(
+                matches!(action, Action::None),
+                "a zombie must not open or break a door on a normal night, got {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_a_blood_moon_a_zombie_opens_the_door_without_destroying_it() {
+        let terrain = door_terrain();
         let mut z = zombie_at(105.0);
         z.direction = 1;
         let bloody = Conditions {
@@ -457,17 +459,20 @@ mod tests {
             ..Conditions::default()
         };
 
-        let mut broke = false;
+        let mut opened = false;
         for _ in 0..400 {
-            if matches!(
-                update(&mut z, &terrain, Some(player(130.0)), bloody),
-                Action::BreakDoor { .. }
-            ) {
-                broke = true;
-                break;
+            match update(&mut z, &terrain, Some(player(130.0)), bloody) {
+                Action::OpenDoor { .. } => {
+                    opened = true;
+                    break;
+                }
+                Action::BreakDoor { .. } => {
+                    panic!("a zombie opens the door, it does not destroy it")
+                }
+                _ => {}
             }
         }
-        assert!(broke, "on a blood moon a zombie should smash through");
+        assert!(opened, "on a blood moon a zombie forces the door open");
     }
 
     #[test]
@@ -518,6 +523,13 @@ mod tests {
         z.position = (406.0 * TILE, 320.0 * TILE - z.height());
         z.direction = -1;
 
+        // On a blood moon, so the door is actually forced — this test is about the probe geometry
+        // reaching the door, and a zombie only produces a door action once it can force it (a normal
+        // night correctly leaves it holding back with no action to observe).
+        let bloody = Conditions {
+            blood_moon: true,
+            ..Conditions::default()
+        };
         let mut action = Action::None;
         for _ in 0..200 {
             action = update(
@@ -529,7 +541,7 @@ mod tests {
                     velocity: (0.0, 0.0),
                     alive: true,
                 }),
-                peaceful(),
+                bloody,
             );
             if action != Action::None {
                 break;
