@@ -4629,6 +4629,18 @@ impl GameServer {
     /// moment the world is saved, invisible to anyone who joins later, and does not count toward a
     /// house.
     fn on_place_object(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        // Same gates every other tile-writing handler has, and that `MessageBuffer.cs`'s own
+        // `case 79` applies: a placement only counts from a client that has actually joined, it is
+        // charged against that client's block-spam budget (`SpamAddBlock++`), and it is refused
+        // outright unless the client owns the section it is placing into
+        // (`Netplay.Clients[whoAmI].TileSections`, mirrored by `Player::sent_sections`). Without
+        // these, any socket — handshake incomplete included — could scatter furniture, chests and
+        // tile entities anywhere in the world at an unthrottled rate, growing `world.tile_entities`
+        // without bound: exactly the illegitimate-edit class the packet-17 fix already closed.
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+
         let mut r = PacketReader::new(payload);
         let x = i32::from(r.i16()?);
         let y = i32::from(r.i16()?);
@@ -4637,6 +4649,10 @@ impl GameServer {
         let _alternate = r.u8()?;
         let random = i32::from(r.i8()?);
         let _direction = r.bool()?;
+
+        if self.note_tile_spam(slot, TileAction::PlaceTile) {
+            return Ok(());
+        }
 
         let Ok(block) = u16::try_from(block) else {
             return Ok(());
@@ -4650,6 +4666,16 @@ impl GameServer {
         };
         // Ten tiles clear of the world's edge, as the game requires.
         if x < 10 || y < 10 || x >= self.world.width() - 10 || y >= self.world.height() - 10 {
+            return Ok(());
+        }
+        // The section the object is placed into must be one this client was actually sent. Vanilla
+        // `break`s here — dropping the placement — rather than relaying a suppressed edit the way
+        // case 17 does.
+        let (sx, sy) = self.world.section_of(x, y);
+        if !self
+            .player(slot)
+            .is_some_and(|p| p.sent_sections.contains(&(sx, sy)))
+        {
             return Ok(());
         }
 

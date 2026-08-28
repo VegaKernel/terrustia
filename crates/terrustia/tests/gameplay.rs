@@ -2875,6 +2875,57 @@ async fn an_object_will_not_be_placed_over_something() {
     );
 }
 
+/// A socket that has not finished the handshake — not a playing client — must not be able to place
+/// an object. Vanilla's `case 79` (like every other tile-writing handler) only acts for a joined
+/// client; before the gate any raw socket could scatter furniture and tile entities across the
+/// world without ever joining.
+#[tokio::test]
+async fn a_socket_that_has_not_joined_cannot_place_an_object() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..420 {
+            for y in 310..322 {
+                world.set_tile(x, y, terrustia_proto::tile::Tile::AIR);
+            }
+            world.set_tile(x, 322, terrustia_proto::tile::Tile::block(1));
+        }
+    })
+    .await;
+
+    // Connect the socket but never handshake, then hand-build a PlaceObject (id 79) frame for a
+    // workbench at (400, 321) and send it raw.
+    let mut sneaky = terrustia_client::Client::connect(addr, "sneaky")
+        .await
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&400i16.to_le_bytes()); // x
+    payload.extend_from_slice(&321i16.to_le_bytes()); // y
+    payload.extend_from_slice(&18i16.to_le_bytes()); // block (workbench)
+    payload.extend_from_slice(&0i16.to_le_bytes()); // style
+    payload.push(0); // alternate
+    payload.push(0); // random
+    payload.push(0); // direction
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&((payload.len() + 3) as u16).to_le_bytes());
+    frame.push(79); // PLACE_OBJECT
+    frame.extend_from_slice(&payload);
+    sneaky.send(&frame).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A real player confirms nothing was placed.
+    let mut watcher = join(addr, "watcher").await;
+    watcher.set_timeout(Duration::from_millis(50));
+    for _ in 0..200 {
+        if watcher.next_event().await.is_err() {
+            break;
+        }
+    }
+    assert_ne!(
+        watcher.world().tile(400, 321).map(|t| t.block),
+        Some(18),
+        "a socket that never joined must not place an object"
+    );
+}
+
 /// A teleport the server does not apply leaves every enemy in the world attacking where the
 /// player used to be, so it has to move the server's idea of them as well as telling everyone.
 #[tokio::test]
