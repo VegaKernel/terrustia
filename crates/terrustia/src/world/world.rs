@@ -90,8 +90,9 @@ pub struct World {
     pub unique_id: [u8; 16],
     pub time: i32,
     pub day_time: bool,
-    /// A blood moon changes behaviour, not just lighting: fighters that would open a door break it
-    /// down instead, and the night spawn pool widens.
+    /// A blood moon changes behaviour, not just lighting: a polite door-opener like a zombie, which
+    /// cannot get through a closed door on an ordinary night, forces it open on a blood moon (the
+    /// door survives — only a Goblin Peon smashes it), and the night spawn pool widens.
     pub blood_moon: bool,
     /// A solar eclipse: a daytime event, and the only time Mothron and its brood appear.
     pub eclipse: bool,

@@ -2433,9 +2433,15 @@ async fn a_lunar_pillar_does_not_despawn_while_no_player_is_near_it() {
 }
 
 #[tokio::test]
-async fn a_zombie_works_at_a_door_and_opens_it() {
-    // A door standing on flat ground, with a zombie spawned beside it.
+async fn a_zombie_forces_a_door_on_a_blood_moon() {
+    // A door standing on flat ground, with a zombie spawned beside it — on a blood moon, which is
+    // the only time a polite opener like a zombie forces a door at all. On an ordinary night it
+    // stands and pushes but the door stays shut (the base-defense mechanic); that case is covered
+    // by the `fighter` unit tests, which are cheap, rather than an 18-second negative integration.
     let addr = start_with(Config::default(), |world| {
+        world.blood_moon = true;
+        world.day_time = false; // night, or the blood moon would be over by morning immediately
+
         // Carve a wide, unambiguously open corridor: the generated world is solid rock here, so
         // anything less leaves the zombie spawning inside a wall.
         for x in 380..430 {
