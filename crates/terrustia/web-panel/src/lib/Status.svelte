@@ -7,15 +7,31 @@
   import Console from "./Console.svelte";
   import Settings from "./Settings.svelte";
   import WorldView from "./WorldView.svelte";
+  import Metrics from "./Metrics.svelte";
+  import Backups from "./Backups.svelte";
+  import Accounts from "./Accounts.svelte";
 
   let { session, onLoggedOut }: { session: string; onLoggedOut: () => void } = $props();
 
-  type Tab = "overview" | "players" | "whitelist" | "worlds" | "console" | "settings" | "world";
+  type Tab =
+    | "overview"
+    | "metrics"
+    | "players"
+    | "whitelist"
+    | "accounts"
+    | "worlds"
+    | "backups"
+    | "console"
+    | "world"
+    | "settings";
   const TABS: { id: Tab; label: string }[] = [
     { id: "overview", label: "overview" },
+    { id: "metrics", label: "metrics" },
     { id: "players", label: "players" },
     { id: "whitelist", label: "whitelist" },
+    { id: "accounts", label: "accounts" },
     { id: "worlds", label: "worlds" },
+    { id: "backups", label: "backups" },
     { id: "console", label: "console" },
     { id: "world", label: "world" },
     { id: "settings", label: "settings" },
@@ -94,12 +110,18 @@
     {:else}
       <p class="dim">waiting for the server…</p>
     {/if}
+  {:else if tab === "metrics"}
+    <Metrics {session} />
   {:else if tab === "players"}
     <Players {session} />
   {:else if tab === "whitelist"}
     <Whitelist {session} />
+  {:else if tab === "accounts"}
+    <Accounts {session} />
   {:else if tab === "worlds"}
     <Worlds {session} />
+  {:else if tab === "backups"}
+    <Backups {session} />
   {:else if tab === "console"}
     <Console {session} lines={consoleLines} {live} />
   {:else if tab === "world"}

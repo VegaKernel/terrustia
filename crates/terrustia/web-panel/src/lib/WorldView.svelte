@@ -32,7 +32,7 @@
   let hoverName = $state<string | null>(null);
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
 
-  const CELL = 6; // canvas pixels per tile sample
+  const CELL = 10; // backing-store pixels per tile sample; the canvas is then scaled to fit
 
   // svelte-ignore state_referenced_locally
   const stop = watchWorld(
@@ -63,13 +63,18 @@
       for (let col = 0; col < tiles.sample_cols; col++) {
         const cell = tiles.tiles[row * tiles.sample_cols + col];
         ctx.fillStyle = TILE_COLORS[cell] ?? TILE_COLORS.other;
-        ctx.fillRect(col * CELL, row * CELL, CELL, CELL);
+        // A one-pixel overlap keeps the solid blocks seam-free once the canvas is scaled to fit.
+        ctx.fillRect(col * CELL, row * CELL, CELL + 1, CELL + 1);
       }
     }
 
+    // A player exactly at — or, for a client that overshoots, just past — the world edge should
+    // still be drawn pinned to the edge rather than vanishing off the canvas. Clamp with a small
+    // margin so the whole avatar stays visible; an in-bounds player is unaffected.
+    const margin = 14;
     for (const p of players) {
-      const fx = (p.x / 16 / tiles.world_width) * w;
-      const fy = (p.y / 16 / tiles.world_height) * h;
+      const fx = Math.max(margin, Math.min(w - margin, (p.x / 16 / tiles.world_width) * w));
+      const fy = Math.max(margin, Math.min(h - margin, (p.y / 16 / tiles.world_height) * h));
       drawAvatar(ctx, fx, fy, p);
     }
   }
@@ -80,16 +85,19 @@
     const hair = a ? `rgb(${a.hair_color.join(",")})` : "#5a3a2a";
     const shirt = a ? `rgb(${a.shirt_color.join(",")})` : "#557799";
     const eye = a ? `rgb(${a.eye_color.join(",")})` : "#222";
-    const r = 7;
+    const r = 9;
+
+    // A soft shadow disc so the avatar reads against any tile colour behind it.
+    ctx.beginPath();
+    ctx.arc(x, y, r + 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fill();
 
     // Body.
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = skin;
     ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = shirt;
-    ctx.stroke();
 
     // Hair, as a cap on the upper half.
     ctx.beginPath();
@@ -97,29 +105,54 @@
     ctx.fillStyle = hair;
     ctx.fill();
 
+    // Shirt collar along the lower third.
+    ctx.beginPath();
+    ctx.arc(x, y + r * 0.4, r * 0.85, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.fillStyle = shirt;
+    ctx.fill();
+
     // Eye.
     ctx.beginPath();
-    ctx.arc(x + 2, y, 1.3, 0, Math.PI * 2);
+    ctx.arc(x + 2.5, y - 0.5, 1.7, 0, Math.PI * 2);
     ctx.fillStyle = eye;
     ctx.fill();
+
+    // A crisp outline — red for a PvP-enabled player, otherwise a light ring.
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = p.pvp ? "#e0645a" : "rgba(215,221,225,0.85)";
+    ctx.stroke();
 
     // Equipped-gear accents: small dots arced beneath the avatar, one per worn item.
     const shown = p.equipped.slice(0, 6);
     shown.forEach((id, i) => {
       const angle = Math.PI * 0.25 + (i / Math.max(shown.length - 1, 1)) * Math.PI * 0.5;
-      const ax = x + Math.cos(angle) * (r + 4);
-      const ay = y + Math.sin(angle) * (r + 4) * 0.6 + r * 0.6;
+      const ax = x + Math.cos(angle) * (r + 5);
+      const ay = y + Math.sin(angle) * (r + 5) * 0.6 + r * 0.6;
       ctx.beginPath();
-      ctx.arc(ax, ay, 1.6, 0, Math.PI * 2);
+      ctx.arc(ax, ay, 2.1, 0, Math.PI * 2);
       ctx.fillStyle = hashColor(id);
       ctx.fill();
     });
 
-    // Name.
-    ctx.font = "10px ui-monospace, monospace";
+    // Name, on a small dark pill so it stays legible over noisy terrain, and clamped so a player
+    // near an edge does not get their label clipped off the canvas.
+    ctx.font = "600 13px ui-monospace, monospace";
+    const label = p.name;
+    const tw = ctx.measureText(label).width;
+    const padX = 4;
+    const half = tw / 2 + padX;
+    let lx = x;
+    if (lx - half < 1) lx = half + 1;
+    if (lx + half > ctx.canvas.width - 1) lx = ctx.canvas.width - half - 1;
+    const ly = y - r - 9;
+    ctx.fillStyle = "rgba(10,13,16,0.72)";
+    ctx.fillRect(lx - half, ly - 11, tw + padX * 2, 16);
     ctx.fillStyle = p.pvp ? "#e0645a" : "#d7dde1";
     ctx.textAlign = "center";
-    ctx.fillText(p.name, x, y - r - 4);
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(label, lx, ly);
   }
 
   $effect(() => {
@@ -143,10 +176,11 @@
     const py = (e.clientY - rect.top) * scaleY;
     const w = tiles.sample_cols * CELL;
     const h = tiles.sample_rows * CELL;
+    const margin = 14;
     const hit = players.find((p) => {
-      const fx = (p.x / 16 / tiles!.world_width) * w;
-      const fy = (p.y / 16 / tiles!.world_height) * h;
-      return Math.hypot(fx - px, fy - py) < 12;
+      const fx = Math.max(margin, Math.min(w - margin, (p.x / 16 / tiles!.world_width) * w));
+      const fy = Math.max(margin, Math.min(h - margin, (p.y / 16 / tiles!.world_height) * h));
+      return Math.hypot(fx - px, fy - py) < 18;
     });
     hoverName = hit ? `${hit.name} — ${hit.life}/${hit.life_max} HP` : null;
   }
@@ -199,7 +233,6 @@
   canvas {
     max-width: 100%;
     max-height: 100%;
-    image-rendering: pixelated;
     cursor: crosshair;
   }
 

@@ -50,7 +50,12 @@ async function unwrap<T>(res: Response): Promise<T> {
     if (res.status === 401) setSession(null);
     throw new ApiCallError(message);
   }
-  return (await res.json()) as T;
+  // Several endpoints answer a successful mutation with an empty `200 OK` and no body (kick, ban,
+  // motd, world switch, console, chat, save, and the account mutations). Calling `res.json()` on an
+  // empty body throws "Unexpected end of JSON input", so read the text first and only parse when
+  // there is something to parse — a void-returning caller simply ignores the `undefined`.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 function authHeaders(session: string): HeadersInit {
@@ -319,6 +324,136 @@ export interface WorldTiles {
   sample_rows: number;
   tiles: TileColorName[];
 }
+
+// ---- metrics ---------------------------------------------------------------------------------
+
+export interface PhaseCost {
+  name: string;
+  us: number;
+}
+
+export interface Metrics {
+  budget_us: number;
+  cpu_us: number;
+  wall_us: number;
+  worst_cpu_us: number;
+  phases: PhaseCost[];
+  player_count: number;
+  npc_count: number;
+  projectile_count: number;
+  item_count: number;
+  ticks: number;
+  memory_bytes: number | null;
+}
+
+export async function fetchMetrics(session: string): Promise<Metrics> {
+  return getJson<Metrics>("/api/metrics", session);
+}
+
+// ---- backups & rollback ----------------------------------------------------------------------
+
+export interface BackupEntry {
+  index: number;
+  size_mb: number;
+  age_secs: number | null;
+}
+
+export interface Backups {
+  saving: boolean;
+  world_file: string | null;
+  kept: number;
+  backups: BackupEntry[];
+}
+
+export async function fetchBackups(session: string): Promise<Backups> {
+  return getJson<Backups>("/api/backups", session);
+}
+
+export async function forceSave(session: string): Promise<void> {
+  await postJson("/api/save", session, {});
+}
+
+/** Roll the world back to backup number `which` (1 is the most recent). This stops the server. */
+export async function rollback(session: string, which: number): Promise<string> {
+  const res = await postJson<{ message: string }>("/api/rollback", session, { which });
+  return res.message;
+}
+
+// ---- groups & accounts -----------------------------------------------------------------------
+
+export interface GroupInfo {
+  name: string;
+  permissions: string[];
+  can_admin: boolean;
+}
+
+export interface AccountInfo {
+  name: string;
+  group: string;
+  can_admin: boolean;
+}
+
+export interface AccountsState {
+  groups: GroupInfo[];
+  accounts: AccountInfo[];
+}
+
+export async function fetchAccounts(session: string): Promise<AccountsState> {
+  return getJson<AccountsState>("/api/accounts", session);
+}
+
+export async function setAccountGroup(
+  session: string,
+  name: string,
+  group: string,
+): Promise<void> {
+  await postJson("/api/accounts/group", session, { name, group });
+}
+
+export async function createAccount(
+  session: string,
+  name: string,
+  password: string,
+  group: string,
+): Promise<void> {
+  await postJson("/api/accounts/create", session, { name, password, group });
+}
+
+export async function deleteAccount(session: string, name: string): Promise<void> {
+  await postJson("/api/accounts/delete", session, { name });
+}
+
+// ---- world creation --------------------------------------------------------------------------
+
+export interface WorldGenStatus {
+  status: "idle" | "running" | "done" | "failed";
+  running: boolean;
+  name: string;
+  world_file: string | null;
+  message: string;
+  elapsed_secs: number;
+}
+
+export interface NewWorldRequest {
+  name: string;
+  width: number;
+  height: number;
+  seed?: string;
+}
+
+/** Kick off a (slow) background world generation. Returns the initial job status. */
+export async function createWorld(
+  session: string,
+  req: NewWorldRequest,
+): Promise<WorldGenStatus> {
+  return postJson<WorldGenStatus>("/api/worlds/new", session, req);
+}
+
+export async function fetchWorldGenStatus(session: string): Promise<WorldGenStatus> {
+  return getJson<WorldGenStatus>("/api/worlds/new/status", session);
+}
+
+// ---- the live world view -------------------------------------------------------------------
 
 type WorldWsFrame =
   | { type: "players"; players: Player[] }
