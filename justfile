@@ -33,17 +33,13 @@ install:
     fi
     @echo "Ready. Next: just run   (or  just dev  to build the panel and embed it first)"
 
-# Build the web panel, then run the server with the panel embedded
+# Run a release server. Extra args pass through, e.g. `just run --new "My World"`
+run *ARGS:
+    cargo run --release -p terrustia -- {{ARGS}}
+
+# Build the web panel and run a debug server with it embedded — the local iteration loop
 dev: web-build
     cargo run -p terrustia --features embed-web
-
-# Run the server (no panel rebuild). Extra args pass through, e.g. `just run --new "My World"`
-run *ARGS:
-    cargo run -p terrustia -- {{ARGS}}
-
-# Build a release server with the panel embedded, then run it
-serve: web-build
-    cargo run --release -p terrustia --features embed-web
 
 # Web panel dev server with hot reload (serve the panel from disk, not embedded)
 web:
@@ -124,18 +120,6 @@ roundtrip WLD OUT="/tmp/terrustia-roundtrip.wld":
 # Check our decoding against a server's bytes (ours: 7777, real Terraria: its port)
 conform ADDR="127.0.0.1:7777" CAPTURE="/tmp/terrustia-conform.trcap":
     cargo run --release -p terrustia-client --example conform -- {{ADDR}} {{CAPTURE}}
-
-# Check what our client *sends* is acted on by a server that did not write it
-provoke ADDR="127.0.0.1:7777":
-    cargo run --release -p terrustia-client --example provoke -- {{ADDR}}
-
-# Compare a generated world against the one Terraria made from the same seed
-genparity REFERENCE:
-    cargo run --release -p terrustia --example genparity -- {{REFERENCE}}
-
-# Report whether a .wld holds every link in the progression chain
-playable WLD:
-    cargo run --release -p terrustia --example playable -- {{WLD}}
 
 # ─────────────────────────────────────────
 # DATA TABLES  (dev-only — need a decompiled Terraria tree, not in the repo)
