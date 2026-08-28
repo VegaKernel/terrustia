@@ -379,9 +379,17 @@ mod tests {
             let bottom = world.tile(15 + dx, 20);
             assert_eq!(top.block, LARGE_PILE_TILE, "top row, column {dx}");
             assert_eq!(bottom.block, LARGE_PILE_TILE, "bottom row, column {dx}");
-            assert_eq!(top.frame_x, base_x + column * 18, "top row frame_x, column {dx}");
+            assert_eq!(
+                top.frame_x,
+                base_x + column * 18,
+                "top row frame_x, column {dx}"
+            );
             assert_eq!(top.frame_y, 0, "top row frame_y, column {dx}");
-            assert_eq!(bottom.frame_x, base_x + column * 18, "bottom row frame_x, column {dx}");
+            assert_eq!(
+                bottom.frame_x,
+                base_x + column * 18,
+                "bottom row frame_x, column {dx}"
+            );
             assert_eq!(bottom.frame_y, 18, "bottom row frame_y, column {dx}");
         }
     }
@@ -397,7 +405,10 @@ mod tests {
         // One cell of the footprint (top-right) is already occupied.
         world.set_tile(16, 19, Tile::block(tiles::STONE));
         let placed = place_large_pile(&mut world, 15, 20, 9);
-        assert!(!placed, "an occupied footprint cell must refuse the whole object");
+        assert!(
+            !placed,
+            "an occupied footprint cell must refuse the whole object"
+        );
         assert!(
             !world.tile(15, 20).is_active(),
             "no cell should have been written on refusal"

@@ -219,7 +219,10 @@ mod tests {
         assert!(place_pot(&mut world, 60, 109, 2, &mut rng));
         let after = world.tile(60, 109);
         assert_eq!(after.block, POT, "the pot should still have been placed");
-        assert_eq!(after.wall, 9, "placing a pot must not erase the wall behind it");
+        assert_eq!(
+            after.wall, 9,
+            "placing a pot must not erase the wall behind it"
+        );
         assert_eq!(after.wall_color, 4, "wall_color must survive too");
     }
 

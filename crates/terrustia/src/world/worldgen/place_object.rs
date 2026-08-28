@@ -154,9 +154,15 @@ mod tests {
 
         let after = world.tile(19, 27);
         assert_eq!(after.block, 105, "the object should still have been placed");
-        assert_eq!(after.wall, 5, "placing an object must not erase the wall behind it");
+        assert_eq!(
+            after.wall, 5,
+            "placing an object must not erase the wall behind it"
+        );
         assert_eq!(after.wall_color, 3, "wall_color must survive too");
-        assert_eq!(after.liquid, 120, "placing an object must not erase liquid behind it");
+        assert_eq!(
+            after.liquid, 120,
+            "placing an object must not erase liquid behind it"
+        );
         assert_eq!(after.liquid_kind, terrustia_proto::Liquid::Water);
     }
 
