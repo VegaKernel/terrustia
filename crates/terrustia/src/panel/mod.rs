@@ -60,8 +60,8 @@ use tracing::{info, warn};
 use crate::admin::{Account, BanKind};
 use crate::config::Config;
 use crate::game::server::{
-    PanelAuthLookup, PanelConfigSnapshot, PanelPlayer, PanelStatus, PanelWhitelist, ServerEvent,
-    TileColor,
+    PanelAccountInfo, PanelAuthLookup, PanelBackupEntry, PanelBackups, PanelConfigSnapshot,
+    PanelGroupInfo, PanelMetrics, PanelPlayer, PanelStatus, PanelWhitelist, ServerEvent, TileColor,
 };
 use crate::term::{ConsoleLine, ConsoleLineKind};
 
@@ -112,6 +112,51 @@ struct PanelState {
     /// out, which is fine — nothing here is persisted state.
     sessions: Arc<Mutex<HashMap<String, String>>>,
     started: Instant,
+    /// The one background world-generation job, if any has been started this panel lifetime.
+    /// Worldgen is slow (seconds, and a lot of memory) and pure — it never touches the game task —
+    /// so it runs on its own `spawn_blocking` thread and reports progress through this shared cell
+    /// rather than blocking the request that kicked it off. Only one at a time.
+    worldgen: Arc<Mutex<WorldGenJob>>,
+}
+
+/// Where a background world generation has got to. Coarse on purpose: `worldgen::generate` is a
+/// single blocking call with no progress callback, so there is no honest percentage to report —
+/// only which of these states it is in, and how long it has been running.
+#[derive(Clone, Default)]
+struct WorldGenJob {
+    status: GenStatus,
+    /// The world's name, echoed back so the panel can label the job it is watching.
+    name: String,
+    /// The file stem of the finished world, on success, so the panel can offer to switch to it.
+    world_file: Option<String>,
+    /// A human-readable line: the error on failure, or a short note on success.
+    message: String,
+    /// When the current (or most recent) job started, for an elapsed-seconds readout.
+    #[allow(clippy::struct_field_names)]
+    started: Option<Instant>,
+    /// How long the finished job took, frozen once it is no longer running.
+    elapsed_secs: Option<u64>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum GenStatus {
+    /// Nothing has ever been started this panel lifetime.
+    #[default]
+    Idle,
+    Running,
+    Done,
+    Failed,
+}
+
+impl GenStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            GenStatus::Idle => "idle",
+            GenStatus::Running => "running",
+            GenStatus::Done => "done",
+            GenStatus::Failed => "failed",
+        }
+    }
 }
 
 impl PanelState {
@@ -120,6 +165,15 @@ impl PanelState {
     /// worth losing every other session over, so this recovers the data rather than panicking.
     fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
         self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The world-generation job cell, recovering a poisoned lock the same way [`Self::sessions`]
+    /// does and for the same reason — a background gen thread that panicked mid-write should not
+    /// take out every future status read.
+    fn worldgen(&self) -> std::sync::MutexGuard<'_, WorldGenJob> {
+        self.worldgen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -137,6 +191,7 @@ pub async fn run(
         events,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         started: Instant::now(),
+        worldgen: Arc::new(Mutex::new(WorldGenJob::default())),
     };
     let router = Router::new()
         .route("/api/unclaimed", get(unclaimed))
@@ -153,10 +208,20 @@ pub async fn run(
         .route("/api/whitelist/remove", post(whitelist_remove))
         .route("/api/worlds", get(worlds))
         .route("/api/worlds/switch", post(switch_world))
+        .route("/api/worlds/new", post(new_world))
+        .route("/api/worlds/new/status", get(new_world_status))
         .route("/api/config", get(config_snapshot))
         .route("/api/config/motd", post(set_motd))
         .route("/api/console", post(send_console))
         .route("/api/chat", post(send_chat))
+        .route("/api/metrics", get(metrics))
+        .route("/api/backups", get(backups))
+        .route("/api/save", post(force_save))
+        .route("/api/rollback", post(rollback))
+        .route("/api/accounts", get(accounts))
+        .route("/api/accounts/group", post(set_account_group))
+        .route("/api/accounts/create", post(create_account))
+        .route("/api/accounts/delete", post(delete_account))
         .fallback(static_handler)
         .with_state(state);
 
@@ -362,14 +427,21 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
         }
         let name = req.name.clone();
         let password = req.password.clone();
-        let account =
-            match tokio::task::spawn_blocking(move || Account::new(&name, &password, "everything"))
-                .await
-            {
-                Ok(Ok(account)) => account,
-                Ok(Err(e)) => return err(StatusCode::BAD_REQUEST, e),
-                Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
-            };
+        // The first account owns the server, so it goes into the `owner` group — the one
+        // `group::defaults` gives the `*` permission. This mirrors the console `claim`/`register`
+        // path exactly (`GameServer::run_console`'s `"claim"` arm and `announce_claim_token`'s own
+        // owner branch both use `"owner"`). An earlier draft passed `"everything"`, which is not a
+        // group any server actually has — it resolves to `default`, silently leaving the very first
+        // account unable to administer anything.
+        let account = match tokio::task::spawn_blocking(move || {
+            Account::new(&name, &password, "owner")
+        })
+        .await
+        {
+            Ok(Ok(account)) => account,
+            Ok(Err(e)) => return err(StatusCode::BAD_REQUEST, e),
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
+        };
         let (reply, rx) = oneshot::channel();
         if state
             .events
@@ -1111,4 +1183,529 @@ async fn stream_world(mut socket: WebSocket, state: PanelState) {
             break;
         }
     }
+}
+
+// ---- metrics --------------------------------------------------------------------------------
+
+/// The process's current resident set size in bytes, best-effort and platform-specific. `None`
+/// where the platform will not report it — the panel's memory graph shows a gap rather than a
+/// wrong number. No new dependency: `libc` is already a workspace crate, and this is the one small
+/// piece of live state the game task does not (and should not) track for the panel.
+///
+/// The `unsafe` here is the same shape `game::clock` already carries an allow for: a single
+/// read-only libc call filling a stack-allocated record, with the pointer and size the platform's
+/// own API dictates. Nothing is retained past the call and no invariant of ours rides on it.
+#[allow(unsafe_code)]
+fn process_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        // Field two of `/proc/self/statm` is the resident page count.
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page <= 0 {
+            return None;
+        }
+        Some(resident_pages * page as u64)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `proc_pid_rusage`'s v0 record carries `ri_resident_size`, the current resident size in
+        // bytes — the honest "how much memory is this process using right now" number, unlike
+        // `getrusage`'s `ru_maxrss`, which is a high-water mark that never falls.
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v0>::zeroed();
+        let ret = unsafe {
+            libc::proc_pid_rusage(
+                std::process::id() as libc::c_int,
+                libc::RUSAGE_INFO_V0,
+                (&mut info as *mut std::mem::MaybeUninit<libc::rusage_info_v0>)
+                    .cast::<libc::rusage_info_t>(),
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+        // A zero return means the kernel filled the whole record.
+        let info = unsafe { info.assume_init() };
+        Some(info.ri_resident_size)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[derive(Serialize)]
+struct PhaseCost {
+    name: &'static str,
+    us: u64,
+}
+
+#[derive(Serialize)]
+struct MetricsResponse {
+    /// The per-tick budget, in microseconds, so the panel can draw the line a tick is measured
+    /// against (16,667 µs — sixty ticks a second).
+    budget_us: u64,
+    /// The most recent tick's processor cost, and how long it took in wall time.
+    cpu_us: u64,
+    wall_us: u64,
+    /// The worst processor cost seen this reporting window.
+    worst_cpu_us: u64,
+    phases: Vec<PhaseCost>,
+    player_count: usize,
+    npc_count: usize,
+    projectile_count: usize,
+    item_count: usize,
+    ticks: u64,
+    /// Resident set size in bytes, or `null` where the platform will not report it.
+    memory_bytes: Option<u64>,
+}
+
+impl MetricsResponse {
+    fn build(m: PanelMetrics, memory_bytes: Option<u64>) -> Self {
+        Self {
+            budget_us: m.budget_us,
+            cpu_us: m.last_cpu_us,
+            wall_us: m.last_wall_us,
+            worst_cpu_us: m.worst_cpu_us,
+            phases: m
+                .phases
+                .into_iter()
+                .map(|(name, us)| PhaseCost { name, us })
+                .collect(),
+            player_count: m.player_count,
+            npc_count: m.npc_count,
+            projectile_count: m.projectile_count,
+            item_count: m.item_count,
+            ticks: m.ticks,
+            memory_bytes,
+        }
+    }
+}
+
+async fn metrics(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelMetrics { reply }).await {
+        Ok(m) => Json(MetricsResponse::build(m, process_rss_bytes())).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+// ---- backups & rollback ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct BackupEntryResponse {
+    index: usize,
+    size_mb: f64,
+    age_secs: Option<u64>,
+}
+
+impl From<PanelBackupEntry> for BackupEntryResponse {
+    fn from(b: PanelBackupEntry) -> Self {
+        Self {
+            index: b.index,
+            size_mb: b.size_bytes as f64 / 1_048_576.0,
+            age_secs: b.age_secs,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct BackupsResponse {
+    saving: bool,
+    world_file: Option<String>,
+    kept: usize,
+    backups: Vec<BackupEntryResponse>,
+}
+
+impl From<PanelBackups> for BackupsResponse {
+    fn from(b: PanelBackups) -> Self {
+        Self {
+            saving: b.saving,
+            world_file: b.world_file,
+            kept: b.kept,
+            backups: b
+                .backups
+                .into_iter()
+                .map(BackupEntryResponse::from)
+                .collect(),
+        }
+    }
+}
+
+async fn backups(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelBackups { reply }).await {
+        Ok(b) => Json(BackupsResponse::from(b)).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+async fn force_save(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelForceSave { reply }).await {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct RollbackRequest {
+    which: usize,
+}
+
+#[derive(Serialize)]
+struct RollbackResponse {
+    message: String,
+}
+
+async fn rollback(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<RollbackRequest>,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelRollback {
+        which: req.which,
+        reply,
+    })
+    .await
+    {
+        Ok(Ok(message)) => Json(RollbackResponse { message }).into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+// ---- groups & accounts admin ----------------------------------------------------------------
+
+#[derive(Serialize)]
+struct GroupResponse {
+    name: String,
+    permissions: Vec<String>,
+    can_admin: bool,
+}
+
+impl From<PanelGroupInfo> for GroupResponse {
+    fn from(g: PanelGroupInfo) -> Self {
+        Self {
+            name: g.name,
+            permissions: g.permissions,
+            can_admin: g.can_admin,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AccountResponse {
+    name: String,
+    group: String,
+    can_admin: bool,
+}
+
+impl From<PanelAccountInfo> for AccountResponse {
+    fn from(a: PanelAccountInfo) -> Self {
+        Self {
+            name: a.name,
+            group: a.group,
+            can_admin: a.can_admin,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AccountsResponse {
+    groups: Vec<GroupResponse>,
+    accounts: Vec<AccountResponse>,
+}
+
+async fn accounts(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelAccounts { reply }).await {
+        Ok(a) => Json(AccountsResponse {
+            groups: a.groups.into_iter().map(GroupResponse::from).collect(),
+            accounts: a.accounts.into_iter().map(AccountResponse::from).collect(),
+        })
+        .into_response(),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct SetGroupRequest {
+    name: String,
+    group: String,
+}
+
+async fn set_account_group(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SetGroupRequest>,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelSetAccountGroup {
+        name: req.name,
+        group: req.group,
+        reply,
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateAccountRequest {
+    name: String,
+    password: String,
+    group: String,
+}
+
+async fn create_account(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateAccountRequest>,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    if req.name.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "an account needs a name");
+    }
+    // Same length rule the claim path and `Admin::register` both enforce.
+    if req.password.len() < 6 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "that password is too short; use at least six characters",
+        );
+    }
+    // Hash off the game task, exactly as the login/claim path does — argon2 must never run inline.
+    let name = req.name.clone();
+    let password = req.password.clone();
+    let group = req.group.clone();
+    let account =
+        match tokio::task::spawn_blocking(move || Account::new(&name, &password, &group)).await {
+            Ok(Ok(account)) => account,
+            Ok(Err(e)) => return err(StatusCode::BAD_REQUEST, e),
+            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
+        };
+    match ask(&state, |reply| ServerEvent::PanelCreateAccount {
+        account,
+        reply,
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteAccountRequest {
+    name: String,
+}
+
+async fn delete_account(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelDeleteAccount {
+        name: req.name,
+        reply,
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+// ---- world management: generate a brand-new world -------------------------------------------
+
+#[derive(Deserialize)]
+struct NewWorldRequest {
+    name: String,
+    width: i32,
+    height: i32,
+    /// Optional seed text — a plain number reproduces that numeric seed, free text is hashed into
+    /// one, and either is checked against vanilla's secret-seed strings (see
+    /// `worldgen::generate_from_text`). Empty or absent means a fresh random seed.
+    #[serde(default)]
+    seed: Option<String>,
+}
+
+#[derive(Serialize)]
+struct NewWorldStatusResponse {
+    status: &'static str,
+    running: bool,
+    name: String,
+    world_file: Option<String>,
+    message: String,
+    elapsed_secs: u64,
+}
+
+/// A world must be a whole number of sections and within the client's addressable range — the same
+/// rules `Config::validate` applies, checked here so a bad size is refused before a slow generation
+/// is started rather than after. Returns the reason as a plain string; the caller turns it into a
+/// `400` (a `Result<(), Response>` here would carry axum's large `Response` in its `Err`, which
+/// `clippy::result_large_err` rightly flags).
+fn validate_world_size(width: i32, height: i32) -> Result<(), String> {
+    use terrustia_proto::section::{SECTION_HEIGHT, SECTION_WIDTH};
+    if width < 400 || height < 300 {
+        return Err("a world must be at least 400 x 300".into());
+    }
+    if width > i32::from(i16::MAX) || height > i32::from(i16::MAX) {
+        return Err(format!("a world may be at most {0} x {0} tiles", i16::MAX));
+    }
+    if width % SECTION_WIDTH != 0 || height % SECTION_HEIGHT != 0 {
+        return Err(format!(
+            "world size must be a whole number of {SECTION_WIDTH}x{SECTION_HEIGHT} sections"
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot_worldgen(state: &PanelState) -> NewWorldStatusResponse {
+    let job = state.worldgen();
+    let elapsed_secs = if job.status == GenStatus::Running {
+        job.started.map_or(0, |s| s.elapsed().as_secs())
+    } else {
+        job.elapsed_secs.unwrap_or(0)
+    };
+    NewWorldStatusResponse {
+        status: job.status.as_str(),
+        running: job.status == GenStatus::Running,
+        name: job.name.clone(),
+        world_file: job.world_file.clone(),
+        message: job.message.clone(),
+        elapsed_secs,
+    }
+}
+
+async fn new_world_status(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    Json(snapshot_worldgen(&state)).into_response()
+}
+
+async fn new_world(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<NewWorldRequest>,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers).await {
+        return resp;
+    }
+    // One at a time. Worldgen is slow and memory-hungry; two at once on the blocking pool is a way
+    // to run a loopback machine out of RAM, not a feature.
+    if state.worldgen().status == GenStatus::Running {
+        return err(
+            StatusCode::CONFLICT,
+            "a world is already being generated; wait for it to finish",
+        );
+    }
+    if let Err(reason) = validate_world_size(req.width, req.height) {
+        return err(StatusCode::BAD_REQUEST, reason);
+    }
+    // Resolve and validate the destination the same way `--new` does — a plain world name, landed
+    // in the platform world directory, never a path the request body could smuggle in.
+    let path = match crate::worlds::new_world_path(&req.name) {
+        Ok(path) => path,
+        Err(e) => return err(StatusCode::BAD_REQUEST, e),
+    };
+    if path.exists() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a world called {} already exists on disk; pick another name",
+                req.name
+            ),
+        );
+    }
+
+    {
+        let mut job = state.worldgen();
+        *job = WorldGenJob {
+            status: GenStatus::Running,
+            name: req.name.clone(),
+            started: Some(Instant::now()),
+            ..WorldGenJob::default()
+        };
+    }
+
+    let handle = Arc::clone(&state.worldgen);
+    let (name, width, height) = (req.name.clone(), req.width, req.height);
+    let seed = req.seed.clone();
+    // A real background thread off the request: `worldgen::generate` is a single blocking call, so
+    // it runs on the blocking pool and reports back through the shared job cell. It deliberately
+    // outlives the request that started it (and even a panel toggled off mid-gen — the `Arc` keeps
+    // the cell alive until the thread finishes), so the operator can watch it via `new_world_status`.
+    tokio::task::spawn_blocking(move || {
+        let began = Instant::now();
+        let world = match seed {
+            Some(text) if !text.trim().is_empty() => {
+                crate::world::worldgen::generate_from_text(width, height, name.clone(), &text)
+            }
+            _ => {
+                use argon2::password_hash::rand_core::{OsRng, RngCore};
+                let mut bytes = [0u8; 8];
+                OsRng.fill_bytes(&mut bytes);
+                crate::world::worldgen::generate(
+                    width,
+                    height,
+                    name.clone(),
+                    u64::from_le_bytes(bytes),
+                )
+            }
+        };
+        let result = crate::world::wld_save::save(&world, &path);
+        let mut job = handle.lock().unwrap_or_else(|p| p.into_inner());
+        job.elapsed_secs = Some(began.elapsed().as_secs());
+        match result {
+            Ok(()) => {
+                job.status = GenStatus::Done;
+                job.world_file = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string);
+                job.message = format!(
+                    "generated {name} ({width} x {height}) in {}s — switch to it from the worlds tab",
+                    began.elapsed().as_secs()
+                );
+                info!(world = %name, "new world generated from the web panel");
+            }
+            Err(e) => {
+                job.status = GenStatus::Failed;
+                job.message = format!("could not save the generated world: {e}");
+                warn!(world = %name, error = %e, "web panel world generation failed");
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(snapshot_worldgen(&state))).into_response()
 }
