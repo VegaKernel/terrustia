@@ -157,6 +157,13 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let started = Instant::now();
     let loaded_from = config.world_file.clone();
+    let world_stage = term::Stage::begin(
+        palette,
+        &match &config.world_file {
+            Some(path) => format!("loading world  {}", path.display()),
+            None => "generating world".to_string(),
+        },
+    );
     // `World::secret_seeds` is read straight off the world either way now — a loaded world's own
     // real flag bytes (`wld.rs`'s own read path), or freshly detected here for a generated one —
     // rather than threaded through as a separate `Built`-only value that a loaded world could
@@ -185,6 +192,12 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             world
         }
     };
+    world_stage.finish(&format!(
+        "{} · {} × {}",
+        world.name,
+        world.width(),
+        world.height()
+    ));
     let mut world_rows = vec![
         ("name", world.name.clone()),
         ("size", format!("{} x {}", world.width(), world.height())),
@@ -209,7 +222,9 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Bind before starting the game task so a port clash fails fast.
+    let bind_stage = term::Stage::begin(palette, &format!("binding {}", config.listen));
     let listener = TcpListener::bind(config.listen).await?;
+    bind_stage.finish("");
     let save_destination = config.save_target().map_or_else(
         || "none — this world will not be saved".to_string(),
         |p| p.display().to_string(),
@@ -256,10 +271,15 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // console's `panel` command) without that same all-or-nothing behaviour — see its own doc
     // comment for why a runtime toggle failure should not take the rest of the server down too.
     let initial_panel = if config.panel_enabled {
-        Some(terrustia::panel::run(config.clone(), events_tx.clone()).await?)
+        let panel_stage = term::Stage::begin(palette, "starting web panel");
+        let handle = terrustia::panel::run(config.clone(), events_tx.clone()).await?;
+        panel_stage.finish("loopback only");
+        Some(handle)
     } else {
+        term::tick(palette, "web panel", "off");
         None
     };
+    print!("{}", term::ready_line(palette, started.elapsed()));
     let (panel_toggle_tx, panel_toggle_rx) = mpsc::unbounded_channel();
     // Handle kept and aborted below, alongside `accept`/`console` — this task holds its own clone
     // of `events_tx` for as long as it runs (it has to, to start the panel on a later toggle), so

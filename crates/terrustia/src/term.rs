@@ -442,6 +442,134 @@ pub fn banner(palette: Palette, version: &str, game: &str, protocol: u32) -> Str
     out
 }
 
+/// Braille spinner frames for the boot stages.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// One step of the boot sequence, shown live: a spinner while it runs, a green ✓ when it finishes.
+///
+/// Falls back to a single plain line when stdout is not a terminal (piped, or a log file), so a
+/// captured boot log carries no cursor games. The spinner rides the same prompt-redraw coordination
+/// the sticky console uses ([`redraw_prompt`]/[`write_line_coordinated`]), so a log line arriving
+/// mid-stage floats it rather than smearing it.
+pub struct Stage {
+    label: String,
+    palette: Palette,
+    tty: bool,
+    stop: Option<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    )>,
+}
+
+impl Stage {
+    /// Begin a stage. On a terminal this starts the spinner animating on its own thread; piped, it
+    /// draws nothing until [`Stage::finish`].
+    pub fn begin(palette: Palette, label: &str) -> Self {
+        use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+        let tty = std::io::stdout().is_terminal();
+        let stop = if tty {
+            let flag = Arc::new(AtomicBool::new(false));
+            let f = flag.clone();
+            let label = label.to_string();
+            let handle = std::thread::spawn(move || {
+                let mut i = 0usize;
+                while !f.load(Ordering::Relaxed) {
+                    let frame = SPINNER[i % SPINNER.len()];
+                    let line = format!(
+                        "  {}{frame}{} {label}{} …{}",
+                        palette.on(sgr::BRIGHT_CYAN),
+                        palette.off(),
+                        palette.on(sgr::DIM),
+                        palette.off(),
+                    );
+                    redraw_prompt(&line, 0);
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+            });
+            Some((flag, handle))
+        } else {
+            None
+        };
+        Self {
+            label: label.to_string(),
+            palette,
+            tty,
+            stop,
+        }
+    }
+
+    /// Finish a stage: stop the spinner and leave a green ✓ in its place, with an optional trailing
+    /// detail (dimmed). `detail` may be empty for a bare tick.
+    pub fn finish(mut self, detail: &str) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        let done = done_line(self.palette, &self.label, detail);
+        if self.tty {
+            // Replace the spinner in place and clear the shared prompt, so a later log line does not
+            // try to redraw a stage that has already ended.
+            let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
+            guard.clear();
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{ERASE}{done}");
+            let _ = out.flush();
+        } else {
+            write_line_coordinated(&done);
+        }
+    }
+}
+
+impl Drop for Stage {
+    /// If a stage is dropped without [`Stage::finish`] — an error propagated out from under it —
+    /// stop the spinner thread so it cannot keep redrawing over the error on its way out.
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+}
+
+/// An instant ✓ line, for a step that does no work worth a spinner — a disabled panel, say.
+pub fn tick(palette: Palette, label: &str, detail: &str) {
+    write_line_coordinated(&done_line(palette, label, detail));
+}
+
+/// The shared shape of a finished stage line: a green ✓, the label, and an optional dimmed detail.
+fn done_line(palette: Palette, label: &str, detail: &str) -> String {
+    let p = palette;
+    if detail.is_empty() {
+        format!("  {}✓{} {label}", p.on(sgr::BRIGHT_GREEN), p.off())
+    } else {
+        format!(
+            "  {}✓{} {label}   {}{detail}{}",
+            p.on(sgr::BRIGHT_GREEN),
+            p.off(),
+            p.on(sgr::DIM),
+            p.off(),
+        )
+    }
+}
+
+/// The line that closes the boot: a bold, green "ready in Xs".
+pub fn ready_line(palette: Palette, elapsed: Duration) -> String {
+    let p = palette;
+    format!(
+        "\n  {}✓{} {}ready{} in {}{:.2}s{}\n",
+        p.on(sgr::BRIGHT_GREEN),
+        p.off(),
+        p.on(sgr::BOLD),
+        p.off(),
+        p.on(sgr::BRIGHT_CYAN),
+        elapsed.as_secs_f64(),
+        p.off(),
+    )
+}
+
 /// The width `panel` would draw these rows at on their own, before alignment with a sibling
 /// panel. A caller with two panels to print side by side in spirit (if not in fact, since they
 /// print one above the other) computes this for both and passes the larger back in as `panel`'s
