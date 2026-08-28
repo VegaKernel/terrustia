@@ -13,21 +13,36 @@ D = sys.argv[1]
 GEN = pathlib.Path(sys.argv[2]).read_text()
 src = pathlib.Path(D + "/Terraria/Recipe.cs").read_text(errors="replace")
 
-# Pull the generated tables back out of the Rust.
+# Pull the generated tables back out of the Rust. `rustfmt` puts a space after every tuple comma
+# (`(1, 1419)`, not `(1,1419)`) and lays each `Recipe { .. }` out one field per line rather than on
+# a single line — both defeated the old space-free, single-line-only regexes below, which then
+# matched nothing at all (0 rows) rather than erroring, so every real recipe looked MISSING. `\s*`
+# tolerates a run's actual whitespace either way, single space or newline-plus-indent alike.
 ing = [
     (int(a), int(b))
-    for a, b in re.findall(r"\((\d+),(\d+)\),", GEN.split("static INGREDIENTS")[1].split("];")[0])
+    for a, b in re.findall(
+        r"\((\d+),\s*(\d+)\),", GEN.split("static INGREDIENTS")[1].split("];")[0]
+    )
 ]
 recipes = [
     (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
     for m in re.finditer(
-        r"Recipe \{ result: (\d+), makes: (\d+), first: (\d+), count: (\d+),", GEN
+        r"Recipe\s*\{\s*result:\s*(\d+),\s*makes:\s*(\d+),\s*first:\s*(\d+),\s*count:\s*(\d+),",
+        GEN,
     )
 ]
 crafted = {
     int(a): int(b)
-    for a, b in re.findall(r"\((\d+),(\d+)\),", GEN.split("static CRAFTED_BY:")[1].split("];")[0])
+    for a, b in re.findall(
+        r"\((\d+),\s*(\d+)\),", GEN.split("static CRAFTED_BY:")[1].split("];")[0]
+    )
 }
+if not crafted:
+    # A parser that silently returns nothing is worse than one that errors: an empty `crafted`
+    # makes every single sampled item look MISSING, which is indistinguishable from "everything is
+    # actually broken" unless this is caught explicitly. This is exactly the failure mode that let
+    # this checker rot unnoticed — see the regex comment above.
+    raise SystemExit("parsed 0 CRAFTED_BY rows; recipes.rs's shape changed under this regex")
 
 # Re-parse the source independently: last decraftable recipe per result wins.
 body = src[src.index("public static void SetupRecipes()") :]
