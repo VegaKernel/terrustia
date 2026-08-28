@@ -8699,6 +8699,52 @@ impl GameServer {
     /// night that is the difference between a sealed house and an invitation.
     ///
     /// `action: 1` is the game's close, against `0` for open (`MessageBuffer.cs:1310`).
+    /// Open a door and tell clients, returning whether it actually moved. Moving the tiles rather
+    /// than only broadcasting keeps the *server's* view of the door in step with everyone else's —
+    /// broadcasting alone once left the server sure every door was shut, so an NPC at one opened it
+    /// on every look, for ever (eighteen thousand door packets in five minutes on a real town). The
+    /// bool lets a wired door try the other swing side when this one is blocked.
+    fn open_door_broadcast(&mut self, x: i32, y: i32, direction: i8) -> bool {
+        if !crate::world::doors::open(&mut self.world, x, y, direction) {
+            return false;
+        }
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: 0,
+            x: x as i16,
+            y: y as i16,
+            direction: if direction > 0 { 1 } else { 0 },
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+        true
+    }
+
+    /// A door a circuit reached — `Wiring.cs`'s `type == 10`/`type == 11`. A shut door opens on a
+    /// random swing side, falling back to the other if that one is blocked; an open door is forced
+    /// shut. Resolved against the door's live state each time, so the per-tile toggling vanilla does
+    /// when more than one of a door's three tiles carries wire falls out on its own.
+    fn fire_wired_door(&mut self, x: i32, y: i32) {
+        let tile = self.world.tile(x, y);
+        if !tile.is_active() {
+            return;
+        }
+        match tile.block {
+            crate::world::doors::DOOR_CLOSED => {
+                let side: i8 = if rand::Rng::random_range(&mut self.rng, 0..2) == 0 {
+                    -1
+                } else {
+                    1
+                };
+                if !self.open_door_broadcast(x, y, side) {
+                    self.open_door_broadcast(x, y, -side);
+                }
+            }
+            crate::world::doors::DOOR_OPEN => self.close_door(x, y),
+            _ => {}
+        }
+    }
+
     fn close_door(&mut self, x: i32, y: i32) {
         if !self.world.in_bounds(x, y) {
             return;
@@ -8722,23 +8768,7 @@ impl GameServer {
         match action {
             Action::None => {}
             Action::OpenDoor { x, y, direction } => {
-                // Move the tiles, then tell everyone. Broadcasting alone — which this used to do,
-                // on the reasoning that every client would open it for itself — left the *server*
-                // believing the door was still shut, so the NPC standing at it decided to open it
-                // again on its next look, and again, for ever. On a world with a town that came to
-                // eighteen thousand door packets in five minutes and half of all traffic.
-                if !crate::world::doors::open(&mut self.world, x, y, direction) {
-                    return;
-                }
-                let toggle = terrustia_proto::objects::DoorToggle {
-                    action: 0,
-                    x: x as i16,
-                    y: y as i16,
-                    direction: if direction > 0 { 1 } else { 0 },
-                };
-                if let Ok(frame) = toggle.encode() {
-                    self.broadcast(frame, None);
-                }
+                self.open_door_broadcast(x, y, direction);
             }
             Action::BreakDoor { x, y } => {
                 // A broken door really is gone, so the tiles are cleared here and the change is
@@ -10142,6 +10172,21 @@ impl GameServer {
             for (tx, ty) in fired.traps {
                 self.fire_trap(tx, ty);
             }
+            // Wired Explosives (tile 141): the flood leaves the tile standing (unlike a land
+            // mine), so the caller kills it, resyncs it, and throws the explosion — `Wiring.cs`'s
+            // own `case 141`.
+            for (mx, my) in fired.mines {
+                self.detonate_explosives(mx, my);
+            }
+            // A buried land mine (tile 210): the flood already cleared the tile and reported the
+            // change (`ExplodeMine`'s `KillTile`, mirrored in `wiring.rs`), so all that remains is
+            // the explosion projectile.
+            for (mx, my) in fired.land_mines {
+                self.detonate_land_mine(mx, my);
+            }
+            for (dx, dy) in fired.doors {
+                self.fire_wired_door(dx, dy);
+            }
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
@@ -10292,6 +10337,32 @@ impl GameServer {
             shot.damage,
             0,
         ) {
+            self.broadcast_projectile(index);
+        }
+    }
+
+    /// Wired Explosives (tile 141) going off: `Wiring.cs`'s `case 141` — kill the tile, tell
+    /// clients, and throw the explosion projectile (108, 500 damage) from the tile's centre.
+    fn detonate_explosives(&mut self, x: i32, y: i32) {
+        self.world.set_tile(x, y, Tile::AIR);
+        self.broadcast_tile(x, y);
+        self.throw_mine_blast(x, y, 108, 500);
+    }
+
+    /// A buried land mine (tile 210) going off: `Wiring.cs`'s `ExplodeMine` — the tile is already
+    /// gone (the flood cleared it), so this only throws the explosion projectile (164, 250 damage).
+    fn detonate_land_mine(&mut self, x: i32, y: i32) {
+        self.throw_mine_blast(x, y, 164, 250);
+    }
+
+    /// The projectile half both mine detonations share: a still (velocity zero) explosion thrown
+    /// from the tile centre, exactly as `Projectile.NewProjectile(..., i*16+8, j*16+8, 0, 0, ...)`.
+    fn throw_mine_blast(&mut self, x: i32, y: i32, projectile_type: u16, damage: i32) {
+        let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+        if let Some(index) = self
+            .projectiles
+            .launch(projectile_type, position, (0.0, 0.0), damage, 0)
+        {
             self.broadcast_projectile(index);
         }
     }
@@ -12996,6 +13067,92 @@ mod panic_path {
         let server = GameServer::new(Config::default(), tiny_world());
         drop(tx);
         assert_eq!(server.run(rx).await, Stopped::Cleanly);
+    }
+}
+
+/// The wire-flood consumer resolves buried mines and doors it reaches, not only the traps and
+/// statues it always has. Each of these fails on the pre-fix `apply_circuit`, which read
+/// `Fired::traps`/`statues`/… but dropped `mines`, `land_mines`, and `doors` on the floor — so a
+/// wired mine never went off and a wired door never moved.
+#[cfg(test)]
+mod wired_mines_and_doors {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::doors::{DOOR_CLOSED, DOOR_OPEN};
+    use crate::world::wiring::Fired;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "wire probe"),
+        )
+    }
+
+    fn threw(server: &GameServer, projectile_type: u16) -> bool {
+        server
+            .projectiles
+            .iter()
+            .any(|(_, p)| p.projectile_type == projectile_type)
+    }
+
+    #[test]
+    fn a_wired_land_mine_throws_its_explosion() {
+        // The flood has already cleared the mine tile, so the consumer owes only the projectile —
+        // `ExplodeMine`'s type 164.
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.land_mines.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            threw(&server, 164),
+            "a land mine a circuit reaches should throw projectile 164"
+        );
+    }
+
+    #[test]
+    fn a_wired_explosive_kills_its_tile_and_throws_a_bomb() {
+        // Unlike a land mine, the flood leaves the Explosives tile (141) standing, so the consumer
+        // both kills it and throws projectile 108 — `Wiring.cs`'s `case 141`.
+        let mut server = server();
+        server.world.set_tile(100, 100, Tile::framed(141, 0, 0));
+        let mut fired = Fired::default();
+        fired.mines.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            !server.world.tile(100, 100).is_active(),
+            "the Explosives tile should be gone (case 141 KillTile)"
+        );
+        assert!(threw(&server, 108), "and it should throw projectile 108");
+    }
+
+    #[test]
+    fn a_wired_door_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        for dy in 0..3 {
+            server.world.set_tile(
+                100,
+                100 + dy,
+                Tile::framed(DOOR_CLOSED, 0, (dy as i16) * 18),
+            );
+        }
+        // First pulse: the shut door swings open.
+        let mut fired = Fired::default();
+        fired.doors.push((100, 101));
+        server.apply_circuit(fired, (100, 101));
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            DOOR_OPEN,
+            "a circuit reaching a shut door opens it"
+        );
+        // Second pulse: the now-open door is forced shut.
+        let mut fired = Fired::default();
+        fired.doors.push((100, 101));
+        server.apply_circuit(fired, (100, 101));
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            DOOR_CLOSED,
+            "and a circuit reaching it again forces it shut"
+        );
     }
 }
 
