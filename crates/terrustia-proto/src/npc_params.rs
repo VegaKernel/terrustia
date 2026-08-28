@@ -1782,8 +1782,16 @@ pub const SKELETRON_SPIN_TICKS: f32 = 400.0;
 pub const SKELETRON_HOVER_ABOVE: f32 = 250.0;
 /// Hover steering: (vertical accel, vertical cap, horizontal accel, horizontal cap).
 pub const SKELETRON_HOVER: (f32, f32, f32, f32) = (0.02, 2.0, 0.05, 8.0);
-/// How fast it charges while spinning, and how fast it spins.
+/// How fast it charges while spinning, and how fast it spins. Expert mode raises the charge
+/// speed to 3.5 and then keeps adding 10% for every 50px of range beyond 150, up to 600
+/// (`NPC.cs:22284-22341`), which is what `SKELETRON_SPIN_SPEED_EXPERT_RANGE` encodes.
 pub const SKELETRON_SPIN_SPEED: f32 = 1.5;
+pub const SKELETRON_SPIN_SPEED_EXPERT: f32 = 3.5;
+/// Range thresholds (in pixels) beyond which the expert charge speed picks up another 10%.
+pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE: [f32; 10] = [
+    150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0,
+];
+pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR: f32 = 1.1;
 pub const SKELETRON_SPIN_RATE: f32 = 0.3;
 /// How much of its defence it drops while spinning — the window the fight gives you.
 pub const SKELETRON_SPIN_DEFENSE: i32 = 10;
@@ -1792,6 +1800,22 @@ pub const SKELETRON_ENRAGED_SPEED: f32 = 8.0;
 pub const SKELETRON_ENRAGED_STAT: i32 = 9999;
 /// Beyond this on either axis it gives up.
 pub const SKELETRON_GIVE_UP: f32 = 2000.0;
+
+/// Expert mode: each living hand adds this much defence to the head, and once fewer than two
+/// hands are left (or the head has dropped under three quarters health) it starts throwing a
+/// skull barrage while it hovers (`NPC.cs:22059-22114`).
+pub const SKELETRON_EXPERT_HAND_DEFENSE: i32 = 25;
+pub const SKELETRON_BARRAGE_HANDS_THRESHOLD: usize = 2;
+pub const SKELETRON_BARRAGE_HEALTH_AT: f32 = 0.75;
+/// The barrage fires every eighty ticks, or forty once every hand is dead.
+pub const SKELETRON_BARRAGE_INTERVAL: f32 = 80.0;
+pub const SKELETRON_BARRAGE_INTERVAL_NO_HANDS: f32 = 40.0;
+pub const SKELETRON_BARRAGE: u16 = 270;
+pub const SKELETRON_BARRAGE_DAMAGE: i32 = 17;
+/// Its speed, faster still with no hands left to soak hits for it.
+pub const SKELETRON_BARRAGE_SPEED: f32 = 3.0;
+pub const SKELETRON_BARRAGE_SPEED_NO_HANDS: f32 = 5.0;
+pub const SKELETRON_BARRAGE_JITTER: i32 = 50;
 
 /// Where a hand docks relative to the head while the head is hovering, and while it is not.
 pub const HAND_DOCK_HIGH: (f32, f32) = (120.0, -100.0);

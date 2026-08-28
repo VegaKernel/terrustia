@@ -627,7 +627,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         67 => snail::update(npc, world, rng),
         4 => effects.spawn.extend(boss::eye::update(npc, world)),
-        11 => effects.spawn.extend(boss::skeletron::head(npc, world)),
+        11 => {
+            let head = boss::skeletron::head(npc, world, rng);
+            effects.spawn.extend(head.spawn);
+            effects.shots.extend(head.shots);
+        }
         27 => {
             let advance = boss::wall::wall(
                 npc,

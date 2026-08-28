@@ -15,15 +15,21 @@
 //! aims once, and throws itself down at eighteen pixels a tick. It gives up the moment it has
 //! passed you, turned, or gone too far, and drifts back to its dock.
 
+use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     HAND_DOCK_HIGH, HAND_DOCK_HIGH_DRIVE, HAND_DOCK_LOW, HAND_DOCK_LOW_DRIVE, HAND_LUNGE,
     HAND_LUNGE_LIMIT, HAND_RISE, HAND_RISE_ABOVE, HAND_RISE_CAP, HAND_SWEEP, HAND_SWEEP_CAP,
-    HAND_WINDUP_AT, SKELETRON_ENRAGED_SPEED, SKELETRON_ENRAGED_STAT, SKELETRON_GIVE_UP,
-    SKELETRON_HAND, SKELETRON_HOVER, SKELETRON_HOVER_ABOVE, SKELETRON_HOVER_TICKS,
-    SKELETRON_SPIN_DEFENSE, SKELETRON_SPIN_RATE, SKELETRON_SPIN_SPEED, SKELETRON_SPIN_TICKS,
+    HAND_WINDUP_AT, SKELETRON_BARRAGE, SKELETRON_BARRAGE_DAMAGE, SKELETRON_BARRAGE_HANDS_THRESHOLD,
+    SKELETRON_BARRAGE_HEALTH_AT, SKELETRON_BARRAGE_INTERVAL, SKELETRON_BARRAGE_INTERVAL_NO_HANDS,
+    SKELETRON_BARRAGE_JITTER, SKELETRON_BARRAGE_SPEED, SKELETRON_BARRAGE_SPEED_NO_HANDS,
+    SKELETRON_ENRAGED_SPEED, SKELETRON_ENRAGED_STAT, SKELETRON_EXPERT_HAND_DEFENSE,
+    SKELETRON_GIVE_UP, SKELETRON_HAND, SKELETRON_HOVER, SKELETRON_HOVER_ABOVE,
+    SKELETRON_HOVER_TICKS, SKELETRON_SPIN_DEFENSE, SKELETRON_SPIN_RATE, SKELETRON_SPIN_SPEED,
+    SKELETRON_SPIN_SPEED_EXPERT, SKELETRON_SPIN_SPEED_EXPERT_RANGE,
+    SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR, SKELETRON_SPIN_TICKS,
 };
 
-use crate::game::ai::World;
+use crate::game::ai::{Shot, World, can_see};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -89,9 +95,17 @@ fn drift(velocity: &mut f32, here: f32, wanted: f32, accel: f32, cap: f32) {
     }
 }
 
-/// Drive Skeletron's head for a tick, returning the hands it wants raised.
-pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
-    let mut hands = Vec::new();
+/// What the head produced this tick: the hands it wants raised, and any skull barrage it threw.
+#[derive(Debug, Default)]
+pub struct HeadOutcome {
+    pub spawn: Vec<Spawn>,
+    pub shots: Vec<Shot>,
+}
+
+/// Drive Skeletron's head for a tick, returning the hands it wants raised and the expert-mode
+/// skull barrage it may have thrown.
+pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> HeadOutcome {
+    let mut out = HeadOutcome::default();
     let guardian = npc.npc_type == DUNGEON_GUARDIAN;
 
     // First tick: a head raises two hands, one to each side, out of step with each other.
@@ -99,7 +113,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         npc.ai[0] = 1.0;
         if !guardian {
             for side in [-1.0, 1.0] {
-                hands.push(Spawn {
+                out.spawn.push(Spawn {
                     npc_type: SKELETRON_HAND,
                     position: (
                         npc.position.0 + npc.width() / 2.0,
@@ -114,6 +128,13 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     }
 
     npc.stats.defense = npc.stats.defense.max(0);
+
+    // Expert mode: every living hand toughens the head, and once few enough are left (or it is
+    // hurt enough) it starts throwing a skull barrage of its own (`NPC.cs:22059-22114`).
+    let living_hands = if guardian { 0 } else { world.count(SKELETRON_HAND) };
+    if world.conditions.expert {
+        npc.stats.defense += living_hands as i32 * SKELETRON_EXPERT_HAND_DEFENSE;
+    }
 
     // Nobody within two thousand pixels on either axis, or nobody left alive.
     let abandoned = match world.target {
@@ -134,12 +155,49 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     let Some(target) = world.target else {
         npc.velocity.1 += 0.1;
         npc.time_left = npc.time_left.min(50);
-        return hands;
+        return out;
     };
     let (cx, cy) = npc.center();
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
 
     if npc.ai[1] == HOVERING {
         npc.ai[2] += 1.0;
+        if world.conditions.expert
+            && (living_hands < SKELETRON_BARRAGE_HANDS_THRESHOLD || health < SKELETRON_BARRAGE_HEALTH_AT)
+            && can_see(world.tiles, npc, target)
+        {
+            let interval = if living_hands == 0 {
+                SKELETRON_BARRAGE_INTERVAL_NO_HANDS
+            } else {
+                SKELETRON_BARRAGE_INTERVAL
+            };
+            if npc.ai[2] % interval == 0.0 {
+                let speed = if living_hands == 0 {
+                    SKELETRON_BARRAGE_SPEED_NO_HANDS
+                } else {
+                    SKELETRON_BARRAGE_SPEED
+                };
+                let dx = target.center.0 - cx + rng.random_range(-20..=20) as f32;
+                let dy = target.center.1 - cy + rng.random_range(-20..=20) as f32;
+                let reach = (dx * dx + dy * dy).sqrt().max(1.0);
+                let mut aim = (dx * speed / reach, dy * speed / reach);
+                aim.0 += rng.random_range(-SKELETRON_BARRAGE_JITTER..=SKELETRON_BARRAGE_JITTER)
+                    as f32
+                    * 0.01;
+                aim.1 += rng.random_range(-SKELETRON_BARRAGE_JITTER..=SKELETRON_BARRAGE_JITTER)
+                    as f32
+                    * 0.01;
+                aim.0 += npc.velocity.0;
+                aim.1 += npc.velocity.1;
+                out.shots.push(Shot {
+                    projectile: SKELETRON_BARRAGE,
+                    damage: SKELETRON_BARRAGE_DAMAGE,
+                    position: (cx + aim.0 * 5.0, cy + aim.1 * 5.0),
+                    velocity: aim,
+                    time_left: 300,
+                });
+            }
+        }
         if npc.ai[2] >= SKELETRON_HOVER_TICKS {
             npc.ai[2] = 0.0;
             npc.ai[1] = SPINNING;
@@ -173,7 +231,16 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         npc.rotation += f32::from(npc.direction) * SKELETRON_SPIN_RATE;
         let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
         let reach = (dx * dx + dy * dy).sqrt().max(0.01);
-        let k = SKELETRON_SPIN_SPEED / reach;
+        let mut spin_speed = SKELETRON_SPIN_SPEED;
+        if world.conditions.expert {
+            spin_speed = SKELETRON_SPIN_SPEED_EXPERT;
+            for threshold in SKELETRON_SPIN_SPEED_EXPERT_RANGE {
+                if reach > threshold {
+                    spin_speed *= SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR;
+                }
+            }
+        }
+        let k = spin_speed / reach;
         npc.velocity = (dx * k, dy * k);
     } else if npc.ai[1] == ENRAGED {
         // Untouchable and fatal.
@@ -194,7 +261,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     }
 
     npc.dirty = true;
-    hands
+    out
 }
 
 /// What a hand's tick concluded.
@@ -244,15 +311,11 @@ pub fn hand(
     let half_width = npc.width() / 2.0;
 
     match npc.ai[2] as i32 {
-        // Docked, either close in beside the head or hanging low beneath it.
+        // Docked, either hanging low beneath the head or close in beside it.
         0 | 3 => {
             if head_hovering {
-                let at = dock(HAND_DOCK_HIGH);
-                let (uy, cyv, ux, cxv) = HAND_DOCK_HIGH_DRIVE;
-                drift(&mut npc.velocity.1, npc.position.1, at.1, uy, cyv);
-                let here = npc.position.0 + half_width;
-                drift(&mut npc.velocity.0, here, at.0, ux, cxv);
-            } else {
+                // The head is in its safe half, which is exactly when the hands come for you:
+                // the low dock is where a hand winds up before it lunges (`NPC.cs:22428-22478`).
                 let at = dock(HAND_DOCK_LOW);
                 let (uy, cyv, ux, cxv) = HAND_DOCK_LOW_DRIVE;
                 drift(&mut npc.velocity.1, npc.position.1, at.1, uy, cyv);
@@ -265,6 +328,14 @@ pub fn hand(
                     npc.ai[3] = 0.0;
                     npc.dirty = true;
                 }
+            } else {
+                // The head is spinning — the vulnerable half — and the hand retreats close in
+                // beside it instead of attacking.
+                let at = dock(HAND_DOCK_HIGH);
+                let (uy, cyv, ux, cxv) = HAND_DOCK_HIGH_DRIVE;
+                drift(&mut npc.velocity.1, npc.position.1, at.1, uy, cyv);
+                let here = npc.position.0 + half_width;
+                drift(&mut npc.velocity.0, here, at.0, ux, cxv);
             }
             let at = dock(HAND_DOCK_LOW);
             npc.rotation = (at.1 - cy).atan2(at.0 - cx) + 1.57;
@@ -347,7 +418,12 @@ mod tests {
     }
     use super::*;
     use crate::game::npc_ai::Target;
+    use rand::SeedableRng;
     use terrustia_proto::tile::Tile;
+
+    fn rng() -> SmallRng {
+        SmallRng::seed_from_u64(1)
+    }
 
     struct Dungeon;
 
@@ -378,23 +454,25 @@ mod tests {
     fn it_raises_two_hands_on_its_first_tick_and_no_more() {
         let tiles = Dungeon;
         let mut s = skeletron();
+        let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
-        let raised = head(&mut s, &world(&tiles, t));
+        let raised = head(&mut s, &world(&tiles, t), &mut r).spawn;
         assert_eq!(raised.len(), 2);
         assert!(raised.iter().all(|h| h.npc_type == SKELETRON_HAND));
         assert!(
             raised[0].velocity.0 != raised[1].velocity.0,
             "one to each side"
         );
-        assert!(head(&mut s, &world(&tiles, t)).is_empty());
+        assert!(head(&mut s, &world(&tiles, t), &mut r).spawn.is_empty());
     }
 
     #[test]
     fn the_dungeon_guardian_has_no_hands_and_is_always_enraged() {
         let tiles = Dungeon;
         let mut g = Npc::new(68, (10_000.0, 9_600.0), 1).expect("dungeon guardian");
+        let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
-        let raised = head(&mut g, &world(&tiles, t));
+        let raised = head(&mut g, &world(&tiles, t), &mut r).spawn;
         assert!(raised.is_empty());
         assert_eq!(g.ai[1], ENRAGED);
         assert_eq!(g.stats.defense, SKELETRON_ENRAGED_STAT);
@@ -404,17 +482,18 @@ mod tests {
     fn it_hovers_above_you_then_spins_at_you() {
         let tiles = Dungeon;
         let mut s = skeletron();
+        let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
         for _ in 0..(SKELETRON_HOVER_TICKS as i32 + 1) {
-            head(&mut s, &world(&tiles, t));
+            head(&mut s, &world(&tiles, t), &mut r);
         }
         assert_eq!(s.ai[1], SPINNING, "should have started spinning");
         let before = s.rotation;
-        head(&mut s, &world(&tiles, t));
+        head(&mut s, &world(&tiles, t), &mut r);
         assert!(s.rotation != before, "and be turning");
 
         for _ in 0..(SKELETRON_SPIN_TICKS as i32 + 1) {
-            head(&mut s, &world(&tiles, t));
+            head(&mut s, &world(&tiles, t), &mut r);
         }
         assert_eq!(s.ai[1], HOVERING, "and settle again");
     }
@@ -424,11 +503,12 @@ mod tests {
     fn spinning_is_when_its_guard_drops() {
         let tiles = Dungeon;
         let mut s = skeletron();
+        let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
-        head(&mut s, &world(&tiles, t));
+        head(&mut s, &world(&tiles, t), &mut r);
         let guarded = s.stats.defense;
         s.ai[1] = SPINNING;
-        head(&mut s, &world(&tiles, t));
+        head(&mut s, &world(&tiles, t), &mut r);
         assert_eq!(s.stats.defense, guarded - SKELETRON_SPIN_DEFENSE);
     }
 
@@ -436,11 +516,12 @@ mod tests {
     fn daylight_makes_it_lethal_rather_than_ending_it() {
         let tiles = Dungeon;
         let mut s = skeletron();
+        let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
         let mut day = world(&tiles, t);
         day.conditions.day = true;
-        head(&mut s, &day);
-        head(&mut s, &day);
+        head(&mut s, &day, &mut r);
+        head(&mut s, &day, &mut r);
         assert_eq!(s.ai[1], ENRAGED);
         assert_eq!(s.stats.damage, SKELETRON_ENRAGED_STAT);
         assert!(s.time_left > 50, "it does not leave, it kills you");
@@ -450,9 +531,10 @@ mod tests {
     fn a_player_who_runs_far_enough_ends_it() {
         let tiles = Dungeon;
         let mut s = skeletron();
+        let mut r = rng();
         let t = Some(player_at(10_000.0 + SKELETRON_GIVE_UP + 100.0, 10_000.0));
-        head(&mut s, &world(&tiles, t));
-        head(&mut s, &world(&tiles, t));
+        head(&mut s, &world(&tiles, t), &mut r);
+        head(&mut s, &world(&tiles, t), &mut r);
         assert_eq!(s.ai[1], LEAVING);
         assert!(s.time_left <= 50);
     }
@@ -474,15 +556,16 @@ mod tests {
         let mut h = a_hand();
         let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         let t = Some(player_at(10_000.0, 10_400.0));
-        // Docked low, because the head is spinning.
+        // Docked low, because the head is hovering — the safe half, and the one the hands
+        // attack from (`NPC.cs:22422-22478`).
         for _ in 0..(HAND_WINDUP_AT as i32 + 1) {
-            hand(&mut h, head_at, false, false, t);
+            hand(&mut h, head_at, true, false, t);
         }
         assert_eq!(h.ai[2], 1.0, "should be winding up");
 
         // It climbs, and once above the head it commits.
         for _ in 0..400 {
-            hand(&mut h, head_at, false, false, t);
+            hand(&mut h, head_at, true, false, t);
             h.position.1 += h.velocity.1;
             if h.ai[2] == 2.0 {
                 break;
@@ -492,6 +575,23 @@ mod tests {
         let speed = h.velocity.0.hypot(h.velocity.1);
         assert!((speed - HAND_LUNGE).abs() < 1e-3, "at speed, got {speed}");
         assert!(h.velocity.1 > 0.0, "and downward at the player");
+    }
+
+    /// B5: hands only wind up and lunge while the head is hovering (the safe half); while the
+    /// head is spinning (the vulnerable half) they dock close instead. The rhythm used to be
+    /// inverted — the hands attacked exactly when you could hurt the head.
+    #[test]
+    fn a_hand_never_winds_up_while_the_head_spins() {
+        let mut h = a_hand();
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
+        let t = Some(player_at(10_000.0, 10_400.0));
+        for _ in 0..2000 {
+            hand(&mut h, head_at, false, false, t);
+        }
+        assert_eq!(
+            h.ai[2], 0.0,
+            "it should stay docked close while the head spins, never winding up"
+        );
     }
 
     #[test]
@@ -512,23 +612,134 @@ mod tests {
         assert_eq!(h.ai[2], 3.0, "the lunge is over");
     }
 
+    /// B5: the hand hangs at the low, far dock while the head hovers (winding up to attack), and
+    /// docks close, near the high dock, while the head spins (retreating from the vulnerable
+    /// half).
     #[test]
-    fn a_hand_docks_closer_while_the_head_hovers() {
-        assert!(HAND_DOCK_HIGH.1 < HAND_DOCK_LOW.1, "high dock is above");
-        let mut close = a_hand();
-        let mut low = a_hand();
+    fn a_hand_docks_low_while_the_head_hovers_and_close_while_it_spins() {
+        assert!(HAND_DOCK_HIGH.1 < HAND_DOCK_LOW.1, "the close dock is the higher one");
+        let mut hovering = a_hand();
+        let mut spinning = a_hand();
         let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         for _ in 0..200 {
-            hand(&mut close, head_at, true, false, None);
-            close.position.1 += close.velocity.1;
-            hand(&mut low, head_at, false, false, None);
-            low.position.1 += low.velocity.1;
+            hand(&mut hovering, head_at, true, false, None);
+            hovering.position.1 += hovering.velocity.1;
+            hand(&mut spinning, head_at, false, false, None);
+            spinning.position.1 += spinning.velocity.1;
         }
         assert!(
-            close.position.1 < low.position.1,
-            "the hovering dock should be the higher one: {} against {}",
-            close.position.1,
-            low.position.1
+            hovering.position.1 > spinning.position.1,
+            "the hand should hang low while the head hovers, and dock close while it spins: {} against {}",
+            hovering.position.1,
+            spinning.position.1
+        );
+    }
+
+    /// B6: Expert mode toughens the head by 25 defence per living hand.
+    #[test]
+    fn expert_mode_toughens_the_head_per_living_hand() {
+        let tiles = Dungeon;
+        let mut r = rng();
+        let t = Some(player_at(10_000.0, 10_000.0));
+
+        let mut classic = skeletron();
+        head(&mut classic, &world(&tiles, t), &mut r);
+        let classic_defense = classic.stats.defense;
+
+        let mut expert = skeletron();
+        let hands = [(SKELETRON_HAND, 2usize)];
+        let mut w = world(&tiles, t);
+        w.conditions.expert = true;
+        w.census = &hands;
+        head(&mut expert, &w, &mut r);
+
+        assert_eq!(
+            expert.stats.defense,
+            classic_defense + 2 * SKELETRON_EXPERT_HAND_DEFENSE,
+            "two living hands should add fifty defence"
+        );
+    }
+
+    /// B6: once expert mode has few hands left (or the head is hurt), it throws a skull barrage
+    /// while it hovers — something the head never did at all before.
+    #[test]
+    fn expert_mode_throws_a_skull_barrage_while_hovering_with_few_hands() {
+        let tiles = Dungeon;
+        let mut r = rng();
+        let mut s = skeletron();
+        s.ai[1] = HOVERING;
+        let t = Some(player_at(10_050.0, 9_600.0));
+        let hands = [(SKELETRON_HAND, 1usize)];
+        let mut w = world(&tiles, t);
+        w.conditions.expert = true;
+        w.census = &hands;
+
+        let mut shots = 0;
+        for _ in 0..(SKELETRON_HOVER_TICKS as i32) {
+            shots += head(&mut s, &w, &mut r).shots.len();
+        }
+        assert!(shots > 0, "it should have thrown a skull barrage");
+        assert!(
+            shots <= (SKELETRON_HOVER_TICKS / SKELETRON_BARRAGE_INTERVAL) as usize + 1,
+            "but not on every tick, got {shots}"
+        );
+    }
+
+    /// B6: classic mode never throws the barrage, no matter how few hands are left.
+    #[test]
+    fn classic_mode_never_throws_a_skull_barrage() {
+        let tiles = Dungeon;
+        let mut r = rng();
+        let mut s = skeletron();
+        s.ai[1] = HOVERING;
+        let t = Some(player_at(10_050.0, 9_600.0));
+        let hands = [(SKELETRON_HAND, 0usize)];
+        let mut w = world(&tiles, t);
+        w.census = &hands;
+
+        let mut shots = 0;
+        for _ in 0..(SKELETRON_HOVER_TICKS as i32) {
+            shots += head(&mut s, &w, &mut r).shots.len();
+        }
+        assert_eq!(shots, 0, "classic mode should never throw it");
+    }
+
+    /// B6: expert mode spins faster than classic, and faster still at range — not the flat speed
+    /// the head used regardless of difficulty.
+    #[test]
+    fn expert_mode_spins_faster_and_faster_still_at_range() {
+        let tiles = Dungeon;
+        let speed_at = |expert: bool, player_x: f32| {
+            let mut r = rng();
+            let mut s = skeletron();
+            s.ai[1] = SPINNING;
+            let t = Some(player_at(player_x, 9_600.0));
+            let mut w = world(&tiles, t);
+            w.conditions.expert = expert;
+            head(&mut s, &w, &mut r);
+            s.velocity.0.hypot(s.velocity.1)
+        };
+
+        let classic_near = speed_at(false, 10_010.0);
+        let classic_far = speed_at(false, 10_900.0);
+        assert!(
+            (classic_near - SKELETRON_SPIN_SPEED).abs() < 0.01,
+            "classic should be flat at {SKELETRON_SPIN_SPEED}, got {classic_near}"
+        );
+        assert!(
+            (classic_far - SKELETRON_SPIN_SPEED).abs() < 0.01,
+            "classic should not ramp with range, got {classic_far}"
+        );
+
+        let expert_near = speed_at(true, 10_010.0);
+        let expert_far = speed_at(true, 10_900.0);
+        assert!(
+            expert_near > classic_near,
+            "expert should charge faster than classic even up close: {expert_near} vs {classic_near}"
+        );
+        assert!(
+            expert_far > expert_near * 1.5,
+            "expert should charge much faster at range: {expert_far} vs {expert_near}"
         );
     }
 }
