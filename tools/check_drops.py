@@ -22,9 +22,14 @@ from pathlib import Path
 
 # Bosses and event bosses. A missing drop on any of these can stop a playthrough, so they are
 # reported separately and are what the exit code turns on.
+#
+# 344/345/346 (Everscream, Santa-NK1, Ice Queen — the Frost Moon's own bosses) and 564/565/576/577
+# (DD2's Dark Mage and Ogre, both tiers) used to be entirely absent from this set: a missing drop
+# on any of the seven was invisible to the exit code, reported as an ordinary-enemy gap (if at
+# all) rather than the boss-loot regression it actually is.
 BOSSES = {
     4, 13, 14, 15, 35, 36, 50, 113, 125, 126, 127, 134, 222, 245, 262, 266, 267,
-    325, 326, 370, 395, 398, 439, 551, 636, 657, 668,
+    325, 326, 344, 345, 346, 370, 395, 398, 439, 551, 564, 565, 576, 577, 636, 657, 668,
 }
 
 
@@ -89,31 +94,55 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
 
     drops: dict[int, set[int]] = {}
     mode_only: dict[int, set[int]] = {}
-    # Track `short type = N;` so the many `RegisterToNPC(type, ...)` calls resolve.
-    current_type: int | None = None
+    # Track every `short varName = N;` local, not just the one literally named `type` — several
+    # register-methods (the Creeper's own `short type2 = 267;` inside `RegisterBoss_BOC`, found
+    # independently while auditing this fix) use a second, differently-named local in the same
+    # function, and `RegisterToNPC(type2, ...)` was previously unresolvable to any npc at all: the
+    # old code checked only the exact literal variable name `type`, so every registration through
+    # a second local silently vanished from `game` — not flagged wrong, just never counted.
+    type_vars: dict[str, int] = {}
+    # Track `IItemDropRule ruleName = RegisterToNPC(...)` so a *later* line's `ruleName.OnSuccess(
+    # ...)` / `ruleName.OnFailedRoll(...)` — a separate statement, chained onto a rule object
+    # rather than a fresh `RegisterToNPC(...)` call — still resolves to the npc that rule was
+    # registered to. `RegisterBoss_FrostMoon`'s own `rule`/`rule2`/`rule3` locals are exactly this
+    # shape: `IItemDropRule rule = RegisterToNPC(344, new LeadingConditionRule(condition));` on one
+    # line, then three or more `rule.OnSuccess(ItemDropRule.ByCondition(...));`-style statements on
+    # the lines after it, none of which mention `RegisterToNPC` at all. Every item those carried —
+    # the whole of the Frost Moon bosses' loot — was invisible to `game` for exactly this reason.
+    rule_vars: dict[str, int] = {}
     arrays: dict[str, set[int]] = {}
 
     for raw in text.splitlines():
         line = raw.strip()
 
-        if m := re.match(r"short type = (\d+);", line):
-            current_type = int(m.group(1))
+        if m := re.match(r"short (\w+) = (\d+);", line):
+            type_vars[m.group(1)] = int(m.group(2))
             continue
         if m := re.match(r"int\[\]\s+(\w+)\s*=\s*new int\[\d+\]\s*\{([^}]*)\}", line):
             arrays[m.group(1)] = {int(n) for n in NUM.findall(m.group(2)) if int(n) >= 0}
             continue
 
+        # A rule-chain continuation line has neither call in it — it is `ruleVar.OnSuccess(...)`
+        # or `ruleVar.OnFailedRoll(...)`, referring back to a rule a *previous* line registered.
+        chain_target: int | None = None
         if "RegisterToNPC(" not in line and "RegisterToMultipleNPCs(" not in line:
-            continue
+            if m := re.match(r"(\w+)\.(?:OnSuccess|OnFailedRoll)\(", line):
+                chain_target = rule_vars.get(m.group(1))
+            if chain_target is None:
+                continue
 
         # Which NPCs this line registers to.
         targets: set[int] = set()
-        if m := re.search(r"RegisterToNPC\((\d+)\s*,", line):
-            targets.add(int(m.group(1)))
-        # Exact variable name `type` only — `type2`, `type18` and friends are different locals
-        # entirely, and a bare substring check here silently reused a stale, unrelated npc id.
-        elif re.search(r"RegisterToNPC\(type\s*,", line) and current_type is not None:
-            targets.add(current_type)
+        if chain_target is not None:
+            targets.add(chain_target)
+        elif m := re.search(r"RegisterToNPC\((\w+)\s*,", line):
+            tok = m.group(1)
+            if tok.isdigit():
+                targets.add(int(tok))
+            elif tok in type_vars:
+                targets.add(type_vars[tok])
+            # Anything else (a method call, an unrecognised variable) is left unresolved rather
+            # than guessed at, same as `RegisterToMultipleNPCs`'s own id-list handling below.
         elif "RegisterToMultipleNPCs(" in line:
             open_at = line.index("RegisterToMultipleNPCs(") + len("RegisterToMultipleNPCs")
             close_at = _find_matching_paren(line, open_at)
@@ -133,6 +162,16 @@ def parse_game(root: Path) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
 
         if not targets:
             continue
+
+        # Remember a rule variable's npc so a later `ruleVar.OnSuccess(...)` continuation line
+        # (caught by `chain_target` above) can resolve back to it. Only single-target lines name
+        # one unambiguously — `RegisterToMultipleNPCs`'s own multi-id lines are never assigned to a
+        # rule variable in source, so this never needs to disambiguate which of several `targets`
+        # a chain continuation meant.
+        if len(targets) == 1 and (
+            m := re.match(r"(?:[\w.<>\[\]]+\s+)?(\w+)\s*=\s*RegisterToNPC\(", line)
+        ):
+            rule_vars[m.group(1)] = next(iter(targets))
 
         # Item ids: the first number inside each rule constructor. Generous on purpose.
         items: set[int] = set()
@@ -220,7 +259,7 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => vec!\[(.*?)\],\n", cond, re.S | re.M
     ):
         npcs = _expand_npcs(m.group(1))
-        items = {int(i) for i in re.findall(r"(?:always|sometimes|a_few)\((\d+)", m.group(2))}
+        items = {int(i) for i in re.findall(r"(?:always|sometimes|a_few|m_in_n)\((\d+)", m.group(2))}
         for npc in npcs:
             ours.setdefault(npc, set()).update(items)
     # A handful of drops in `conditional()` are gated by an `if npc_type == N { ... }` guard
@@ -245,7 +284,7 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
                 depth -= 1
             i += 1
         body = cond[m.end() : i]
-        items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", body)}
+        items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few|m_in_n)\((\d+)", body)}
         for arr in re.finditer(r"&\[([\d,\s]+)\]", body):
             items.update(int(n) for n in re.findall(r"\d+", arr.group(1)))
         items.update(int(n) for n in re.findall(r"item:\s*(\d+)", body))
@@ -284,7 +323,7 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         for nth, (_, body_at, label) in enumerate(arm_starts):
             arm_end = arm_starts[nth + 1][0] if nth + 1 < len(arm_starts) else len(block)
             arm_body = block[body_at:arm_end]
-            items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few)\((\d+)", arm_body)}
+            items = {int(n) for n in re.findall(r"(?:always|sometimes|a_few|m_in_n)\((\d+)", arm_body)}
             # `pool`'s own first argument is a chance denominator, not an item — sometimes a
             # literal, sometimes (the pumpkin moon's wave-scaled gate, the goblin summoner's
             # mode-scaled one) an expression computed at runtime. Either way this scan cannot and
