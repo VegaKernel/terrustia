@@ -2,17 +2,22 @@
 //!
 //! Terraria runs `WorldGen.UpdateWorld` every tick, sampling random tiles near the players and
 //! growing things on them. None of it was here, which made the world permanently static: grass
-//! never spread, so a mud pit could never become a jungle and no biome could be built by hand.
-//! Combined with the rest of that loop being absent it also meant nothing was renewable — but
-//! grass is the foundation, because herbs and trees both need it underneath them.
+//! never spread and no biome could be built by hand. Combined with the rest of that loop being
+//! absent it also meant nothing was renewable — but grass is the foundation, because herbs and
+//! trees both need it underneath them.
 //!
-//! The rule is `WorldGen.SpreadGrass`: a dirt tile turns to grass if it is **not sealed in**. The
+//! The rule is `WorldGen.SpreadGrass`: a base tile turns to grass if it is **not sealed in**. The
 //! game checks the three-by-three box around it and refuses if every tile in that box is active
 //! and solid, which is what stops grass appearing in the middle of solid ground where no light
 //! reaches.
 //!
-//! What spreads is decided by the neighbours: dirt beside jungle grass becomes jungle grass, dirt
-//! beside corruption becomes corrupt grass. That is what lets a player make a biome, and what lets
+//! What spreads is decided by the neighbours, but *which base a grass will spread onto at all* is
+//! not the same for every grass — this was the one thing an earlier version of this doc got
+//! backwards, claiming "a mud pit could never become a jungle": jungle and mushroom grass grow
+//! only on **mud**, never on dirt, so dirt beside jungle grass stays dirt forever. The two evils
+//! are the exception that spreads onto both: dirt beside corruption becomes corrupt grass, and mud
+//! beside it becomes corrupt *jungle* grass — the block that lets an infection swallow a jungle
+//! rather than stopping dead at its edge. That is what lets a player make a biome, and what lets
 //! one creep.
 
 use rand::{Rng, rngs::SmallRng};
@@ -20,10 +25,18 @@ use terrustia_proto::{Tile, tile_solid::solid};
 
 use super::world::World;
 
-/// Plain dirt, the only thing grass grows on.
+/// Plain dirt, one of the two bases grass grows on.
 pub const DIRT: u16 = 0;
+/// Mud, the other base — jungle and mushroom grass grow *only* here, never on dirt; the two evils
+/// grow on both, taking their ordinary form on dirt and their own jungle-grass form on mud.
+pub const MUD: u16 = 59;
+/// Corrupt jungle grass, the block mud becomes beside ordinary corrupt grass or beside more of
+/// itself — `TileID.CorruptJungleGrass`.
+const CORRUPT_JUNGLE_GRASS: u16 = 661;
+/// Crimson jungle grass, the same thing for the other evil — `TileID.CrimsonJungleGrass`.
+const CRIMSON_JUNGLE_GRASS: u16 = 662;
 
-/// Every grass that can spread, and so every grass a dirt tile might become.
+/// Every grass that can spread, and so every grass a base tile might become.
 ///
 /// Ordinary grass is last so that a tile touching both plain grass and an evil one takes the evil:
 /// an infection that loses ties would never advance.
@@ -36,7 +49,28 @@ pub const GRASSES: [u16; 6] = [
     2,   // plain
 ];
 
-/// Whether a dirt tile is open enough for grass to reach it.
+/// What a base tile becomes next to this grass, given which base it already is — `None` when this
+/// grass does not grow on that base at all.
+///
+/// `WorldGen.SpreadGrass`'s own `dirt`/`grass` argument pairs, picked apart from the `TileFrame`
+/// dispatcher that decides which pairs to try for a given neighbouring grass
+/// (`WorldGen.cs:75225-75307`). Jungle (60) and mushroom (70) grass only ever list mud; the two
+/// evils (23, 199) list both bases, taking their own jungle-grass form on mud.
+fn grass_result(grass: u16, base: u16) -> Option<u16> {
+    match (grass, base) {
+        (23, DIRT) => Some(23),
+        (23, MUD) => Some(CORRUPT_JUNGLE_GRASS),
+        (199, DIRT) => Some(199),
+        (199, MUD) => Some(CRIMSON_JUNGLE_GRASS),
+        (109, DIRT) => Some(109),
+        (60, MUD) => Some(60),
+        (70, MUD) => Some(70),
+        (2, DIRT) => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether a base tile is open enough for grass to reach it.
 ///
 /// `SpreadGrass` scans `[x-1, x+2) x [y-1, y+2)` and gives up when everything in it is active and
 /// solid. One gap anywhere in that box is enough.
@@ -55,9 +89,10 @@ fn is_exposed(world: &World, x: i32, y: i32) -> bool {
     false
 }
 
-/// Which grass, if any, is touching this tile.
-fn neighbouring_grass(world: &World, x: i32, y: i32) -> Option<u16> {
-    let mut found = None;
+/// Which grass, if any, is touching this tile *and will actually grow on it* — a jungle-grass
+/// neighbour is not a candidate for a dirt tile, the way a plain-grass or evil-grass one is.
+fn neighbouring_grass(world: &World, x: i32, y: i32, base: u16) -> Option<u16> {
+    let mut found: Option<(usize, u16)> = None;
     for nx in (x - 1)..=(x + 1) {
         for ny in (y - 1)..=(y + 1) {
             if (nx, ny) == (x, y) || !world.in_bounds(nx, ny) {
@@ -67,16 +102,20 @@ fn neighbouring_grass(world: &World, x: i32, y: i32) -> Option<u16> {
             if !tile.is_active() {
                 continue;
             }
-            if let Some(rank) = GRASSES.iter().position(|g| *g == tile.block) {
-                // Lower index wins, so an evil grass beats plain grass on a contested tile.
-                found = Some(match found {
-                    Some((best, _)) if best <= rank => (best, GRASSES[best]),
-                    _ => (rank, GRASSES[rank]),
-                });
-            }
+            let Some(rank) = GRASSES.iter().position(|g| *g == tile.block) else {
+                continue;
+            };
+            let Some(result) = grass_result(tile.block, base) else {
+                continue;
+            };
+            // Lower index wins, so an evil grass beats plain grass on a contested tile.
+            found = Some(match found {
+                Some((best, best_result)) if best <= rank => (best, best_result),
+                _ => (rank, result),
+            });
         }
     }
-    found.map(|(_, grass)| grass)
+    found.map(|(_, result)| result)
 }
 
 /// Try to grow grass on one tile. Returns the tile it changed, if it changed one.
@@ -85,13 +124,13 @@ pub fn spread_grass(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
         return None;
     }
     let tile = world.tile(x, y);
-    if !tile.is_active() || tile.block != DIRT {
+    if !tile.is_active() || !matches!(tile.block, DIRT | MUD) {
         return None;
     }
     if !is_exposed(world, x, y) {
         return None;
     }
-    let grass = neighbouring_grass(world, x, y)?;
+    let grass = neighbouring_grass(world, x, y, tile.block)?;
 
     let mut grown = tile;
     grown.block = grass;
@@ -495,6 +534,70 @@ mod tests {
         world.set_tile(12, 20, Tile::block(23));
         assert_eq!(spread_grass(&mut world, 11, 20), Some((11, 20)));
         assert_eq!(world.tile(11, 20).block, 23, "corruption should take it");
+    }
+
+    /// Jungle grass spreads onto mud, never onto dirt — the reverse of what this file's own doc
+    /// used to claim ("a mud pit could never become a jungle").
+    ///
+    /// Fails before the fix: `spread_grass` only ever accepted `DIRT` as the base, so mud beside
+    /// jungle grass stayed mud forever.
+    #[test]
+    fn jungle_grass_spreads_onto_mud_not_dirt() {
+        let mut world = World::empty(40, 40, "growth");
+        for x in 0..40 {
+            for y in 20..40 {
+                world.set_tile(x, y, Tile::block(MUD));
+            }
+        }
+        world.set_tile(10, 20, Tile::block(60)); // jungle grass
+
+        assert_eq!(spread_grass(&mut world, 11, 20), Some((11, 20)));
+        assert_eq!(
+            world.tile(11, 20).block,
+            60,
+            "mud should have turned to jungle grass"
+        );
+    }
+
+    /// Dirt beside jungle grass does not turn to jungle grass at all — vanilla never spreads
+    /// jungle grass onto dirt, only onto mud.
+    ///
+    /// Fails before the fix: the old code adopted whatever grass touched a dirt tile, jungle
+    /// included, which is exactly the bug this file's own doc used to assert was impossible in
+    /// the other direction.
+    #[test]
+    fn dirt_beside_jungle_grass_stays_dirt() {
+        let mut world = dirt_field(Some((10, 20)), 60);
+        assert_eq!(spread_grass(&mut world, 11, 20), None);
+        assert_eq!(world.tile(11, 20).block, DIRT);
+    }
+
+    /// Corrupt grass spreads onto dirt as itself *and* onto mud as corrupt jungle grass — the two
+    /// evils are the only grasses that take root on both bases at once.
+    #[test]
+    fn corrupt_grass_spreads_onto_both_dirt_and_mud() {
+        let mut world = World::empty(40, 40, "growth");
+        for x in 0..40 {
+            for y in 20..40 {
+                world.set_tile(x, y, Tile::block(if x < 20 { DIRT } else { MUD }));
+            }
+        }
+        world.set_tile(10, 20, Tile::block(23)); // corrupt grass beside the dirt half
+        world.set_tile(30, 20, Tile::block(23)); // and beside the mud half
+
+        assert_eq!(spread_grass(&mut world, 11, 20), Some((11, 20)));
+        assert_eq!(
+            world.tile(11, 20).block,
+            23,
+            "dirt takes ordinary corrupt grass"
+        );
+
+        assert_eq!(spread_grass(&mut world, 31, 20), Some((31, 20)));
+        assert_eq!(
+            world.tile(31, 20).block,
+            CORRUPT_JUNGLE_GRASS,
+            "mud takes corrupt jungle grass instead"
+        );
     }
 
     /// A herb appears on grass with open air above it.

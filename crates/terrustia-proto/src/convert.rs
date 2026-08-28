@@ -61,8 +61,15 @@ pub fn block(block: u16, into: Biome) -> Option<u16> {
         (Material::JungleGrass, Biome::Purity) => 60,
         (Material::JungleGrass, Biome::Corruption) => 661,
         (Material::JungleGrass, Biome::Crimson) => 662,
-        // ...but the hallow has no jungle of its own, so it takes the ordinary grass.
-        (Material::JungleGrass, Biome::Hallow) => 109,
+        // ...and the hallow has no jungle of its own at all — vanilla's own hardmode `Convert`
+        // (`WorldGen.cs`'s own hallow branch, `type != 109 && type != 492`) checks
+        // `TileID.Sets.Conversion.Grass` for what becomes hallowed grass, and that set is
+        // `{2, 23, 109, 199, 477, 492}` — it does not include jungle grass (60/661/662) at all, a
+        // separate set (`Conversion.JungleGrass`). A previous version of this table sent jungle
+        // grass to 109 anyway; the hardmode stripe's own inline conversion table agrees with the
+        // general one here — its "good" branch (`WorldGen.cs:77049`) never touches type 60, and
+        // only heals 661/662 back to plain 60, never forward into 109.
+        (Material::JungleGrass, Biome::Hallow) => return None,
         // Mushroom grass is only ever itself or plain jungle.
         (Material::MushroomGrass, Biome::Purity) => 70,
         (Material::MushroomGrass, _) => return None,
@@ -291,7 +298,22 @@ mod tests {
     fn the_hallow_has_no_thorns() {
         assert_eq!(block(32, Biome::Hallow), None, "corrupt thorns");
         assert_eq!(block(352, Biome::Hallow), None, "crimson thorns");
-        // Jungle grass in the hallow becomes ordinary hallowed grass rather than nothing.
-        assert_eq!(block(60, Biome::Hallow), Some(109));
+    }
+
+    /// The hallow has no jungle of its own either, and vanilla never de-jungles a tile the way a
+    /// previous version of this table did (sending 60/661/662 to 109) — `WorldGen.cs`'s own
+    /// hardmode `Convert` checks `TileID.Sets.Conversion.Grass`, a set that does not include any
+    /// of the three jungle-grass types, for what becomes hallowed grass.
+    ///
+    /// Fails on the code before this fix: `block(60, Biome::Hallow)` returned `Some(109)`.
+    #[test]
+    fn the_hallow_never_converts_jungle_grass() {
+        for jungle in [60u16, 661, 662] {
+            assert_eq!(
+                block(jungle, Biome::Hallow),
+                None,
+                "{jungle} should not de-jungle into hallowed grass"
+            );
+        }
     }
 }

@@ -72,6 +72,18 @@ pub struct Outcome {
     pub actuators_spent: i32,
     /// Whether the run stopped early for want of materials.
     pub ran_out: bool,
+    /// An item this cut should drop into the world, at the cut tile's own pixel position — one
+    /// entry per successful cut, colour and actuator alike.
+    ///
+    /// `KillWire`/`KillWire2`/`KillWire3`/`KillWire4` (`WorldGen.cs:58613-58703`) and
+    /// `KillActuator` (`58513`) each independently spawn a real item pickup in the world the
+    /// instant they clear a tile's flag — [`WIRE_ITEM`] for any colour, [`ACTUATOR_ITEM`] for an
+    /// actuator — not an inventory credit the way *placing* draws straight from the player's
+    /// stack. This module has no notion of a world item entity, only tiles, so it reports where
+    /// and what rather than spawning anything; the caller, which does have an item-drop system,
+    /// is the one that can hand a player back what a mistake with the Grand Design used to simply
+    /// destroy.
+    pub drops: Vec<(i32, i32, u16)>,
 }
 
 // The tile-manipulation actions, from `MessageBuffer`'s own numbering.
@@ -85,6 +97,11 @@ const PLACE_WIRE3: u8 = 12;
 const KILL_WIRE3: u8 = 13;
 const PLACE_WIRE4: u8 = 16;
 const KILL_WIRE4: u8 = 17;
+
+/// `ItemID.Wire` — what any colour of cut wire drops, one per tile.
+const WIRE_ITEM: u16 = 530;
+/// `ItemID.Actuator` — what a cut actuator drops.
+const ACTUATOR_ITEM: u16 = 849;
 
 /// What the world has to offer the run.
 ///
@@ -198,20 +215,37 @@ fn step_at(
     let mut touched = false;
 
     if mode.cutting() {
-        for (bit, flag, action) in [
-            (ToolMode::RED, TileFlags::WIRE_RED, KILL_WIRE),
-            (ToolMode::GREEN, TileFlags::WIRE_GREEN, KILL_WIRE3),
-            (ToolMode::BLUE, TileFlags::WIRE_BLUE, KILL_WIRE2),
-            (ToolMode::YELLOW, TileFlags::WIRE_YELLOW, KILL_WIRE4),
-            (ToolMode::ACTUATOR, TileFlags::ACTUATOR, KILL_ACTUATOR),
+        for (bit, flag, action, item) in [
+            (ToolMode::RED, TileFlags::WIRE_RED, KILL_WIRE, WIRE_ITEM),
+            (
+                ToolMode::GREEN,
+                TileFlags::WIRE_GREEN,
+                KILL_WIRE3,
+                WIRE_ITEM,
+            ),
+            (ToolMode::BLUE, TileFlags::WIRE_BLUE, KILL_WIRE2, WIRE_ITEM),
+            (
+                ToolMode::YELLOW,
+                TileFlags::WIRE_YELLOW,
+                KILL_WIRE4,
+                WIRE_ITEM,
+            ),
+            (
+                ToolMode::ACTUATOR,
+                TileFlags::ACTUATOR,
+                KILL_ACTUATOR,
+                ACTUATOR_ITEM,
+            ),
         ] {
             if mode.has(bit) && tile.flags.has(flag) {
                 tile.flags.set(flag, false);
                 out.changes.push(Change { x, y, action });
+                // Every colour (and the actuator) that was actually cleared drops its own item,
+                // matching vanilla's own per-colour KillWire/KillActuator calls.
+                out.drops.push((x, y, item));
                 touched = true;
             }
         }
-        // Cutting gives nothing back, which is why a mistake with the Grand Design is expensive.
     } else {
         for (bit, flag, action) in [
             (ToolMode::RED, TileFlags::WIRE_RED, PLACE_WIRE),
@@ -461,9 +495,15 @@ mod tests {
         }
     }
 
-    /// The cutter takes wire away and gives nothing back.
+    /// The cutter costs nothing from the player's own supply, and reports an item-530 drop for
+    /// every tile it actually cut — `KillWire`'s own `Item.NewItem(..., 530)`, once per colour
+    /// cleared, rather than the cut simply destroying the wire.
+    ///
+    /// Fails before the fix: `Outcome::drops` did not exist, and a mistake with the Grand Design
+    /// permanently destroyed the wire it cut instead of dropping it for the player to pick back
+    /// up.
     #[test]
-    fn the_cutter_removes_without_refunding() {
+    fn the_cutter_costs_nothing_and_reports_a_drop_per_tile_cut() {
         let mut grid = Grid::new();
         run(
             &mut grid,
@@ -485,8 +525,24 @@ mod tests {
             },
             true,
         );
-        assert_eq!(out.wire_spent, 0, "cutting costs nothing");
+        assert_eq!(
+            out.wire_spent, 0,
+            "cutting costs nothing from the player's own supply"
+        );
         assert_eq!(out.changes.len(), 6, "and reports every tile it cut");
+        assert_eq!(
+            out.drops.len(),
+            6,
+            "and one wire item drop per tile actually cut"
+        );
+        assert!(
+            out.drops.iter().all(|&(_, _, item)| item == WIRE_ITEM),
+            "every drop should be a wire item"
+        );
+        for &(x, y, _) in &out.drops {
+            assert_eq!(y, 20);
+            assert!((10..=15).contains(&x));
+        }
         for x in 10..=15 {
             assert!(!grid.tile(x, 20).flags.has(TileFlags::WIRE_RED));
             assert!(
@@ -494,6 +550,31 @@ mod tests {
                 "the blue should be untouched"
             );
         }
+    }
+
+    /// Cutting an actuator reports its own item drop (849), separate from wire (530) —
+    /// `KillActuator`'s own `Item.NewItem(..., 849)`.
+    #[test]
+    fn cutting_an_actuator_reports_the_actuator_item() {
+        let mut grid = Grid::new();
+        run(
+            &mut grid,
+            (10, 20),
+            (12, 20),
+            ToolMode(ToolMode::ACTUATOR),
+            plenty(),
+            true,
+        );
+        let out = run(
+            &mut grid,
+            (10, 20),
+            (12, 20),
+            ToolMode(ToolMode::ACTUATOR | ToolMode::CUTTER),
+            plenty(),
+            true,
+        );
+        assert_eq!(out.drops.len(), 3);
+        assert!(out.drops.iter().all(|&(_, _, item)| item == ACTUATOR_ITEM));
     }
 
     /// Actuators come out of their own supply, not the wire.
