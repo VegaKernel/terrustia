@@ -46,6 +46,9 @@ mod reaction {
     pub const CRISPY_HONEY: u16 = 230;
     /// Honey on water.
     pub const HONEY_BLOCK: u16 = 229;
+    /// Shimmer on anything at all — `Liquid.GetLiquidMergeTypes`'s own shimmer branch always
+    /// makes this block and always survives as shimmer, whatever the other liquid was.
+    pub const AETHERIUM: u16 = 659;
 }
 
 /// A queue of tiles whose liquid may still need to move.
@@ -63,6 +66,15 @@ pub struct Settled {
     pub changed: Vec<(i32, i32)>,
     /// Tiles that turned to stone where two liquids met.
     pub reacted: Vec<(i32, i32, u16)>,
+    /// Tiles liquid just arrived on that were carrying something — `Liquid.AddWater`'s own
+    /// `CheckLavaDeath`/`CheckWaterDeath` check (`Liquid.cs:1192-1215`), which kills whatever is
+    /// sitting there (a torch, a plant, and a good deal else) the instant liquid touches it.
+    ///
+    /// Reported rather than resolved here: vanilla decides *which* furniture actually dies from
+    /// a per-type flag pair (`TileObjectData`'s own `WaterDeath`/`LavaDeath`) this project has no
+    /// table for, so every active tile liquid newly reaches is listed — the caller, which does
+    /// have (or can build) that table, is the one that can tell a torch from a chest.
+    pub drowned: Vec<(i32, i32)>,
 }
 
 /// What the simulation needs of the world: read a tile, write one back.
@@ -152,6 +164,13 @@ impl Liquids {
             *waited = 0;
         }
 
+        // A lava tile burns the grass around it every real tick it is processed, not only the
+        // first time it stops moving — `Liquid.DelWater`'s own per-tick call, not a one-shot
+        // "just arrived" hook.
+        if here.liquid_kind == Liquid::Lava {
+            lava_burn(world, x, y, out);
+        }
+
         if self.fall(world, x, y, out) {
             return;
         }
@@ -172,6 +191,12 @@ impl Liquids {
         let moved = room.min(here.liquid);
         if moved == 0 {
             return false;
+        }
+        // Liquid arriving on something that was dry a moment ago — `Liquid.AddWater`'s own
+        // `CheckLavaDeath`/`CheckWaterDeath`; see [`Settled::drowned`] for why this only reports
+        // rather than resolves it.
+        if below.liquid == 0 && below.is_active() {
+            out.drowned.push((x, y + 1));
         }
 
         let mut here = here;
@@ -276,6 +301,9 @@ impl Liquids {
             if i32::from(tile.liquid) == level {
                 continue;
             }
+            if tile.liquid == 0 && level > 0 && tile.is_active() {
+                out.drowned.push((sx, y));
+            }
             tile.liquid = level as u8;
             tile.liquid_kind = kind;
             world.set_tile(sx, y, tile);
@@ -305,6 +333,9 @@ impl Liquids {
             if each == i32::from(neighbour.liquid) {
                 continue;
             }
+            if neighbour.liquid == 0 && each > 0 && neighbour.is_active() {
+                out.drowned.push((x + side, y));
+            }
             // The leftover stays here, so nothing is created or destroyed on an odd total.
             let mut here = here;
             let mut neighbour = neighbour;
@@ -321,51 +352,174 @@ impl Liquids {
         }
     }
 
-    /// Two different liquids touching. Returns whether something turned to stone.
+    /// Two different liquids touching. Returns whether something turned into a merge block.
+    ///
+    /// Transcribed from `Liquid.LiquidCheck` (`Liquid.cs:1234-1320`), which is not the pairwise
+    /// "any neighbour of a different kind reacts" rule the old version of this function used.
+    /// Left, right and above are checked together first: every one of them holding a different
+    /// kind has its liquid **zeroed regardless of the amount** — vanilla does this before it ever
+    /// looks at the total — and only once their combined amount reaches 24 does a merge block
+    /// appear, planted at *this* tile and clearing this tile's own liquid too. A tile with nothing
+    /// foreign on any of those three sides falls through to a second, separate check against the
+    /// tile directly below: not summed with the other three (there is only the one), and its
+    /// merge block lands *below* rather than here, with both tiles' liquid zeroed.
+    ///
+    /// Two things vanilla's own version of this checks that this does not, both simplifications
+    /// rather than oversights: the merge-block placement is refused unless this tile (or, for the
+    /// below case, the tile below) is inactive, standing in for vanilla's `!tile.active() ||
+    /// tileObsidianKill[tile.type]` — this project has no `tileObsidianKill` table, so the handful
+    /// of furniture types that check would additionally allow are not covered; and the below case
+    /// skips vanilla's `IsAContainer`/cuttable-plant special cases entirely, requiring the tile
+    /// below to simply be inactive.
     fn react(&mut self, world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) -> bool {
         let here = world.tile(x, y);
-        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+
+        let mut foreign = 0i32;
+        let (mut water, mut lava, mut honey, mut shimmer) = (false, false, false, false);
+        let mut any_differs = false;
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1)] {
             let (nx, ny) = (x + dx, y + dy);
-            let other = world.tile(nx, ny);
-            if other.liquid == 0 || other.liquid_kind == here.liquid_kind {
+            let mut side = world.tile(nx, ny);
+            if side.liquid == 0 {
                 continue;
             }
-            let Some(block) = product(here.liquid_kind, other.liquid_kind) else {
-                continue;
-            };
-            // The lava is what turns to stone; the other liquid is spent doing it.
-            let (sx, sy) = if here.liquid_kind == Liquid::Lava {
-                (x, y)
-            } else {
-                (nx, ny)
-            };
-            let (ox, oy) = if (sx, sy) == (x, y) { (nx, ny) } else { (x, y) };
+            match side.liquid_kind {
+                Liquid::Water => water = true,
+                Liquid::Lava => lava = true,
+                Liquid::Honey => honey = true,
+                Liquid::Shimmer => shimmer = true,
+            }
+            if side.liquid_kind != here.liquid_kind {
+                any_differs = true;
+                foreign += i32::from(side.liquid);
+                side.liquid = 0;
+                world.set_tile(nx, ny, side);
+                out.changed.push((nx, ny));
+                self.disturb(nx, ny);
+            }
+        }
 
-            world.set_tile(sx, sy, Tile::block(block));
-            let mut spent = world.tile(ox, oy);
-            spent.liquid = spent.liquid.saturating_sub(FULL / 2);
-            world.set_tile(ox, oy, spent);
-            out.reacted.push((sx, sy, block));
-            out.changed.push((ox, oy));
-            self.disturb(sx, sy);
-            self.disturb(ox, oy);
+        if any_differs {
+            let (block, kind) = merge_result(here.liquid_kind, water, lava, honey, shimmer);
+            if foreign < 24 || kind == here.liquid_kind || here.is_active() {
+                return false;
+            }
+            world.set_tile(x, y, Tile::block(block));
+            out.reacted.push((x, y, block));
+            out.changed.push((x, y));
+            self.disturb(x, y);
             return true;
         }
-        false
+
+        // Nothing foreign to either side or above: the one check left is straight down, which
+        // reacts on its own rather than being summed in with the other three.
+        let below = world.tile(x, y + 1);
+        if below.liquid == 0 || below.liquid_kind == here.liquid_kind || below.is_active() {
+            return false;
+        }
+        if here.liquid < 24 {
+            // Too little to make anything: it simply evaporates, matching `LiquidCheck`'s own
+            // `tile5.liquid < 24` branch, which clears the source without creating a block.
+            let mut cleared = here;
+            cleared.liquid = 0;
+            cleared.liquid_kind = Liquid::Water;
+            world.set_tile(x, y, cleared);
+            out.changed.push((x, y));
+            return true;
+        }
+        let (water, lava, honey, shimmer) = match below.liquid_kind {
+            Liquid::Water => (true, false, false, false),
+            Liquid::Lava => (false, true, false, false),
+            Liquid::Honey => (false, false, true, false),
+            Liquid::Shimmer => (false, false, false, true),
+        };
+        let (block, kind) = merge_result(here.liquid_kind, water, lava, honey, shimmer);
+        if kind == here.liquid_kind {
+            return false;
+        }
+        world.set_tile(x, y + 1, Tile::block(block));
+        let mut cleared = here;
+        cleared.liquid = 0;
+        world.set_tile(x, y, cleared);
+        out.reacted.push((x, y + 1, block));
+        out.changed.push((x, y));
+        out.changed.push((x, y + 1));
+        self.disturb(x, y);
+        self.disturb(x, y + 1);
+        true
     }
 }
 
-/// What two liquids make where they meet. `None` means they simply do not react.
-fn product(a: Liquid, b: Liquid) -> Option<u16> {
-    let pair = |x: Liquid, y: Liquid| (a == x && b == y) || (a == y && b == x);
-    if pair(Liquid::Water, Liquid::Lava) {
-        Some(reaction::OBSIDIAN)
-    } else if pair(Liquid::Honey, Liquid::Lava) {
-        Some(reaction::CRISPY_HONEY)
-    } else if pair(Liquid::Honey, Liquid::Water) {
-        Some(reaction::HONEY_BLOCK)
-    } else {
-        None
+/// What a liquid becomes, and what block it makes, where it merges with another kind present
+/// nearby — transcribed from `Liquid.GetLiquidMergeTypes` (`Liquid.cs:1386-1454`). The four checks
+/// run in a fixed order and each can overwrite what an earlier one decided, exactly as vanilla's
+/// own un-early-exiting sequence does: that is what makes shimmer win over honey, honey over lava,
+/// and lava over water whenever more than one is present around the same tile at once.
+fn merge_result(
+    this_kind: Liquid,
+    water: bool,
+    lava: bool,
+    honey: bool,
+    shimmer: bool,
+) -> (u16, Liquid) {
+    let mut block = reaction::OBSIDIAN;
+    let mut kind = this_kind;
+    if this_kind != Liquid::Water && water {
+        block = match this_kind {
+            Liquid::Lava => reaction::OBSIDIAN,
+            Liquid::Honey => reaction::HONEY_BLOCK,
+            Liquid::Shimmer => reaction::AETHERIUM,
+            Liquid::Water => unreachable!(),
+        };
+        kind = Liquid::Water;
+    }
+    if this_kind != Liquid::Lava && lava {
+        block = match this_kind {
+            Liquid::Water => reaction::OBSIDIAN,
+            Liquid::Honey => reaction::CRISPY_HONEY,
+            Liquid::Shimmer => reaction::AETHERIUM,
+            Liquid::Lava => unreachable!(),
+        };
+        kind = Liquid::Lava;
+    }
+    if this_kind != Liquid::Honey && honey {
+        block = match this_kind {
+            Liquid::Water => reaction::HONEY_BLOCK,
+            Liquid::Lava => reaction::CRISPY_HONEY,
+            Liquid::Shimmer => reaction::AETHERIUM,
+            Liquid::Honey => unreachable!(),
+        };
+        kind = Liquid::Honey;
+    }
+    if this_kind != Liquid::Shimmer && shimmer {
+        block = reaction::AETHERIUM;
+        kind = Liquid::Shimmer;
+    }
+    (block, kind)
+}
+
+/// Grass, jungle grass, mushroom grass and their evil counterparts around a lava tile burn away
+/// every real tick that tile is processed — `Liquid.DelWater`'s own literal table
+/// (`Liquid.cs:1552-1569`). Ordinary grasses (plain, corrupt, hallowed, crimson, and the two golf
+/// variants) burn to dirt; the jungle grasses (plain, mushroom, and their evil-biome forms) burn
+/// to mud, which is what a lava flow through an underground jungle actually leaves behind.
+fn lava_burn(world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) {
+    for bx in x - 1..=x + 1 {
+        for by in y - 1..=y + 1 {
+            let tile = world.tile(bx, by);
+            if !tile.is_active() {
+                continue;
+            }
+            let burned = match tile.block {
+                2 | 23 | 109 | 199 | 477 | 492 => 0u16,
+                60 | 70 | 661 | 662 => 59,
+                _ => continue,
+            };
+            let mut gone = tile;
+            gone.block = burned;
+            world.set_tile(bx, by, gone);
+            out.changed.push((bx, by));
+        }
     }
 }
 
@@ -580,6 +734,103 @@ mod tests {
         run(&mut cave, &mut liquids, 40);
         assert!(!cave.tile(20, 19).is_active());
         assert!(!cave.tile(21, 19).is_active());
+    }
+
+    /// A small amount of foreign liquid on each side does not react at all — vanilla requires the
+    /// *combined* foreign amount to reach 24, not merely "some contact" between two kinds.
+    ///
+    /// Fails on the code before this fix, which reacted to any two different liquids touching
+    /// regardless of how little of either was actually there.
+    #[test]
+    fn small_amounts_of_foreign_liquid_do_not_react() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        cave.pour(20, 19, Liquid::Lava, 10);
+        cave.pour(21, 19, Liquid::Water, 10);
+        liquids.disturb(20, 19);
+        liquids.disturb(21, 19);
+        run(&mut cave, &mut liquids, 20);
+
+        assert!(
+            !cave.tile(20, 19).is_active() && !cave.tile(21, 19).is_active(),
+            "10 and 10 together are under the 24 threshold, so nothing should have reacted"
+        );
+    }
+
+    /// Lava dripping onto water directly below it reacts too, separately from the lateral check,
+    /// and — same as the lateral case — lands its merge block on the *other* liquid's own tile.
+    ///
+    /// Fails on the code before this fix, which always planted the block on the lava's own tile
+    /// regardless of which side the other liquid was on.
+    #[test]
+    fn lava_over_water_reacts_and_lands_on_the_waters_own_tile() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        cave.pour(20, 18, Liquid::Lava, FULL);
+        cave.pour(20, 19, Liquid::Water, FULL);
+        liquids.disturb(20, 18);
+        liquids.disturb(20, 19);
+        run(&mut cave, &mut liquids, 20);
+
+        assert!(
+            cave.tile(20, 19).is_active(),
+            "the merge block should be on the water's own tile"
+        );
+        assert_eq!(cave.tile(20, 19).block, reaction::OBSIDIAN);
+    }
+
+    /// Liquid arriving on something active — a torch here — is reported, so a caller with the
+    /// real per-type table can decide whether it dies.
+    ///
+    /// Fails on the code before this fix: `Settled::drowned` did not exist and nothing was ever
+    /// reported when liquid reached an occupied tile.
+    #[test]
+    fn liquid_arriving_on_something_active_is_reported() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        // A torch standing where the water is about to land — active, but not solid, so liquid
+        // still reaches it rather than being blocked outright.
+        cave.set_tile(20, 19, Tile::framed(4, 0, 0));
+        cave.pour(20, 5, Liquid::Water, FULL);
+        liquids.disturb(20, 5);
+
+        let mut reported = false;
+        for _ in 0..200 {
+            if liquids.tick(&mut cave).drowned.contains(&(20, 19)) {
+                reported = true;
+            }
+        }
+        assert!(
+            reported,
+            "liquid arriving on the torch should have been reported"
+        );
+    }
+
+    /// Settled lava burns the grass and jungle grass around it into dirt and mud —
+    /// `Liquid.DelWater`'s own literal table.
+    ///
+    /// Fails on the code before this fix: lava simply sat next to grass forever, with nothing
+    /// converting it at all.
+    #[test]
+    fn settled_lava_burns_grass_and_jungle_grass_around_it() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        cave.tiles.insert((19, 19), Tile::block(2)); // ordinary grass, one side
+        cave.tiles.insert((21, 19), Tile::block(60)); // jungle grass, the other side
+        cave.pour(20, 19, Liquid::Lava, FULL);
+        liquids.disturb(20, 19);
+        run(&mut cave, &mut liquids, 40);
+
+        assert_eq!(
+            cave.tile(19, 19).block,
+            0,
+            "ordinary grass should have burned to dirt"
+        );
+        assert_eq!(
+            cave.tile(21, 19).block,
+            59,
+            "jungle grass should have burned to mud"
+        );
     }
 
     /// Lava creeps: it takes longer to cover the same ground than water does.
