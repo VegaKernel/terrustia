@@ -3007,6 +3007,22 @@ pub const MOTHRON_SWEEP_PAST: f32 = 260.0;
 /// Where it will lay: within this many tiles of you, on a floor, and not in lava.
 pub const MOTHRON_LAY_RANGE_X: i32 = 30;
 pub const MOTHRON_LAY_RANGE_Y: i32 = 20;
+/// Laying is not instant: it has to fly down to the spot it picked first, easing toward it a
+/// tenth of the way each tick and never faster than the cap.
+pub const MOTHRON_LAY_SPEED_BASE: f32 = 6.0;
+pub const MOTHRON_LAY_SPEED_GAIN: f32 = 150.0;
+pub const MOTHRON_LAY_SPEED_CAP: f32 = 10.0;
+/// How close counts as arrived, for the flight down and then the hover once there.
+pub const MOTHRON_LAY_ARRIVE: f32 = 10.0;
+pub const MOTHRON_SETTLE_ARRIVE: f32 = 4.0;
+pub const MOTHRON_SETTLE_SPEED_CAP: f32 = 4.0;
+/// Once settled it hovers over the spot for this long before the egg actually appears, and the
+/// same again after that before it goes back to hovering — halved in Expert Mode.
+pub const MOTHRON_SETTLE_WAIT: f32 = 70.0;
+pub const MOTHRON_SETTLE_WAIT_EXPERT: f32 = 52.0;
+/// The odds, out of three, that a Mothron with room left in its brood goes straight back down to
+/// lay another egg rather than returning to its hover.
+pub const MOTHRON_RELAY_ODDS: u32 = 3;
 
 // --- The Twins ------------------------------------------------------------------------------------
 
