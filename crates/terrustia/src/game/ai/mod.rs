@@ -627,7 +627,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         67 => snail::update(npc, world, rng),
         4 => effects.spawn.extend(boss::eye::update(npc, world)),
-        11 => effects.spawn.extend(boss::skeletron::head(npc, world)),
+        11 => {
+            let head = boss::skeletron::head(npc, world, rng);
+            effects.spawn.extend(head.spawn);
+            effects.shots.extend(head.shots);
+        }
         27 => {
             let advance = boss::wall::wall(
                 npc,
@@ -1132,6 +1136,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         121 => {
             let out = boss::queen_slime::queen_slime(npc, world, rng);
+            effects.shots.extend(out.shots);
             effects.teleport_to = out.teleport_to;
         }
         style => unreachable!("style {style} claims parity but has no routine here"),

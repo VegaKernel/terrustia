@@ -14,12 +14,15 @@
 
 use rand::rngs::SmallRng;
 use terrustia_proto::npc_params::{
-    CULTIST_ARRIVAL, CULTIST_CLONE, CULTIST_CLONES, CULTIST_FIRE, CULTIST_FIRE_COUNT,
-    CULTIST_FIRE_COUNT_EXPERT, CULTIST_FIRE_DAMAGE, CULTIST_FIRE_EVERY, CULTIST_FIRE_EVERY_EXPERT,
-    CULTIST_HALF_DEFENSE, CULTIST_ICE, CULTIST_ICE_DAMAGE, CULTIST_ICE_EVERY,
-    CULTIST_ICE_EVERY_EXPERT, CULTIST_LIGHTNING, CULTIST_LIGHTNING_DAMAGE, CULTIST_LIGHTNING_EVERY,
-    CULTIST_LIGHTNING_EVERY_EXPERT, CULTIST_MOVE_STEP, CULTIST_ORBIT, CULTIST_ORBIT_SPREAD,
-    CULTIST_PAUSE, CULTIST_RITUAL_TICKS, CULTIST_RITUAL_WINDOW, CULTIST_SCRIPT,
+    CULTIST_ANCIENT_LIGHT, CULTIST_ARRIVAL, CULTIST_CLONE, CULTIST_CLONES, CULTIST_FIRE,
+    CULTIST_FIRE_COUNT, CULTIST_FIRE_COUNT_EXPERT, CULTIST_FIRE_DAMAGE, CULTIST_FIRE_EVERY,
+    CULTIST_FIRE_EVERY_EXPERT, CULTIST_HALF_DEFENSE, CULTIST_ICE, CULTIST_ICE_DAMAGE,
+    CULTIST_ICE_EVERY, CULTIST_ICE_EVERY_EXPERT, CULTIST_LIGHTNING, CULTIST_LIGHTNING_DAMAGE,
+    CULTIST_LIGHTNING_EVERY, CULTIST_LIGHTNING_EVERY_EXPERT, CULTIST_MOVE_STEP, CULTIST_ORBIT,
+    CULTIST_ORBIT_SPREAD, CULTIST_PAUSE, CULTIST_RITUAL_TICKS, CULTIST_RITUAL_WINDOW,
+    CULTIST_SCRIPT_HEALTHY, CULTIST_SCRIPT_WOUNDED, CULTIST_SHADOWFLAME_ANGLE_STEP,
+    CULTIST_SHADOWFLAME_COUNT, CULTIST_SHADOWFLAME_EVERY, CULTIST_SHADOWFLAME_EVERY_EXPERT,
+    CULTIST_SHADOWFLAME_SPAWNS, CULTIST_SHADOWFLAME_SPEED,
 };
 
 use super::skeletron::Parent;
@@ -36,6 +39,7 @@ mod state {
     pub const ICE: f32 = 3.0;
     pub const LIGHTNING: f32 = 4.0;
     pub const RITUAL: f32 = 5.0;
+    pub const SHADOWFLAME: f32 = 6.0;
 }
 
 /// What it did this tick.
@@ -120,10 +124,17 @@ pub fn cultist(
             if npc.ai[1] < CULTIST_PAUSE || !real {
                 return out;
             }
-            // The script, indexed by how many attacks it has made. Running off the end restarts it.
+            // The script, indexed by how many attacks it has made. Running off the end restarts
+            // it. There are two scripts, chosen by health, not one shared by both halves of the
+            // fight (`NPC.cs:65361-65461`).
+            let script: &[u8] = if wounded {
+                &CULTIST_SCRIPT_WOUNDED
+            } else {
+                &CULTIST_SCRIPT_HEALTHY
+            };
             let step = npc.ai[3] as usize;
-            let what = CULTIST_SCRIPT.get(step).copied().unwrap_or(0);
-            if step + 1 >= CULTIST_SCRIPT.len() {
+            let what = script.get(step).copied().unwrap_or(0);
+            if step + 1 >= script.len() {
                 npc.ai[3] = -1.0;
             }
             npc.ai[1] = 0.0;
@@ -132,6 +143,7 @@ pub fn cultist(
                 2 => state::FIREBALLS,
                 3 => state::LIGHTNING,
                 4 => state::RITUAL,
+                5 => state::SHADOWFLAME,
                 _ => {
                     // Move. The destination is an ellipse above the player, and the whole group
                     // shares it out so they fan rather than stack.
@@ -227,6 +239,49 @@ pub fn cultist(
                 ));
             }
             if npc.ai[1] >= every {
+                finish(npc, real);
+            }
+        }
+
+        state::SHADOWFLAME => {
+            // Five Ancient Lights fanned out toward you, twice over — the attack that used to be
+            // an idle "move" (`NPC.cs:65949-66020`).
+            let every = if expert {
+                CULTIST_SHADOWFLAME_EVERY_EXPERT
+            } else {
+                CULTIST_SHADOWFLAME_EVERY
+            };
+            npc.ai[1] += 1.0;
+            // `local_ai[1]` counts the volleys actually fired, which is what caps it at exactly
+            // `CULTIST_SHADOWFLAME_COUNT` — deriving the cap from `ai[1]` arithmetic alone can
+            // let a fire tick and the termination tick land together and fire one too many.
+            if npc.ai[1] >= 4.0
+                && (npc.ai[1] as i32 - 4) % every as i32 == 0
+                && (npc.local_ai[1] as i32) < CULTIST_SHADOWFLAME_COUNT
+            {
+                npc.local_ai[1] += 1.0;
+                let aim = (target.center.0 - cx, target.center.1 - cy);
+                let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+                let aim = (aim.0 / length, aim.1 / length);
+                let arc = std::f32::consts::TAU / CULTIST_SHADOWFLAME_SPAWNS as f32;
+                let start = -(arc - CULTIST_SHADOWFLAME_ANGLE_STEP) / 2.0;
+                for i in 0..CULTIST_SHADOWFLAME_SPAWNS {
+                    let angle = start + CULTIST_SHADOWFLAME_ANGLE_STEP * i as f32;
+                    let (s, c) = angle.sin_cos();
+                    let v = (aim.0 * c - aim.1 * s, aim.0 * s + aim.1 * c);
+                    out.spawn.push(Spawn {
+                        npc_type: CULTIST_ANCIENT_LIGHT,
+                        position: (cx, cy),
+                        velocity: (
+                            v.0 * CULTIST_SHADOWFLAME_SPEED,
+                            v.1 * CULTIST_SHADOWFLAME_SPEED,
+                        ),
+                        parent: None,
+                    });
+                }
+            }
+            if npc.ai[1] >= 4.0 + every * CULTIST_SHADOWFLAME_COUNT as f32 {
+                npc.local_ai[1] = 0.0;
                 finish(npc, real);
             }
         }
@@ -408,6 +463,112 @@ mod tests {
             sequence(1).contains(&state::ICE),
             "and should include its attacks: {:?}",
             sequence(1)
+        );
+    }
+
+    /// B9: below half health it runs a different, longer script that includes the shadowflame —
+    /// not the same fixed script the healthy half of the fight uses.
+    #[test]
+    fn a_wounded_cultist_runs_a_different_script() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((300.0, 200.0)));
+        let sequence = |wounded: bool| {
+            let mut rng = SmallRng::seed_from_u64(9);
+            let mut c = caster(CULTIST);
+            if wounded {
+                c.life = c.life_max / 4;
+            }
+            let mut seen = Vec::new();
+            let mut was = c.ai[0];
+            for _ in 0..6000 {
+                cultist(&mut c, &w, None, 0, &mut rng);
+                if c.ai[0] != was {
+                    if c.ai[0] != state::DECIDING {
+                        seen.push(c.ai[0]);
+                    }
+                    was = c.ai[0];
+                }
+                if seen.len() >= 14 {
+                    break;
+                }
+            }
+            seen
+        };
+        let healthy = sequence(false);
+        let wounded = sequence(true);
+        assert_ne!(
+            healthy, wounded,
+            "a wounded cultist should not run the healthy script"
+        );
+        assert!(
+            wounded.contains(&state::SHADOWFLAME),
+            "and its script should include the shadowflame: {wounded:?}"
+        );
+        assert!(
+            !healthy.contains(&state::SHADOWFLAME),
+            "which the healthy script never reaches: {healthy:?}"
+        );
+    }
+
+    /// B9 (found while fixing it): ice, fire and lightning had each other's damage numbers and
+    /// were firing three completely unrelated placeholder projectiles instead of
+    /// `CultistBossIceMist`/`FireBall`/`LightningOrb`.
+    #[test]
+    fn it_casts_the_real_vanilla_projectiles_with_the_right_damage() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((300.0, 0.0)));
+        let shot_for = |state_val: f32| {
+            let mut rng = SmallRng::seed_from_u64(11);
+            let mut c = caster(CULTIST);
+            c.ai[0] = state_val;
+            (0..200).find_map(|_| {
+                cultist(&mut c, &w, None, 0, &mut rng)
+                    .shots
+                    .into_iter()
+                    .next()
+            })
+        };
+        let ice = shot_for(state::ICE).expect("ice should have fired");
+        assert_eq!(ice.projectile, 464, "CultistBossIceMist");
+        assert_eq!(ice.damage, 35);
+
+        let fire = shot_for(state::FIREBALLS).expect("fire should have fired");
+        assert_eq!(fire.projectile, 467, "CultistBossFireBall");
+        assert_eq!(fire.damage, 30);
+
+        let lightning = shot_for(state::LIGHTNING).expect("lightning should have fired");
+        assert_eq!(lightning.projectile, 465, "CultistBossLightningOrb");
+        assert_eq!(lightning.damage, 45);
+    }
+
+    /// B9: the shadowflame fans out five Ancient Lights toward you, twice over.
+    #[test]
+    fn the_shadowflame_fires_five_ancient_lights_twice() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(10);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        let mut c = caster(CULTIST);
+        c.ai[0] = state::SHADOWFLAME;
+
+        let mut volleys = Vec::new();
+        for _ in 0..400 {
+            let out = cultist(&mut c, &w, None, 0, &mut rng);
+            let lights = out
+                .spawn
+                .iter()
+                .filter(|s| s.npc_type == CULTIST_ANCIENT_LIGHT)
+                .count();
+            if lights > 0 {
+                volleys.push(lights);
+            }
+            if c.ai[0] == state::DECIDING {
+                break;
+            }
+        }
+        assert_eq!(
+            volleys,
+            vec![5, 5],
+            "it should fan five Ancient Lights out, twice"
         );
     }
 
