@@ -162,6 +162,29 @@ pub fn trophy(npc_type: u16) -> Option<u16> {
         636 => 4783, // Empress of Light
         657 => 4958, // Queen Slime — was missing entirely; see `classic_only`'s own note
         668 => 5108, // Deerclops
+        // The Frost Moon's three: `RegisterBoss_FrostMoon` (`ItemDropDatabase.cs:363-387`) wraps
+        // every one of these three trophies in `ItemDropRule.ByCondition(FrostMoonDropGateForTrophies,
+        // item)` — a custom, wave-dependent rate (`Conditions.cs:127-166`: unreachable before wave
+        // 15, then 1-in-4 through wave 16, 1-in-3 through 18, 1-in-2 from 19 on, further shrunk by a
+        // 1-in-3 chance in expert) rather than the flat 1-in-10 every other boss's own trophy uses —
+        // and the whole thing is itself inside `RegisterToNPC(npc, new LeadingConditionRule(
+        // FrostMoonDropGatingChance))`, a second, independent wave/luck roll on top of that. Neither
+        // gate can be modelled here: both need the frost moon's live wave number, which has nowhere
+        // to reach this module — `Conditions` only carries `pumpkin_moon_wave`, and adding a sibling
+        // field would break every existing caller's struct literal, a change outside this lane's own
+        // files. Modelled instead at the standard 1-in-10 flat rate every other trophy already uses,
+        // a strictly more generous simplification (obtainable from wave 1, not just wave 15+) —
+        // documented rather than left unreachable, the same call this module already makes for
+        // hardmode's `NormalvsExpert` luck-scaling and the Groom/Bride's unscaled 1/5 floor.
+        //
+        // The item-to-boss mapping itself is not a mistake either way: real vanilla's own constant
+        // names are internally swapped from what they drop — `RegisterBoss_FrostMoon` gives npc 345
+        // (Santa-NK1) `ItemID.IceQueenTrophy` (1960) and npc 346 (Ice Queen) `ItemID.SantaNK1Trophy`
+        // (1961); only npc 344 (Everscream) gets the trophy actually named for it (`EverscreamTrophy`,
+        // 1962). Kept exactly as source drops them, not as the names suggest.
+        344 => 1962, // Everscream
+        345 => 1960, // Santa-NK1 (drops the item vanilla itself calls `IceQueenTrophy`)
+        346 => 1961, // Ice Queen (drops the item vanilla itself calls `SantaNK1Trophy`)
         _ => return None,
     })
 }
@@ -453,6 +476,19 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         });
     }
 
+    // Santa-NK1's Reindeer Bells: `rule2.OnSuccess(ItemDropRule.ByCondition(
+    // Conditions.FromCertainWaveAndAbove(15), 1914, 15))` (`ItemDropDatabase.cs:376`) — its own
+    // 1-in-15 roll, further gated on `NPC.waveNumber >= 15` and on the same outer
+    // `LeadingConditionRule(FrostMoonDropGatingChance)` every other Frost Moon boss item shares.
+    // Neither gate is modelled, for the same reason `trophy`'s and `one_from`'s own Frost Moon
+    // entries are not: both need the live wave number, which has nowhere to reach this module
+    // without a new `Conditions` field, and that would break every existing caller outside this
+    // lane's files. Modelled at its own bare 1-in-15 rate, unconditionally — previously entirely
+    // absent, so a Santa-NK1 kill could not drop this item at all regardless of wave.
+    if npc_type == 345 {
+        out.push(sometimes(1914, 15));
+    }
+
     out.extend(by_mode(npc_type, at));
     out
 }
@@ -480,6 +516,25 @@ pub fn one_from(npc_type: u16, at: Conditions) -> &'static [&'static [u16]] {
             // are different shapes even when they share the same gate.
             &[&[49, 50, 53, 54, 5011, 975]]
         };
+    }
+    // Ice Queen (346): `RegisterToNPC(346, new LeadingConditionRule(condition)).OnSuccess(
+    // ItemDropRule.OneFromOptions(1, 1910, 1929))` (`ItemDropDatabase.cs:384-385`) — a guaranteed
+    // (bare `1` denominator) pick between ElfMelter and ChainGun. `treasure_bag` has no case for
+    // 346 (Frost Moon minibosses have no expert-mode bag at all), and nothing in
+    // `RegisterBoss_FrostMoon` wraps this in a `NotExpert` guard the way real bosses' loot is, so
+    // — same reasoning as npc 85 just above — it must be checked ahead of the expert-mode return
+    // below rather than be silently emptied by it in expert/master worlds.
+    //
+    // The outer `LeadingConditionRule(FrostMoonDropGatingChance)` — a further wave/luck-based
+    // gate on top of this guaranteed pick — is not modelled, for the same reason `trophy`'s own
+    // Frost Moon entries cannot be: it needs a live wave number this module has nowhere to reach
+    // without a new `Conditions` field, which would break every existing caller outside this
+    // lane's files. Modelled as unconditionally available once the boss is dead, which is what
+    // this project's outer-gate simplifications already do elsewhere (the Headless Horseman's own
+    // medallion is the one place that gate *is* modelled, because `Conditions` already happens to
+    // carry `pumpkin_moon_wave` for it).
+    if npc_type == 346 {
+        return &[&[1910, 1929]];
     }
     if at.expert {
         // Expert replaces the lot with a treasure bag.
@@ -830,6 +885,45 @@ pub type ConditionalChain = Vec<Conditional>;
 /// chain moved there would keep firing in expert mode instead of yielding to the boss bag. Checked
 /// directly against that constraint rather than routed around it.
 pub fn conditional_chains(npc_type: u16, at: Conditions) -> Vec<ConditionalChain> {
+    // Everscream (344) and Santa-NK1 (345): each registers one `Common(primary, 15).OnFailedRoll(
+    // OneFromOptions(1, a, b, c))` chain (`ItemDropDatabase.cs:373-374, 381-382`) — a 1-in-15 shot
+    // at the primary item, and only on that roll's failure a *guaranteed* (bare `1` denominator)
+    // pick among the other three. `treasure_bag` has no case for either npc (Frost Moon
+    // minibosses have no expert-mode bag), and `RegisterBoss_FrostMoon` never wraps either chain
+    // in a `NotExpert` guard the way every chain below is, so both must be checked ahead of this
+    // function's own blanket `at.expert` return rather than be silently emptied by it.
+    //
+    // Flattened into four sequential links using the same "worked by hand" trick as Queen Bee's
+    // Hive Wand/armour chain above: with the primary at its own real 1-in-15, the fallback pool's
+    // three items must land at 1/3, then (of what is left) 1/2, then whatever remains,
+    // guaranteed, to reproduce a uniform 1-in-3 pick across the *whole* 14-in-15 of kills the
+    // primary did not claim — checked: 1/15 + (14/15)(1/3) + (14/15)(2/3)(1/2) +
+    // (14/15)(2/3)(1/2) each equal 1/15, 14/45, 14/45, 14/45, summing to 1.
+    //
+    // The outer `LeadingConditionRule(FrostMoonDropGatingChance)` wrapping both whole chains — a
+    // further wave/luck-based gate — is not modelled, for the same reason `trophy`'s and
+    // `one_from`'s own Frost Moon entries are not: it needs a live wave number this module has
+    // nowhere to reach without a new `Conditions` field, which would break every existing caller
+    // outside this lane's files. Modelled as unconditionally reachable once the boss is dead.
+    match npc_type {
+        344 => {
+            return vec![vec![
+                a_few(1871, 15, 1, 1), // FestiveWings
+                a_few(1916, 3, 1, 1),  // ChristmasHook
+                a_few(1928, 2, 1, 1),  // ChristmasTreeSword
+                always(1930),          // Razorpine
+            ]];
+        }
+        345 => {
+            return vec![vec![
+                a_few(1959, 15, 1, 1), // BabyGrinchMischiefWhistle
+                a_few(1931, 3, 1, 1),  // BlizzardStaff
+                a_few(1946, 2, 1, 1),  // SnowmanCannon
+                always(1947),          // NorthPole
+            ]];
+        }
+        _ => {}
+    }
     if at.expert {
         return Vec::new();
     }
@@ -857,6 +951,24 @@ pub fn conditional_chains(npc_type: u16, at: Conditions) -> Vec<ConditionalChain
         // Skeletron: `ByCondition(condition, 1281, 7).OnFailedRoll(Common(1273,
         // 7)).OnFailedRoll(Common(1313, 7))` (`ItemDropDatabase.cs:563`) — at most one of
         // Skeletron Hand, Bone Sword and Muramasa per kill, never independently.
+        //
+        // NOT modelled here despite being confirmed missing (audit finding D3): npc 35's own
+        // five-item RedHatSkeletron set — `RegisterToNPC(35, ByCondition(RedHatSkeletron, item))`
+        // for 5624/5625/5626/5628/5737, each unconditional (bare default `chanceDenominator: 1`)
+        // once `Conditions.RedHatSkeletron` (`info.npc.RedHatSkeletronAdjustmentsEnabled()`, which
+        // this project's own `spawn_skeletron_from(.., red_hat: bool)` reads back from `ai[3]` —
+        // `crates/terrustia/src/game/server.rs:4222-4230`) is true (`ItemDropDatabase.cs:565-569`).
+        // That is *per-instance* state — the same npc_type 35 fights both the ordinary boss and
+        // this Chippy-vanity re-fight — which `Conditions` has nowhere to carry: every field here
+        // is a fact about the world or the kill site, never about which variant of an npc_type
+        // this particular kill was, and `drop_loot`'s own struct literal
+        // (`crates/terrustia/src/game/server.rs:8613`) lists every field explicitly with no
+        // `..Default::default()`, so adding one breaks that literal — a `server.rs` change, and
+        // this lane's own instructions are explicit that file is out of bounds. Implementing this
+        // unconditionally instead (on every Skeletron kill, red hat or not) was considered and
+        // rejected: it would hand out five vanity items on ordinary Skeletron kills that real
+        // vanilla never gives there at all, trading "missing" for "wrong" rather than fixing
+        // anything. Left for whichever lane owns `server.rs` to wire `ai[3]` through.
         35 | 36 => vec![vec![
             a_few(1281, 7, 1, 1),
             a_few(1273, 7, 1, 1),
@@ -1036,7 +1148,14 @@ mod tests {
         // classic-only, half-rate entry in `classic_only(657)` — this table's own count of 19 was
         // itself proof of the miscount, since real vanilla's `RegisterBossTrophies` registers
         // twenty of these at the standard rate.
-        assert_eq!(trophies.len(), 20, "and twenty have trophies: {trophies:?}");
+        //
+        // The Frost Moon's three (1960, 1961, 1962) added later still, at that same standard
+        // rate rather than their own real wave-gated one — see `trophy`'s own doc for why.
+        assert_eq!(
+            trophies.len(),
+            23,
+            "and twenty-three have trophies: {trophies:?}"
+        );
         // The Twins are the one boss whose halves have different trophies.
         assert_ne!(trophy(125), trophy(126));
         // ...but they share a bag.
@@ -1811,5 +1930,82 @@ mod tests {
             (1, 1),
             "expert stays unconditional: {stinger:?}"
         );
+    }
+
+    /// Everscream (344) used to drop nothing at all: `RegisterBoss_FrostMoon`
+    /// (`ItemDropDatabase.cs:363-375`) was never ported, so none of `conditional`,
+    /// `conditional_chains` or `trophy` had a case for npc 344. Fails on the pre-fix code, whose
+    /// `conditional_chains(344, ..)` returned an empty `Vec` and whose `trophy(344)` returned
+    /// `None`.
+    #[test]
+    fn everscream_drops_its_frost_moon_loot() {
+        let chains = conditional_chains(344, plain());
+        let items: Vec<u16> = chains.iter().flatten().map(|c| c.item).collect();
+        assert!(items.contains(&1871), "FestiveWings");
+        assert!(items.contains(&1916), "ChristmasHook");
+        assert!(items.contains(&1928), "ChristmasTreeSword");
+        assert!(items.contains(&1930), "Razorpine");
+        // Razorpine is the chain's guaranteed last link — the fight that never dropped nothing
+        // must never miss it either.
+        assert_eq!(chains[0].last().map(|c| c.item), Some(1930));
+        assert_eq!(chains[0].last().map(|c| c.one_in), Some(1));
+
+        assert_eq!(trophy(344), Some(1962), "EverscreamTrophy");
+
+        // No treasure bag exists for this npc, and real vanilla never gates this chain on
+        // `NotExpert` the way a true boss's classic-only loot is — so expert must not empty it.
+        let expert = conditional_chains(
+            344,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        assert!(
+            !expert.is_empty(),
+            "Frost Moon loot must survive expert mode: {expert:?}"
+        );
+    }
+
+    /// Santa-NK1 (345): same gap as Everscream, plus its own Reindeer Bells (`conditional`) and
+    /// its own trophy — real vanilla's `IceQueenTrophy` (1960), not `SantaNK1Trophy`; see
+    /// `trophy`'s own doc for why. Fails on the pre-fix code the same way Everscream's test does.
+    #[test]
+    fn santa_nk1_drops_its_frost_moon_loot() {
+        let chains = conditional_chains(345, plain());
+        let items: Vec<u16> = chains.iter().flatten().map(|c| c.item).collect();
+        assert!(items.contains(&1959), "BabyGrinchMischiefWhistle");
+        assert!(items.contains(&1931), "BlizzardStaff");
+        assert!(items.contains(&1946), "SnowmanCannon");
+        assert!(items.contains(&1947), "NorthPole");
+        assert_eq!(chains[0].last().map(|c| c.item), Some(1947));
+
+        assert!(
+            conditional(345, plain()).iter().any(|d| d.item == 1914),
+            "ReindeerBells"
+        );
+        assert_eq!(trophy(345), Some(1960));
+    }
+
+    /// Ice Queen (346): its own guaranteed `OneFromOptions(1, 1910, 1929)` pool
+    /// (`one_from`), and its own trophy — real vanilla's `SantaNK1Trophy` (1961), not
+    /// `IceQueenTrophy`; see `trophy`'s own doc for why.
+    #[test]
+    fn ice_queen_drops_its_frost_moon_loot() {
+        let pools = one_from(346, plain());
+        assert_eq!(pools.len(), 1);
+        assert!(pools[0].contains(&1910), "ElfMelter");
+        assert!(pools[0].contains(&1929), "ChainGun");
+        assert_eq!(trophy(346), Some(1961));
+
+        // No treasure bag for this npc either, so expert must not empty the pool.
+        let expert = one_from(
+            346,
+            Conditions {
+                expert: true,
+                ..plain()
+            },
+        );
+        assert_eq!(expert.len(), 1, "must survive expert mode: {expert:?}");
     }
 }
