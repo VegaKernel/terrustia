@@ -172,9 +172,13 @@ fn place_cat_tail(
     let Some(row) = cattail_row(world.tile(x, ground_y).block, x, layout) else {
         return false;
     };
+    // `PlaceCatTail` itself (`WorldGen.cs:59218-59221`): `frameX = 0; frameY = num5;` — the
+    // ground-material row lands on frameY, not frameX. `GrowCatTail`'s own growth stages (below)
+    // really do advance frameX, which is why only the initial row was wrong.
     let mut t = world.tile(x, ground_y - 1);
     t.block = CATTAIL;
-    t.frame_x = row;
+    t.frame_x = 0;
+    t.frame_y = row;
     t.flags.set(TileFlags::ACTIVE, true);
     t.flags.set(TileFlags::HALF_BRICK, false);
     t.slope = 0;
@@ -286,10 +290,12 @@ pub fn cacti_and_beach_decorations(
                 let deep_water = (2..=4).all(|d| world.tile(x, y - d).liquid == 255);
                 if deep_water {
                     let block = if rand.next_bool() { CORAL } else { SEASHELL };
-                    place_beach_decoration(world, x, y - 1, block, roll_seashell_style(rand));
+                    let style = roll_seashell_style(rand);
+                    place_beach_decoration(world, x, y - 1, block, style, rand);
                     beach += 1;
                 } else if world.tile(x, y - 2).liquid == 0 {
-                    place_beach_decoration(world, x, y - 1, SEASHELL, roll_seashell_style(rand));
+                    let style = roll_seashell_style(rand);
+                    place_beach_decoration(world, x, y - 1, SEASHELL, style, rand);
                     beach += 1;
                 }
                 break;
@@ -304,14 +310,31 @@ fn grow_cactus_here(world: &mut World, x: i32, y: i32) -> bool {
     growth::grow_cactus(world, x, y).is_some()
 }
 
-fn place_beach_decoration(world: &mut World, x: i32, y: i32, block: u16, style: i16) {
+fn place_beach_decoration(
+    world: &mut World,
+    x: i32,
+    y: i32,
+    block: u16,
+    style: i16,
+    rand: &mut UnifiedRandom,
+) {
     if world.tile(x, y).is_active() {
         return;
     }
     let mut t = terrustia_proto::Tile::AIR;
     t.block = block;
-    t.frame_x = style * 18;
-    t.frame_y = 0;
+    if block == SEASHELL {
+        // `Place1x1`'s own dedicated `type == 324` branch (`WorldGen.cs:45607-45613`) — the first
+        // check in the function, ahead of the generic default case: `frameX` gets its own
+        // independent 0-2 roll (`22 * genRand.Next(3)`), and the *style* this module already
+        // rolls (`roll_seashell_style`, vanilla's own `RollRandomSeaShellStyle`) lands on `frameY`
+        // at 22px steps, not on `frameX` at 18px steps.
+        t.frame_x = 22 * rand.next_max(3) as i16;
+        t.frame_y = style * 22;
+    } else {
+        t.frame_x = style * 18;
+        t.frame_y = 0;
+    }
     t.flags.set(TileFlags::ACTIVE, true);
     world.set_tile(x, y, t);
 }
@@ -345,6 +368,59 @@ mod tests {
         let mut rand = UnifiedRandom::new(seed);
         let layout = Layout::plan(width, height, &mut rand);
         (world, layout)
+    }
+
+    /// `PlaceCatTail` (`WorldGen.cs:59218-59221`) writes `frameX = 0; frameY = num5;` — the
+    /// ground-material row lands on `frameY`, not `frameX`. Fails on the pre-fix code (which
+    /// wrote the row to `frame_x` and left `frame_y` at 0 regardless of ground material).
+    #[test]
+    fn place_cat_tail_stores_its_ground_row_on_frame_y_not_frame_x() {
+        // `find_pond_floor`'s own surface scan only walks upward while `surface > 50` — a real
+        // guard against running off the top of a real, several-hundred-tile-tall world, but it
+        // means a synthetic test world needs everything of interest comfortably above row 50, and
+        // tall enough that the ground-scan's own `height - 50` bound doesn't cut off before
+        // reaching the ground row either.
+        let mut world = World::empty(60, 200, "cattail-frame");
+        let mut layout_rand = UnifiedRandom::new(1);
+        let layout = Layout::plan(60, 200, &mut layout_rand);
+        let ground_y = 100;
+        for y in (ground_y - 8)..ground_y {
+            world.set_tile(25, y, Tile::AIR.with_liquid(Liquid::Water, 200));
+        }
+        // Crimson sand family ground (199/CRIMSAND/662) -> row 54.
+        world.set_tile(25, ground_y, Tile::block(199));
+        let mut rand = UnifiedRandom::new(2);
+        let placed = place_cat_tail(&mut world, &layout, 25, ground_y - 4, &mut rand);
+        assert!(placed, "expected the cattail to place over a real pond");
+        let t = world.tile(25, ground_y - 1);
+        assert_eq!(t.block, CATTAIL);
+        assert_eq!(
+            t.frame_y, 54,
+            "the ground-material row must land on frame_y, not frame_x"
+        );
+    }
+
+    /// `Place1x1`'s dedicated `type == 324` branch (`WorldGen.cs:45607-45613`): the style this
+    /// module rolls (`roll_seashell_style`) lands on `frameY` at 22px steps, and `frameX` gets its
+    /// own independent 0-2 roll at 22px — not the reverse at 18px this code used to write. Fails
+    /// on the pre-fix code (`frame_y == 0`, `frame_x == style * 18`).
+    #[test]
+    fn a_placed_seashell_stores_style_on_frame_y_at_22px_not_frame_x_at_18px() {
+        let mut world = World::empty(50, 50, "seashell-frame");
+        let mut rand = UnifiedRandom::new(3);
+        place_beach_decoration(&mut world, 10, 10, SEASHELL, 3, &mut rand);
+        let t = world.tile(10, 10);
+        assert_eq!(t.block, SEASHELL);
+        assert_eq!(
+            t.frame_y,
+            3 * 22,
+            "seashell style must land on frame_y at 22px steps, not frame_x"
+        );
+        assert!(
+            [0, 22, 44].contains(&t.frame_x),
+            "seashell frame_x must be an independent 0-2 roll at 22px, got {}",
+            t.frame_x
+        );
     }
 
     #[test]
