@@ -1703,21 +1703,22 @@ impl GameServer {
         if !self.admin.unclaimed() {
             return;
         }
-        // Not a password: a short one-time secret that lives for one process. Derived from the
-        // clock rather than a CSPRNG dependency, mixed so it is not simply readable back as a
-        // timestamp. It only has to be unguessable by someone who cannot see this line.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
-        let mut state = now ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mut token = String::new();
-        for _ in 0..12 {
-            // xorshift64*, which is plenty for a value that is printed and then used once.
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let alphabet = b"abcdefghjkmnpqrstuvwxyz23456789";
-            token.push(alphabet[(state % alphabet.len() as u64) as usize] as char);
+        // Not a password: a short one-time secret that lives for one process. It gates ownership on
+        // two network-reachable paths (`/register <name> <pw> <token>` and an unclaimed panel
+        // login), so it is drawn from a real CSPRNG — the same `rand_core::OsRng` the panel's own
+        // session tokens use — rather than the clock+pid it used to be, whose entropy an attacker
+        // who can estimate the boot time could search. It only has to be unguessable by someone who
+        // cannot see this line.
+        use argon2::password_hash::rand_core::{OsRng, RngCore};
+        const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789"; // 30 symbols
+        let mut token = String::with_capacity(12);
+        while token.len() < 12 {
+            let mut byte = [0u8; 1];
+            OsRng.fill_bytes(&mut byte);
+            // Reject the top of the byte range so the map onto 30 symbols is unbiased (240 = 8*30).
+            if byte[0] < 240 {
+                token.push(ALPHABET[(byte[0] % 30) as usize] as char);
+            }
         }
         warn!(
             "this server has no accounts yet, so everyone connecting has every permission. \

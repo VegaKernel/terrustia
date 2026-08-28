@@ -132,6 +132,18 @@ pub async fn run(
     config: Config,
     events: mpsc::Sender<ServerEvent>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    // Defence in depth: the panel never faces the network. `Config::validate` already refuses a
+    // non-loopback `panel_listen`, but refusing to bind one here too means no path — a future
+    // caller that skips validation, a bug — can ever expose this surface.
+    if !config.panel_listen.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "panel_listen must be loopback; refusing to bind {}",
+                config.panel_listen
+            ),
+        ));
+    }
     let listener = tokio::net::TcpListener::bind(config.panel_listen).await?;
     let addr = listener.local_addr().unwrap_or(config.panel_listen);
     let state = PanelState {
