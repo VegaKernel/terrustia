@@ -11,7 +11,7 @@ use terrustia_proto::npc_params::{
     HOP_DRAG, HOP_FIRST_REST, HOP_HIGH, HOP_LEAN, HOP_LEAN_CAP, HOP_LONG, HOP_REST, HOP_WAKE_MARGIN,
 };
 
-use crate::game::ai::{World, face};
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, World, face};
 use crate::game::npc::{Npc, TileView};
 
 /// Style 25.
@@ -34,11 +34,16 @@ pub fn hopper(npc: &mut Npc, world: &World<'_, impl TileView>, sleeps_through_ta
             npc.ai[0] = 1.0;
             return;
         }
+        // Vanilla intersects two real rectangles — the wake box against the player's own hitbox —
+        // not the wake box against a bare point, so the box has to be widened by the player's own
+        // half-extents too, or it only wakes once you are already ten to twenty-one pixels inside.
         let woken = npc.life < npc.life_max
             || world.target.is_some_and(|t| {
                 let (cx, cy) = npc.center();
-                (t.center.0 - cx).abs() < npc.width() / 2.0 + HOP_WAKE_MARGIN
-                    && (t.center.1 - cy).abs() < npc.height() / 2.0 + HOP_WAKE_MARGIN
+                (t.center.0 - cx).abs()
+                    < npc.width() / 2.0 + HOP_WAKE_MARGIN + PLAYER_WIDTH as f32 / 2.0
+                    && (t.center.1 - cy).abs()
+                        < npc.height() / 2.0 + HOP_WAKE_MARGIN + PLAYER_HEIGHT as f32 / 2.0
             });
         if woken {
             npc.ai[0] = 1.0;
@@ -175,6 +180,24 @@ mod tests {
         hurt.life -= 1;
         hopper(&mut hurt, &world(&tiles, Some((10_000.0, 0.0))), false);
         assert_eq!(hurt.ai[0], 1.0, "so should being hit");
+    }
+
+    /// The wake box is a real rectangle intersected against the player's own hitbox, not the wake
+    /// box against a bare point — so it has to wake up to twenty-one pixels sooner than the box's
+    /// own edge, where the player's own width and height still overlap it.
+    #[test]
+    fn a_hopper_wakes_at_the_edge_of_the_players_own_hitbox() {
+        let tiles = floor(20);
+        let mut s = snowman(0, 17);
+        let (cx, cy) = s.center();
+        // Fifteen pixels past the box's own edge: outside the old, point-only test, but still
+        // within reach once the player's own eighty-four-pixel-tall hitbox is accounted for.
+        let just_past = cy - (s.height() / 2.0 + HOP_WAKE_MARGIN + 15.0);
+        hopper(&mut s, &world(&tiles, Some((cx, just_past))), false);
+        assert_eq!(
+            s.ai[0], 1.0,
+            "the player's own hitbox should have reached it"
+        );
     }
 
     /// The jumps alternate: one long and low, one short and high. A hopper that only ever did one
