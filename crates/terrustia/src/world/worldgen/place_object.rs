@@ -76,7 +76,17 @@ pub fn place_object(
         let fx = frame_x + dx * (object.coord_width + object.padding);
         let mut fy = frame_y;
         for dy in 0..object.height {
-            let tile = Tile::framed(block, fx as i16, fy as i16);
+            // Vanilla's own placers (`PlacePot`, `Place2xX`, and friends) only ever set
+            // `active`/`type`/`frameX`/`frameY` on the tile that was already there — never
+            // `wall` or `liquid`. Building from `Tile::framed` (which starts from `Tile::AIR`,
+            // wall 0, no liquid) instead wiped whatever wall was lining the room and any liquid
+            // sitting in it. Preserve both explicitly.
+            let existing = world.tile(left + dx, top + dy);
+            let mut tile = Tile::framed(block, fx as i16, fy as i16);
+            tile.wall = existing.wall;
+            tile.wall_color = existing.wall_color;
+            tile.liquid = existing.liquid;
+            tile.liquid_kind = existing.liquid_kind;
             world.set_tile(left + dx, top + dy, tile);
             fy += object.coord_heights.get(dy as usize).copied().unwrap_or(16) + object.padding;
         }
@@ -120,6 +130,34 @@ mod tests {
                 assert_eq!(tile.frame_y, want_y as i16, "row {dy}");
             }
         }
+    }
+
+    /// Vanilla's own placers only ever touch `active`/`type`/`frameX`/`frameY` — never `wall` or
+    /// `liquid`. Building the new tile from `Tile::framed` (which starts from `Tile::AIR`) instead
+    /// wiped whatever wall lined the room and any liquid sitting in it, leaving a hole in the wall
+    /// behind every pot/statue/pile/log/door/altar this module places. Fails on the pre-fix code
+    /// (`after.wall == 0`, `after.liquid == 0`).
+    #[test]
+    fn placing_an_object_keeps_the_wall_and_liquid_already_behind_it() {
+        let mut world = floor(40);
+        // The top-left cell of a statue's footprint (anchored at (20, 29), origin (1, 2) ->
+        // columns 19-20, rows 27-29) already has a wall and standing water behind it, matching a
+        // real wall-lined room interior.
+        let mut seeded = world.tile(19, 27);
+        seeded.wall = 5;
+        seeded.wall_color = 3;
+        seeded.liquid = 120;
+        seeded.liquid_kind = terrustia_proto::Liquid::Water;
+        world.set_tile(19, 27, seeded);
+
+        assert!(place_object(&mut world, 20, 29, 105, 3, -1));
+
+        let after = world.tile(19, 27);
+        assert_eq!(after.block, 105, "the object should still have been placed");
+        assert_eq!(after.wall, 5, "placing an object must not erase the wall behind it");
+        assert_eq!(after.wall_color, 3, "wall_color must survive too");
+        assert_eq!(after.liquid, 120, "placing an object must not erase liquid behind it");
+        assert_eq!(after.liquid_kind, terrustia_proto::Liquid::Water);
     }
 
     /// Every shape this module's callers actually use, placed once, checked for internal
