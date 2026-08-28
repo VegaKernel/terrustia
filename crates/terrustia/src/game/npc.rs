@@ -521,6 +521,40 @@ fn move_vertical(npc: &mut Npc, tiles: &impl TileView) {
     }
     npc.collide_y = true;
 
+    // Whether the NPC is already inside solid ground *before* this tick's velocity is even
+    // applied — a tile placed under or through it by a player building nearby, not a collision its
+    // own motion is approaching. A real player watching a real Guide's house get built around him
+    // found exactly this: an embedded, `on_ground: false` NPC that could never move again, in any
+    // direction, for the rest of its existence.
+    //
+    // The loop below (`while !blocked_for(position + step) { position += step; ... }`) exists to
+    // creep an NPC from open air toward a *new* collision one pixel at a time, stopping the moment
+    // the very next pixel would be blocked — which assumes the *current* position is already
+    // clear. For an embedded NPC that assumption is false everywhere nearby: shifting by a single
+    // pixel essentially never crosses a whole `TILE`-sized tile boundary, so `blocked_for` at
+    // `position + step` reports exactly as blocked as `position` itself did, the loop's own guard
+    // never lets it take even one step, and gravity making `velocity.1` strictly positive on every
+    // tick an NPC is not `on_ground` means this is not a one-tick problem either — the very same
+    // stuck check repeats forever on every following tick too.
+    //
+    // Climbing out needs an unconditional, un-gated push instead — not "is the next pixel already
+    // clear," just "move up, tick after tick, until it is." `ESCAPE_SPEED` is deliberately modest:
+    // fast enough to clear a person-sized NPC in well under a second, slow enough that escaping a
+    // deep burial reads as digging free rather than teleporting.
+    if blocked_for(
+        tiles,
+        npc.npc_type,
+        npc.position.0,
+        npc.position.1,
+        npc.width(),
+        npc.height(),
+    ) {
+        const ESCAPE_SPEED: f32 = 2.0;
+        npc.position.1 -= ESCAPE_SPEED;
+        npc.velocity.1 = 0.0;
+        return;
+    }
+
     let step = npc.velocity.1.signum();
     while !blocked_for(
         tiles,
@@ -1043,6 +1077,30 @@ mod tests {
         assert!(
             npc.position.1 > 160.0,
             "should have passed through the floor"
+        );
+    }
+
+    /// A resting NPC (`velocity.1 == 0.0`) fully inside solid ground — a real player watching a
+    /// real Guide build a house live saw this exact symptom, and it reproduces the same way here:
+    /// a tile placed under or through an NPC that was not already falling. `move_vertical`'s own
+    /// recovery loop steps by `velocity.1.signum()`, which is `0.0` for a resting NPC, so an
+    /// already-embedded-but-resting NPC could never move at all — not further in, not back out —
+    /// on any tick, forever.
+    #[test]
+    fn a_resting_npc_pushed_underground_eventually_escapes() {
+        let terrain = ground(); // solid at and below row 10 (y = 160px)
+        let mut npc = zombie_at(32.0, 200.0); // well inside the solid ground
+        npc.velocity.1 = 0.0;
+        for _ in 0..60 {
+            step_physics(&mut npc, &terrain);
+        }
+        // A couple of pixels of tolerance for ordinary float resting contact — the same harmless
+        // sub-pixel overlap every other landing in this engine has — not for the 80-pixel burial
+        // this test actually reproduces.
+        assert!(
+            npc.position.1 + npc.height() <= 162.0,
+            "should have been pushed back out of solid ground, feet ended at {}",
+            npc.position.1 + npc.height()
         );
     }
 

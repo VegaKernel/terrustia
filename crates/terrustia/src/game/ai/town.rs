@@ -571,7 +571,15 @@ fn try_combat<T: TileView>(
             shot: Some(Shot {
                 projectile,
                 damage: town_combat::town_npc_damage(damage, world.conditions.expert),
-                position: npc.center(),
+                // Vanilla's own launch point for every branch of `AI_007_TownEntities`
+                // (`NPC.cs`, e.g. line 1553): `base.Center.X + spriteDirection * 16, base.Center.Y
+                // - 2` — a real player watching this fire live saw the plain, un-offset
+                // `npc.center()` this used to read as the shot visibly leaving from around the
+                // NPC's head rather than an outstretched hand.
+                position: (
+                    npc.center().0 + f32::from(npc.direction) * 16.0,
+                    npc.center().1 - 2.0,
+                ),
                 velocity: (dx / distance * speed, dy / distance * speed),
                 time_left: 300,
             }),

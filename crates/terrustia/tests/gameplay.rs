@@ -1938,6 +1938,98 @@ async fn a_town_npcs_shot_actually_damages_the_hostile_it_targeted() {
     );
 }
 
+/// A real player watched a real Guide open fire on a Firefly and asked why. The `hostiles` list
+/// `server.rs` builds for every combat-capable town resident used to be `!friendly && !town_npc &&
+/// is_alive()` — no damage check at all, so a harmless critter (`friendly: false` in this
+/// project's own data the same way a real hostile is, but always `damage: 0`) qualified exactly
+/// like a real threat. Firefly (355) is real vanilla's own `friendly: false, damage: 0` shape.
+#[tokio::test]
+async fn a_combat_town_npc_does_not_shoot_a_harmless_critter() {
+    let (addr, game_task, listener_task) = start_with_owned_tasks().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(15));
+
+    let guide = spawn_npc(&mut alice, "Guide").await;
+    spawn_npc(&mut alice, "Firefly").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut fired_at_something = false;
+    while tokio::time::Instant::now() < deadline {
+        let Ok(event) = alice.next_event().await else {
+            break;
+        };
+        if let Event::ProjectileSynced(p) = event
+            && p.projectile_type == 1
+        {
+            fired_at_something = true;
+            break;
+        }
+    }
+    assert!(
+        !fired_at_something,
+        "the Guide should never open fire on a harmless, zero-damage critter"
+    );
+    assert_eq!(guide.net_id, 22, "sanity: the right NPC was spawned");
+    game_task.abort();
+    listener_task.abort();
+}
+
+/// A real player watched a real Guide's arrow leave from around his head rather than an
+/// outstretched hand. Every ranged town NPC's shot used to spawn at the NPC's own plain geometric
+/// `center()`, with no offset at all — real vanilla's own launch point, at every branch of
+/// `AI_007_TownEntities`, is `Center.X + spriteDirection * 16, Center.Y - 2` (`NPC.cs`, e.g.
+/// `:53515+1553`): sixteen pixels forward in the direction the NPC is actually facing, two pixels
+/// up, not dead center.
+#[tokio::test]
+async fn a_town_npcs_shot_spawns_from_an_outstretched_hand_not_dead_center() {
+    let (addr, game_task, listener_task) = start_with_owned_tasks().await;
+    let mut alice = join(addr, "alice").await;
+    alice.set_timeout(Duration::from_secs(15));
+
+    let guide = spawn_npc(&mut alice, "Guide").await;
+    spawn_npc(&mut alice, "Zombie").await;
+
+    // Guide's own real `width`/`height` (`npc_data.rs`): 18x40. `position` is the top-left corner,
+    // the same convention this project's server-side `Npc::center()` uses.
+    let mut guide_position = guide.position;
+    let mut shot_position = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while shot_position.is_none() && tokio::time::Instant::now() < deadline {
+        let Ok(event) = alice.next_event().await else {
+            break;
+        };
+        match event {
+            Event::NpcSynced(n) if n.index == guide.index => guide_position = n.position,
+            Event::ProjectileSynced(p) if p.projectile_type == 1 => {
+                shot_position = Some(p.position);
+            }
+            _ => {}
+        }
+    }
+    let shot_position = shot_position.expect("the Guide never fired at the zombie");
+    let center = (guide_position.0 + 9.0, guide_position.1 + 20.0);
+
+    // Loose bounds, not pixel-perfect ones: `guide_position` is whichever `NpcSynced` for this
+    // NPC arrived most recently by the time the shot's own event is processed, and a real, one-
+    // tick-wide race between an NPC's own last-position sync and its very next shot is already a
+    // documented, accepted source of slack in the test above this one ("Sequential `wait_for`
+    // calls race on that"). What this test needs to prove is that a *real, non-trivial* offset
+    // exists in both axes, in the right rough shape and direction — not exact equality with a
+    // formula computed from a potentially one-tick-stale center.
+    assert!(
+        (shot_position.0 - center.0).abs() > 5.0,
+        "the shot should launch offset toward whichever way the Guide is facing, not from dead \
+         center: shot={shot_position:?} center={center:?}"
+    );
+    assert!(
+        (shot_position.1 - center.1) < 0.0 && (shot_position.1 - center.1).abs() < 10.0,
+        "the shot's own vertical offset should be a small upward nudge (vanilla's `Center.Y - \
+         2`), not roughly dead center or wildly off: shot={shot_position:?} center={center:?}"
+    );
+    game_task.abort();
+    listener_task.abort();
+}
+
 /// Every one of the 24 town NPCs added to `game::ai::town_combat` this session — beyond the four
 /// (Merchant/Arms Dealer/Wizard/Dye Trader) the two tests above already cover — actually fights,
 /// over a real socket, the same way those four were proven: land, spawn a hostile beside it, watch

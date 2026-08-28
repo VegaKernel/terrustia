@@ -6922,12 +6922,26 @@ impl GameServer {
             // Where hostile NPCs are, for town residents fighting back — built once here rather
             // than scanning the whole table per resident, the same reasoning `hurt` above uses
             // for the Dark Mage.
+            //
+            // `damage > 0` is load-bearing, not incidental: real vanilla's own candidate filter
+            // for this exact system (`AI_007_TownEntities`, `NPC.cs:54033`) skips a candidate
+            // whenever `(friendly || damage <= 0) && !stinky` — a harmless critter (a bug, a
+            // firefly, a worm) is `friendly: false` in this project's own data the same way a real
+            // hostile is, but always has `damage: 0`, and without this check a town resident reads
+            // it as a threat and opens fire on it. `stinky` (a real, separate override letting a
+            // town NPC treat *any* nearby NPC as a target while under that specific debuff) and
+            // `NPCID.Sets.CritterThatCanTurnOnPlayers`/the Skeleton Merchant's own faction
+            // exception in that same real condition are not modelled — narrower simplifications on
+            // top of the fix, not alternatives to it, in the same spirit this module's own doc
+            // comment already discloses its other approximations.
             let hostiles: Vec<Hostile> = if self.npcs.iter().any(|(_, n)| {
                 n.stats.town_npc && crate::game::ai::town_combat::town_combat(n.npc_type).is_some()
             }) {
                 self.npcs
                     .iter()
-                    .filter(|(_, n)| !n.stats.friendly && !n.stats.town_npc && n.is_alive())
+                    .filter(|(_, n)| {
+                        !n.stats.friendly && !n.stats.town_npc && n.stats.damage > 0 && n.is_alive()
+                    })
                     .map(|(slot, n)| (slot, n.center(), n.velocity))
                     .collect()
             } else {
