@@ -155,6 +155,28 @@ pub trait WiredWorld {
     fn set_tile(&mut self, x: i32, y: i32, tile: Tile);
     fn width(&self) -> i32;
     fn height(&self) -> i32;
+
+    /// The world's surface line, in tile `y`. [`actuation_allowed`]'s own Lihzahrd guard reads it
+    /// to decide "below the surface", the same test `DeActive` makes against `Main.worldSurface`.
+    ///
+    /// Defaulted to `0` — every ordinary tile then counts as underground — rather than making
+    /// every implementor supply a real value just to compile. That default is the *protective*
+    /// side of the guard: paired with [`Self::downed_plantera`]'s own default, an implementation
+    /// that does not override either one gets a Lihzahrd wall that can never be actuated away at
+    /// all, which is strictly closer to vanilla than this project's previous behaviour (no guard
+    /// whatsoever) rather than further from it. A real implementation should still override this
+    /// with the world's actual surface line so the guard lifts below it and after Plantera falls.
+    fn surface_y(&self) -> i32 {
+        0
+    }
+
+    /// Whether this world has downed Plantera yet — `NPC.downedPlantBoss` in vanilla.
+    ///
+    /// Defaulted to `false` for the same reason [`Self::surface_y`] is: it is the conservative
+    /// answer, keeping the temple's own walls protected until a real implementation overrides it.
+    fn downed_plantera(&self) -> bool {
+        false
+    }
 }
 
 /// What a circuit changed.
@@ -569,7 +591,15 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     }
     // An actuator toggles its block between solid and passable. It runs whether or not the block
     // is active, which is the only way a block that has been actuated away can ever come back.
-    if tile.flags.has(TileFlags::ACTUATOR) {
+    //
+    // Coming *back* (`ReActive`, `Wiring.cs:3238-3246`) has no guard at all in vanilla — it is
+    // going the other way, hiding a solid block (`DeActive`, `3208-3236`), that is refused for a
+    // handful of reasons; see [`actuation_allowed`]. Without this an actuator on a Lihzahrd temple
+    // wall let a player walk in before Plantera the way the boss is meant to gate, and an
+    // actuator on a door/gate/track/golf-hole did something vanilla never lets it do at all.
+    if tile.flags.has(TileFlags::ACTUATOR)
+        && (tile.flags.has(TileFlags::ACTUATED) || actuation_allowed(world, y, tile))
+    {
         let mut toggled = tile;
         toggled
             .flags
@@ -723,6 +753,49 @@ const TRAPDOOR_OPEN: u16 = 387;
 /// `TileID.TallGateClosed`/`TallGateOpen` — see [`Fired::gates`] for the same reason.
 const TALL_GATE_CLOSED: u16 = 388;
 const TALL_GATE_OPEN: u16 = 389;
+/// `TileID.LihzahrdBrick` — the temple's own walls, which `actuation_allowed` refuses to actuate
+/// away before Plantera falls while still underground, exactly as `DeActive` does.
+const LIHZAHRD_BRICK: u16 = 226;
+/// `TileID.Bubble` — a decorative water/lava bubble; listed in `DeActive`'s own exclusion switch
+/// even though it is not in `Main.tileSolid` to begin with, so excluding it here changes nothing
+/// in practice but matches the source line for line.
+const BUBBLE: u16 = 379;
+/// `TileID.GolfHole` — also one of `DeActive`'s excluded types, and already one of [`is_trigger`]'s
+/// own (a golf hole is hit directly to sink a ball, unrelated to this).
+const GOLF_HOLE: u16 = 476;
+
+/// Whether a solid tile with an actuator on it may be hidden — `Wiring.cs:3208-3236`'s own
+/// `DeActive`, minus the two pieces this project has no equivalent of yet (`WorldGen.CanKillTile`
+/// and `TileID.Sets.PreventsActuationUnder`, both about whether removing *this* tile would strand
+/// something built on top of it — narrower checks than "is there solid ground" and not modelled
+/// here, which is a real simplification, not an oversight: everything a manually-placed actuator
+/// contraption cares about is covered by the checks that are here).
+///
+/// Coming back the other way (hidden to solid) has none of these guards in vanilla — `ReActive`
+/// is unconditional — so this is only ever consulted before hiding a tile, never before showing
+/// one again.
+fn actuation_allowed(world: &impl WiredWorld, y: i32, tile: Tile) -> bool {
+    // The temple's own walls cannot be actuated away before Plantera is down, while still
+    // underground — the one thing standing between an early visit and the boss meant to gate it.
+    if tile.block == LIHZAHRD_BRICK && y > world.surface_y() && !world.downed_plantera() {
+        return false;
+    }
+    // A handful of types are never actuatable at all, whatever `tile_solid` says about them.
+    if matches!(
+        tile.block,
+        MINECART_TRACK
+            | BUBBLE
+            | TRAPDOOR_CLOSED
+            | TRAPDOOR_OPEN
+            | TALL_GATE_CLOSED
+            | TALL_GATE_OPEN
+            | GOLF_HOLE
+    ) {
+        return false;
+    }
+    // Everything else has to actually be solid to have anything to hide.
+    terrustia_proto::tile_solid::solid(tile.block)
+}
 
 /// The tile every dart, flame, spear and spiky-ball trap is a frame of.
 const TRAPS: u16 = 137;
@@ -1249,6 +1322,98 @@ mod tests {
         assert!(
             !board.tile(105, 100).flags.has(TileFlags::ACTUATED),
             "and back again"
+        );
+    }
+
+    /// An actuator cannot hide a Lihzahrd temple wall before Plantera is down, while it is still
+    /// underground — `DeActive`'s own guard (`Wiring.cs:3210`), which stands between an early
+    /// temple visit and the boss meant to gate it.
+    ///
+    /// Fails before the fix: the actuator toggle had no guard at all, so it hid the wall the very
+    /// first hit — a `Board` (this test's `WiredWorld`) never overrides `surface_y`/
+    /// `downed_plantera`, so it gets the trait's own conservative defaults, exactly like a real
+    /// implementation would before being wired up to the world's actual state.
+    #[test]
+    fn an_actuator_cannot_hide_lihzahrd_brick_pre_plantera() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut wall = wired(LIHZAHRD_BRICK, Wire::Red);
+        wall.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, wall);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(
+            !board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the wall should still be solid"
+        );
+    }
+
+    /// An actuator on something that is not solid to begin with — a torch, here — has nothing to
+    /// hide, and `DeActive`'s own `flag` computation (`tileSolid && !NotReallySolid`) never lets
+    /// it try.
+    #[test]
+    fn an_actuator_on_a_non_solid_tile_does_nothing() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut torch = wired(4, Wire::Red); // torch: not in the solid set.
+        torch.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, torch);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// A minecart track is one of `DeActive`'s explicit exclusions — never actuatable, whatever
+    /// `tile_solid` says about the type.
+    #[test]
+    fn an_actuator_on_a_minecart_track_does_nothing() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut track = wired(MINECART_TRACK, Wire::Red);
+        track.frame_x = 1;
+        track.frame_y = -1;
+        track.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, track);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// Coming back the other way has no guard at all — an already-hidden tile always returns to
+    /// solid, exactly the asymmetry `ReActive` has and `DeActive` does not.
+    #[test]
+    fn an_already_hidden_tile_always_reactivates() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut wall = wired(LIHZAHRD_BRICK, Wire::Red);
+        wall.flags.set(TileFlags::ACTUATOR, true);
+        wall.flags.set(TileFlags::ACTUATED, true); // already hidden
+        board.set_tile(105, 100, wall);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(
+            !board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "should have come back solid with no guard to stop it"
         );
     }
 
