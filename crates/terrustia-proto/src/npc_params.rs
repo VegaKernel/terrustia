@@ -3879,9 +3879,12 @@ pub const QUEEN_SLIME_FLIES_AT: f32 = 0.5;
 /// It waits this long between attacks: a second on the ground, two in the air.
 pub const QUEEN_SLIME_WAIT: f32 = 60.0;
 pub const QUEEN_SLIME_WAIT_FLYING: f32 = 120.0;
-/// The three-hop set: two low, then one high that ends it.
-pub const QUEEN_SLIME_HOPS: [(f32, f32, f32); 3] = [
+/// The four-hop set: two identical low hops, a slightly higher third, then one high that ends it
+/// (`NPC.cs:45946-46023`; the ground case's first hop repeats because `ai[2]==0` and `ai[2]==1`
+/// both fall through to the same `else` branch).
+pub const QUEEN_SLIME_HOPS: [(f32, f32, f32); 4] = [
     // rise, drift, rest afterwards
+    (-8.0, 4.0, -40.0),
     (-8.0, 4.0, -40.0),
     (-6.0, 4.5, -40.0),
     (-13.0, 3.5, 0.0),
@@ -3902,6 +3905,30 @@ pub const QUEEN_SLIME_LEASH_TILES: f32 = 500.0;
 /// Flying: it holds above you and dives.
 pub const QUEEN_SLIME_HOVER: f32 = 250.0;
 pub const QUEEN_SLIME_DIVE_RANGE: f32 = 250.0;
+
+/// The dive: a stationary burst dropped where it lands, on the ground or in the air alike
+/// (`NPC.cs:46024-46118`).
+pub const QUEEN_SLIME_DIVE_SHOT: u16 = 922;
+pub const QUEEN_SLIME_DIVE_DAMAGE: i32 = 40;
+/// It hangs above the aim point for up to this many ticks before committing to the fall.
+pub const QUEEN_SLIME_DIVE_WINDUP: f32 = 60.0;
+/// How far above the player it aims before dropping, and how fast it closes on that point.
+pub const QUEEN_SLIME_DIVE_ABOVE: f32 = 384.0;
+pub const QUEEN_SLIME_DIVE_APPROACH_SPEED: f32 = 20.0;
+/// Once it commits, gravity is hand-rolled: this much added to its fall speed each tick, capped.
+pub const QUEEN_SLIME_DIVE_FALL_ACCEL: f32 = 1.0;
+pub const QUEEN_SLIME_DIVE_FALL_CAP: f32 = 14.0;
+
+/// The swoop: a ring of these fired outward once it commits — six on the ground, ten in the air
+/// (`NPC.cs:46159-46236`; vanilla's getGoodWorld bump to fifteen is disclosed and not counted).
+pub const QUEEN_SLIME_RING_SHOT: u16 = 926;
+pub const QUEEN_SLIME_RING_DAMAGE: i32 = 30;
+pub const QUEEN_SLIME_RING_SPEED: f32 = 9.0;
+pub const QUEEN_SLIME_RING_COUNT_GROUND: usize = 6;
+pub const QUEEN_SLIME_RING_COUNT_FLYING: usize = 10;
+/// How long it hangs before firing the ring: fifty ticks of windup, then ten more once committed.
+pub const QUEEN_SLIME_SWOOP_WINDUP: f32 = 50.0;
+pub const QUEEN_SLIME_SWOOP_COMMIT: f32 = 10.0;
 
 // --- The Lunatic Cultist ---------------------------------------------------------------------------
 
