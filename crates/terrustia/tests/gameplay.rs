@@ -5318,7 +5318,12 @@ async fn placing_a_frames_tile_creates_and_shares_its_entity() {
     let mut r = terrustia_proto::PacketReader::new(&frame.payload);
     let _id = r.i32().unwrap();
     assert!(r.bool().unwrap(), "it should say the entity is present");
-    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    let entity = terrustia_proto::tile_entity::TileEntity::read(
+        &mut r,
+        true,
+        terrustia_proto::tile_entity::CURRENT_FILE_VERSION,
+    )
+    .unwrap();
     assert_eq!(
         entity.kind,
         terrustia_proto::tile_entity::EntityKind::ItemFrame
@@ -5420,7 +5425,12 @@ async fn an_item_frame_holds_what_is_put_in_it() {
     let mut r = terrustia_proto::PacketReader::new(&frame.payload);
     r.i32().unwrap();
     r.bool().unwrap();
-    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    let entity = terrustia_proto::tile_entity::TileEntity::read(
+        &mut r,
+        true,
+        terrustia_proto::tile_entity::CURRENT_FILE_VERSION,
+    )
+    .unwrap();
     assert_eq!(entity.held().map(|i| i.id), Some(3507));
 
     // Swapping it should give the first one back rather than destroying it.

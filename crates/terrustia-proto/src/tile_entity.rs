@@ -28,6 +28,19 @@ use crate::{
     writer::{PacketWriter, Writer},
 };
 
+/// The world-file version whose tile-entity layout this crate reads and writes by default. Real
+/// 1.4.5.8 writes 326; live network sends are always current, so they pass this.
+pub const CURRENT_FILE_VERSION: i32 = 326;
+
+/// `TEDisplayDoll` began writing its pose byte at file version 307 and its third presence byte
+/// (`bitsByte3`, carrying the 9th equip/dye and the misc slot) at 308 — `TEDisplayDoll.ReadExtraData`.
+/// Reading either from an older file consumes the following entry's bytes and desyncs the section.
+const DOLL_POSE_VERSION: i32 = 307;
+const DOLL_EXTRA_VERSION: i32 = 308;
+/// Version 311 has a one-off quirk: the 9th equip item's presence is still flagged in `bitsByte3`
+/// bit 1, but the item itself is appended after the misc slots rather than read in place.
+const DOLL_QUIRK_VERSION: i32 = 311;
+
 /// The kinds, numbered as `TileEntitiesManager.RegisterAll` registers them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityKind {
@@ -253,20 +266,23 @@ impl TileEntity {
         }
     }
 
-    /// Write this entity as the network carries it.
+    /// Write this entity as the network carries it, or (when `!network`) in the world-file form for
+    /// a file of version `version`.
     ///
     /// The world file's form differs: it carries the id and, for a logic sensor, its state. Both
-    /// are decided by `network` rather than by two separate writers, as the game does it.
-    pub fn write(&self, w: &mut Writer, network: bool) {
+    /// are decided by `network` rather than by two separate writers, as the game does it. `version`
+    /// only affects the `DisplayDoll` payload, whose pose/extra bytes are version-gated (see
+    /// [`DOLL_POSE_VERSION`]); network sends are always current, so they pass [`CURRENT_FILE_VERSION`].
+    pub fn write(&self, w: &mut Writer, network: bool, version: i32) {
         w.u8(self.kind.id());
         if !network {
             w.i32(self.id);
         }
         w.i16(self.x).i16(self.y);
-        self.write_data(w, network);
+        self.write_data(w, network, version);
     }
 
-    fn write_data(&self, w: &mut Writer, network: bool) {
+    fn write_data(&self, w: &mut Writer, network: bool, version: i32) {
         fn item(w: &mut Writer, it: ItemStack) {
             w.i16(it.id as i16).u8(it.prefix).i16(it.stack);
         }
@@ -305,8 +321,24 @@ impl TileEntity {
                 if !doll.dyes[8].is_empty() {
                     extra_bits |= 1 << 2;
                 }
-                w.u8(equip_bits).u8(dye_bits).u8(doll.pose).u8(extra_bits);
-                for it in doll.equip.iter().chain(&doll.dyes).chain(&doll.misc) {
+                // A file older than these versions never had the pose / third-presence byte; writing
+                // them into a preserved <307/<308 world (whose header still says so) would make a
+                // real client misparse the whole section. Network form is always current.
+                let write_pose = network || version >= DOLL_POSE_VERSION;
+                let write_extra = network || version >= DOLL_EXTRA_VERSION;
+                w.u8(equip_bits).u8(dye_bits);
+                if write_pose {
+                    w.u8(doll.pose);
+                }
+                if write_extra {
+                    w.u8(extra_bits);
+                }
+                // Without the extra byte, the 9th equip/dye and the misc slot cannot be represented,
+                // so only the low-8 slots are emitted.
+                let equip_iter = doll.equip.iter().take(if write_extra { 9 } else { 8 });
+                let dye_iter = doll.dyes.iter().take(if write_extra { 9 } else { 8 });
+                let misc_iter = doll.misc.iter().take(if write_extra { 1 } else { 0 });
+                for it in equip_iter.chain(dye_iter).chain(misc_iter) {
                     if !it.is_empty() {
                         item(w, *it);
                     }
@@ -336,8 +368,10 @@ impl TileEntity {
         }
     }
 
-    /// Read one back, in the same two forms.
-    pub fn read(r: &mut PacketReader<'_>, network: bool) -> Result<Self> {
+    /// Read one back, in the same two forms. `version` is the world-file version for the file form
+    /// (it gates the `DisplayDoll` payload); network reads are current, so they pass
+    /// [`CURRENT_FILE_VERSION`].
+    pub fn read(r: &mut PacketReader<'_>, network: bool, version: i32) -> Result<Self> {
         let Some(kind) = EntityKind::from_id(r.u8()?) else {
             return Err(crate::ProtoError::OutOfRange {
                 field: "tile entity kind",
@@ -346,7 +380,7 @@ impl TileEntity {
         };
         let id = if network { 0 } else { r.i32()? };
         let (x, y) = (r.i16()?, r.i16()?);
-        let data = Self::read_data(r, kind, network)?;
+        let data = Self::read_data(r, kind, network, version)?;
         Ok(Self {
             id,
             kind,
@@ -356,7 +390,12 @@ impl TileEntity {
         })
     }
 
-    fn read_data(r: &mut PacketReader<'_>, kind: EntityKind, network: bool) -> Result<EntityData> {
+    fn read_data(
+        r: &mut PacketReader<'_>,
+        kind: EntityKind,
+        network: bool,
+        version: i32,
+    ) -> Result<EntityData> {
         fn item(r: &mut PacketReader<'_>) -> Result<ItemStack> {
             let id = i32::from(r.i16()?);
             let prefix = r.u8()?;
@@ -386,8 +425,24 @@ impl TileEntity {
             EntityKind::DisplayDoll => {
                 let equip_bits = r.u8()?;
                 let dye_bits = r.u8()?;
-                let pose = r.u8()?;
-                let extra_bits = r.u8()?;
+                // Pose (>=307) and the third presence byte (>=308) only exist in newer files.
+                let pose = if network || version >= DOLL_POSE_VERSION {
+                    r.u8()?
+                } else {
+                    0
+                };
+                let mut extra_bits = if network || version >= DOLL_EXTRA_VERSION {
+                    r.u8()?
+                } else {
+                    0
+                };
+                // Version 311 flagged the 9th equip item in extra bit 1 but appended it last; pull
+                // that bit out so the in-place read below skips it, and read that item at the end.
+                let quirk_equip8 =
+                    !network && version == DOLL_QUIRK_VERSION && extra_bits >> 1 & 1 == 1;
+                if quirk_equip8 {
+                    extra_bits &= !(1 << 1);
+                }
                 let mut doll = DollContents {
                     pose,
                     ..Default::default()
@@ -410,6 +465,9 @@ impl TileEntity {
                 }
                 if extra_bits & 1 == 1 {
                     doll.misc[0] = item(r)?;
+                }
+                if quirk_equip8 {
+                    doll.equip[8] = item(r)?;
                 }
                 EntityData::DisplayDoll(Box::new(doll))
             }
@@ -443,7 +501,7 @@ impl TileEntity {
 pub fn share(entity: &TileEntity) -> Result<Vec<u8>> {
     let mut w = PacketWriter::new(crate::id::TILE_ENTITY_SHARING);
     w.i32(entity.id).bool(true);
-    entity.write(&mut w, true);
+    entity.write(&mut w, true, CURRENT_FILE_VERSION);
     w.finish()
 }
 
@@ -527,15 +585,46 @@ mod tests {
 
     fn round_trip(entity: &TileEntity, network: bool) -> TileEntity {
         let mut w = Writer::new();
-        entity.write(&mut w, network);
+        entity.write(&mut w, network, CURRENT_FILE_VERSION);
         let bytes = w.into_bytes();
         let mut r = PacketReader::new(&bytes);
-        let back = TileEntity::read(&mut r, network).expect("it should read back");
+        let back =
+            TileEntity::read(&mut r, network, CURRENT_FILE_VERSION).expect("it should read back");
         assert_eq!(r.remaining(), 0, "every byte written should be read");
         back
     }
 
     /// Every kind survives the trip, in both forms.
+    /// A DisplayDoll saved by a pre-307 world has no pose byte and (pre-308) no third presence
+    /// byte. Reading one at 326 would eat the following equip item's bytes as the pose/extra and
+    /// desync the whole section; reading it at its real version must consume exactly its own bytes
+    /// and round-trip back to them.
+    #[test]
+    fn a_pre_307_display_doll_has_no_pose_or_extra_byte() {
+        let mut w = Writer::new();
+        w.u8(EntityKind::DisplayDoll.id());
+        w.i32(7); // id (file form)
+        w.i16(10).i16(20); // x, y
+        w.u8(0b0000_0001); // equip_bits: slot 0 present
+        w.u8(0); // dye_bits: none
+        w.i16(100).u8(0).i16(1); // one equip item: id 100, no prefix, stack 1
+        let bytes = w.as_slice().to_vec();
+
+        let mut r = PacketReader::new(&bytes);
+        let te = TileEntity::read(&mut r, false, 306).expect("a v306 doll must read");
+        assert_eq!(r.remaining(), 0, "no pose/extra byte exists at v306");
+        let EntityData::DisplayDoll(doll) = &te.data else {
+            panic!("expected a doll");
+        };
+        assert_eq!(doll.pose, 0, "pose defaults to 0 pre-307");
+        assert_eq!(doll.equip[0].id, 100);
+
+        // And it re-serialises at 306 to exactly the bytes it came from.
+        let mut out = Writer::new();
+        te.write(&mut out, false, 306);
+        assert_eq!(out.as_slice(), bytes.as_slice(), "v306 doll round-trips");
+    }
+
     #[test]
     fn each_kind_round_trips() {
         for id in 0..11u8 {
@@ -583,8 +672,8 @@ mod tests {
         let mut bare = TileEntity::new(2, EntityKind::DisplayDoll, 10, 20);
         bare.data = EntityData::DisplayDoll(Box::default());
         let (mut dressed_bytes, mut bare_bytes) = (Writer::new(), Writer::new());
-        doll.write(&mut dressed_bytes, true);
-        bare.write(&mut bare_bytes, true);
+        doll.write(&mut dressed_bytes, true, CURRENT_FILE_VERSION);
+        bare.write(&mut bare_bytes, true, CURRENT_FILE_VERSION);
         assert!(
             dressed_bytes.len() > bare_bytes.len(),
             "an empty mannequin should be the shorter packet"
@@ -657,7 +746,7 @@ mod tests {
         let mut r = PacketReader::new(&bytes[3..]);
         assert_eq!(r.i32().unwrap(), 9);
         assert!(r.bool().unwrap(), "present");
-        let back = TileEntity::read(&mut r, true).unwrap();
+        let back = TileEntity::read(&mut r, true, CURRENT_FILE_VERSION).unwrap();
         assert_eq!(back.held(), frame.held());
         assert_eq!((back.x, back.y), (33, 44));
     }

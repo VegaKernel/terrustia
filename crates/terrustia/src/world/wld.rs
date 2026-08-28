@@ -195,7 +195,7 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
     let mut town_npcs_understood = true;
     if let Some(section) = trailing_sections.first() {
         let mut r = PacketReader::new(section);
-        let read = read_town_npcs(&mut r);
+        let read = read_town_npcs(&mut r, file.version);
         town_npcs_understood = read.complete;
         if !read.complete {
             warn!(
@@ -214,7 +214,7 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
     let mut tile_entities_understood = true;
     if let Some(section) = trailing_sections.get(1) {
         let mut r = PacketReader::new(section);
-        let (entities, complete) = read_tile_entities(&mut r);
+        let (entities, complete) = read_tile_entities(&mut r, file.version);
         tile_entities_understood = complete;
         if !complete {
             warn!(
@@ -1093,7 +1093,12 @@ pub(crate) struct TownNpcSection {
     pub complete: bool,
 }
 
-fn read_town_npcs(r: &mut PacketReader<'_>) -> TownNpcSection {
+/// `WorldFile.LoadNPCs` reads each resident's `homelessDespawn` flag only for file version >= 315;
+/// older worlds (down to `MIN_VERSION` 279) never wrote it, so reading it there consumes the next
+/// entry's lead boolean and desyncs the whole section.
+pub(crate) const HOMELESS_DESPAWN_VERSION: i32 = 315;
+
+fn read_town_npcs(r: &mut PacketReader<'_>, version: i32) -> TownNpcSection {
     let mut section = TownNpcSection {
         shimmered: Vec::new(),
         npcs: Vec::new(),
@@ -1133,7 +1138,11 @@ fn read_town_npcs(r: &mut PacketReader<'_>) -> TownNpcSection {
             // A flag byte whose first bit says a variation index follows.
             let flags = r.u8().ok()?;
             let variation = if flags & 1 != 0 { r.i32().ok()? } else { 0 };
-            let homeless_despawn = r.bool().ok()?;
+            let homeless_despawn = if version >= HOMELESS_DESPAWN_VERSION {
+                r.bool().ok()?
+            } else {
+                false
+            };
             Some(super::objects::TownNpc {
                 net_id,
                 name,
@@ -1164,6 +1173,7 @@ fn read_town_npcs(r: &mut PacketReader<'_>) -> TownNpcSection {
 /// gone on the next save. Now the tail is kept as bytes instead, by not rewriting the section.
 fn read_tile_entities(
     r: &mut PacketReader<'_>,
+    version: i32,
 ) -> (Vec<terrustia_proto::tile_entity::TileEntity>, bool) {
     let Ok(count) = r.i32() else {
         return (Vec::new(), false);
@@ -1171,7 +1181,7 @@ fn read_tile_entities(
     let wanted = count.max(0) as usize;
     let mut entities = Vec::with_capacity(count.clamp(0, 1 << 16) as usize);
     for _ in 0..wanted {
-        match terrustia_proto::tile_entity::TileEntity::read(r, false) {
+        match terrustia_proto::tile_entity::TileEntity::read(r, false, version) {
             Ok(entity) => entities.push(entity),
             Err(_) => break,
         }
@@ -1377,7 +1387,7 @@ mod tests {
         let bytes = w.into_bytes();
 
         let mut r = PacketReader::new(&bytes);
-        let read = read_town_npcs(&mut r);
+        let read = read_town_npcs(&mut r, 326);
 
         assert_eq!(read.npcs.len(), 1, "the resident that did decode is kept");
         assert_eq!(read.npcs[0].name, "Andrew");
@@ -1410,11 +1420,47 @@ mod tests {
         let bytes = w.into_bytes();
 
         let mut r = PacketReader::new(&bytes);
-        let read = read_town_npcs(&mut r);
+        let read = read_town_npcs(&mut r, 326);
 
         assert_eq!(read.shimmered, vec![5]);
         assert_eq!(read.npcs.len(), 1);
         assert!(read.complete, "a section ending in its terminator is whole");
+    }
+
+    /// A pre-315 world (e.g. 1.4.4.x, still within `MIN_VERSION`) wrote no `homelessDespawn` byte.
+    /// Reading one there would eat the section terminator and desync everything after it — the exact
+    /// corruption that made such a world fail to load in real Terraria after a round-trip. Two
+    /// residents with no despawn byte, ending in the terminator, must decode whole.
+    #[test]
+    fn a_pre_315_townsfolk_section_has_no_despawn_byte() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(64);
+        w.i32(0); // no shimmered types
+        for (id, name) in [(22, "Andrew"), (17, "Steve")] {
+            w.bool(true)
+                .i32(id)
+                .string(name)
+                .f32(1.0)
+                .f32(2.0)
+                .bool(false)
+                .i32(0)
+                .i32(0)
+                .u8(0);
+            // deliberately NO homeless_despawn byte — this is a <315 world
+        }
+        w.bool(false); // terminator
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new(&bytes);
+        let read = read_town_npcs(&mut r, 279);
+        assert!(
+            read.complete,
+            "a pre-315 section without despawn bytes must decode whole, not desync"
+        );
+        assert_eq!(read.npcs.len(), 2);
+        assert_eq!(read.npcs[1].name, "Steve");
+        assert!(!read.npcs[0].homeless_despawn, "defaults to false pre-315");
     }
 
     /// Tile entities: fewer decoded than the count promised means the tail was not understood.
@@ -1427,7 +1473,7 @@ mod tests {
         let bytes = w.into_bytes(); // supplies none
 
         let mut r = PacketReader::new(&bytes);
-        let (entities, complete) = read_tile_entities(&mut r);
+        let (entities, complete) = read_tile_entities(&mut r, 326);
 
         assert!(entities.is_empty());
         assert!(
