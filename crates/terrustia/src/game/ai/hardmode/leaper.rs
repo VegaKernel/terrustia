@@ -99,8 +99,9 @@ pub fn leaper(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome {
             npc.ai[2] = TEETH_FUSE;
             return out;
         }
-    } else if world.wet {
+    } else if world.wet && npc.npc_type != DERPLING {
         // In water a leaper swims: it bounces off walls and paddles upward instead of hopping.
+        // The derpling is the one leaper that does not — it just keeps hopping, water or not.
         if npc.collide_x {
             npc.direction = -npc.direction;
             npc.sprite_direction = npc.direction;
@@ -372,5 +373,27 @@ mod tests {
         let (cx, cy) = bomb.center();
         leaper(&mut bomb, &world(&tiles, Some((cx + 30.0, cy))));
         assert_eq!(bomb.ai[1], 5.0, "you are close enough to set it off");
+    }
+
+    /// Every other leaper swims in water; the derpling is gated out of that and just keeps
+    /// hopping regardless.
+    #[test]
+    fn a_derpling_does_not_swim_like_other_leapers() {
+        let tiles = flat(30);
+        let mut d = settled(
+            &tiles,
+            Npc::new(DERPLING, (0.0, 25.0 * TILE), 1).expect("derpling"),
+        );
+        // Nowhere near winding up a hop this tick, so nothing but the swim branch could move it.
+        d.ai[0] = -1000.0;
+        let mut w = world(&tiles, Some((10_000.0, 0.0)));
+        w.wet = true;
+
+        leaper(&mut d, &w);
+        assert_eq!(
+            d.velocity.1, 0.0,
+            "wet should not have started it paddling: {:?}",
+            d.velocity
+        );
     }
 }
