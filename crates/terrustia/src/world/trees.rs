@@ -49,14 +49,20 @@ const TRUNK: [[(i16, i16); 3]; 8] = [
     [(110, 66), (110, 88), (110, 110)],
 ];
 
-/// The left-hand root, in its two forms.
-const ROOT_LEFT: [[(i16, i16); 3]; 2] = [
+/// A left branch's own tile, in its two forms — weighted two-to-one toward the first
+/// (`WorldGen.cs:30271-30294`, `genRand.Next(3) < 2`). Grows beside whichever trunk segment
+/// rolled style 5 or 7, at that segment's own row: a *second* tile, not a frame on the trunk.
+///
+/// This table used to be called `ROOT_LEFT` and be written at the tree's base, immediately
+/// overwritten there by `BASE_LEFT` a few lines later — a dead write on frames that were never a
+/// root at all. Every generated tree had branch stubs on its trunk and nothing beside them.
+const BRANCH_LEFT: [[(i16, i16); 3]; 2] = [
     [(44, 198), (44, 220), (44, 242)],
     [(66, 0), (66, 22), (66, 44)],
 ];
 
-/// The right-hand root.
-const ROOT_RIGHT: [[(i16, i16); 3]; 2] = [
+/// A right branch's own tile, the same way — `WorldGen.cs:30314-30357`.
+const BRANCH_RIGHT: [[(i16, i16); 3]; 2] = [
     [(66, 198), (66, 220), (66, 242)],
     [(88, 66), (88, 88), (88, 110)],
 ];
@@ -141,25 +147,37 @@ pub fn grow(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) -> bool {
         // Styles past the table are the plain trunk, exactly as the `default` arm is.
         let row = TRUNK.get(style as usize).unwrap_or(&TRUNK[0]);
         let (fx, fy) = row[variant as usize];
-        world.set_tile(x, y - 1 - step, Tile::framed(TREE, fx, fy));
+        let trunk_row = y - 1 - step;
+        world.set_tile(x, trunk_row, Tile::framed(TREE, fx, fy));
+
+        // A branch is a real tile beside the trunk, at the same row — not merely implied by the
+        // trunk's own joint frame. `WorldGen.cs:30271-30357`: each side is independent (a style-7
+        // segment gets both) and, on each, the first frame form wins twice as often as the
+        // second.
+        if branched_left {
+            let form = usize::from(rng.random_range(0..3) >= 2);
+            let (fx, fy) = BRANCH_LEFT[form][rng.random_range(0..3) as usize];
+            world.set_tile(x - 1, trunk_row, Tile::framed(TREE, fx, fy));
+        }
+        if branched_right {
+            let form = usize::from(rng.random_range(0..3) >= 2);
+            let (fx, fy) = BRANCH_RIGHT[form][rng.random_range(0..3) as usize];
+            world.set_tile(x + 1, trunk_row, Tile::framed(TREE, fx, fy));
+        }
     }
 
     // --- the roots ----------------------------------------------------------------------------
     //
-    // A root only grows where the ground beside the trunk would hold one.
+    // A root only grows where the ground beside the trunk would hold one. Nothing is written to
+    // either tile yet — the `BASE_LEFT`/`BASE_RIGHT` step below is what actually places a root,
+    // and always did; this only decides *whether* one grows here.
     let root_row = y - 1;
     let mut has_left = false;
     let mut has_right = false;
     if root_grows_here(world, x - 1, y) && rng.random_range(0..3) < 2 {
-        let form = usize::from(rng.random_range(0..2) == 0);
-        let (fx, fy) = ROOT_LEFT[form][rng.random_range(0..3) as usize];
-        world.set_tile(x - 1, root_row, Tile::framed(TREE, fx, fy));
         has_left = true;
     }
     if root_grows_here(world, x + 1, y) && rng.random_range(0..3) < 2 {
-        let form = usize::from(rng.random_range(0..2) == 0);
-        let (fx, fy) = ROOT_RIGHT[form][rng.random_range(0..3) as usize];
-        world.set_tile(x + 1, root_row, Tile::framed(TREE, fx, fy));
         has_right = true;
     }
 
@@ -363,6 +381,42 @@ mod tests {
         assert!(
             TOP.iter().any(|row| row.contains(&frames)),
             "the topmost tile should be a canopy, got {frames:?}"
+        );
+    }
+
+    /// A branch is a real tile beside the trunk, not merely implied by the trunk's own joint
+    /// frame — `WorldGen.cs:30271-30357` grows a genuine second tile at `x-1` or `x+1`, on the
+    /// same row, whenever a trunk segment rolls a branching style.
+    ///
+    /// Fails before the fix: no tile at `x-1`/`x+1` other than the tree's own two roots (at the
+    /// base row only, excluded from this scan) was ever written, whatever the trunk's own frames
+    /// implied — the ROOT_LEFT/ROOT_RIGHT writes that used to sit here landed on the base row and
+    /// were immediately overwritten by the real root frames a few lines later, so every generated
+    /// tree had branch stubs on its trunk and nothing beside them.
+    #[test]
+    fn branches_are_real_tiles_beside_the_trunk() {
+        let mut found_branch = false;
+        for seed in 0..80u64 {
+            let mut world = meadow(40);
+            let mut rng = SmallRng::seed_from_u64(seed);
+            if !grow(&mut world, 20, 100, &mut rng) {
+                continue;
+            }
+            // Rows 1..99: above the ground (100) and below the root row (99), so a tile found
+            // here can only be a branch, never one of the tree's two roots.
+            for y in 1..99 {
+                if world.tile(19, y).block == TREE || world.tile(21, y).block == TREE {
+                    found_branch = true;
+                    break;
+                }
+            }
+            if found_branch {
+                break;
+            }
+        }
+        assert!(
+            found_branch,
+            "no branch tile appeared beside a trunk in 80 tries"
         );
     }
 
