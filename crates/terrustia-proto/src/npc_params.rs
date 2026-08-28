@@ -2965,9 +2965,11 @@ pub const TOWER_COLLAPSE_EASE: f32 = 0.02;
 
 /// It will not lay more than this many eggs and spawn at once.
 pub const MOTHRON_BROOD: usize = 7;
-/// The egg it lays, and the spawn that hatches from it.
-pub const MOTHRON_EGG: u16 = 470;
-pub const MOTHRON_SPAWN_TYPE: u16 = 471;
+/// The egg it lays, and the spawn that hatches from it. NPCID: MothronEgg=478, MothronSpawn=479.
+/// These were previously 470/471 — CrimsonPenguin and GoblinSummoner — so during an eclipse Mothron
+/// laid Crimson Penguins and the brood census counted the wrong types.
+pub const MOTHRON_EGG: u16 = 478;
+pub const MOTHRON_SPAWN_TYPE: u16 = 479;
 /// Hovering: it holds two hundred pixels above you and picks an attack every three seconds.
 pub const MOTHRON_ABOVE: f32 = 200.0;
 pub const MOTHRON_HOVER_SPEED: f32 = 6.0;
@@ -3186,9 +3188,13 @@ pub const DESTROYER_LASER_LIFE: u16 = 300;
 // --- Skeletron Prime ------------------------------------------------------------------------------
 
 pub const PRIME_HEAD: u16 = 127;
-pub const PRIME_SAW: u16 = 128;
-pub const PRIME_VICE: u16 = 129;
-pub const PRIME_CANNON: u16 = 130;
+// NPCID order (`NPCID.cs`): 128 PrimeCannon, 129 PrimeSaw, 130 PrimeVice, 131 PrimeLaser. These
+// were previously shifted (SAW=128/VICE=129/CANNON=130), which put the bomb-lobbing behavior on
+// the Vice arm and left the real Cannon as a plain melee arm. The head-spawn side list below is
+// written explicitly by arm so it still reproduces vanilla's per-type `ai[0]`.
+pub const PRIME_CANNON: u16 = 128;
+pub const PRIME_SAW: u16 = 129;
+pub const PRIME_VICE: u16 = 130;
 pub const PRIME_LASER: u16 = 131;
 
 /// The head hovers for ten seconds, then spins for six and two thirds, and repeats.
@@ -4781,6 +4787,46 @@ pub fn town_toughness(down: &[bool; 15], combat_books: (bool, bool)) -> TownToug
         }
     }
     out
+}
+
+#[cfg(test)]
+mod id_pin_tests {
+    use super::*;
+
+    /// Pins the Skeletron Prime limb behavior to the real NPCIDs, not to the (self-consistent)
+    /// constant names: 128 is `PrimeCannon` and must lob a bomb (proj 102); 129/130 (Saw/Vice) are
+    /// melee. Every other Prime test builds its arm from the constants, so they passed whatever the
+    /// constants held — this one catches the shift.
+    #[test]
+    fn the_prime_cannon_is_npcid_128_and_lobs_a_bomb() {
+        assert_eq!(PRIME_CANNON, 128, "NPCID.PrimeCannon");
+        assert_eq!(
+            prime_limb(128).shot,
+            Some(102),
+            "NPC 128 (PrimeCannon) must lob its bomb"
+        );
+        assert_eq!(prime_limb(129).shot, None, "NPC 129 (PrimeSaw) is melee");
+        assert_eq!(prime_limb(130).shot, None, "NPC 130 (PrimeVice) is melee");
+        assert_eq!(
+            prime_limb(131).shot,
+            Some(100),
+            "NPC 131 (PrimeLaser) fires its laser"
+        );
+    }
+
+    /// Mothron must lay its actual egg (478), not CrimsonPenguin (470). Verified through the type
+    /// table so the constant is tied to the real entity, not just a literal.
+    #[test]
+    fn mothron_lays_its_real_egg_not_a_penguin() {
+        assert_eq!(
+            crate::npc_data::npc_stats(MOTHRON_EGG).unwrap().name,
+            "MothronEgg"
+        );
+        assert_eq!(
+            crate::npc_data::npc_stats(MOTHRON_SPAWN_TYPE).unwrap().name,
+            "MothronSpawn"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -79,9 +79,9 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
         // the consumer that fulfils `Spawn` requests reads a parented spawn's side from the sign
         // of `velocity.0`, the same encoding `skeletron::head`'s own hands already use.
         for (limb, side) in [
-            (PRIME_SAW, -1.0),
-            (PRIME_VICE, 1.0),
             (PRIME_CANNON, -1.0),
+            (PRIME_SAW, 1.0),
+            (PRIME_VICE, -1.0),
             (PRIME_LASER, 1.0),
         ] {
             out.spawn.push(Spawn {
