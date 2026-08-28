@@ -38,12 +38,15 @@
 
 use std::collections::HashSet;
 
-use terrustia_proto::tile_solid;
+use terrustia_proto::{TileFlags, tile_solid};
 
 use super::cave_flood;
 use super::layout::Layout;
 use super::rand::UnifiedRandom;
 use super::tiles::{self, walls};
+
+/// `TileID.ExposedGems` — the same tile `speleothems.rs`'s own exposed-gem passes place.
+const GEM_TILE: u16 = 178;
 
 /// `Gemmable` (`WorldGen.cs:3731`): which active tile types `Spread.Gem` will recolor.
 fn gemmable(block: u16) -> bool {
@@ -151,6 +154,22 @@ fn spread_gem(
             let mut t = tile;
             t.wall = walls::GEM_WALLS[rand_gem(gems, rand)];
             world.set_tile(cx, cy, t);
+            // `Spread.Gem`'s own open-tile branch (`WorldGen.cs:3589-3592`): once in a while, an
+            // inactive tile in the pocket's own open interior gets a genuinely exposed gem tile
+            // instead of staying bare wall — the pocket's real, findable loot, not just a colored
+            // backdrop. `PlaceTile`'s dedicated `num == 178` dispatch (`WorldGen.cs:60190-60200`)
+            // writes `frameX = style * 18` (the species — `KillTile`'s drop table reads this back
+            // as `frameX / 18`) and `frameY = genRand.Next(3) * 18` (a cosmetic variant); a second,
+            // independent `randGem()` roll picks the style here, separate from the wall's own.
+            if !world.tile(cx, cy).is_active() && rand.next_max(2) == 0 {
+                let style = rand_gem(gems, rand);
+                let mut gem = world.tile(cx, cy);
+                gem.block = GEM_TILE;
+                gem.frame_x = style as i16 * 18;
+                gem.frame_y = rand.next_max(3) as i16 * 18;
+                gem.flags.set(TileFlags::ACTIVE, true);
+                world.set_tile(cx, cy, gem);
+            }
             for n in [(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)] {
                 if !seen.contains(&n) {
                     wave.push(n);
@@ -225,6 +244,41 @@ mod tests {
         let mut layout = Layout::plan(width, height, &mut rand);
         layout.rock = rock;
         (world, layout)
+    }
+
+    /// `Spread.Gem`'s own open-tile branch (`WorldGen.cs:3589-3592`) was never transcribed — a
+    /// gem cave's open interior only ever got wall paint, never the exposed gem tile itself that
+    /// is the pocket's own real, findable loot. Fails on the pre-fix code (no tile 178 anywhere).
+    #[test]
+    fn spread_gem_places_real_exposed_gem_tiles_in_the_open_interior() {
+        let (mut world, _layout) = stone_block(200, 200, 100);
+        for x in 90..110 {
+            for y in 90..110 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        let mut rand = UnifiedRandom::new(7);
+        // Every gem in this pocket's palette, maximizing how much of the 400-tile room the
+        // exposed-gem roll actually gets to run against.
+        let gems = [true; 6];
+        spread_gem(&mut world, 100, 100, gems, &mut rand);
+
+        let gem_tiles: Vec<(i32, i32)> = (90..110)
+            .flat_map(|x| (90..110).map(move |y| (x, y)))
+            .filter(|&(x, y)| world.tile(x, y).is_active() && world.tile(x, y).block == GEM_TILE)
+            .collect();
+        assert!(
+            !gem_tiles.is_empty(),
+            "expected at least one real exposed gem tile in a 400-tile open pocket"
+        );
+        for (x, y) in gem_tiles {
+            let t = world.tile(x, y);
+            assert!(
+                (0..6).contains(&(t.frame_x / 18)) && t.frame_x % 18 == 0,
+                "gem at ({x},{y}) has an invalid species frame_x {}",
+                t.frame_x
+            );
+        }
     }
 
     #[test]

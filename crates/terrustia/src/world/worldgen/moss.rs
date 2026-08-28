@@ -224,6 +224,18 @@ fn is_moss(block: u16) -> bool {
 }
 
 /// The `LongMoss` pass. Returns how many overlay tiles were placed.
+///
+/// `PlaceTile`'s dedicated `num == 184` branch (`WorldGen.cs:60202-60219`, reached before the
+/// generic `Place1x1` path this file used to assume) writes `frameX = style * 18` and
+/// `frameY = genRand.Next(3) * 18`. `LongMoss`'s own call (`WorldGen.cs:20951`,
+/// `PlaceTile(num3, num4, 184, mute: true)`) always uses the default `style = 0`, so `frameX` is
+/// always 0 here — real, not a narrowing. `frameY`'s `Next(3)*18` roll is a purely cosmetic
+/// variant with no gameplay meaning, but reproducing it needs a `UnifiedRandom` this function has
+/// no parameter for; threading one through means changing this function's public signature, which
+/// needs a matching change at its call site in `mod.rs` — outside this lane (single-owner, see the
+/// module doc). Fixed at a constant `frameY = 0` (a real, reachable vanilla value — the `Next(3)
+/// == 0` case) rather than left at the old -1/-1 corruption sentinel; flagged for whoever next
+/// touches `mod.rs`.
 pub fn hang_long_moss(world: &mut World) -> usize {
     let (width, height) = (world.width(), world.height());
     let mut placed = 0usize;
@@ -238,8 +250,8 @@ pub fn hang_long_moss(world: &mut World) -> usize {
                 if !world.tile(nx, ny).is_active() {
                     let mut overlay = world.tile(nx, ny);
                     overlay.block = LONG_MOSS;
-                    overlay.frame_x = -1;
-                    overlay.frame_y = -1;
+                    overlay.frame_x = 0;
+                    overlay.frame_y = 0;
                     overlay.flags.set(TileFlags::ACTIVE, true);
                     world.set_tile(nx, ny, overlay);
                     placed += 1;
@@ -306,6 +318,22 @@ mod tests {
         assert_eq!(world.tile(26, 25).block, LONG_MOSS);
         assert_eq!(world.tile(25, 24).block, LONG_MOSS);
         assert_eq!(world.tile(25, 26).block, LONG_MOSS);
+    }
+
+    /// The format writes no frame for an inactive tile, but every *active* frame-important tile
+    /// needs a real one — the old `-1/-1` here was the same corruption sentinel already found
+    /// (and fixed) for doors, vines and cacti elsewhere in this session, not a valid frame. Fails
+    /// on the pre-fix code (`frame_x == -1`).
+    #[test]
+    fn long_moss_overlay_tiles_are_actually_framed() {
+        let mut world = World::empty(50, 50, "long-moss-framed");
+        world.set_tile(25, 25, Tile::block(MOSS_TILES[0]));
+        hang_long_moss(&mut world);
+        for (x, y) in [(24, 25), (26, 25), (25, 24), (25, 26)] {
+            let t = world.tile(x, y);
+            assert_ne!(t.frame_x, -1, "overlay at ({x},{y}) has a corrupt frame_x");
+            assert_ne!(t.frame_y, -1, "overlay at ({x},{y}) has a corrupt frame_y");
+        }
     }
 
     #[test]

@@ -38,10 +38,35 @@ use super::layout::Layout;
 use super::rand::UnifiedRandom;
 use super::{piles, pots, structures, tiles};
 use crate::world::World;
-use terrustia_proto::{Tile, TileFlags};
+use terrustia_proto::{Tile, TileFlags, tile_solid};
 
 const MATERIAL: u16 = tiles::SANDSTONE_BRICK;
 const WALL: u16 = tiles::walls::SANDSTONE_BRICK;
+
+/// `PlaceBanner` (`WorldGen.cs:46668`): a 1-wide, 3-tall hanging object anchored at `(x, y)` as
+/// its topmost cell — not the single tile the old code wrote. Requires a solid, non-platform
+/// ceiling directly above and all three cells clear, or nothing is placed. Only the small-style
+/// path is transcribed: `style` here is always 4-6, well under the 111 that triggers vanilla's own
+/// sheet-wrap correction (`num -= 1998; num2 += 54;`).
+fn place_banner(world: &mut World, x: i32, y: i32, style: i32) {
+    let ceiling = world.tile(x, y - 1);
+    if !(ceiling.is_active()
+        && tile_solid::solid(ceiling.block)
+        && !tile_solid::solid_top(ceiling.block))
+    {
+        return;
+    }
+    if world.tile(x, y).is_active()
+        || world.tile(x, y + 1).is_active()
+        || world.tile(x, y + 2).is_active()
+    {
+        return;
+    }
+    let frame_x = (style * 18) as i16;
+    for (dy, frame_y) in [(0, 0i16), (1, 18), (2, 36)] {
+        world.set_tile(x, y + dy, Tile::framed(tiles::BANNERS, frame_x, frame_y));
+    }
+}
 
 /// The `Pyramids` pass (plus the site-selection half of `DunesAndPyramidLocations` — see the
 /// module doc for what that skips). Returns how many pyramids were built.
@@ -423,7 +448,7 @@ fn place_treasure_room(
         (right - 3, row_lo),
     ] {
         let style = rand.next_range(4, 7);
-        world.set_tile(bx, by, Tile::framed(tiles::BANNERS, (style * 18) as i16, 0));
+        place_banner(world, bx, by, style);
     }
 
     for col in left..=right {
@@ -438,6 +463,38 @@ mod tests {
     use super::*;
     use crate::world::World;
     use rand::SeedableRng;
+
+    /// The treasure room's own corner banners used to write only one of the object's three
+    /// cells, leaving `PlaceBanner`'s other two `frameX`/`frameY` writes (`WorldGen.cs:
+    /// 46668-46706`) never applied at all. Fails on the pre-fix code, which never wrote the
+    /// `dy=1`/`dy=2` cells.
+    #[test]
+    fn a_banner_places_the_full_1x3_footprint_not_a_single_tile() {
+        let mut world = World::empty(30, 30, "banner-1x3");
+        // A solid, non-platform ceiling directly above the anchor, three clear cells below it.
+        world.set_tile(10, 9, Tile::block(1));
+        place_banner(&mut world, 10, 10, 5);
+        for (dy, want_frame_y) in [(0, 0i16), (1, 18), (2, 36)] {
+            let t = world.tile(10, 10 + dy);
+            assert_eq!(
+                t.block,
+                tiles::BANNERS,
+                "cell at dy={dy} should be a banner tile"
+            );
+            assert_eq!(t.frame_x, 5 * 18, "cell at dy={dy} frame_x mismatch");
+            assert_eq!(t.frame_y, want_frame_y, "cell at dy={dy} frame_y mismatch");
+        }
+    }
+
+    #[test]
+    fn a_banner_refuses_without_a_solid_non_platform_ceiling() {
+        let mut world = World::empty(30, 30, "banner-no-ceiling");
+        place_banner(&mut world, 10, 10, 5);
+        assert!(
+            !world.tile(10, 10).is_active(),
+            "no ceiling above -> nothing should be placed"
+        );
+    }
 
     /// A wide, deep desert with a real sand surface — wide enough for a pyramid's own construction
     /// bounds (its solid mass alone reaches ~150 tiles wide near the base at max depth).
