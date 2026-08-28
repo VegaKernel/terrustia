@@ -7810,7 +7810,7 @@ impl GameServer {
                         direction,
                     });
                 }
-                crate::game::ai::town::DoorAction::Close { x, y } => self.close_door(x, y),
+                crate::game::ai::town::DoorAction::Close { x, y } => self.close_door(x, y, false),
                 crate::game::ai::town::DoorAction::None => {}
             }
         }
@@ -8760,16 +8760,53 @@ impl GameServer {
                     self.open_door_broadcast(x, y, -side);
                 }
             }
-            crate::world::doors::DOOR_OPEN => self.close_door(x, y),
+            crate::world::doors::DOOR_OPEN => self.close_door(x, y, true),
             _ => {}
         }
     }
 
-    fn close_door(&mut self, x: i32, y: i32) {
+    /// Every playing player's and every active NPC's hitbox, in world pixels as `(left, top, right,
+    /// bottom)` — the boxes vanilla's `Collision.EmptyTile` tests a tile against, so an unforced
+    /// door close can tell whether something is standing in the column it would shut on.
+    fn entity_hitboxes(&self) -> Vec<(f32, f32, f32, f32)> {
+        let mut boxes = Vec::new();
+        for player in self.players.iter().flatten() {
+            if !player.is_playing() {
+                continue;
+            }
+            let (px, py) = player.position;
+            boxes.push((px, py, px + PLAYER_HALF_WIDTH * 2.0, py + PLAYER_HEIGHT));
+        }
+        for (_, npc) in self.npcs.iter() {
+            let (nx, ny) = npc.position;
+            boxes.push((nx, ny, nx + npc.width(), ny + npc.height()));
+        }
+        boxes
+    }
+
+    /// Shut a door, telling clients. Unless `forced`, refuses while a player or NPC is standing in
+    /// the column the shut door lands on (`WorldGen.CloseDoor`'s own `Collision.EmptyTile` guard,
+    /// `WorldGen.cs:32155`) — a resident pulling its door shut must not trap whoever is in the
+    /// doorway. A wire signal forces it, as vanilla's `case 11` does.
+    fn close_door(&mut self, x: i32, y: i32, forced: bool) {
         if !self.world.in_bounds(x, y) {
             return;
         }
-        if !crate::world::doors::close(&mut self.world, x, y) {
+        let occupants = if forced {
+            Vec::new()
+        } else {
+            self.entity_hitboxes()
+        };
+        let moved = crate::world::doors::close_checked(&mut self.world, x, y, forced, |tx, ty| {
+            let tile = (
+                (tx * 16) as f32,
+                (ty * 16) as f32,
+                (tx * 16 + 16) as f32,
+                (ty * 16 + 16) as f32,
+            );
+            occupants.iter().any(|&b| boxes_overlap(tile, b))
+        });
+        if !moved {
             return;
         }
         let toggle = terrustia_proto::objects::DoorToggle {
@@ -13217,6 +13254,42 @@ mod wired_mines_and_doors {
             server.world.tile(100, 100).block,
             DOOR_CLOSED,
             "and a circuit reaching it again forces it shut"
+        );
+    }
+
+    #[test]
+    fn a_resident_will_not_shut_a_door_on_someone_standing_in_it() {
+        let mut server = server();
+        // A shut door, opened so there is an open door to close again.
+        for dy in 0..3 {
+            server
+                .world
+                .set_tile(100, 50 + dy, Tile::framed(DOOR_CLOSED, 0, (dy as i16) * 18));
+        }
+        assert!(
+            crate::world::doors::open(&mut server.world, 100, 50, 1),
+            "the door should open"
+        );
+        // Someone stands in the doorway.
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 50.0 * 16.0))
+            .expect("a slime should spawn");
+
+        // The town-NPC path is unforced, so `Collision.EmptyTile` refuses while the slime is there.
+        server.close_door(100, 50, false);
+        assert!(
+            server.world.tile(100, 50).block == DOOR_OPEN
+                || server.world.tile(101, 50).block == DOOR_OPEN,
+            "an unforced close is blocked by the occupant"
+        );
+
+        // A wire signal forces it shut regardless.
+        server.close_door(100, 50, true);
+        assert!(
+            server.world.tile(100, 50).block != DOOR_OPEN
+                && server.world.tile(101, 50).block != DOOR_OPEN,
+            "a forced (wired) close ignores the occupant"
         );
     }
 
