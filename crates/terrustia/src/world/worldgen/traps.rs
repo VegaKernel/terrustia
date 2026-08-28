@@ -63,6 +63,9 @@ const UNBREAKABLE_WALL: u16 = 350;
 const CLOSED_DOOR: u16 = 10;
 const SPIKES: u16 = 48;
 const SAND: u16 = 53;
+/// `TileID.Containers` — an ordinary chest. `place_boulder_trap`'s own nearby-chest guard checks
+/// this, not the pressure plate.
+const CHEST: u16 = 21;
 
 fn is_boulder(block: u16) -> bool {
     matches!(
@@ -319,7 +322,7 @@ fn place_trap(
     match kind_type {
         0 => place_dart_trap(world, layout, x2, y, rng),
         1 => place_boulder_trap(world, layout, x2, y, rng, boulder_pets_placed),
-        2 => place_mine(world, x2, y),
+        2 => place_mine(world, layout, x2, y, rng),
         3 => place_geyser(world, layout, x2, y, rng),
         _ => unreachable!("kind_type is rolled from a fixed range above"),
     }
@@ -390,15 +393,13 @@ fn place_dart_trap(
         return None;
     }
 
+    // `Place1x1`'s default case (`WorldGen.cs:45636`) puts a placed tile's *style* on `frameY`
+    // (`style * 18`), leaving `frameX` at 0 — the opposite of what this used to write. The style
+    // itself is vanilla's own dart-trap-specific roll (`WorldGen.cs:9106-9110`): a walled plate
+    // gets the fixed style 2, an unwalled one rolls 2 or 3.
     let has_wall = world.tile(x2, y).wall != 0;
-    place_tile(
-        world,
-        x2,
-        y,
-        PRESSURE_PLATE,
-        126,
-        if has_wall { 0 } else { 18 },
-    );
+    let plate_style = if has_wall { 2 } else { rng.random_range(2..4) };
+    place_tile(world, x2, y, PRESSURE_PLATE, 0, (plate_style * 18) as i16);
     kill_tile(world, wall_x, y);
     let frame_x = if aim_right { 18 } else { 0 };
     place_tile(world, wall_x, y, DART_TRAP, frame_x, 0);
@@ -407,26 +408,62 @@ fn place_dart_trap(
     Some(TrapKind::Dart)
 }
 
-/// `placeTrap`'s `case 2`: a buried explosive, one tile below the floor the plate sits on, wired
-/// straight down.
-fn place_mine(world: &mut World, x2: i32, y: i32) -> Option<TrapKind> {
-    let has_wall = world.tile(x2, y).wall != 0;
-    place_tile(
-        world,
-        x2,
-        y,
-        PRESSURE_PLATE,
-        126,
-        if has_wall { 0 } else { 18 },
-    );
-    kill_tile(world, x2, y + 1);
+/// `placeTrap`'s `case 2`: a mine buried `Next(4,7)` tiles beneath the floor the plate sits on,
+/// inside a fully solid pocket, wired down to it.
+///
+/// The old version buried the mine one tile below the plate's own floor — visible the instant a
+/// player dug a single block down. Vanilla (`WorldGen.cs:9357-9385`) digs a real shaft first
+/// (`num4 = genRand.Next(4, 7)` steps, each one required to already be solid ground, `InWorld`,
+/// and not unbreakable-walled), then requires the *whole* 5-wide, 6-tall pocket around the final
+/// spot (`num5-2..=num5+2`, `num6-2..=num6+3`) to be solid before anything is written — the same
+/// all-or-nothing shape `place_boulder_trap`'s own chamber search already uses. Only then does it
+/// kill the one target tile and drop the mine into it.
+fn place_mine(
+    world: &mut World,
+    layout: &Layout,
+    x2: i32,
+    y: i32,
+    rng: &mut SmallRng,
+) -> Option<TrapKind> {
+    let depth = rng.random_range(4..7);
+    let mx = x2 + rng.random_range(-1..=1);
+    let mut my = y;
+    for _ in 0..depth {
+        my += 1;
+        if !in_world(layout, mx, my, 5)
+            || !solid_tile(world, mx, my)
+            || !place_trap_can_continue(world, mx, my)
+        {
+            return None;
+        }
+    }
+    for xx in (mx - 2)..=(mx + 2) {
+        for yy in (my - 2)..=(my + 3) {
+            if !in_world(layout, xx, yy, 0)
+                || !solid_tile(world, xx, yy)
+                || !place_trap_can_continue(world, xx, yy)
+            {
+                return None;
+            }
+        }
+    }
+
+    kill_tile(world, mx, my);
     let mut mine = Tile::AIR;
     mine.block = EXPLOSIVES;
+    mine.frame_x = 0;
+    mine.frame_y = 18 * rng.random_range(0..2);
     mine.flags.set(TileFlags::ACTIVE, true);
-    mine.wall = world.tile(x2, y + 1).wall;
-    world.set_tile(x2, y + 1, mine);
+    mine.wall = world.tile(mx, my).wall;
+    world.set_tile(mx, my, mine);
 
-    wire_path(world, (x2, y), (x2, y + 1));
+    // The plate itself: same `Place1x1` default-case convention (style on `frameY`) as the other
+    // plates, style unconditionally `Next(2,4)` here (`WorldGen.cs:9390`) — no wall-presence
+    // branch, unlike the dart trap's own plate.
+    let plate_style = rng.random_range(2..4);
+    place_tile(world, x2, y, PRESSURE_PLATE, 0, (plate_style * 18) as i16);
+
+    wire_path(world, (x2, y), (mx, my));
     Some(TrapKind::Mine)
 }
 
@@ -528,7 +565,11 @@ fn place_boulder_trap(
     if y - floor_y <= 5 || y - floor_y >= 40 {
         return None;
     }
-    if nearby(world, cx, floor_y, PRESSURE_PLATE, 4) || nearby(world, cx, floor_y, 467, 4) {
+    // `IsTileNearby(num21, num22, 21, 4) || IsTileNearby(num21, num22, 467, 4)`
+    // (`WorldGen.cs:9227`) — 21 is `TileID.Containers` (an ordinary chest), not the pressure
+    // plate. Checking `PRESSURE_PLATE` here let the chamber-carve loop below cut straight through
+    // a placed chest, orphaning it.
+    if nearby(world, cx, floor_y, CHEST, 4) || nearby(world, cx, floor_y, 467, 4) {
         return None;
     }
     if any_boulder_nearby(world, cx, floor_y, 10) {
@@ -552,15 +593,9 @@ fn place_boulder_trap(
         }
     }
 
-    let has_wall = world.tile(x2, y).wall != 0;
-    place_tile(
-        world,
-        x2,
-        y,
-        PRESSURE_PLATE,
-        126,
-        if has_wall { 0 } else { 18 },
-    );
+    // Same `Place1x1` default-case convention as the dart trap's plate (style on `frameY`, not
+    // `frameX`) — the boulder trap's own style is always the fixed 7 (`WorldGen.cs:9264`).
+    place_tile(world, x2, y, PRESSURE_PLATE, 0, 7 * 18);
     {
         let wall = world.tile(cx, floor_y + 2).wall;
         world.set_tile(cx, floor_y + 2, Tile::block(1).with_wall(wall));
@@ -777,7 +812,9 @@ fn place_sand_trap(world: &mut World, i: i32, j0: i32, rng: &mut SmallRng) -> bo
     kill_tile(world, i - 1, j);
     kill_tile(world, i + 1, j);
     kill_tile(world, i + 2, j);
-    place_tile(world, i, j, PRESSURE_PLATE, 126, 0);
+    // Same `Place1x1` default-case convention as the other plates: style (always 7 here, per
+    // `WorldGen.cs:36088`) on `frameY`, not `frameX`.
+    place_tile(world, i, j, PRESSURE_PLATE, 0, 7 * 18);
 
     for x in (i - rx)..=(i + rx) {
         let mut yy = j;
@@ -1193,6 +1230,176 @@ mod tests {
             result.total(),
             0,
             "No Traps World should place nothing at all"
+        );
+    }
+
+    /// Every plate this file places must carry vanilla's own `Place1x1` default-case convention
+    /// (`WorldGen.cs:45636`): style on `frameY` (`style * 18`), `frameX` left at 0. The old code
+    /// wrote a fixed `126` on `frameX` (not a real style at all) and only ever varied `frameY`
+    /// between 0 and 18 based on wall presence — neither axis matched vanilla. Fails on the
+    /// pre-fix code (`frame_x == 126`).
+    #[test]
+    fn a_dart_traps_plate_has_style_on_frame_y_not_frame_x() {
+        let mut world = corridor();
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut pets = 0;
+
+        let mut found = None;
+        'search: for x2 in 95..106 {
+            for y2 in 5..64 {
+                if let Some(TrapKind::Dart) =
+                    place_trap(&mut world, &layout, x2, y2, &mut rng, &mut pets)
+                {
+                    found = Some((x2, y2));
+                    break 'search;
+                }
+            }
+        }
+        let (x2, y2) = found.expect("a dart trap should place somewhere in the walled corridor");
+        let mut plate_y = y2;
+        while !world.tile(x2, plate_y).is_active() {
+            plate_y += 1;
+        }
+        let plate = world.tile(x2, plate_y);
+        assert_eq!(
+            plate.frame_x, 0,
+            "a pressure plate's frameX must be 0, not a style value"
+        );
+        assert!(
+            [36, 54].contains(&plate.frame_y),
+            "a dart trap's plate style is 2 or 3 (frameY 36 or 54), got {}",
+            plate.frame_y
+        );
+    }
+
+    /// Same convention, for the boulder trap's own plate — whose style is always the fixed 7
+    /// (`WorldGen.cs:9264`), so `frameY` must always land on exactly `126`.
+    #[test]
+    fn a_boulder_traps_plate_has_the_fixed_style_seven_frame() {
+        let mut world = corridor();
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut pets = 0;
+
+        let mut found = None;
+        'search: for x2 in 20..180 {
+            for y2 in 5..64 {
+                if let Some(TrapKind::Boulder) =
+                    place_trap(&mut world, &layout, x2, y2, &mut rng, &mut pets)
+                {
+                    found = Some((x2, y2));
+                    break 'search;
+                }
+            }
+        }
+        let (x2, y2) = found.expect("a boulder trap should place somewhere in this corridor");
+        let mut plate_y = y2;
+        while !world.tile(x2, plate_y).is_active() {
+            plate_y += 1;
+        }
+        let plate = world.tile(x2, plate_y);
+        assert_eq!(plate.frame_x, 0);
+        assert_eq!(
+            plate.frame_y, 126,
+            "a boulder trap's plate style is always 7 (frameY = 7*18 = 126)"
+        );
+    }
+
+    /// A land mine used to sit one tile below its own plate — visible the instant a player dug a
+    /// single block down. Vanilla (`WorldGen.cs:9357-9385`) digs `Next(4,7)` tiles further down
+    /// first and requires a fully solid pocket around the final spot before burying it there.
+    /// Fails on the pre-fix code, which always buried the mine exactly one tile under the plate.
+    #[test]
+    fn a_mine_is_buried_well_below_its_plate_not_one_tile_under_it() {
+        let mut world = corridor();
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(0);
+        let mut pets = 0;
+
+        let mut found = None;
+        'search: for x2 in 20..180 {
+            for y2 in 5..64 {
+                if let Some(TrapKind::Mine) =
+                    place_trap(&mut world, &layout, x2, y2, &mut rng, &mut pets)
+                {
+                    found = Some((x2, y2));
+                    break 'search;
+                }
+            }
+        }
+        let Some((x2, y2)) = found else {
+            // Mines are a 1/20 roll; a fixed seed may legitimately never land one within this
+            // small a search grid — not a failure of this test (matches the sibling wiring test's
+            // own reasoning).
+            return;
+        };
+        let mut plate_y = y2;
+        while !world.tile(x2, plate_y).is_active() {
+            plate_y += 1;
+        }
+
+        // The mine's own `x` wanders by `Next(-1, 2)` from the plate's column, so search all
+        // three candidate columns for the buried explosive.
+        let mut mine_pos = None;
+        for dx in -1..=1 {
+            let mx = x2 + dx;
+            for my in (plate_y + 1)..world.height() {
+                let t = world.tile(mx, my);
+                if t.is_active() && t.block == EXPLOSIVES {
+                    mine_pos = Some((mx, my));
+                    break;
+                }
+            }
+            if mine_pos.is_some() {
+                break;
+            }
+        }
+        let (mine_x, mine_y) = mine_pos.expect("expected a buried explosive tile below the plate");
+        assert!(
+            mine_y - plate_y >= 4,
+            "the mine should be buried at least 4 tiles below its plate (vanilla's own \
+             `Next(4, 7)`), not 1 — found at depth {}",
+            mine_y - plate_y
+        );
+        let mine_tile = world.tile(mine_x, mine_y);
+        assert_eq!(mine_tile.frame_x, 0, "mine frameX must be 0");
+        assert!(
+            mine_tile.frame_y == 0 || mine_tile.frame_y == 18,
+            "mine frameY must be 0 or 18 (18 * Next(2)), got {}",
+            mine_tile.frame_y
+        );
+    }
+
+    /// The boulder trap's own nearby-chest guard checked for a pressure plate (135) instead of a
+    /// chest (21, `IsTileNearby(num21, num22, 21, 4)`, `WorldGen.cs:9227`) — so a chest sitting
+    /// where the trap wanted to carve its chamber got cut straight through instead of refusing
+    /// the trap. Fails on the pre-fix code, which finds no nearby pressure plate, proceeds, and
+    /// destroys the chest.
+    #[test]
+    fn a_boulder_trap_refuses_to_carve_through_a_nearby_chest() {
+        let mut world = corridor();
+        let (x2, y) = (60, 90);
+        // `place_boulder_trap`'s own chamber search converges deterministically to
+        // `floor_y = y - 9` on a uniformly solid floor with no walls (the search loop consults
+        // `rng` exactly once, for `cx`, before that point) — `corridor()`'s floor (rows 65..200,
+        // all `Tile::block(1)`) already has that shape. A single chest at `(x2, y - 9)` sits
+        // inside the guard's own 9-tile search box around `(cx, floor_y)` no matter which of the
+        // three possible `cx` rolls (`x2 - 1`, `x2`, `x2 + 1`) comes out.
+        world.set_tile(x2, y - 9, Tile::framed(CHEST, 0, 0));
+        let layout = layout(&world);
+        let mut rng = SmallRng::seed_from_u64(1);
+        let mut pets = 0;
+
+        let result = place_boulder_trap(&mut world, &layout, x2, y, &mut rng, &mut pets);
+        assert!(
+            result.is_none(),
+            "a boulder trap must refuse to place near a chest, not carve through it"
+        );
+        assert_eq!(
+            world.tile(x2, y - 9).block,
+            CHEST,
+            "the chest itself must survive untouched"
         );
     }
 }
