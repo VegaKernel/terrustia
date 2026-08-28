@@ -2762,6 +2762,17 @@ impl GameServer {
     }
 
     /// Put an item into the world at a place, as a thing that can be picked up.
+    /// Drop into the world every pickup a mass-wire run reported — one wire or actuator at each
+    /// tile a cut cleared, at that tile's own pixel centre. Vanilla's `KillWire`/`KillActuator`
+    /// spawn these the instant they clear a flag; this is the same, batched by the caller. Without
+    /// it a mistake with the Grand Design simply destroyed the wire the player paid for.
+    fn spawn_wire_drops(&mut self, drops: &[(i32, i32, u16)]) {
+        for &(x, y, item_id) in drops {
+            let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+            self.spawn_item(ItemStack::new(i32::from(item_id), 1, 0), position);
+        }
+    }
+
     fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) {
         if item.is_empty() {
             return;
@@ -6132,6 +6143,8 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
         }
+
+        self.spawn_wire_drops(&outcome.drops);
 
         // Tell the player what it cost. Both are sent even when zero, as the game sends both.
         for (item, spent) in [
@@ -13152,6 +13165,29 @@ mod wired_mines_and_doors {
             server.world.tile(100, 100).block,
             DOOR_CLOSED,
             "and a circuit reaching it again forces it shut"
+        );
+    }
+
+    #[test]
+    fn cut_wire_drops_become_world_pickups() {
+        // What a mass-wire cut reports back: a wire at one tile, an actuator at the next. The
+        // pre-fix `on_mass_wire` ignored `Outcome::drops`, so a mistake with the Grand Design
+        // destroyed the materials outright.
+        let mut server = server();
+        server.spawn_wire_drops(&[(50, 50, WIRE_ITEM as u16), (51, 50, ACTUATOR_ITEM as u16)]);
+        let mut found: Vec<(i32, (f32, f32))> = server
+            .items
+            .iter()
+            .map(|(_, it)| (it.item.id, it.position))
+            .collect();
+        found.sort_by_key(|(id, _)| *id);
+        assert_eq!(found.len(), 2, "both cuts should drop a pickup");
+        assert_eq!(found[0].0, i32::from(WIRE_ITEM));
+        assert_eq!(found[1].0, i32::from(ACTUATOR_ITEM));
+        assert_eq!(
+            found[0].1,
+            (50.0 * 16.0 + 8.0, 50.0 * 16.0 + 8.0),
+            "dropped at the cut tile's own centre"
         );
     }
 }
