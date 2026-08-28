@@ -782,6 +782,55 @@ pub enum ServerEvent {
         path: PathBuf,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// A live snapshot of the last tick's cost and the current entity counts, for the panel's
+    /// metrics view. Reads [`Self::last_tick`] and a few `len()`s — nothing that costs the tick.
+    PanelMetrics {
+        reply: oneshot::Sender<PanelMetrics>,
+    },
+    /// The world backups on disk right now, for the panel's backup/rollback view. The listing
+    /// itself is a filesystem read, but which file is *current* — and therefore what the backups
+    /// belong to — is game-task state, so it is answered here.
+    PanelBackups {
+        reply: oneshot::Sender<PanelBackups>,
+    },
+    /// The panel's "save now" button. Reuses the same background save the console's `save` command
+    /// runs, so it never blocks the tick.
+    PanelForceSave {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The panel's rollback button. Reuses [`Self::roll_back`] exactly — the same destructive,
+    /// stop-and-reload operation the console `rollback` command performs — and hands its message
+    /// back so the panel can show it.
+    PanelRollback {
+        which: usize,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The groups and accounts, for the panel's accounts admin view.
+    PanelAccounts {
+        reply: oneshot::Sender<PanelAccounts>,
+    },
+    /// Move an account into a different group. Same rule the console `group` command enforces (the
+    /// group must exist), plus a guard the panel needs and the console does not: it refuses to
+    /// strip the last account that can still administer the server, so nobody locks themselves out
+    /// through the very screen they would use to fix it.
+    PanelSetAccountGroup {
+        name: String,
+        group: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The panel inserting an account it already hashed off the game task, into a chosen group.
+    /// Distinct from [`Self::PanelInsertAccount`], the claim path, which always uses `owner`:
+    /// this one validates the requested group exists first.
+    PanelCreateAccount {
+        account: crate::admin::Account,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
+    /// that can administer the server cannot be removed.
+    PanelDeleteAccount {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// One connected player, as the panel needs to show them: who they are, how they are doing, where
@@ -897,6 +946,78 @@ pub struct PanelStatus {
     /// The file stem of the world currently being served, if it has one, so the panel's world
     /// list can mark which entry is the running one.
     pub world_file: Option<String>,
+}
+
+/// What [`ServerEvent::PanelMetrics`] hands back — a live snapshot for the panel's metrics graphs.
+/// Every duration is in microseconds, on the same clock the tick budget itself uses. No history is
+/// kept here; the panel accumulates its own rolling window client-side.
+#[derive(Debug, Clone, Default)]
+pub struct PanelMetrics {
+    /// The tick budget, so the panel can draw the line a tick is measured against.
+    pub budget_us: u64,
+    /// The most recent tick's processor cost, and how long it actually took to happen.
+    pub last_cpu_us: u64,
+    pub last_wall_us: u64,
+    /// The worst processor cost seen in the current reporting window, before it is reset.
+    pub worst_cpu_us: u64,
+    /// The last tick's per-phase processor breakdown, `(phase name, microseconds)`, in tick order.
+    pub phases: Vec<(&'static str, u64)>,
+    pub player_count: usize,
+    pub npc_count: usize,
+    pub projectile_count: usize,
+    pub item_count: usize,
+    /// Ticks elapsed since the process started — a monotonic clock the panel can label the x-axis
+    /// with without needing wall-clock time.
+    pub ticks: u64,
+}
+
+/// One world backup on disk, for the panel's backup/rollback view.
+#[derive(Debug, Clone)]
+pub struct PanelBackupEntry {
+    /// `1` is the most recent — the number `rollback <n>` takes.
+    pub index: usize,
+    pub size_bytes: u64,
+    /// Seconds since the backup was written, or `None` if the filesystem would not say.
+    pub age_secs: Option<u64>,
+}
+
+/// What [`ServerEvent::PanelBackups`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelBackups {
+    /// Whether this world is being saved at all — `false` means there is nothing to back up or roll
+    /// back, and the panel says so rather than showing an empty list as if saves were merely absent.
+    pub saving: bool,
+    /// The world file the backups belong to, for display.
+    pub world_file: Option<String>,
+    /// How many backups the server keeps, so the panel can explain the rotation.
+    pub kept: usize,
+    pub backups: Vec<PanelBackupEntry>,
+}
+
+/// One admin group, for the panel's accounts view.
+#[derive(Debug, Clone)]
+pub struct PanelGroupInfo {
+    pub name: String,
+    /// The permission names the group holds (or the single entry `*`).
+    pub permissions: Vec<String>,
+    /// Whether this group can administer the server — i.e. change who may do what.
+    pub can_admin: bool,
+}
+
+/// One account, for the panel's accounts view. Never carries the password hash.
+#[derive(Debug, Clone)]
+pub struct PanelAccountInfo {
+    pub name: String,
+    pub group: String,
+    /// Whether the account's group actually resolves to one that can administer the server.
+    pub can_admin: bool,
+}
+
+/// What [`ServerEvent::PanelAccounts`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelAccounts {
+    pub groups: Vec<PanelGroupInfo>,
+    pub accounts: Vec<PanelAccountInfo>,
 }
 
 /// What the console can offer to complete a command's second argument with.
@@ -1062,6 +1183,10 @@ pub struct GameServer {
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
+    /// The most recent tick's cost, surfaced live to the web panel's metrics view. Unlike
+    /// [`Self::worst_tick`] — a windowed maximum that is taken and reset every report — this is
+    /// simply the last tick that ran, so a graph drawn from it moves every frame. Never persisted.
+    last_tick: TickCost,
     /// A trailing, time-windowed log of player tile edits, for `/world undo`. See
     /// [`crate::game::tile_log`]'s own module doc for retention and scope.
     tile_log: crate::game::tile_log::TileLog,
@@ -1201,6 +1326,7 @@ impl GameServer {
             stopping: false,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
+            last_tick: TickCost::default(),
             save_path,
             autosave_ticks,
             tile_log: crate::game::tile_log::TileLog::default(),
@@ -1639,50 +1765,49 @@ impl GameServer {
     /// moved, and the next autosave writing the in-memory world straight back over the backup that
     /// was just restored — undoing the rollback within five minutes. Stopping is honest and takes
     /// one restart.
-    fn roll_back(&mut self, which: usize) {
+    ///
+    /// Returns the message describing what happened either way, so a caller that is not the console
+    /// (the web panel) can report it to whoever asked rather than only to the log. The console arm
+    /// logs whatever comes back; on success the same announce/stop side effects happen regardless of
+    /// who called.
+    fn roll_back(&mut self, which: usize) -> Result<String, String> {
         let Some(path) = self.save_path.clone() else {
-            info!("this world is not being saved, so there is nothing to roll back to");
-            return;
+            return Err(
+                "this world is not being saved, so there is nothing to roll back to".into(),
+            );
         };
         if which == 0 || which > crate::world::wld_save::BACKUPS_KEPT {
-            info!(
+            return Err(format!(
                 "there are only {} backups; use `rollback 1` for the most recent",
                 crate::world::wld_save::BACKUPS_KEPT
-            );
-            return;
+            ));
         }
         let bak = path.with_extension(format!("wld.bak{which}"));
         if !bak.exists() {
-            info!(path = %bak.display(), "no such backup");
-            return;
+            return Err(format!("there is no backup #{which} to roll back to"));
         }
         // Check it before trusting it. Restoring an unreadable file over a readable one would turn
         // a rollback into the very thing it exists to undo.
-        match std::fs::read(&bak)
+        std::fs::read(&bak)
             .map_err(|e| e.to_string())
             .and_then(|bytes| {
                 crate::world::wld::parse(&bytes)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
-            }) {
-            Ok(()) => {}
-            Err(e) => {
-                error!(path = %bak.display(), error = %e, "that backup will not load; refusing");
-                return;
-            }
-        }
+            })
+            .map_err(|e| format!("that backup will not load; refusing to roll back to it: {e}"))?;
         // Keep what is being replaced, so a rollback is itself reversible.
         let aside = path.with_extension("wld.before-rollback");
         if path.exists()
             && let Err(e) = std::fs::rename(&path, &aside)
         {
-            error!(error = %e, "could not move the current world aside; refusing to roll back");
-            return;
+            return Err(format!(
+                "could not move the current world aside; refusing to roll back: {e}"
+            ));
         }
         if let Err(e) = std::fs::copy(&bak, &path) {
-            error!(error = %e, "could not restore the backup");
             let _ = std::fs::rename(&aside, &path);
-            return;
+            return Err(format!("could not restore the backup: {e}"));
         }
         self.announce("The world is being rolled back; the server is stopping.");
         info!(
@@ -1693,6 +1818,10 @@ impl GameServer {
         // The in-memory world must not be written over what was just restored.
         self.save_path = None;
         self.stopping = true;
+        Ok(format!(
+            "rolled back to backup #{which}; the server is stopping so it loads cleanly on the \
+             next start"
+        ))
     }
 
     /// Print the one-time claim token, if this server has not been claimed yet.
@@ -1935,6 +2064,7 @@ impl GameServer {
     /// The breakdown comes with the first one, because "a tick took 26 ms" is a mystery and "the
     /// spawn scan took 26 ms" is a bug report.
     fn note_tick_cost(&mut self, cost: TickCost) {
+        self.last_tick = cost;
         if cost.cpu > self.worst_tick.cpu {
             self.worst_tick = cost;
         }
@@ -2738,7 +2868,16 @@ impl GameServer {
                 });
             }
             ServerEvent::PanelInsertAccount { account, reply } => {
-                let _ = reply.send(self.admin.insert_account(account));
+                // The claim path. Persist and retire the one-time token on success, exactly as the
+                // console `claim` command does (`run_console`'s `"claim"` arm) — without the save, a
+                // server claimed through the panel would forget its owner on the next restart (until
+                // some later admin mutation happened to save), and the spent token would linger.
+                let result = self.admin.insert_account(account);
+                if result.is_ok() {
+                    let _ = self.admin.save();
+                    self.claim_token = None;
+                }
+                let _ = reply.send(result);
             }
             ServerEvent::PanelStatus { reply } => {
                 let player_count = self
@@ -2861,7 +3000,225 @@ impl GameServer {
                 self.stopping = true;
                 let _ = reply.send(Ok(()));
             }
+            ServerEvent::PanelMetrics { reply } => {
+                let _ = reply.send(self.panel_metrics());
+            }
+            ServerEvent::PanelBackups { reply } => {
+                let _ = reply.send(self.panel_backups());
+            }
+            ServerEvent::PanelForceSave { reply } => {
+                if self.save_path.is_none() {
+                    let _ = reply.send(Err(
+                        "this world is not being saved, so there is nothing to save".into(),
+                    ));
+                    return;
+                }
+                // The same background save the console `save` command runs — off the tick, one at a
+                // time. The outcome reaches the operator on the live console feed, the same place
+                // the console command's own "World saved" line goes.
+                self.save_world_in_background("web panel");
+                let _ = reply.send(Ok(()));
+            }
+            ServerEvent::PanelRollback { which, reply } => {
+                let _ = reply.send(self.roll_back(which));
+            }
+            ServerEvent::PanelAccounts { reply } => {
+                let _ = reply.send(self.panel_accounts());
+            }
+            ServerEvent::PanelSetAccountGroup { name, group, reply } => {
+                let _ = reply.send(self.panel_set_account_group(&name, &group));
+            }
+            ServerEvent::PanelCreateAccount { account, reply } => {
+                // The group has to exist — an account pointed at a group that is not there silently
+                // falls back to `default`, which would be a confusing thing to have just created.
+                if !self.admin.groups.iter().any(|g| g.name == account.group) {
+                    let _ = reply.send(Err(format!("there is no group called {}", account.group)));
+                    return;
+                }
+                let result = self.admin.insert_account(account);
+                if result.is_ok() {
+                    let _ = self.admin.save();
+                }
+                let _ = reply.send(result);
+            }
+            ServerEvent::PanelDeleteAccount { name, reply } => {
+                let _ = reply.send(self.panel_delete_account(&name));
+            }
         }
+    }
+
+    /// Whether an account's group resolves to one that can administer the server. The last such
+    /// account is the one the panel refuses to strip or delete — see [`ServerEvent::PanelSetAccountGroup`].
+    fn account_can_admin(&self, account: &crate::admin::Account) -> bool {
+        self.admin
+            .groups
+            .iter()
+            .find(|g| g.name == account.group)
+            .is_some_and(|g| g.may(crate::admin::Permission::Admin))
+    }
+
+    /// How many accounts can still administer the server. Used to refuse the change that would take
+    /// this to zero.
+    fn admin_capable_accounts(&self) -> usize {
+        self.admin
+            .accounts
+            .iter()
+            .filter(|a| self.account_can_admin(a))
+            .count()
+    }
+
+    /// A live snapshot for the panel's metrics view. See [`PanelMetrics`].
+    fn panel_metrics(&self) -> PanelMetrics {
+        let phases = Phase::NAMES
+            .iter()
+            .zip(self.last_tick.phases.iter())
+            .map(|(&name, dur)| (name, dur.as_micros() as u64))
+            .collect();
+        PanelMetrics {
+            budget_us: TICK.as_micros() as u64,
+            last_cpu_us: self.last_tick.cpu.as_micros() as u64,
+            last_wall_us: self.last_tick.wall.as_micros() as u64,
+            worst_cpu_us: self.worst_tick.cpu.as_micros() as u64,
+            phases,
+            player_count: self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .count(),
+            npc_count: self.npcs.len(),
+            projectile_count: self.projectiles.len(),
+            item_count: self.items.len(),
+            ticks: self.ticks,
+        }
+    }
+
+    /// The world backups on disk, newest first. Mirrors [`Self::list_backups`]'s own scan, but hands
+    /// the data back rather than logging it — the panel draws the same rows the console prints.
+    fn panel_backups(&self) -> PanelBackups {
+        let kept = crate::world::wld_save::BACKUPS_KEPT;
+        let Some(path) = self.save_path.clone() else {
+            return PanelBackups {
+                saving: false,
+                world_file: None,
+                kept,
+                backups: Vec::new(),
+            };
+        };
+        let mut backups = Vec::new();
+        for n in 1..=kept {
+            let bak = path.with_extension(format!("wld.bak{n}"));
+            let Ok(meta) = std::fs::metadata(&bak) else {
+                continue;
+            };
+            let age_secs = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs());
+            backups.push(PanelBackupEntry {
+                index: n,
+                size_bytes: meta.len(),
+                age_secs,
+            });
+        }
+        PanelBackups {
+            saving: true,
+            world_file: self.current_world_file_stem(),
+            kept,
+            backups,
+        }
+    }
+
+    /// The groups and accounts, for the panel's accounts view. Never carries a password hash.
+    fn panel_accounts(&self) -> PanelAccounts {
+        let groups = self
+            .admin
+            .groups
+            .iter()
+            .map(|g| PanelGroupInfo {
+                name: g.name.clone(),
+                permissions: g.permissions.iter().cloned().collect(),
+                can_admin: g.may(crate::admin::Permission::Admin),
+            })
+            .collect();
+        let accounts = self
+            .admin
+            .accounts
+            .iter()
+            .map(|a| PanelAccountInfo {
+                name: a.name.clone(),
+                group: a.group.clone(),
+                can_admin: self.account_can_admin(a),
+            })
+            .collect();
+        PanelAccounts { groups, accounts }
+    }
+
+    /// Move an account into a different group. The console `group` command's own rule (the group
+    /// must exist), plus the lock-out guard the panel needs.
+    fn panel_set_account_group(&mut self, name: &str, group: &str) -> Result<(), String> {
+        if !self.admin.groups.iter().any(|g| g.name == group) {
+            return Err(format!("there is no group called {group}"));
+        }
+        let Some(account) = self
+            .admin
+            .accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("there is no account called {name}"));
+        };
+        // Would this move strip the last account that can still administer the server?
+        let target_can_admin_now = self.account_can_admin(account);
+        let new_group_can_admin = self
+            .admin
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+            .is_some_and(|g| g.may(crate::admin::Permission::Admin));
+        if target_can_admin_now && !new_group_can_admin && self.admin_capable_accounts() <= 1 {
+            return Err(
+                "that is the only account that can still administer the server; make another \
+                 account an admin before removing this one's access"
+                    .into(),
+            );
+        }
+        let account = self
+            .admin
+            .accounts
+            .iter_mut()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .expect("account existence just checked above");
+        account.group = group.to_string();
+        let _ = self.admin.save();
+        info!(account = name, group, "group changed from the web panel");
+        Ok(())
+    }
+
+    /// Delete an account, guarded so the last admin-capable one cannot be removed.
+    fn panel_delete_account(&mut self, name: &str) -> Result<(), String> {
+        let Some(account) = self
+            .admin
+            .accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("there is no account called {name}"));
+        };
+        if self.account_can_admin(account) && self.admin_capable_accounts() <= 1 {
+            return Err(
+                "that is the only account that can still administer the server; it cannot be \
+                 deleted, or nobody could sign in to the panel again"
+                    .into(),
+            );
+        }
+        self.admin
+            .accounts
+            .retain(|a| !a.name.eq_ignore_ascii_case(name));
+        let _ = self.admin.save();
+        info!(account = name, "account deleted from the web panel");
+        Ok(())
     }
 
     /// The file stem of the world currently being served, if it has one.
@@ -3121,7 +3478,10 @@ impl GameServer {
             }
             "rollback" => {
                 let which: usize = argument.trim().parse().unwrap_or(1);
-                self.roll_back(which);
+                match self.roll_back(which) {
+                    Ok(message) => info!(target: CONSOLE_REPLY, "{message}"),
+                    Err(message) => info!(target: CONSOLE_REPLY, "{message}"),
+                }
             }
             "stop" => {
                 info!("stopping on console request");
