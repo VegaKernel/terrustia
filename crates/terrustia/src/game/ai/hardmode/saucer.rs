@@ -14,10 +14,13 @@
 //! dangerous than a whole one.
 
 use terrustia_proto::npc_params::{
-    MARTIAN_SAUCER_BODY, MARTIAN_SAUCER_CANNON, MARTIAN_SAUCER_TURRET, SAUCER_BEAT, SAUCER_CLOSE,
-    SAUCER_CYCLE, SAUCER_DEATHRAY, SAUCER_DEATHRAY_DAMAGE, SAUCER_GIVE_UP, SAUCER_HALF_BEAT,
-    SAUCER_HIGH, SAUCER_LAST_STAND, SAUCER_LOW, SAUCER_PART_OUT, SAUCER_PHASES, SAUCER_SPIN,
-    SAUCER_WIDE,
+    MARTIAN_SAUCER_BODY, MARTIAN_SAUCER_CANNON, MARTIAN_SAUCER_TURRET, SAUCER_BEAT,
+    SAUCER_CIRCUIT_RAY_AT, SAUCER_CIRCUIT_RAY_DAMAGE, SAUCER_CLOSE, SAUCER_CYCLE, SAUCER_DEATHRAY,
+    SAUCER_DEATHRAY_DAMAGE, SAUCER_GIVE_UP, SAUCER_HALF_BEAT, SAUCER_HIGH, SAUCER_LASER,
+    SAUCER_LASER_DAMAGE, SAUCER_LASER_DAMAGE_EXPERT, SAUCER_LASER_FROM, SAUCER_LASER_PERIOD,
+    SAUCER_LASER_SPEED, SAUCER_LAST_STAND, SAUCER_LOW, SAUCER_MISSILE, SAUCER_MISSILE_DAMAGE,
+    SAUCER_MISSILE_DAMAGE_EXPERT, SAUCER_MISSILE_FROM, SAUCER_MISSILE_PERIOD, SAUCER_MISSILE_SPEED,
+    SAUCER_PART_OUT, SAUCER_PHASES, SAUCER_SPIN, SAUCER_WIDE, seat,
 };
 
 use crate::game::ai::{Shot, World};
@@ -118,7 +121,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
     };
 
     match npc.ai[0] {
-        state::CIRCUIT => circuit(npc, world, target.center),
+        state::CIRCUIT => circuit(npc, world, target.center, &mut out),
         state::SPINNING => {
             // Two and a half seconds of tumbling, tightening as it goes, and then it comes back.
             npc.invulnerable = false;
@@ -144,7 +147,17 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
 }
 
 /// The intact circuit: six phases on a ten-second loop.
-fn circuit(npc: &mut Npc, world: &World<'_, impl TileView>, player: (f32, f32)) {
+///
+/// Whole, it is not toothless: the guns are still up, and vanilla drives them straight off this
+/// same clock (`NPC.cs`'s style-75 rider code, reading the core's own `ai[3]`) — a single deathray
+/// as the strafe opens, a laser burst through the whole low hold, and missiles through the whole
+/// overhead hover. Only the last-stand deathray, once the guns are gone, is a routine of its own.
+fn circuit(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    player: (f32, f32),
+    out: &mut SaucerOutcome,
+) {
     let (cx, cy) = npc.center();
     let was = phase_at(npc.ai[3]);
     npc.ai[3] += 1.0;
@@ -159,6 +172,49 @@ fn circuit(npc: &mut Npc, world: &World<'_, impl TileView>, player: (f32, f32)) 
             0 | 2 => npc.ai[2] = 0.0,
             1 => npc.ai[2] = if player.0 > cx { 1.0 } else { -1.0 },
             _ => {}
+        }
+    }
+
+    if npc.ai[3] == SAUCER_CIRCUIT_RAY_AT {
+        out.shots.push(Shot {
+            projectile: SAUCER_DEATHRAY,
+            damage: SAUCER_CIRCUIT_RAY_DAMAGE,
+            position: (cx, cy),
+            velocity: (0.0, 0.0),
+            time_left: SAUCER_HALF_BEAT as u16,
+        });
+    }
+    if now == 3 && due(npc.ai[3], SAUCER_LASER_FROM, SAUCER_LASER_PERIOD) {
+        let aim = unit((player.0 - cx, player.1 - cy), SAUCER_LASER_SPEED);
+        let damage = if world.conditions.expert {
+            SAUCER_LASER_DAMAGE_EXPERT
+        } else {
+            SAUCER_LASER_DAMAGE
+        };
+        for side in gun_sides(MARTIAN_SAUCER_TURRET) {
+            out.shots.push(Shot {
+                projectile: SAUCER_LASER,
+                damage,
+                position: (cx + side, cy),
+                velocity: aim,
+                time_left: 300,
+            });
+        }
+    }
+    if now == 5 && due(npc.ai[3], SAUCER_MISSILE_FROM, SAUCER_MISSILE_PERIOD) {
+        let damage = if world.conditions.expert {
+            SAUCER_MISSILE_DAMAGE_EXPERT
+        } else {
+            SAUCER_MISSILE_DAMAGE
+        };
+        for side in gun_sides(MARTIAN_SAUCER_CANNON) {
+            out.shots.push(Shot {
+                projectile: SAUCER_MISSILE,
+                damage,
+                position: (cx + side, cy),
+                velocity: (side.signum() * SAUCER_MISSILE_SPEED, 0.0),
+                time_left: 300,
+            });
         }
     }
 
@@ -262,6 +318,29 @@ fn last_stand(
         glide(npc, to, 16.0);
     }
     npc.rotation = 0.0;
+}
+
+/// Whether a repeating shot is due: `at` has reached `from` and sits on a multiple of `period`
+/// since then. Everything here is a small whole number, so the equality is exact.
+fn due(at: f32, from: f32, period: f32) -> bool {
+    at >= from && ((at - from) as i32) % (period as i32) == 0
+}
+
+/// A vector of length `speed` along `v`, or nothing when `v` has no direction.
+fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
+    let length = v.0.hypot(v.1);
+    if length <= 0.0 || !length.is_finite() {
+        (0.0, 0.0)
+    } else {
+        (v.0 / length * speed, v.1 / length * speed)
+    }
+}
+
+/// Where a mirrored pair of guns sits either side of the core, reusing the same offsets the
+/// riders themselves seat at rather than a second copy of the number.
+fn gun_sides(rider: u16) -> [f32; 2] {
+    let out = seat(rider).map_or(0.0, |s| s.side_offset);
+    [-out, out]
 }
 
 /// Ease toward a direction at a speed. It never turns sharply; a tenth of the difference a tick.
@@ -426,18 +505,11 @@ mod tests {
         assert_eq!(seen.len(), 6, "all six: {seen:?}");
     }
 
-    /// It only fires once its guns are gone, and then on the beat.
+    /// A stripped saucer fires its deathray on the beat, every two seconds without fail.
     #[test]
-    fn only_a_stripped_saucer_fires() {
+    fn a_stripped_saucer_fires_on_the_beat() {
         let tiles = ground();
         let w = world(&tiles, Some((2000.0, 3100.0)));
-
-        let mut whole = saucer();
-        let mut shots = 0;
-        for _ in 0..2000 {
-            shots += tick(&mut whole, &w, &tiles).shots.len();
-        }
-        assert_eq!(shots, 0, "an intact saucer has no ray");
 
         let mut stripped = saucer();
         stripped.ai[0] = state::LAST_STAND;
@@ -455,6 +527,37 @@ mod tests {
                 "the rays keep the beat"
             );
         }
+    }
+
+    /// An intact saucer is not toothless: it fires a weaker deathray once a circuit, a laser
+    /// burst through its hold, and missiles through its overhead hover — all off the same clock
+    /// that drives its flight, not just contact damage.
+    #[test]
+    fn an_intact_saucer_fires_missiles_and_lasers_too() {
+        use terrustia_proto::npc_params::{SAUCER_LASER, SAUCER_MISSILE};
+
+        let tiles = ground();
+        let w = world(&tiles, Some((2000.0, 3100.0)));
+        let mut n = saucer();
+        let mut rays = 0;
+        let mut lasers = 0;
+        let mut missiles = 0;
+        for _ in 0..(SAUCER_CYCLE as i32 * 2) {
+            for shot in tick(&mut n, &w, &tiles).shots {
+                match shot.projectile {
+                    p if p == SAUCER_DEATHRAY => rays += 1,
+                    p if p == SAUCER_LASER => lasers += 1,
+                    p if p == SAUCER_MISSILE => missiles += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(rays, 2, "one deathray a circuit, over two circuits");
+        assert!(lasers > 0, "it should fire lasers through its hold");
+        assert!(missiles > 0, "and missiles through its overhead hover");
+        // A mirrored pair each time, one either side of the hull.
+        assert_eq!(lasers % 2, 0, "lasers come in pairs: {lasers}");
+        assert_eq!(missiles % 2, 0, "missiles come in pairs: {missiles}");
     }
 
     /// Losing its guns puts it through the spin before the last phase, not straight into it.

@@ -87,6 +87,11 @@ pub fn nebula_brain(
         npc.velocity.1 *= BRAIN_DRIFT_DRAG;
     }
 
+    // Being hit has a one-in-six chance of forcing an early relocation, rather than always
+    // waiting out the full cycle — so hitting one is not simply free, safe damage.
+    if world.was_hurt && rng.random_range(0..6) == 0 {
+        npc.ai[0] = BRAIN_TELEPORT_EVERY;
+    }
     npc.ai[0] += 1.0;
     if npc.ai[0] >= BRAIN_TELEPORT_EVERY {
         npc.ai[0] = 0.0;
@@ -283,6 +288,29 @@ mod tests {
         );
         let jump = (after.0 - before.0).hypot(after.1 - before.1);
         assert!(jump > 100.0, "and it should be a jump, not a step: {jump}");
+    }
+
+    /// Being hit gives a real one-in-six chance of forcing a relocation early, rather than always
+    /// waiting out the full eight-second cycle — hitting one is not free.
+    #[test]
+    fn a_brain_can_relocate_early_when_hit() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut b = brain(0.0, 0.0);
+        let mut w = world(&tiles, Some((600.0, 0.0)));
+        w.was_hurt = true;
+
+        let mut relocated_early = false;
+        for _ in 0..(BRAIN_TELEPORT_EVERY as i32 - 10) {
+            if nebula_brain(&mut b, &w, &mut rng).hurried_floaters {
+                relocated_early = true;
+                break;
+            }
+        }
+        assert!(
+            relocated_early,
+            "constant hits should eventually force a relocation well before the cycle is up"
+        );
     }
 
     /// It never lands on top of a player.

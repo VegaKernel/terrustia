@@ -2078,8 +2078,11 @@ pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
 pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
 pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
 
-/// How long a Mothron egg takes to hatch, and what it hatches into.
+/// How long a Mothron egg takes to hatch, and what it hatches into. Expert Mode halves the wait
+/// (but also only sets it back once when hit, rather than twice — the two together are not as
+/// lopsided a change as the raw tick counts alone suggest).
 pub const MOTHRON_EGG_TICKS: f32 = 900.0;
+pub const MOTHRON_EGG_TICKS_EXPERT: f32 = 600.0;
 pub const MOTHRON_SPAWN: u16 = 479;
 
 /// How long a stardust cell takes to grow up, and what into.
@@ -3009,6 +3012,22 @@ pub const MOTHRON_SWEEP_PAST: f32 = 260.0;
 /// Where it will lay: within this many tiles of you, on a floor, and not in lava.
 pub const MOTHRON_LAY_RANGE_X: i32 = 30;
 pub const MOTHRON_LAY_RANGE_Y: i32 = 20;
+/// Laying is not instant: it has to fly down to the spot it picked first, easing toward it a
+/// tenth of the way each tick and never faster than the cap.
+pub const MOTHRON_LAY_SPEED_BASE: f32 = 6.0;
+pub const MOTHRON_LAY_SPEED_GAIN: f32 = 150.0;
+pub const MOTHRON_LAY_SPEED_CAP: f32 = 10.0;
+/// How close counts as arrived, for the flight down and then the hover once there.
+pub const MOTHRON_LAY_ARRIVE: f32 = 10.0;
+pub const MOTHRON_SETTLE_ARRIVE: f32 = 4.0;
+pub const MOTHRON_SETTLE_SPEED_CAP: f32 = 4.0;
+/// Once settled it hovers over the spot for this long before the egg actually appears, and the
+/// same again after that before it goes back to hovering — halved in Expert Mode.
+pub const MOTHRON_SETTLE_WAIT: f32 = 70.0;
+pub const MOTHRON_SETTLE_WAIT_EXPERT: f32 = 52.0;
+/// The odds, out of three, that a Mothron with room left in its brood goes straight back down to
+/// lay another egg rather than returning to its hover.
+pub const MOTHRON_RELAY_ODDS: u32 = 3;
 
 // --- The Twins ------------------------------------------------------------------------------------
 
@@ -4214,6 +4233,23 @@ pub const MARTIAN_SAUCER_CANNON: u16 = 394;
 /// Its deathray, fired once at the start of each strafe of the last phase.
 pub const SAUCER_DEATHRAY: u16 = 447;
 pub const SAUCER_DEATHRAY_DAMAGE: i32 = 80;
+/// Whole, it is not toothless: a single, weaker deathray as the strafe of its circuit opens.
+pub const SAUCER_CIRCUIT_RAY_AT: f32 = 20.0;
+pub const SAUCER_CIRCUIT_RAY_DAMAGE: i32 = 50;
+/// Missiles, sprayed loosely outward through the whole overhead hover of an intact circuit.
+pub const SAUCER_MISSILE: u16 = 448;
+pub const SAUCER_MISSILE_DAMAGE: i32 = 50;
+pub const SAUCER_MISSILE_DAMAGE_EXPERT: i32 = 37;
+pub const SAUCER_MISSILE_SPEED: f32 = 8.0;
+pub const SAUCER_MISSILE_FROM: f32 = 440.0;
+pub const SAUCER_MISSILE_PERIOD: f32 = 20.0;
+/// Lasers, aimed at you, through the whole low hold of an intact circuit.
+pub const SAUCER_LASER: u16 = 449;
+pub const SAUCER_LASER_DAMAGE: i32 = 35;
+pub const SAUCER_LASER_DAMAGE_EXPERT: i32 = 30;
+pub const SAUCER_LASER_SPEED: f32 = 16.0;
+pub const SAUCER_LASER_FROM: f32 = 280.0;
+pub const SAUCER_LASER_PERIOD: f32 = 6.0;
 /// How far the parts sit from the core when it puts itself together.
 pub const SAUCER_PART_OUT: f32 = 150.0;
 /// Beyond this it gives up on you.
@@ -4372,9 +4408,12 @@ pub struct Walker {
     /// Whether it keeps re-aiming during the throw, and from when in the throw.
     pub retarget_from: i32,
 
-    /// What it throws, how much it hurts, how fast it goes, and how many at once.
+    /// What it throws, how much it hurts, how fast it goes, and how many at once. Every troop
+    /// that throws something deals noticeably less in Expert Mode — the two are not the same
+    /// number scaled by a fixed ratio, so both have to be stored rather than derived from one.
     pub shot: u16,
     pub shot_damage: i32,
+    pub shot_damage_expert: i32,
     pub shot_speed: f32,
     pub shot_count: i32,
     /// How much the throw arcs upward with distance, and how much it scatters.
@@ -4429,6 +4468,7 @@ impl Walker {
         retarget_from: i32::MAX,
         shot: 81,
         shot_damage: 1,
+        shot_damage_expert: 1,
         shot_speed: 11.0,
         shot_count: 1,
         shot_arc: 0.1,
@@ -4495,6 +4535,11 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_arc: 0.4,
             muzzle: (0.0, -14.0),
             shot_damage: match npc_type {
+                DD2_GOBLIN_BOMBER_T3 => 40,
+                DD2_GOBLIN_BOMBER_T2 => 30,
+                _ => 20,
+            },
+            shot_damage_expert: match npc_type {
                 DD2_GOBLIN_BOMBER_T3 => 35,
                 DD2_GOBLIN_BOMBER_T2 => 25,
                 _ => 15,
@@ -4535,6 +4580,11 @@ pub fn walker(npc_type: u16) -> Walker {
                 _ => 13.0,
             },
             shot_damage: match npc_type {
+                DD2_JAVELINST_T1 => 15,
+                DD2_JAVELINST_T2 => 30,
+                _ => 45,
+            },
+            shot_damage_expert: match npc_type {
                 DD2_JAVELINST_T1 => 10,
                 DD2_JAVELINST_T2 => 20,
                 _ => 30,
@@ -4564,7 +4614,8 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_lead: 0.0,
             muzzle: (22.0, 0.0),
             shot_spread: if npc_type == DD2_DRAKIN_T2 { 2.5 } else { 1.5 },
-            shot_damage: if npc_type == DD2_DRAKIN_T3 { 45 } else { 25 },
+            shot_damage: if npc_type == DD2_DRAKIN_T3 { 60 } else { 35 },
+            shot_damage_expert: if npc_type == DD2_DRAKIN_T3 { 45 } else { 25 },
             max_speed: 0.77,
             ..base
         },
@@ -4618,7 +4669,8 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_cooldown: 150.0,
             shot: GOBLIN_SHARK_SHOT,
             shot_speed: 13.0,
-            shot_damage: 30,
+            shot_damage: 40,
+            shot_damage_expert: 30,
             shot_arc: 0.15,
             shot_spread: 2.5,
             shot_lead: 0.0,
@@ -4656,7 +4708,8 @@ pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
             melee_range: 1000.0,
             melee_cooldown: 240,
             shot: OGRE_SPIT,
-            shot_damage: 30,
+            shot_damage: 40,
+            shot_damage_expert: 30,
             muzzle: (30.0, -70.0),
             ..walker
         },
@@ -4666,7 +4719,8 @@ pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
             melee_ticks: 90,
             melee_range: 250.0,
             shot: OGRE_POUND,
-            shot_damage: 40,
+            shot_damage: 60,
+            shot_damage_expert: 40,
             ranged_at: 36,
             leap_at: 56,
             leap_floor: 41,

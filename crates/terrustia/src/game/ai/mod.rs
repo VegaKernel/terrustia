@@ -904,7 +904,8 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         63 => hardmode::drifters::flocko(npc, world),
         89 => {
-            let out = hardmode::drifters::mothron_egg(npc, world.was_hurt, rng);
+            let out =
+                hardmode::drifters::mothron_egg(npc, world.was_hurt, world.conditions.expert, rng);
             effects.transform = out.became;
         }
         95 => effects.transform = hardmode::drifters::stardust_cell(npc).became,

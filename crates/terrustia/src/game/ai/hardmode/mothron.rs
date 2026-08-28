@@ -15,15 +15,18 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    MOTHRON_ABOVE, MOTHRON_CHASE_ACCEL, MOTHRON_CHASE_ACCEL_EXPERT, MOTHRON_CHASE_BASE,
-    MOTHRON_CHASE_DAMAGE, MOTHRON_CHASE_GAIN, MOTHRON_CHASE_SMOOTH, MOTHRON_CHASE_TICKS,
-    MOTHRON_CROSS_GAIN, MOTHRON_CROSS_SMOOTH, MOTHRON_CROSS_SPEED, MOTHRON_DECIDE_TICKS,
-    MOTHRON_EGG, MOTHRON_FAR, MOTHRON_HIT_HURRY, MOTHRON_HOVER_HOLD, MOTHRON_HOVER_SMOOTH,
-    MOTHRON_HOVER_SPEED, MOTHRON_LAY_RANGE_X, MOTHRON_LAY_RANGE_Y, MOTHRON_LOSE, MOTHRON_REACQUIRE,
-    MOTHRON_SWEEP_ACCEL, MOTHRON_SWEEP_AIM_SMOOTH, MOTHRON_SWEEP_AIM_SPEED,
-    MOTHRON_SWEEP_AIM_TICKS, MOTHRON_SWEEP_DAMAGE, MOTHRON_SWEEP_DRAW_ACCEL,
-    MOTHRON_SWEEP_DRAW_SMOOTH, MOTHRON_SWEEP_DRAW_SPEED, MOTHRON_SWEEP_OFFSET, MOTHRON_SWEEP_PAST,
-    MOTHRON_SWEEP_READY_X, MOTHRON_SWEEP_READY_Y,
+    MOTHRON_ABOVE, MOTHRON_BROOD, MOTHRON_CHASE_ACCEL, MOTHRON_CHASE_ACCEL_EXPERT,
+    MOTHRON_CHASE_BASE, MOTHRON_CHASE_DAMAGE, MOTHRON_CHASE_GAIN, MOTHRON_CHASE_SMOOTH,
+    MOTHRON_CHASE_TICKS, MOTHRON_CROSS_GAIN, MOTHRON_CROSS_SMOOTH, MOTHRON_CROSS_SPEED,
+    MOTHRON_DECIDE_TICKS, MOTHRON_EGG, MOTHRON_FAR, MOTHRON_HIT_HURRY, MOTHRON_HOVER_HOLD,
+    MOTHRON_HOVER_SMOOTH, MOTHRON_HOVER_SPEED, MOTHRON_LAY_ARRIVE, MOTHRON_LAY_RANGE_X,
+    MOTHRON_LAY_RANGE_Y, MOTHRON_LAY_SPEED_BASE, MOTHRON_LAY_SPEED_CAP, MOTHRON_LAY_SPEED_GAIN,
+    MOTHRON_LOSE, MOTHRON_REACQUIRE, MOTHRON_RELAY_ODDS, MOTHRON_SETTLE_ARRIVE,
+    MOTHRON_SETTLE_SPEED_CAP, MOTHRON_SETTLE_WAIT, MOTHRON_SETTLE_WAIT_EXPERT, MOTHRON_SWEEP_ACCEL,
+    MOTHRON_SWEEP_AIM_SMOOTH, MOTHRON_SWEEP_AIM_SPEED, MOTHRON_SWEEP_AIM_TICKS,
+    MOTHRON_SWEEP_DAMAGE, MOTHRON_SWEEP_DRAW_ACCEL, MOTHRON_SWEEP_DRAW_SMOOTH,
+    MOTHRON_SWEEP_DRAW_SPEED, MOTHRON_SWEEP_OFFSET, MOTHRON_SWEEP_PAST, MOTHRON_SWEEP_READY_X,
+    MOTHRON_SWEEP_READY_Y,
 };
 
 use super::drifters::Outcome;
@@ -40,7 +43,11 @@ mod state {
     pub const DRAWING_OFF: f32 = 3.0;
     pub const LINING_UP: f32 = 3.1;
     pub const SWEEPING: f32 = 3.2;
+    /// Laying is not instant: it picks a spot, flies down to it, hovers there while the egg
+    /// actually appears, and only then goes back to hovering over you.
     pub const LAYING: f32 = 4.0;
+    pub const DESCENDING: f32 = 4.1;
+    pub const SETTLING: f32 = 4.2;
 }
 
 /// Style 88.
@@ -261,19 +268,94 @@ pub fn mothron(
             npc.rotation = (npc.rotation * 4.0 + npc.velocity.0 * 0.07) / 5.0;
         }
 
-        _ => {
-            // Laying. One egg on a floor near the player, then straight back to hovering.
+        s if s == state::LAYING => {
+            // Pick a spot first. `ai[1]`/`ai[2]` become the tile it is heading for, and `ai[3]`
+            // starts counting the moment it actually gets there.
             face(npc, target);
             if let Some(at) = egg_spot(world, target.center, rng) {
-                out.spawn.push(Spawn {
-                    npc_type: MOTHRON_EGG,
-                    position: at,
-                    velocity: (0.0, 0.0),
-                    parent: None,
-                });
+                npc.ai = [state::DESCENDING, at.0, at.1, 0.0];
+            } else {
+                // Nowhere to put one: back to hovering rather than sitting here forever.
+                npc.ai = [state::HOVERING, 0.0, 0.0, 0.0];
             }
-            npc.ai = [state::HOVERING, 0.0, 0.0, 0.0];
         }
+
+        s if s == state::DESCENDING => {
+            // Flying down to the spot it picked — the punish window, since it is not attacking
+            // and not hovering out of reach while this plays out.
+            npc.no_tile_collide = true;
+            npc.direction = if npc.velocity.0 < -2.0 {
+                -1
+            } else if npc.velocity.0 > 2.0 {
+                1
+            } else {
+                npc.direction
+            };
+            npc.rotation = (npc.rotation * 9.0 + npc.velocity.0 * 0.1) / 10.0;
+
+            let spot = lay_target(npc);
+            let to_spot = (spot.0 - cx, spot.1 - cy);
+            let dist = to_spot.0.hypot(to_spot.1);
+            let speed =
+                (MOTHRON_LAY_SPEED_BASE + dist / MOTHRON_LAY_SPEED_GAIN).min(MOTHRON_LAY_SPEED_CAP);
+            if dist < MOTHRON_LAY_ARRIVE {
+                npc.ai[0] = state::SETTLING;
+            }
+            let wanted = unit(to_spot, speed);
+            npc.velocity.0 = (npc.velocity.0 * 9.0 + wanted.0) / 10.0;
+            npc.velocity.1 = (npc.velocity.1 * 9.0 + wanted.1) / 10.0;
+            clamp_speed(&mut npc.velocity, speed);
+        }
+
+        s if s == state::SETTLING => {
+            // Hovering right over the spot while the egg actually appears, then a second, equal
+            // wait before it goes back to hovering — or, with room in the brood, straight down to
+            // lay another rather than always just the one.
+            npc.no_tile_collide = true;
+            npc.rotation = (npc.rotation * 9.0 + npc.velocity.0 * 0.1) / 10.0;
+
+            let spot = lay_target(npc);
+            let mut to_spot = (spot.0 - cx, spot.1 - cy);
+            let dist = to_spot.0.hypot(to_spot.1);
+            if dist < MOTHRON_SETTLE_ARRIVE {
+                let wait = if world.conditions.expert {
+                    MOTHRON_SETTLE_WAIT_EXPERT
+                } else {
+                    MOTHRON_SETTLE_WAIT
+                };
+                npc.ai[3] += 1.0;
+                if npc.ai[3] == wait {
+                    out.spawn.push(Spawn {
+                        npc_type: MOTHRON_EGG,
+                        position: (npc.ai[1], npc.ai[2]),
+                        velocity: (0.0, 0.0),
+                        parent: None,
+                    });
+                } else if npc.ai[3] >= wait * 2.0 {
+                    let relay =
+                        brood < MOTHRON_BROOD && rng.random_range(0..MOTHRON_RELAY_ODDS) != 0;
+                    npc.ai = [
+                        if relay {
+                            state::LAYING
+                        } else {
+                            state::HOVERING
+                        },
+                        0.0,
+                        0.0,
+                        0.0,
+                    ];
+                }
+            }
+            if dist > MOTHRON_SETTLE_SPEED_CAP {
+                let k = MOTHRON_SETTLE_SPEED_CAP / dist.max(f32::MIN_POSITIVE);
+                to_spot = (to_spot.0 * k, to_spot.1 * k);
+            }
+            npc.velocity.0 = (npc.velocity.0 + to_spot.0) / 2.0;
+            npc.velocity.1 = (npc.velocity.1 + to_spot.1) / 2.0;
+            clamp_speed(&mut npc.velocity, MOTHRON_SETTLE_SPEED_CAP);
+        }
+
+        _ => {}
     }
     out
 }
@@ -317,6 +399,21 @@ fn egg_spot(
 fn solid(world: &World<'_, impl TileView>, x: i32, y: i32) -> bool {
     let tile = world.tiles.tile(x, y);
     tile.is_active() && terrustia_proto::tile_solid::solid(tile.block)
+}
+
+/// Where it flies to while descending or settling: a little above the spot it picked
+/// (`ai[1]`/`ai[2]`, the tile's own position, which is where the egg itself ends up).
+fn lay_target(npc: &Npc) -> (f32, f32) {
+    (npc.ai[1] + TILE / 2.0, npc.ai[2] - 20.0)
+}
+
+/// Clamp a velocity's length to a cap, keeping its direction.
+fn clamp_speed(velocity: &mut (f32, f32), cap: f32) {
+    let length = velocity.0.hypot(velocity.1);
+    if length > cap {
+        velocity.0 = velocity.0 / length * cap;
+        velocity.1 = velocity.1 / length * cap;
+    }
 }
 
 /// Rebound off terrain, keeping enough speed to clear it.
@@ -505,8 +602,38 @@ mod tests {
         m.ai[0] = state::LAYING;
         let w = eclipse(&tiles, Some((100.0, 295.0 * TILE)));
 
-        let out = mothron(&mut m, &w, 0, &mut rng);
-        let egg = out.spawn.first().expect("it should have laid one");
+        // Laying is not instant any more: it takes a real, multi-tick punish window — a spot to
+        // pick, a flight down to it, and a hover over it before the egg actually appears — and
+        // never on the very first tick.
+        let first = mothron(&mut m, &w, 0, &mut rng);
+        assert!(
+            first.spawn.is_empty(),
+            "the very first tick should not already have laid an egg"
+        );
+        assert_ne!(
+            m.ai[0],
+            state::HOVERING,
+            "it should be underway, not done already"
+        );
+
+        let mut egg = None;
+        let mut ticks = 0;
+        for at in 0..2000 {
+            ticks = at;
+            let out = mothron(&mut m, &w, 0, &mut rng);
+            // Nothing else moves it during the test, so the flight down has to be driven here.
+            m.position.0 += m.velocity.0;
+            m.position.1 += m.velocity.1;
+            if let Some(spawned) = out.spawn.into_iter().next() {
+                egg = Some(spawned);
+                break;
+            }
+        }
+        let egg = egg.expect("it should eventually have laid one");
+        assert!(
+            ticks > 10,
+            "and it should have taken a real punish window: {ticks} ticks"
+        );
         assert_eq!(egg.npc_type, MOTHRON_EGG);
         // On the floor rather than in the air.
         let tile_y = (egg.position.1 / TILE) as i32;
@@ -514,7 +641,12 @@ mod tests {
             (299..=302).contains(&tile_y),
             "the egg should be on the ground, at tile {tile_y}"
         );
-        assert_eq!(m.ai[0], state::HOVERING, "and back to hovering");
+        // It stays put, hovering over the egg, rather than leaving the instant it appears.
+        assert_eq!(
+            m.ai[0],
+            state::SETTLING,
+            "it should still be hovering there"
+        );
 
         // A full brood means no more.
         let mut full = mothron_at(0.0, 280.0 * TILE);

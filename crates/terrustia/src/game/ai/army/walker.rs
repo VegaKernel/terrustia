@@ -286,7 +286,7 @@ fn melee(
 
     // The throw and the leap both happen at fixed points inside the swing, not at its start.
     if it.melee_throws && npc.ai[0] == it.ranged_at as f32 {
-        throw(npc, it, target, rng, out);
+        throw(npc, world, it, target, rng, out);
     }
     if it.leaps {
         // Interrupted mid-air, the swing is cut short rather than abandoned.
@@ -330,7 +330,7 @@ fn ranged(
             face(npc, t);
         }
         if npc.ai[1] == it.ranged_at as f32 {
-            let aim = throw(npc, it, target, rng, out);
+            let aim = throw(npc, world, it, target, rng, out);
             // The pose it holds afterwards depends on where it threw, which is why a javelinist
             // aiming up looks different from one aiming across.
             npc.ai[0] = pose(aim);
@@ -389,6 +389,7 @@ fn pose(aim: (f32, f32)) -> f32 {
 /// Let something fly. Returns the direction it went, before the scatter.
 fn throw(
     npc: &Npc,
+    world: &World<'_, impl TileView>,
     it: &Walker,
     target: Option<Target>,
     rng: &mut SmallRng,
@@ -410,6 +411,12 @@ fn throw(
         aim.0 / length * it.shot_speed,
         aim.1 / length * it.shot_speed,
     );
+    // Every troop that throws something deals noticeably less in Expert Mode.
+    let damage = if world.conditions.expert {
+        it.shot_damage_expert
+    } else {
+        it.shot_damage
+    };
     for _ in 0..it.shot_count {
         let scatter = (
             rng.random_range(-it.shot_spread..=it.shot_spread),
@@ -418,7 +425,7 @@ fn throw(
         let velocity = (straight.0 + scatter.0, straight.1 + scatter.1);
         out.shots.push(Shot {
             projectile: it.shot,
-            damage: it.shot_damage,
+            damage,
             position: (
                 from.0 + straight.0 * it.shot_lead,
                 from.1 + straight.1 * it.shot_lead,
@@ -736,6 +743,34 @@ mod tests {
             thrown.len()
         );
         assert!(thrown.iter().all(|s| s.projectile == GOBLIN_BOMB));
+
+        // Expert Mode's version of the same throw hits for less, not more — the two values are
+        // not related by a fixed ratio, so this only holds if both are genuinely stored.
+        let mut expert_world = world(&tiles, Some((1200.0, GROUND - 20.0)));
+        expert_world.conditions.expert = true;
+        let mut expert_troop = troop(DD2_GOBLIN_BOMBER_T1, 1000.0);
+        let mut expert_rng = SmallRng::seed_from_u64(2);
+        let expert_thrown: Vec<Shot> = run(
+            &mut expert_troop,
+            &expert_world,
+            &tiles,
+            600,
+            &mut expert_rng,
+        )
+        .into_iter()
+        .flat_map(|o| o.shots)
+        .collect();
+        assert!(
+            !expert_thrown.is_empty(),
+            "expert should still be lobbing bombs"
+        );
+        assert!(
+            expert_thrown[0].damage < thrown[0].damage,
+            "expert should hit for less, not the same: {} vs classic {}",
+            expert_thrown[0].damage,
+            thrown[0].damage
+        );
+
         // The lob arcs: a bomb thrown at something level goes up first.
         assert!(
             thrown.iter().any(|s| s.velocity.1 < 0.0),

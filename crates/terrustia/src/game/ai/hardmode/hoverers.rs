@@ -256,10 +256,11 @@ pub fn detonating_bubble<T: TileView>(
     }
 
     if npc.ai[0] == 0.0 {
-        // Anyone within forty pixels sets it off early.
+        // Anyone within forty pixels sets it off early — and so does being shot, which is
+        // supposed to kill one of these outright rather than just being ignored until the fuse.
         let close = (cx - target.center.0).abs() < BUBBLE_TRIGGER + npc.width()
             && (cy - target.center.1).abs() < BUBBLE_TRIGGER + npc.height();
-        if close {
+        if close || world.was_hurt {
             npc.ai[0] = 1.0;
             npc.ai[1] = BUBBLE_BLAST_TICKS;
             npc.dirty = true;
@@ -293,8 +294,23 @@ pub fn detonating_bubble<T: TileView>(
 }
 
 /// Style 100 — an ancient light.
+///
+/// It is thrown with a velocity of its own, in `ai[2]`/`ai[3]`, rather than starting from rest.
+/// After a second it starts to arc — `ai[1]` is a per-tick rotation, so its path curves rather
+/// than bends once — and after two it sheds speed, which is what eventually brings it to rest:
+/// once its velocity dies away to nothing, the landed check above catches it on the next tick and
+/// it sticks for five ticks before it is gone, exactly as it does when it hits something.
 pub fn ancient_light(npc: &mut Npc) -> Outcome {
     let mut out = Outcome::default();
+
+    // First tick: launched with the velocity it was thrown with, not the zero it spawned at —
+    // this has to happen before the landed check below, or a light that spawns at rest (as one
+    // freshly placed in the world does) would read as already landed and die on the spot.
+    if npc.local_ai[0] == 0.0 {
+        npc.local_ai[0] = 1.0;
+        npc.velocity = (npc.ai[2], npc.ai[3]);
+    }
+
     if npc.velocity.1 == 0.0 && npc.ai[0] >= 0.0 {
         npc.ai[0] = -1.0;
         npc.ai[1] = 0.0;
@@ -310,9 +326,30 @@ pub fn ancient_light(npc: &mut Npc) -> Outcome {
         }
         return out;
     }
+
+    if npc.ai[0] >= 0.0 {
+        npc.ai[0] += 1.0;
+        if npc.ai[0] > 60.0 {
+            npc.velocity = rotated_by(npc.velocity, npc.ai[1]);
+        }
+        if npc.ai[0] > 120.0 {
+            npc.velocity.0 *= 0.98;
+            npc.velocity.1 *= 0.98;
+        }
+        if npc.velocity.0.hypot(npc.velocity.1) < 0.2 {
+            npc.velocity = (0.0, 0.0);
+        }
+    }
+
     npc.rotation = npc.velocity.1.atan2(npc.velocity.0) - std::f32::consts::FRAC_PI_2;
     npc.dirty = true;
     out
+}
+
+/// Turn a vector by an angle in radians, the way `Vector2.RotatedBy` does.
+fn rotated_by(v: (f32, f32), angle: f32) -> (f32, f32) {
+    let (sin, cos) = angle.sin_cos();
+    (v.0 * cos - v.1 * sin, v.0 * sin + v.1 * cos)
 }
 
 /// Style 101 — an ancient doom.
@@ -573,6 +610,20 @@ mod tests {
         assert_eq!(b.ai[0], 1.0, "it should have armed");
     }
 
+    /// Being shot sets it off too, not just the proximity fuse or the timer.
+    #[test]
+    fn a_bubble_pops_when_shot() {
+        let tiles = Air::default();
+        let mut b = npc(371);
+        let (cx, cy) = b.center();
+        let mut r = rng();
+        // Far off, so proximity would not trigger it — but it is shot.
+        let mut w = world(&tiles, Some(player_at(cx + 4000.0, cy)));
+        w.was_hurt = true;
+        detonating_bubble(&mut b, &w, &mut r);
+        assert_eq!(b.ai[0], 1.0, "being shot should have armed it");
+    }
+
     #[test]
     fn a_bubble_going_off_is_briefly_enormous_and_untouchable() {
         let tiles = Air::default();
@@ -589,8 +640,10 @@ mod tests {
 
     #[test]
     fn an_ancient_light_sticks_where_it_lands() {
-        let mut l = npc(521);
-        l.velocity = (5.0, 5.0);
+        let mut l = npc(522);
+        // Thrown with a real velocity, the way it actually spawns.
+        l.ai[2] = 5.0;
+        l.ai[3] = 5.0;
         assert!(!ancient_light(&mut l).spent);
         l.velocity.1 = 0.0;
         ancient_light(&mut l);
@@ -600,6 +653,55 @@ mod tests {
             spent |= ancient_light(&mut l).spent;
         }
         assert!(spent);
+    }
+
+    /// It is launched with the velocity it was thrown with, arcs off that heading after a
+    /// second, sheds speed after two, and — rather than flying dead straight forever — eventually
+    /// decelerates to a stop and dies on its own, with nothing to hit.
+    #[test]
+    fn an_ancient_light_curves_then_slows_then_dies_on_its_own() {
+        let mut l = npc(522);
+        l.ai[2] = 6.0;
+        l.ai[3] = -3.0;
+        // A gentle per-tick turn, so it arcs rather than snapping round all at once.
+        l.ai[1] = 0.05;
+
+        ancient_light(&mut l);
+        assert_eq!(
+            l.velocity,
+            (6.0, -3.0),
+            "launched with ai[2]/ai[3], not at rest"
+        );
+
+        // Dead straight for the first minute.
+        for _ in 0..59 {
+            ancient_light(&mut l);
+        }
+        assert_eq!(
+            l.velocity,
+            (6.0, -3.0),
+            "still on its original heading at 60 ticks"
+        );
+
+        // Past sixty it curves off that heading.
+        for _ in 0..30 {
+            ancient_light(&mut l);
+        }
+        assert!(
+            (l.velocity.1 - -3.0).abs() > 0.5,
+            "it should have arced off its original heading: {:?}",
+            l.velocity
+        );
+
+        // It never hits anything here, yet it still eventually comes to rest and is gone.
+        let mut spent = false;
+        for _ in 0..1000 {
+            spent |= ancient_light(&mut l).spent;
+            if spent {
+                break;
+            }
+        }
+        assert!(spent, "it should decelerate to a stop and die on its own");
     }
 
     /// A wounded cultist makes its dooms arrive three times as fast.
