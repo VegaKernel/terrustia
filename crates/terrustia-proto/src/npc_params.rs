@@ -3668,14 +3668,32 @@ pub const FISHRON_EXPERT_PACE: f32 = 1.2;
 /// Where it holds station: three hundred pixels to one side, two hundred above.
 pub const FISHRON_BESIDE: f32 = 300.0;
 pub const FISHRON_ABOVE: f32 = 200.0;
-/// The attack cycle: ten charges, then a sharkron burst, then bubbles, repeating.
+/// The attack cycle: five charges, then a sharkron burst, then bubbles, repeating. Only the
+/// first phase runs this cycle; the second and third use the shorter one below
+/// (`NPC.cs:49624-49646` vs `49889-49907`).
 pub const FISHRON_CYCLE_SHARKRONS: i32 = 10;
 pub const FISHRON_CYCLE_BUBBLES: i32 = 11;
-/// The sharkron burst: one every so many ticks, for this long.
-pub const FISHRON_BURST_TICKS: f32 = 120.0;
-pub const FISHRON_BURST_EVERY: f32 = 20.0;
-pub const FISHRON_BURST_SPEED: f32 = 10.0;
-pub const FISHRON_BURST_ACCEL: f32 = 0.4;
+/// The first phase's burst: it holds station and throws a sharkron every four ticks, for eighty
+/// (`NPC.cs:49354-49357`, `num8`/`num9`/`num10`/`num11` — previously 120/20/10/0.4, roughly a
+/// third the sharkrons vanilla throws).
+pub const FISHRON_BURST_TICKS: f32 = 80.0;
+pub const FISHRON_BURST_EVERY: f32 = 4.0;
+pub const FISHRON_BURST_SPEED: f32 = 5.0;
+pub const FISHRON_BURST_ACCEL: f32 = 0.3;
+
+/// The second and third phases' cycle is three charges to a burst, not five
+/// (`NPC.cs:49889-49907`).
+pub const FISHRON_CYCLE_SHARKRONS_LATER: i32 = 6;
+pub const FISHRON_CYCLE_BUBBLES_LATER: i32 = 7;
+/// Their burst is a different attack entirely: a dash toward the player that curves through the
+/// air for its whole duration, spraying a sharkron out to each side of its own heading every four
+/// ticks instead of holding station (`NPC.cs:49916-50015`).
+pub const FISHRON_BURST_LATER_TICKS: f32 = 120.0;
+pub const FISHRON_BURST_LATER_DASH_SPEED: f32 = 20.0;
+pub const FISHRON_BURST_LATER_SPRAY_EVERY: f32 = 4.0;
+pub const FISHRON_BURST_LATER_SPRAY_SPEED: f32 = 6.0;
+/// How far it turns each tick: a full half-circle spread over the whole burst.
+pub const FISHRON_BURST_LATER_CURVE: f32 = std::f32::consts::TAU / 60.0;
 /// The bubbles: two, thrown from its mouth partway through the wind-up.
 pub const FISHRON_BUBBLE_TICKS: f32 = 90.0;
 pub const FISHRON_BUBBLE_AT: f32 = 30.0;
