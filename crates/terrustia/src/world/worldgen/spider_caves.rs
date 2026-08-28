@@ -153,7 +153,13 @@ fn spread_spider(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) {
                         place_stalactite(world, cx, cy, rng);
                     } else if floor_solid {
                         let style = 9 + rng.random_range(0..5);
-                        world.set_tile(cx, cy, Tile::framed(LARGE_PILE_TILE, style as i16 * 18, 0));
+                        // `place_large_pile` refuses (writes nothing) unless the whole 3x2
+                        // footprint is clear and floored — matching vanilla's own `Place3x2`,
+                        // which is genuinely all-or-nothing. When it refuses, `(cx, cy)` is still
+                        // inactive afterward, which is exactly what un-deads the small-pile
+                        // fallback below (`WorldGen.cs:3691-3699`'s own `if (!tile.active())`
+                        // guards only ever pass when `Place3x2` itself didn't place anything).
+                        place_large_pile(world, cx, cy, style);
                         if rng.random_range(0..3) == 0 {
                             if !world.tile(cx, cy).is_active() {
                                 place_small_pile(world, cx, cy, 34 + rng.random_range(0..4), 1);
@@ -172,6 +178,37 @@ fn spread_spider(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) {
             }
         }
     }
+}
+
+/// `Place3x2` for a `TileID.LargePiles2` object (type 187): a 3-wide, 2-tall footprint anchored
+/// with `(cx, cy)` as the bottom-middle cell — matching vanilla's own call
+/// `PlaceTile(item.X, item.Y, 187, ..., 9 + genRand.Next(5))` (`WorldGen.cs:3691`), which
+/// dispatches to `Place3x2` (`:52533`). Vanilla's own placer is genuinely all-or-nothing: all six
+/// cells must already be inactive, and the row directly beneath each of the three columns must be
+/// solid, or nothing is written at all — a partial pile is not a real pile. The old code wrote
+/// only the single `(cx, cy)` cell with `frameX = style * 18`, which is neither the real 3x2
+/// footprint nor `Place3x2`'s own `frameX = 54*style + 18*column` stride, and — because it always
+/// unconditionally activated `(cx, cy)` — made the small-pile fallback below permanently dead code
+/// (its own `!tile.active()` guards could never see anything but an already-active tile).
+fn place_large_pile(world: &mut World, cx: i32, cy: i32, style: i32) -> bool {
+    for dx in -1..=1 {
+        for dy in -1..=0 {
+            if world.tile(cx + dx, cy + dy).is_active() {
+                return false;
+            }
+        }
+        let floor = world.tile(cx + dx, cy + 1);
+        if !(floor.is_active() && tile_solid::solid(floor.block)) {
+            return false;
+        }
+    }
+    let base_x = (54 * style) as i16;
+    for (dx, column) in [(-1i32, 0i16), (0, 1), (1, 2)] {
+        let frame_x = base_x + column * 18;
+        world.set_tile(cx + dx, cy - 1, Tile::framed(LARGE_PILE_TILE, frame_x, 0));
+        world.set_tile(cx + dx, cy, Tile::framed(LARGE_PILE_TILE, frame_x, 18));
+    }
+    true
 }
 
 /// `PlaceUncheckedStalactite`, the `spiders: true` branch only (`WorldGen.cs:38735-38748`) —
@@ -322,5 +359,74 @@ mod tests {
             "the stalactite is two tiles tall"
         );
         assert_eq!(world.tile(10, 10).block, STALACTITE);
+    }
+
+    /// `Place3x2`'s real footprint (`WorldGen.cs:52533-52660`) is 3 wide, 2 tall, anchored at
+    /// `(cx, cy)` as the bottom-middle cell, with `frameX = 54*style + 18*column` — not the single
+    /// tile the old code wrote. Fails on the pre-fix code (which only ever activated `(cx, cy)`
+    /// itself).
+    #[test]
+    fn a_large_pile_places_the_full_3x2_footprint_with_the_right_stride() {
+        let mut world = World::empty(30, 30, "large-pile-3x2");
+        for dx in -1..=1 {
+            world.set_tile(15 + dx, 21, Tile::block(tiles::STONE));
+        }
+        let placed = place_large_pile(&mut world, 15, 20, 9);
+        assert!(placed, "a clear, floored 3x2 footprint should place");
+        let base_x = 54 * 9;
+        for (dx, column) in [(-1i32, 0i16), (0, 1), (1, 2)] {
+            let top = world.tile(15 + dx, 19);
+            let bottom = world.tile(15 + dx, 20);
+            assert_eq!(top.block, LARGE_PILE_TILE, "top row, column {dx}");
+            assert_eq!(bottom.block, LARGE_PILE_TILE, "bottom row, column {dx}");
+            assert_eq!(top.frame_x, base_x + column * 18, "top row frame_x, column {dx}");
+            assert_eq!(top.frame_y, 0, "top row frame_y, column {dx}");
+            assert_eq!(bottom.frame_x, base_x + column * 18, "bottom row frame_x, column {dx}");
+            assert_eq!(bottom.frame_y, 18, "bottom row frame_y, column {dx}");
+        }
+    }
+
+    /// When any of the six footprint cells is already active, `Place3x2` refuses the whole
+    /// object rather than filling in whichever cells happen to be free.
+    #[test]
+    fn a_large_pile_refuses_the_whole_object_if_any_cell_is_occupied() {
+        let mut world = World::empty(30, 30, "large-pile-refuse");
+        for dx in -1..=1 {
+            world.set_tile(15 + dx, 21, Tile::block(tiles::STONE));
+        }
+        // One cell of the footprint (top-right) is already occupied.
+        world.set_tile(16, 19, Tile::block(tiles::STONE));
+        let placed = place_large_pile(&mut world, 15, 20, 9);
+        assert!(!placed, "an occupied footprint cell must refuse the whole object");
+        assert!(
+            !world.tile(15, 20).is_active(),
+            "no cell should have been written on refusal"
+        );
+    }
+
+    /// Vanilla's own small-pile fallback (`WorldGen.cs:3693-3699`) only ever fires when
+    /// `Place3x2` itself refused to place — its `!tile.active()` guards can only pass then. The
+    /// old code always unconditionally activated `(cx, cy)` before this check ran, so the
+    /// fallback was permanently unreachable. Fails on the pre-fix code (in which `place_large_pile`
+    /// activating `(cx, cy)` unconditionally would make this small pile branch dead).
+    #[test]
+    fn the_small_pile_fallback_can_fire_when_the_large_pile_is_refused() {
+        let mut world = World::empty(30, 30, "small-pile-fallback");
+        // A floor under only the small pile's own 2-wide footprint (columns 15-16 at row 21), not
+        // under the large pile's full 3-wide one (columns 14-16) — enough for `place_small_pile`
+        // to succeed on its own, while `place_large_pile` still refuses for lacking column 14's
+        // floor.
+        world.set_tile(15, 21, Tile::block(tiles::STONE));
+        world.set_tile(16, 21, Tile::block(tiles::STONE));
+
+        assert!(!place_large_pile(&mut world, 15, 20, 9));
+        assert!(!world.tile(15, 20).is_active());
+        // With the center cell still inactive, the small-pile call this session already trusts
+        // elsewhere (`piles.rs`) can go ahead and actually write something there.
+        assert!(
+            place_small_pile(&mut world, 15, 20, 34, 1),
+            "the small pile should have been free to place once the large pile refused"
+        );
+        assert!(world.tile(15, 20).is_active());
     }
 }
