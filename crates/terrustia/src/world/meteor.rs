@@ -50,12 +50,28 @@ pub fn world_is_full(world: &World) -> bool {
     false
 }
 
-/// Find somewhere for a meteor to land and put one there.
+/// Find somewhere for a meteor to land and put one there. Always accepts whatever
+/// [`site_is_safe`] allows and never refuses for a player or NPC standing nearby — see
+/// [`drop_checked`] for the version that can, which every caller that actually tracks entities
+/// should be using instead.
 ///
 /// Returns the centre it landed on. The standard for "solid enough" drops by half a tile every
 /// time a site is rejected, so a world that is mostly caves still gets one eventually — but a
 /// world with nowhere at all gets none rather than a meteor in the sky.
 pub fn drop(world: &mut World, rng: &mut SmallRng) -> Option<(i32, i32)> {
+    drop_checked(world, rng, |_, _| false)
+}
+
+/// [`drop`], but `blocked_by_entity(x, y)` gets a chance to refuse a candidate centred on `(x,
+/// y)` too — vanilla's own player- and NPC-safety-rectangle check (`WorldGen.cs:6324-6345`, a
+/// player's own spawn-safe zone widened by `NPC.safeRangeX`/`Y` and each active NPC's hitbox,
+/// tested against a box centred on the strike) needs live entity positions this module has no
+/// access to on its own.
+pub fn drop_checked(
+    world: &mut World,
+    rng: &mut SmallRng,
+    blocked_by_entity: impl Fn(i32, i32) -> bool,
+) -> Option<(i32, i32)> {
     if world_is_full(world) {
         return None;
     }
@@ -83,6 +99,10 @@ pub fn drop(world: &mut World, rng: &mut SmallRng) -> Option<(i32, i32)> {
             continue;
         };
 
+        if !site_is_safe(world, x, y) || blocked_by_entity(x, y) {
+            continue;
+        }
+
         if solidity_around(world, x, y) >= wanted {
             strike(world, x, y, rng);
             return Some((x, y));
@@ -90,6 +110,42 @@ pub fn drop(world: &mut World, rng: &mut SmallRng) -> Option<(i32, i32)> {
         wanted -= 0.5;
     }
     None
+}
+
+/// Whether a meteor may land here at all, beyond how solid the ground is underneath it —
+/// vanilla's own tile-based refusals (`WorldGen.cs:6346-6368`), checked across the same
+/// thirty-five-tile-radius box the strike itself carves: a chest, a dungeon brick, an altar
+/// (26), a Lihzahrd brick (226), a display doll, a hat rack, a fallen log or a teleportation
+/// pylon anywhere in it refuses the whole site, not just that one tile — an orphaned chest
+/// record, a hole punched through a dungeon wall, or an early Lihzahrd-temple entrance are all
+/// worse than a meteor landing a little further off.
+fn site_is_safe(world: &World, x: i32, y: i32) -> bool {
+    const REACH: i32 = 35;
+    for at_x in x - REACH..x + REACH {
+        for at_y in y - REACH..y + REACH {
+            if !world.in_bounds(at_x, at_y) {
+                continue;
+            }
+            let tile = world.tile(at_x, at_y);
+            if !tile.is_active() {
+                continue;
+            }
+            if matches!(
+                tile.block,
+                21 | 467 // chests (TileID.Sets.BasicChest)
+                    | 41 | 43 | 44 | 677 | 678 | 679 // dungeon brick (Main.tileDungeon)
+                    | 26   // altar
+                    | 226  // Lihzahrd brick
+                    | 470  // display doll
+                    | 475  // hat rack
+                    | 488  // fallen log
+                    | 597 // teleportation pylon
+            ) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// How much rock there is around a point, minus what is hollow or wet.
@@ -128,12 +184,20 @@ pub fn strike(world: &mut World, x: i32, y: i32, rng: &mut SmallRng) {
                 continue;
             }
             let mut tile = world.tile(at_x, at_y);
-            tile.block = METEORITE;
-            tile.flags.set(TileFlags::ACTIVE, true);
+            // Vanilla never activates a tile here (`WorldGen.cs:6383-6390`) — it only ever
+            // *keeps* one active, by leaving `active` untouched, and only when what was already
+            // there was solid. Anything that was not solid (air included: an inactive tile reads
+            // as `solid(0) == false`) is explicitly deactivated instead. The net effect: existing
+            // solid ground becomes meteorite ore; open air and non-solid decorations stay empty,
+            // never filled in — a meteor over a cave carves a hollow ball, not a solid one.
+            if !terrustia_proto::tile_solid::solid(tile.block) {
+                tile.flags.set(TileFlags::ACTIVE, false);
+            }
             tile.flags.set(TileFlags::HALF_BRICK, false);
             tile.slope = 0;
             tile.frame_x = -1;
             tile.frame_y = -1;
+            tile.block = METEORITE;
             world.set_tile(at_x, at_y, tile);
         }
     }
@@ -222,6 +286,34 @@ mod tests {
         assert!(meteorite > 200, "only {meteorite} meteorite tiles");
     }
 
+    /// A meteor never fills existing open space with solid ore — vanilla only ever *keeps* a
+    /// tile active if it was already solid (`WorldGen.cs:6383-6390`); open air stays open air.
+    ///
+    /// The pocket sits 15 tiles straight down from the impact centre: outside the *hollowing*
+    /// pass's own largest possible reach (radius 8..13, so at most `13*0.8+3 = 13.4`), which
+    /// would otherwise clear it regardless of what the first pass did and make this test
+    /// meaningless either way, but within the *filling* pass's radius (17..22) for this seed.
+    ///
+    /// Fails before the fix: `strike()` set `ACTIVE` on every tile in the ball unconditionally,
+    /// so this pocket came out solid ore instead of staying the hollow it started as.
+    #[test]
+    fn strike_does_not_fill_an_existing_cave_with_ore() {
+        let mut world = stone_world();
+        let (cx, cy) = (600, 300);
+        for x in cx - 1..=cx + 1 {
+            for y in cy + 14..=cy + 16 {
+                world.set_tile(x, y, Tile::AIR);
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(11);
+        strike(&mut world, cx, cy, &mut rng);
+
+        assert!(
+            !world.tile(cx, cy + 15).is_active(),
+            "the cave pocket should not have been filled solid by the meteor"
+        );
+    }
+
     /// It is a bowl, not a ball: the middle is open so a player can get to the ore.
     #[test]
     fn the_crater_is_hollow_on_top() {
@@ -246,6 +338,58 @@ mod tests {
         assert!(world_is_full(&world));
         let mut rng = SmallRng::seed_from_u64(6);
         assert!(drop(&mut world, &mut rng).is_none());
+    }
+
+    /// A site near a chest, an altar, a dungeon brick or a Lihzahrd brick is refused; one far
+    /// enough away is fine — vanilla's own tile-based refusals (`WorldGen.cs:6346-6368`).
+    ///
+    /// Fails before the fix: `site_is_safe` did not exist, and nothing stopped a meteor cratering
+    /// straight through a chest, a dungeon wall, or the temple.
+    #[test]
+    fn a_site_near_protected_furniture_is_unsafe() {
+        let world = stone_world();
+        assert!(site_is_safe(&world, 600, 300), "plain stone should be fine");
+
+        for (block, name) in [
+            (21u16, "chest"),
+            (26, "altar"),
+            (41, "dungeon brick"),
+            (226, "Lihzahrd brick"),
+        ] {
+            let mut guarded = stone_world();
+            guarded.set_tile(620, 300, Tile::framed(block, 0, 0));
+            assert!(
+                !site_is_safe(&guarded, 600, 300),
+                "a {name} within reach should refuse the site"
+            );
+            assert!(
+                site_is_safe(&guarded, 700, 300),
+                "but a {name} far enough away should not"
+            );
+        }
+    }
+
+    /// `drop_checked` also refuses wherever `blocked_by_entity` says a player or NPC is standing
+    /// — the piece `drop` itself has no way to check.
+    ///
+    /// Fails before the fix: `drop_checked` did not exist, and `drop` had no entity-awareness at
+    /// all — a meteor could land directly on a player.
+    #[test]
+    fn drop_checked_refuses_every_entity_blocked_site() {
+        let mut world = stone_world();
+        let mut rng = SmallRng::seed_from_u64(4);
+        assert!(
+            drop_checked(&mut world, &mut rng, |_, _| true).is_none(),
+            "an entity blocking every candidate should stop it landing anywhere"
+        );
+    }
+
+    /// ...but with nothing blocking, `drop_checked` behaves exactly like `drop`.
+    #[test]
+    fn drop_checked_with_nothing_blocking_still_lands() {
+        let mut world = stone_world();
+        let mut rng = SmallRng::seed_from_u64(4);
+        assert!(drop_checked(&mut world, &mut rng, |_, _| false).is_some());
     }
 
     /// It lands away from the spawn, because nobody wants one on their house.
