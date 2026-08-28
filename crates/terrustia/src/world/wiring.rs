@@ -12,8 +12,14 @@
 //! The ones that change what the world *is*, rather than what it looks like, are here:
 //!
 //! * **Actuators**, which toggle their block between solid and passable.
+//! * **Junction boxes**, which route the current through by frame rather than in every direction,
+//!   which is what lets two circuits cross the same tile without joining into one.
+//! * **Conveyor belts** and **Active/Inactive Stone Blocks**, which swap between their two states.
 //! * **Traps** — darts, flames, spears, spiky balls and geysers — which hurt.
+//! * **Land mines**, which explode on the spot rather than joining a circuit at all.
 //! * **Statues**, which produce monsters, items or a fetched townsperson.
+//! * **Doors, trapdoors and tall gates**, which change the world's shape — a shut door becomes a
+//!   wider, different tile rather than merely a different frame of the same one.
 //! * **Teleporters**, which swap whoever is standing on one pad with whoever is on the other.
 //! * **Pumps**, which move liquid from every inlet cell a circuit reaches to every outlet.
 //! * **Timers**, the one thing here that starts a circuit with nobody touching it.
@@ -23,15 +29,19 @@
 //! contraption anybody builds runs off a timer, and almost every interesting one has a gate in
 //! it; a server that only ran a circuit when a player hit a switch would run hardly any of them.
 //!
-//! Only the actuator, the pump, the lamp and the timer are handled inside the flood, because they
-//! need nothing but the tiles. The rest are *reported*: firing a trap needs a die roll, a cooldown
-//! and the projectile store; a statue needs the NPC table; a teleporter needs the players; a gate
-//! needs to start a new circuit, which cannot happen from inside the one that is running. All of
-//! that lives on the server, so the flood hands back which tiles it reached and the server does
-//! the work — [`trap_shot`] and [`check_logic_gate`] are the tables it calls.
+//! Only the actuator, the junction box, the conveyor belt, the stone block, the pump, the lamp
+//! and the timer are handled inside the flood, because they need nothing but the tiles. The rest
+//! are *reported*: firing a trap needs a die roll, a cooldown and the projectile store; a statue
+//! needs the NPC table; a teleporter needs the players; a gate needs to start a new circuit, which
+//! cannot happen from inside the one that is running; a door, trapdoor or tall gate needs the real
+//! function that reshapes it, which either lives elsewhere in this module (doors, by way of
+//! [`super::doors`]) or has not been ported yet (trapdoors, tall gates — see [`Fired::trapdoors`]
+//! and [`Fired::gates`]). All of that lives on the caller, so the flood hands back which tiles it
+//! reached and the caller does the work — [`trap_shot`] and [`check_logic_gate`] are the tables it
+//! calls.
 //!
-//! The remaining entries are cosmetic: candles, chandeliers and the like change a frame and
-//! nothing else, and a client does that for itself from the relayed hit.
+//! What is left after all of that really is cosmetic: candles, chandeliers and the like change a
+//! frame and nothing else, and a client does that for itself from the relayed hit.
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
 //! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
@@ -40,6 +50,8 @@
 use std::collections::HashSet;
 
 use terrustia_proto::tile::{Tile, TileFlags};
+
+use super::doors::{DOOR_CLOSED, DOOR_OPEN};
 
 /// The four wire colours, which are four independent circuits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -164,6 +176,23 @@ pub struct Fired {
     /// listed here (`ExplodeMine`'s own `KillTile`), and throws a different projectile at a
     /// different damage — the caller needs to tell the two apart to spawn the right one.
     pub land_mines: Vec<(i32, i32)>,
+    /// Doors the current reached, whichever of their tiles it happened to touch — for the caller
+    /// to resolve into `doors::open`/`doors::close`, exactly as a click does (`Wiring.cs:1464-
+    /// 1491`), a shut one picking a random swing side and a closing one always forced.
+    pub doors: Vec<(i32, i32)>,
+    /// Trapdoors the current reached (`Wiring.cs:1443-1456`, `WorldGen.ShiftTrapdoor`).
+    ///
+    /// Reported rather than resolved here: shifting one is a real animation — it moves between a
+    /// vertical and a horizontal two-tile form depending on which side has room, and kills a
+    /// cuttable plant in the way rather than refusing — and porting that whole mechanism is not
+    /// part of this fix. Left for a caller that has it.
+    pub trapdoors: Vec<(i32, i32)>,
+    /// Tall gates the current reached (`Wiring.cs:1457-1463`, `WorldGen.ShiftTallGate`).
+    ///
+    /// Reported for the same reason `trapdoors` is: shifting one is real domain logic (a three-
+    /// tile column swapping type, refused unforced while anything occupies it) that has not been
+    /// ported, not something this flood can resolve on its own.
+    pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
     /// The first two distinct teleporters the current reached, which are the pair it joins.
@@ -566,6 +595,67 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         out.land_mines.push((x, y));
         return;
     }
+    // A conveyor belt swaps direction — `Wiring.cs:1017-1032`'s own `case 421`/`case 422`, a plain
+    // type swap with no frame or anchor math at all. Vanilla skips the swap while the belt also
+    // carries an actuator; this project's own actuator toggle above already ran this tick, so
+    // `ACTUATOR` here means exactly what vanilla's guard checks.
+    if tile.is_active() && matches!(tile.block, CONVEYOR_LEFT | CONVEYOR_RIGHT) {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        if !tile.flags.has(TileFlags::ACTUATOR) {
+            let mut flipped = tile;
+            flipped.block = if tile.block == CONVEYOR_LEFT {
+                CONVEYOR_RIGHT
+            } else {
+                CONVEYOR_LEFT
+            };
+            world.set_tile(x, y, flipped);
+            out.changed.push((x, y));
+        }
+        return;
+    }
+    // Active Stone Block hides itself; Inactive Stone Block always comes back solid —
+    // `Wiring.cs:1426-1442`. Vanilla also refuses to hide a block whose absence would leave
+    // something above it unsupported (`CanKillTile`, and a `PreventsActuationUnder` check on the
+    // tile directly above); this project has neither piece of machinery yet, so it only checks
+    // that there is *something* above to stand on, which is the common case that check exists for.
+    if tile.is_active() && tile.block == ACTIVE_STONE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        if world.tile(x, y - 1).is_active() {
+            let mut hidden = tile;
+            hidden.block = INACTIVE_STONE;
+            world.set_tile(x, y, hidden);
+            out.changed.push((x, y));
+        }
+        return;
+    }
+    if tile.is_active() && tile.block == INACTIVE_STONE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        let mut shown = tile;
+        shown.block = ACTIVE_STONE;
+        world.set_tile(x, y, shown);
+        out.changed.push((x, y));
+        return;
+    }
+    // Doors, trapdoors and tall gates all change the *shape* of the world, not merely a frame —
+    // opening a shut door replaces one tile column with two, for instance — which needs the real
+    // functions this project already has for doors (`doors::open`/`doors::close`) or, for
+    // trapdoors and tall gates, functions nobody has ported yet. Either way that is not something
+    // a generic `WiredWorld` can resolve on the spot, so these are reported for the caller.
+    if tile.is_active() && matches!(tile.block, DOOR_CLOSED | DOOR_OPEN) {
+        out.doors.push((x, y));
+    }
+    if tile.is_active() && matches!(tile.block, TRAPDOOR_CLOSED | TRAPDOOR_OPEN) {
+        out.trapdoors.push((x, y));
+    }
+    if tile.is_active() && matches!(tile.block, TALL_GATE_CLOSED | TALL_GATE_OPEN) {
+        out.gates.push((x, y));
+    }
     if tile.is_active() && tile.block == TELEPORTER {
         // A teleporter is three tiles wide and the anchor is its left one. Only the first two
         // distinct ones matter: they are the pair the circuit joins.
@@ -618,6 +708,21 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         }
     }
 }
+
+/// `TileID.Conveyorbelt` and its reverse — swapped for each other on a wire signal.
+const CONVEYOR_LEFT: u16 = 421;
+const CONVEYOR_RIGHT: u16 = 422;
+/// `TileID.ActiveStoneBlock`, visible and solid.
+const ACTIVE_STONE: u16 = 130;
+/// `TileID.InactiveStoneBlock`, invisible and passable until a signal brings it back.
+const INACTIVE_STONE: u16 = 131;
+/// `TileID.Trapdoor` and its open form — see [`Fired::trapdoors`] for why these are only
+/// detected, not resolved, here.
+const TRAPDOOR_CLOSED: u16 = 386;
+const TRAPDOOR_OPEN: u16 = 387;
+/// `TileID.TallGateClosed`/`TallGateOpen` — see [`Fired::gates`] for the same reason.
+const TALL_GATE_CLOSED: u16 = 388;
+const TALL_GATE_OPEN: u16 = 389;
 
 /// The tile every dart, flame, spear and spiky-ball trap is a frame of.
 const TRAPS: u16 = 137;
@@ -1823,6 +1928,102 @@ mod tests {
         let fired = hit_switch(&mut board, 100, 100);
         assert_eq!(fired.mines, vec![(105, 100)]);
         assert!(fired.traps.is_empty(), "a mine is not a trap");
+    }
+
+    /// A conveyor belt reverses direction when a circuit reaches it — `Wiring.cs:1017-1032`'s own
+    /// plain type swap between the two directions.
+    ///
+    /// Fails before the fix: the module doc used to call every tile past the reported ones
+    /// "cosmetic", and the flood genuinely did nothing to a conveyor belt at all.
+    #[test]
+    fn a_conveyor_belt_reverses_direction() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(CONVEYOR_LEFT, Wire::Red));
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_RIGHT);
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_LEFT, "and back again");
+    }
+
+    /// A conveyor belt with an actuator on it does not reverse — vanilla's own guard
+    /// (`!tile.actuator()`) on the swap.
+    #[test]
+    fn an_actuated_conveyor_belt_does_not_reverse() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut belt = wired(CONVEYOR_LEFT, Wire::Red);
+        belt.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, belt);
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_LEFT, "did not reverse");
+    }
+
+    /// Active Stone Block hides itself when a circuit reaches it, so long as there is something
+    /// above it to stand on; Inactive Stone Block always comes back solid — `Wiring.cs:1426-1442`.
+    #[test]
+    fn stone_blocks_hide_and_reappear() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(ACTIVE_STONE, Wire::Red));
+        board.set_tile(105, 99, Tile::block(1)); // something to stand on above it
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, INACTIVE_STONE, "hidden");
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, ACTIVE_STONE, "and back again");
+    }
+
+    /// Doors, trapdoors and tall gates are reported to the caller rather than resolved on the
+    /// spot — they change the world's *shape*, not just a frame, which a generic `WiredWorld`
+    /// cannot do by itself.
+    ///
+    /// Fails before the fix: none of the three was recognised at all, so a wired door, trapdoor or
+    /// gate did nothing — the exact gap the module's own doc used to call "cosmetic" and wave away.
+    #[test]
+    fn doors_trapdoors_and_gates_are_reported() {
+        let mut board = Board(HashMap::new());
+        // Three independent switch-and-target pairs, one per row, so each proves the report on
+        // its own rather than relying on one flood happening to touch all three.
+        for (row, block) in [
+            (100i32, DOOR_CLOSED),
+            (101, TRAPDOOR_CLOSED),
+            (102, TALL_GATE_CLOSED),
+        ] {
+            board.set_tile(90, row, wired(136, Wire::Red));
+            for x in 91..95 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(x, row, wire);
+            }
+            board.set_tile(95, row, wired(block, Wire::Red));
+        }
+
+        let doors = hit_switch(&mut board, 90, 100);
+        assert!(doors.doors.contains(&(95, 100)));
+        let trapdoors = hit_switch(&mut board, 90, 101);
+        assert!(trapdoors.trapdoors.contains(&(95, 101)));
+        let gates = hit_switch(&mut board, 90, 102);
+        assert!(gates.gates.contains(&(95, 102)));
     }
 
     /// A pump moves what the inlet holds into the outlet, up to what the outlet can take.
