@@ -3423,6 +3423,50 @@ pub const GOLEM_HEAD_CHARGE: f32 = 300.0;
 pub const GOLEM_FIREBALL: u16 = 258;
 pub const GOLEM_FIREBALL_DAMAGE: i32 = 18;
 pub const GOLEM_FIREBALL_SPEED: f32 = 8.0;
+/// Past half health the attached head's fireball hits harder (`NPC.cs:31480`).
+pub const GOLEM_FIREBALL_DAMAGE_UPGRADED: i32 = 24;
+/// The free head's own fireball hits harder still than the attached head's base one
+/// (`NPC.cs:31684`).
+pub const GOLEM_FREE_FIREBALL_DAMAGE: i32 = 20;
+
+/// Eye-lasers. The attached head only grows these past half health, alongside its upgraded
+/// fireball (`NPC.cs:31504-31564`); the free head always has them (`NPC.cs:31736-31801`).
+///
+/// Vanilla's interval is `60 + rand(0..600)` (attached) or `100 + rand(0..4800)` (free), rerolled
+/// every tick until crossed. This module has no source of randomness available to it without
+/// threading one in from outside its lane, so both use the roll's fixed average instead — the
+/// same cadence, without the jitter.
+pub const GOLEM_LASER: u16 = 259;
+pub const GOLEM_LASER_DAMAGE: i32 = 28;
+/// Centred on the player it fires two; off to one side of the body, one.
+pub const GOLEM_LASER_SPEED: f32 = 11.0;
+pub const GOLEM_LASER_SPEED_OFFSIDE: f32 = 12.0;
+/// `60 + 600/2`, plus four more per tick spent unable to see you.
+pub const GOLEM_LASER_INTERVAL: f32 = 360.0;
+pub const GOLEM_LASER_NO_LOS_BONUS: f32 = 4.0;
+
+/// The free head's own laser: a slower cadence that quickens both as it is hurt and while it
+/// cannot see you, and hits harder and faster once badly hurt.
+pub const GOLEM_FREE_LASER_DAMAGE: i32 = 24;
+pub const GOLEM_FREE_LASER_SPEED: f32 = 11.0;
+/// Health fractions (of `life_max`) past which the interval speeds up by one more `pace`.
+pub const GOLEM_FREE_LASER_INTERVAL_STEPS: [f32; 7] = [
+    1.0 / 1.25,
+    1.0 / 1.5,
+    1.0 / 2.0,
+    1.0 / 3.0,
+    1.0 / 4.0,
+    1.0 / 5.0,
+    1.0 / 6.0,
+];
+pub const GOLEM_FREE_LASER_NO_LOS_BONUS: f32 = 10.0;
+/// `100 + 4800/2`.
+pub const GOLEM_FREE_LASER_INTERVAL: f32 = 2500.0;
+/// Health fractions past which each laser hits one harder and a quarter faster.
+pub const GOLEM_FREE_LASER_DAMAGE_STEPS: [f32; 5] = [0.5, 0.4, 0.3, 0.2, 0.1];
+/// Without line of sight, the volley is fired blind but hits much harder and faster.
+pub const GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT: f32 = 1.5;
+pub const GOLEM_FREE_LASER_NO_LOS_SPEED_MULT: f32 = 2.5;
 
 /// A fist: it holds its station, winds up, and punches.
 pub const GOLEM_FIST_RETURN: f32 = 14.0;

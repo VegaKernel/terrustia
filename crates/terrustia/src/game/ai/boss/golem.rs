@@ -15,15 +15,21 @@
 //! setting; it is the game refusing to be dragged out of the fight it designed.
 
 use terrustia_proto::npc_params::{
-    GOLEM_AIR_ACCEL, GOLEM_AIR_SPEED, GOLEM_FIREBALL, GOLEM_FIREBALL_DAMAGE, GOLEM_FIREBALL_SPEED,
-    GOLEM_FIST_LEFT, GOLEM_FIST_OFFSET, GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN,
-    GOLEM_FIST_RETURN_BODY_HURT, GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF,
-    GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP, GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL,
-    GOLEM_FREE_SPEED, GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET, GOLEM_HEAD_TETHER_SPEED,
-    GOLEM_HOP_ACROSS, GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT, GOLEM_HOP_BONUS_PART,
-    GOLEM_HOP_BONUS_THIRD, GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP,
-    GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT, GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF,
-    GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_SPEED, GOLEM_PUNCH_TICKS, GOLEM_SLAM,
+    GOLEM_AIR_ACCEL, GOLEM_AIR_SPEED, GOLEM_FIREBALL, GOLEM_FIREBALL_DAMAGE,
+    GOLEM_FIREBALL_DAMAGE_UPGRADED, GOLEM_FIREBALL_SPEED, GOLEM_FIST_LEFT, GOLEM_FIST_OFFSET,
+    GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN, GOLEM_FIST_RETURN_BODY_HURT,
+    GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF, GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP,
+    GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL, GOLEM_FREE_FIREBALL_DAMAGE, GOLEM_FREE_LASER_DAMAGE,
+    GOLEM_FREE_LASER_DAMAGE_STEPS, GOLEM_FREE_LASER_INTERVAL, GOLEM_FREE_LASER_INTERVAL_STEPS,
+    GOLEM_FREE_LASER_NO_LOS_BONUS, GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT,
+    GOLEM_FREE_LASER_NO_LOS_SPEED_MULT, GOLEM_FREE_LASER_SPEED, GOLEM_FREE_SPEED,
+    GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET, GOLEM_HEAD_TETHER_SPEED, GOLEM_HOP_ACROSS,
+    GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT, GOLEM_HOP_BONUS_PART, GOLEM_HOP_BONUS_THIRD,
+    GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP, GOLEM_LASER,
+    GOLEM_LASER_DAMAGE, GOLEM_LASER_INTERVAL, GOLEM_LASER_NO_LOS_BONUS, GOLEM_LASER_SPEED,
+    GOLEM_LASER_SPEED_OFFSIDE, GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT,
+    GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF, GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_SPEED, GOLEM_PUNCH_TICKS,
+    GOLEM_SLAM,
 };
 
 use super::skeletron::Parent;
@@ -236,6 +242,11 @@ pub fn head(
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
+    // Past half health it hits harder with the fireball, and starts growing eye-lasers too
+    // (`NPC.cs:31480`, `31504-31564`).
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+    let hurt = health < 0.5;
+
     // The charge runs faster at the ends of its cycle, which is what gives the fireballs their
     // uneven rhythm rather than a metronome.
     let pace = state.pace();
@@ -253,11 +264,49 @@ pub fn head(
         );
         out.shots.push(Shot {
             projectile: GOLEM_FIREBALL,
-            damage: GOLEM_FIREBALL_DAMAGE,
+            damage: if hurt {
+                GOLEM_FIREBALL_DAMAGE_UPGRADED
+            } else {
+                GOLEM_FIREBALL_DAMAGE
+            },
             position: from,
             velocity: aim,
             time_left: 600,
         });
+    }
+
+    if hurt {
+        npc.ai[2] += pace;
+        for step in [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0] {
+            if health < step {
+                npc.ai[2] += pace;
+            }
+        }
+        if !crate::game::ai::can_see(world.tiles, npc, target) {
+            npc.ai[2] += GOLEM_LASER_NO_LOS_BONUS;
+        }
+        if npc.ai[2] >= GOLEM_LASER_INTERVAL {
+            npc.ai[2] = 0.0;
+            // Centred on you it fires a pair; off to one side of the body, just one.
+            let body_width = body.size.0;
+            let centered = target.center.0 >= bx - body_width && target.center.0 <= bx + body_width;
+            let speed = if centered {
+                GOLEM_LASER_SPEED
+            } else {
+                GOLEM_LASER_SPEED_OFFSIDE
+            };
+            let aim = unit((target.center.0 - cx, target.center.1 - cy), speed);
+            let volleys = if centered { 2 } else { 1 };
+            for _ in 0..volleys {
+                out.shots.push(Shot {
+                    projectile: GOLEM_LASER,
+                    damage: GOLEM_LASER_DAMAGE,
+                    position: (cx, cy),
+                    velocity: aim,
+                    time_left: 300,
+                });
+            }
+        }
     }
     out
 }
@@ -408,6 +457,7 @@ pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcom
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
     // It comes through terrain when it cannot see you, and becomes solid again once it can.
     let seen = crate::game::ai::can_see(world.tiles, npc, target);
     if !seen {
@@ -441,13 +491,14 @@ pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcom
         }
     }
 
-    // It keeps spitting fireballs, on the same cycle it used while attached.
+    // It keeps spitting fireballs, on the same cycle it used while attached — but harder
+    // (`NPC.cs:31684`).
     npc.ai[1] += 1.0;
     if npc.ai[1] >= GOLEM_HEAD_CHARGE {
         npc.ai[1] = 0.0;
         out.shots.push(Shot {
             projectile: GOLEM_FIREBALL,
-            damage: GOLEM_FIREBALL_DAMAGE,
+            damage: GOLEM_FREE_FIREBALL_DAMAGE,
             position: (cx, cy + 10.0),
             velocity: unit(
                 (target.center.0 - cx, target.center.1 - cy),
@@ -455,6 +506,44 @@ pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcom
             ),
             time_left: 600,
         });
+    }
+
+    // Eye-lasers, always present on the free head: a slower cadence than the fireball's, one
+    // that quickens as it is hurt and while it cannot see you, and hits harder and faster once
+    // badly hurt (`NPC.cs:31697-31801`).
+    npc.ai[2] += 1.0;
+    for step in GOLEM_FREE_LASER_INTERVAL_STEPS {
+        if health < step {
+            npc.ai[2] += 1.0;
+        }
+    }
+    if !seen {
+        npc.ai[2] += GOLEM_FREE_LASER_NO_LOS_BONUS;
+    }
+    if npc.ai[2] >= GOLEM_FREE_LASER_INTERVAL {
+        npc.ai[2] = 0.0;
+        let mut damage = GOLEM_FREE_LASER_DAMAGE;
+        let mut speed = GOLEM_FREE_LASER_SPEED;
+        for step in GOLEM_FREE_LASER_DAMAGE_STEPS {
+            if health < step {
+                damage += 1;
+                speed += 0.25;
+            }
+        }
+        if !seen {
+            damage = (damage as f32 * GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT) as i32;
+            speed *= GOLEM_FREE_LASER_NO_LOS_SPEED_MULT;
+        }
+        let aim = unit((target.center.0 - cx, target.center.1 - cy), speed);
+        for _ in 0..2 {
+            out.shots.push(Shot {
+                projectile: GOLEM_LASER,
+                damage,
+                position: (cx, cy),
+                velocity: aim,
+                time_left: 300,
+            });
+        }
     }
     out
 }
@@ -673,6 +762,71 @@ mod tests {
         }
         assert!(!shots.is_empty(), "it should have thrown something");
         assert!(shots.iter().all(|s| s.projectile == GOLEM_FIREBALL));
+    }
+
+    /// B8: a healthy attached head has no eye-lasers at all — those only grow in past half health.
+    #[test]
+    fn a_healthy_head_has_no_lasers() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut h = piece(GOLEM_HEAD, 0, 25);
+        let mut lasers = 0;
+        for _ in 0..2000 {
+            lasers += head(&mut h, &w, Some(body_at((0.0, 400.0))), whole())
+                .shots
+                .iter()
+                .filter(|s| s.projectile == GOLEM_LASER)
+                .count();
+        }
+        assert_eq!(lasers, 0, "a healthy head should not have lasers yet");
+    }
+
+    /// B8: past half health the attached head also fires eye-lasers, alongside a harder fireball.
+    #[test]
+    fn a_hurt_head_fires_eye_lasers_and_a_harder_fireball() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut h = piece(GOLEM_HEAD, 0, 25);
+        h.life = h.life_max / 4;
+        let mut lasers = 0;
+        let mut fireball_damage = None;
+        for _ in 0..2000 {
+            let out = head(&mut h, &w, Some(body_at((0.0, 400.0))), whole());
+            for s in &out.shots {
+                if s.projectile == GOLEM_LASER {
+                    lasers += 1;
+                } else if s.projectile == GOLEM_FIREBALL {
+                    fireball_damage = Some(s.damage);
+                }
+            }
+        }
+        assert!(lasers > 0, "a hurt head should fire lasers too");
+        assert_eq!(
+            fireball_damage,
+            Some(GOLEM_FIREBALL_DAMAGE_UPGRADED),
+            "and its fireball should hit harder"
+        );
+    }
+
+    /// B8: the free head fires eye-lasers of its own, on top of its fireball.
+    #[test]
+    fn the_free_head_fires_eye_lasers() {
+        let tiles = floor(30);
+        let player = (0.0, 29.0 * TILE);
+        let w = world(&tiles, Some(player));
+        let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        let mut lasers = 0;
+        for _ in 0..3000 {
+            let out = free_head(&mut h, &w);
+            lasers += out
+                .shots
+                .iter()
+                .filter(|s| s.projectile == GOLEM_LASER)
+                .count();
+            h.position.0 += h.velocity.0;
+            h.position.1 += h.velocity.1;
+        }
+        assert!(lasers > 0, "the free head should have fired lasers");
     }
 
     /// A fist only punches at somebody on its own side.
