@@ -723,6 +723,29 @@ mod tests {
         }
     }
 
+    /// Shimmer reacts with every other liquid, always making Aetherium and always surviving as
+    /// shimmer itself — `Liquid.GetLiquidMergeTypes`'s own shimmer branch, which always runs last
+    /// and so always wins. A side effect of porting the real merge-type cascade for L1 rather than
+    /// a fix of its own (L4, MINOR): the old three-pair `product()` table had no notion of
+    /// shimmer at all.
+    #[test]
+    fn shimmer_reacts_with_everything_into_aetherium() {
+        for other in [Liquid::Water, Liquid::Lava, Liquid::Honey] {
+            let mut cave = Cave::new();
+            let mut liquids = Liquids::default();
+            cave.pour(20, 19, other, FULL);
+            cave.pour(21, 19, Liquid::Shimmer, FULL);
+            liquids.disturb(20, 19);
+            liquids.disturb(21, 19);
+            run(&mut cave, &mut liquids, 40);
+            let made = (19..22)
+                .map(|x| cave.tile(x, 19))
+                .find(|t| t.is_active())
+                .unwrap_or_else(|| panic!("nothing reacted for {other:?}"));
+            assert_eq!(made.block, reaction::AETHERIUM, "{other:?} and shimmer");
+        }
+    }
+
     /// Two of the same kind do not react at all.
     #[test]
     fn like_liquids_do_not_react() {
