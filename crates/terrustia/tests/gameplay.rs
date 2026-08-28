@@ -3126,7 +3126,16 @@ fn per_player_toggle_request(power_id: u16, claimed_player_index: u8, state: boo
 /// All four of Journey mode's time-skip buttons set the clock to exactly the values vanilla's own
 /// `SpawnSkeletron`-adjacent `SkipToTime` calls use (`CreativePowers.cs`'s `StartDayImmediately`/
 /// `StartNoonImmediately`/`StartNightImmediately`/`StartMidnightImmediately`) — the same values
-/// `/time day|noon|night|midnight` already sends, over the same real `SET_TIME` packet.
+/// `/time day|noon|night|midnight` already sends. Real vanilla's own `SkipToTime`
+/// (`Main.cs:66163`) resyncs with `NetMessage.TrySendData(7)`, full `WorldData` — never message id
+/// 18: grepping the whole decompiled tree finds no call to `SendData(18)` anywhere, from any code
+/// path, ever. This test used to expect id 18 (`packets::TimeSet`) instead, matching a bug in
+/// `set_time` rather than real vanilla — a bug a live player watching it fire against a real
+/// client caught by seeing the sky visibly *snap* to a different time rather than keep flowing,
+/// which is exactly what the real client's own hard, non-interpolated receive handler for id 18
+/// does (`MessageBuffer.cs`'s `case 18`, an unconditional `Main.time = reader.ReadInt32()` with no
+/// smoothing at all — a packet real vanilla never sends specifically because no code path ever
+/// needed a client to snap like that).
 #[tokio::test]
 async fn each_journey_time_skip_button_sends_the_right_time_set() {
     let addr = start().await;
@@ -3153,16 +3162,19 @@ async fn each_journey_time_skip_button_sends_the_right_time_set() {
 
         let event = client
             .wait_for(
-                "a time-set packet",
-                |e| matches!(e, Event::Other(f) if f.id == id::SET_TIME),
+                "a world-data resync",
+                |e| matches!(e, Event::Other(f) if f.id == id::WORLD_DATA),
             )
             .await
             .unwrap();
         let Event::Other(f) = event else {
             unreachable!()
         };
-        let day_time = f.payload[0] != 0;
-        let time = i32::from_le_bytes(f.payload[1..5].try_into().unwrap());
+        // `WorldData::write_payload`'s own layout: `time` (i32 LE), then a `day_flags` byte whose
+        // bit 0 is `day_time` (bit 1 blood moon, bit 2 eclipse) — the only two fields this test
+        // needs out of a much larger packet.
+        let time = i32::from_le_bytes(f.payload[0..4].try_into().unwrap());
+        let day_time = f.payload[4] & 0x01 != 0;
         assert_eq!(day_time, expect_day, "power id {power_id}");
         assert_eq!(time, expect_time, "power id {power_id}");
     }

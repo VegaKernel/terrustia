@@ -84,19 +84,6 @@ const TICK: Duration = Duration::from_nanos(16_666_667);
 /// forward progress.
 const SECTION_STREAM_BUDGET: Duration = Duration::from_micros(4_000);
 
-/// How often the world clock is pushed to clients.
-///
-/// A minute, not a second. Vanilla never sends packet 18 at all — nothing in the game's source
-/// calls `SendData(18)` — and keeps clients' clocks right by resending packet 7 whenever something
-/// about the world changes, which on a quiet world is a handful of times an hour. A client runs its
-/// own clock at a known rate between those.
-///
-/// Once a second was three and a quarter kilobytes over a five-minute session to say something a
-/// client already knew. This keeps a correction, because drifting for an hour on nothing but a
-/// client's own arithmetic is a worse failure than a small packet, but at a cadence that costs
-/// nothing worth measuring.
-const TIME_SYNC_TICKS: u64 = 60 * 60;
-
 /// How often the worst tick in the window is reported, when it is worth reporting.
 const TICK_REPORT_EVERY: u64 = 600;
 
@@ -2097,19 +2084,6 @@ impl GameServer {
         self.tick_cultist_tablet();
         lap(&mut cost, Phase::Housing);
 
-        if self.ticks.is_multiple_of(TIME_SYNC_TICKS)
-            && self.players.iter().flatten().any(Player::is_playing)
-        {
-            let time = packets::TimeSet {
-                day_time: self.world.day_time,
-                time: self.world.time,
-                sun_mod_y: 0,
-                moon_mod_y: 0,
-            };
-            if let Ok(frame) = time.encode() {
-                self.broadcast(frame, None);
-            }
-        }
         lap(&mut cost, Phase::Sync);
 
         cost.cpu = clock::Cpu::now().since(cpu_began);
@@ -6333,7 +6307,7 @@ impl GameServer {
                 };
                 match set {
                     Some((day_time, time)) => {
-                        self.set_time(day_time, time)?;
+                        self.set_time(day_time, time);
                         self.announce(&format!("Time set to {argument}."));
                     }
                     None => self.tell(slot, "usage: /time <day|noon|night|midnight>"),
@@ -11492,18 +11466,21 @@ impl GameServer {
     /// pulled out so Journey mode's four time-skip buttons (`StartDayImmediately`/
     /// `StartNoonImmediately`/`StartNightImmediately`/`StartMidnightImmediately`) can share it
     /// rather than re-decide what a client needs to hear about a jumped clock.
-    fn set_time(&mut self, day_time: bool, time: i32) -> terrustia_proto::Result<()> {
+    ///
+    /// Real vanilla's own equivalent, `Main.SkipToTime`, resyncs with `NetMessage.TrySendData(7)`
+    /// — the same `broadcast_world_data` this file's own `skip_to` (the sundial/moondial, right
+    /// above) already uses for an identical jumped clock. This used to build and broadcast a
+    /// `packets::TimeSet` (message id 18) instead, which is wrong on two counts, not just a style
+    /// mismatch: grepping the whole decompiled tree found no call to `SendData(18)` anywhere in
+    /// real vanilla's own source, ever, from any code path — and the real client's own receive
+    /// side for it (`MessageBuffer.cs`'s `case 18`) does a hard, unconditional assignment with no
+    /// interpolation (`Main.dayTime = ...; Main.time = reader.ReadInt32(); ...`), which a real
+    /// player watching this exact bug fire live saw as the sky visibly snapping to a different
+    /// time of day rather than continuing to flow.
+    fn set_time(&mut self, day_time: bool, time: i32) {
         self.world.day_time = day_time;
         self.world.time = time;
-        let frame = packets::TimeSet {
-            day_time,
-            time,
-            sun_mod_y: 0,
-            moon_mod_y: 0,
-        }
-        .encode()?;
-        self.broadcast(frame, None);
-        Ok(())
+        self.broadcast_world_data();
     }
 
     /// `Main.Difficulty`'s own real shape: real vanilla never reads `Main.GameMode` for anything
@@ -11591,7 +11568,7 @@ impl GameServer {
                     _ => None,
                 };
                 if let Some((day_time, time)) = set {
-                    self.set_time(day_time, time)?;
+                    self.set_time(day_time, time);
                 }
             }
             CreativePowerMessage::Toggle(id, enabled) => {
