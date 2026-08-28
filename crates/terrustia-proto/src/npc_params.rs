@@ -2078,8 +2078,11 @@ pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
 pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
 pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
 
-/// How long a Mothron egg takes to hatch, and what it hatches into.
+/// How long a Mothron egg takes to hatch, and what it hatches into. Expert Mode halves the wait
+/// (but also only sets it back once when hit, rather than twice — the two together are not as
+/// lopsided a change as the raw tick counts alone suggest).
 pub const MOTHRON_EGG_TICKS: f32 = 900.0;
+pub const MOTHRON_EGG_TICKS_EXPERT: f32 = 600.0;
 pub const MOTHRON_SPAWN: u16 = 479;
 
 /// How long a stardust cell takes to grow up, and what into.
