@@ -96,7 +96,15 @@ const RULES: &[(&[u16], &[Touch])] = &[
         &[305, 306, 307, 308, 309, 310, 311, 312, 313, 314],
         &BROKEN_ARMOUR_3,
     ),
-    (&[1, 79, 81, 183, 630], &DARKNESS),
+    // `Player.cs:22704`: `(npc.type == 1 && npc.netID == -6) || npc.type == 81 || npc.type == 79
+    // || npc.type == 183 || npc.type == 630`. Type 1 is the *ordinary* Blue Slime — vanilla only
+    // lands Darkness from it when it is specifically the `netID == -6` reskin ("Black Slime",
+    // `NPCID.cs:11059`), a palette variant of the same `type` this project has no netID/reskin
+    // concept for anywhere (`RULES` here, like the rest of this crate, keys everything on
+    // `npc_type` alone). 1 used to be listed unconditionally, so every ordinary Blue Slime landed
+    // Darkness the real one never does; removed rather than left mis-gated, since there is no way
+    // to express "this npc_type, but only this reskin" with what this table can key on.
+    (&[79, 81, 183, 630], &DARKNESS),
     (&[93, 109, 80], &SILENCED),
     (&[527], &SILENCED_2),
     (&[23, 25], &CONFUSED),
@@ -193,6 +201,18 @@ mod tests {
         let mage: Vec<u16> = on_touch(93).map(|r| r.buff).collect();
         assert!(mage.contains(&31), "Silenced");
         assert!(mage.contains(&148), "and Feral Bite in expert");
+    }
+
+    /// The ordinary Blue Slime (type 1) does not land Darkness — only the unmodeled `netID == -6`
+    /// "Black Slime" reskin does in real vanilla, and this table cannot key on netID at all, so
+    /// applying it to every plain Blue Slime (as it used to) is the one direction that is
+    /// definitely wrong.
+    #[test]
+    fn ordinary_blue_slime_does_not_land_darkness() {
+        assert!(
+            !on_touch(1).any(|r| r.buff == 22),
+            "type 1 is the ordinary Blue Slime, not the netID == -6 Black Slime reskin"
+        );
     }
 
     /// Most of the roster leaves nothing, which is what makes the ones that do worth noticing.

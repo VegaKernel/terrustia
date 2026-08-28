@@ -18,9 +18,20 @@ start = chest_cs.index("public static void SetupTravelShop_GetItem(")
 end = chest_cs.index("public static void SetupTravelShop()", start)
 body = chest_cs[start:end]
 
-# `if (playerWithHighestLuck.RollLuck(rarity[N]) == 0 [&& cond...]) { it = ITEM; }`
+# `if ([minimumRarity <= F &&] playerWithHighestLuck.RollLuck(rarity[N]) == 0 [&& cond...])
+#     { it = ITEM; }`
+#
+# Two candidates (Chest.cs:980-987, BlackCounterweight/YellowCounterweight) carry their own
+# leading `minimumRarity <= F &&` guard instead of relying on an enclosing `if (minimumRarity >
+# N) return;` checkpoint — they sit before any such checkpoint in the function, so without their
+# own guard they would be offered no matter how high `minimumRarity` climbs, which is exactly why
+# the old anchored pattern (requiring the match to start at `playerWithHighestLuck`) skipped both
+# of them outright. The optional leading group captures that inline floor directly; every other
+# candidate leaves it unmatched and keeps falling back to the checkpoint-derived floor below,
+# exactly as before.
 pattern = re.compile(
-    r"if \(playerWithHighestLuck\.RollLuck\(rarity\[(\d+)\]\) == 0([^)]*)\)\s*\{\s*it = (\d+);",
+    r"if \((?:minimumRarity <= (\d+) && )?playerWithHighestLuck\.RollLuck\(rarity\[(\d+)\]\) == 0"
+    r"([^)]*)\)\s*\{\s*it = (\d+);",
     re.S,
 )
 # The `minimumRarity` guards partition the chain; track the floor in force at each match.
@@ -39,19 +50,27 @@ CONDITIONS = {
 
 entries = []
 for m in pattern.finditer(body):
-    tier = int(m.group(1))
-    tail = m.group(2)
-    item = int(m.group(3))
+    inline_floor = m.group(1)
+    tier = int(m.group(2))
+    tail = m.group(3)
+    item = int(m.group(4))
     # A nested RollLuck in the tail means a compound roll this table cannot express; skip it and
     # say so rather than emitting something that looks right.
     if "RollLuck" in tail:
         continue
     needs = [flag for src, flag in CONDITIONS.items() if src in tail]
-    # Which minimumRarity floor is in force here.
-    floor = 0
-    for at, value in floors:
-        if at < m.start():
-            floor = value
+    if inline_floor is not None:
+        # This candidate carries its own `minimumRarity <= F &&` guard rather than sitting behind
+        # one of the checkpoints below — trust it directly rather than the checkpoint scan, which
+        # would otherwise credit it with whatever floor happened to precede it in the text (here,
+        # none at all, since both inline-guarded candidates sit before the first checkpoint).
+        floor = int(inline_floor)
+    else:
+        # Which minimumRarity floor is in force here, from the nearest preceding checkpoint.
+        floor = 0
+        for at, value in floors:
+            if at < m.start():
+                floor = value
     entries.append((tier, item, needs, floor))
 
 if len(entries) < 30:
