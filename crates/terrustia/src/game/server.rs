@@ -477,6 +477,13 @@ const BEACH_MARGIN: i32 = 50;
 const PLAYER_HALF_WIDTH: f32 = 10.0;
 const PLAYER_HEIGHT: f32 = 42.0;
 
+/// Whether two `(left, top, right, bottom)` boxes overlap — the same open-interval test as
+/// `Rectangle.Intersects` (touching edges do not count), used to keep a meteor off any player or
+/// NPC.
+fn boxes_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+}
+
 /// The world position of a tile's top-left corner.
 fn tile_corner(x: i16, y: i16) -> (f32, f32) {
     (
@@ -11292,10 +11299,21 @@ impl GameServer {
 
     /// Bring a meteor down somewhere out of the way, and tell everyone it happened.
     fn land_meteor(&mut self) {
-        let landed = {
-            let world = &mut self.world;
-            crate::world::meteor::drop(world, &mut self.rng)
-        };
+        // Vanilla refuses a strike whose 35-tile box overlaps any player's spawn-safe zone or any
+        // active NPC (`WorldGen.cs:6324-6345`) — a meteor should not bury the player who summoned
+        // it, or a town. The boxes are gathered up front because the drop borrows the world and the
+        // rng, and the refusal closure must not also reach back into `self`.
+        let blockers = self.meteor_entity_boxes();
+        let landed = crate::world::meteor::drop_checked(&mut self.world, &mut self.rng, |x, y| {
+            // The crater's own box, in world pixels: `num * 2 * 16` on a side, `num == 35`.
+            let strike = (
+                ((x - 35) * 16) as f32,
+                ((y - 35) * 16) as f32,
+                ((x + 35) * 16) as f32,
+                ((y + 35) * 16) as f32,
+            );
+            blockers.iter().any(|&b| boxes_overlap(strike, b))
+        });
         let Some((x, y)) = landed else {
             debug!("nowhere for a meteor to land");
             return;
@@ -11303,6 +11321,40 @@ impl GameServer {
         self.announce("A meteorite has landed!");
         info!(x, y, "meteorite landed");
         self.push_region(x, y, METEOR_REACH);
+    }
+
+    /// Every playing player's spawn-safe rectangle and every active NPC's hitbox, in world pixels
+    /// as `(left, top, right, bottom)` — the boxes a meteor strike is tested against
+    /// (`WorldGen.cs:6324-6345`). A player's box is the on-screen spawn area (`NPC.sWidth`/`sHeight`)
+    /// widened by `NPC.safeRangeX`/`Y`, centred on the player; an NPC's is simply its own hitbox.
+    fn meteor_entity_boxes(&self) -> Vec<(f32, f32, f32, f32)> {
+        // `NPC.sWidth => 1920`, `sHeight => 1200`, and `safeRangeX = (int)(sWidth/16 * 0.52) = 62`,
+        // `safeRangeY = (int)(sHeight/16 * 0.52) = 39`.
+        const S_WIDTH: f32 = 1920.0;
+        const S_HEIGHT: f32 = 1200.0;
+        const SAFE_X: f32 = 62.0;
+        const SAFE_Y: f32 = 39.0;
+
+        let mut boxes = Vec::new();
+        for player in self.players.iter().flatten() {
+            if !player.is_playing() {
+                continue;
+            }
+            let (px, py) = player.position;
+            let left = px + PLAYER_HALF_WIDTH - S_WIDTH / 2.0 - SAFE_X;
+            let top = py + PLAYER_HEIGHT / 2.0 - S_HEIGHT / 2.0 - SAFE_Y;
+            boxes.push((
+                left,
+                top,
+                left + S_WIDTH + SAFE_X * 2.0,
+                top + S_HEIGHT + SAFE_Y * 2.0,
+            ));
+        }
+        for (_, npc) in self.npcs.iter() {
+            let (nx, ny) = npc.position;
+            boxes.push((nx, ny, nx + npc.width(), ny + npc.height()));
+        }
+        boxes
     }
 
     /// Push a square region of the world at every client.
@@ -13188,6 +13240,68 @@ mod wired_mines_and_doors {
             found[0].1,
             (50.0 * 16.0 + 8.0, 50.0 * 16.0 + 8.0),
             "dropped at the cut tile's own centre"
+        );
+    }
+}
+
+/// A meteor refuses a landing site that overlaps a player or an NPC — the `blocked_by_entity`
+/// closure `land_meteor` now feeds `meteor::drop_checked`, which the pre-fix code (a bare
+/// `meteor::drop`) had no way to express, so a meteor could bury the player who summoned it.
+#[cfg(test)]
+mod meteor_entity_safety {
+    use super::*;
+    use crate::config::Config;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(400, 300, "meteor probe"),
+        )
+    }
+
+    /// The open-interval overlap: a shared edge is not an overlap.
+    #[test]
+    fn touching_boxes_do_not_count_as_overlap() {
+        assert!(boxes_overlap((0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 15.0, 15.0)));
+        assert!(!boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (10.0, 0.0, 20.0, 10.0)
+        ));
+        assert!(!boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (20.0, 20.0, 30.0, 30.0)
+        ));
+    }
+
+    #[test]
+    fn a_meteor_will_not_land_on_an_npc() {
+        let mut server = server();
+        let at = (2000.0, 2000.0);
+        server.npcs.spawn(1, at).expect("a slime should spawn");
+
+        let boxes = server.meteor_entity_boxes();
+        assert_eq!(boxes.len(), 1, "one NPC, no players");
+        let npc_box = boxes[0];
+        assert_eq!((npc_box.0, npc_box.1), at, "the box starts at the NPC");
+
+        // The 35-tile strike box centred on the slime's tile overlaps it and is refused...
+        let (tx, ty) = ((at.0 / 16.0) as i32, (at.1 / 16.0) as i32);
+        let strike = |cx: i32, cy: i32| {
+            (
+                ((cx - 35) * 16) as f32,
+                ((cy - 35) * 16) as f32,
+                ((cx + 35) * 16) as f32,
+                ((cy + 35) * 16) as f32,
+            )
+        };
+        assert!(
+            boxes_overlap(strike(tx, ty), npc_box),
+            "a strike on the slime is blocked"
+        );
+        // ...but one a couple of hundred tiles away is fine.
+        assert!(
+            !boxes_overlap(strike(tx + 200, ty), npc_box),
+            "a strike far from the slime is allowed"
         );
     }
 }
