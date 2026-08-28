@@ -360,12 +360,32 @@ fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &m
     }
 }
 
+/// The four directions a step of the flood can take, numbered the way vanilla's own `HitWire`
+/// does (`Wiring.cs:863-885`): `0` down, `1` up, `2` right, `3` left. The numbering itself is
+/// only meaningful to [`junction_lets_through`] — nothing else here cares which number is which,
+/// only that leaving in direction `k` and arriving from it are the same `k`.
+const STEP: [(i32, i32); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
 /// Flood the current outward from a set of seeds and act on everything it reaches.
+///
+/// Every step remembers which of the four directions it *arrived* by, not just where it is — a
+/// junction box's own frame decides which of the four is allowed to leave again, and without that
+/// the box cannot do the one thing it exists for (see [`junction_lets_through`]).
+///
+/// **Simplified relative to vanilla's own flood**, and worth knowing about: `HitWire` tracks a
+/// reference count per tile (`_toProcess`) that lets a tile already queued be reached again from a
+/// second direction before it is finally visited, which matters for exactly how a wire diamond or
+/// a loop back into a junction box settles. This keeps the simpler model the rest of the module
+/// already used before junction boxes existed — a tile visited once by any direction is not
+/// revisited by another — which is right for what a junction box is *for* (keeping two ordinary
+/// crossing runs apart) and does not attempt the rarer shapes vanilla's ref-counting also handles.
 fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: &mut Fired) {
     let mut seen: HashSet<(i32, i32)> = seeds.iter().copied().collect();
-    let mut queue: Vec<(i32, i32)> = seeds;
+    // Every seed is treated as having "arrived" from direction 0, exactly as vanilla's own
+    // `_wireDirectionList.PushBack(0)` seeds every tile the flood starts from.
+    let mut queue: Vec<(i32, i32, u8)> = seeds.into_iter().map(|(x, y)| (x, y, 0)).collect();
 
-    while let Some((x, y)) = queue.pop() {
+    while let Some((x, y, arrived_via)) = queue.pop() {
         if seen.len() > MAX_CIRCUIT {
             out.truncated = true;
             break;
@@ -373,7 +393,16 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
         out.reached += 1;
         act(world, x, y, out);
 
-        for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+        // A junction box is never itself acted on (no case for it in `act`), so its frame here is
+        // still whatever it was before the line above.
+        let here = world.tile(x, y);
+        for (leaving_via, &(dx, dy)) in STEP.iter().enumerate() {
+            let leaving_via = leaving_via as u8;
+            if here.block == JUNCTION_BOX
+                && !junction_lets_through(here.frame_x, arrived_via, leaving_via)
+            {
+                continue;
+            }
             let (nx, ny) = (x + dx, y + dy);
             if nx < 2 || ny < 2 || nx >= world.width() - 2 || ny >= world.height() - 2 {
                 continue;
@@ -381,8 +410,40 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
             if !colour.on(world.tile(nx, ny)) || !seen.insert((nx, ny)) {
                 continue;
             }
-            queue.push((nx, ny));
+            queue.push((nx, ny, leaving_via));
         }
+    }
+}
+
+/// The junction box, `TileID.WirePipe` (`424`). Its three frame styles are three different pairs
+/// of sides wired together, which is what lets two circuits cross the same tile without merging
+/// into one — the whole reason anybody places one. Before this the flood had no notion of it at
+/// all, so a junction box was simply open ground: every wire crossing through the same tile joined
+/// into a single circuit, which is the opposite of what the piece is for.
+const JUNCTION_BOX: u16 = 424;
+
+/// Whether current arriving at a junction box from `arrived_via` may leave again via
+/// `leaving_via` — transcribed from `Wiring.cs:900-928`'s own three-armed `switch` on
+/// `frameX / 18`.
+///
+/// Style 0 (the straight frame) only ever lets current leave the way it was already travelling, so
+/// a vertical run and a horizontal run cross the same tile without touching each other. Styles 1
+/// and 2 are the two elbow frames: each is a pair of turns that, again, do not touch each other —
+/// style 1 pairs *down* with *left* and *up* with *right*; style 2 pairs *down* with *right* and
+/// *up* with *left*. A style outside 0..=2 (there is none in the real game, but a frame is just a
+/// number) lets everything through rather than trapping a circuit that reaches it.
+fn junction_lets_through(frame_x: i16, arrived_via: u8, leaving_via: u8) -> bool {
+    match frame_x / 18 {
+        0 => leaving_via == arrived_via,
+        1 => matches!(
+            (arrived_via, leaving_via),
+            (0, 3) | (3, 0) | (1, 2) | (2, 1)
+        ),
+        2 => matches!(
+            (arrived_via, leaving_via),
+            (0, 2) | (2, 0) | (1, 3) | (3, 1)
+        ),
+        _ => true,
     }
 }
 
@@ -1491,6 +1552,114 @@ mod tests {
         assert!(
             board.tile(102, 100).flags.has(TileFlags::ACTUATED),
             "the current should have passed through the stone"
+        );
+    }
+
+    /// A straight junction box (frame style 0) lets a horizontal run and a vertical run of the
+    /// *same* colour cross the same tile without joining into one circuit — the whole reason
+    /// anybody places one.
+    ///
+    /// Fails on the code before this fix: with no routing at all, the flood left every direction
+    /// open at the junction box, so hitting either switch actuated *both* blocks instead of only
+    /// the one on its own line.
+    #[test]
+    fn a_straight_junction_box_keeps_two_crossing_circuits_apart() {
+        let mut board = Board(HashMap::new());
+        // A horizontal line: switch A at x=80, through the box at (100,100), to a block at x=120.
+        board.set_tile(80, 100, wired(136, Wire::Red));
+        for x in 81..=120 {
+            if x == 100 {
+                continue;
+            }
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(120, 100, actuated(Wire::Red));
+        // A vertical line: switch B at y=80, through the same box, to a block at y=120.
+        board.set_tile(100, 80, wired(136, Wire::Red));
+        for y in 81..=120 {
+            if y == 100 {
+                continue;
+            }
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        board.set_tile(100, 120, actuated(Wire::Red));
+        // The box itself, straight style, carrying the colour both lines share.
+        let mut junction = wired(JUNCTION_BOX, Wire::Red);
+        junction.frame_x = 0;
+        board.set_tile(100, 100, junction);
+
+        hit_switch(&mut board, 80, 100);
+        assert!(
+            board.tile(120, 100).flags.has(TileFlags::ACTUATED),
+            "switch A's own line should have run"
+        );
+        assert!(
+            !board.tile(100, 120).flags.has(TileFlags::ACTUATED),
+            "but not have leaked into the crossing vertical line"
+        );
+
+        hit_switch(&mut board, 100, 80);
+        assert!(
+            board.tile(100, 120).flags.has(TileFlags::ACTUATED),
+            "switch B's own line should have run"
+        );
+    }
+
+    /// An elbow junction box (frame style 1) connects exactly one pair of sides — arriving from
+    /// above and leaving to the left, here — and nothing else: not straight through, not to the
+    /// opposite elbow.
+    ///
+    /// Fails on the code before this fix, which had no routing at all: the current would have
+    /// reached every one of the three other blocks, not only the one the elbow actually connects.
+    #[test]
+    fn an_elbow_junction_box_connects_only_its_own_pair_of_sides() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 80, wired(136, Wire::Red));
+        for y in 81..100 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        let mut junction = wired(JUNCTION_BOX, Wire::Red);
+        junction.frame_x = 18; // style 1: down pairs with left.
+        board.set_tile(100, 100, junction);
+        // The three sides that should each carry their own separate wire and block: left (the
+        // one this style actually connects to "down"), right, and straight on down.
+        for x in 90..100 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(90, 100, actuated(Wire::Red));
+        for x in 101..110 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(110, 100, actuated(Wire::Red));
+        for y in 101..110 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        board.set_tile(100, 110, actuated(Wire::Red));
+
+        hit_switch(&mut board, 100, 80);
+        assert!(
+            board.tile(90, 100).flags.has(TileFlags::ACTUATED),
+            "down should connect to left, the pair this style is"
+        );
+        assert!(
+            !board.tile(110, 100).flags.has(TileFlags::ACTUATED),
+            "but not to right"
+        );
+        assert!(
+            !board.tile(100, 110).flags.has(TileFlags::ACTUATED),
+            "nor straight on down"
         );
     }
 
