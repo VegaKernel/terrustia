@@ -3027,15 +3027,27 @@ pub struct Twin {
     pub dash_ticks: f32,
     pub dash_brake_at: f32,
     pub dashes: f32,
+    /// The multiplier applied to velocity once braking starts. Retinazer's dash barely bleeds
+    /// speed (0.96); Spazmatism's sheds it much faster (0.9).
+    pub dash_decay: f32,
+    /// Cumulative expert-only speed bumps added to the dash once life drops under each listed
+    /// fraction. Empty for Retinazer, whose dash speed is a flat expert value; Spazmatism's
+    /// climbs from 13 toward ~15.8 as it is worn down (`NPC.cs:27410-27433`).
+    pub dash_speed_ramp: &'static [(f32, f32)],
     /// Its ranged attack in the first form.
     pub shot: u16,
     pub shot_damage: i32,
     pub shot_speed: f32,
     pub shot_speed_expert: f32,
     pub shot_charge: f32,
+    /// How far ahead of the eye the shot is spawned, and how much its aim is scattered.
+    pub shot_lead: f32,
+    pub shot_spread_scale: f32,
     /// Whether it only shoots from above and close, as Retinazer does.
     pub shoots_only_from_above: bool,
-    /// The second form: where it holds, how fast, and what it throws.
+    /// The second form: where it holds, how fast, and what it throws (Retinazer) or breathes
+    /// (Spazmatism's cursed-inferno flame, gated the same way through `second_shot_charge` but
+    /// with a much lower threshold).
     pub second_station: (f32, f32),
     pub second_speed: f32,
     pub second_accel: f32,
@@ -3047,12 +3059,21 @@ pub struct Twin {
     pub second_shot_speed: f32,
     pub second_shot_speed_expert: f32,
     pub second_shot_charge: f32,
-    /// The strafing sub-state of the second form.
+    /// The strafing sub-state of Retinazer's second form. Unused by Spazmatism, whose second
+    /// form dashes instead (`second_dash_*` below).
     pub strafe_offset: f32,
     pub strafe_speed: f32,
     pub strafe_accel: f32,
     pub strafe_speed_expert: f32,
     pub strafe_accel_expert: f32,
+    /// Spazmatism's second-form dash: structurally the same loop as the first form's, but with
+    /// its own speed, timing and decay (`NPC.cs:27733-27795`). Zero and unused for Retinazer.
+    pub second_dash_speed: f32,
+    pub second_dash_speed_expert: f32,
+    pub second_dash_ticks: f32,
+    pub second_dash_brake_at: f32,
+    pub second_dash_decay: f32,
+    pub second_dashes: f32,
 }
 
 pub const RETINAZER: u16 = 125;
@@ -3065,16 +3086,22 @@ pub const RETINAZER_TWIN: Twin = Twin {
     speed_expert: 8.25,
     accel_expert: 0.115,
     hover_ticks: 600.0,
-    dash_speed: 14.0,
-    dash_speed_expert: 17.0,
+    // 12/15, not 14/17: the +2 only applies under getGoodWorld (`NPC.cs:26806-26814`), which is
+    // out of scope here.
+    dash_speed: 12.0,
+    dash_speed_expert: 15.0,
     dash_ticks: 70.0,
     dash_brake_at: 25.0,
     dashes: 4.0,
+    dash_decay: 0.96,
+    dash_speed_ramp: &[],
     shot: 83,
     shot_damage: 20,
     shot_speed: 9.0,
     shot_speed_expert: 10.5,
     shot_charge: 60.0,
+    shot_lead: 15.0,
+    shot_spread_scale: 0.08,
     shoots_only_from_above: true,
     second_station: (0.0, -300.0),
     second_speed: 8.0,
@@ -3092,42 +3119,69 @@ pub const RETINAZER_TWIN: Twin = Twin {
     strafe_accel: 0.2,
     strafe_speed_expert: 9.5,
     strafe_accel_expert: 0.25,
+    second_dash_speed: 0.0,
+    second_dash_speed_expert: 0.0,
+    second_dash_ticks: 0.0,
+    second_dash_brake_at: 0.0,
+    second_dash_decay: 0.0,
+    second_dashes: 0.0,
 };
 
 pub const SPAZMATISM_TWIN: Twin = Twin {
+    // Holds level with the player at 400px, not above (`NPC.cs:27289-27291`).
     station: (400.0, 0.0),
     speed: 12.0,
     accel: 0.4,
     speed_expert: 12.0,
     accel_expert: 0.4,
     hover_ticks: 600.0,
-    dash_speed: 14.0,
-    dash_speed_expert: 17.0,
-    dash_ticks: 70.0,
-    dash_brake_at: 25.0,
-    dashes: 4.0,
+    // Its own dash, not Retinazer's: 10 short 42-tick dashes braking hard at tick 8, decaying
+    // 0.9/tick, base speed 13 climbing toward ~15.8 in expert as it takes damage
+    // (`NPC.cs:27407-27483`).
+    dash_speed: 13.0,
+    dash_speed_expert: 13.0,
+    dash_ticks: 42.0,
+    dash_brake_at: 8.0,
+    dashes: 10.0,
+    dash_decay: 0.9,
+    dash_speed_ramp: &[(0.9, 0.5), (0.8, 0.5), (0.7, 0.55), (0.6, 0.6), (0.5, 0.65)],
     shot: 96,
     shot_damage: 25,
     shot_speed: 12.0,
-    shot_speed_expert: 13.0,
+    shot_speed_expert: 14.0,
     shot_charge: 60.0,
+    shot_lead: 4.0,
+    shot_spread_scale: 0.05,
     shoots_only_from_above: false,
-    second_station: (0.0, -300.0),
-    second_speed: 8.0,
-    second_accel: 0.15,
-    second_speed_expert: 9.5,
-    second_accel_expert: 0.175,
-    second_hover_ticks: 300.0,
+    // Its second form is a close-range flamethrower, not Retinazer's hover-and-throw: station at
+    // player.X +-180 / player.Y, speed 4, cursed-inferno flame (proj 101) gated by
+    // `second_shot_charge` at localAI[1] > 8 instead of 180 — roughly twenty times faster
+    // (`NPC.cs:27558-27732`).
+    second_station: (180.0, 0.0),
+    second_speed: 4.0,
+    second_accel: 0.1,
+    second_speed_expert: 4.0,
+    second_accel_expert: 0.1,
+    second_hover_ticks: 400.0,
     second_shot: 101,
     second_shot_damage: 30,
-    second_shot_speed: 8.5,
-    second_shot_speed_expert: 10.0,
-    second_shot_charge: 180.0,
-    strafe_offset: 340.0,
-    strafe_speed: 8.0,
-    strafe_accel: 0.2,
-    strafe_speed_expert: 9.5,
-    strafe_accel_expert: 0.25,
+    second_shot_speed: 6.0,
+    second_shot_speed_expert: 6.0,
+    second_shot_charge: 8.0,
+    // Unused: Spazmatism's second form dashes instead of strafing.
+    strafe_offset: 0.0,
+    strafe_speed: 0.0,
+    strafe_accel: 0.0,
+    strafe_speed_expert: 0.0,
+    strafe_accel_expert: 0.0,
+    // Six dashes of 80 ticks, braking at 50, decaying 0.93/tick, at 14 (16.5 in expert)
+    // (`NPC.cs:27733-27795`).
+    second_dash_speed: 14.0,
+    second_dash_speed_expert: 16.5,
+    second_dash_ticks: 80.0,
+    second_dash_brake_at: 50.0,
+    second_dash_decay: 0.93,
+    second_dashes: 6.0,
 };
 
 /// Below this fraction of its health an eye transforms.
@@ -3141,10 +3195,10 @@ pub const TWIN_SECOND_DAMAGE: f32 = 1.5;
 pub const TWIN_SECOND_DEFENSE: i32 = 10;
 /// Its first-form shot only comes when it is above you and within this far.
 pub const TWIN_SHOT_RANGE: f32 = 400.0;
-/// Shots are spawned fifteen ticks ahead of the eye, and scattered by this much.
+/// The lead on the second form's heavy throw (both eyes use the same fifteen-tick lead there;
+/// the first-form shot's lead and scatter are per-eye, in the `Twin` table).
 pub const TWIN_SHOT_LEAD: f32 = 15.0;
 pub const TWIN_SHOT_SPREAD: i32 = 40;
-pub const TWIN_SHOT_SPREAD_SCALE: f32 = 0.08;
 /// Daylight sends both of them home.
 pub const TWIN_FLEE_CLIMB: f32 = -0.04;
 
