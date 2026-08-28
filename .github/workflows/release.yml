@@ -85,7 +85,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/*.{tar.gz,zip}
+          # @actions/glob (what upload-artifact uses) does not brace-expand, so
+          # `dist/*.{tar.gz,zip}` matches nothing and, with if-no-files-found: error, fails every
+          # build. One pattern per line is the supported form.
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: error
 
   publish:
