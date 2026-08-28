@@ -3878,6 +3878,44 @@ pub const QUEEN_PACE: [(f32, f32, f32); 4] = [
     (0.25, 0.8, 11.0),
 ];
 
+/// Mode 0's forward mist: fired while above the player and either close or already mid-volley
+/// (`NPC.cs:33751-33796`). The interval already carries vanilla's `+1`; the tick counter here
+/// advances by a flat one a tick rather than vanilla's `rand(1..4)`, since this routine has no
+/// source of randomness available to it without threading one in from outside its lane — the
+/// mode-switch thresholds below inherit the same simplification.
+pub const ICE_QUEEN_MIST: u16 = 348;
+pub const ICE_QUEEN_MIST_DAMAGE: i32 = 42;
+pub const ICE_QUEEN_MIST_INTERVAL: [(f32, f32); 4] =
+    [(1.0, 14.0), (0.75, 13.0), (0.5, 12.0), (0.25, 11.0)];
+pub const ICE_QUEEN_MIST_SPEED: [(f32, f32); 4] =
+    [(1.0, 6.0), (0.75, 7.0), (0.5, 8.0), (0.25, 9.0)];
+pub const ICE_QUEEN_MIST_RANGE: f32 = 500.0;
+
+/// Mode 1: a gentler pursuit that drops ice shards straight down instead of sweeping and firing
+/// forward (`NPC.cs:33811-33919`). Vanilla has a third mode (a random scatter shot) reached the
+/// same way; not implemented here; see `ice_queen`'s doc comment.
+pub const ICE_QUEEN_SHARD: u16 = 349;
+pub const ICE_QUEEN_SHARD_DAMAGE: i32 = 37;
+/// (accel, cap) — already carrying vanilla's flat `-0.05`/`-1` adjustments.
+pub const ICE_QUEEN_MODE2_PACE: [(f32, f32, f32); 4] = [
+    (1.0, 0.10, 6.0),
+    (0.75, 0.12, 7.0),
+    (0.5, 0.15, 8.0),
+    (0.25, 0.20, 9.0),
+];
+/// The shard interval, already carrying vanilla's flat `+3`.
+pub const ICE_QUEEN_SHARD_INTERVAL: [(f32, f32); 5] = [
+    (1.0, 18.0),
+    (0.75, 17.0),
+    (0.5, 15.0),
+    (0.25, 13.0),
+    (0.1, 11.0),
+];
+
+/// How long each mode runs before switching to the other (`NPC.cs:33804-33805`, `33913-33917`).
+pub const ICE_QUEEN_MODE0_AT: f32 = 800.0;
+pub const ICE_QUEEN_MODE1_AT: f32 = 600.0;
+
 /// Santa-NK1 walks and shoots, faster at every quarter of its health.
 pub const SANTA_WALK: [(f32, f32); 4] = [(1.0, 2.0), (0.75, 3.0), (0.5, 4.0), (0.25, 5.0)];
 pub const SANTA_WAIT: f32 = 300.0;
