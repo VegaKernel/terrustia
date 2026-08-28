@@ -72,13 +72,52 @@ impl Wire {
 ///
 /// A lever and a switch remember their state and flip it; a pressure plate and the rest simply
 /// fire. Anything else is not a trigger and hitting it does nothing at all.
+///
+/// `HitSwitch` (`Wiring.cs:259`) handles several more tiles than the ones that flood a circuit in
+/// the ordinary way, which is why they are listed here even though [`hit_switch`]'s own handling
+/// of them is bespoke rather than a plain [`run_from`]:
+/// * [`LEVER`] and [`DETONATOR`] are two tiles wide and flip their *own* frame — both cells of it
+///   — before flooding from the pair, rather than flooding from the clicked tile alone.
+/// * [`FAKE_CONTAINER`] and [`FAKE_CONTAINER2`] are a trapped chest's real footprint, found the
+///   same way, but nothing about them changes: they only relay the click into a flood.
+/// * [`LAND_MINE`] and [`GEYSER`] do not flood at all when clicked directly — they fire on the
+///   spot, the same as a wire reaching one does.
 pub fn is_trigger(block: u16) -> bool {
     matches!(
         block,
         // Switch, lever, a track switch, the pressure plates, and the Party Monolith.
-        135 | 136 | 144 | MINECART_TRACK | 423 | 428 | 440 | 442 | 476 | PARTY_MONOLITH
+        135 | 136
+            | 144
+            | MINECART_TRACK
+            | 423
+            | 428
+            | 440
+            | 442
+            | 476
+            | PARTY_MONOLITH
+            | LEVER
+            | DETONATOR
+            | FAKE_CONTAINER
+            | FAKE_CONTAINER2
+            | LAND_MINE
+            | GEYSER
     )
 }
+
+/// `TileID.Lever` — a switch two tiles wide, whose own frame remembers which way it is thrown
+/// rather than using `frameY` the way [`flips`]'s tiles do. See [`hit_switch`]'s own case for it.
+const LEVER: u16 = 132;
+/// `TileID.Detonator` — clicked exactly like a [`LEVER`]; the only difference vanilla makes is a
+/// cooldown record (`CheckMech`) this project has no use for, since nothing here reads it back.
+const DETONATOR: u16 = 411;
+/// `TileID.FakeContainers` — a chest that is really a trap, styled to look ordinary. Clicking it
+/// finds its true footprint and floods from there; nothing about the chest itself changes.
+const FAKE_CONTAINER: u16 = 441;
+/// `TileID.FakeContainers2`, the other trapped-chest style, found and handled the same way.
+const FAKE_CONTAINER2: u16 = 468;
+/// `TileID.LandMine` — explodes the instant it is hit, whether by a click or by a circuit reaching
+/// it; it is never itself a thing wired to something else the way a switch is.
+const LAND_MINE: u16 = 210;
 
 /// Whether hitting this trigger flips a remembered state rather than only firing.
 fn flips(block: u16) -> bool {
@@ -118,6 +157,13 @@ pub struct Fired {
     /// Kept apart from `traps`: a mine is tile 141, not 137, and detonating is not a shot, so it
     /// cannot go through [`trap_shot`] without that function guessing at a kind that isn't there.
     pub mines: Vec<(i32, i32)>,
+    /// Buried land mines that went off, whether from a direct click or a circuit reaching one.
+    ///
+    /// Kept apart from `mines`: a land mine (tile 210) is a different tile from the wired
+    /// Explosives (141) `mines` reports, has already been cleared from the world by the time it is
+    /// listed here (`ExplodeMine`'s own `KillTile`), and throws a different projectile at a
+    /// different damage — the caller needs to tell the two apart to spawn the right one.
+    pub land_mines: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
     /// The first two distinct teleporters the current reached, which are the pair it joins.
@@ -162,6 +208,25 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         return out;
     }
 
+    // A land mine explodes the instant it is hit — `ExplodeMine` (`Wiring.cs:3087`), which is a
+    // `KillTile` and a projectile, not a circuit. No wire is involved when it is clicked directly,
+    // so this returns before ever reaching `run_from`.
+    if tile.block == LAND_MINE {
+        world.set_tile(x, y, Tile::AIR);
+        out.changed.push((x, y));
+        out.land_mines.push((x, y));
+        return out;
+    }
+
+    // A geyser trap fires the instant it is hit too (`GeyserTrap`, called directly from
+    // `HitSwitch`'s own `case 443`) — reported the same way a wire reaching one is (`act`'s own
+    // `TRAPS | GEYSER` case), so the caller's cooldown and projectile logic does not need to know
+    // which path found it.
+    if tile.block == GEYSER {
+        out.traps.push((x, y));
+        return out;
+    }
+
     // A timer hit by hand is only switched on or off. It does not run its circuit there and then
     // — that is what it will do on its own, on its own schedule, from now on.
     if tile.block == TIMER {
@@ -185,6 +250,35 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         out.changed.push((x, y));
     }
 
+    // A Lever or a Detonator is two tiles wide and remembers its own state in `frameX`, both
+    // cells of it, rather than in `frameY` the way a Switch does. `Wiring.cs:345-377`: find the
+    // pair's own anchor from whichever half was clicked, flip every cell of it that is really a
+    // Lever or a Detonator (the 2x2 scan can land on a neighbour that is neither), and flood from
+    // the pair rather than from the tile the player happened to click.
+    if matches!(tile.block, LEVER | DETONATOR) {
+        let (ax, ay, delta) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
+        for k in ax..ax + 2 {
+            for l in ay..ay + 2 {
+                let mut cell = world.tile(k, l);
+                if matches!(cell.block, LEVER | DETONATOR) {
+                    cell.frame_x += delta;
+                    world.set_tile(k, l, cell);
+                    out.changed.push((k, l));
+                }
+            }
+        }
+        run_from(world, ax, ay, 2, 2, &mut out);
+        return out;
+    }
+
+    // A trapped chest is found the same way a Lever is, but nothing about the chest changes —
+    // `Wiring.cs:312-325` only ever floods from its real footprint.
+    if matches!(tile.block, FAKE_CONTAINER | FAKE_CONTAINER2) {
+        let (ax, ay, _) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
+        run_from(world, ax, ay, 2, 2, &mut out);
+        return out;
+    }
+
     // A Party Monolith has no frame of its own to flip — the toggle is the world-level state a
     // direct click reaches immediately, matching `Player.cs`'s own click branch rather than
     // needing the flood below to reach it the way a wire-triggered one does.
@@ -195,6 +289,31 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
     let (w, h) = footprint(tile.block);
     run_from(world, x, y, w, h, &mut out);
     out
+}
+
+/// Find a Lever's, a Detonator's or a trapped chest's real footprint from whichever cell of it was
+/// clicked, and — for the two that flip a frame — which way to flip it.
+///
+/// `Wiring.cs`'s own formula (`345-359` for the Lever/Detonator pair, `312-322` for a trapped
+/// chest, identical but for the frame-flip step the chest never does): the clicked cell's own
+/// column within the pair falls out of `frameX / 18`, taken negative and wrapped to `-1..=0` by a
+/// modulo 4 that never actually reaches 4 in practice — a real two-column sprite only ever stores
+/// `frameX` of `0`, `18` (off) or `36`, `54` (on) — so this recovers "which half" and "off or on"
+/// in the same step: a clicked right-hand cell (`frameX` `18`/`54`) yields `-1`, wrapping the
+/// anchor one tile left; a clicked "on" cell (`frameX` `36`/`54`) yields `-2`/`-3`, which the
+/// `< -1` branch corrects back to `0`/`-1` while also flipping the flip direction negative, so a
+/// second click turns the pair back off. The row offset has no such wrap: a chest or a Detonator
+/// with a second row stacked underneath needs only the plain `frameY / 18`.
+fn switch_anchor(frame_x: i16, frame_y: i16, x: i32, y: i32) -> (i32, i32, i16) {
+    let mut dx = -(i32::from(frame_x) / 18);
+    let mut delta: i16 = 36;
+    dx %= 4;
+    if dx < -1 {
+        dx += 2;
+        delta = -36;
+    }
+    let dy = -(i32::from(frame_y) / 18);
+    (x + dx, y + dy, delta)
 }
 
 /// Run whatever is connected to a tile, without it having to be something a player can hit.
@@ -373,6 +492,18 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     }
     if tile.is_active() && tile.block == EXPLOSIVES {
         out.mines.push((x, y));
+    }
+    // A land mine a circuit reaches explodes exactly as one that is clicked directly does
+    // (`Wiring.cs`'s own per-tile dispatch, `case 210: ExplodeMine(i, j);` — the same call
+    // `hit_switch`'s own `LAND_MINE` case makes).
+    if tile.is_active() && tile.block == LAND_MINE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        world.set_tile(x, y, Tile::AIR);
+        out.changed.push((x, y));
+        out.land_mines.push((x, y));
+        return;
     }
     if tile.is_active() && tile.block == TELEPORTER {
         // A teleporter is three tiles wide and the anchor is its left one. Only the first two
@@ -1200,6 +1331,141 @@ mod tests {
         hit_switch(&mut board, 100, 100);
         assert!(board.tile(101, 100).flags.has(TileFlags::ACTUATED), "red");
         assert!(board.tile(100, 101).flags.has(TileFlags::ACTUATED), "blue");
+    }
+
+    /// A real Lever (`TileID.Lever`, 132) is two tiles wide and flips *both* halves of its own
+    /// frame before flooding from the pair — `Wiring.cs:345-377`, a different mechanism from the
+    /// single-tile `frameY` flip a Switch (136) uses.
+    ///
+    /// Fails on the code before this fix: `is_trigger` did not recognise 132 at all, so
+    /// `hit_switch` returned immediately without touching the lever's frame or the actuator it is
+    /// wired to — "a Lever currently does NOTHING", as the audit finding put it.
+    #[test]
+    fn a_lever_flips_both_halves_and_actuates() {
+        let mut board = Board(HashMap::new());
+        let mut left = Tile::framed(LEVER, 0, 0);
+        left.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(100, 100, left);
+        let mut right = Tile::framed(LEVER, 18, 0);
+        right.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(101, 100, right);
+        for x in 102..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, actuated(Wire::Red));
+
+        // Click the right-hand half; the anchor should still be found at the left one.
+        hit_switch(&mut board, 101, 100);
+        assert_eq!(board.tile(100, 100).frame_x, 36, "left half flipped on");
+        assert_eq!(board.tile(101, 100).frame_x, 54, "right half flipped on");
+        assert!(
+            board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the circuit it starts should have run"
+        );
+
+        // Click it again, from the same half, and it flips back off.
+        hit_switch(&mut board, 101, 100);
+        assert_eq!(board.tile(100, 100).frame_x, 0);
+        assert_eq!(board.tile(101, 100).frame_x, 18);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// A land mine explodes the instant it is hit — `ExplodeMine` — rather than flooding a
+    /// circuit: no wire is involved at all when it is clicked directly.
+    ///
+    /// Fails before the fix: 210 was not in `is_trigger`, so hitting a buried land mine did
+    /// nothing.
+    #[test]
+    fn a_land_mine_explodes_on_a_direct_hit() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, Tile::framed(LAND_MINE, 0, 0));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.land_mines, vec![(100, 100)]);
+        assert!(!board.tile(100, 100).is_active(), "the mine tile is gone");
+        assert!(fired.reached == 0, "no circuit ran for it");
+    }
+
+    /// A land mine a circuit reaches also explodes — `Wiring.cs`'s own per-tile dispatch has a
+    /// `case 210` calling the very same `ExplodeMine`, separate from `HitSwitch`'s direct click.
+    #[test]
+    fn a_land_mine_reached_by_a_circuit_also_explodes() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut mine = Tile::framed(LAND_MINE, 0, 0);
+        mine.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(105, 100, mine);
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.land_mines, vec![(105, 100)]);
+        assert!(!board.tile(105, 100).is_active());
+    }
+
+    /// A geyser trap fires the instant it is hit directly, the same as a land mine — but unlike a
+    /// land mine it is *reported*, not resolved on the spot, exactly the way a wire reaching one
+    /// is (`act`'s own `TRAPS | GEYSER` case), so the caller's cooldown and projectile logic does
+    /// not need to know which path found it.
+    ///
+    /// Fails before the fix: 443 was not in `is_trigger`, so clicking a geyser trap did nothing.
+    #[test]
+    fn a_geyser_fires_on_a_direct_hit() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(300, 400, Tile::framed(GEYSER, 0, 0));
+
+        let fired = hit_switch(&mut board, 300, 400);
+        assert_eq!(fired.traps, vec![(300, 400)]);
+        assert_eq!(
+            board.tile(300, 400).block,
+            GEYSER,
+            "firing it does not change the tile"
+        );
+    }
+
+    /// A trapped chest (`TileID.FakeContainers`) is styled to look like an ordinary one, but
+    /// clicking it finds its real two-by-two footprint and floods from there — `Wiring.cs:312-325`
+    /// — regardless of which of the four cells was actually clicked.
+    ///
+    /// Fails before the fix: 441 was not in `is_trigger`, so clicking a trapped chest did nothing.
+    #[test]
+    fn a_trapped_chest_floods_from_its_real_footprint() {
+        let mut board = Board(HashMap::new());
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                let mut cell = Tile::framed(FAKE_CONTAINER, dx as i16 * 18, dy as i16 * 18);
+                cell.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(100 + dx, 100 + dy, cell);
+            }
+        }
+        for x in 102..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, actuated(Wire::Red));
+
+        // Click the bottom-right cell — the anchor should still be found at the top-left one.
+        let fired = hit_switch(&mut board, 101, 101);
+        assert!(
+            board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the flood should have started from the chest's real anchor"
+        );
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                assert_eq!(
+                    board.tile(100 + dx, 100 + dy).block,
+                    FAKE_CONTAINER,
+                    "the chest itself never changes"
+                );
+            }
+        }
+        assert!(fired.changed.contains(&(105, 100)));
     }
 
     /// Hitting something that is not a trigger does nothing at all.
