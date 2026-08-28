@@ -212,6 +212,25 @@ impl TermLayer {
         line
     }
 
+    /// Render a player's chat line: an uptime and a coloured `CHAT` tag, then the message — no
+    /// level and no target column, so a conversation reads as a conversation rather than as a
+    /// column of identical `INFO … chat` operational events.
+    fn render_chat(&self, parts: &Parts, uptime: Duration) -> String {
+        let p = self.palette;
+        let mut line = String::with_capacity(64);
+        line.push_str(p.on(sgr::DIM));
+        stamp(uptime, &mut line);
+        line.push_str(p.off());
+        line.push(' ');
+        line.push_str(p.on(sgr::BRIGHT_CYAN));
+        line.push_str(p.on(sgr::BOLD));
+        line.push_str("CHAT ");
+        line.push_str(p.off());
+        line.push(' ');
+        line.push_str(&parts.message);
+        line
+    }
+
     /// Render a console command's own reply: no timestamp, no level tag, no target column — the
     /// furniture that makes sense for a stream of log events reads as noise around the one line
     /// somebody just asked for by typing a command. A REPL prints its own output plainly; this is
@@ -369,8 +388,11 @@ where
         event.record(&mut parts);
         let meta = event.metadata();
         let is_reply = meta.target() == CONSOLE_REPLY_TARGET;
+        let is_chat = meta.target() == CHAT_TARGET;
         let line = if is_reply {
             self.render_reply(&parts)
+        } else if is_chat {
+            self.render_chat(&parts, self.started.elapsed())
         } else {
             self.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
@@ -381,7 +403,7 @@ where
         // nothing on every run that never starts the panel.
         let kind = if is_reply {
             ConsoleLineKind::Reply
-        } else if meta.target() == CHAT_TARGET {
+        } else if is_chat {
             ConsoleLineKind::Chat
         } else {
             ConsoleLineKind::Log
@@ -392,6 +414,8 @@ where
         };
         let text = if is_reply {
             plain.render_reply(&parts)
+        } else if is_chat {
+            plain.render_chat(&parts, self.started.elapsed())
         } else {
             plain.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
@@ -806,6 +830,26 @@ mod tests {
         drop(guard);
         // Leave the shared state clean for any test that runs after this one.
         set_prompt_drawn("");
+    }
+
+    /// A chat line gets its own `CHAT` tag and its message, but none of the level/target furniture
+    /// an operational log line carries — so a room full of chatter does not read as a wall of
+    /// identical `INFO … chat` events.
+    #[test]
+    fn a_chat_line_reads_as_chat_not_as_a_log_event() {
+        let layer = TermLayer::new(Palette::PLAIN);
+        let parts = Parts {
+            message: "<bri> hello everyone".into(),
+            fields: vec![],
+        };
+        let line = layer.render_chat(&parts, Duration::from_millis(65_432));
+        assert!(line.contains("CHAT"), "missing the chat tag: {line:?}");
+        assert!(line.contains("<bri> hello everyone"), "lost the message: {line:?}");
+        assert!(
+            !line.contains("INFO"),
+            "chat must not look like an INFO log: {line:?}"
+        );
+        assert!(line.contains("00:01:05.432"), "uptime missing: {line:?}");
     }
 
     /// A `console_reply`-tagged event is rendered without the timestamp/level/target furniture
