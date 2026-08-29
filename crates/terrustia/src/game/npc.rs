@@ -7,6 +7,7 @@ use terrustia_proto::{
     Tile,
     npc::MAX_NPCS,
     npc_data::{NpcStats, npc_stats},
+    npc_params::SOLAR_SROLLER,
     tile_solid::{solid, solid_top},
 };
 
@@ -594,6 +595,47 @@ pub fn step_physics(npc: &mut Npc, tiles: &impl TileView) {
 
     move_horizontal(npc, tiles);
     move_vertical(npc, tiles);
+
+    if npc.npc_type == SOLAR_SROLLER {
+        collision_move_solar_sroller(npc);
+    }
+}
+
+/// `Collision_MoveSolarSroller`, `NPC.cs:93879-93900`.
+///
+/// Curled and mid-bounce (`ai[0] == 6`, the roller's `phase::BOUNCING`), a wall or floor hit costs
+/// the sroller one of the two-to-four bounces its wind-up rolled for it (`ai[2]`, `NPC.cs:29608-
+/// 29609`) and sends that axis back the other way at nine tenths the speed it hit with, flipping
+/// direction on an X bounce so it does not just wedge itself into the wall again next tick. Once
+/// `ai[2]` reaches zero the bouncing loop in `roller()` (its own `ai[2] == 0.0` check, matching
+/// `NPC.cs:29818`) stands the sroller back up instead of waiting out the 1200-tick safety timer.
+///
+/// Vanilla decides "did this axis just hit something" off the sub-pixel residual
+/// `Collision.TileCollision` leaves behind (`velocity.X != 0f && velocity.X != oldVelocity.X`): a
+/// swept collision resolves to the exact remaining distance to the wall face, not to zero. This
+/// engine's own tile step above (`move_horizontal`/`move_vertical`) resolves a blocked axis to
+/// precisely zero instead, so `collide_x`/`collide_y` (the same "this axis's velocity changed
+/// because of terrain" fact vanilla itself records a few lines later as `collideX`/`collideY`,
+/// `Collision_MoveWhileDry`, `NPC.cs:93734-93751`) stand in for the nonzero-residual check without
+/// changing what triggers a bounce.
+fn collision_move_solar_sroller(npc: &mut Npc) {
+    if npc.ai[0] != 6.0 || !(npc.collide_x || npc.collide_y) {
+        return;
+    }
+    npc.ai[2] -= 1.0;
+    // `NPC.cs`'s `ai[3] = 1f` here only starts a client-side dust and gore burst; this server does
+    // not render either, but the flag is still part of the synced `ai` array a real client watches
+    // for that cue, so it is set for parity even though nothing here reads it back.
+    npc.ai[3] = 1.0;
+    if npc.ai[2] > 0.0 {
+        if npc.collide_x {
+            npc.velocity.0 = -npc.old_velocity.0 * 0.9;
+            npc.direction = -npc.direction;
+        }
+        if npc.collide_y {
+            npc.velocity.1 = -npc.old_velocity.1 * 0.9;
+        }
+    }
 }
 
 /// The types whose life grows with the number of players, from `NPC.ScaleStats_ByPlayerCount`.
@@ -1052,6 +1094,38 @@ mod tests {
             "walked into the wall: x={}",
             npc.position.0
         );
+    }
+
+    /// The solar sroller's curled bounce is not the game's ordinary tile collision: a wall hit
+    /// during it costs one of the two-to-four bounces the wind-up rolled and sends it straight back
+    /// the way it came, rather than just stopping it dead the way an ordinary NPC's wall hit would.
+    /// `Collision_MoveSolarSroller`, `NPC.cs:93879-93900`.
+    #[test]
+    fn a_bouncing_solar_sroller_loses_a_bounce_off_a_wall() {
+        let mut s = Npc::new(SOLAR_SROLLER, (0.0, 100.0), 1).expect("solar sroller");
+        // A wall five pixels past its right edge, and nothing else solid, so a sixteen-pixel move
+        // collides on X only.
+        let wall_x = s.position.0 + s.width() + 5.0;
+        let wall_tile = (wall_x / TILE).floor() as i32;
+        let terrain = Terrain(move |x: i32, _y: i32| if x >= wall_tile { Some(1) } else { None });
+        s.ai[0] = 6.0; // phase::BOUNCING
+        s.ai[2] = 3.0; // three bounces still owed from the wind-up's rand(2..5)
+        s.direction = 1;
+        s.velocity = (16.0, 0.0);
+
+        step_physics(&mut s, &terrain);
+
+        assert!(s.collide_x, "should have hit the wall this tick");
+        assert_eq!(
+            s.ai[2], 2.0,
+            "a wall hit during a bounce should cost it one"
+        );
+        assert!(
+            s.velocity.0 < 0.0,
+            "and send it back the other way, got {}",
+            s.velocity.0
+        );
+        assert_eq!(s.direction, -1, "direction flips with an X bounce");
     }
 
     #[test]
