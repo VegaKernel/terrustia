@@ -240,7 +240,9 @@ pub const MAX_SPAWNS: f32 = 5.0;
 
 /// Vanilla's screen-relative spawn/safe half-ranges. The actual integer rectangles are asymmetric;
 /// `spawn_ranges` owns their west/east/up/down edges and the sampling/checking helpers.
-pub use crate::game::spawn_ranges::{SAFE_RANGE_X, SAFE_RANGE_Y, SPAWN_RANGE_X, SPAWN_RANGE_Y};
+pub use crate::game::spawn_ranges::{
+    SAFE_RANGE_X, SAFE_RANGE_Y, SPAWN_RANGE_X, SPAWN_RANGE_Y,
+};
 
 /// How deep below the world's bottom the underworld begins.
 pub const UNDERWORLD_DEPTH: i32 = 200;
@@ -861,8 +863,8 @@ pub fn try_spawn(
             };
             let y = ground - 1;
 
-            // Never spawn inside the early safe rectangle around this player.
-            if crate::game::spawn_ranges::in_safe_rectangle(x - px, y - py) {
+            // Vanilla tests the resolved solid floor against the early safe rectangle.
+            if crate::game::spawn_ranges::in_safe_rectangle(x - px, ground - py) {
                 continue;
             }
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
@@ -1264,11 +1266,13 @@ mod tests {
                     "spawned an unknown type {npc_type}"
                 );
                 let (x, y) = ((px / 16.0) as i32, (py / 16.0) as i32);
+                let floor_y = y + 1;
                 assert!(
-                    !crate::game::spawn_ranges::in_safe_rectangle(x - tx, y - ty),
-                    "spawned inside the safe rectangle at ({x}, {y}) vs player ({tx}, {ty})"
+                    !crate::game::spawn_ranges::in_safe_rectangle(x - tx, floor_y - ty),
+                    "spawned with floor inside the safe rectangle at ({x}, {floor_y}) vs player \
+                     ({tx}, {ty})"
                 );
-                let floor = world.tile(x, y + 1);
+                let floor = world.tile(x, floor_y);
                 assert!(
                     floor.is_active() && solid(floor.block),
                     "spawned dry forest NPC without solid ground at ({x}, {y})"
