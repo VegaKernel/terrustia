@@ -25,9 +25,8 @@ PR #1 adds a two-client test using Bound Goblin (105): both clients receive the 
 moves outside section reach, the other applies a one-HP zero-knockback change, and the distant
 client must receive the delayed state after the bounded skip window rather than remain stale.
 
-Do not merge this merely because the code looks right: the repository's Actions API currently
-reports no workflow runs at all, so the test still needs an actual run somewhere before it becomes
-the proof it was written to be.
+Do not merge this merely because the code looks right: the new integration test still needs an
+actual test/CI run before it becomes the proof it was written to be.
 
 ---
 
