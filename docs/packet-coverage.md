@@ -11,7 +11,7 @@ receives and sends it, and why not where it does not.
 
 The source of truth is `docs/packet-ids.tsv`, a tab-separated file Python's standard library can
 read without a parser. `tools/packet_audit.py` validates every row against the actual code (the
-dispatch table in `crates/terrustia/src/game/server.rs`'s `handle_packet`, and the encoders in
+dispatch table in `crates/terrustia/src/game/server/`'s `handle_packet`, and the encoders in
 `crates/terrustia-proto/src/packets.rs` and its neighbours) and fails with a precise message on any
 mismatch — a handler added without updating its row, a row claiming an encoder that no longer
 exists, an id the table never mentions. Regenerate this page after editing the table:
