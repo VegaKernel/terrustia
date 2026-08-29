@@ -28,6 +28,13 @@ pub fn eligible(
     depth: Depth,
     biome: Biome,
 ) -> bool {
+    // Surface events replace the ordinary surface spawn pool. A rescue roll must not steal one of
+    // those attempts just because the Angler or Tavernkeep happens to be otherwise eligible. The
+    // same events do not own underground/cavern spawning, so only Surface is suppressed here.
+    if depth == Depth::Surface && (world.eclipse || world.pumpkin_moon || world.snow_moon) {
+        return false;
+    }
+
     match bound {
         // Bound Goblin: after the Goblin Army, in Cavern, but above the bottom 210-tile margin.
         105 => {
@@ -233,6 +240,68 @@ mod tests {
             250,
             Depth::Underground,
             Biome::Ocean
+        ));
+    }
+
+    #[test]
+    fn surface_events_suppress_surface_rescues_only() {
+        let mut world = world();
+        world.progress.downed_boss2 = true;
+        assert!(eligible(
+            &world,
+            579,
+            500,
+            100,
+            Depth::Surface,
+            Biome::Forest
+        ));
+        assert!(eligible(
+            &world,
+            579,
+            500,
+            400,
+            Depth::Cavern,
+            Biome::Forest
+        ));
+
+        world.eclipse = true;
+        assert!(!eligible(
+            &world,
+            579,
+            500,
+            100,
+            Depth::Surface,
+            Biome::Forest
+        ));
+        assert!(eligible(
+            &world,
+            579,
+            500,
+            400,
+            Depth::Cavern,
+            Biome::Forest
+        ));
+
+        world.eclipse = false;
+        world.pumpkin_moon = true;
+        assert!(!eligible(
+            &world,
+            579,
+            500,
+            100,
+            Depth::Surface,
+            Biome::Forest
+        ));
+
+        world.pumpkin_moon = false;
+        world.snow_moon = true;
+        assert!(!eligible(
+            &world,
+            579,
+            500,
+            100,
+            Depth::Surface,
+            Biome::Forest
         ));
     }
 
