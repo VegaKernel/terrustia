@@ -162,7 +162,7 @@ mod tests {
             block,
             physical_floor_y: floor_y,
             source_y,
-            used_chosen_fallback: false,
+            used_floor_fallback: false,
         }
     }
 
