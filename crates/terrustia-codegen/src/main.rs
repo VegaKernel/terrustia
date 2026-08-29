@@ -13,6 +13,7 @@
 mod csharp;
 mod drops;
 mod hurt_tiles;
+mod projectiles;
 mod recipes;
 
 use std::path::{Path, PathBuf};
@@ -40,6 +41,11 @@ const TABLES: &[Table] = &[
         name: "drops",
         out: "crates/terrustia-proto/src/npc_drops.rs",
         generate: drops::generate,
+    },
+    Table {
+        name: "projectiles",
+        out: "crates/terrustia-proto/src/projectile_data.rs",
+        generate: projectiles::generate,
     },
 ];
 
