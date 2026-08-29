@@ -1,5 +1,18 @@
 [workspace]
-members = ["crates/terrustia-proto", "crates/terrustia-client", "crates/terrustia"]
+members = [
+    "crates/terrustia-proto",
+    "crates/terrustia-client",
+    "crates/terrustia",
+    "crates/terrustia-codegen",
+]
+# The data-table generator is a hand-run developer tool, not part of an ordinary build. Excluding it
+# from the default set keeps a bare `cargo build`/`cargo test` off it (and off its `regex` dep);
+# `cargo build -p terrustia-codegen` or `just regen` still reach it.
+default-members = [
+    "crates/terrustia-proto",
+    "crates/terrustia-client",
+    "crates/terrustia",
+]
 resolver = "3"
 
 [workspace.package]

@@ -1,0 +1,25 @@
+# The data-table generator, in Rust rather than Python.
+#
+# `terrustia-proto` ships a handful of tables extracted from the game — which tiles hurt, what each
+# NPC drops, and so on. The extraction used to be a directory of Python scripts (`tools/gen_*.py`);
+# this crate replaces them, so regenerating a table needs only the Rust toolchain the rest of the
+# project already needs, and no second language in the build story. Each table is its own module
+# with a `generate(decompiled) -> String`; `main` runs one or all of them and writes the result,
+# and `just regen` runs this then `cargo fmt` exactly as the Python recipe did.
+#
+# Not in the workspace's own dependency graph on purpose — it is a developer tool, run by hand
+# against a decompiled tree that never ships, so nothing in `crates/terrustia*` depends on it and an
+# ordinary build never compiles it.
+[package]
+name = "terrustia-codegen"
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "codegen"
+path = "src/main.rs"
+
+[dependencies]
+regex = "1"
