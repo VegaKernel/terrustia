@@ -184,6 +184,33 @@ impl PlayerMana {
     }
 }
 
+/// Packet `66` (`id::UNKNOWN66` — genuinely unnamed in vanilla's own `MessageID.cs`): a
+/// heal-on-touch projectile's own effect (`Projectile.cs:28951`, `aiStyle == 52`) landing on a
+/// player, and its relay. The owning client computes the amount and applies it to its own local
+/// copy before ever sending this; the server's job is only to apply the same amount to its own
+/// authoritative copy and pass it on, exactly as `MessageBuffer.cs:3038-3056`'s own `case 66` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealPlayer {
+    pub player: u8,
+    pub amount: i16,
+}
+
+impl HealPlayer {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = PacketReader::new(payload);
+        Ok(Self {
+            player: r.u8()?,
+            amount: r.i16()?,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut w = PacketWriter::new(id::UNKNOWN66);
+        w.u8(self.player).i16(self.amount);
+        w.finish()
+    }
+}
+
 /// Packet `18`: world clock.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimeSet {
@@ -852,6 +879,22 @@ mod tests {
         let frame = player_info(3, false).unwrap();
         assert_eq!(frame, vec![5, 0, id::PLAYER_INFO, 3, 0]);
         assert_eq!(payload(&frame).len(), 2);
+    }
+
+    #[test]
+    fn heal_player_round_trips() {
+        let heal = HealPlayer {
+            player: 3,
+            amount: 40,
+        };
+        let frame = heal.encode().unwrap();
+        assert_eq!(frame[2], id::UNKNOWN66);
+        assert_eq!(HealPlayer::decode(payload(&frame)).unwrap(), heal);
+    }
+
+    #[test]
+    fn heal_player_rejects_a_truncated_payload() {
+        assert!(HealPlayer::decode(&[3]).is_err());
     }
 
     #[test]

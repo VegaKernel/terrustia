@@ -25,8 +25,8 @@ use terrustia_proto::{
         SyncPlayerChestIndex,
     },
     packets::{
-        self, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn, SpawnTileData,
-        TileAction, TileManipulation,
+        self, HealPlayer, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn,
+        SpawnTileData, TileAction, TileManipulation,
     },
     reader::PacketReader,
     section::encode_section_packet,

@@ -103,6 +103,7 @@ impl GameServer {
             }
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
             id::TELEPORT_ENTITY => self.on_teleport(slot, &payload),
+            id::UNKNOWN66 => self.on_heal_player(slot, &payload),
             // Which town NPC a player is talking to. The owner byte is first, so the ordinary
             // relay handles it, and remembering it is what a shop will need.
             id::SYNC_TALK_N_P_C => self.on_talk_npc(slot, &payload),
@@ -1198,6 +1199,38 @@ impl GameServer {
         let frame = w.finish()?;
         self.broadcast(frame, Some(slot));
         debug!(slot, x = at.0, y = at.1, "player teleported");
+        Ok(())
+    }
+
+    /// Packet 66 (`id::UNKNOWN66`): a heal-on-touch projectile's effect landing on a player
+    /// (`Projectile.cs:28951`, `aiStyle == 52`).
+    ///
+    /// The owning client already applied this to its own local copy before sending it — real
+    /// vanilla's own receive side (`MessageBuffer.cs:3038-3056`) still applies it again to the
+    /// server's authoritative copy rather than trusting the sender's math, and this does the same:
+    /// only a positive amount is ever applied (`if (num72 > 0)`, matching real vanilla exactly —
+    /// zero and negative heals are silently ignored, not clamped to zero and applied), a target
+    /// outside the connected slots is a no-op rather than a panic, and life is clamped to the
+    /// target's own max the same way `statLife`/`statLifeMax2` are. Relayed to everyone but the
+    /// sender either way vanilla does (`NetMessage.TrySendData(66, -1, whoAmI, ...)`).
+    fn on_heal_player(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let heal = HealPlayer::decode(payload)?;
+        if heal.amount <= 0 {
+            return Ok(());
+        }
+        let Some(target) = self.player_mut(heal.player) else {
+            return Ok(());
+        };
+        // Saturating: `statLife` is a real `int` in source, wide enough that `+=` never overflows
+        // it; this project's own `Player::life` is an `i16` to match the wire, which a maliciously
+        // large claimed heal on an already-high life total genuinely can — panicking on the packet
+        // path is worse than a heal simply capping out.
+        target.life = target.life.saturating_add(heal.amount).min(target.life_max);
+
+        self.broadcast(heal.encode()?, Some(slot));
         Ok(())
     }
 
@@ -4839,5 +4872,84 @@ mod teleport_controls_guard {
             after_teleport,
             "the stale controls packet must not undo the teleport"
         );
+    }
+}
+
+/// Packet 66 (C1-b item 6): a heal-on-touch projectile's own effect (`Projectile.cs:28951`,
+/// `aiStyle == 52`), applied server-side and relayed — `MessageBuffer.cs:3038-3056`.
+#[cfg(test)]
+mod heal_on_touch {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "heal on touch probe")
+    }
+
+    fn with_two_players(
+        mut server: GameServer,
+    ) -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        let (sender_tx, sender_rx) = mpsc::channel(16);
+        let (healed_tx, healed_rx) = mpsc::channel(16);
+        for (slot, tx) in [(0u8, sender_tx), (1u8, healed_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            player.life = 50;
+            player.life_max = 100;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, sender_rx, healed_rx)
+    }
+
+    fn heal_payload(player: u8, amount: i16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(3);
+        payload.push(player);
+        payload.extend_from_slice(&amount.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn a_positive_heal_is_applied_and_relayed() {
+        let (mut server, mut sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 30)).unwrap();
+
+        assert_eq!(server.player(1).unwrap().life, 80);
+        // Relayed to everyone but the sender.
+        assert!(sender_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_heal_never_exceeds_the_targets_own_life_max() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 9999)).unwrap();
+
+        assert_eq!(server.player(1).unwrap().life, 100, "clamped to life_max");
+    }
+
+    /// Matches `if (num72 > 0)` exactly: zero and negative amounts are ignored outright, not
+    /// clamped to zero and applied.
+    #[test]
+    fn a_non_positive_heal_amount_is_ignored() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 0)).unwrap();
+        assert_eq!(server.player(1).unwrap().life, 50);
+
+        server.on_heal_player(0, &heal_payload(1, -10)).unwrap();
+        assert_eq!(server.player(1).unwrap().life, 50);
+    }
+
+    /// A target slot with nobody connected there is a no-op, not a panic.
+    #[test]
+    fn an_out_of_range_target_does_not_panic() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        assert!(server.on_heal_player(0, &heal_payload(200, 30)).is_ok());
     }
 }

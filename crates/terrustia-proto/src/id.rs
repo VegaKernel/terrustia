@@ -101,9 +101,10 @@ pub const TELEPORT_ENTITY: u8 = 65;
 /// Not dead, unlike its neighbours either side. `Projectile.cs`'s `aiStyle == 52` (a heal-on-touch
 /// projectile) calls `NetMessage.SendData(66, -1, -1, null, target, healAmount)`, and
 /// `MessageBuffer.GetData`'s case 66 applies the heal to `player.statLife` and, when
-/// `Main.netMode == 2`, relays it on to other clients. Unimplemented here: no dispatch arm and no
-/// encoder, so a real client using that projectile heals silently as far as this server is
-/// concerned. See `docs/packet-coverage.md`.
+/// `Main.netMode == 2`, relays it on to other clients. `packets::HealPlayer` is the encoder/decoder
+/// pair, and `on_heal_player` (`dispatch.rs`) is the receive arm — genuinely unnamed in vanilla's
+/// own `MessageID.cs` (`Unknown66`), which is why this stays `UNKNOWN66` rather than a name this
+/// project invented.
 pub const UNKNOWN66: u8 = 66;
 /// Dead. `NetMessage.SendData` has no `case 67:` at all, and `MessageBuffer.GetData` groups it
 /// with the officially-deprecated ids 15/25/26/44/83/93 under a bare `break;` with no field reads.
