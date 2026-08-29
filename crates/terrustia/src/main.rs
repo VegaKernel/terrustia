@@ -12,7 +12,7 @@ use terrustia::{
     term::{self, Palette},
     world::{wld, worldgen},
 };
-use tokio::{net::TcpListener, signal, sync::mpsc};
+use tokio::{signal, sync::mpsc};
 use tracing::{error, info, warn};
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -181,12 +181,14 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let started = Instant::now();
-    let loaded_from = config.world_file.clone();
+    // One spinner covers the single slow step, generating or loading the world. It clears when the
+    // world is ready and the boot card below takes its place; every other boot step is quick and
+    // reports itself as a row in that card rather than as its own ✓ line.
     let world_stage = term::Stage::begin(
         palette,
-        &match &config.world_file {
-            Some(path) => format!("loading world  {}", path.display()),
-            None => "generating world".to_string(),
+        match &config.world_file {
+            Some(_) => "loading world",
+            None => "generating world",
         },
     );
     // `World::secret_seeds` is read straight off the world either way now — a loaded world's own
@@ -217,72 +219,13 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             world
         }
     };
-    world_stage.finish(&format!(
-        "{} · {} × {}",
-        world.name,
-        world.width(),
-        world.height()
-    ));
-    // Logged before the summary block, not spliced into the middle of it as it once was.
-    if let Some(path) = &loaded_from {
-        info!(path = %path.display(), "loading world file");
-    }
+    world_stage.clear();
 
-    // Bind before starting the game task so a port clash fails fast.
-    let bind_stage = term::Stage::begin(palette, &format!("binding {}", config.listen));
-    let listener = TcpListener::bind(config.listen).await?;
-    bind_stage.finish("");
-
-    // The settled facts, as one aligned key/value block on a single left margin rather than two
-    // boxes each hugging their own width.
-    let evil = if world.crimson {
-        "crimson"
-    } else {
-        "corruption"
-    };
-    let mut world_line = format!(
-        "{} · {} × {} · {}",
-        world.name,
-        world.width(),
-        world.height(),
-        evil
-    );
-    if world.secret_seeds.any() {
-        world_line = format!(
-            "{world_line} · seed {}",
-            world.secret_seeds.active_names().join(", ")
-        );
-    }
-    let saves_to = match config.save_target() {
-        None => "nowhere, this world will not be saved".to_string(),
-        Some(path) => {
-            let autosave = if config.autosave_secs == 0 {
-                "autosave off".to_string()
-            } else {
-                format!("autosave {}s", config.autosave_secs)
-            };
-            format!("{} · {autosave}", path.display())
-        }
-    };
-    let info = [
-        ("world", world_line),
-        (
-            "spawn",
-            format!(
-                "{}, {} · {} chests",
-                world.spawn_x,
-                world.spawn_y,
-                world.chests.len()
-            ),
-        ),
-        (
-            "listening",
-            format!("{} · up to {} players", config.listen, config.max_players),
-        ),
-        ("saves to", saves_to),
-    ];
-    print!("{}", term::info_block(palette, &info));
-    println!();
+    // Bind before starting the game task so a port clash fails fast, and before the card so a
+    // failure here can never print beneath a "ready" line that would be a lie. `listener::bind`
+    // turns a bare errno (a port in use, or `os error 28` socket exhaustion) into a message that
+    // says what to do about it.
+    let listener = listener::bind(config.listen).await?;
 
     let recorder = match &args.record {
         Some(path) => Some(terrustia::net::record::Recorder::create(path)?),
@@ -291,20 +234,62 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
 
-    // Opt-in, so a bind failure *here* — at boot, before anything is actually serving — is a
-    // configuration mistake worth failing loudly on rather than silently running without it. Once
-    // up, ownership passes to `panel::supervise` below, which handles every later start/stop (the
-    // console's `panel` command) without that same all-or-nothing behaviour — see its own doc
-    // comment for why a runtime toggle failure should not take the rest of the server down too.
-    let initial_panel = if config.panel_enabled {
-        let panel_stage = term::Stage::begin(palette, "starting web panel");
+    // Started before the card so the panel's on/off state is a fact the card can state. Opt-in, so
+    // a bind failure *here* — at boot, before anything is actually serving — is a configuration
+    // mistake worth failing loudly on rather than silently running without it. Once up, ownership
+    // passes to `panel::supervise` below, which handles every later start/stop (the console's
+    // `panel` command) without that same all-or-nothing behaviour — see its own doc comment for why
+    // a runtime toggle failure should not take the rest of the server down too.
+    let (initial_panel, panel_state) = if config.panel_enabled {
         let handle = terrustia::panel::run(config.clone(), events_tx.clone()).await?;
-        panel_stage.finish("loopback only");
-        Some(handle)
+        (Some(handle), "loopback only")
     } else {
-        term::tick(palette, "web panel", "off");
-        None
+        (None, "off")
     };
+
+    // The settled facts, one aligned key/value card on a single left margin: what the world is,
+    // where it listens, where it saves, and whether the panel is up. Paths are shown short — a
+    // server-owned world in worlds/ reads as `worlds/Name.wld`, the way a Minecraft server names its
+    // own files, and anything under home collapses to `~`.
+    let evil = if world.crimson {
+        "crimson"
+    } else {
+        "corruption"
+    };
+    let mut rows: Vec<(&str, String)> = vec![(
+        "world",
+        format!(
+            "{} · {} × {} · {}",
+            world.name,
+            world.width(),
+            world.height(),
+            evil
+        ),
+    )];
+    if world.secret_seeds.any() {
+        rows.push(("seed", world.secret_seeds.active_names().join(", ")));
+    }
+    rows.push((
+        "listening",
+        format!("{} · up to {} players", config.listen, config.max_players),
+    ));
+    rows.push((
+        "saves to",
+        match config.save_target() {
+            None => "nowhere, this world will not be saved".to_string(),
+            Some(path) => display_path(path),
+        },
+    ));
+    rows.push((
+        "autosave",
+        if config.autosave_secs == 0 {
+            "off".to_string()
+        } else {
+            format!("every {}s", config.autosave_secs)
+        },
+    ));
+    rows.push(("web panel", panel_state.to_string()));
+    print!("{}", term::info_block(palette, &rows));
     print!("{}", term::ready_line(palette, started.elapsed()));
     let (panel_toggle_tx, panel_toggle_rx) = mpsc::unbounded_channel();
     // Handle kept and aborted below, alongside `accept`/`console` — this task holds its own clone
@@ -438,6 +423,26 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("could not restart into {}: {e}", new_world.display()).into());
     }
     Ok(())
+}
+
+/// How a path is shown in the boot card. A path under the working directory is shown relative to it,
+/// so a server-owned world in `worlds/` reads as `worlds/Name.wld` the way a Minecraft server names
+/// its own files; a path under the user's home directory collapses that prefix to `~`; anything else
+/// is shown as it is. Presentation only, so nothing ever opens the shortened form.
+fn display_path(path: &Path) -> String {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(rel) = path.strip_prefix(&cwd)
+        && !rel.as_os_str().is_empty()
+    {
+        return rel.display().to_string();
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Ok(rest) = path.strip_prefix(&home)
+        && !rest.as_os_str().is_empty()
+    {
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+    }
+    path.display().to_string()
 }
 
 /// Replace this process with a fresh one pointed at `world`, keeping the config file and listen

@@ -163,6 +163,27 @@ docker-build:
     docker build -t terrustia:dev .
 
 # ─────────────────────────────────────────
+# PUBLISH  (crates.io)
+# ─────────────────────────────────────────
+# Only terrustia-proto is published to crates.io: it is the MIT wire-format library, free for any
+# Terraria tool to build on. The server crate is AGPL and application-shaped, not a library, so it
+# is not published here.
+
+# List exactly what would go into the terrustia-proto package — catches a stray or missing file
+publish-proto-list:
+    cargo package -p terrustia-proto --locked --list
+
+# Dry run: build and pack terrustia-proto the way crates.io will, without uploading anything
+publish-proto-dry:
+    cargo publish -p terrustia-proto --locked --dry-run
+    @echo "Dry run OK. Publish for real with: just publish-proto"
+
+# Publish terrustia-proto to crates.io (needs a prior `cargo login`). Dry-runs first as a guard.
+publish-proto: publish-proto-dry
+    cargo publish -p terrustia-proto --locked
+    @echo "Published terrustia-proto → https://crates.io/crates/terrustia-proto"
+
+# ─────────────────────────────────────────
 # UTILITIES
 # ─────────────────────────────────────────
 

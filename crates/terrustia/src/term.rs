@@ -337,6 +337,97 @@ fn terminal_cols() -> usize {
         .max(1)
 }
 
+/// Whether the sticky console currently has the terminal in raw mode. Raw mode turns off the
+/// terminal's own `\n` -> `\r\n` translation, so a plain `\n` moves the cursor down without
+/// returning it to column 0, and a line printed after one lands mid-column. Every line this module
+/// prints while this is set has to carry its own carriage return. `console.rs` sets and clears it
+/// around `enable_raw_mode`/`disable_raw_mode`; while it is false (piped output, a service with no
+/// terminal, or before the console starts) a bare `\n` is correct and a `\r` would be litter.
+static RAW_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell this module whether the terminal is in raw mode; see [`RAW_MODE`]. Called by the console.
+pub fn set_raw_mode(on: bool) {
+    RAW_MODE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The line ending to use right now: `\r\n` while the raw-mode console holds the terminal, a bare
+/// `\n` otherwise. One place decides it, so every writer here agrees.
+fn newline() -> &'static str {
+    if RAW_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// The visible column an ordinary log line's message begins at: the width of the timestamp, level
+/// tag and target columns [`TermLayer::render`] lays down before it (12 + 1 + 5 + 1 + 18 + 1). A
+/// wrapped log line indents its continuation rows to here so the message reads as one block rather
+/// than sprawling back to column 0. Tied to `render`'s layout by
+/// `the_message_column_matches_render`.
+const MESSAGE_COL: usize = 38;
+
+/// The same, for a chat line, which carries only a timestamp and a `CHAT` tag (12 + 1 + 5 + 1).
+const CHAT_COL: usize = 19;
+
+/// Re-flow `line` to `cols` columns, indenting every row after the first to `indent`, so a log line
+/// wider than the terminal wraps into an aligned block instead of spilling back to column 0. ANSI
+/// colour and cursor escapes are copied through without counting toward the width, and characters
+/// (not words) are the break unit, matching what the terminal's own wrap would have done. A line
+/// that fits is returned unchanged.
+fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
+    // Nothing sane to do if the terminal is narrower than the indent itself; leave it to wrap on
+    // its own rather than emit rows that are all indent and no room.
+    if cols <= indent || visible_len(line) <= cols {
+        return line.to_string();
+    }
+    let pad = " ".repeat(indent);
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len() + line.len() / cols.max(1) + indent);
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // Copy a CSI escape verbatim; it takes no visible columns.
+            let start = i;
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            out.push_str(&line[start..i]);
+            continue;
+        }
+        // The start of a UTF-8 character. Wrap before it if the row is full.
+        if col >= cols {
+            out.push_str("\r\n");
+            out.push_str(&pad);
+            col = indent;
+        }
+        let char_len = utf8_len(bytes[i]);
+        let end = (i + char_len).min(bytes.len());
+        out.push_str(&line[i..end]);
+        col += 1;
+        i = end;
+    }
+    out
+}
+
+/// Byte length of a UTF-8 character from its lead byte.
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        b if b >= 0xF0 => 4,
+        b if b >= 0xE0 => 3,
+        b if b >= 0xC0 => 2,
+        _ => 1,
+    }
+}
+
 /// How many visible columns a rendered line occupies, skipping ANSI CSI escapes (colour and cursor
 /// moves) and counting each UTF-8 character as one column. Good enough for the narrow content a
 /// prompt and status line hold; it is not a full character-width table.
@@ -447,23 +538,34 @@ pub fn clear_footer() {
 }
 
 /// Write one already-rendered line, floating the footer above it under one lock so a second writer
-/// (another log line, or the console's next keystroke) can never interleave. With no prompt shown
-/// (a non-interactive console) it is a plain `writeln!`, exactly as before.
-fn write_line_coordinated(line: &str) {
+/// (another log line, or the console's next keystroke) can never interleave. `indent` is the column
+/// a wrapped line's continuation rows align to (0 to leave wrapping to the terminal). With no prompt
+/// shown (a non-interactive console) it is a plain write, with the line ending [`newline`] chose.
+fn write_line_coordinated(line: &str, indent: usize) {
     let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
     if f.prompt.is_empty() {
+        // No sticky footer: piped output, or a service console. Wrapping would bake hard breaks and
+        // carriage returns into a captured log, so print the line untouched with the right ending.
         let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}");
+        let _ = write!(out, "{line}{}", newline());
         let _ = out.flush();
         return;
     }
-    redraw_footer(&mut f, &format!("{line}\r\n"));
+    // A sticky console is up. Re-flow a too-wide line so its continuation rows sit under the message
+    // column rather than sprawling back to column 0, and let `redraw_footer` handle the coordination.
+    let body = if indent > 0 {
+        wrap_ansi(line, terminal_cols(), indent)
+    } else {
+        line.to_string()
+    };
+    redraw_footer(&mut f, &format!("{body}\r\n"));
 }
 
 /// Print a line under the same coordination as a log write, for output unrelated to `tracing` —
-/// Tab completion's candidate list, for one. Public so `console.rs` can print directly.
+/// Tab completion's candidate list and the console's own command echo, for two. Public so
+/// `console.rs` can print directly.
 pub fn print_notice(line: &str) {
-    write_line_coordinated(line);
+    write_line_coordinated(line, 0);
 }
 
 /// Set the one-line status footer shown above the prompt (an empty string clears it). Called by the
@@ -514,7 +616,17 @@ where
         } else {
             self.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
-        write_line_coordinated(&line);
+        // A console reply is meant to read like a REPL's own output, so it wraps at column 0 like
+        // anything typed; a chat and an ordinary log line indent their continuation rows under where
+        // their message began.
+        let indent = if is_reply {
+            0
+        } else if is_chat {
+            CHAT_COL
+        } else {
+            MESSAGE_COL
+        };
+        write_line_coordinated(&line, indent);
 
         // A second, ANSI-free rendering for the web panel's live feed. `broadcast::Sender::send`
         // on a channel nobody is subscribed to just returns an error immediately, so this costs
@@ -662,7 +774,27 @@ impl Stage {
             f.prompt.clear();
             f.drawn_rows = 0;
         } else {
-            write_line_coordinated(&done);
+            write_line_coordinated(&done, 0);
+        }
+    }
+
+    /// Finish a stage by erasing its spinner and leaving nothing in its place, for when what
+    /// replaces it is drawn separately — the boot card printed below it. Stops the spinner thread
+    /// and forgets the prompt exactly the way [`Stage::finish`] does, minus the ✓ line. Piped,
+    /// where the spinner never drew anything, this is a no-op and the card alone stands in for it.
+    pub fn clear(mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        if self.tty {
+            let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+            let _ = out.flush();
+            f.prompt.clear();
+            f.drawn_rows = 0;
         }
     }
 }
@@ -681,7 +813,7 @@ impl Drop for Stage {
 
 /// An instant ✓ line, for a step that does no work worth a spinner — a disabled panel, say.
 pub fn tick(palette: Palette, label: &str, detail: &str) {
-    write_line_coordinated(&done_line(palette, label, detail));
+    write_line_coordinated(&done_line(palette, label, detail), 0);
 }
 
 /// The shared shape of a finished stage line: a green ✓, the label, and an optional dimmed detail.
@@ -943,5 +1075,80 @@ mod tests {
             !line.contains("INFO"),
             "a reply must not look like a log line: {line:?}"
         );
+    }
+
+    /// The hanging-indent constants are only right if they match the columns `render` actually lays
+    /// down before the message. Pin them to the real output so a change to the prefix layout that
+    /// forgets to update them fails here rather than misaligning every wrapped line at runtime.
+    #[test]
+    fn the_message_column_matches_render() {
+        let layer = TermLayer::new(Palette::PLAIN);
+        let parts = Parts {
+            message: "MARKER".into(),
+            fields: vec![],
+        };
+        let log = layer.render(
+            Level::INFO,
+            "terrustia::game::server",
+            &parts,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            log.find("MARKER"),
+            Some(MESSAGE_COL),
+            "a log line's message must begin at MESSAGE_COL: {log:?}"
+        );
+        let chat = layer.render_chat(&parts, Duration::ZERO);
+        assert_eq!(
+            chat.find("MARKER"),
+            Some(CHAT_COL),
+            "a chat line's message must begin at CHAT_COL: {chat:?}"
+        );
+    }
+
+    /// A line wider than the terminal is re-flowed so its continuation rows begin at the indent
+    /// column, the escapes ride along without counting toward the width, and a line that fits is
+    /// left exactly as it was.
+    #[test]
+    fn wrap_ansi_reflows_with_a_hanging_indent() {
+        // 20 visible columns, indent 4, at a width of 10: rows are "aaaaaaaaaa", then
+        // "    aaaaaa", "    aaaa" (indent 4 + 6 message cols per continuation).
+        let wrapped = wrap_ansi(&"a".repeat(20), 10, 4);
+        let rows: Vec<&str> = wrapped.split("\r\n").collect();
+        assert_eq!(rows[0], "a".repeat(10), "the first row is full width");
+        assert!(
+            rows[1..].iter().all(|r| r.starts_with("    ")),
+            "every continuation row is indented to column 4: {rows:?}"
+        );
+        assert!(
+            rows[1..].iter().all(|r| visible_len(r) <= 10),
+            "no row is wider than the terminal: {rows:?}"
+        );
+        let msg_chars: usize = rows
+            .iter()
+            .enumerate()
+            .map(|(k, r)| {
+                if k == 0 {
+                    visible_len(r)
+                } else {
+                    visible_len(r) - 4
+                }
+            })
+            .sum();
+        assert_eq!(
+            msg_chars, 20,
+            "no visible characters are lost or duplicated: {rows:?}"
+        );
+
+        // Colour escapes do not count toward the width, so this fits on one row untouched.
+        let coloured = format!("\x1b[92m{}\x1b[0m", "x".repeat(8));
+        assert_eq!(
+            wrap_ansi(&coloured, 10, 4),
+            coloured,
+            "8 visible chars fit in 10 columns even wrapped in escapes"
+        );
+
+        // A short plain line is returned unchanged.
+        assert_eq!(wrap_ansi("short", 80, 38), "short");
     }
 }

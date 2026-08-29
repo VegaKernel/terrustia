@@ -56,6 +56,30 @@ byte-identical. The rest is deferred (no time to finish the full port now):
 A full second pass over the whole codebase for bugs, performance, and idiomatic-Rust improvements,
 then fixing what it finds. Not started.
 
+## Error handling
+
+- **Clear every non-test `.unwrap()` / `.expect()` from the production paths.** The server should
+  never take a caller-triggered or environment-triggered fault out as a panic when it could return
+  or log an explained error instead. Sweep the crates for `.unwrap()`, `.expect()`, panicking
+  indexing, and integer casts that truncate on hostile input, and replace each production one with
+  real propagation and an operator-facing message. Test-only unwraps (the `update.rs` fixture
+  server, unit tests) are fine and out of scope. The `net::listener::bind` mapping added for the
+  `os error 28` port-exhaustion case is the pattern to follow: keep the error kind, add advice that
+  says what to do about it.
+- **Back off the accept loop on a persistent error.** `net::listener::run` logs and retries on an
+  `accept()` failure with no delay, so a sticky error (descriptor exhaustion, a broken listener)
+  turns into a hot loop that pegs a core while filling the log. A short, capped backoff between
+  repeated failures fixes that without slowing the normal one-off case.
+- **Handle out-of-space and other storage errors on the write paths.** A full disk (ENOSPC), a
+  read-only filesystem, or a vanished directory can hit any place the server writes: the world save
+  and autosave, the rotating backups, the admin/account store, and the config the setup wizard
+  writes. Today those surface as a bare OS error or, worse, risk a partial or truncated `.wld`. Each
+  writer should fail with an explained, operator-facing message (the way `net::listener::bind` now
+  does for `os error 28`), never lose the last good save to a half-written file (write to a temp
+  path and rename into place), and keep the server running where the failure is recoverable (an
+  autosave that could not write should warn and retry, not take the process down). Pairs with the
+  `.unwrap()` sweep above.
+
 ## TUI and hosting
 
 The wrap-corruption bug, Ctrl-D, the flat boot, the status footer, the worlds/ directory and the

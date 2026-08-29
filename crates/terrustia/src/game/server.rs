@@ -2153,9 +2153,11 @@ impl GameServer {
                 projectiles = self.projectiles.len(),
                 "ticks are using a lot of their budget"
             );
-        } else if stall > TICK {
-            // Not a warning: nothing here is wrong, the machine is just busy. Worth saying,
-            // because a player will feel it either way.
+        } else if stall > TICK * 6 {
+            // Not a warning: nothing here is wrong, the machine is just busy. The threshold is six
+            // ticks (~100 ms) rather than one, because a single-tick stall is a dropped frame nobody
+            // notices, and an idle laptop that naps for a moment should not narrate it. A stall this
+            // size is a real hitch a player feels, and worth one quiet line per ten-second window.
             info!(
                 stall_us = stall.as_micros() as u64,
                 cpu_us = worst.cpu.as_micros() as u64,
