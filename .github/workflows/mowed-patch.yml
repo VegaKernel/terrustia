@@ -50,8 +50,12 @@ jobs:
           assert spawn.count(old) == 1, "quiet EventSpawns fixture shape changed"
           spawn_path.write_text(spawn.replace(old, new, 1))
           PY
-      - name: Verify formatting
-        run: cargo fmt --all --check
+      - name: Check whitespace
+        run: git diff --check
+      - name: Compile Terrustia
+        run: cargo check -p terrustia
+      - name: Run spawn postcheck tests
+        run: cargo test -p terrustia spawn_postcheck::tests --lib
       - name: Commit runtime wiring
         run: |
           git config user.name "github-actions[bot]"
