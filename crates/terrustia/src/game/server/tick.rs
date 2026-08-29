@@ -124,7 +124,6 @@ impl TickCost {
     }
 }
 
-
 impl GameServer {
     /// Refresh the live status footer: who is online, how long the server has been up, and the last
     /// tick's cost. Called about once a second from [`Self::note_tick_cost`]. Cheap, and a no-op on
@@ -406,7 +405,6 @@ impl GameServer {
         cost.wall = began.elapsed();
         cost
     }
-
 }
 
 /// Journey mode's `FreezeTime` actually stops the clock — not just the toggle sticking, the real
@@ -511,6 +509,7 @@ mod modify_time_rate {
 mod tick_accounting {
     use super::*;
     use crate::config::Config;
+    use crate::world::World;
 
     #[tokio::test]
     async fn no_phase_can_cost_more_than_its_own_tick() {
@@ -590,4 +589,3 @@ mod tick_accounting {
         );
     }
 }
-

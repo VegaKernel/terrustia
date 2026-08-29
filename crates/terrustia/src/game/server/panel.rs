@@ -11,7 +11,10 @@ use tracing::info;
 
 use crate::game::player::Player;
 
-use super::{GameServer, Phase, TICK};
+use super::{
+    GameServer,
+    tick::{Phase, TICK},
+};
 
 /// One connected player, as the panel needs to show them: who they are, how they are doing, where
 /// they are, and — for the live world view — enough of their real appearance data to draw a
