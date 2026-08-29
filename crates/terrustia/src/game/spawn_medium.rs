@@ -39,6 +39,24 @@ pub fn classify(world: &World, x: i32, ground_y: i32) -> Option<SpawnMedium> {
     }
 }
 
+/// The topmost water-containing tile in the column immediately above a solid spawning tile.
+///
+/// Aquatic enemies can stay near the spawning tile at the bottom. Sleeping Angler is different:
+/// vanilla presents him on the water's surface, so the live spawn path needs the top of the same
+/// water column rather than the bottom candidate. The input is already inside the world's safe
+/// bounds, so walking upward to row zero is bounded by the world height, not by arbitrary depth.
+pub fn water_surface_y(world: &World, x: i32, ground_y: i32) -> i32 {
+    let mut y = ground_y - 1;
+    while y > 0 {
+        let tile = world.tile(x, y - 1);
+        if tile.liquid == 0 || tile.liquid_kind != Liquid::Water {
+            break;
+        }
+        y -= 1;
+    }
+    y
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +93,19 @@ mod tests {
             ));
         }
         assert_eq!(classify(&world, 50, 50), Some(SpawnMedium::Water));
+    }
+
+    #[test]
+    fn water_surface_walks_to_the_top_of_the_same_column() {
+        let mut world = world();
+        for y in 43..=49 {
+            assert!(world.set_tile(
+                50,
+                y,
+                Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
+            ));
+        }
+        assert_eq!(water_surface_y(&world, 50, 50), 43);
     }
 
     #[test]
