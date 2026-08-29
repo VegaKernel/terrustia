@@ -11,6 +11,7 @@
 //! table. Run `just regen` to do them all and `cargo fmt` afterward, exactly as before.
 
 mod csharp;
+mod drops;
 mod hurt_tiles;
 mod recipes;
 
@@ -34,6 +35,11 @@ const TABLES: &[Table] = &[
         name: "recipes",
         out: "crates/terrustia-proto/src/recipes.rs",
         generate: recipes::generate,
+    },
+    Table {
+        name: "drops",
+        out: "crates/terrustia-proto/src/npc_drops.rs",
+        generate: drops::generate,
     },
 ];
 
