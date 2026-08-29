@@ -758,6 +758,295 @@ async fn the_finishing_features_work_over_real_sockets() {
     let _ = std::fs::remove_file(save_file.with_extension("wld.bak1"));
 }
 
+/// Sessions are scoped by permission, not all-or-nothing: a `default` account cannot even sign in
+/// (it holds no `panel.view`), and a `moderator` session can reach a route it has the permission
+/// for (`server.kick`) while getting a real `403` from one it does not (`panel.console`) — proving
+/// the check is per-route, not "any session is fully privileged" the way it used to be before this
+/// system existed (see `panel/mod.rs`'s module doc for the full route-to-permission map).
+///
+/// Fail-then-pass: before `authorized()` took a `Permission` and checked it fresh per route, a
+/// `moderator` session hitting `/api/console` here got `200`, not `403` — any valid session could
+/// run unrestricted console commands, which is exactly the all-or-nothing hole this closes.
+#[tokio::test]
+async fn moderator_and_default_sessions_are_scoped_by_permission() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "scoped", 9);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    // Claim as owner.
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let owner_session = extract_session(&body);
+
+    // Create one account in each of the two non-owner default groups.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"modacct","password":"moderator-pass","group":"moderator"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"defacct","password":"default-pass","group":"default"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // A `default` account cannot even sign in to the panel: it does not hold `panel.view`.
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            r#"{"name":"defacct","password":"default-pass"}"#,
+        )
+        .await;
+    assert_eq!(
+        status, 403,
+        "a default-group account must not be able to open a panel session: {body}"
+    );
+
+    // A `moderator` account can sign in — it holds `panel.view`.
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            r#"{"name":"modacct","password":"moderator-pass"}"#,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let mod_session = extract_session(&body);
+
+    // `/api/status` carries the session's own permissions, for the frontend's tab filtering.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/status"), Some(&mod_session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"server.kick\""), "{body}");
+    assert!(
+        !body.contains("\"panel.console\""),
+        "a moderator must not carry panel.console: {body}"
+    );
+
+    // A route it *does* have the permission for: not found (proving the permission check passed
+    // and the request reached the handler), never forbidden.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/kick"),
+            r#"{"name":"nobody-connected","reason":"test"}"#,
+            &mod_session,
+        )
+        .await;
+    assert_eq!(
+        status, 404,
+        "a moderator has server.kick, so this must reach the handler: {body}"
+    );
+
+    // A route it does *not* have the permission for: forbidden, not merely "not found" or "ok".
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/console"),
+            r#"{"line":"players"}"#,
+            &mod_session,
+        )
+        .await;
+    assert_eq!(
+        status, 403,
+        "a moderator must not reach the raw console channel: {body}"
+    );
+
+    // Same story for accounts administration — a moderator does not hold `admin.accounts`.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/accounts"), Some(&mod_session))
+        .await;
+    assert_eq!(status, 403, "{body}");
+
+    // But an ordinary `panel.view` route still works for it.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/players"), Some(&mod_session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+/// The group-permission editor: an `admin.groups` holder (`owner`) may grant/revoke a permission on
+/// a group, but only within its own reach — and the reach guard applies to *itself* too, not just
+/// to account/group reassignment. Also proves an `admin.accounts`-only account (no `admin.groups`)
+/// gets `403` from the editor routes even though it can see the plain accounts list.
+#[tokio::test]
+async fn the_group_permission_editor_is_reach_limited() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "groupedit", 13);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let owner_session = extract_session(&body);
+
+    // The known vocabulary includes both a leaf and a family wildcard.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/permissions"), Some(&owner_session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"server.kick\""), "{body}");
+    assert!(body.contains("\"server.*\""), "{body}");
+
+    // Owner (holding `*`) may grant `moderator` a new permission it did not have before.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/groups/permissions"),
+            r#"{"group":"moderator","permission":"server.ban","grant":true}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = client
+        .get_status(&format!("{base}/api/accounts"), Some(&owner_session))
+        .await;
+    assert!(
+        body.contains("\"name\":\"moderator\"") && body.contains("server.ban"),
+        "the grant should be visible in the groups list: {body}"
+    );
+
+    // And revoke it again.
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/groups/permissions"),
+            r#"{"group":"moderator","permission":"server.ban","grant":false}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // An unrecognised permission name is refused rather than silently doing nothing.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/groups/permissions"),
+            r#"{"group":"moderator","permission":"srever.kcik","grant":true}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 400, "a typo must be refused: {body}");
+
+    // Now the escalation guard: promote a fresh account to `admin` (which holds `admin.accounts`
+    // but deliberately not `admin.groups`), and prove it can see the accounts list but gets `403`
+    // from the group-permission editor — the whole point of the ladder in `group::defaults`.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"adminacct","password":"admin-password","group":"admin"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            r#"{"name":"adminacct","password":"admin-password"}"#,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let admin_session = extract_session(&body);
+
+    let (status, body) = client
+        .get_status(&format!("{base}/api/accounts"), Some(&admin_session))
+        .await;
+    assert_eq!(status, 200, "admin.accounts should see the list: {body}");
+
+    let (status, body) = client
+        .get_status(&format!("{base}/api/permissions"), Some(&admin_session))
+        .await;
+    assert_eq!(
+        status, 403,
+        "admin lacks admin.groups, so the editor's vocabulary route must refuse it: {body}"
+    );
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/groups/permissions"),
+            r#"{"group":"moderator","permission":"server.ban","grant":true}"#,
+            &admin_session,
+        )
+        .await;
+    assert_eq!(
+        status, 403,
+        "admin must not be able to edit any group's permissions: {body}"
+    );
+
+    // And the reach guard bites even for owner: it cannot demote itself into a group that then
+    // could not edit permissions at all, because `panel_set_account_group`'s lock-out guard (not
+    // the reach guard) refuses stripping the last `admin.groups`-capable account.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/group"),
+            r#"{"name":"owner","group":"default"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 400, "the last admin.groups-capable account: {body}");
+}
+
 /// Whether *something* is accepting connections on `addr` right now — a closed port refuses
 /// immediately rather than hanging, so no timeout is needed here.
 async fn port_answers(addr: std::net::SocketAddr) -> bool {

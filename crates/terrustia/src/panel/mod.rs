@@ -29,17 +29,39 @@
 //! `admin::store::Admin::account_hash`'s doc comment requires for player logins.
 //!
 //! **Every endpoint below `/api/` other than `/api/unclaimed` and `/api/login` requires a valid
-//! session**, checked the same way `/api/status` already did before this module grew: a bearer
-//! token (or, for the two WebSocket routes, a `session` query parameter — a browser cannot attach
-//! a custom header to a WebSocket upgrade) looked up in [`PanelState::sessions`]. A session is only
-//! ever issued to an account whose group grants `Permission::Admin`: the panel runs *unrestricted*
-//! console commands (`ServerEvent::Console` → `run_console`), so holding a session is equivalent to
-//! full operator power and must require the credential for it. Authenticating any account is not
-//! enough — a `default` account (look-only in-game, and `/register` needs no permission to create
-//! one) authenticated but could then `group <self> owner` its way up through `/api/console`, so
-//! `login` refuses anything below admin. Kick, ban, whitelist and console/chat commands sent from
-//! the panel reuse `run_admin_command`'s own logic, or (for raw console/chat lines)
-//! `ServerEvent::Console` itself, the very channel the sticky console sends down.
+//! session and its own permission**, checked by [`authorized`] (or [`authorized_token`] for the two
+//! WebSocket routes, which carry the session as a `session` query parameter instead of a bearer
+//! header — a browser cannot attach a custom header to a WebSocket upgrade): a token looked up in
+//! [`PanelState::sessions`] to find the signed-in account, then a fresh, per-request check —
+//! against the game task's live `Admin` store, not anything cached at login — that the account's
+//! group grants the specific permission that route needs. `login` itself only requires `panel.view`
+//! to issue a session at all; a `default` account (which does not hold it) cannot get a session,
+//! and a `moderator` one can sign in but still gets `403` from, say, `/api/console`.
+//!
+//! Route → permission map (see `admin::group::perm` for what each name actually gates):
+//!
+//! | route | permission |
+//! |---|---|
+//! | `/api/status`, `/api/players`, `/api/whitelist` (view), `/api/worlds` (view), `/api/config` (view), `/api/metrics`, `/api/backups`, `/api/worlds/new/status`, `/api/ws`, `/api/ws/world` | `panel.view` |
+//! | `/api/console`, `/api/chat` | `panel.console` — a raw line down the same unrestricted channel the sticky console uses |
+//! | `/api/players/kick` | `server.kick` |
+//! | `/api/players/ban` | `server.ban` |
+//! | `/api/players/unban` | `server.unban` |
+//! | `/api/players/mute`, `/api/players/unmute` | `server.mute` / `server.unmute` |
+//! | `/api/whitelist/add`, `/api/whitelist/remove` | `server.whitelist` |
+//! | `/api/config/motd` | `world.motd` |
+//! | `/api/worlds/switch` | `world.switch` |
+//! | `/api/worlds/new` | `world.new` |
+//! | `/api/save` | `world.save` |
+//! | `/api/rollback` | `world.rollback` |
+//! | `/api/accounts` (view, create, delete) | `admin.accounts` |
+//! | `/api/accounts/group` | `admin.accounts`, plus an anti-escalation reach check (see `Admin::group_within_reach`) |
+//! | `/api/permissions`, `/api/groups/permissions` | `admin.groups`, the group-permission-set editor — plus, for a grant, the same reach check |
+//! | `/api/audit` | `admin.audit` |
+//!
+//! Kick, ban, whitelist and console/chat commands sent from the panel reuse `run_admin_command`'s
+//! own logic, or (for raw console/chat lines) `ServerEvent::Console` itself, the very channel the
+//! sticky console sends down.
 //!
 //! **Sessions** are an in-memory map owned by this module, not the account store: a session is a
 //! panel-HTTP concern, not core game state, and doesn't need to survive a panel restart.
@@ -58,7 +80,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::admin::{Account, BanKind};
+use crate::admin::{Account, BanKind, perm};
 use crate::config::Config;
 use crate::game::server::{
     PanelAccountInfo, PanelAuthLookup, PanelBackupEntry, PanelBackups, PanelConfigSnapshot,
@@ -235,6 +257,8 @@ pub async fn run(
         .route("/api/accounts/group", post(set_account_group))
         .route("/api/accounts/create", post(create_account))
         .route("/api/accounts/delete", post(delete_account))
+        .route("/api/permissions", get(known_permissions))
+        .route("/api/groups/permissions", post(set_group_permission))
         .fallback(static_handler)
         .with_state(state);
 
@@ -393,17 +417,54 @@ async fn ask<T>(
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "the game did not answer"))
 }
 
-/// The session-check every endpoint other than `/api/unclaimed` and `/api/login` needs, pulled out
-/// of `status` (the first handler to need it) so every handler added since shares the exact same
-/// check rather than a plausible-looking copy of it.
-async fn authorized(state: &PanelState, headers: &axum::http::HeaderMap) -> Result<(), Response> {
+/// The session-and-permission check every endpoint other than `/api/unclaimed` and `/api/login`
+/// needs: a valid session (a bearer token that resolves to a signed-in account), and that account's
+/// group currently granting `permission`. Checked fresh against the game task's live `Admin` store
+/// on *every* call rather than cached at login — a group's permissions, or an account's own group,
+/// can change mid-session (through this very panel), and a session issued before that change must
+/// not go on behaving as if it never happened.
+///
+/// Returns the account name on success: a handful of handlers (anything that can hand power to
+/// someone else — creating an account, moving one between groups, editing a group's own permission
+/// set) need to know who is asking, for `Admin::group_within_reach`'s anti-escalation check.
+///
+/// See this module's own doc comment for the full route-to-permission map.
+async fn authorized(
+    state: &PanelState,
+    headers: &axum::http::HeaderMap,
+    permission: crate::admin::Permission,
+) -> Result<String, Response> {
     let Some(token) = bearer_token(headers) else {
         return Err(err(StatusCode::UNAUTHORIZED, "missing session"));
     };
-    if session_name(state, token).is_none() {
+    authorized_token(state, token, permission).await
+}
+
+/// The token-and-permission half of [`authorized`], factored out so the two WebSocket upgrades
+/// ([`ws_upgrade`], [`world_ws_upgrade`]) can reuse the exact same check with a session that
+/// arrived as a query parameter rather than a bearer header (a browser cannot attach a custom
+/// header to a WebSocket upgrade request).
+async fn authorized_token(
+    state: &PanelState,
+    token: &str,
+    permission: crate::admin::Permission,
+) -> Result<String, Response> {
+    let Some(name) = session_name(state, token) else {
         return Err(err(StatusCode::UNAUTHORIZED, "invalid or expired session"));
+    };
+    let allowed = ask(state, |reply| ServerEvent::PanelAuthorize {
+        name: name.clone(),
+        permission: permission.as_str().to_string(),
+        reply,
+    })
+    .await?;
+    if !allowed {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            format!("this account does not have '{}'", permission.as_str()),
+        ));
     }
-    Ok(())
+    Ok(name)
 }
 
 #[derive(Deserialize)]
@@ -482,11 +543,12 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
     if !ok {
         return err(StatusCode::UNAUTHORIZED, "wrong name or password");
     }
-    // Authenticating an account is not enough to drive the panel: every panel session can run
-    // unrestricted console commands, so only an account whose group grants `Permission::Admin` may
-    // hold one. Without this, a self-registered `default` account (look-only in-game, and `/register`
-    // needs no permission) could log in and `group <self> owner` its way to full control.
-    if !lookup.admin {
+    // Authenticating an account is not enough to hold a panel session: the account's group must
+    // grant `panel.view`. Every route reached with that session then checks its own permission (see
+    // this module's doc comment for the full mapping) — a `default` account, which does not hold
+    // `panel.view`, cannot get a session at all; a `moderator` one can sign in but gets `403` from
+    // `/api/console` all the same.
+    if !lookup.panel_view {
         return err(
             StatusCode::FORBIDDEN,
             "this account is not permitted to use the admin panel",
@@ -529,11 +591,19 @@ struct StatusResponse {
     world_file: Option<String>,
     version: &'static str,
     unclaimed: bool,
+    /// The calling account's own permission strings — a UX convenience so the frontend can choose
+    /// which tabs and buttons to show; every route still re-checks its own permission server-side
+    /// regardless of what this says. See [`PanelAuthLookup::permissions`].
+    permissions: Vec<String>,
 }
 
-async fn build_status(state: &PanelState) -> Result<StatusResponse, Response> {
+/// `account` is the signed-in account making the request — its own permissions are what the
+/// response's `permissions` field carries, so this must be the real caller, not an empty
+/// placeholder (an earlier draft used `String::new()` here, before this field existed, when only
+/// the server-wide `unclaimed` flag was needed from `auth_lookup`).
+async fn build_status(state: &PanelState, account: &str) -> Result<StatusResponse, Response> {
     let live: PanelStatus = ask(state, |reply| ServerEvent::PanelStatus { reply }).await?;
-    let lookup = auth_lookup(state, String::new()).await?;
+    let lookup = auth_lookup(state, account.to_string()).await?;
     Ok(StatusResponse {
         uptime_secs: state.started.elapsed().as_secs(),
         player_count: live.player_count,
@@ -542,14 +612,16 @@ async fn build_status(state: &PanelState) -> Result<StatusResponse, Response> {
         world_file: live.world_file,
         version: env!("CARGO_PKG_VERSION"),
         unclaimed: lookup.unclaimed,
+        permissions: lookup.permissions,
     })
 }
 
 async fn status(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
-        return resp;
-    }
-    match build_status(&state).await {
+    let account = match authorized(&state, &headers, perm::PANEL_VIEW).await {
+        Ok(account) => account,
+        Err(resp) => return resp,
+    };
+    match build_status(&state, &account).await {
         Ok(s) => Json(s).into_response(),
         Err(resp) => resp,
     }
@@ -575,10 +647,11 @@ async fn ws_upgrade(
     // A WebSocket upgrade can't carry a custom Authorization header from a browser, so the session
     // travels as a query parameter here instead — same token, same validation, just a different
     // transport for the one request type that needs it.
-    if session_name(&state, &q.session).is_none() {
-        return err(StatusCode::UNAUTHORIZED, "invalid or expired session");
-    }
-    ws.on_upgrade(move |socket| stream_status(socket, state))
+    let account = match authorized_token(&state, &q.session, perm::PANEL_VIEW).await {
+        Ok(account) => account,
+        Err(resp) => return resp,
+    };
+    ws.on_upgrade(move |socket| stream_status(socket, state, account))
 }
 
 /// Every frame this socket sends, tagged by `type` so the frontend's one `onmessage` handler can
@@ -595,7 +668,7 @@ enum WsMessage {
     },
 }
 
-async fn stream_status(mut socket: WebSocket, state: PanelState) {
+async fn stream_status(mut socket: WebSocket, state: PanelState, account: String) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     // Subscribing here, not earlier, is deliberate: a `broadcast` receiver only ever sees frames
     // sent *after* it subscribes, so this socket's console tab starts from "now" rather than
@@ -604,7 +677,7 @@ async fn stream_status(mut socket: WebSocket, state: PanelState) {
     loop {
         let message = tokio::select! {
             _ = interval.tick() => {
-                match build_status(&state).await {
+                match build_status(&state, &account).await {
                     Ok(s) => WsMessage::Status(s),
                     Err(_) => break,
                 }
@@ -716,7 +789,7 @@ impl From<PanelPlayer> for PlayerResponse {
 }
 
 async fn players(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelPlayers { reply }).await {
@@ -743,7 +816,7 @@ async fn kick_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<KickRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::SERVER_KICK).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelKick {
@@ -773,7 +846,7 @@ async fn ban_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<BanRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::SERVER_BAN).await {
         return resp;
     }
     let Some(kind) = BanKind::parse(&req.kind) else {
@@ -807,7 +880,7 @@ async fn unban_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<UnbanRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::SERVER_UNBAN).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelUnban {
@@ -839,7 +912,7 @@ impl From<PanelWhitelist> for WhitelistResponse {
 }
 
 async fn whitelist(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelWhitelist { reply }).await {
@@ -863,7 +936,7 @@ async fn whitelist_add(
     headers: axum::http::HeaderMap,
     Json(req): Json<NameRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::SERVER_WHITELIST).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelWhitelistAdd {
@@ -882,7 +955,7 @@ async fn whitelist_remove(
     headers: axum::http::HeaderMap,
     Json(req): Json<NameRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::SERVER_WHITELIST).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelWhitelistRemove {
@@ -907,7 +980,7 @@ struct WorldEntry {
 }
 
 async fn worlds(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     // Listing the world directory is a plain filesystem read that needs no game-task state; only
@@ -948,7 +1021,7 @@ async fn switch_world(
     headers: axum::http::HeaderMap,
     Json(req): Json<SwitchWorldRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::WORLD_SWITCH).await {
         return resp;
     }
     // The panel never accepts a raw path from the client — only a name matched against what
@@ -1017,7 +1090,7 @@ async fn config_snapshot(
     State(state): State<PanelState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelConfigSnapshot { reply }).await {
@@ -1036,7 +1109,7 @@ async fn set_motd(
     headers: axum::http::HeaderMap,
     Json(req): Json<MotdRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::WORLD_MOTD).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelSetMotd {
@@ -1070,7 +1143,7 @@ async fn send_console(
     headers: axum::http::HeaderMap,
     Json(req): Json<ConsoleRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_CONSOLE).await {
         return resp;
     }
     let line = first_line(&req.line);
@@ -1100,7 +1173,7 @@ async fn send_chat(
     headers: axum::http::HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_CONSOLE).await {
         return resp;
     }
     let text = first_line(&req.text);
@@ -1128,8 +1201,8 @@ async fn world_ws_upgrade(
     Query(q): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if session_name(&state, &q.session).is_none() {
-        return err(StatusCode::UNAUTHORIZED, "invalid or expired session");
+    if let Err(resp) = authorized_token(&state, &q.session, perm::PANEL_VIEW).await {
+        return resp;
     }
     ws.on_upgrade(move |socket| stream_world(socket, state))
 }
@@ -1307,7 +1380,7 @@ impl MetricsResponse {
 }
 
 async fn metrics(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelMetrics { reply }).await {
@@ -1359,7 +1432,7 @@ impl From<PanelBackups> for BackupsResponse {
 }
 
 async fn backups(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelBackups { reply }).await {
@@ -1369,7 +1442,7 @@ async fn backups(State(state): State<PanelState>, headers: axum::http::HeaderMap
 }
 
 async fn force_save(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::WORLD_SAVE).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelForceSave { reply }).await {
@@ -1394,7 +1467,7 @@ async fn rollback(
     headers: axum::http::HeaderMap,
     Json(req): Json<RollbackRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::WORLD_ROLLBACK).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelRollback {
@@ -1452,7 +1525,7 @@ struct AccountsResponse {
 }
 
 async fn accounts(State(state): State<PanelState>, headers: axum::http::HeaderMap) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelAccounts { reply }).await {
@@ -1476,10 +1549,12 @@ async fn set_account_group(
     headers: axum::http::HeaderMap,
     Json(req): Json<SetGroupRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelSetAccountGroup {
+        actor,
         name: req.name,
         group: req.group,
         reply,
@@ -1504,9 +1579,10 @@ async fn create_account(
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateAccountRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     if req.name.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "an account needs a name");
     }
@@ -1528,6 +1604,7 @@ async fn create_account(
             Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "hashing task panicked"),
         };
     match ask(&state, |reply| ServerEvent::PanelCreateAccount {
+        actor,
         account,
         reply,
     })
@@ -1549,11 +1626,61 @@ async fn delete_account(
     headers: axum::http::HeaderMap,
     Json(req): Json<DeleteAccountRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
         return resp;
     }
     match ask(&state, |reply| ServerEvent::PanelDeleteAccount {
         name: req.name,
+        reply,
+    })
+    .await
+    {
+        Ok(Ok(())) => StatusCode::OK.into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+// ---- group permission editing ----------------------------------------------------------------
+
+/// Every known permission name, for the group editor's picker. A plain function call rather than a
+/// `ServerEvent` round trip: the vocabulary registry (`admin::group::known`) is process-global, not
+/// game state, so there is nothing on the game task worth asking.
+async fn known_permissions(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers, perm::ADMIN_GROUPS).await {
+        return resp;
+    }
+    Json(crate::admin::group::known()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SetGroupPermissionRequest {
+    group: String,
+    permission: String,
+    grant: bool,
+}
+
+/// Add or remove one permission on a group. `actor` (the signed-in account) must already hold the
+/// permission being granted — enforced on the game task, in
+/// `GameServer::panel_set_group_permission` — so the editor cannot be used to hand out power nobody
+/// making the change actually has.
+async fn set_group_permission(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SetGroupPermissionRequest>,
+) -> Response {
+    let actor = match authorized(&state, &headers, perm::ADMIN_GROUPS).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
+    match ask(&state, |reply| ServerEvent::PanelSetGroupPermission {
+        actor,
+        group: req.group,
+        permission: req.permission,
+        grant: req.grant,
         reply,
     })
     .await
@@ -1630,7 +1757,7 @@ async fn new_world_status(
     State(state): State<PanelState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::PANEL_VIEW).await {
         return resp;
     }
     Json(snapshot_worldgen(&state)).into_response()
@@ -1641,7 +1768,7 @@ async fn new_world(
     headers: axum::http::HeaderMap,
     Json(req): Json<NewWorldRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers).await {
+    if let Err(resp) = authorized(&state, &headers, perm::WORLD_NEW).await {
         return resp;
     }
     // One at a time. Worldgen is slow and memory-hungry; two at once on the blocking pool is a way

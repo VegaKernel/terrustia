@@ -506,7 +506,7 @@ async fn a_generated_world_saves_and_reloads() {
 ///
 /// An unclaimed server grants every permission to everyone (see
 /// `a_stranger_cannot_claim_an_unclaimed_server`'s own comment on that), so this needs no
-/// registration step to exercise `/world undo`'s `Permission::Players` gate.
+/// registration step to exercise `/world undo`'s `server.undo` gate.
 #[tokio::test]
 async fn world_undo_reverts_a_players_tile_edits_and_a_witness_sees_it() {
     let addr = start_with(Config::default(), |world| {

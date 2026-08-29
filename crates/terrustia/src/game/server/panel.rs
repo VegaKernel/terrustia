@@ -114,10 +114,16 @@ pub struct PanelAuthLookup {
     pub claim_token: Option<String>,
     /// `(hash, group)` for the named account, if one exists.
     pub hash_and_group: Option<(String, String)>,
-    /// Whether that account's group grants `Permission::Admin` — i.e. may drive the panel, which
-    /// runs unrestricted console commands. A self-registered `default` (look-only) account must
-    /// not, which is what stops it escalating to owner through `/api/console`.
-    pub admin: bool,
+    /// Whether that account's group grants `panel.view` — i.e. may sign in to the panel at all. A
+    /// self-registered `default` account does not, by default; a specific route beyond login is
+    /// then gated on its own permission (see `panel/mod.rs`'s module doc for the full mapping),
+    /// not on this flag.
+    pub panel_view: bool,
+    /// The raw permission strings the account's group holds (or empty, for no account/unknown
+    /// group). Handed back to the frontend on `/api/status` so it can decide which tabs and buttons
+    /// to show — a UX convenience only; every route re-checks its own permission server-side
+    /// regardless of what the panel chose to display.
+    pub permissions: Vec<String>,
 }
 
 /// What [`ServerEvent::PanelStatus`](super::ServerEvent::PanelStatus) hands back.
@@ -205,15 +211,17 @@ pub struct PanelAccounts {
 }
 
 impl GameServer {
-    /// Whether an account's group resolves to one that can administer the server. The last such
-    /// account is the one the panel refuses to strip or delete — see
-    /// [`ServerEvent::PanelSetAccountGroup`](super::ServerEvent::PanelSetAccountGroup).
+    /// Whether an account's group can edit who is allowed to do what (`admin.groups`, or the
+    /// wildcard). The last such account is the one the panel refuses to strip or delete — see
+    /// [`ServerEvent::PanelSetAccountGroup`](super::ServerEvent::PanelSetAccountGroup) — because
+    /// losing it would mean nobody could ever fix a permissions mistake from the panel again (the
+    /// server's own console can always do so regardless; this guard is about not needing it to).
     fn account_can_admin(&self, account: &crate::admin::Account) -> bool {
         self.admin
             .groups
             .iter()
             .find(|g| g.name == account.group)
-            .is_some_and(|g| g.may(crate::admin::Permission::Admin))
+            .is_some_and(|g| g.may(crate::admin::perm::ADMIN_GROUPS))
     }
 
     /// How many accounts can still administer the server. Used to refuse the change that would take
@@ -298,7 +306,7 @@ impl GameServer {
             .map(|g| PanelGroupInfo {
                 name: g.name.clone(),
                 permissions: g.permissions.iter().cloned().collect(),
-                can_admin: g.may(crate::admin::Permission::Admin),
+                can_admin: g.may(crate::admin::perm::ADMIN_GROUPS),
             })
             .collect();
         let accounts = self
@@ -315,14 +323,27 @@ impl GameServer {
     }
 
     /// Move an account into a different group. The console `group` command's own rule (the group
-    /// must exist), plus the lock-out guard the panel needs.
+    /// must exist), the lock-out guard the panel needs, and the anti-escalation guard every
+    /// account/group change needs: `actor` must already reach everything `group` holds (see
+    /// `Admin::group_within_reach`), or this refuses — without it, an `admin.accounts` holder could
+    /// promote themselves straight into `owner` through this very route.
     pub(super) fn panel_set_account_group(
         &mut self,
+        actor: &str,
         name: &str,
         group: &str,
     ) -> Result<(), String> {
         if !self.admin.groups.iter().any(|g| g.name == group) {
             return Err(format!("there is no group called {group}"));
+        }
+        let Some(actor_group) = self.admin.account_group(actor) else {
+            return Err("your own account no longer exists".into());
+        };
+        if !self.admin.group_within_reach(actor_group, group) {
+            return Err(format!(
+                "you cannot move anyone into '{group}': it holds permissions you do not have \
+                 yourself"
+            ));
         }
         let Some(account) = self
             .admin
@@ -339,7 +360,7 @@ impl GameServer {
             .groups
             .iter()
             .find(|g| g.name == group)
-            .is_some_and(|g| g.may(crate::admin::Permission::Admin));
+            .is_some_and(|g| g.may(crate::admin::perm::ADMIN_GROUPS));
         if target_can_admin_now && !new_group_can_admin && self.admin_capable_accounts() <= 1 {
             return Err(
                 "that is the only account that can still administer the server; make another \
@@ -361,7 +382,86 @@ impl GameServer {
         };
         account.group = group.to_string();
         let _ = self.admin.save();
-        info!(account = name, group, "group changed from the web panel");
+        info!(
+            account = name,
+            group, actor, "group changed from the web panel"
+        );
+        Ok(())
+    }
+
+    /// Create an account through the panel, guarded by the same anti-escalation rule
+    /// [`Self::panel_set_account_group`] applies: `actor` must already reach everything the new
+    /// account's chosen group holds.
+    pub(super) fn panel_create_account(
+        &mut self,
+        actor: &str,
+        account: crate::admin::Account,
+    ) -> Result<(), String> {
+        // The group has to exist — an account pointed at a group that is not there silently falls
+        // back to `default`, which would be a confusing thing to have just created.
+        if !self.admin.groups.iter().any(|g| g.name == account.group) {
+            return Err(format!("there is no group called {}", account.group));
+        }
+        let Some(actor_group) = self.admin.account_group(actor) else {
+            return Err("your own account no longer exists".into());
+        };
+        if !self.admin.group_within_reach(actor_group, &account.group) {
+            return Err(format!(
+                "you cannot create an account in '{}': it holds permissions you do not have \
+                 yourself",
+                account.group
+            ));
+        }
+        let name = account.name.clone();
+        let group = account.group.clone();
+        let result = self.admin.insert_account(account);
+        if result.is_ok() {
+            let _ = self.admin.save();
+            info!(
+                account = name,
+                group, actor, "account created from the web panel"
+            );
+        }
+        result
+    }
+
+    /// Add or remove a permission on a group. `actor` must already hold `permission` themselves —
+    /// the same reach rule as account/group changes, applied to a single permission instead of a
+    /// whole group's worth, so the group editor cannot be used to grant a permission nobody making
+    /// the change actually has. An unrecognised permission name is refused outright.
+    pub(super) fn panel_set_group_permission(
+        &mut self,
+        actor: &str,
+        group: &str,
+        permission: &str,
+        grant: bool,
+    ) -> Result<(), String> {
+        if !crate::admin::group::is_known(permission) {
+            return Err(format!("'{permission}' is not a recognised permission"));
+        }
+        let Some(actor_group) = self.admin.account_group(actor) else {
+            return Err("your own account no longer exists".into());
+        };
+        if grant && !self.admin.group_grants_str(actor_group, permission) {
+            return Err(format!(
+                "you cannot grant '{permission}': you do not hold it yourself"
+            ));
+        }
+        let Some(target) = self.admin.groups.iter_mut().find(|g| g.name == group) else {
+            return Err(format!("there is no group called {group}"));
+        };
+        let changed = if grant {
+            target.permissions.insert(permission.to_string())
+        } else {
+            target.permissions.remove(permission)
+        };
+        if changed {
+            let _ = self.admin.save();
+            info!(
+                group,
+                permission, grant, actor, "group permissions changed from the web panel"
+            );
+        }
         Ok(())
     }
 

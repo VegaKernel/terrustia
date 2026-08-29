@@ -14,7 +14,7 @@ use std::{
 
 use tracing::{info, warn};
 
-use super::{Account, Ban, BanKind, Group, Permission, ban::now, group::defaults};
+use super::{Account, Ban, BanKind, Group, Permission, ban::now, group, group::defaults};
 
 /// Everything the server knows about who may do what.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -86,6 +86,29 @@ impl Admin {
             admin.groups = defaults();
         }
         admin.path = Some(path.to_path_buf());
+
+        // A store written before permissions were namespaced still has the old coarse words
+        // (`look`/`world`/`players`/`admin`) in one or more groups. Map them across once — see
+        // `group::migrate`'s own doc comment for exactly what each word becomes and why — and save
+        // immediately so the rewrite happens exactly once rather than on every boot.
+        let mut migrated = false;
+        for group in &mut admin.groups {
+            if group::migrate(&mut group.permissions) {
+                migrated = true;
+            }
+        }
+        if migrated {
+            info!(
+                path = %path.display(),
+                "migrated legacy coarse group permissions to the namespaced vocabulary",
+            );
+            if let Err(e) = admin.save() {
+                warn!(
+                    error = %e,
+                    "could not persist the migrated admin file; migration will be retried next boot",
+                );
+            }
+        }
         admin
     }
 
@@ -137,6 +160,48 @@ impl Admin {
         self.groups
             .iter()
             .any(|g| g.name == group_name && g.may(permission))
+    }
+
+    /// The raw-string form of [`Self::group_grants`], for a permission name that arrived over the
+    /// wire (the panel's per-route `PanelAuthorize` check) rather than as a compile-time constant.
+    pub fn group_grants_str(&self, group_name: &str, permission: &str) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.name == group_name && g.grants_str(permission))
+    }
+
+    /// The group an account belongs to, by name, if the account exists. Used alongside
+    /// [`Self::group_within_reach`] wherever an actor's own group needs to be found first.
+    pub fn account_group(&self, name: &str) -> Option<&str> {
+        self.accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .map(|a| a.group.as_str())
+    }
+
+    /// Whether everything `target_group` may do is already something `actor_group` may do — the
+    /// general rule that stops any account/group change from ever handing out more power than the
+    /// person making the change already holds themselves.
+    ///
+    /// This is what actually keeps `admin.accounts` safe to grant to the `admin` tier even though
+    /// `admin` lacks `admin.groups`: without it, an `admin`-tier account could reassign *itself* into
+    /// `owner` through the ordinary account-group-change route, which is exactly the
+    /// self-escalation the ladder in `group::defaults` is trying to rule out. Both an unknown actor
+    /// group and an unknown target group return `false` — nothing is "within reach" of a group that
+    /// does not exist, and a target that does not exist cannot be reached either.
+    ///
+    /// Used for two different edits, both of which are really "does this change grant power the
+    /// actor doesn't have": moving an account into a different group (every permission the *target*
+    /// group holds must already be within the *actor*'s reach), and adding a permission to a group
+    /// (the single permission being added must be within the actor's reach).
+    pub fn group_within_reach(&self, actor_group: &str, target_group: &str) -> bool {
+        let Some(actor) = self.groups.iter().find(|g| g.name == actor_group) else {
+            return false;
+        };
+        let Some(target) = self.groups.iter().find(|g| g.name == target_group) else {
+            return false;
+        };
+        target.permissions.iter().all(|p| actor.grants_str(p))
     }
 
     /// Sign in, returning whether the password was right.
@@ -301,6 +366,7 @@ impl Admin {
 
 #[cfg(test)]
 mod tests {
+    use super::group::perm;
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
@@ -318,29 +384,63 @@ mod tests {
         let admin = Admin::load(&temp("does-not-exist.toml"));
         assert!(!admin.groups.is_empty());
         assert!(admin.unclaimed());
-        assert!(admin.may(0, Permission::World));
-        assert!(admin.may(0, Permission::Admin));
+        assert!(admin.may(0, perm::WORLD_TIME));
+        assert!(admin.may(0, perm::ADMIN_GROUPS));
     }
 
-    /// Only an admin-capable group may drive the web panel (which runs unrestricted console
-    /// commands). This is what stops a self-registered `default` account escalating through it — and
-    /// it also pins that the bogus `"everything"` group name grants nothing, since it is not a real
-    /// group (the owner group is named `"owner"`).
+    /// Only `owner` may edit who is allowed to do what (`admin.groups`) — not even `admin`, since
+    /// that permission is exactly the one that would let a group grant itself anything, up to and
+    /// including `owner` itself. This also pins that the bogus `"everything"` group name grants
+    /// nothing, since it is not a real group (the owner group is named `"owner"`).
     #[test]
-    fn only_an_admin_group_may_drive_the_panel() {
-        let admin = Admin::load(&temp("panel-authz.toml"));
-        assert!(admin.group_grants("owner", Permission::Admin), "owner may");
+    fn only_owner_may_edit_group_permissions() {
+        let admin = Admin::load(&temp("group-edit-authz.toml"));
+        assert!(admin.group_grants("owner", perm::ADMIN_GROUPS), "owner may");
         assert!(
-            !admin.group_grants("moderator", Permission::Admin),
+            !admin.group_grants("admin", perm::ADMIN_GROUPS),
+            "admin must not be able to grant itself anything"
+        );
+        assert!(
+            !admin.group_grants("moderator", perm::ADMIN_GROUPS),
             "a moderator is not an admin"
         );
         assert!(
-            !admin.group_grants("default", Permission::Admin),
-            "a look-only default account must not reach the panel"
+            !admin.group_grants("default", perm::ADMIN_GROUPS),
+            "a look-only default account must not administer permissions"
         );
         assert!(
-            !admin.group_grants("everything", Permission::Admin),
+            !admin.group_grants("everything", perm::ADMIN_GROUPS),
             "\"everything\" is not a real group name, so it grants nothing"
+        );
+    }
+
+    /// The escalation guard: an `admin`-tier account cannot reach `owner` through account/group
+    /// reassignment, because `owner` holds `*` and `admin` does not. It *can* reach `moderator` and
+    /// its own tier, since everything those groups hold is already within its own reach.
+    #[test]
+    fn group_within_reach_blocks_reassignment_above_ones_own_ceiling() {
+        let admin = Admin::load(&temp("within-reach.toml"));
+        assert!(
+            !admin.group_within_reach("admin", "owner"),
+            "admin must not be able to promote anyone to owner"
+        );
+        assert!(admin.group_within_reach("admin", "moderator"));
+        assert!(admin.group_within_reach("admin", "admin"));
+        assert!(
+            admin.group_within_reach("owner", "owner"),
+            "owner reaches anything"
+        );
+        assert!(
+            !admin.group_within_reach("moderator", "admin"),
+            "moderator cannot promote anyone into admin either"
+        );
+        assert!(
+            !admin.group_within_reach("nonsense", "moderator"),
+            "an unknown actor group reaches nothing"
+        );
+        assert!(
+            !admin.group_within_reach("admin", "nonsense"),
+            "an unknown target group cannot be reached"
         );
     }
 
@@ -353,12 +453,12 @@ mod tests {
             .expect("register");
 
         assert!(!admin.unclaimed());
-        assert!(admin.may(0, Permission::Look), "looking is always allowed");
+        assert!(admin.may(0, perm::SERVER_LOOK), "looking is always allowed");
         assert!(
-            !admin.may(0, Permission::World),
+            !admin.may(0, perm::WORLD_TIME),
             "once claimed, a stranger cannot reshape the world",
         );
-        assert!(!admin.may(0, Permission::Admin));
+        assert!(!admin.may(0, perm::ADMIN_GROUPS));
     }
 
     /// Signing in with the right password moves you into your group; a wrong one changes nothing.
@@ -369,19 +469,19 @@ mod tests {
             .register("brook", "a good password", "owner")
             .expect("register");
 
-        assert!(!admin.may(3, Permission::Admin), "not until signed in");
+        assert!(!admin.may(3, perm::ADMIN_GROUPS), "not until signed in");
         assert!(
             !admin.sign_in(3, "brook", "wrong"),
             "a wrong password fails"
         );
-        assert!(!admin.may(3, Permission::Admin), "and grants nothing");
+        assert!(!admin.may(3, perm::ADMIN_GROUPS), "and grants nothing");
 
         assert!(admin.sign_in(3, "brook", "a good password"));
-        assert!(admin.may(3, Permission::Admin));
+        assert!(admin.may(3, perm::ADMIN_GROUPS));
 
         // And leaving gives it up, so whoever reuses the slot does not inherit it.
         admin.sign_out(3);
-        assert!(!admin.may(3, Permission::Admin));
+        assert!(!admin.may(3, perm::ADMIN_GROUPS));
     }
 
     /// A name cannot be registered twice, and a short password is refused.
@@ -439,6 +539,67 @@ mod tests {
             back.sign_in(0, "brook", "a good password"),
             "the hash has to survive the round trip or nobody can log in again",
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A store written before permissions were namespaced (a literal, hand-written coarse-word
+    /// TOML file — no `Admin` in this test build ever writes that format any more) loads with the
+    /// old words transparently mapped to their namespaced equivalents, and the mapping is persisted
+    /// so a second load sees the namespaced form already on disk. This is the fail-then-pass for
+    /// `group::migrate`: before the migration call was wired into `Admin::load`, `admin.may(0,
+    /// perm::WORLD_TIME)` here returned `false` for a group whose file said `"world"`, because
+    /// nothing recognised the old word as the new permission.
+    #[test]
+    fn an_old_coarse_store_migrates_transparently_and_the_migration_persists() {
+        let path = temp("legacy-migrate.toml");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            r#"
+            [[groups]]
+            name = "default"
+            permissions = ["look"]
+
+            [[groups]]
+            name = "moderator"
+            permissions = ["look", "world", "players"]
+            "#,
+        )
+        .expect("write legacy admin file");
+
+        let admin = Admin::load(&path);
+        let moderator = admin
+            .groups
+            .iter()
+            .find(|g| g.name == "moderator")
+            .expect("moderator group");
+        assert_eq!(
+            moderator.permissions,
+            std::collections::BTreeSet::from([
+                "server.look".to_string(),
+                "world.*".to_string(),
+                "server.*".to_string(),
+            ]),
+            "the old words must be rewritten to their namespaced equivalents",
+        );
+        assert!(
+            admin.may(0, perm::WORLD_TIME),
+            "world -> world.* keeps world access"
+        );
+        assert!(
+            admin.group_grants("moderator", perm::SERVER_KICK),
+            "players -> server.* keeps kick access",
+        );
+
+        // And the file on disk now says the namespaced form, so a second load finds nothing left to
+        // migrate — the on-disk text itself changed, not just the in-memory value.
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            !text.contains("\"world\""),
+            "the raw legacy word must be gone: {text}"
+        );
+        assert!(text.contains("world.*"), "{text}");
+
         let _ = std::fs::remove_file(&path);
     }
 

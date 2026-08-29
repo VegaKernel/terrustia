@@ -316,6 +316,24 @@ impl GameServer {
                         self.tell(slot, &format!("there is no group called {group}."));
                         return Ok(());
                     }
+                    // The console (slot 255, "the server") is unconditionally trusted — see this
+                    // module's own doc comment — so this reach check only applies to a real
+                    // player's own `/group`, where it is what actually stops an `admin.accounts`
+                    // holder promoting themselves (or anyone else) into a group that holds more
+                    // than they do, `owner` above all. See `Admin::group_within_reach`.
+                    if slot != net_module::SERVER_AUTHOR {
+                        let actor_group = self.admin.group_of(slot).name.clone();
+                        if !self.admin.group_within_reach(&actor_group, group) {
+                            self.tell(
+                                slot,
+                                &format!(
+                                    "you cannot move anyone into '{group}': it holds permissions \
+                                     you do not have yourself."
+                                ),
+                            );
+                            return Ok(());
+                        }
+                    }
                     match self
                         .admin
                         .accounts
@@ -386,12 +404,14 @@ impl GameServer {
 
     /// Handle a chat line beginning with `/`.
     ///
-    /// Commands are gated by the permission table below: `time`, `save`, `spawn` and `butcher`
-    /// need `World`, `kick`/`ban`/`unban` need `Players`, `group` needs `Admin`, and the rest are
-    /// read-only or something any player could do anyway. Until somebody registers, the server is
-    /// unclaimed and every check passes — see `Admin::unclaimed`.
+    /// Commands are gated per-command against the namespaced vocabulary in `admin::group::perm` —
+    /// see the table below. Self-service (`register`/`login`/`logout`/`whoami`) and the read-only
+    /// "look" commands (`help`/`players`/`npcs`/`house`/`where`) need no permission at all, matching
+    /// the behaviour before this system existed (`Permission::Look`, its predecessor, never gated
+    /// anything in this dispatcher either). Until somebody registers, the server is unclaimed and
+    /// every check passes regardless — see `Admin::unclaimed`.
     pub(super) fn run_command(&mut self, slot: u8, command: &str) -> terrustia_proto::Result<()> {
-        use crate::admin::Permission;
+        use crate::admin::perm;
 
         let mut parts = command.split_whitespace();
         let name = parts.next().unwrap_or("").to_ascii_lowercase();
@@ -408,9 +428,22 @@ impl GameServer {
 
         // What each command costs. Anything absent needs nothing beyond being here.
         let needed = match name.as_str() {
-            "time" | "save" | "spawn" | "butcher" => Some(Permission::World),
-            "kick" | "ban" | "unban" | "world" => Some(Permission::Players),
-            "group" => Some(Permission::Admin),
+            "time" => Some(perm::WORLD_TIME),
+            "save" => Some(perm::WORLD_SAVE),
+            "spawn" => Some(perm::WORLD_SPAWN),
+            "butcher" => Some(perm::WORLD_BUTCHER),
+            "kick" => Some(perm::SERVER_KICK),
+            "ban" => Some(perm::SERVER_BAN),
+            "unban" => Some(perm::SERVER_UNBAN),
+            "mute" => Some(perm::SERVER_MUTE),
+            "unmute" => Some(perm::SERVER_UNMUTE),
+            // `world undo <player> <duration>` — the only subcommand `world` has as a chat command.
+            "world" => Some(perm::SERVER_UNDO),
+            // Moving an account between groups, which is exactly the lever a self-escalation would
+            // pull — see `Admin::group_within_reach`, checked again inside `run_admin_command`'s own
+            // `"group"` arm on top of this.
+            "group" => Some(perm::ADMIN_ACCOUNTS),
+            "audit" => Some(perm::ADMIN_AUDIT),
             _ => None,
         };
         if let Some(permission) = needed

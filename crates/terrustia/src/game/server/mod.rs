@@ -724,25 +724,55 @@ pub enum ServerEvent {
         reply: oneshot::Sender<PanelAccounts>,
     },
     /// Move an account into a different group. Same rule the console `group` command enforces (the
-    /// group must exist), plus a guard the panel needs and the console does not: it refuses to
-    /// strip the last account that can still administer the server, so nobody locks themselves out
-    /// through the very screen they would use to fix it.
+    /// group must exist), plus two guards: the lock-out guard the panel has always had (refuses to
+    /// strip the last account that can still edit permissions, so nobody locks themselves out
+    /// through the very screen they would use to fix it), and the anti-escalation guard every
+    /// account/group change needs — `actor` (the signed-in account making the request) must already
+    /// be able to reach every permission `group` holds, or the change is refused. See
+    /// [`crate::admin::store::Admin::group_within_reach`].
     PanelSetAccountGroup {
+        actor: String,
         name: String,
         group: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The panel inserting an account it already hashed off the game task, into a chosen group.
     /// Distinct from [`Self::PanelInsertAccount`], the claim path, which always uses `owner`:
-    /// this one validates the requested group exists first.
+    /// this one validates the requested group exists first, and applies the same anti-escalation
+    /// guard [`Self::PanelSetAccountGroup`] does — `actor` must already reach everything the new
+    /// account's group holds.
     PanelCreateAccount {
+        actor: String,
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
-    /// that can administer the server cannot be removed.
+    /// that can still edit permissions cannot be removed.
     PanelDeleteAccount {
         name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Whether the named account's group grants a permission — the per-route authorization check
+    /// every panel handler makes, fresh on every request rather than cached at login, since a
+    /// group's permissions (or an account's group) can change mid-session. Runs on the game task
+    /// because only it holds the live `Admin` store. See `panel/mod.rs`'s module doc for the full
+    /// route-to-permission mapping.
+    PanelAuthorize {
+        name: String,
+        permission: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Add or remove a single permission string on a group — the group-editor's own mutation.
+    /// `actor` must already hold `permission` themselves (checked the same way
+    /// [`Self::PanelSetAccountGroup`]'s reach guard is, just for one permission instead of a whole
+    /// group's worth), so nobody can use the editor to grant a group — including their own — a
+    /// permission they do not already have. Refuses an unrecognised permission name outright,
+    /// before it ever reaches the guard, so a typo is reported rather than silently doing nothing.
+    PanelSetGroupPermission {
+        actor: String,
+        group: String,
+        permission: String,
+        grant: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
 }
@@ -1596,12 +1626,13 @@ impl GameServer {
         }
     }
 
-    /// Hands `slot` the pending update notice, if there is one and `slot` just signed in with the
-    /// `Admin` permission — "the first recognised admin who connects" from `update`'s own module
-    /// doc. `.take()` on the shared cell delivers it exactly once, to whoever this turns out to
-    /// be; every sign-in after that finds the cell already empty and says nothing.
+    /// Hands `slot` the pending update notice, if there is one and `slot` just signed in holding
+    /// `panel.console` (or `*`) — "the first recognised admin who connects" from `update`'s own
+    /// module doc, now spelled as "whoever holds the same standing power a raw console line does".
+    /// `.take()` on the shared cell delivers it exactly once, to whoever this turns out to be;
+    /// every sign-in after that finds the cell already empty and says nothing.
     fn notify_update_if_pending(&mut self, slot: u8) {
-        if !self.admin.may(slot, crate::admin::Permission::Admin) {
+        if !self.admin.may(slot, crate::admin::perm::PANEL_CONSOLE) {
             return;
         }
         let Some(handle) = &self.update_notice else {
@@ -1656,15 +1687,19 @@ impl GameServer {
             }
             ServerEvent::PanelAuthLookup { name, reply } => {
                 let hash_and_group = self.admin.account_hash_and_group(&name);
-                let admin = hash_and_group.as_ref().is_some_and(|(_, group)| {
-                    self.admin
-                        .group_grants(group, crate::admin::Permission::Admin)
-                });
+                let group_of = hash_and_group
+                    .as_ref()
+                    .and_then(|(_, group)| self.admin.groups.iter().find(|g| &g.name == group));
+                let panel_view = group_of.is_some_and(|g| g.may(crate::admin::perm::PANEL_VIEW));
+                let permissions = group_of
+                    .map(|g| g.permissions.iter().cloned().collect())
+                    .unwrap_or_default();
                 let _ = reply.send(PanelAuthLookup {
                     unclaimed: self.admin.unclaimed(),
                     claim_token: self.claim_token.clone(),
                     hash_and_group,
-                    admin,
+                    panel_view,
+                    permissions,
                 });
             }
             ServerEvent::PanelInsertAccount { account, reply } => {
@@ -1825,24 +1860,44 @@ impl GameServer {
             ServerEvent::PanelAccounts { reply } => {
                 let _ = reply.send(self.panel_accounts());
             }
-            ServerEvent::PanelSetAccountGroup { name, group, reply } => {
-                let _ = reply.send(self.panel_set_account_group(&name, &group));
+            ServerEvent::PanelSetAccountGroup {
+                actor,
+                name,
+                group,
+                reply,
+            } => {
+                let _ = reply.send(self.panel_set_account_group(&actor, &name, &group));
             }
-            ServerEvent::PanelCreateAccount { account, reply } => {
-                // The group has to exist — an account pointed at a group that is not there silently
-                // falls back to `default`, which would be a confusing thing to have just created.
-                if !self.admin.groups.iter().any(|g| g.name == account.group) {
-                    let _ = reply.send(Err(format!("there is no group called {}", account.group)));
-                    return;
-                }
-                let result = self.admin.insert_account(account);
-                if result.is_ok() {
-                    let _ = self.admin.save();
-                }
-                let _ = reply.send(result);
+            ServerEvent::PanelCreateAccount {
+                actor,
+                account,
+                reply,
+            } => {
+                let _ = reply.send(self.panel_create_account(&actor, account));
             }
             ServerEvent::PanelDeleteAccount { name, reply } => {
                 let _ = reply.send(self.panel_delete_account(&name));
+            }
+            ServerEvent::PanelAuthorize {
+                name,
+                permission,
+                reply,
+            } => {
+                let allowed = self
+                    .admin
+                    .account_hash_and_group(&name)
+                    .is_some_and(|(_, group)| self.admin.group_grants_str(&group, &permission));
+                let _ = reply.send(allowed);
+            }
+            ServerEvent::PanelSetGroupPermission {
+                actor,
+                group,
+                permission,
+                grant,
+                reply,
+            } => {
+                let _ =
+                    reply.send(self.panel_set_group_permission(&actor, &group, &permission, grant));
             }
         }
     }

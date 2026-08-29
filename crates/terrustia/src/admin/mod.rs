@@ -23,7 +23,7 @@ pub mod group;
 pub mod store;
 
 pub use ban::{Ban, BanKind};
-pub use group::{Group, Permission};
+pub use group::{Group, Permission, perm};
 pub use store::Admin;
 
 /// An account: a name, a hashed password, and the group it belongs to.

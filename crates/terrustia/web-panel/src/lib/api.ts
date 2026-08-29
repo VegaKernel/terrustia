@@ -106,10 +106,32 @@ export interface StatusResponse {
   world_file: string | null;
   version: string;
   unclaimed: boolean;
+  /** The signed-in account's own permission strings. A UX convenience for choosing which tabs and
+   *  buttons to show; every route still re-checks its own permission on the backend regardless of
+   *  what this says, so getting this wrong client-side is a display bug, never a security one. */
+  permissions: string[];
 }
 
 export async function fetchStatus(session: string): Promise<StatusResponse> {
   return getJson<StatusResponse>("/api/status", session);
+}
+
+/**
+ * Whether `held` (a group's raw permission set, exactly as `/api/status`'s `permissions` field or
+ * `GroupInfo.permissions` carries it) grants `want` — the bare `*`, an exact match, or a family
+ * wildcard on a segment boundary (`server.*` grants `server.kick`, not `serverish.kick`). Mirrors
+ * `admin::group::grants` on the backend exactly; kept in sync by hand since this workspace has no
+ * shared Rust/TS codegen — see that function's own doc comment for the matching rule.
+ */
+export function hasPermission(held: string[], want: string): boolean {
+  if (held.includes("*") || held.includes(want)) return true;
+  let end = want.length;
+  for (;;) {
+    const dot = want.lastIndexOf(".", end - 1);
+    if (dot < 0) return false;
+    if (held.includes(`${want.slice(0, dot)}.*`)) return true;
+    end = dot;
+  }
 }
 
 // ---- live status + console/chat feed, over one WebSocket ------------------------------------
@@ -421,6 +443,24 @@ export async function createAccount(
 
 export async function deleteAccount(session: string, name: string): Promise<void> {
   await postJson("/api/accounts/delete", session, { name });
+}
+
+// ---- group permission editing -----------------------------------------------------------------
+
+/** Every known permission name (leaves and family wildcards), for the group editor's picker.
+ *  Requires `admin.groups`; a session without it gets `403` and the caller should fall back to a
+ *  read-only view. */
+export async function fetchKnownPermissions(session: string): Promise<string[]> {
+  return getJson<string[]>("/api/permissions", session);
+}
+
+export async function setGroupPermission(
+  session: string,
+  group: string,
+  permission: string,
+  grant: boolean,
+): Promise<void> {
+  await postJson("/api/groups/permissions", session, { group, permission, grant });
 }
 
 // ---- world creation --------------------------------------------------------------------------
