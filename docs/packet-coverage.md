@@ -1,7 +1,9 @@
 # Packet coverage
 
-Terraria 1.4.5.7 defines 162 message ids, of which **148 are live** (the rest are unused slots or
-deprecated). This is what this server does with them, and what it does not.
+Terraria 1.4.5.7 (release 325) and 1.4.5.8 (release 326) share this wire format and define 162
+message ids, of which **148 are live** (the rest are unused slots or deprecated). This is what this
+server does with them, and what it does not. `terrustia-proto::id` accepts both releases and uses
+`Terraria326` for current-client handshakes.
 
 Regenerate this picture at any time:
 
