@@ -12162,6 +12162,7 @@ impl GameServer {
             wind: self.weather.wind,
             desert: biome == crate::game::spawn::Biome::Desert,
             sandstorm: self.weather.sandstorm,
+            slime_rain: self.slime_rain.is_active(),
             surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
             // `Main.expertMode` itself — `Difficulty >= Expert`, not a raw game-mode check, so a
             // Journey world's `DifficultySlider` reaches AI branches that ask this too.

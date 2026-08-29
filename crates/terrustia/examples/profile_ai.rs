@@ -58,6 +58,7 @@ fn main() -> ExitCode {
         wind: 0.0,
         desert: false,
         sandstorm: false,
+        slime_rain: false,
         crimson: world.crimson,
         jungle: false,
         snow: false,
