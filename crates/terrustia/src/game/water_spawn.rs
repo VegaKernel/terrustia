@@ -11,7 +11,6 @@ const OCEAN: &[u16] = &[
     64,  // PinkJellyfish
     65,  // Shark
     221, // Squid
-    220, // SeaSnail
 ];
 const BLOOD_WATER: &[u16] = &[
     241, // BloodFeeder
@@ -74,9 +73,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ocean_water_has_aquatic_enemies_and_never_the_crab() {
+    fn ocean_water_has_existing_aquatic_enemies_and_never_the_crab() {
         let pool = pool(Depth::Surface, Biome::Ocean, false, 53);
-        for npc in [64, 65, 220, 221] {
+        for npc in [64, 65, 221] {
             assert!(pool.contains(&npc), "missing ocean-water npc {npc}");
         }
         assert!(!pool.contains(&67), "Crab is a ground spawn, not a water spawn");
@@ -127,6 +126,16 @@ mod tests {
             HARDMODE_JELLY.iter().filter(|&&npc| npc == 103).count(),
             2
         );
+    }
+
+    #[test]
+    fn every_water_pool_id_exists_in_this_build() {
+        for npc in [58, 63, 64, 65, 102, 103, 157, 221, 241, 242] {
+            assert!(
+                terrustia_proto::npc_data::npc_stats(npc).is_some(),
+                "water pool names unknown NPC {npc}"
+            );
+        }
     }
 
     #[test]
