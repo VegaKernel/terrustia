@@ -119,7 +119,39 @@ idiomatic cleanup for that same file so it is only churned once.
 ## TUI and hosting
 
 The wrap-corruption bug, Ctrl-D, the flat boot, the status footer, the worlds/ directory and the
-`--headless` flag all landed. Two lower-impact polish items from the TUI audit remain:
+`--headless` flag all landed. A smooth-gradient boot logo is the next enhancement; two lower-impact
+polish leftovers from the TUI audit also remain:
+
+- **Smooth-gradient boot logo via a terminal image protocol.** The boot logo is a 5-row block-glyph
+  `TERRUSTIA` with a 256-colour cyan-to-blue ramp (`term::banner`). It cannot be made to match the
+  smooth gradient of `docs/assets/banner.svg` as text: five rows give at most ten vertical colour
+  samples even with half-blocks (`▀`), which still reads as banding and adds a fg/bg seam per cell.
+  The only way to genuinely match the SVG is to put real pixels on the screen with a terminal image
+  protocol. Plan:
+  - **Image: bake, do not rasterise at runtime.** The logo is fixed, so render it once offline to a
+    transparent-background PNG at about 2x the on-screen cell size (from `banner.svg` via
+    `rsvg-convert`) and `include_bytes!` it. Transparent alpha so it sits on light and dark
+    terminals; 2x for Retina crispness. No `image`/`resvg` rasteriser enters the build.
+  - **Protocol: hand-roll two small emitters.** iTerm2 `OSC 1337`
+    (`ESC ]1337;File=inline=1;...:<base64 PNG> ST`, trivial) covers iTerm2, WezTerm and the VSCode
+    terminal; the kitty graphics protocol (chunked `ESC _ G a=T,f=100,...;<base64> ESC \`) covers
+    kitty and Ghostty (the maintainer's own terminal) plus WezTerm and Konsole, and those do not
+    accept the iTerm2 one. Skip sixel: on macOS almost nothing needs it and it costs palette
+    quantisation.
+  - **Detection: env vars, gated behind the existing colour precedence.** Reuse the
+    `supports-terminal-graphics` heuristics (`LC_TERMINAL`, `TERM_PROGRAM`, `KITTY_WINDOW_ID` /
+    `KITTY_PID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_*`, `TERM`). Require `Palette::is_enabled()` first,
+    so `NO_COLOR`, a pipe and `TERM=dumb` already suppress it; treat `TMUX` as unsupported and fall
+    back to text, since tmux strips the escapes without a passthrough wrapper.
+  - **Fallback ladder:** image protocol if detected, else the current 256-colour `banner()`, else
+    plain text. Deliberately not the half-block, which was tried and reads as weird.
+  - **Dependencies: none new.** `include_bytes!` plus a roughly 15-line base64 encoder (std has none,
+    and a base64 encoder is exactly the narrow, well-defined thing this workspace hand-rolls) plus
+    the two escape emitters. Explicitly not `viuer`: it pulls `image`, `console`, `crossterm 0.29`
+    (a second copy beside the pinned `0.28`), `termcolor` and more, and decodes at runtime, all to
+    draw one logo already held as bytes. Wrong shape here, and against the dependency decision below.
+  - **Gotcha:** cursor advance after the image differs between iTerm2 and kitty, so the emitter must
+    leave the cursor at a known row for the tagline and boot card beneath it to land right.
 
 - **Hanging indent for wrapped log lines.** A long operational log line wraps back to column 0,
   misaligned from where its message started (around column 38). Padding continuation lines to the
