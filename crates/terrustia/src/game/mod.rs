@@ -22,6 +22,7 @@ pub mod slime_rain;
 pub mod spawn;
 pub mod spawn_clearance;
 pub mod spawn_medium;
+pub mod spawn_ranges;
 pub mod spawn_source;
 pub mod teleport;
 pub mod tile_log;
