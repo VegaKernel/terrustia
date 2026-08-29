@@ -655,24 +655,12 @@ pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     })
 }
 
-/// Whether the three tiles above a solid spawning tile have enough clearance.
+/// Whether the vanilla-shaped 2x3 rectangle above a solid spawning tile is clear.
 ///
-/// Liquid is not itself an obstruction: vanilla classifies it after finding the solid spawning
-/// tile. Lava is the exception and invalidates the candidate outright. Deep water is therefore
-/// allowed through to `spawn_medium`, while walking enemies still cannot reach it because the
-/// medium-specific pool selection below never falls back from Water to Dry.
+/// Kept as a tiny wrapper so the geometry and its tests live in `spawn_clearance.rs` rather than
+/// growing more coordinate arithmetic inside the already-large spawn selector.
 fn has_room(world: &World, x: i32, y: i32) -> bool {
-    for dy in 0..3 {
-        let tile = world.tile(x, y - dy);
-        if tile.is_active() && solid(tile.block) {
-            return false;
-        }
-        if tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Lava {
-            return false;
-        }
-    }
-    let floor = world.tile(x, y + 1);
-    floor.is_active() && solid(floor.block)
+    crate::game::spawn_clearance::has_room(world, x, y)
 }
 
 /// Pick spawns for this tick.
