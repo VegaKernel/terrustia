@@ -36,13 +36,33 @@ The wire, door, meteor and slime items already landed. These remain:
 
 ## Codegen (finish moving the data generators off Python)
 
-The Rust `terrustia-codegen` crate now generates `hurt_tiles` and `recipes`, both verified
-byte-identical. The rest is deferred (no time to finish the full port now):
+The Rust `terrustia-codegen` crate now generates eight of the ten tables, all verified
+byte-identical: `hurt_tiles`, `recipes`, `drops`, `projectiles`, `banners`, `buffs`, `angler` and
+`town_names`. `just regen` calls `codegen` for all eight and their `tools/gen_*.py` are deleted.
 
-- **Port the remaining eight generators** into the codegen crate, one module each, each verified
-  byte-identical against its committed `.rs`: `gen_drops`, `gen_projectiles`, `gen_banners`,
-  `gen_buffs`, `gen_angler`, `gen_shimmer`, `gen_town_names`, `gen_travel_shop`. When all ten are
-  ported, point `just regen` at `codegen all` and delete the last `tools/gen_*.py`.
+- **Two generators are stuck on a pre-existing drift, not a porting bug.** `gen_shimmer.py` and
+  `gen_travel_shop.py`, run unmodified right now, already fail to reproduce their own committed
+  tables — proven by running them directly and diffing, with no codegen work involved. Both are
+  the same root cause: a past commit hand-edited the committed `.rs` (in violation of "generated
+  tables are never hand-edited") without updating the generator's `emit()` to match.
+  - `shimmer.rs`: commit `78d07de` ("Split the licence, and make the lints and licences
+    enforceable") rewrote the module doc's decraft paragraph to describe decraft as now
+    implemented (accurate, since `recipes.rs`/`decraft_recipe` had just landed), but never touched
+    `gen_shimmer.py`'s embedded docstring. Only that one paragraph differs; every table and test is
+    unaffected.
+  - `travel_shop.rs`: commit `65f4be3` ("Fix travel shop generator skipping leading-guard chain
+    candidates") correctly regenerated the two new `OFFERS` entries (BlackCounterweight,
+    YellowCounterweight) through the fixed generator, but then hand-added a source comment above
+    them and a regression test (`the_travelling_merchant_can_offer_both_counterweights`) straight
+    into the `.rs`, without adding either to `gen_travel_shop.py`'s `emit()`. Porting this generator
+    as specified would delete that regression test on the next regen — worth fixing the drift
+    first, not blindly porting past it.
+  - Fix either by updating the generator's docstring/emit to match what is now hand-carried in the
+    committed table (then porting is a clean byte-identical job), or by deciding the hand-edit was
+    wrong and reverting the table — a call for whoever owns that call, not something to guess at
+    silently. `terrustia-codegen/src/shimmer.rs` and `.../travel_shop.rs` exist already, fully
+    ported and verified against everything except the drifted text; wiring them into `main.rs`'s
+    `TABLES` and `regen` is a few lines once the drift is resolved.
 - **Keep the three checker scripts in Python.** `check_drops.py`, `check_recipes.py` and
   `packet_audit.py` stay as Python: they only run in CI, never in the build or data path, and are
   genuinely useful there. Full Python removal is a longer-term goal, not this pass.
