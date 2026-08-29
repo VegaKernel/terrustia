@@ -139,6 +139,11 @@ check-drops:
 check-recipes:
     python3 tools/check_recipes.py {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
 
+# Both data cross-checks in one go. Part of release-candidate qualification, run locally against
+# the decompiled tree: CI can never hold decompiled game source, so these deliberately never run
+# there.
+check-data: check-drops check-recipes
+
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:
     cargo run -q -p terrustia-codegen -- recipes {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
