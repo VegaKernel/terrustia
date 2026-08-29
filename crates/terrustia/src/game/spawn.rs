@@ -674,6 +674,8 @@ pub struct EventSpawns<'a> {
     pub moon: Option<(crate::game::moons::Moon, i32)>,
     /// Whether a solar eclipse is happening.
     pub eclipse: bool,
+    pub slime_rain: bool,
+    pub invasion: bool,
     pub downed_plantera: bool,
     pub downed_all_mechs: bool,
     /// Whether the field already holds as many event bosses as it will take.
@@ -866,6 +868,20 @@ pub fn try_spawn(
                 crate::game::spawn_location::NormalCandidate::Accept { floor_y } => floor_y,
             };
             let y = ground - 1;
+            let source = crate::game::spawn_source::resolve(world, x, ground);
+            let mowed_events = crate::game::spawn_postcheck::MowedGrassEvents {
+                blood_moon: world.blood_moon,
+                eclipse: world.eclipse,
+                pumpkin_moon: world.pumpkin_moon,
+                frost_moon: world.snow_moon,
+                slime_rain: events.slime_rain,
+                invasion: events.invasion,
+            };
+            if crate::game::spawn_postcheck::mowed_grass_rejects(source.block, mowed_events, || {
+                rng.random_range(0..10) == 0
+            }) {
+                break;
+            }
 
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
                 continue;
@@ -875,12 +891,11 @@ pub fn try_spawn(
             let biome = biome_at(world, x, y);
 
             if medium == crate::game::spawn_medium::SpawnMedium::Water {
-                let spawning_block = crate::game::spawn_source::block(world, x, ground);
                 let water_pool = crate::game::water_spawn::pool(
                     depth,
                     biome,
                     world.progress.hard_mode,
-                    spawning_block,
+                    source.block,
                 );
                 if water_pool.is_empty() {
                     continue;
@@ -996,6 +1011,8 @@ mod tests {
         EventSpawns {
             moon: None,
             eclipse: false,
+            slime_rain: false,
+            invasion: false,
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,

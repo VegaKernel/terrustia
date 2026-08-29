@@ -89,16 +89,16 @@ pub fn dungeon_source_is_valid(
 /// Whether mowed grass rejects an otherwise-valid spawn attempt.
 ///
 /// Vanilla makes exactly a one-in-ten roll on Mowed grass / Mowed Hallowed grass when none of the
-/// six listed events are active. The caller owns the random roll so this helper remains deterministic
-/// and the no-retry `break` semantics stay visible at the integration site.
+/// six listed events are active. The roll is provided lazily so callers do not consume RNG at all
+/// for another source tile or while an event disables this rule.
 pub fn mowed_grass_rejects(
     spawn_tile_type: u16,
     events: MowedGrassEvents,
-    one_in_ten_roll: bool,
+    one_in_ten_roll: impl FnOnce() -> bool,
 ) -> bool {
     matches!(spawn_tile_type, MOWED_GRASS | MOWED_HALLOWED_GRASS)
         && !events.any()
-        && one_in_ten_roll
+        && one_in_ten_roll()
 }
 
 /// Whether liquid in the two tiles directly above the chosen tile is allowed.
@@ -179,19 +179,41 @@ mod tests {
             MowedGrassEvents { invasion: true, ..Default::default() },
         ];
         for events in cases {
-            assert!(!mowed_grass_rejects(MOWED_GRASS, events, true));
-            assert!(!mowed_grass_rejects(MOWED_HALLOWED_GRASS, events, true));
+            assert!(!mowed_grass_rejects(MOWED_GRASS, events, || true));
+            assert!(!mowed_grass_rejects(MOWED_HALLOWED_GRASS, events, || true));
         }
     }
 
     #[test]
     fn mowed_grass_rejects_only_on_the_one_in_ten_roll() {
         let quiet = MowedGrassEvents::default();
-        assert!(mowed_grass_rejects(MOWED_GRASS, quiet, true));
-        assert!(mowed_grass_rejects(MOWED_HALLOWED_GRASS, quiet, true));
-        assert!(!mowed_grass_rejects(MOWED_GRASS, quiet, false));
-        assert!(!mowed_grass_rejects(2, quiet, true));
-        assert!(!mowed_grass_rejects(109, quiet, true));
+        assert!(mowed_grass_rejects(MOWED_GRASS, quiet, || true));
+        assert!(mowed_grass_rejects(MOWED_HALLOWED_GRASS, quiet, || true));
+        assert!(!mowed_grass_rejects(MOWED_GRASS, quiet, || false));
+        assert!(!mowed_grass_rejects(2, quiet, || true));
+        assert!(!mowed_grass_rejects(109, quiet, || true));
+    }
+
+    #[test]
+    fn irrelevant_mowed_grass_rolls_do_not_consume_rng() {
+        let quiet = MowedGrassEvents::default();
+        let mut rolled = false;
+        assert!(!mowed_grass_rejects(2, quiet, || {
+            rolled = true;
+            true
+        }));
+        assert!(!rolled);
+
+        let mut rolled = false;
+        assert!(!mowed_grass_rejects(
+            MOWED_GRASS,
+            MowedGrassEvents { invasion: true, ..Default::default() },
+            || {
+                rolled = true;
+                true
+            }
+        ));
+        assert!(!rolled);
     }
 
     #[test]
