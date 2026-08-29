@@ -1655,8 +1655,8 @@ async fn new_world(
     if let Err(reason) = validate_world_size(req.width, req.height) {
         return err(StatusCode::BAD_REQUEST, reason);
     }
-    // Resolve and validate the destination the same way `--new` does — a plain world name, landed
-    // in the platform world directory, never a path the request body could smuggle in.
+    // Resolve and validate the destination the same way `--new` does: a plain world name, landed in
+    // the server's own worlds/ directory, never a path the request body could smuggle in.
     let path = match crate::worlds::new_world_path(&req.name) {
         Ok(path) => path,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
@@ -1668,6 +1668,15 @@ async fn new_world(
                 "a world called {} already exists on disk; pick another name",
                 req.name
             ),
+        );
+    }
+    // Make sure worlds/ exists before the generated world is saved into it.
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot create the world directory {}: {e}", parent.display()),
         );
     }
 

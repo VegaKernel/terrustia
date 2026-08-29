@@ -14,11 +14,10 @@
 //!
 //! **The install-guard property this exists to provide**: double-clicking the raw binary must
 //! never scatter a world file and a `terrustia.toml` into wherever it happens to sit (`~/Downloads`,
-//! most likely). The wizard's dedicated directory holds the config; the world itself is generated
-//! through [`crate::worlds::new_world_path`] — Terraria's own real world directory, the same place
-//! `--new` already writes to — so *neither* file lands beside the executable. The dedicated
-//! directory is refused outright if it already has anything in it, rather than writing into
-//! whatever is already there.
+//! most likely). The wizard's dedicated directory holds the config, and the world is generated
+//! through [`crate::worlds::new_world_path`] into the server's own `worlds/` directory (the same
+//! place `--new` writes to), so neither file lands beside the executable. The dedicated directory is
+//! refused outright if it already has anything in it, rather than writing into whatever is there.
 
 use std::{
     io::{self, Write},

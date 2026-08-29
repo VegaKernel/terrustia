@@ -155,6 +155,25 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // against the final, fully-layered config so that case is covered too.
     config.validate()?;
 
+    // Minecraft-style placement: a generated world with nowhere else to go persists into the
+    // server's own worlds/ directory, so a server run from a folder sets that folder up rather than
+    // serving something that vanishes on shutdown. An explicit --world, --new, --save, or a config
+    // save_file all win over this, since they already leave a world_file or a save target in place.
+    if config.world_file.is_none()
+        && config.save_target().is_none()
+        && let Ok(path) = terrustia::worlds::new_world_path(&config.world_name)
+    {
+        config.save_file = Some(path);
+    }
+    // Create the directory a world will save into before the first save reaches for it, so worlds/
+    // exists the moment it is needed rather than failing the first autosave.
+    if let Some(parent) = config.save_target().and_then(|t| t.parent().map(|p| p.to_path_buf()))
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| format!("cannot create the world directory {}: {e}", parent.display()))?;
+    }
+
     let started = Instant::now();
     let loaded_from = config.world_file.clone();
     let world_stage = term::Stage::begin(
@@ -462,19 +481,16 @@ fn relaunch_into(
     Ok(())
 }
 
-/// List the worlds Terraria has on this machine.
+/// List the worlds the server keeps in its own `worlds/` directory.
 ///
 /// Enough to pick one by name without opening a file manager: the size the header claims, and how
-/// recently it was played. Reading each header is a few hundred bytes and worth it — a list of
+/// recently it was played. Reading each header is a few hundred bytes and worth it, since a list of
 /// bare filenames does not tell you which of three saves is the one you want.
 fn print_worlds() {
-    let Some(dir) = terrustia::worlds::directory() else {
-        println!("no world directory on this platform, or no home directory set");
-        return;
-    };
+    let dir = terrustia::worlds::worlds_dir();
     let worlds = terrustia::worlds::list();
     if worlds.is_empty() {
-        println!("no worlds in {}", dir.display());
+        println!("no worlds in {} yet", dir.display());
         return;
     }
     println!("{}\n", dir.display());
@@ -565,15 +581,14 @@ struct Args {
     /// `main`'s own use of it via `worldgen::generate_from_text`.
     seed: Option<String>,
     world: Option<PathBuf>,
-    /// Generate a fresh world under this name, written into the Terraria world directory itself —
-    /// so it shows up beside every other world, in the actual game, without anyone touching a
-    /// file path at all.
+    /// Generate a fresh world under this name, written into the server's own `worlds/` directory,
+    /// following Terraria's own space-to-underscore filename convention.
     new_world: Option<String>,
     /// Where to write the world, for a generated one that has nowhere else to go.
     save: Option<PathBuf>,
     /// Where to record every byte of every connection, for checking against a real client.
     record: Option<PathBuf>,
-    /// List the worlds Terraria has on this machine, and stop.
+    /// List the worlds in the server's own `worlds/` directory, and stop.
     list_worlds: bool,
     /// Always run the interactive setup wizard — see `setup.rs`.
     setup: bool,
@@ -673,12 +688,12 @@ fn print_usage(palette: Palette) {
         ),
         (
             "-n, --new <NAME>",
-            "Generate a fresh world, saved into the Terraria world directory",
+            "Generate a fresh world, saved into the server's worlds/ directory",
             "",
         ),
         (
             "    --worlds",
-            "List the worlds Terraria has on this machine",
+            "List the worlds in the server's worlds/ directory",
             "",
         ),
         (

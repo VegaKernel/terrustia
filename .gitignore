@@ -3,10 +3,12 @@
 **/*.rs.bk
 
 # Worlds. A .wld is a save file, not source: they are large, binary, and personal, and a stray
-# commit of one puts somebody's world into the history permanently.
+# commit of one puts somebody's world into the history permanently. `/worlds/` is the server's own
+# world directory when it is run from the repo root.
 *.wld
 *.wld.bak*
 *.twld
+/worlds/
 
 # Local configuration, which holds a listen address and a world path for one machine.
 /terrustia.toml

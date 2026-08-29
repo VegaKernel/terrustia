@@ -41,9 +41,10 @@ What it does best today is serve a world you already have:
 terrustia --world path/to/World.wld
 ```
 
-Your world file, your clients, nothing else to install. Point it at nothing instead and it
-generates a fresh world to serve. Measured against the official server on the same 4200×1200 world
-with nobody connected:
+Your world file, your clients, nothing else to install. Point it at nothing and it generates a fresh
+world, saves it into a `worlds/` directory in the folder you ran it from, and serves that, the way a
+Minecraft server lays out its own files wherever it is started. Measured against the official server
+on the same 4200×1200 world with nobody connected:
 
 | | vanilla 1.4.5.8 | terrustia |
 |---|:---:|:---:|
@@ -71,16 +72,19 @@ differences, sized in [`plan.md`](plan.md) and deferred to v0.1.0.
 ## Running
 
 ```sh
-cargo run --release -- --world path/to/World.wld     # what you want: serve a real world
+cargo run --release -- --world path/to/World.wld     # serve a world you already have
 cargo run --release -- --listen 127.0.0.1:7777 --world path/to/World.wld
-cargo run --release                                  # generate a world; playable, but ephemeral
-cargo run --release -- --save world.wld              # generate one and keep it
+cargo run --release                                  # generate one into worlds/ and serve it
+cargo run --release -- --new "My World"              # generate a named world into worlds/
+cargo run --release -- --save /some/where.wld        # generate one at an explicit path instead
 cargo run --release -- --record capture.trcap        # record every byte, for docs/real-client.md
 ```
 
-Worlds are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from a file
-saves back over itself. Set `save_file`, or pass `--save`, to write somewhere else, which is also
-how a generated world is given somewhere to live.
+Worlds live in a `worlds/` directory next to wherever the server runs, and `--worlds` lists them.
+They are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from an explicit
+path saves back over itself; `--save` writes somewhere else. A `--world <name>` (rather than a path)
+is looked up in `worlds/` first, then in your own Terraria folder, so a world you already own is
+still servable by name.
 
 Then in Terraria: **Multiplayer → Join via IP → `127.0.0.1`**, port `7777`.
 
