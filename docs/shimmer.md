@@ -66,10 +66,20 @@ here knows about crafting stations, conditions or whether a player can reach a b
 one question: *if this were broken apart, what would come out?*
 
 [`recipes.rs`](../crates/terrustia-proto/src/recipes.rs) is generated from `Recipe.SetupRecipes`:
-**2,721 recipes parsed, 2,551 decraftable, 2,536 craftable items, 4,407 ingredient entries.** Two
+**3,292 recipes parsed, 3,098 decraftable, 3,083 craftable items, 5,372 ingredient entries.** Two
 of the game's rules are baked in rather than applied at runtime — where several recipes make the
 same item the *last* wins (`UpdateWhichItemsAreCrafted` overwrites as it goes), and recipes marked
 `notDecraftable` are excluded outright.
+
+Around 570 of those recipes never appear as a literal `createItem.SetDefaults(N)` in `Recipe.cs`:
+`SetupRecipes` builds them inside `for` loops and small per-set helper functions instead (fake
+chests, weapon racks, alphabet and critter statues, jars, gemspark walls, the counterweight, and
+every `AddXxxFurniture` set), which a plain literal parse cannot see. This was D1: the generator's
+`loop_built_recipes` unrolls each family by hand against the cited `Recipe.cs` lines, and turned up
+one real bug in the pre-D1 table along the way: the counterweight loop reused a literal
+`createItem` argument across six iterations that only differed by a loop-variable ingredient, so the
+old naive parse kept a real but truncated recipe (one ingredient instead of two) rather than missing
+it outright.
 
 Three rules govern what comes back:
 
@@ -81,8 +91,11 @@ Three rules govern what comes back:
   chance of being lost, which is what stops potions being a free material duplicator.
 
 The table was checked against the source by a script written from the format rather than from the
-generator: 300 recipes sampled at random, all matching, and 2,536 of 2,536 craftable items
-present.
+generator: 300 recipes sampled at random, all matching, and 2,536 of 2,536 pre-D1 craftable items
+present. `tools/check_recipes.py` still parses `SetupRecipes` the plain literal way, so it does not
+sample the loop-built families; those 548 unique new items were checked separately, by an
+independent re-derivation of every one of them, and by confirming that all 2,536 pre-D1 items kept
+the exact recipe they had before (bar the one counterweight fix above).
 
 ## A note on chains
 

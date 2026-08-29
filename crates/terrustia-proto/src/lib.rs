@@ -45,6 +45,7 @@ pub mod shimmer;
 pub mod square;
 pub mod statues;
 pub mod tile;
+pub mod tile_death;
 pub mod tile_drops;
 pub mod tile_entity;
 pub mod tile_object;

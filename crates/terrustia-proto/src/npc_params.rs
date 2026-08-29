@@ -4989,10 +4989,33 @@ pub const EMPRESS_BLAST: u16 = 873;
 pub const EMPRESS_SUN_DANCE: u16 = 874;
 pub const EMPRESS_LANCE: u16 = 919;
 pub const EMPRESS_ETHEREAL_LANCE: u16 = 923;
-/// Damage per attack, classic then expert, in the order: sun dance, blast, rainbow, lance, wall.
-pub const EMPRESS_DAMAGE: [(i32, i32); 5] = [(30, 40), (30, 50), (30, 45), (35, 45), (65, 70)];
+/// The sun dance's own damage: flat regardless of phase, difficulty, or the enrage override.
+///
+/// `AI_120_HallowBoss`, `NPC.cs:46462` declares it (`num5 = 40`) alongside the other five damage
+/// locals, but unlike them it is never touched again: not by the phase-2 block that raises the
+/// rest (`NPC.cs:46482-46494`), not by `GetAttackDamage_ForProjectiles` (`NPC.cs:46495-46499`,
+/// which the other five all pass through to interpolate classic to expert), and not by the
+/// enrage override that sets the other five to 9999 (`NPC.cs:46500-46508`). Case 3's own shot
+/// (`NPC.cs:46833`) passes `num5` straight through. The very first sun dance, planted while she
+/// arrives (`NPC.cs:46528`), is a separate, always-literal-zero shot, ported as `planted(..., 0,
+/// ...)` at its call site rather than through this constant.
+pub const EMPRESS_SUN_DANCE_DAMAGE: i32 = 40;
+/// Damage per attack, classic then expert, phase 1: blast, rainbow, bolt, ethereal-lance ring,
+/// lance wall. Ported from `AI_120_HallowBoss`'s five `num6`..`num10` locals (`NPC.cs:46463-
+/// 46467`) and the `GetAttackDamage_ForProjectiles(classic, expert)` calls that finalise them
+/// (`NPC.cs:46495-46499`), matched to their attacks by the projectile id and damage local each
+/// case block's own `Projectile.NewProjectile` call passes: blast is `num8`/873 (case 2,
+/// `NPC.cs:46765-46820`, reused by circling blasts, case 12, `NPC.cs:47304-47353`); rainbow is
+/// `num9`/872 (case 5, `NPC.cs:46953-46994`); bolt is `num6`/919 (case 4, `NPC.cs:46843-46952`,
+/// reused by chasing bolts, case 11, `NPC.cs:47213-47303`); the ethereal-lance ring is
+/// `num10`/923 (case 6, `NPC.cs:46995-47034`); the lance wall is `num7`/919 (case 7, `NPC.cs:47035-
+/// 47135`), a genuinely different local from the ring's `num10` despite the similar name, which a
+/// prior pass had collapsed both into a single shared slot.
+pub const EMPRESS_DAMAGE: [(i32, i32); 5] = [(45, 30), (45, 30), (50, 30), (50, 35), (70, 65)];
+/// As [`EMPRESS_DAMAGE`], phase 2: the same five locals after the `if (flag)` block raises them
+/// (`NPC.cs:46482-46494`), then through the same `GetAttackDamage_ForProjectiles` calls.
 pub const EMPRESS_DAMAGE_PHASE_2: [(i32, i32); 5] =
-    [(30, 40), (35, 60), (35, 50), (40, 60), (30, 65)];
+    [(50, 35), (50, 35), (60, 35), (60, 40), (65, 30)];
 /// Where she stations herself for each attack, relative to you.
 pub const EMPRESS_STATION_LEFT: (f32, f32) = (-150.0, -250.0);
 pub const EMPRESS_STATION_RIGHT: (f32, f32) = (150.0, -250.0);

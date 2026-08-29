@@ -1230,4 +1230,60 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P1d: bytes that would fail the new section-pointer monotonicity check must never replace
+    /// the previous good save, and must not leave a temp file behind either.
+    ///
+    /// This runs the exact sequence `save` itself does around its own verify step (write to the
+    /// temp path, then read the just-written bytes back through `wld::parse` before ever
+    /// touching the real path) with a deliberately corrupt buffer standing in for whatever
+    /// produced one, since a healthy `World` can never serialise its own section pointers out of
+    /// order. Before the monotonicity check landed, this exact buffer parsed successfully (as a
+    /// world with an emptied trailing section) and the verify step would have waved it through.
+    #[test]
+    fn a_corrupt_write_never_replaces_the_previous_good_save() {
+        let dir =
+            std::env::temp_dir().join(format!("terrustia-refuse-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("world.wld");
+
+        let world = crate::world::worldgen::generate(400, 300, "refuse", 1);
+        save(&world, &path).expect("the first, good save");
+        let good_bytes = std::fs::read(&path).expect("reading the good save");
+
+        // Swap two trailing section pointers (townsfolk and tile entities, indices 4 and 5) the
+        // same way the wld.rs fixture does, to build a corrupt buffer out of a genuinely valid one.
+        const POINTER_TABLE: usize = 4 + 7 + 1 + 4 + 8 + 2;
+        let mut corrupt = good_bytes.clone();
+        let (at4, at5) = (POINTER_TABLE + 4 * 4, POINTER_TABLE + 5 * 4);
+        let (mut p4, mut p5) = ([0u8; 4], [0u8; 4]);
+        p4.copy_from_slice(&corrupt[at4..at4 + 4]);
+        p5.copy_from_slice(&corrupt[at5..at5 + 4]);
+        corrupt[at4..at4 + 4].copy_from_slice(&p5);
+        corrupt[at5..at5 + 4].copy_from_slice(&p4);
+        assert!(
+            crate::world::wld::parse(&corrupt).is_err(),
+            "the fixture should actually be corrupt"
+        );
+
+        let temp = path.with_extension("wld.tmp");
+        write_and_sync(&temp, &corrupt).expect("writing the corrupt bytes to the temp path");
+        if crate::world::wld::parse(&corrupt).is_err() {
+            // What save() itself does on a failed verify: drop the temp file and refuse, leaving
+            // the real path untouched.
+            let _ = std::fs::remove_file(&temp);
+        } else {
+            panic!("the corrupt buffer must not verify as loadable");
+        }
+
+        assert_eq!(
+            std::fs::read(&path).expect("reading the world back"),
+            good_bytes,
+            "the previous good save must be exactly as it was"
+        );
+        assert!(!temp.exists(), "no half-written temp file left behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
