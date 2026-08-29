@@ -34,7 +34,10 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID_RS = ROOT / "crates/terrustia-proto/src/id.rs"
-SERVER_RS = ROOT / "crates/terrustia/src/game/server.rs"
+# The server side was one file (game/server.rs) until the Lane A split; it is now a module
+# directory, and the dispatch table lives in server/dispatch.rs. Scanning the concatenation of
+# every file in the directory keeps this checker indifferent to further splits.
+SERVER_DIR = ROOT / "crates/terrustia/src/game/server"
 PROTO_DIR = ROOT / "crates/terrustia-proto/src"
 TERRUSTIA_SRC = ROOT / "crates/terrustia/src"
 TABLE_PATH = ROOT / "docs/packet-ids.tsv"
@@ -108,12 +111,19 @@ def parse_id_rs():
     return name_to_value, value_to_primary, display_name
 
 
-# ---------------------------------------------------------------- server.rs: what is dispatched
+# ---------------------------------------------------------------- game/server/: what is dispatched
+
+def server_text():
+    return "\n".join(p.read_text() for p in sorted(SERVER_DIR.glob("*.rs")))
+
 
 def parse_dispatch_set():
-    text = SERVER_RS.read_text()
+    text = server_text()
     if "fn handle_packet" not in text or "fn on_hello" not in text:
-        fail("server.rs: could not find `fn handle_packet` / `fn on_hello` to slice the dispatch table")
+        fail(
+            "game/server/: could not find `fn handle_packet` / `fn on_hello` to slice the "
+            "dispatch table"
+        )
         return set()
     block = text[text.index("fn handle_packet"): text.index("fn on_hello")]
     return set(re.findall(r"id::([A-Z_0-9]+)", block))
@@ -128,7 +138,7 @@ _RELAY_PAT = re.compile(r"(?:rewrite_owner|verbatim)\(\s*(?:id::)?(?:crate::)?id
 
 def parse_encoder_names():
     names = set()
-    for f in list(PROTO_DIR.glob("*.rs")) + [SERVER_RS]:
+    for f in list(PROTO_DIR.glob("*.rs")) + sorted(SERVER_DIR.glob("*.rs")):
         text = f.read_text()
         names |= set(_ENCODER_PAT.findall(text))
         for line in text.splitlines():
@@ -139,7 +149,7 @@ def parse_encoder_names():
 
 
 def parse_relay_send_names():
-    return set(_RELAY_PAT.findall(SERVER_RS.read_text()))
+    return set(_RELAY_PAT.findall(server_text()))
 
 
 # ---------------------------------------------------------------- the table
@@ -170,7 +180,7 @@ def main():
     dispatch_values = {name_to_value[n] for n in dispatch_names if n in name_to_value}
     for n in dispatch_names:
         if n not in name_to_value:
-            fail(f"server.rs handle_packet dispatches on id::{n}, which id.rs does not define")
+            fail(f"handle_packet dispatches on id::{n}, which id.rs does not define")
 
     encoder_values = {name_to_value[n] for n in parse_encoder_names() if n in name_to_value}
     relay_values = {name_to_value[n] for n in parse_relay_send_names() if n in name_to_value}
@@ -241,12 +251,12 @@ def main():
         table_says_dispatched = recv_impl in ("dispatched", "relayed-opaque")
         if actually_dispatched and not table_says_dispatched:
             fail(
-                f"{where}: server.rs handle_packet has a match arm for this id, but the table says "
+                f"{where}: handle_packet has a match arm for this id, but the table says "
                 f"recv_impl={recv_impl!r} (expected 'dispatched' or 'relayed-opaque')"
             )
         if table_says_dispatched and not actually_dispatched:
             fail(
-                f"{where}: table says recv_impl={recv_impl!r}, but server.rs handle_packet has no "
+                f"{where}: table says recv_impl={recv_impl!r}, but handle_packet has no "
                 f"match arm for id::{value_to_primary.get(v, v)}"
             )
 
@@ -286,7 +296,7 @@ def main():
     recv_counts = Counter(row["recv_impl"] for row in by_id.values())
     send_counts = Counter(row["send_impl"] for row in by_id.values())
 
-    print(f"packet_audit: {len(by_id)} ids checked against id.rs and server.rs, table and code agree")
+    print(f"packet_audit: {len(by_id)} ids checked against id.rs and game/server/, table and code agree")
     print("\nstatus:")
     for k in sorted(STATUSES):
         if status_counts[k]:
@@ -331,7 +341,7 @@ receives and sends it, and why not where it does not.
 
 The source of truth is `docs/packet-ids.tsv`, a tab-separated file Python's standard library can
 read without a parser. `tools/packet_audit.py` validates every row against the actual code (the
-dispatch table in `crates/terrustia/src/game/server.rs`'s `handle_packet`, and the encoders in
+dispatch table in `crates/terrustia/src/game/server/`'s `handle_packet`, and the encoders in
 `crates/terrustia-proto/src/packets.rs` and its neighbours) and fails with a precise message on any
 mismatch — a handler added without updating its row, a row claiming an encoder that no longer
 exists, an id the table never mentions. Regenerate this page after editing the table:
