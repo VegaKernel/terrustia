@@ -1,10 +1,13 @@
-//! Finding the worlds somebody already has.
+//! Where the server keeps its worlds, and how to find one somebody already has.
 //!
-//! `--world` used to take a path and nothing else, so serving a world you own meant pasting
-//! `/Users/you/Library/Application Support/Terraria/Worlds/My World.wld` onto a command line —
-//! with a space in it. The worlds are always in the same place; the server may as well look.
+//! The server owns a `worlds/` directory in its working directory, the way a Minecraft server lays
+//! out a `world/` folder wherever it is run. New worlds, whether from `--new`, the setup wizard or
+//! the panel, land there rather than in the player's own Terraria save folder, which is not the
+//! server's to write into.
 //!
-//! A path is still a path. This is a fallback for a value that plainly is not one.
+//! Serving a world you already own still works. `--world <path>` opens any file, and `--world
+//! <name>` looks the name up in `worlds/` first and then in the platform Terraria folder, so a name
+//! you type finds the world whether it belongs to the server or to the game.
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +37,14 @@ pub fn directory() -> Option<PathBuf> {
     }
 }
 
+/// The directory the server keeps its own worlds in: `worlds/`, relative to the working directory.
+/// This is where a new world is created and where a running world saves, so a server run from a
+/// folder lays out its own state there the way a Minecraft server does, rather than in the player's
+/// Terraria save folder.
+pub fn worlds_dir() -> PathBuf {
+    PathBuf::from("worlds")
+}
+
 /// Turn whatever `--world` was given into a path to open.
 ///
 /// A value with a separator or a `.wld` on it is taken at its word. Anything else is looked for by
@@ -48,34 +59,45 @@ pub fn resolve(given: &str) -> PathBuf {
         return PathBuf::from(given);
     }
 
-    let Some(dir) = directory() else {
-        return PathBuf::from(given);
-    };
-    let exact = dir.join(format!("{given}.wld"));
-    if exact.exists() {
-        return exact;
+    // The server's own worlds/ directory first, then the player's Terraria folder, so a bare name
+    // finds a world the server made or one the game did.
+    if let Some(found) = find_by_name(&worlds_dir(), given) {
+        return found;
     }
-    // Terraria replaces spaces with underscores when it names the file, so a world called
-    // "My World" is `My_World.wld` on disk and nobody remembers that.
-    let underscored = dir.join(format!("{}.wld", given.replace(' ', "_")));
-    if underscored.exists() {
-        return underscored;
+    if let Some(dir) = directory()
+        && let Some(found) = find_by_name(&dir, given)
+    {
+        return found;
     }
-    for world in list() {
-        if world
+    // Nothing matched. Hand back what was asked for so the error names it rather than naming a
+    // guess the person never made.
+    PathBuf::from(given)
+}
+
+/// Find a world called `given` inside `dir`, trying the exact name, then Terraria's own
+/// space-to-underscore filename, then a case-insensitive scan. A person types "The Successful
+/// Excrement", not the underscored filename they never see.
+fn find_by_name(dir: &Path, given: &str) -> Option<PathBuf> {
+    for candidate in [format!("{given}.wld"), filename_for(given)] {
+        let path = dir.join(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let matches = path
             .file_stem()
             .and_then(|s| s.to_str())
             .is_some_and(|stem| {
                 stem.eq_ignore_ascii_case(given)
                     || stem.replace('_', " ").eq_ignore_ascii_case(given)
-            })
-        {
-            return world;
+            });
+        if matches {
+            return Some(path);
         }
     }
-    // Nothing matched. Hand back what was asked for so the error names it rather than naming a
-    // guess the person never made.
-    PathBuf::from(given)
+    None
 }
 
 /// The filename a world called `name` gets, following Terraria's own convention of turning spaces
@@ -85,40 +107,31 @@ fn filename_for(name: &str) -> String {
     format!("{}.wld", name.replace(' ', "_"))
 }
 
-/// Where a brand-new world called `name` should be written, so `--new` lands it next to every
-/// world Terraria already has rather than in some path nobody would think to look.
+/// Where a brand-new world called `name` should be written: into the server's own [`worlds_dir`].
 ///
-/// Refuses a `name` that is not a plain world name — one containing a path separator or a `..`
-/// segment — rather than silently joining it onto the world directory: `--new` is one command for
-/// one thing, "generate a fresh world here, called this," and a name that reaches outside the
-/// world directory is a mistake worth stopping on rather than a path worth following. Anyone who
-/// wants an exact file elsewhere already has `--save <path>` for that.
+/// Refuses a `name` that is not a plain world name (one containing a path separator or a `..`
+/// segment) rather than silently joining it onto the directory, since a name that reaches outside
+/// `worlds/` is a mistake worth stopping on. Anyone who wants an exact file elsewhere has `--save
+/// <path>` for that. The caller creates the directory; this only decides the path.
 pub fn new_world_path(name: &str) -> Result<PathBuf, String> {
     if name.trim().is_empty() {
         return Err("a world needs a name".into());
     }
     if name.contains('/') || name.contains('\\') || name.split(['/', '\\']).any(|s| s == "..") {
         return Err(format!(
-            "\"{name}\" is not a plain world name; --new writes into the Terraria world \
-             directory itself, so pick a name with no path in it, or use --save <path> instead"
+            "\"{name}\" is not a plain world name; pick a name with no path in it, or use \
+             --save <path> for an exact location"
         ));
     }
-    let dir = directory().ok_or_else(|| {
-        "cannot find the Terraria world directory on this system; use --save <path> instead of \
-         --new"
-            .to_string()
-    })?;
-    Ok(dir.join(filename_for(name)))
+    Ok(worlds_dir().join(filename_for(name)))
 }
 
-/// Every `.wld` in the platform world directory, sorted by name.
+/// Every `.wld` the server owns, in [`worlds_dir`], sorted by name.
 ///
-/// Backups are excluded: `.bak1` and friends are ours, and Terraria's own `.wld.bak` is not a
-/// world somebody means to serve.
+/// Backups are excluded: `.bak1` and friends are ours, and a `.terrustia.wld` copy is not a world
+/// somebody means to serve on its own.
 pub fn list() -> Vec<PathBuf> {
-    let Some(dir) = directory() else {
-        return Vec::new();
-    };
+    let dir = worlds_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -198,12 +211,12 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_new_world_name_is_accepted_whenever_the_directory_is_known() {
-        // `directory()` depends on the environment, so this only asserts when it resolves —
-        // matching `looking_for_the_directory_never_fails` above, which does the same.
-        if let Some(dir) = directory() {
-            let path = new_world_path("My Fork World").unwrap();
-            assert_eq!(path, dir.join("My_Fork_World.wld"));
-        }
+    fn a_new_world_lands_in_the_servers_worlds_dir() {
+        let path = new_world_path("My Fork World").unwrap();
+        assert_eq!(path, worlds_dir().join("My_Fork_World.wld"));
+        assert!(
+            path.starts_with("worlds"),
+            "a new world belongs to the server, not the Terraria folder: {path:?}"
+        );
     }
 }

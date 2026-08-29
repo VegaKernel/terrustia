@@ -38,18 +38,21 @@ pub fn swooper(npc: &mut Npc, world: &World<'_, impl TileView>) {
         npc.alpha = (npc.alpha - SWOOP_FADE).max(0);
     }
 
-    // Two too close shove apart. Each applies its own half, so the pair separates at the same rate
-    // the game's mutual push does.
+    // Two too close shove apart. Vanilla writes this push twice over: once from this NPC's own
+    // pass, which pushes itself, and once more from the *neighbour's* own pass, which reaches
+    // across and pushes this one directly. A routine here only ever has its own NPC to move, so
+    // it cannot reach across the way vanilla's second write does — doubling its own push is what
+    // makes up the difference and keeps the pair separating at the true, full rate.
     let (cx, cy) = npc.center();
     for (kx, ky) in world.avoid {
         let (dx, dy) = (kx - cx, ky - cy);
         let gap = dx.hypot(dy);
         if gap < SWOOP_PERSONAL_SPACE {
             let push = if gap > 0.0 {
-                (dx / gap * SWOOP_SHOVE, dy / gap * SWOOP_SHOVE)
+                (dx / gap * SWOOP_SHOVE * 2.0, dy / gap * SWOOP_SHOVE * 2.0)
             } else {
                 // Exactly on top of one another: pick a side rather than divide by zero.
-                (SWOOP_SHOVE, 0.0)
+                (SWOOP_SHOVE * 2.0, 0.0)
             };
             npc.velocity.0 -= push.0;
             npc.velocity.1 -= push.1;
@@ -291,6 +294,29 @@ mod tests {
         assert!(
             crowded < alone,
             "a neighbour on the right should push it left: {crowded} vs {alone}"
+        );
+    }
+
+    /// Vanilla writes the shove into both NPCs from both of their passes; this routine only ever
+    /// moves its own NPC, so its lone push has to be doubled to stand in for the write it cannot
+    /// make into the neighbour, and end up at the true, full separation rate.
+    #[test]
+    fn the_shove_makes_up_for_not_being_able_to_push_the_neighbour_too() {
+        let tiles = Sky(HashMap::new());
+        let mut a = apparition(0.0, 0.0);
+        a.local_ai[0] = SWOOP_ENTRANCE;
+        let mut w = world(&tiles, Some((5000.0, 0.0)));
+        let (cx, cy) = a.center();
+        let neighbour = [(cx + 10.0, cy)];
+        w.avoid = &neighbour;
+
+        swooper(&mut a, &w);
+        assert!(
+            (a.velocity.0.abs() - SWOOP_SHOVE * 2.0).abs() < 1e-4,
+            "the self-push should double up for the write vanilla makes into the neighbour \
+             directly: got {}, wanted {}",
+            a.velocity.0.abs(),
+            SWOOP_SHOVE * 2.0
         );
     }
 }

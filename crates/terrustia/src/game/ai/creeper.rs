@@ -10,6 +10,10 @@ use crate::game::npc_ai::Target;
 /// How far a creeper may drift from the Brain before it is pulled back.
 pub const TETHER_RANGE: f32 = 90.0;
 
+/// A charging creeper more than this far from the Brain gives up and returns to orbit
+/// (`AI_055`: `num885 > 700f`).
+pub const CHARGE_RETURN_RANGE: f32 = 700.0;
+
 /// Speed of both the return and the charge.
 pub const SPEED: f32 = 8.0;
 
@@ -42,7 +46,16 @@ pub fn update(
     };
 
     // ai[0] marks a creeper that has committed to a charge; it stops orbiting until it resets.
+    // Vanilla `AI_055` resets it (back to orbit) once the creeper strays more than 700px from the
+    // Brain — without this the creeper flew straight forever after one dart and the swarm scattered
+    // off and never re-formed. Its charge velocity carries it there under normal physics.
     if npc.ai[0] != 0.0 {
+        let (cx, cy) = npc.center();
+        let (dx, dy) = (brain_center.0 - cx, brain_center.1 - cy);
+        if (dx * dx + dy * dy).sqrt() > CHARGE_RETURN_RANGE {
+            npc.ai[0] = 0.0;
+            npc.dirty = true;
+        }
         return Outcome::Alive;
     }
 
@@ -97,6 +110,25 @@ mod tests {
     fn a_creeper_without_a_brain_asks_to_be_removed() {
         let mut c = creeper((0.0, 0.0));
         assert_eq!(update(&mut c, None, None, false), Outcome::BrainGone);
+    }
+
+    #[test]
+    fn a_charging_creeper_returns_to_orbit_once_it_strays_from_the_brain() {
+        let brain = (1000.0, 1000.0);
+        // Committed to a charge (ai[0] set) but now well over 700px from the Brain.
+        let mut strayed = creeper((0.0, 0.0));
+        strayed.ai[0] = 1.0;
+        update(&mut strayed, Some(brain), None, false);
+        assert_eq!(
+            strayed.ai[0], 0.0,
+            "a strayed creeper drops its charge and re-orbits instead of flying off forever"
+        );
+
+        // Still charging while close to the Brain.
+        let mut close = creeper((985.0, 1000.0));
+        close.ai[0] = 1.0;
+        update(&mut close, Some(brain), None, false);
+        assert_eq!(close.ai[0], 1.0, "a creeper near the Brain stays committed");
     }
 
     #[test]

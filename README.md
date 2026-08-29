@@ -1,122 +1,262 @@
-# terrustia
+<div align="center">
 
-A Terraria **1.4.5.8** server, written from scratch in Rust. Real clients connect to it, real
-worlds load in it, and the game that gets played is the game.
+<img src="docs/assets/banner.svg" alt="terrustia" width="720">
 
-## Point it at a world you already have
+<br>
 
-That is what it does best today, and it does it well:
+[![CI](https://github.com/bybrooklyn/terrustia/actions/workflows/ci.yml/badge.svg)](https://github.com/bybrooklyn/terrustia/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-00afff?style=flat-square)](LICENSE)
+[![proto crate: MIT](https://img.shields.io/badge/proto%20crate-MIT-00d7ff?style=flat-square)](crates/terrustia-proto/LICENSE)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-005fff?style=flat-square&logo=rust&logoColor=white)
+![Terraria 1.4.5.8](https://img.shields.io/badge/Terraria-1.4.5.8-00afff?style=flat-square)
+![protocol 326](https://img.shields.io/badge/protocol-326-0087ff?style=flat-square)
+![platforms](https://img.shields.io/badge/platforms-Linux%20·%20macOS%20·%20Windows-0087ff?style=flat-square)
+
+**A Terraria 1.4.5.8 dedicated server, written from scratch in Rust.**
+Real clients connect to it, and the worlds they play are ordinary Terraria worlds.
+
+[Quickstart](#quickstart) ·
+[Running](#running) ·
+[Hosting](#hosting-and-setup) ·
+[How it fits together](#how-it-fits-together) ·
+[What works](#what-works) ·
+[What the audits found](#what-the-audits-found) ·
+[Verification](#verification) ·
+[Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+> [!NOTE]
+> Terraria is a trademark of Re-Logic. This is an independent reimplementation of the **dedicated
+> server**, not affiliated with, endorsed by, or supported by Re-Logic. You need a copy of the game
+> to play. This replaces the server, not the game.
+
+## Quickstart
+
+What it does best today is serve a world you already have:
 
 ```sh
-terrustia --world ~/Library/Application\ Support/Terraria/Worlds/MyWorld.wld
+terrustia --world path/to/World.wld
 ```
 
-Your world file, your clients, nothing else to install. Measured against the official server on the
-same 4200×1200 world with nobody connected:
+Your world file, your clients, nothing else to install. Point it at nothing and it generates a fresh
+world, saves it into a `worlds/` directory in the folder you ran it from, and serves that, the way a
+Minecraft server lays out its own files wherever it is started. Measured against the official server
+on the same 4200×1200 world with nobody connected:
 
-| | vanilla 1.4.5.8 | terrustia |
+| | vanilla 1.4.5.8 | terrustia | |
+|---|:---:|:---:|:---:|
+| Startup | 2.26 s | **0.06 s** | 37× faster |
+| CPU, idle | 104% of a core | **0.7%** | ~150× less |
+| RAM, idle | 641.8 MB | **45.4 MB** | 14× less |
+| Bandwidth over 5 minutes | 148,874 B | **133,400 B** | 10% less |
+
+Saves are verified before they replace anything, then fsynced, and three backups are kept in
+rotation. A crash partway through a write cannot destroy the previous save. The file header is
+preserved byte for byte and patched, so everything this server does not model (Journey research, the
+bestiary, pylon rooms) survives untouched.
+
+The short version: point it at a `.wld` you already have and it serves it well, with the same
+clients, the same file, and a much lighter footprint than the official server. Point it at nothing
+and it generates a world that is playable, decorated, settled and smoothed: forests, a green jungle,
+cacti, lakes, settled water, pots, statues, piles, fallen logs, traps, rounded terrain, floating
+islands, spider and gem caves, pyramids, living trees, jungle shrines, underground cabins, an oasis,
+the glowing mushroom biome, and the full cosmetic and cleanup tail. Vanilla's seven secret seeds,
+plus two more real ones an earlier pass had missed, are detected by their real magic strings (`--seed
+"getfixedboi"` works and persists), and one of the nine, No Traps World, is fully wired. What is left
+of worldgen is 7 of 15 micro-biome classes and the other eight seeds' own generation-content
+differences, sized in [`plan.md`](plan.md) and deferred to v0.1.0.
+
+## Running
+
+```sh
+cargo run --release -- --world path/to/World.wld     # serve a world you already have
+cargo run --release -- --listen 127.0.0.1:7777 --world path/to/World.wld
+cargo run --release                                  # generate one into worlds/ and serve it
+cargo run --release -- --new "My World"              # generate a named world into worlds/
+cargo run --release -- --save /some/where.wld        # generate one at an explicit path instead
+cargo run --release -- --record capture.trcap        # record every byte, for docs/real-client.md
+```
+
+Worlds live in a `worlds/` directory next to wherever the server runs, and `--worlds` lists them.
+They are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from an explicit
+path saves back over itself; `--save` writes somewhere else. A `--world <name>` (rather than a path)
+is looked up in `worlds/` first, then in your own Terraria folder, so a world you already own is
+still servable by name.
+
+Then in Terraria: **Multiplayer → Join via IP → `127.0.0.1`**, port `7777`.
+
+Configuration is optional. A `terrustia.toml` in the working directory overrides the defaults; see
+`terrustia.toml.example`. `TERRUSTIA_LOG=debug` raises the log level.
+
+## Hosting and setup
+
+There is no single blessed path. Docker, a native binary behind systemd, and OS packages (Homebrew,
+winget, AUR) are all documented and supported equally; see [Packaging](#packaging) below.
+
+- **`terrustia --setup`** runs a short interactive wizard (dedicated directory, world name, max
+  players, whether to turn the web panel on) and starts the server with what it wrote. It also runs
+  automatically on a first, zero-flag launch when the working directory is the same directory the
+  executable itself is in and nothing terrustia-shaped is there yet, which is the shape a raw binary
+  double-clicked out of a downloads folder actually has. Plain `terrustia` with no flags, run from
+  anywhere else, is unchanged: still the non-interactive "generate a world and serve it." The
+  wizard's dedicated directory is refused if anything is already in it.
+- **Environment variables** configure everything a `terrustia.toml` can, for Docker and automation
+  use where there is often no shell around the process to pass a flag and no volume mount to put a
+  file on: `TERRUSTIA_LISTEN`, `TERRUSTIA_MAX_PLAYERS`, `TERRUSTIA_WORLD_NAME`,
+  `TERRUSTIA_PANEL_ENABLED`, and so on. Every key in `terrustia.toml.example` has a
+  `TERRUSTIA_<UPPERCASE_KEY>` equivalent. Precedence is defaults, then `terrustia.toml`, then
+  environment, then an explicit CLI flag.
+- **UPnP**: on startup, terrustia asks the router to forward the game port automatically. When no
+  UPnP-capable router answers, or it refuses, this logs a specific fallback message naming the port
+  and the local address to forward it to by hand. It is never a fatal error. Set `upnp_enabled =
+  false` to turn it off. This has nothing to do with the web panel, which stays bound to loopback
+  regardless.
+- **`terrustia update`**: on boot, terrustia checks GitHub for a newer, signature-verified release
+  and says so, in the console log and as an in-game notice to the first recognised admin who signs
+  in afterward. Applying it is a separate, deliberate step: run `terrustia update` yourself. It
+  shells out to the real `cosign` binary, checking the same keyless GitHub Actions signing chain
+  `release.yml` signs with, so there is no separate trust root.
+
+### Packaging
+
+| Target | Where | Status |
 |---|---|---|
-| Startup | 2.26 s | **0.41 s** |
-| CPU, idle | 104% of a core | **0.7%** |
-| RAM, idle | 641.8 MB | **45.4 MB** |
-| Bandwidth over 5 minutes | 148,874 B | **133,400 B** |
+| Homebrew | `packaging/homebrew/terrustia.rb` | Builds from source with `cargo install`. `brew style` clean; verified with a real `cargo install --path` build. `brew audit` and `--build-from-source` could not run in this environment (its Xcode CLT is below Homebrew's required minimum) |
+| systemd | `packaging/terrustia.service` | Verified by running the unit's literal `ExecStart` and sending it the exact `SIGTERM` its `KillSignal` names, which is how a real shutdown deadlock was found and fixed (see [What the audits found](#what-the-audits-found)) |
+| Docker | `Dockerfile`, `.github/workflows/docker.yml` | Multi-arch image, cosign-signed, smoke-tested serving with no config. `HEALTHCHECK` present |
+| winget | `packaging/winget/manifests/…` | Validated against the current (1.12.0) `microsoft/winget-cli` schemas; all three manifests pass structurally. Publishing needs a PR into `microsoft/winget-pkgs` |
+| AUR | `packaging/aur/PKGBUILD` | Builds from source, matches Arch's Rust packaging guidelines, `shellcheck`-clean. `makepkg` and `namcap` need a real Arch environment. Publishing needs an AUR account |
 
-Saves are verified before they replace anything, fsynced, and rotated through three backups. The
-header is preserved byte-for-byte and patched, so everything this server does not model — Journey
-research, the bestiary, pylon rooms — survives untouched.
+Every `url` or checksum above that points at a `v0.0.1` release asset is a disclosed placeholder;
+that tag does not exist yet (see [`plan.md`](plan.md)).
 
-## Not affiliated with Re-Logic
+---
 
-Terraria is a trademark of Re-Logic. This project is an independent reimplementation of the
-dedicated server and is not affiliated with, endorsed by, or supported by Re-Logic. You need a copy
-of the game to play; this replaces the server, not the game.
+## How it fits together
+
+Three crates. `terrustia-proto` is the wire format with no I/O: primitives, packets, tile-section
+coding, and the tile, NPC and housing tables extracted from the game. Because it does no I/O, every
+packet round-trips in a unit test without a socket. `terrustia-client` is a headless client that
+speaks the protocol a real client speaks, so the same code drives integration tests, probes a real
+`TerrariaServer` for comparison, or runs as a bot. `terrustia` is the async server.
+
+The server is a single-writer actor. One task owns the world and the player table, so there are no
+locks on the hot path and packet ordering is deterministic. Each connection gets a read task that
+feeds that actor and a write task draining a bounded queue. The web panel, when it is on, taps the
+same event stream the terminal prints, rather than keeping a second path of its own.
+
+```mermaid
+flowchart TB
+    C(["Terraria clients<br/>up to 255"]) -->|"packets in"| R
+    W -->|"packets out"| C
+    subgraph proc["terrustia · one process"]
+      direction TB
+      R["read task"] -->|"events"| A
+      A -->|"broadcasts"| W["write task<br/>bounded queue"]
+      A["single-writer GAME ACTOR<br/>owns world + player table<br/>no locks on the hot path"]
+      G["worldgen"] --> A
+      A --> WLD[("world state")]
+      WLD -->|"verify → fsync → 3 backups"| SAVE[".wld on disk"]
+      A -. "same event stream" .-> P["web panel<br/>loopback · off by default"]
+    end
+```
+
+### How this was derived
+
+Terraria 1.4.5 changed the protocol, and at the time of writing no public documentation covers it.
+The community references, and the existing Rust crates, all describe 1.4.4.9 (release 279).
+Everything here was transcribed from the shipped `TerrariaServer.exe`, decompiled with `ilspycmd`.
+`docs/protocol-notes.md` records the findings in our own words. No decompiled game code is checked
+into this repository.
+
+Differences from 1.4.4 that matter, and that stale documentation gets wrong:
+
+- The handshake string is `Terraria325`.
+- Packet `3` carries a trailing bool after the player slot.
+- Tile sections are a bare DEFLATE stream with no leading "is compressed" flag byte.
+- `WorldData` has eleven world-flag bytes and a trailing extra-spawn-point list.
+- The server no longer pushes sections as players move; clients pull them with packet `159`.
 
 ## What works
 
-The honest answer, feature by feature. Built from audits run against the code rather than against
-these notes — the two documents this section replaces (a separate `README.md` status list and
-`FEATURES.md`) had drifted far enough apart to disagree with each other about whether cacti grow.
-This is the one place that answer lives now. **[`AUDIT.md`](AUDIT.md)** has the findings behind it:
-what was wrong, what it would have done to a real save or a real server, and how each fix was
-verified rather than assumed.
+The honest answer, feature by feature. It was built from audits run against the code rather than
+against these notes. [`AUDIT.md`](AUDIT.md) has the findings behind it, and
+[What the audits found](#what-the-audits-found) below tells the ones worth telling.
 
 | | Meaning |
-|---|---|
+|:---:|---|
 | ✅ | Implemented, and checked |
-| 🟡 | Works, with the limitation named in the row. "Partial" without a qualifier is a lie by omission |
+| 🟡 | Works, with the limitation named in the row |
 | 🔴 | Not implemented. A player will notice |
 | ⬜ | Deliberately out of scope, with the reason |
 
-**The short version:** point it at a `.wld` you already have and it serves it well — same clients,
-same file, and measurably lighter than the official server. Point it at nothing and it generates a
-world that is playable, decorated, settled and smoothed — forests, a green jungle, cacti, lakes,
-settled water, pots, statues, piles, fallen logs, traps and rounded terrain, floating islands, spider
-and gem caves, pyramids, living trees, jungle shrines, underground cabins, an oasis, and the full
-Tier 3 cosmetic/cleanup tail (moss, wall variety, waterfalls, thin ice, speleothems, exposed gems,
-lily pads, cacti, and the seven-pass tile-cleanup bundle) are all there now. Vanilla's seven secret
-seeds — plus two more real ones this project's earlier investigation had missed — are now detected
-by their real magic strings (a real `--seed "getfixedboi"` works and now persists), and one of the
-nine — No Traps World — is fully wired. What's left of worldgen is 7 of 15 real micro-biome classes
-and the other eight secret seeds' own generation-content differences — sized and tracked in
-`plan.md`, and explicitly deferred to v0.1.0.
-
-### Protocol and connectivity
+<details>
+<summary><b>Protocol and connectivity</b></summary>
 
 | | Feature | Notes |
 |---|---|---|
-| ✅ | Protocol release 326 (1.4.5.8) | Release 325 accepted too; they differ in the announced number and four bytes of packet 7 |
+| ✅ | Protocol release 326 (1.4.5.8) | Release 325 accepted too. They differ in the announced number and four bytes of packet 7 |
 | ✅ | Handshake, world data, section streaming | Checked against a real `TerrariaServer`, not only against our own client |
 | ✅ | Server password | |
-| ✅ | Localized announcements | Keys with substitutions, as the game sends — so a non-English client reads its own language |
-| 🟡 | Packet coverage | 111 of 163 message ids handled; most of the rest are outbound-only or dead in vanilla too. Genuinely missing: portal-gunning an NPC (100), spectating (150), shop overrides (104) |
-| ⬜ | Steam P2P / lobbies | Steamworks' licence is incompatible with AGPL |
-| ⬜ | Encryption | Terraria's protocol has none. `/login` sends a password as ordinary chat text — do not reuse a real one |
+| ✅ | Localized announcements | Keys with substitutions, as the game sends, so a non-English client reads its own language |
+| 🟡 | Packet coverage | 111 of 163 message ids handled. Most of the rest are outbound-only or dead in vanilla too. Genuinely missing: portal-gunning an NPC (100), spectating (150), shop overrides (104) |
+| ⬜ | Steam P2P and lobbies | Steamworks' licence is incompatible with AGPL |
+| ⬜ | Encryption | Terraria's protocol has none. `/login` sends a password as ordinary chat text, so do not reuse a real one |
 
-### World files
+</details>
+
+<details>
+<summary><b>World files</b></summary>
 
 | | Feature | Notes |
 |---|---|---|
-| ✅ | Load `.wld` (format 279–325) | Refuses older and newer by name rather than guessing |
-| ✅ | Save `.wld` | Header preserved byte-for-byte and patched, so state we do not model survives untouched |
-| ✅ | Journey research, bestiary, pylon rooms, pressure plates | Carried through verbatim — verified by section index, not assumed |
-| ✅ | Verified before replacing, fsynced, 3 rotating backups | An atomic rename over a corrupt file is an atomic loss |
-| ✅ | `--new <name>` | Generates a fresh world straight into the platform's own Terraria world directory (creating it first if nothing has ever saved there), under vanilla's own space→underscore filename convention, so it shows up beside every world the game itself made. Refuses rather than overwrites if that name is already taken |
+| ✅ | Load `.wld` (format 279 to 326) | Refuses older and newer by name rather than guessing |
+| ✅ | Save `.wld` | Header preserved byte for byte and patched, so state we do not model survives untouched |
+| ✅ | Journey research, bestiary, pylon rooms, pressure plates | Carried through verbatim, verified by section index rather than assumed |
+| ✅ | Verified before replacing, fsynced, 3 rotating backups | So a crash mid-write cannot leave a corrupt file in place of a good one |
+| ✅ | `--new <name>` | Generates a fresh world into the world directory, under vanilla's own space-to-underscore filename convention. Refuses rather than overwrites if that name is taken |
 | 🟡 | Bestiary | Existing data is preserved; kills during a session are not added to it |
-| 🟡 | In-progress blood moon / eclipse | Not resumed from the file. The file's own bytes are undisturbed |
+| 🟡 | In-progress blood moon or eclipse | Not resumed from the file. The file's own bytes are undisturbed |
 
-### World generation
+</details>
 
-Tier 1 (the passes that make a world stop looking like a prototype), Tier 2 (biome set pieces —
-floating islands, spider and gem caves, pyramids, living trees, jungle shrines, underground cabins,
-the oasis, the glowing mushroom biome) and Tier 3 (the cosmetic/cleanup tail — moss, wall variety,
-waterfalls, thin ice, speleothems, exposed gems, lily pads and beach decorations, the seven-pass
-tile-cleanup bundle) are all done. What's left: 7 of 15 real `MicroBiome` classes (each one sized and
-disclosed individually below), and eight of the nine known secret seeds' own generation-content
-differences (the ninth, No Traps World, is done — see below). Both are v0.1.0 scope.
+<details>
+<summary><b>World generation</b></summary>
+
+Tier 1 (the passes that make a world stop looking like a prototype), Tier 2 (biome set pieces) and
+Tier 3 (the cosmetic and cleanup tail) are all done. What is left: 7 of 15 real `MicroBiome`
+classes, and eight of the nine known secret seeds' own generation-content differences (the ninth, No
+Traps World, is done). Both are v0.1.0 scope.
 
 | | Feature | Notes |
 |---|---|---|
 | ✅ | Terrain, caves, ore veins | |
 | ✅ | Dungeon, hive, underworld, evil chasms | Our own algorithms, not vanilla's |
-| ✅ | Jungle temple, **including the Lihzahrd Altar** | The altar was missing for a while without anyone noticing — a real client refuses to let a player even attempt the Power Cell interaction without one nearby, so its absence made Golem unreachable in every world this generator ever produced. Found by a sizing pass, fixed, tested across 40 seeds |
-| ✅ | Demon/crimson altars, life crystals, shadow orbs | Enough to be beatable |
-| ✅ | Chests | Depth-tiered everywhere; vanilla's own jungle and underground-desert item lists where the biome matches |
-| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree` — trunk, branches, roots, canopy |
+| ✅ | Jungle temple, **including the Lihzahrd Altar** | Its absence once made Golem unreachable in every generated world; see [What the audits found](#what-the-audits-found) |
+| ✅ | Demon and crimson altars, life crystals, shadow orbs | Enough to be beatable |
+| ✅ | Chests | Depth-tiered everywhere, with vanilla's own jungle and underground-desert item lists where the biome matches |
+| ✅ | **Trees** | Frames transcribed from `WorldGen.GrowTree`: trunk, branches, roots, canopy |
 | ✅ | Vines and jungle grass | The underground jungle's mud is lined with grass, which is what vines hang from |
 | ✅ | Cacti | |
 | ✅ | Lakes | Sited on level ground with a solid floor |
-| ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before the world is handed off — reuses the runtime liquid simulator rather than porting vanilla's separate generation-time algorithm |
+| ✅ | **Settled water** | Lakes, oceans and underworld lava all reach a stable rest state before hand-off, reusing the runtime liquid simulator rather than porting vanilla's generation-time algorithm |
 | ✅ | Flowers, mushrooms, alchemy herbs, sunflowers | |
-| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground→style table is transcribed directly from the `Piles` pass's primary loop (`WorldGen.cs:18963-19030`) |
-| ✅ | Traps | Dart traps, land mines, boulder traps and geysers, plus the desert's sand trap — transcribed from `placeTrap`/`PlaceSandTrap`/the driving `Traps` pass. Ordinary-world path only; every secret-seed branch but one (`noTrapsWorldGen`, now wired — see the secret-seeds row below) is skipped. A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
-| ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator runs smoothing *last*, after every decoration, rather than vanilla's before-decoration placement — see `smooth.rs`'s doc comment for why, and how the altar and other fixtures stay protected either way. 30,107 tiles smoothed on the same 4200×1200 world |
-| ✅ | Floating islands, spider caves, gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | The ~200-line structure-overlap tracker (`StructureMap`) this project built instead of porting vanilla's heavy shape/structure DSL turned out to be enough for all nine — no DSL needed |
-| 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes: `CaveHouseBiome`, `ThinIceBiome`, `CorruptionPitBiome`, `SpikePitBiome`, `HoneyPatchBiome`, `CampsiteBiome`, and a shared painter standing in for both `MarbleBiome`/`GraniteBiome`. The other 7 — `DeadMansChestBiome`, `DesertBiome`, `DunesBiome`, `MahoganyTreeBiome`, `EnchantedSwordBiome`, `MiningExplosivesBiome`, `HiveBiome` — each need a genuinely separate subsystem this project doesn't have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape...); sized individually in `plan.md` |
-| ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads/cattails/coral/cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed. Each has its own disclosed narrowing where vanilla's version leans on a genuinely separate subsystem (`neonMossBiome`'s grass-diffusion machinery, gem trees, bamboo/seaweed/palm growth, vanilla's own defensive multi-tile-frame repair this project's placement code has no equivalent need for) — see `plan.md`'s own Done rows for the full, pass-by-pass account |
-| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve, For the Worthy, Skyblock) | An earlier pass detected all seven originally-known seeds by name, but — checked directly against real source once decompiled access came back — every one of its seven magic strings turned out wrong except Celebrationmk10 (Remix's real trigger is `dontdigup`, not "remix"; Drunk World has no text trigger at all, only the numeric seed 5162020; four more similarly wrong). Fixed against source, along with two more real secret seeds the original investigation never named: For the Worthy (`fortheworthy`) and Skyblock (`skyblock`). All nine flags now also **persist** through a save/reload and reach a connecting client's own packet 7 (six of them have a real client-visible flag bit; a real Terraria client already knows how to render each seed's own atmosphere once told, with no rendering code needed in this project). **No Traps World is done**: real vanilla's own `noTrapsWorldGen` flag now short-circuits `traps::scatter` to placing nothing, including when reached via "get fixed boi"'s own real dependency cascade — verified on a real 4200×1200 world (397 real trap tiles on an ordinary seed, 0 on this one). The other eight seeds' own *generation-content* differences are detected and persisted correctly but not yet implemented — each individually sized in `plan.md`'s backlog, now with real per-seed call-site counts (Don't Starve 103, Not the Bees 138, Celebrationmk10 191, Drunk World 199, For the Worthy 261, Remix 554) — **explicitly deferred to v0.1.0** |
-| ⬜ | Seed-identical worlds | Sized at 219–372 engineer-days. Feature-complete is the goal; identical is not |
+| ✅ | Pots, statues, piles, fallen logs | Statue order is load-bearing and transcribed verbatim (73 entries). The piles' ground-to-style table comes straight from `WorldGen.cs:18963-19030` |
+| ✅ | Traps | Dart traps, land mines, boulder traps, geysers, and the desert's sand trap, transcribed from `placeTrap` and `PlaceSandTrap`. A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
+| ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator smooths last, after decoration; see `smooth.rs`. 30,107 tiles smoothed on the same world |
+| ✅ | Floating islands, spider and gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | A roughly 200-line structure-overlap tracker (`StructureMap`) turned out to be enough for all nine, with no port of vanilla's shape and structure DSL needed |
+| 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes done. The other 7 each need a genuinely separate subsystem this project does not have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape, and so on); sized individually in `plan.md` |
+| ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads, coral, cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed, each with its own disclosed narrowing; see `plan.md`'s Done rows |
+| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve, For the Worthy, Skyblock) | All nine detected by their real magic strings (an earlier pass had six of seven wrong: Remix's real trigger is `dontdigup`, Drunk World has only the numeric 5162020, and so on), fixed against source, plus two more the original investigation never named. All nine persist through save and reload and reach a client's packet 7. No Traps World is fully wired (0 trap tiles versus 397 on an ordinary seed). The other eight seeds' generation-content differences are detected and persisted but not yet implemented; sized in `plan.md`, deferred to v0.1.0 |
+| ⬜ | Seed-identical worlds | Sized at 219 to 372 engineer-days. Feature-complete is the goal; byte-identical is not |
 
-### NPCs, bosses and events
+</details>
+
+<details>
+<summary><b>NPCs, bosses and events</b></summary>
 
 | | Feature | Notes |
 |---|---|---|
@@ -125,15 +265,20 @@ differences (the ninth, No Traps World, is done — see below). Both are v0.1.0 
 | ✅ | Both moons, all four invasions, Old One's Army with Betsy, eclipse with Mothron | |
 | ✅ | Rain, wind, sandstorms | |
 | ✅ | Town NPC arrival and housing | Including the in-game housing screen |
-| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla — no packet populates it, and the click gate (`townNPC`, derived from `type` alone, plus `velocity.Y == 0`) is satisfied by an ordinary NPC sync. The one thing the server owns, packet 40, was already correct; a test proves it, relayed to other players. Happiness-driven pricing is covered below; shop overrides (packet 104) are not yet done, see the packet-coverage row above |
-| ✅ | **Town NPCs fighting back** | All 28 real vanilla combat-capable town NPCs, across every one of vanilla's attack classes (ranged, melee, magic and the rest) — target and damage nearby hostiles, verified end to end over a real socket including the shot actually landing |
-| ✅ | NPC happiness, price effects, moving out | Same shape as the "Town NPC shops" row above: moving out is the housing screen's own "kick out" (packet 60), which the existing eviction handler already does and broadcasts. Happiness/price adjustment is player-local computation in vanilla too — its one call site (`Player.cs`) reads nearby NPCs' type/position, each NPC's home state, and the player's own position/biome, all of which terrustia already sends completely (not just on change — a joining player gets every town NPC's current home immediately). Verified by source-tracing and by confirming terrustia's sends are complete; not verified by watching a real client's shop UI, which nothing in this environment can launch |
-| ✅ | The birthday party | Natural daily rolls (Party Girl gated, five eligible town NPCs minimum), the Party Monolith (direct click or wire signal), and the every-party-ends-at-nightfall rule, for both genuine and manually-forced parties |
-| ✅ | Slime Rain | The daily roll (gated on whether King Slime has ever been beaten, hardmode, and whether anyone present is ready to fight him), the delayed start/stop announcement real vanilla actually uses (a ~7-second warning countdown, not instant), and King Slime arriving at the closest player once enough Blue Slimes die during it |
-| ✅ | Lantern Night | The daily roll (gated on Moon Lord ever downed, no population requirement), and the real guarantee that the very next roll succeeds outright the first time any of 17 tracked boss-kill/hardmode flags is cleared |
-| 🟡 | Enemy drops | Boss loot has zero remaining unjustified gaps. `tools/check_drops.py` and `tools/gen_drops.py` each had real bugs of their own (parsing false positives, a variable-name collision silently misattributing whole registration blocks, an over-broad exclusion that discarded a chain's genuinely-flat prefix); fixed, which recovered the great majority of the ordinary-enemy gaps outright. 6 remain, each individually traced against source: 5 are `RemixSeed`-only branches genuinely out of scope, and one is a pre-existing documented nested-fallback-chain shape |
+| ✅ | Town NPC shops | Opening and using a shop is entirely client-side in vanilla. The one thing the server owns, packet 40, was already correct, and a test proves it, relayed to other players |
+| ✅ | **Town NPCs fighting back** | All 28 real vanilla combat-capable town NPCs, across every attack class, target and damage nearby hostiles, verified end to end over a real socket including the shot landing |
+| ✅ | NPC happiness, price effects, moving out | Moving out is the housing screen's own kick-out (packet 60). Happiness and pricing are player-local computation in vanilla too, and terrustia sends everything its one call site reads. Verified by source-tracing, not by watching a real client's shop UI (nothing here can launch one) |
+| ✅ | The birthday party | Natural daily rolls, the Party Monolith (click or wire signal), and the rule that every party ends at nightfall, for both genuine and forced parties |
+| ✅ | Slime Rain | The gated daily roll, the roughly seven-second warning countdown vanilla actually uses, and King Slime arriving at the closest player once enough Blue Slimes die |
+| ✅ | Lantern Night | The gated daily roll, and the guarantee that the next roll succeeds the first time any of 17 tracked boss-kill or hardmode flags is cleared |
+| 🟡 | Enemy drops | Boss loot has no remaining unjustified gaps. Six ordinary-enemy gaps remain, each traced against source: five are `RemixSeed`-only branches out of scope, one is a pre-existing nested-fallback-chain shape. The checker bugs behind the rest are in [What the audits found](#what-the-audits-found) |
 
-### Items and mechanics
+</details>
+
+<details>
+<summary><b>Items, mechanics, Journey mode, multiplayer, hardening, platforms</b></summary>
+
+**Items and mechanics**
 
 | | Feature | Notes |
 |---|---|---|
@@ -141,113 +286,130 @@ differences (the ninth, No Traps World, is done — see below). Both are v0.1.0 
 | ✅ | Wiring, logic gates, timers, teleporters | |
 | ✅ | Chests, signs, tile entities, pylons | |
 | ✅ | Boss summon items, Angler quests, fishing NPCs | |
+| ✅ | Pets, mounts, minecart tracks | Pets and mounts are client-authoritative in vanilla too, so this was a gap in the tracking rather than the server. A minecart track switch's flip did nothing at all; fixed |
 | ⬜ | Crafting validation | Terraria has no craft packet; the client is authoritative in vanilla too |
 | ⬜ | Armour set bonuses, accessories | Client-side in vanilla; the server applies plain defence |
-| ✅ | Pets, mounts, minecart tracks | Pets and mounts are already client-authoritative and working in vanilla too — a real gap in this file's own tracking, not in the server. Minecart tracks had one real bug: a track switch's own flip did nothing at all, fixed |
 
-### Journey mode
+**Journey mode**
 
 | | Feature | Notes |
 |---|---|---|
-| ✅ | **Every Journey power** | All 15 real vanilla powers, across all 5 real wire shapes: the four time-skip buttons, four shared toggles, four shared sliders (including `Difficulty`, a continuous 0–3 replacement for the discrete game-mode read at dozens of call sites), and the three per-player powers (Godmode, FarPlacementRange, SpawnRate) — bit-packed sync across up to 255 players, with a real anti-cheat property (a client can't claim to toggle another player's slot) pinned by a two-client integration test |
+| ✅ | **Every Journey power** | All 15 real vanilla powers across all 5 wire shapes: the four time-skip buttons, four toggles, four sliders (including `Difficulty`, a continuous 0 to 3 game-mode replacement read at dozens of call sites), and the three per-player powers. Bit-packed across up to 255 players, with a real anti-cheat property (a client cannot toggle another player's slot) pinned by a two-client test |
 | ✅ | Existing research survives a save | Preserved verbatim; it simply cannot grow here |
 
-### Multiplayer
+**Multiplayer**
 
 | | Feature | Notes |
 |---|---|---|
 | ✅ | PvP, teams, deaths, respawn, chat | |
-| ✅ | Accounts, groups, permissions, bans by name/address/uuid | Argon2, off the game task |
-| 🟡 | Chat commands | 18 of them. No warps, regions, or item bans — that is the deferred TShock-shaped work |
+| ✅ | Accounts, groups, permissions, bans by name, address or uuid | Argon2, off the game task |
+| 🟡 | Chat commands | 18 of them. No warps, regions, or item bans yet; that is the deferred TShock-shaped work |
 | ✅ | Whitelist | Empty means off, so it cannot lock the operator out on the day it is enabled |
-| ✅ | Web admin panel | A full subsystem, embedded in the main binary, off by default: player list with kick/ban, whitelist management, world switching (a real graceful process restart, not a hot-swap), a live console/chat stream (the same event stream the terminal itself prints), live-editable settings, and a stylized live world view — player avatars coloured from their own real skin/hair/gear data over the wire, no game assets shipped or read. Always localhost-only, independent of whatever the game port is exposed to |
+| ✅ | Web admin panel | A full subsystem embedded in the binary, off by default: player list with kick and ban, whitelist, world switching (a real graceful restart), a live console and chat stream, a metrics dashboard, backups and rollback, groups and accounts admin, world creation, and a stylized live world view with player avatars coloured from their own real skin, hair and gear over the wire, no game assets shipped or read. Always localhost-only |
 
-### Hardening
+**Hardening**
 
 | | Feature | Notes |
 |---|---|---|
 | ✅ | Decode path cannot panic or over-allocate | One `unsafe` block in the workspace, for the CPU clock |
 | ✅ | A panic on the packet path saves the world and exits non-zero | So `Restart=on-failure` fires |
-| ✅ | A real `SIGTERM` actually stops the server, with a real shutdown save — including with the web panel running | Two related bugs, found by hand while verifying `packaging/terrustia.service`'s literal `ExecStart`/`KillSignal` path: the panel supervisor task's own clone of the shutdown channel outlived a plain `.abort()`, and — once that was fixed — its real inner axum-serving task (started whenever the panel is actually on) turned out to survive that same `.abort()` too, since cancelling the outer task only detached rather than stopped the inner one. Both closed; the second one with a small abort-on-drop guard around the inner handle, so it cannot outlive the supervisor regardless of why the supervisor's own task ends. `packaging/terrustia.service`'s own `TimeoutStopSec=90` would eventually have masked either with a hard kill, but only after the graceful path had already silently failed |
+| ✅ | A real `SIGTERM` stops the server with a shutdown save, even with the web panel running | Two related bugs found by hand; see [What the audits found](#what-the-audits-found) |
 | ✅ | Connection ceiling, per-address cap, handshake deadline | |
 | ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
 | ✅ | Server claim requires a console token | |
-| ✅ | `/world undo <player> <duration>` | Admin-only grief recovery, up to 72h back. In-memory and time-windowed on purpose — does not survive a restart, and only covers `on_tile_manipulation` edits (not the wire tool's bulk drag-paint); both disclosed in `tile_log.rs`'s own doc comment |
-| ✅ | `terrustia update`: check-and-notify on boot, signature-verified, manual apply | Console log plus an in-game notice to the first admin who signs in after one is found. Verification shells out to the real `cosign` binary against the same keyless GitHub Actions signing chain `release.yml` already signs with — no separate trust root. Applying is always a deliberate `terrustia update`, never automatic |
+| ✅ | `/world undo <player> <duration>` | Admin-only grief recovery, up to 72h back. In-memory and time-windowed on purpose; disclosed in `tile_log.rs` |
+| ✅ | `terrustia update`: check-and-notify on boot, signature-verified, manual apply | Shells out to real `cosign` against the same keyless signing chain `release.yml` signs with |
 | ⬜ | Server-authoritative inventory and damage | Vanilla trusts the client for both; diverging would change how the game plays |
 
-### Platforms
+**Platforms**
 
 | | | Notes |
 |---|---|---|
-| ✅ | Linux x86_64 / aarch64, macOS arm64 / x86_64, Windows x86_64 | All five pass `cargo check` |
-| 🟡 | Container image, signed releases, packaging | The container workflow has actually run: multi-arch image built, pushed, cosign-signed, and smoke-tested serving with no configuration. Getting there for real found and fixed real CI bugs invisible to local `cargo check` alone — see `AUDIT.md`. Signed releases still untested; that workflow only triggers on a `v*` tag |
+| ✅ | Linux x86_64 and aarch64, macOS arm64 and x86_64, Windows x86_64 | All five pass `cargo check` |
+| 🟡 | Container image, signed releases, packaging | The container workflow has run for real: multi-arch image built, pushed, cosign-signed, smoke-tested. Signed releases are still untested; that workflow only triggers on a `v*` tag |
 
-## Running
+</details>
+
+## What the audits found
+
+This project's scope is to transcribe vanilla and be honest about the gaps. Several of the fixes
+worth the most were things that looked fine until an audit ran against the actual code. The full
+trail is in [`AUDIT.md`](AUDIT.md); these are the ones worth telling.
+
+- **The missing Lihzahrd Altar made Golem unreachable in every world this generator produced.** A
+  real client refuses to let a player even attempt the Power Cell interaction without an altar
+  nearby, so its absence stayed invisible until a sizing pass caught it. Fixed, tested across 40
+  seeds.
+- **`SIGTERM` never stopped the server when the panel was on.** Found by running
+  `packaging/terrustia.service`'s literal `ExecStart` and sending the exact `SIGTERM` its
+  `KillSignal` names. Two bugs, nested: the panel supervisor's clone of the shutdown channel
+  outlived a plain `.abort()`, and once that was fixed, the inner axum task it had spawned survived
+  the same `.abort()` too. Both are closed, the second with an abort-on-drop guard, so the graceful
+  shutdown save cannot be silently skipped. `TimeoutStopSec=90` would eventually have masked it with
+  a hard kill, but only after the graceful path had already failed.
+- **The first autosave cost 89% of the frame budget.** Instrumentation once claimed a verified full
+  60 Hz tick; it was comparing CPU time to wall time, so it was withdrawn and re-measured. A typical
+  tick costs 184 to 330 µs of a 16,666 µs budget, and the autosave, once the most expensive thing an
+  idle server did, now costs 43 to 137 µs because only changed sections are copied. That figure was
+  from a server's second autosave onward. The first, with no prior buffer to diff against, cost
+  14,833 µs until this repo's own first CI soak run caught it. It was fixed by building the buffer
+  during startup instead of inside a counted tick.
+- **88 of 255 connections dropped on a synchronized join burst.** Disclosed here first: at the real
+  protocol maximum of 255 players all joining at once, the outbound queue overflowed and 88
+  connections were dropped. Fixed and re-verified to zero dropped connections, with a regression
+  test (`tests/queue_capacity.rs`) confirmed failing against the unfixed queue size first.
+- **The drop-table checkers had bugs of their own.** `tools/check_drops.py` and `tools/gen_drops.py`
+  carried parsing false positives, a variable-name collision that silently misattributed whole
+  registration blocks, and an over-broad exclusion that discarded a chain's genuinely-flat prefix.
+  Fixing the checkers recovered the great majority of the ordinary-enemy drop gaps outright.
+- **Building the packaging for real found CI bugs invisible to local `cargo check`.** The multi-arch
+  container workflow only passed after several real fixes that a local build never exercised; see
+  [`AUDIT.md`](AUDIT.md).
+
+## Verification
+
+Beyond the unit and integration tests, several `terrustia-client` examples check this implementation
+against the real game rather than against itself. `probe` dumps and compares the packet sequence.
+`diff_sections` and `verify_sections` compare captures at the tile level and re-encode real payloads.
+`verify` joins, spawns things, and confirms enemies move, shoot, hurt, and drop loot.
+`stress`, `crowd` and `load` hold the world full while the server reports its own per-phase tick
+costs. `bot` joins, walks east, and reports, to be run against both servers and compared.
 
 ```sh
-cargo run --release -- --world path/to/World.wld     # what you want: serve a real world
-cargo run --release -- --listen 127.0.0.1:7777 --world path/to/World.wld
-cargo run --release                                  # generate a world; playable, but ephemeral
-cargo run --release -- --save world.wld              # generate one and keep it
-cargo run --release -- --record capture.trcap        # record every byte, for docs/real-client.md
+cargo run --release --example probe -- 127.0.0.1:7778          # the real TerrariaServer
+cargo run --release --example probe -- 127.0.0.1:7777          # terrustia
+cargo run --release --example verify -- 127.0.0.1:7777
+cargo run --release -p terrustia --example stress -- 127.0.0.1:7777 60
 ```
 
-Worlds are saved on shutdown, every `autosave_secs`, and on `/save`. A world loaded from a file
-saves back over itself; set `save_file`, or pass `--save`, to write somewhere else — which is also
-how a generated world is given somewhere to live.
+Results at the time of writing, against Terraria 1.4.5.8:
 
-Then in Terraria: **Multiplayer → Join via IP → `127.0.0.1`**, port `7777`.
+- All 15 tile sections captured from the real server decode and re-encode byte-identically.
+- Serving the same `.wld` from both servers produces byte-identical section streams for all 15
+  sections, trailers included.
+- The handshake packet sequence and sizes match vanilla's, `WorldData` at exactly 163 bytes plus the
+  encoded world name; a real `WorldData` payload decodes and re-encodes to identical bytes.
+- Both servers serving the same world agree on 45 of 47 packet 7 fields. The two that differ are the
+  clock and the wind, which both servers simulate as they run.
+- Re-saving a 2.9 MB world produces a file byte-identical except for the revision counter.
+- A world edited through this server, saved, then handed to the real `TerrariaServer`, loads and
+  serves correctly, edits in place. A world this server generated survives the full round trip (our
+  writer to Re-Logic's reader to Re-Logic's writer to our reader): 46 of 47 packet 7 fields
+  identical, all 308 chests with their 1224 item stacks intact.
+- The `bestiary` example spawns all 691 NPC types over the real protocol and confirms every one
+  arrives and syncs.
+- Every table was diffed against the game's own, mechanically: 5,103 NPC stat fields across 686
+  types and 5,488 flag fields; the projectile types this server flies; both tile-solidity bitsets and
+  the frame-importance table, all 754 entries each; the 345 constant-drop tile types; and every
+  unconditional drop rule.
+- At 255 players, the real protocol maximum, on vanilla's own Large preset (8400×2400, 4× the tile
+  count), the worst tick costs 3,451 µs of the 16,666 budget, with zero dropped connections (see
+  [What the audits found](#what-the-audits-found)).
+- The `fuzz` example throws fifty thousand malformed packets at a running server and confirms it is
+  still answering, world uncorrupted, log clean.
 
-Configuration is optional; `terrustia.toml` in the working directory overrides the defaults. See
-`terrustia.toml.example`. `TERRUSTIA_LOG=debug` raises the log level.
-
-## Hosting and setup
-
-No single "the" easy path — Docker, a native binary behind systemd, and OS packages (Homebrew,
-winget, AUR) are all documented and supported equally; see [Packaging](#packaging) below.
-
-- **`terrustia --setup`** runs a short interactive wizard (dedicated config directory, world name,
-  max players, whether to turn the web panel on) and starts the server with what it wrote. It also
-  runs automatically on a first, zero-flag launch when the working directory is the same directory
-  the executable itself is in and nothing terrustia-shaped is there yet — the shape a raw binary
-  double-clicked right out of `~/Downloads` actually has. Plain `terrustia` with no flags, run from
-  anywhere else, is unchanged: still the original non-interactive "generate a world and serve it."
-  The wizard's dedicated directory is refused outright if anything is already in it, and the world
-  itself is generated into the platform's own Terraria world directory (the same place `--new`
-  writes to) — never beside the executable, so double-clicking the raw binary can never scatter a
-  world file and a config into wherever it happened to land.
-- **Environment variables** configure everything a `terrustia.toml` can, for Docker/automation use
-  where there is often no shell around the process to pass a flag and no volume mount to put a file
-  on: `TERRUSTIA_LISTEN`, `TERRUSTIA_MAX_PLAYERS`, `TERRUSTIA_WORLD_NAME`, `TERRUSTIA_PANEL_ENABLED`,
-  and so on — every key in `terrustia.toml.example` has a `TERRUSTIA_<UPPERCASE_KEY>` equivalent.
-  Precedence is defaults < `terrustia.toml` < environment < an explicit CLI flag.
-- **UPnP**: on startup, terrustia asks the router to forward the game port automatically (the same
-  thing AstroLauncher does for its own server launcher). When no UPnP-capable router answers, or it
-  refuses, this logs a specific fallback message naming the port and the local address to forward
-  it to by hand — never a fatal error. Set `upnp_enabled = false` (or `TERRUSTIA_UPNP_ENABLED=false`)
-  to turn it off entirely. This has nothing to do with the web panel, which stays bound to loopback
-  regardless — see `panel_listen` above.
-- **`terrustia update`**: on boot, terrustia checks GitHub for a newer, signature-verified release
-  and says so — console log, plus an in-game notice to the first recognised admin who signs in
-  afterward. Applying it is a separate, deliberate step: run `terrustia update` yourself. It shells
-  out to the real `cosign` binary, checking the exact same keyless GitHub Actions signing chain
-  described below in [Platforms](#platforms) — no separate trust root.
-
-## Packaging
-
-| Target | Where | Status |
-|---|---|---|
-| Homebrew | `packaging/homebrew/terrustia.rb` | Builds from source with `cargo install`. `brew style` clean; verified with a real `cargo install --path crates/terrustia` build. `brew audit`/`brew install --build-from-source` could not run in this environment specifically — its Xcode Command Line Tools are below Homebrew's own required minimum, a system-level fix this session did not make unilaterally on a machine shared with other work in progress |
-| systemd | `packaging/terrustia.service` | Verified by running the unit's literal `ExecStart` command and sending it the exact `SIGTERM` its `KillSignal` names — which is how this session found and fixed a real, severe shutdown deadlock (see the Hardening table above) |
-| Docker | `Dockerfile`, `.github/workflows/docker.yml` | Multi-arch image, cosign-signed. `HEALTHCHECK` already present in the Dockerfile (pre-existing). Could not exercise it live this session — see plan.md for why |
-| winget | `packaging/winget/manifests/...` | Validated against the real, current (1.12.0) JSON schemas from `microsoft/winget-cli` — all three manifests pass structurally. Publishing needs a PR into `microsoft/winget-pkgs`, which needs a maintainer account this session does not have |
-| AUR | `packaging/aur/PKGBUILD` | Builds from source with `cargo`, matching Arch's own Rust package guidelines; `shellcheck`-clean. `makepkg`/`namcap` need a real Arch environment this session's Docker attempt could not complete — see plan.md. Publishing needs an AUR account this session does not have |
-
-Every `url`/checksum above that points at a `v0.0.1` release asset is a disclosed placeholder —
-that tag does not exist yet (see plan.md). Each package was verified as far as this environment
-allows without it; see plan.md's own packaging row for exactly what was and wasn't possible to run
-for real.
+More detail, and the full method behind the performance figures, is in
+[`docs/performance.md`](docs/performance.md).
 
 ## Layout
 
@@ -257,163 +419,23 @@ for real.
 | `terrustia-client` | A headless client: handshake, world view, movement, chat, tile and item actions |
 | `terrustia` | The async server: world state, game loop, connection handling, `.wld` reading and writing |
 
-The client crate exists to check the server against something other than itself. It speaks the
-protocol a real client speaks, so the same code can drive integration tests, probe a real
-`TerrariaServer` for comparison, or run as a bot.
+The data tables in `terrustia-proto` are produced from a decompiled copy of the game by the
+`terrustia-codegen` crate, which reads the decompiled tree and writes each table's `.rs`. No
+decompiled source, game assets or game text ship in this repository; the one exception is the
+town-NPC name pools in `town_names.rs`, whose provenance is documented in `docs/generated-tables.md`.
 
-The protocol crate is deliberately I/O-free so every packet round-trips in a unit test without a
-socket. The server is a single-writer actor: one task owns the world and the player table, so there
-are no locks on the hot path and packet ordering is deterministic. Each connection gets a read task
-that feeds that actor and a write task draining a bounded queue.
+## Contributing
 
-## How this was derived
-
-Terraria 1.4.5 changed the protocol and, at the time of writing, no public documentation covers it
-— the community references, and the existing Rust crates, all describe 1.4.4.9 (release 279).
-Everything here was instead transcribed from the shipped `TerrariaServer.exe`, decompiled with
-`ilspycmd`. `docs/protocol-notes.md` records the findings in our own words; no decompiled game code
-is checked into this repository.
-
-Differences from 1.4.4 that matter, and that stale documentation gets wrong:
-
-- The handshake string is `Terraria325`.
-- Packet `3` carries a trailing bool after the player slot.
-- Tile sections are a bare DEFLATE stream with **no** leading "is compressed" flag byte.
-- `WorldData` has eleven world-flag bytes and a trailing extra-spawn-point list.
-- The server no longer pushes sections as players move; clients pull them with packet `159`.
-
-## Verification
-
-Beyond the unit and integration tests, several examples check this implementation against the real
-game rather than against itself.
-
-`probe` drives a client handshake and dumps the packet sequence, so vanilla and terrustia can be
-compared side by side:
-
-```sh
-cargo run --release --example probe -- 127.0.0.1:7778   # the real TerrariaServer
-cargo run --release --example probe -- 127.0.0.1:7777   # terrustia
-```
-
-`diff_sections` compares two captures at the *tile* level rather than the byte level, which is what
-distinguishes an encoding bug from the world simply having changed underneath you:
-
-```sh
-cargo run --release -p terrustia --example diff_sections -- /tmp/mine /tmp/vanilla
-```
-
-`verify_sections` decodes tile-section payloads captured from a real server and re-encodes them,
-which is the strongest available check on the hardest part of the format:
-
-```sh
-PROBE_DUMP_DIR=/tmp/sections cargo run --release --example probe -- 127.0.0.1:7778
-cargo run --release --example verify_sections -- /tmp/sections
-```
-
-`verify` plays the game: it joins a running server, spawns things, and checks that enemies move,
-that the ones that shoot put projectiles in the air, that standing among them costs health, that
-the Eye of Cthulhu runs its phases and summons, and that killing something drops loot.
-
-```sh
-cargo run --release --example verify -- 127.0.0.1:7777
-```
-
-`stress` fills the world with three rounds of the whole roster and holds it there while the server
-reports its own per-phase tick costs, and `crowd` joins a given number of players and walks them
-about:
-
-```sh
-TERRUSTIA_LOG=terrustia=debug cargo run --release -- --world World.wld   # then, elsewhere:
-cargo run --release -p terrustia --example stress -- 127.0.0.1:7777 60
-cargo run --release -p terrustia --example crowd -- 127.0.0.1:7777 24 30
-```
-
-`load` fills the world with a crowd of every kind of enemy and reports the traffic, for checking
-that the server keeps its tick budget under pressure:
-
-```sh
-cargo run --release --example load -- 127.0.0.1:7777 30
-```
-
-The `bot` example joins, walks east and reports what it sees, and is meant to be run against both
-servers and compared:
-
-```sh
-cargo run --release --example bot -- 127.0.0.1:7778   # vanilla
-cargo run --release --example bot -- 127.0.0.1:7777   # terrustia
-```
-
-Results at the time of writing, against Terraria 1.4.5.8:
-
-- All 15 tile sections captured from the real server decode and **re-encode byte-identically**.
-- Serving the *same* `.wld` file from both servers produces **byte-identical section streams** for
-  all 15 sections, trailers included.
-- The handshake packet sequence and sizes match vanilla's, including `WorldData` at exactly 163
-  bytes plus the encoded world name.
-- A real server's `WorldData` payload, captured verbatim, decodes and **re-encodes to the identical
-  bytes** — every field, in order, at the right width.
-- Both servers serving the *same* world file agree on **45 of 47 packet 7 fields**; the two that
-  differ are the clock and the wind, which both servers simulate as they run.
-- Re-saving a 2.9 MB world produces a file **byte-identical to the original except the revision
-  counter**, which the game increments too.
-- A world edited through this server, saved, and then handed to the real `TerrariaServer` **loads
-  and serves correctly**, with the edits in place.
-- A world this server **generated from scratch** survives the full round trip `our writer →
-  Re-Logic's reader → Re-Logic's writer → our reader`: **46 of 47 packet 7 fields identical**
-  afterwards, and all **308 chests with their 1224 item stacks intact**.
-- The `bestiary` example spawns **all 691 NPC types** on a running server over the real protocol and
-  confirms every one arrives and syncs.
-- Every table was diffed against the game's own, mechanically: **5,103 NPC stat fields** across 686
-  types and **5,488 flag fields** on top of them; the 27 projectile types this server flies; both
-  tile-solidity bitsets and the frame-importance table, all 754 entries each; the 345 tile types
-  whose drop the game states as a constant; and every unconditional drop rule.
-- The `crowd` example joins **twenty-four players**, spreads them across the world and walks them at
-  the rate a real client reports at. The worst tick over the whole run — bestiary, fuzz, crowd and
-  stress against one server — is **520 microseconds against a budget of 16,666**, at 50 MB.
-- Against a real 8400×2400 world (vanilla's own "Large" preset, 4× the tile count of everything
-  above) and **255 players — the real protocol maximum**, the worst tick still costs only **3,451
-  microseconds of the 16,666 budget**, better than 4.8× headroom. A separate capacity ceiling was
-  found and disclosed here first — 88 of 255 connections dropped for a full outbound queue during
-  the initial synchronized join burst — and has since been fixed and re-verified: **zero dropped
-  connections** across the same real scenario, with a regression test (`tests/queue_capacity.rs`)
-  confirmed failing against the unfixed queue size first. See `plan.md` for the root cause and fix.
-- The `fuzz` example throws **fifty thousand malformed packets** at a running server and checks it
-  is still answering afterwards, with the world uncorrupted and nothing in the log.
-
-### Measured against the official server
-
-Same 4200×1200 world, same machine, nobody connected.
-
-| | vanilla 1.4.5.8 | terrustia |
-|---|---|---|
-| Startup | 2.26 s | 0.41 s |
-| CPU, idle | 104% of a core | 0.7% |
-| RAM, idle | 641.8 MB | 45.4 MB |
-| Bandwidth over 5 min | 148,874 B | 133,400 B |
-
-A note on the tick, because the claim has changed three times now. "A verified full 60 Hz tick"
-originally rested on instrumentation that was comparing CPU time against wall time, so it was
-withdrawn. With that fixed, it was measured again on the same world: a typical tick costs
-**184–330 µs of a 16,666 µs budget**, and the autosave — previously the most expensive thing an
-idle server did, at up to 7,656 µs — now costs 43–137 µs because only changed sections are copied.
-That third figure had a real gap the other two didn't: it was measured from a server's *second*
-autosave onward. The first one, with no prior buffer to diff against, cost 14,833 µs — 89% of the
-whole budget — until this repository's own first real CI soak run caught it and it was fixed by
-building that buffer during startup instead of inside a counted tick.
-
-The remaining figures above were measured externally, at the process level, and were never affected
-by that instrumentation.
+Contributions are welcome, including AI-assisted ones, provided a human is accountable for every line
+and it meets the same bar as the rest of the project. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+standard a change is held to and for the contributor license terms (a broad grant that lets the
+project relicense later).
 
 ## Licence
 
 The server and the client are under the **GNU Affero General Public License v3.0 or later**; see
-`LICENSE`.
+[`LICENSE`](LICENSE).
 
-`terrustia-proto` is **MIT**, on purpose — see `crates/terrustia-proto/LICENSE`. It is a
-description of Terraria's wire format with no I/O and no game logic in it, and anyone writing a
-Terraria tool in Rust should be able to use that without taking on the server's licence.
-
-The generated tables in that crate were produced *from* a decompiled copy of the game by the
-scripts in `tools/`, each of which takes the decompiled tree as an argument. No decompiled source,
-no game assets and no game text ship in this repository — the one exception being the town-NPC name
-pools in `town_names.rs`, whose provenance is documented in `docs/generated-tables.md`.
+`terrustia-proto` is **MIT**, on purpose; see [`crates/terrustia-proto/LICENSE`](crates/terrustia-proto/LICENSE).
+It is a description of Terraria's wire format with no I/O and no game logic in it, and anyone writing
+a Terraria tool in Rust should be able to use it without taking on the server's licence.

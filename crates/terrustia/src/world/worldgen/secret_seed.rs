@@ -125,24 +125,36 @@ impl SecretSeeds {
     /// one of six dependency flags cascading from `everything`, not from the number.
     pub fn detect(seed_text: &str) -> Self {
         let trimmed = seed_text.trim();
-        let lower = trimmed.to_lowercase();
         let numeric = trimmed.parse::<i64>().ok();
+
+        // Vanilla lowercases the seed and strips every non-alphanumeric character before matching a
+        // special-seed name (`WorldGenerationOptions.GetOptionFromSeedText`:
+        // `Regex.Replace(processedSeed.ToLower(), "[^a-z0-9]+", "")`), so the spellings a player
+        // actually types — "get fixed boi", "not the bees!", "no traps", "for the worthy",
+        // "don't dig up", "celebration mk10" — all normalise onto the internal names below. Matching
+        // only the pre-stripped forms (as this used to) left every one of those doing nothing.
+        let norm: String = trimmed
+            .to_lowercase()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
 
         let mut flags = Self::none();
         flags.tenth_anniversary =
-            lower == "celebrationmk10" || matches!(numeric, Some(5_162_021 | 5_162_011));
+            norm == "celebrationmk10" || matches!(numeric, Some(5_162_021 | 5_162_011));
+        // Drunk has no special-seed *name* in vanilla — only the value 5162020 (WorldSeedOption_Drunk).
         flags.drunk = numeric == Some(5_162_020);
-        flags.not_the_bees = lower == "notthebees";
-        flags.remix = lower == "dontdigup";
-        flags.no_traps = lower == "notraps";
-        flags.get_good = lower == "fortheworthy";
+        flags.not_the_bees = norm == "notthebees";
+        flags.remix = norm == "dontdigup";
+        flags.no_traps = norm == "notraps";
+        flags.get_good = norm == "fortheworthy";
         flags.dont_starve = matches!(
-            lower.as_str(),
+            norm.as_str(),
             "constant" | "theconstant" | "eye4aneye" | "eyeforaneye"
         );
-        flags.skyblock = lower == "skyblock";
+        flags.skyblock = norm == "skyblock";
 
-        if lower == "getfixedboi" {
+        if norm == "getfixedboi" {
             flags.everything = true;
             flags.remix = true;
             flags.drunk = true;
@@ -251,22 +263,34 @@ mod tests {
     }
 
     #[test]
-    fn the_old_guessed_strings_no_longer_match_anything() {
-        // Every one of these was this module's own previous (wrong) guess for a real magic
-        // string. None of them are real vanilla triggers, and none should match now.
-        for text in [
-            "drunk world",
-            "not the bees!",
-            "remix",
-            "no traps",
-            "get fixed boi",
-            "don't starve",
-        ] {
+    fn strings_that_are_not_real_name_triggers_do_not_match() {
+        // These read like seed names but are not among vanilla's `SpecialSeedNames`: Drunk has no
+        // name at all (only the value 5162020), Remix's name is "dontdigup", and Don't Starve's are
+        // "constant"/"theconstant"/"eye4aneye"/"eyeforaneye" — never the game's own title.
+        for text in ["drunk world", "remix", "don't starve", "terraria"] {
             assert!(
                 !SecretSeeds::detect(text).any(),
-                "{text:?} was a wrong guess and must not match"
+                "{text:?} is not a vanilla name trigger and must not match"
             );
         }
+    }
+
+    /// The spellings a player actually types must activate, exactly as vanilla's
+    /// `Regex.Replace(ToLower, "[^a-z0-9]+", "")` normalisation makes them. This is the case the
+    /// old test got backwards — it asserted "not the bees!", "no traps" and "get fixed boi" must
+    /// *not* match, enshrining the bug where every punctuated/spaced spelling did nothing.
+    #[test]
+    fn real_spellings_with_spaces_and_punctuation_activate() {
+        assert!(SecretSeeds::detect("not the bees!").not_the_bees);
+        assert!(SecretSeeds::detect("No Traps").no_traps);
+        assert!(SecretSeeds::detect("for the worthy").get_good);
+        assert!(SecretSeeds::detect("don't dig up").remix);
+        assert!(SecretSeeds::detect("celebration mk10").tenth_anniversary);
+        assert!(SecretSeeds::detect("the constant").dont_starve);
+        assert!(SecretSeeds::detect("eye for an eye").dont_starve);
+        // "get fixed boi" cascades into the full Everything set.
+        let fixed = SecretSeeds::detect("get fixed boi");
+        assert!(fixed.everything && fixed.no_traps && fixed.not_the_bees);
     }
 
     #[test]

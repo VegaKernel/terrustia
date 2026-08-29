@@ -18,10 +18,13 @@
 
 use terrustia_proto::npc_params::{
     FISHRON_ABOVE, FISHRON_BESIDE, FISHRON_BUBBLE, FISHRON_BUBBLE_AT, FISHRON_BUBBLE_SPEED,
-    FISHRON_BUBBLE_TICKS, FISHRON_BURST_ACCEL, FISHRON_BURST_EVERY, FISHRON_BURST_SPEED,
-    FISHRON_BURST_TICKS, FISHRON_CYCLE_BUBBLES, FISHRON_CYCLE_SHARKRONS, FISHRON_EXPERT_PACE,
-    FISHRON_FIRST, FISHRON_SECOND, FISHRON_SECOND_AT, FISHRON_SHIFT_TICKS, FISHRON_THIRD,
-    FISHRON_THIRD_AT, FishronPhase, SHARKRON,
+    FISHRON_BUBBLE_TICKS, FISHRON_BURST_ACCEL, FISHRON_BURST_EVERY, FISHRON_BURST_LATER_CURVE,
+    FISHRON_BURST_LATER_DASH_SPEED, FISHRON_BURST_LATER_SPRAY_EVERY,
+    FISHRON_BURST_LATER_SPRAY_SPEED, FISHRON_BURST_LATER_TICKS, FISHRON_BURST_SPEED,
+    FISHRON_BURST_TICKS, FISHRON_CYCLE_BUBBLES, FISHRON_CYCLE_BUBBLES_LATER,
+    FISHRON_CYCLE_SHARKRONS, FISHRON_CYCLE_SHARKRONS_LATER, FISHRON_EXPERT_PACE, FISHRON_FIRST,
+    FISHRON_SECOND, FISHRON_SECOND_AT, FISHRON_SHIFT_TICKS, FISHRON_THIRD, FISHRON_THIRD_AT,
+    FishronPhase, SHARKRON,
 };
 
 use crate::game::ai::{Shot, World};
@@ -115,12 +118,18 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                 return out;
             }
 
-            // The cycle: ten charges, then a burst, then bubbles.
+            // The cycle: five charges, then a burst, then bubbles — three charges instead of
+            // five once past the first phase (`NPC.cs:49624-49646` vs `49889-49907`).
+            let (cycle_sharkrons, cycle_bubbles) = if phase >= 1 {
+                (FISHRON_CYCLE_SHARKRONS_LATER, FISHRON_CYCLE_BUBBLES_LATER)
+            } else {
+                (FISHRON_CYCLE_SHARKRONS, FISHRON_CYCLE_BUBBLES)
+            };
             let attack = npc.ai[3] as i32;
-            let next = if attack == FISHRON_CYCLE_SHARKRONS {
+            let next = if attack == cycle_sharkrons {
                 npc.ai[3] = 1.0;
                 state::BURSTING
-            } else if attack == FISHRON_CYCLE_BUBBLES {
+            } else if attack == cycle_bubbles {
                 npc.ai[3] = 0.0;
                 state::BUBBLING
             } else {
@@ -153,8 +162,8 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
             }
         }
 
-        s if s == state::BURSTING => {
-            // It keeps station and throws a sharkron every twenty ticks.
+        s if s == state::BURSTING && phase == 0 => {
+            // The first phase's burst: it keeps station and throws a sharkron every four ticks.
             if npc.ai[1] == 0.0 {
                 npc.ai[1] = FISHRON_BESIDE * (cx - target.center.0).signum();
             }
@@ -182,6 +191,56 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
             }
             npc.ai[2] += 1.0;
             if npc.ai[2] >= FISHRON_BURST_TICKS {
+                npc.ai[0] = base + state::HOVERING;
+                npc.ai[1] = 0.0;
+                npc.ai[2] = 0.0;
+            }
+        }
+
+        s if s == state::BURSTING && phase >= 1 => {
+            // The second and third phases' burst: a dash that curves through the air for its
+            // whole duration, spraying a sharkron out perpendicular to its own heading every
+            // four ticks instead of holding station (`NPC.cs:49916-50015`).
+            if npc.ai[2] == 0.0 {
+                let aim = (target.center.0 - cx, target.center.1 - cy);
+                let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+                npc.velocity = (
+                    aim.0 / length * FISHRON_BURST_LATER_DASH_SPEED,
+                    aim.1 / length * FISHRON_BURST_LATER_DASH_SPEED,
+                );
+                face(npc, target.center.0 - cx);
+                npc.rotation = npc.velocity.1.atan2(npc.velocity.0);
+            }
+
+            if npc.ai[2] % FISHRON_BURST_LATER_SPRAY_EVERY == 0.0 {
+                let vlen = npc.velocity.0.hypot(npc.velocity.1).max(f32::MIN_POSITIVE);
+                let heading = (npc.velocity.0 / vlen, npc.velocity.1 / vlen);
+                let side = f32::from(npc.direction);
+                // Perpendicular to its own heading, not aimed at the player.
+                let perp = (-heading.1 * side, heading.0 * side);
+                let reach = (npc.width() + 20.0) / 2.0;
+                out.spawn.push(Spawn {
+                    npc_type: SHARKRON,
+                    position: (cx + heading.0 * reach, cy + heading.1 * reach + 45.0),
+                    velocity: (
+                        perp.0 * FISHRON_BURST_LATER_SPRAY_SPEED,
+                        perp.1 * FISHRON_BURST_LATER_SPRAY_SPEED,
+                    ),
+                    parent: None,
+                });
+            }
+
+            // It curves through the air the whole time, rather than flying straight.
+            let angle = -FISHRON_BURST_LATER_CURVE * f32::from(npc.direction);
+            let (sin, cos) = angle.sin_cos();
+            npc.velocity = (
+                npc.velocity.0 * cos - npc.velocity.1 * sin,
+                npc.velocity.0 * sin + npc.velocity.1 * cos,
+            );
+            npc.rotation -= FISHRON_BURST_LATER_CURVE * f32::from(npc.direction);
+
+            npc.ai[2] += 1.0;
+            if npc.ai[2] >= FISHRON_BURST_LATER_TICKS {
                 npc.ai[0] = base + state::HOVERING;
                 npc.ai[1] = 0.0;
                 npc.ai[2] = 0.0;
@@ -482,6 +541,91 @@ mod tests {
         }
         assert!(!thrown.is_empty(), "it should have thrown some");
         assert!(thrown.iter().all(|s| s.npc_type == SHARKRON));
+    }
+
+    /// B11: the first phase's burst throws roughly twenty sharkrons over its eighty ticks — one
+    /// every four — not the roughly six the old 120-tick/20-tick numbers gave.
+    #[test]
+    fn the_first_phase_burst_throws_about_twenty_sharkrons() {
+        let tiles = Sky(HashMap::new());
+        let mut d = duke(0.0, 0.0);
+        d.ai[0] = state::BURSTING;
+        let w = world(&tiles, Some((600.0, 400.0)));
+
+        let mut thrown = 0;
+        for _ in 0..(FISHRON_BURST_TICKS as i32 + 2) {
+            thrown += fishron(&mut d, &w).spawn.len();
+        }
+        assert_eq!(
+            thrown, 20,
+            "eighty ticks at one every four should be twenty"
+        );
+    }
+
+    /// B11: past the first phase it bursts after three charges, not five.
+    #[test]
+    fn later_phases_burst_after_three_charges_not_five() {
+        let tiles = Sky(HashMap::new());
+        let mut d = duke(0.0, 0.0);
+        d.ai[0] = state::PHASE + state::HOVERING;
+        d.life = d.life_max / 3; // safely inside the second phase throughout
+        let w = world(&tiles, Some((600.0, 400.0)));
+
+        let mut seen = Vec::new();
+        let mut was = d.ai[0];
+        for _ in 0..8000 {
+            fishron(&mut d, &w);
+            d.position.0 += d.velocity.0;
+            d.position.1 += d.velocity.1;
+            if d.ai[0] != was {
+                if d.ai[0] != state::PHASE + state::HOVERING {
+                    seen.push(d.ai[0]);
+                }
+                was = d.ai[0];
+            }
+            if d.ai[0] == state::PHASE + state::BURSTING {
+                break;
+            }
+        }
+        assert_eq!(
+            d.ai[0],
+            state::PHASE + state::BURSTING,
+            "it should have burst: {seen:?}"
+        );
+        let charges = seen
+            .iter()
+            .filter(|&&s| s == state::PHASE + state::CHARGING)
+            .count();
+        assert_eq!(
+            charges, 3,
+            "three charges before the burst, not five: {seen:?}"
+        );
+    }
+
+    /// B11: past the first phase the burst launches sharkrons already moving, perpendicular to
+    /// its own heading — not the stationary, player-aimed drop the first phase uses.
+    #[test]
+    fn later_phase_burst_launches_sharkrons_moving_not_stationary() {
+        let tiles = Sky(HashMap::new());
+        let mut d = duke(0.0, 0.0);
+        d.ai[0] = state::PHASE + state::BURSTING;
+        d.direction = 1;
+        let w = world(&tiles, Some((600.0, 400.0)));
+
+        let mut thrown = Vec::new();
+        for _ in 0..(FISHRON_BURST_LATER_TICKS as i32 + 2) {
+            thrown.extend(fishron(&mut d, &w).spawn);
+        }
+        assert!(!thrown.is_empty(), "it should have thrown some");
+        assert!(thrown.iter().all(|s| s.npc_type == SHARKRON));
+        for s in &thrown {
+            let speed = s.velocity.0.hypot(s.velocity.1);
+            assert!(
+                (speed - FISHRON_BURST_LATER_SPRAY_SPEED).abs() < 0.01,
+                "should launch at the spray speed, not stationary: {:?}",
+                s.velocity
+            );
+        }
     }
 
     /// The bubbles come in pairs that drift apart.

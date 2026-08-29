@@ -538,9 +538,13 @@ pub fn spreads(block: u16) -> Option<Biome> {
 
 /// Whether a block is one a spread can take.
 ///
-/// Grass, stone, moss, sand and sandstone, and nothing else. Everything a player built is safe.
+/// Grass, stone, ice, moss, sand and sandstone, and nothing else. Everything a player built is
+/// safe. Ice (161) was missing here even though all three spreads target it identically
+/// (`WorldGen.cs`'s own `SpreadsCorruption`/`SpreadsCrimson`/`SpreadsHallow` blocks each end with
+/// a `type == 161` case) — without it, a frozen cave was the one biome an infection could never
+/// actually enter.
 fn takeable(block: u16) -> bool {
-    matches!(block, 1 | 2 | 53 | 60 | 69 | 396 | 397 | 477)
+    matches!(block, 1 | 2 | 53 | 60 | 69 | 161 | 396 | 397 | 477)
         || terrustia_proto::tile_sets::is_moss(block)
 }
 
@@ -659,8 +663,12 @@ pub fn run_stripe(
     let width = f64::from(rng.random_range(200..250)) * f64::from(world.width()) / 4200.0;
     let mut here = (f64::from(x), 0.0);
     let mut drift = (f64::from(drift_x), 5.0);
+    // The drift wanders around the stripe's *own* starting lean, not around zero — GERunner
+    // clamps `val2.X` to the fixed `speedX` parameter plus or minus one, never to the evolving
+    // drift itself, which is why this is captured once here rather than read back from `drift.0`.
+    let speed_x = f64::from(drift_x);
 
-    while here.1 < f64::from(world.height() - 5) {
+    loop {
         let x0 = ((here.0 - width * 0.5) as i32).max(0);
         let x1 = ((here.0 + width * 0.5) as i32).min(world.width());
         let y0 = ((here.1 - width * 0.5) as i32).max(0);
@@ -693,7 +701,19 @@ pub fn run_stripe(
             }
         }
         here = (here.0 + drift.0, here.1 + drift.1);
-        drift.0 = (drift.0 + f64::from(rng.random_range(-10..=10)) * 0.05).clamp(-4.0, 4.0);
+        drift.0 = (drift.0 + f64::from(rng.random_range(-10..=10)) * 0.05)
+            .clamp(speed_x - 1.0, speed_x + 1.0);
+        // GERunner's own `while (flag2)` runs until the stripe leaves the world on *any* side —
+        // not only the bottom, which is all the old `here.1 < height - 5` loop condition checked.
+        // A stripe that drifted hard enough sideways (once possible: the old +-4 clamp let the
+        // random walk saturate far past any real lean) would otherwise carve sideways forever.
+        if here.0 < -width
+            || here.1 < -width
+            || here.0 > f64::from(world.width()) + width
+            || here.1 > f64::from(world.height()) + width
+        {
+            break;
+        }
     }
     changed
 }
@@ -834,6 +854,32 @@ mod spread_tests {
         }
     }
 
+    /// An infection can take ice — all three spreads target it identically in vanilla, and this
+    /// was the one type `takeable` left out.
+    ///
+    /// Fails before the fix: `takeable` did not list 161, so ice next to an infection was passed
+    /// over as if it were something a player had built, and a frozen cave stayed clean forever.
+    #[test]
+    fn an_infection_can_take_ice() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(25)); // ebonstone, already corrupt
+        world.set_tile(251, 250, Tile::block(161)); // ice, right beside it
+        let mut rng = SmallRng::seed_from_u64(6);
+        let mut taken = Vec::new();
+        for _ in 0..500 {
+            taken.extend(spread(&mut world, 250, 250, false, &mut rng));
+        }
+        assert!(
+            taken.contains(&(251, 250)),
+            "the ice tile should have been reachable"
+        );
+        assert_eq!(
+            world.tile(251, 250).block,
+            163,
+            "and turned into corrupt ice"
+        );
+    }
+
     /// The two hardmode stripes go on opposite sides, and neither lands on the dungeon.
     #[test]
     fn the_stripes_avoid_the_dungeon() {
@@ -851,6 +897,76 @@ mod spread_tests {
                 }
             }
         }
+    }
+
+    /// A world wide enough that a stripe's drift alone decides how far sideways it wanders,
+    /// without the world's own edge cutting the run short. `tile`/`set_tile` are backed by a
+    /// sparse map over an effectively solid world rather than a real fill, since the width needed
+    /// to give the drift room is far too large to actually allocate a tile for every cell of.
+    struct WideGround {
+        changed: HashMap<(i32, i32), u16>,
+        width: i32,
+        height: i32,
+    }
+
+    impl OreWorld for WideGround {
+        fn tile(&self, x: i32, y: i32) -> Tile {
+            match self.changed.get(&(x, y)) {
+                Some(&block) => Tile::block(block),
+                None => Tile::block(1),
+            }
+        }
+        fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
+            self.changed.insert((x, y), tile.block);
+        }
+        fn width(&self) -> i32 {
+            self.width
+        }
+        fn height(&self) -> i32 {
+            self.height
+        }
+    }
+
+    /// The stripe's own drift stays locked to within one of its starting lean — `GERunner` clamps
+    /// `val2.X` to `speedX +/- 1`, not to a fixed range unrelated to the lean it was given. A
+    /// large lean (20 here) makes the difference unmistakable: the fixed clamp keeps drift near
+    /// 20 the whole way down, while a `+-4`-regardless-of-lean clamp would slam it down to at most
+    /// 4 after the very first step.
+    ///
+    /// Fails on the code before this fix: with a lean of 20, the deepest tiles landed only a few
+    /// hundred tiles from the start (`.clamp(-4.0, 4.0)` capped every step after the first at 4),
+    /// not the couple of thousand a lean of 20 actually carried down.
+    #[test]
+    fn the_stripes_drift_stays_near_its_own_large_lean() {
+        let mut world = WideGround {
+            changed: HashMap::new(),
+            width: 10_000,
+            height: 1000,
+        };
+        let mut rng = SmallRng::seed_from_u64(20);
+        let speed_x = 20;
+        let x0 = 5000;
+        let changed = run_stripe(&mut world, x0, speed_x, Biome::Hallow, &mut rng);
+        assert!(!changed.is_empty(), "it should have converted something");
+
+        let deepest_y = changed.iter().map(|(_, y)| *y).max().unwrap();
+        let deepest_x = changed
+            .iter()
+            .filter(|(_, y)| *y == deepest_y)
+            .map(|(x, _)| *x)
+            .max()
+            .unwrap();
+        // A clamp locked to 19..=21 covers roughly `deepest_y / 5 * 19` of drift by the time it
+        // reaches this deep; a clamp capped at 4 regardless of the lean could only ever have
+        // covered about a fifth of that. The threshold sits well above what the old code could
+        // reach and well below what the fixed code reliably does, so it separates the two rather
+        // than depending on exactly how far this particular run got.
+        let minimum_expected = x0 + deepest_y * 3;
+        assert!(
+            deepest_x > minimum_expected,
+            "the deepest tile ({deepest_x}) should be far right of {minimum_expected}, \
+             given a lean of {speed_x} the clamp should have stayed close to"
+        );
     }
 
     /// A stripe converts a band from the top of the world to the bottom.

@@ -206,6 +206,14 @@ impl ArmyState {
         let tier = self.tier?;
         if npc_type == tier.champion() {
             self.champion_down = true;
+            // Tier three's final wave is not a kill count at all — it is Betsy's health
+            // (`Difficulty_3_GetRequiredWaveKills`: progress = 100 - life/lifeMax*100, reaching 100
+            // as she dies). Every gate enemy there is worth 0 and Betsy herself only 1, against a
+            // quota of 100, so her death could never complete the wave and the whole tier-3 event
+            // was unwinnable. Her death is what ends it; mark the wave's quota met.
+            if tier == Tier::Three && self.wave == tier.waves() {
+                self.kills = tier.required_kills(self.wave);
+            }
         }
         self.kills += tier.kill_worth(npc_type, self.wave, self.kills, expert);
         if self.kills < tier.required_kills(self.wave) {
@@ -767,6 +775,24 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use std::collections::HashSet;
+
+    #[test]
+    fn killing_betsy_wins_the_tier_three_finale() {
+        let mut army = ArmyState::default();
+        army.start(Tier::Three, (0, 0));
+        army.wave = Tier::Three.waves(); // the final wave
+        army.kills = 0;
+
+        // Gate enemies on tier three's last wave are worth nothing — the wave is Betsy's health.
+        assert_eq!(army.note_kill(ids::DD2_GOBLIN_T3, false), None);
+        assert!(!army.won(), "gate kills do not advance the tier-3 finale");
+
+        // Betsy's death is what ends it. Before the fix this added 1 toward a quota of 100 and the
+        // event could never be won.
+        let finished = army.note_kill(ids::DD2_BETSY, false);
+        assert_eq!(finished, Some(7), "Betsy's death completes wave 7");
+        assert!(army.won(), "the Old One's Army is won when Betsy falls");
+    }
 
     fn empty(_: u16) -> usize {
         0

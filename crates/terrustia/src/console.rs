@@ -61,11 +61,11 @@ const PLAYER_ARG_COMMANDS: &[&str] = &["kick", "ban", "unban"];
 /// Commands whose second word is worth completing against the known groups.
 const GROUP_ARG_COMMANDS: &[&str] = &["group"];
 
-/// Start the console. Sticky raw-mode editing when both ends of stdio are a real terminal;
-/// otherwise exactly the behaviour this replaces — a plain line reader — so a service started
-/// with no terminal, or a piped `echo stop | terrustia`, keeps working unchanged.
-pub fn spawn(events: mpsc::Sender<ServerEvent>) -> tokio::task::JoinHandle<()> {
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+/// Start the console. Sticky raw-mode editing when both ends of stdio are a real terminal and the
+/// operator did not ask for headless; otherwise the plain line reader, so a service started with no
+/// terminal, a piped `echo stop | terrustia`, or an explicit `--headless` keeps working unchanged.
+pub fn spawn(events: mpsc::Sender<ServerEvent>, headless: bool) -> tokio::task::JoinHandle<()> {
+    if !headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         // `event::read()` blocks the OS thread it runs on waiting for a keypress; a tokio worker
         // thread must never be parked like that, which is exactly what `spawn_blocking` is for.
         // Sending the resulting `ServerEvent`s back onto the async side uses the blocking
@@ -332,6 +332,9 @@ fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
         rt.block_on(run_plain(events.clone()));
         return;
     }
+    // The terminal is now in raw mode, so its own `\n` -> `\r\n` translation is off; tell `term` so
+    // every line it prints carries its own carriage return until we leave raw mode below.
+    term::set_raw_mode(true);
 
     let mut editor = Editor::new();
     term::redraw_prompt(&editor.rendered(), editor.cursor_back());
@@ -356,13 +359,17 @@ fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
                     });
                     return Ok(());
                 }
+                // A `stop` command was typed and already sent; leave the loop so the footer comes
+                // down and the shutdown log prints on a clean, cooked-mode terminal below.
+                Dispatch::Exit => return Ok(()),
                 Dispatch::Closed => return Ok(()),
             }
         }
     })();
 
-    term::set_prompt_drawn("");
+    term::clear_footer();
     let _ = terminal::disable_raw_mode();
+    term::set_raw_mode(false);
     if let Err(e) = result {
         tracing::warn!(error = %e, "console input closed");
     }
@@ -371,6 +378,10 @@ fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
 enum Dispatch {
     Continue,
     Stop,
+    /// A `stop` command was typed and its event already sent; the loop should end and tear the
+    /// console down, so the server's shutdown log prints on a clean terminal rather than under a
+    /// prompt this task keeps redrawing.
+    Exit,
     /// The channel to the game task has closed — it is gone, nothing left to do here.
     Closed,
 }
@@ -381,10 +392,24 @@ fn dispatch(events: &mpsc::Sender<ServerEvent>, editor: &mut Editor, key: KeyEve
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Enter => {
+            // Commit what was typed into the scrollback above the fresh prompt, the way a shell
+            // leaves your command on screen, so a reply below it is not an answer to a question the
+            // log no longer shows. Blank lines are not echoed.
+            let committed = editor.rendered();
+            let echo = !editor.line().trim().is_empty();
             let line = editor.submit();
+            let is_stop = line.trim() == "stop";
             term::redraw_prompt(&editor.rendered(), 0);
+            if echo {
+                term::print_notice(&committed);
+            }
             if events.blocking_send(ServerEvent::Console { line }).is_err() {
                 return Dispatch::Closed;
+            }
+            if is_stop {
+                // The game task will save and shut down now. Bow out so the footer is cleared and
+                // its goodbye prints cleanly, rather than parking here redrawing a prompt over it.
+                return Dispatch::Exit;
             }
         }
         KeyCode::Char('c') if ctrl => {
@@ -395,7 +420,14 @@ fn dispatch(events: &mpsc::Sender<ServerEvent>, editor: &mut Editor, key: KeyEve
             term::redraw_prompt(&editor.rendered(), 0);
         }
         KeyCode::Char('d') if ctrl => {
-            return Dispatch::Stop;
+            // Ctrl-D exits only on an empty line, the way a shell does. On a half-typed command it
+            // clears the line instead, so an adjacent-key typo cannot silently discard the text and
+            // take the whole server down with it.
+            if editor.buf.is_empty() {
+                return Dispatch::Stop;
+            }
+            editor.clear();
+            term::redraw_prompt(&editor.rendered(), 0);
         }
         KeyCode::Char(c) if !ctrl => {
             editor.insert(c);

@@ -54,7 +54,13 @@ pub fn charger(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallR
         npc.rotation -= std::f32::consts::PI;
     }
     if npc.velocity.0 != 0.0 {
-        npc.sprite_direction = -(npc.velocity.0.signum() as i8);
+        let sign = npc.velocity.0.signum() as i8;
+        // A drone's sprite faces the way it came from; a corite's faces the way it is going.
+        npc.sprite_direction = if npc.npc_type == MARTIAN_DRONE {
+            -sign
+        } else {
+            sign
+        };
     }
 
     let Some(target) = world.target.filter(|t| t.alive) else {
@@ -351,6 +357,25 @@ mod tests {
             }
         }
         assert!(went_off, "and it should not linger");
+    }
+
+    /// A drone's sprite faces the way it came from (mirrored); a corite's faces the way it is
+    /// actually going — the two are not the same sign.
+    #[test]
+    fn a_corite_faces_the_way_it_is_going_unlike_a_drone() {
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(2);
+        let w = world(&tiles, None);
+
+        let mut d = drone(0.0, 0.0);
+        d.velocity.0 = 5.0;
+        charger(&mut d, &w, &mut rng);
+        assert_eq!(d.sprite_direction, -1, "a drone mirrors its heading");
+
+        let mut c = Npc::new(SOLAR_CORITE_TYPE, (0.0, 0.0), 1).expect("solar corite");
+        c.velocity.0 = 5.0;
+        charger(&mut c, &w, &mut rng);
+        assert_eq!(c.sprite_direction, 1, "a corite does not");
     }
 
     /// A corite does not detonate; it recovers and lines up again.

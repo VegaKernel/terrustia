@@ -19,8 +19,8 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     FLOCKO_RANGE, FLOCKO_SPEED, FLOCKO_SPIN_TICKS, GOOP_SETTLE_TICKS, JELLYFISH_ABOVE,
     JELLYFISH_EASE, JELLYFISH_EVERY, JELLYFISH_SHOT, JELLYFISH_SHOT_DAMAGE, JELLYFISH_SPEED,
-    MOTHRON_EGG_TICKS, MOTHRON_SPAWN, SPIRIT_SMOOTH, SPIRIT_SPEED, STARDUST_CELL_GROWN,
-    STARDUST_CELL_TICKS,
+    MOTHRON_EGG_TICKS, MOTHRON_EGG_TICKS_EXPERT, MOTHRON_SPAWN, SPIRIT_SMOOTH, SPIRIT_SPEED,
+    STARDUST_CELL_GROWN, STARDUST_CELL_TICKS,
 };
 
 use crate::game::ai::{Shot, World, face};
@@ -133,7 +133,10 @@ pub fn flocko<T: TileView>(npc: &mut Npc, world: &World<'_, T>) {
 }
 
 /// Style 89 — a Mothron egg.
-pub fn mothron_egg(npc: &mut Npc, was_hurt: bool, rng: &mut SmallRng) -> Outcome {
+///
+/// `expert` halves the hatch time — but also makes a hit set it back only once rather than
+/// twice, which is why an expert egg is not simply twice as fragile as it looks.
+pub fn mothron_egg(npc: &mut Npc, was_hurt: bool, expert: bool, rng: &mut SmallRng) -> Outcome {
     let mut out = Outcome::default();
     if npc.velocity.1 == 0.0 {
         npc.velocity.0 *= 0.9;
@@ -143,21 +146,30 @@ pub fn mothron_egg(npc: &mut Npc, was_hurt: bool, rng: &mut SmallRng) -> Outcome
         npc.rotation += npc.velocity.0 * 0.04;
     }
 
-    // Hitting it sets the clock back, which is the only way to stop one hatching.
+    let hatch_at = if expert {
+        MOTHRON_EGG_TICKS_EXPERT
+    } else {
+        MOTHRON_EGG_TICKS
+    };
+
+    // Hitting it sets the clock back, which is the only way to stop one hatching — twice over in
+    // classic and normal mode, but only once in expert, where the shorter clock already does
+    // most of the work.
     if was_hurt {
         npc.ai[0] -= rng.random_range(10..21) as f32;
-        npc.ai[0] -= rng.random_range(10..21) as f32;
+        if !expert {
+            npc.ai[0] -= rng.random_range(10..21) as f32;
+        }
     }
     npc.ai[0] += 1.0;
-    if npc.ai[0] >= MOTHRON_EGG_TICKS {
+    if npc.ai[0] >= hatch_at {
         out.became = Some(MOTHRON_SPAWN);
         return out;
     }
 
     // The last quarter of the wait: it starts twitching, harder the closer it is.
-    if npc.velocity.1 == 0.0 && npc.velocity.0.abs() < 0.2 && npc.ai[0] >= MOTHRON_EGG_TICKS * 0.75
-    {
-        let along = (npc.ai[0] - MOTHRON_EGG_TICKS * 0.75) / (MOTHRON_EGG_TICKS * 0.25);
+    if npc.velocity.1 == 0.0 && npc.velocity.0.abs() < 0.2 && npc.ai[0] >= hatch_at * 0.75 {
+        let along = (npc.ai[0] - hatch_at * 0.75) / (hatch_at * 0.25);
         if (rng.random_range(-10..120) as f32) < along * 100.0 {
             npc.velocity.1 -= rng.random_range(20..40) as f32 * 0.025;
             npc.velocity.0 += rng.random_range(-20..20) as f32 * 0.025;
@@ -349,7 +361,7 @@ mod tests {
         let mut r = rng();
         let mut hatched = None;
         for _ in 0..(MOTHRON_EGG_TICKS as i32 + 5) {
-            if let Some(into) = mothron_egg(&mut e, false, &mut r).became {
+            if let Some(into) = mothron_egg(&mut e, false, false, &mut r).became {
                 hatched = Some(into);
                 break;
             }
@@ -364,7 +376,7 @@ mod tests {
             let mut r = rng();
             let mut e = npc(89);
             for tick in 0..(MOTHRON_EGG_TICKS as i32 * 3) {
-                if mothron_egg(&mut e, hit, &mut r).became.is_some() {
+                if mothron_egg(&mut e, hit, false, &mut r).became.is_some() {
                     return tick;
                 }
             }
@@ -373,6 +385,46 @@ mod tests {
         assert!(
             time_to_hatch(true) > time_to_hatch(false),
             "a battered egg takes longer"
+        );
+    }
+
+    /// Expert Mode halves the hatch clock, but also only sets it back once when hit rather than
+    /// twice — so an expert egg does not hatch twice as fast under fire as the raw clock alone
+    /// would suggest, and a normal-mode egg does not take the expert clock at all.
+    #[test]
+    fn expert_mode_shortens_the_clock_but_softens_the_setback() {
+        let hatches_by = |expert: bool, tick_cap: i32| {
+            let mut r = rng();
+            let mut e = npc(89);
+            (0..tick_cap).find(|_tick| mothron_egg(&mut e, false, expert, &mut r).became.is_some())
+        };
+        let normal = hatches_by(false, MOTHRON_EGG_TICKS as i32 + 5).expect("it should hatch");
+        let expert = hatches_by(true, MOTHRON_EGG_TICKS as i32 + 5).expect("it should hatch");
+        assert_eq!(normal, MOTHRON_EGG_TICKS as i32 - 1);
+        assert_eq!(
+            expert,
+            MOTHRON_EGG_TICKS_EXPERT as i32 - 1,
+            "half the clock"
+        );
+
+        // Being hit sets it back once in expert mode and twice in normal mode. Both branches draw
+        // their first setback from the same fresh, identically-seeded rng, so they are bit-for-bit
+        // comparable up to that draw; classic then takes a second draw expert does not, so one hit
+        // should always leave the expert egg strictly further along than the classic one.
+        let after_one_hit = |expert: bool| {
+            let mut r = rng();
+            let mut e = npc(89);
+            // Comfortably clear of both the hatch and the twitch thresholds either way.
+            e.ai[0] = 300.0;
+            mothron_egg(&mut e, true, expert, &mut r);
+            e.ai[0]
+        };
+        let normal_after = after_one_hit(false);
+        let expert_after = after_one_hit(true);
+        assert!(
+            expert_after > normal_after,
+            "one hit should set a classic egg back further than an expert one: \
+             classic {normal_after} vs expert {expert_after}"
         );
     }
 

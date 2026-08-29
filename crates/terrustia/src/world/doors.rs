@@ -28,6 +28,63 @@ pub const DOOR_OPEN: u16 = 11;
 const FRAME: i16 = 18;
 const DOOR_HEIGHT_PX: i16 = 54;
 
+/// Whether a door swinging into this tile may kill it and proceed, rather than being blocked by
+/// it — `Main.tileCut`, plus the stalactite (165) and the drip tiles (`TileID.Sets.IsADripTile`)
+/// `OpenDoor`'s own guard checks alongside it (`WorldGen.cs:38093` and `38101`). Vines, herbs,
+/// torches on a wall bracket, banners and the like: things a door swinging through would obviously
+/// just knock out of the way in real life, as opposed to a wall, which stops it dead.
+fn cuttable(block: u16) -> bool {
+    matches!(
+        block,
+        3 | 24
+            | 28
+            | 32
+            | 51
+            | 52
+            | 61
+            | 62
+            | 69
+            | 71
+            | 73
+            | 74
+            | 82
+            | 83
+            | 84
+            | 110
+            | 113
+            | 115
+            | 165
+            | 184
+            | 201
+            | 205
+            | 231
+            | 236
+            | 254
+            | 352
+            | 373
+            | 374
+            | 375
+            | 382
+            | 444
+            | 454
+            | 461
+            | 484
+            | 485
+            | 518
+            | 519
+            | 528
+            | 529
+            | 549
+            | 636
+            | 637
+            | 638
+            | 654
+            | 655
+            | 709
+            | 711
+    )
+}
+
 /// Open the door at `(x, y)`, swinging it in `direction`.
 ///
 /// `direction` is -1 for left and anything else for right, matching the game. Returns whether
@@ -65,11 +122,20 @@ pub fn open(world: &mut World, x: i32, y: i32, direction: i8) -> bool {
         (x, x + 1)
     };
 
-    // It cannot open into anything solid.
+    // A genuine obstruction — a wall, a placed block — refuses the swing outright. Something
+    // cuttable in the way (a vine, a herb, a torch bracket, a stalactite, a drip tile) does not:
+    // the door knocks it out of the way and swings through, exactly as `OpenDoor` does
+    // (`WorldGen.cs:38090-38105`, a guard loop followed by a kill loop over the same tiles).
     for dy in 0..3 {
         let blocking = world.tile(swinging_into, top + dy);
-        if blocking.is_active() {
+        if blocking.is_active() && !cuttable(blocking.block) {
             return false;
+        }
+    }
+    for dy in 0..3 {
+        let blocking = world.tile(swinging_into, top + dy);
+        if blocking.is_active() && cuttable(blocking.block) {
+            world.set_tile(swinging_into, top + dy, Tile::AIR);
         }
     }
 
@@ -96,10 +162,38 @@ pub fn open(world: &mut World, x: i32, y: i32, direction: i8) -> bool {
     true
 }
 
-/// Shut the door at `(x, y)`, wherever in its two-by-three block that position lands.
+/// Shut the door at `(x, y)`, wherever in its two-by-three block that position lands. Always
+/// forced — the door shuts even if a player or NPC is standing in the doorway.
+///
+/// This is `close_checked(world, x, y, true, ..)` with no way to say otherwise, kept so every
+/// existing caller keeps compiling and behaving exactly as it already does. A caller that can
+/// actually tell whether the doorway is occupied — which this module cannot, on its own, since
+/// entities are not tiles — should call [`close_checked`] instead and pass a real `forced` and a
+/// real `occupied`, which is the only way to get vanilla's own refusal (`WorldGen.cs:32155-32164`):
+/// an unforced close where a player or NPC stands in the tile the shut door lands on does nothing,
+/// rather than embedding them in a wall.
 ///
 /// Returns whether anything moved.
 pub fn close(world: &mut World, x: i32, y: i32) -> bool {
+    close_checked(world, x, y, true, |_, _| false)
+}
+
+/// Shut the door at `(x, y)`, wherever in its two-by-three block that position lands.
+///
+/// Unless `forced`, refuses while `occupied` says something stands in the *one* tile column the
+/// shut door will actually land on — not the whole two-by-three opening, and not the side that
+/// stays open air either. That is narrower than it might look, and it is exactly what vanilla's
+/// own check is narrower than too (`WorldGen.cs:32155-32164`, `Collision.EmptyTile` against only
+/// that column).
+///
+/// Returns whether anything moved.
+pub fn close_checked(
+    world: &mut World,
+    x: i32,
+    y: i32,
+    forced: bool,
+    occupied: impl Fn(i32, i32) -> bool,
+) -> bool {
     // The position may be any of the six tiles the open door occupies, so find its corner.
     let Some((left, top, style)) = open_door_corner(world, x, y) else {
         return false;
@@ -109,6 +203,14 @@ pub fn close(world: &mut World, x: i32, y: i32) -> bool {
     // of the open form are the ones with 36 added to the style's base.
     let hinged_left = (world.tile(left, top).frame_x - style * 72) >= 36;
     let shut_x = if hinged_left { left + 1 } else { left };
+
+    if !forced {
+        for dy in 0..3i32 {
+            if occupied(shut_x, top + dy) {
+                return false;
+            }
+        }
+    }
 
     for dy in 0..3i32 {
         for dx in 0..2i32 {
@@ -211,6 +313,78 @@ mod tests {
         }
         assert!(!open(&mut world, 10, 10, 1), "there is stone in the way");
         assert_eq!(world.tile(10, 10).block, DOOR_CLOSED, "and it stays shut");
+    }
+
+    /// A cuttable plant in the swing path is killed, and the door opens through it — vanilla's
+    /// `OpenDoor` kills a `tileCut` tile in the way rather than refusing (`WorldGen.cs:38090-
+    /// 38105`).
+    ///
+    /// Fails before the fix: `open`'s own guard treated *any* active tile as a wall, so a single
+    /// vine or herb beside a door made it unopenable server-side, even though the real client
+    /// opens the door locally regardless — the exact server/client disagreement this module's own
+    /// doc says the rest of it exists to fix.
+    #[test]
+    fn a_cuttable_plant_in_the_swing_path_is_killed_and_the_door_opens() {
+        let mut world = World::empty(40, 40, "doors");
+        shut_door(&mut world, 10, 10);
+        // A vine (52) in the way, one row of the swing.
+        world.set_tile(11, 11, Tile::block(52));
+
+        assert!(
+            open(&mut world, 10, 10, 1),
+            "a vine should not block the door"
+        );
+        for dy in 0..3 {
+            assert_eq!(world.tile(11, 10 + dy).block, DOOR_OPEN);
+        }
+    }
+
+    /// Something that is not cuttable still blocks the swing, exactly as before.
+    #[test]
+    fn a_solid_block_in_the_swing_path_still_refuses() {
+        let mut world = World::empty(40, 40, "doors");
+        shut_door(&mut world, 10, 10);
+        world.set_tile(11, 11, Tile::block(1)); // plain stone: not cuttable
+        assert!(!open(&mut world, 10, 10, 1), "stone still blocks the swing");
+        assert_eq!(world.tile(10, 10).block, DOOR_CLOSED, "and it stays shut");
+    }
+
+    /// An unforced close refuses while something occupies the tile the shut door would land on.
+    ///
+    /// Fails before the fix: `close` had no occupancy notion at all, so a caller closing a door
+    /// with a player standing in the doorway would have embedded them in the wall it created.
+    #[test]
+    fn an_unforced_close_refuses_while_the_doorway_is_occupied() {
+        let mut world = World::empty(40, 40, "doors");
+        shut_door(&mut world, 10, 10);
+        open(&mut world, 10, 10, 1);
+
+        assert!(
+            !close_checked(&mut world, 10, 10, false, |_, y| y == 11),
+            "something is standing in the doorway"
+        );
+        for dy in 0..3 {
+            assert_eq!(
+                world.tile(10, 10 + dy).block,
+                DOOR_OPEN,
+                "the door should still be open"
+            );
+        }
+
+        // And with the doorway clear, the same unforced close goes through.
+        assert!(close_checked(&mut world, 10, 10, false, |_, _| false));
+        assert_eq!(world.tile(10, 10).block, DOOR_CLOSED);
+    }
+
+    /// A forced close goes through regardless — matching `close`'s own always-forced behaviour,
+    /// which every existing caller keeps.
+    #[test]
+    fn a_forced_close_ignores_occupancy() {
+        let mut world = World::empty(40, 40, "doors");
+        shut_door(&mut world, 10, 10);
+        open(&mut world, 10, 10, 1);
+        assert!(close_checked(&mut world, 10, 10, true, |_, _| true));
+        assert_eq!(world.tile(10, 10).block, DOOR_CLOSED);
     }
 
     #[test]

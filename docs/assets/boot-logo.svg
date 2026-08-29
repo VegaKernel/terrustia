@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="44 34 795 130" width="795" height="130">
+  <!-- Text-free, transparent-background source for the terminal boot logo. Just the TERRUSTIA
+       gradient letterforms: no dark card, no tagline. The terminal supplies its own background,
+       and the tagline (with runtime version/protocol) is drawn as real styled text below the
+       image. docs/assets/banner.svg keeps the card and tagline for the README hero. The gradient
+       coordinates match banner.svg exactly (userSpaceOnUse y1=34 y2=164), so the glyphs are
+       byte-for-byte the same shapes; only the chrome is removed and the viewBox cropped tight. -->
+  <defs>
+    <linearGradient id="asciiGradient" x1="0" y1="34" x2="0" y2="164" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5fffff"/>
+      <stop offset="25%" stop-color="#22c1ff"/>
+      <stop offset="50%" stop-color="#0092ff"/>
+      <stop offset="75%" stop-color="#1160ff"/>
+      <stop offset="100%" stop-color="#2a44ff"/>
+    </linearGradient>
+  </defs>
+  <g shape-rendering="crispEdges">
+    <rect x="44" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="59" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="74" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="89" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="104" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="134" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="149" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="164" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="179" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="194" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="224" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="239" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="254" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="269" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="314" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="329" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="344" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="359" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="404" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="464" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="494" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="509" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="524" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="539" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="554" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="584" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="599" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="614" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="629" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="644" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="674" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="689" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="704" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="719" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="734" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="764" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="779" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="794" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="809" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="824" y="34" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="74" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="134" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="224" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="284" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="314" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="374" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="404" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="464" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="494" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="614" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="704" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="764" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="824" y="60" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="74" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="134" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="149" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="164" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="179" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="224" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="239" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="254" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="269" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="314" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="329" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="344" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="359" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="404" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="464" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="494" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="509" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="524" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="539" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="554" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="614" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="704" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="764" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="779" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="794" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="809" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="824" y="86" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="74" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="134" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="224" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="269" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="314" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="359" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="404" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="464" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="554" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="614" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="704" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="764" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="824" y="112" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="74" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="134" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="149" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="164" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="179" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="194" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="224" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="284" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="314" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="374" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="404" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="419" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="434" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="449" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="464" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="494" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="509" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="524" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="539" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="554" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="614" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="674" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="689" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="704" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="719" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="734" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="764" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+    <rect x="824" y="138" width="15" height="26" fill="url(#asciiGradient)"/>
+  </g>
+</svg>

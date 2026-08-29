@@ -329,19 +329,17 @@ mod tests {
     /// most of `terrain.rs` — the real pipeline already has both.
     #[test]
     fn a_tree_grows_a_real_tall_trunk_with_walls_behind_it() {
-        // Seed 999, not 4242: Tier 3 (`DirtWallCleanup`, wired into `build()` early, before every
-        // Tier 2 decorative pass) consumes real `rand` draws ahead of this pass, shifting the whole
-        // downstream sequence — the same kind of drift this project's own module doc already
-        // discloses as expected ("the same seed here and in Terraria produce different maps... not
-        // seed-identical"). Measured directly rather than assumed: seed 4242 now legitimately rolls
-        // zero living trees (itself a real, already-documented possible outcome — see this file's
-        // own Done-row measurement "0, 2, 1... an ordinary world can reasonably have none at all"),
-        // while seed 999 still reliably rolls two. Not a regression in `living_trees.rs` itself.
-        let (world, built) = super::super::build(4200, 1200, "living-trees-test", 999);
-        assert!(
-            built.living_trees > 0,
-            "a real generated world should take at least one living tree at this seed"
-        );
+        // Living trees are probabilistic and a world can legitimately grow none, so this does not
+        // pin a single seed: any faithful change to a draw earlier in generation (e.g. gem caves
+        // now placing their scattered gems) shifts the whole downstream `rand` sequence — the exact
+        // "not seed-identical" drift the generator's own module doc discloses — and re-pinning one
+        // seed each time it moves is a losing game. Take the first of a handful of seeds that grows
+        // one, and run the trunk/wall checks against that world.
+        let (world, _built) = [999u64, 4242, 12345, 7, 2024, 31337]
+            .into_iter()
+            .map(|seed| super::super::build(4200, 1200, "living-trees-test", seed))
+            .find(|(_, built)| built.living_trees > 0)
+            .expect("at least one of several seeds should grow a living tree");
 
         let mut wood_tiles = 0;
         let mut walled = 0;

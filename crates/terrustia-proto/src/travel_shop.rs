@@ -42,7 +42,23 @@ pub struct Offer {
 }
 
 /// The chain, in the order the game walks it. Later entries win.
-pub const OFFERS: [Offer; 62] = [
+pub const OFFERS: [Offer; 64] = [
+    // `Chest.cs:980-987` — BlackCounterweight and YellowCounterweight each carry their own
+    // leading `minimumRarity <= F &&` guard rather than sitting behind one of the
+    // `if (minimumRarity > N) return;` checkpoints the rest of the chain uses, and both sit
+    // ahead of item 1987 in source, so they are tried (and can be overwritten by it) first.
+    Offer {
+        item: 3309,
+        tier: 4,
+        needs: Needs(0),
+        floor: 4,
+    },
+    Offer {
+        item: 3314,
+        tier: 3,
+        needs: Needs(0),
+        floor: 3,
+    },
     Offer {
         item: 1987,
         tier: 5,
@@ -449,6 +465,17 @@ mod tests {
         let late = open(Needs(u16::MAX));
         assert!(fresh > 0, "a fresh world should have stock");
         assert!(late > fresh, "{late} late against {fresh} fresh");
+    }
+
+    /// BlackCounterweight (3309) and YellowCounterweight (3314) each carry their own leading
+    /// `minimumRarity <= F &&` guard in `Chest.cs:980-987` instead of an enclosing
+    /// `if (minimumRarity > N) return;` checkpoint, which the old anchored regex in
+    /// `gen_travel_shop.py` could not see at all — both items were silently absent, with no
+    /// other drop or craft source anywhere in this project, making them unobtainable.
+    #[test]
+    fn the_travelling_merchant_can_offer_both_counterweights() {
+        assert!(OFFERS.iter().any(|o| o.item == 3309), "BlackCounterweight");
+        assert!(OFFERS.iter().any(|o| o.item == 3314), "YellowCounterweight");
     }
 
     /// The condition test is a subset check, not equality: a world that has been through more

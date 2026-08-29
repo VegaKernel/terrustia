@@ -12,7 +12,7 @@ use terrustia::{
     term::{self, Palette},
     world::{wld, worldgen},
 };
-use tokio::{net::TcpListener, signal, sync::mpsc};
+use tokio::{signal, sync::mpsc};
 use tracing::{error, info, warn};
 use tracing_subscriber::{filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -155,8 +155,42 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // against the final, fully-layered config so that case is covered too.
     config.validate()?;
 
+    // Minecraft-style placement: a generated world with nowhere else to go persists into the
+    // server's own worlds/ directory, so a server run from a folder sets that folder up rather than
+    // serving something that vanishes on shutdown. An explicit --world, --new, --save, or a config
+    // save_file all win over this, since they already leave a world_file or a save target in place.
+    if config.world_file.is_none()
+        && config.save_target().is_none()
+        && let Ok(path) = terrustia::worlds::new_world_path(&config.world_name)
+    {
+        config.save_file = Some(path);
+    }
+    // Create the directory a world will save into before the first save reaches for it, so worlds/
+    // exists the moment it is needed rather than failing the first autosave.
+    if let Some(parent) = config
+        .save_target()
+        .and_then(|t| t.parent().map(|p| p.to_path_buf()))
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(&parent).map_err(|e| {
+            format!(
+                "cannot create the world directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
     let started = Instant::now();
-    let loaded_from = config.world_file.clone();
+    // One spinner covers the single slow step, generating or loading the world. It clears when the
+    // world is ready and the boot card below takes its place; every other boot step is quick and
+    // reports itself as a row in that card rather than as its own ✓ line.
+    let world_stage = term::Stage::begin(
+        palette,
+        match &config.world_file {
+            Some(_) => "loading world",
+            None => "generating world",
+        },
+    );
     // `World::secret_seeds` is read straight off the world either way now — a loaded world's own
     // real flag bytes (`wld.rs`'s own read path), or freshly detected here for a generated one —
     // rather than threaded through as a separate `Built`-only value that a loaded world could
@@ -185,63 +219,13 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             world
         }
     };
-    let mut world_rows = vec![
-        ("name", world.name.clone()),
-        ("size", format!("{} x {}", world.width(), world.height())),
-        ("spawn", format!("{}, {}", world.spawn_x, world.spawn_y)),
-        (
-            "evil",
-            if world.crimson {
-                "crimson"
-            } else {
-                "corruption"
-            }
-            .to_string(),
-        ),
-        ("chests", world.chests.len().to_string()),
-        ("loaded in", format!("{} ms", started.elapsed().as_millis())),
-    ];
-    // Only shown when one was actually detected — an ordinary world (numeric seed or otherwise)
-    // gets no row at all rather than a "none" filler on the common case.
-    if world.secret_seeds.any() {
-        let names = world.secret_seeds.active_names().join(", ");
-        world_rows.push(("secret seed", names));
-    }
+    world_stage.clear();
 
-    // Bind before starting the game task so a port clash fails fast.
-    let listener = TcpListener::bind(config.listen).await?;
-    let save_destination = config.save_target().map_or_else(
-        || "none — this world will not be saved".to_string(),
-        |p| p.display().to_string(),
-    );
-    let autosave_interval = if config.save_target().is_none() {
-        "disabled (no save destination)".to_string()
-    } else if config.autosave_secs == 0 {
-        "disabled".to_string()
-    } else {
-        format!("every {}s", config.autosave_secs)
-    };
-    let server_rows = [
-        ("listening", config.listen.to_string()),
-        ("players", format!("up to {}", config.max_players)),
-        (
-            "log filter",
-            std::env::var("TERRUSTIA_LOG").unwrap_or_else(|_| "info".into()),
-        ),
-        ("save destination", save_destination),
-        ("autosave interval", autosave_interval),
-    ];
-
-    // Both panels are sized off the wider of the two, so they line up to the same gutter the log
-    // lines below them use rather than each hugging its own content.
-    let width =
-        term::panel_width("world", &world_rows).max(term::panel_width("server", &server_rows));
-    print!("{}", term::panel(palette, "world", &world_rows, width));
-    if let Some(path) = &loaded_from {
-        info!(path = %path.display(), "loading world file");
-    }
-    print!("{}", term::panel(palette, "server", &server_rows, width));
-    println!();
+    // Bind before starting the game task so a port clash fails fast, and before the card so a
+    // failure here can never print beneath a "ready" line that would be a lie. `listener::bind`
+    // turns a bare errno (a port in use, or `os error 28` socket exhaustion) into a message that
+    // says what to do about it.
+    let listener = listener::bind(config.listen).await?;
 
     let recorder = match &args.record {
         Some(path) => Some(terrustia::net::record::Recorder::create(path)?),
@@ -250,16 +234,63 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let (events_tx, events_rx) = mpsc::channel::<ServerEvent>(EVENT_QUEUE);
 
-    // Opt-in, so a bind failure *here* — at boot, before anything is actually serving — is a
-    // configuration mistake worth failing loudly on rather than silently running without it. Once
-    // up, ownership passes to `panel::supervise` below, which handles every later start/stop (the
-    // console's `panel` command) without that same all-or-nothing behaviour — see its own doc
-    // comment for why a runtime toggle failure should not take the rest of the server down too.
-    let initial_panel = if config.panel_enabled {
-        Some(terrustia::panel::run(config.clone(), events_tx.clone()).await?)
+    // Started before the card so the panel's on/off state is a fact the card can state. Opt-in, so
+    // a bind failure *here* — at boot, before anything is actually serving — is a configuration
+    // mistake worth failing loudly on rather than silently running without it. Once up, ownership
+    // passes to `panel::supervise` below, which handles every later start/stop (the console's
+    // `panel` command) without that same all-or-nothing behaviour — see its own doc comment for why
+    // a runtime toggle failure should not take the rest of the server down too.
+    let (initial_panel, panel_state) = if config.panel_enabled {
+        let handle = terrustia::panel::run(config.clone(), events_tx.clone()).await?;
+        (Some(handle), "loopback only")
     } else {
-        None
+        (None, "off")
     };
+
+    // The settled facts, one aligned key/value card on a single left margin: what the world is,
+    // where it listens, where it saves, and whether the panel is up. Paths are shown short — a
+    // server-owned world in worlds/ reads as `worlds/Name.wld`, the way a Minecraft server names its
+    // own files, and anything under home collapses to `~`.
+    let evil = if world.crimson {
+        "crimson"
+    } else {
+        "corruption"
+    };
+    let mut rows: Vec<(&str, String)> = vec![(
+        "world",
+        format!(
+            "{} · {} × {} · {}",
+            world.name,
+            world.width(),
+            world.height(),
+            evil
+        ),
+    )];
+    if world.secret_seeds.any() {
+        rows.push(("seed", world.secret_seeds.active_names().join(", ")));
+    }
+    rows.push((
+        "listening",
+        format!("{} · up to {} players", config.listen, config.max_players),
+    ));
+    rows.push((
+        "saves to",
+        match config.save_target() {
+            None => "nowhere, this world will not be saved".to_string(),
+            Some(path) => display_path(path),
+        },
+    ));
+    rows.push((
+        "autosave",
+        if config.autosave_secs == 0 {
+            "off".to_string()
+        } else {
+            format!("every {}s", config.autosave_secs)
+        },
+    ));
+    rows.push(("web panel", panel_state.to_string()));
+    print!("{}", term::info_block(palette, &rows));
+    print!("{}", term::ready_line(palette, started.elapsed()));
     let (panel_toggle_tx, panel_toggle_rx) = mpsc::unbounded_channel();
     // Handle kept and aborted below, alongside `accept`/`console` — this task holds its own clone
     // of `events_tx` for as long as it runs (it has to, to start the panel on a later toggle), so
@@ -305,7 +336,8 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let game_server = GameServer::new(config.clone(), world)
         .with_panel_toggle(panel_toggle_tx)
-        .with_update_notice(update_notice);
+        .with_update_notice(update_notice)
+        .with_palette(palette);
     // Cloned out before `run` consumes `game_server` — see the field's own doc comment in
     // `game::server` for why a shared cell, read only after the task ends, is how a world switch
     // requested from the panel reaches this function at all.
@@ -320,7 +352,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // Whoever has the terminal already has the world file, so the console is not gated. Reading
     // stdin has to be its own task: a blocking read would otherwise hold up the accept loop, and a
     // closed stdin (a service with no terminal) simply ends the task rather than the server.
-    let console = console::spawn(events_tx.clone());
+    let console = console::spawn(events_tx.clone(), args.headless);
 
     // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
     // than moved so it is still here afterwards to be waited on.
@@ -393,6 +425,26 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// How a path is shown in the boot card. A path under the working directory is shown relative to it,
+/// so a server-owned world in `worlds/` reads as `worlds/Name.wld` the way a Minecraft server names
+/// its own files; a path under the user's home directory collapses that prefix to `~`; anything else
+/// is shown as it is. Presentation only, so nothing ever opens the shortened form.
+fn display_path(path: &Path) -> String {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(rel) = path.strip_prefix(&cwd)
+        && !rel.as_os_str().is_empty()
+    {
+        return rel.display().to_string();
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Ok(rest) = path.strip_prefix(&home)
+        && !rest.as_os_str().is_empty()
+    {
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+    }
+    path.display().to_string()
+}
+
 /// Replace this process with a fresh one pointed at `world`, keeping the config file and listen
 /// address the operator already chose. Never returns on success: on Unix `exec` replaces the
 /// process image outright, same PID, which is what lets a supervisor (systemd, a container
@@ -440,19 +492,16 @@ fn relaunch_into(
     Ok(())
 }
 
-/// List the worlds Terraria has on this machine.
+/// List the worlds the server keeps in its own `worlds/` directory.
 ///
 /// Enough to pick one by name without opening a file manager: the size the header claims, and how
-/// recently it was played. Reading each header is a few hundred bytes and worth it — a list of
+/// recently it was played. Reading each header is a few hundred bytes and worth it, since a list of
 /// bare filenames does not tell you which of three saves is the one you want.
 fn print_worlds() {
-    let Some(dir) = terrustia::worlds::directory() else {
-        println!("no world directory on this platform, or no home directory set");
-        return;
-    };
+    let dir = terrustia::worlds::worlds_dir();
     let worlds = terrustia::worlds::list();
     if worlds.is_empty() {
-        println!("no worlds in {}", dir.display());
+        println!("no worlds in {} yet", dir.display());
         return;
     }
     println!("{}\n", dir.display());
@@ -543,18 +592,22 @@ struct Args {
     /// `main`'s own use of it via `worldgen::generate_from_text`.
     seed: Option<String>,
     world: Option<PathBuf>,
-    /// Generate a fresh world under this name, written into the Terraria world directory itself —
-    /// so it shows up beside every other world, in the actual game, without anyone touching a
-    /// file path at all.
+    /// Generate a fresh world under this name, written into the server's own `worlds/` directory,
+    /// following Terraria's own space-to-underscore filename convention.
     new_world: Option<String>,
     /// Where to write the world, for a generated one that has nowhere else to go.
     save: Option<PathBuf>,
     /// Where to record every byte of every connection, for checking against a real client.
     record: Option<PathBuf>,
-    /// List the worlds Terraria has on this machine, and stop.
+    /// List the worlds in the server's own `worlds/` directory, and stop.
     list_worlds: bool,
     /// Always run the interactive setup wizard — see `setup.rs`.
     setup: bool,
+    /// Run without the interactive sticky console: start and serve straight away, with only the
+    /// plain line reader for input. For services and daemons that have no terminal to be sticky
+    /// about, and for anyone who just wants it to autostart. `-h` stays `--help`, so this is
+    /// `--headless` with no short form.
+    headless: bool,
     help: bool,
 }
 
@@ -570,6 +623,7 @@ impl Args {
             record: None,
             list_worlds: false,
             setup: false,
+            headless: false,
             help: false,
         };
         let mut args = args.peekable();
@@ -597,6 +651,7 @@ impl Args {
                 }
                 "--worlds" => parsed.list_worlds = true,
                 "--setup" => parsed.setup = true,
+                "--headless" => parsed.headless = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
@@ -644,12 +699,12 @@ fn print_usage(palette: Palette) {
         ),
         (
             "-n, --new <NAME>",
-            "Generate a fresh world, saved into the Terraria world directory",
+            "Generate a fresh world, saved into the server's worlds/ directory",
             "",
         ),
         (
             "    --worlds",
-            "List the worlds Terraria has on this machine",
+            "List the worlds in the server's worlds/ directory",
             "",
         ),
         (
@@ -671,6 +726,11 @@ fn print_usage(palette: Palette) {
         (
             "    --setup",
             "Interactive first-run wizard: writes a terrustia.toml and starts",
+            "",
+        ),
+        (
+            "    --headless",
+            "Start and serve without the interactive console (for services)",
             "",
         ),
         ("-h, --help", "Show this message", ""),

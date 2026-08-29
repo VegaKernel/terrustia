@@ -12,8 +12,14 @@
 //! The ones that change what the world *is*, rather than what it looks like, are here:
 //!
 //! * **Actuators**, which toggle their block between solid and passable.
+//! * **Junction boxes**, which route the current through by frame rather than in every direction,
+//!   which is what lets two circuits cross the same tile without joining into one.
+//! * **Conveyor belts** and **Active/Inactive Stone Blocks**, which swap between their two states.
 //! * **Traps** — darts, flames, spears, spiky balls and geysers — which hurt.
+//! * **Land mines**, which explode on the spot rather than joining a circuit at all.
 //! * **Statues**, which produce monsters, items or a fetched townsperson.
+//! * **Doors, trapdoors and tall gates**, which change the world's shape — a shut door becomes a
+//!   wider, different tile rather than merely a different frame of the same one.
 //! * **Teleporters**, which swap whoever is standing on one pad with whoever is on the other.
 //! * **Pumps**, which move liquid from every inlet cell a circuit reaches to every outlet.
 //! * **Timers**, the one thing here that starts a circuit with nobody touching it.
@@ -23,15 +29,19 @@
 //! contraption anybody builds runs off a timer, and almost every interesting one has a gate in
 //! it; a server that only ran a circuit when a player hit a switch would run hardly any of them.
 //!
-//! Only the actuator, the pump, the lamp and the timer are handled inside the flood, because they
-//! need nothing but the tiles. The rest are *reported*: firing a trap needs a die roll, a cooldown
-//! and the projectile store; a statue needs the NPC table; a teleporter needs the players; a gate
-//! needs to start a new circuit, which cannot happen from inside the one that is running. All of
-//! that lives on the server, so the flood hands back which tiles it reached and the server does
-//! the work — [`trap_shot`] and [`check_logic_gate`] are the tables it calls.
+//! Only the actuator, the junction box, the conveyor belt, the stone block, the pump, the lamp
+//! and the timer are handled inside the flood, because they need nothing but the tiles. The rest
+//! are *reported*: firing a trap needs a die roll, a cooldown and the projectile store; a statue
+//! needs the NPC table; a teleporter needs the players; a gate needs to start a new circuit, which
+//! cannot happen from inside the one that is running; a door, trapdoor or tall gate needs the real
+//! function that reshapes it, which either lives elsewhere in this module (doors, by way of
+//! [`super::doors`]) or has not been ported yet (trapdoors, tall gates — see [`Fired::trapdoors`]
+//! and [`Fired::gates`]). All of that lives on the caller, so the flood hands back which tiles it
+//! reached and the caller does the work — [`trap_shot`] and [`check_logic_gate`] are the tables it
+//! calls.
 //!
-//! The remaining entries are cosmetic: candles, chandeliers and the like change a frame and
-//! nothing else, and a client does that for itself from the relayed hit.
+//! What is left after all of that really is cosmetic: candles, chandeliers and the like change a
+//! frame and nothing else, and a client does that for itself from the relayed hit.
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
 //! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
@@ -40,6 +50,8 @@
 use std::collections::HashSet;
 
 use terrustia_proto::tile::{Tile, TileFlags};
+
+use super::doors::{DOOR_CLOSED, DOOR_OPEN};
 
 /// The four wire colours, which are four independent circuits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,13 +84,52 @@ impl Wire {
 ///
 /// A lever and a switch remember their state and flip it; a pressure plate and the rest simply
 /// fire. Anything else is not a trigger and hitting it does nothing at all.
+///
+/// `HitSwitch` (`Wiring.cs:259`) handles several more tiles than the ones that flood a circuit in
+/// the ordinary way, which is why they are listed here even though [`hit_switch`]'s own handling
+/// of them is bespoke rather than a plain [`run_from`]:
+/// * [`LEVER`] and [`DETONATOR`] are two tiles wide and flip their *own* frame — both cells of it
+///   — before flooding from the pair, rather than flooding from the clicked tile alone.
+/// * [`FAKE_CONTAINER`] and [`FAKE_CONTAINER2`] are a trapped chest's real footprint, found the
+///   same way, but nothing about them changes: they only relay the click into a flood.
+/// * [`LAND_MINE`] and [`GEYSER`] do not flood at all when clicked directly — they fire on the
+///   spot, the same as a wire reaching one does.
 pub fn is_trigger(block: u16) -> bool {
     matches!(
         block,
         // Switch, lever, a track switch, the pressure plates, and the Party Monolith.
-        135 | 136 | 144 | MINECART_TRACK | 423 | 428 | 440 | 442 | 476 | PARTY_MONOLITH
+        135 | 136
+            | 144
+            | MINECART_TRACK
+            | 423
+            | 428
+            | 440
+            | 442
+            | 476
+            | PARTY_MONOLITH
+            | LEVER
+            | DETONATOR
+            | FAKE_CONTAINER
+            | FAKE_CONTAINER2
+            | LAND_MINE
+            | GEYSER
     )
 }
+
+/// `TileID.Lever` — a switch two tiles wide, whose own frame remembers which way it is thrown
+/// rather than using `frameY` the way [`flips`]'s tiles do. See [`hit_switch`]'s own case for it.
+const LEVER: u16 = 132;
+/// `TileID.Detonator` — clicked exactly like a [`LEVER`]; the only difference vanilla makes is a
+/// cooldown record (`CheckMech`) this project has no use for, since nothing here reads it back.
+const DETONATOR: u16 = 411;
+/// `TileID.FakeContainers` — a chest that is really a trap, styled to look ordinary. Clicking it
+/// finds its true footprint and floods from there; nothing about the chest itself changes.
+const FAKE_CONTAINER: u16 = 441;
+/// `TileID.FakeContainers2`, the other trapped-chest style, found and handled the same way.
+const FAKE_CONTAINER2: u16 = 468;
+/// `TileID.LandMine` — explodes the instant it is hit, whether by a click or by a circuit reaching
+/// it; it is never itself a thing wired to something else the way a switch is.
+const LAND_MINE: u16 = 210;
 
 /// Whether hitting this trigger flips a remembered state rather than only firing.
 fn flips(block: u16) -> bool {
@@ -104,6 +155,28 @@ pub trait WiredWorld {
     fn set_tile(&mut self, x: i32, y: i32, tile: Tile);
     fn width(&self) -> i32;
     fn height(&self) -> i32;
+
+    /// The world's surface line, in tile `y`. [`actuation_allowed`]'s own Lihzahrd guard reads it
+    /// to decide "below the surface", the same test `DeActive` makes against `Main.worldSurface`.
+    ///
+    /// Defaulted to `0` — every ordinary tile then counts as underground — rather than making
+    /// every implementor supply a real value just to compile. That default is the *protective*
+    /// side of the guard: paired with [`Self::downed_plantera`]'s own default, an implementation
+    /// that does not override either one gets a Lihzahrd wall that can never be actuated away at
+    /// all, which is strictly closer to vanilla than this project's previous behaviour (no guard
+    /// whatsoever) rather than further from it. A real implementation should still override this
+    /// with the world's actual surface line so the guard lifts below it and after Plantera falls.
+    fn surface_y(&self) -> i32 {
+        0
+    }
+
+    /// Whether this world has downed Plantera yet — `NPC.downedPlantBoss` in vanilla.
+    ///
+    /// Defaulted to `false` for the same reason [`Self::surface_y`] is: it is the conservative
+    /// answer, keeping the temple's own walls protected until a real implementation overrides it.
+    fn downed_plantera(&self) -> bool {
+        false
+    }
 }
 
 /// What a circuit changed.
@@ -118,6 +191,30 @@ pub struct Fired {
     /// Kept apart from `traps`: a mine is tile 141, not 137, and detonating is not a shot, so it
     /// cannot go through [`trap_shot`] without that function guessing at a kind that isn't there.
     pub mines: Vec<(i32, i32)>,
+    /// Buried land mines that went off, whether from a direct click or a circuit reaching one.
+    ///
+    /// Kept apart from `mines`: a land mine (tile 210) is a different tile from the wired
+    /// Explosives (141) `mines` reports, has already been cleared from the world by the time it is
+    /// listed here (`ExplodeMine`'s own `KillTile`), and throws a different projectile at a
+    /// different damage — the caller needs to tell the two apart to spawn the right one.
+    pub land_mines: Vec<(i32, i32)>,
+    /// Doors the current reached, whichever of their tiles it happened to touch — for the caller
+    /// to resolve into `doors::open`/`doors::close`, exactly as a click does (`Wiring.cs:1464-
+    /// 1491`), a shut one picking a random swing side and a closing one always forced.
+    pub doors: Vec<(i32, i32)>,
+    /// Trapdoors the current reached (`Wiring.cs:1443-1456`, `WorldGen.ShiftTrapdoor`).
+    ///
+    /// Reported rather than resolved here: shifting one is a real animation — it moves between a
+    /// vertical and a horizontal two-tile form depending on which side has room, and kills a
+    /// cuttable plant in the way rather than refusing — and porting that whole mechanism is not
+    /// part of this fix. Left for a caller that has it.
+    pub trapdoors: Vec<(i32, i32)>,
+    /// Tall gates the current reached (`Wiring.cs:1457-1463`, `WorldGen.ShiftTallGate`).
+    ///
+    /// Reported for the same reason `trapdoors` is: shifting one is real domain logic (a three-
+    /// tile column swapping type, refused unforced while anything occupies it) that has not been
+    /// ported, not something this flood can resolve on its own.
+    pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
     /// The first two distinct teleporters the current reached, which are the pair it joins.
@@ -162,6 +259,25 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         return out;
     }
 
+    // A land mine explodes the instant it is hit — `ExplodeMine` (`Wiring.cs:3087`), which is a
+    // `KillTile` and a projectile, not a circuit. No wire is involved when it is clicked directly,
+    // so this returns before ever reaching `run_from`.
+    if tile.block == LAND_MINE {
+        world.set_tile(x, y, Tile::AIR);
+        out.changed.push((x, y));
+        out.land_mines.push((x, y));
+        return out;
+    }
+
+    // A geyser trap fires the instant it is hit too (`GeyserTrap`, called directly from
+    // `HitSwitch`'s own `case 443`) — reported the same way a wire reaching one is (`act`'s own
+    // `TRAPS | GEYSER` case), so the caller's cooldown and projectile logic does not need to know
+    // which path found it.
+    if tile.block == GEYSER {
+        out.traps.push((x, y));
+        return out;
+    }
+
     // A timer hit by hand is only switched on or off. It does not run its circuit there and then
     // — that is what it will do on its own, on its own schedule, from now on.
     if tile.block == TIMER {
@@ -185,6 +301,35 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
         out.changed.push((x, y));
     }
 
+    // A Lever or a Detonator is two tiles wide and remembers its own state in `frameX`, both
+    // cells of it, rather than in `frameY` the way a Switch does. `Wiring.cs:345-377`: find the
+    // pair's own anchor from whichever half was clicked, flip every cell of it that is really a
+    // Lever or a Detonator (the 2x2 scan can land on a neighbour that is neither), and flood from
+    // the pair rather than from the tile the player happened to click.
+    if matches!(tile.block, LEVER | DETONATOR) {
+        let (ax, ay, delta) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
+        for k in ax..ax + 2 {
+            for l in ay..ay + 2 {
+                let mut cell = world.tile(k, l);
+                if matches!(cell.block, LEVER | DETONATOR) {
+                    cell.frame_x += delta;
+                    world.set_tile(k, l, cell);
+                    out.changed.push((k, l));
+                }
+            }
+        }
+        run_from(world, ax, ay, 2, 2, &mut out);
+        return out;
+    }
+
+    // A trapped chest is found the same way a Lever is, but nothing about the chest changes —
+    // `Wiring.cs:312-325` only ever floods from its real footprint.
+    if matches!(tile.block, FAKE_CONTAINER | FAKE_CONTAINER2) {
+        let (ax, ay, _) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
+        run_from(world, ax, ay, 2, 2, &mut out);
+        return out;
+    }
+
     // A Party Monolith has no frame of its own to flip — the toggle is the world-level state a
     // direct click reaches immediately, matching `Player.cs`'s own click branch rather than
     // needing the flood below to reach it the way a wire-triggered one does.
@@ -195,6 +340,31 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
     let (w, h) = footprint(tile.block);
     run_from(world, x, y, w, h, &mut out);
     out
+}
+
+/// Find a Lever's, a Detonator's or a trapped chest's real footprint from whichever cell of it was
+/// clicked, and — for the two that flip a frame — which way to flip it.
+///
+/// `Wiring.cs`'s own formula (`345-359` for the Lever/Detonator pair, `312-322` for a trapped
+/// chest, identical but for the frame-flip step the chest never does): the clicked cell's own
+/// column within the pair falls out of `frameX / 18`, taken negative and wrapped to `-1..=0` by a
+/// modulo 4 that never actually reaches 4 in practice — a real two-column sprite only ever stores
+/// `frameX` of `0`, `18` (off) or `36`, `54` (on) — so this recovers "which half" and "off or on"
+/// in the same step: a clicked right-hand cell (`frameX` `18`/`54`) yields `-1`, wrapping the
+/// anchor one tile left; a clicked "on" cell (`frameX` `36`/`54`) yields `-2`/`-3`, which the
+/// `< -1` branch corrects back to `0`/`-1` while also flipping the flip direction negative, so a
+/// second click turns the pair back off. The row offset has no such wrap: a chest or a Detonator
+/// with a second row stacked underneath needs only the plain `frameY / 18`.
+fn switch_anchor(frame_x: i16, frame_y: i16, x: i32, y: i32) -> (i32, i32, i16) {
+    let mut dx = -(i32::from(frame_x) / 18);
+    let mut delta: i16 = 36;
+    dx %= 4;
+    if dx < -1 {
+        dx += 2;
+        delta = -36;
+    }
+    let dy = -(i32::from(frame_y) / 18);
+    (x + dx, y + dy, delta)
 }
 
 /// Run whatever is connected to a tile, without it having to be something a player can hit.
@@ -241,12 +411,32 @@ fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &m
     }
 }
 
+/// The four directions a step of the flood can take, numbered the way vanilla's own `HitWire`
+/// does (`Wiring.cs:863-885`): `0` down, `1` up, `2` right, `3` left. The numbering itself is
+/// only meaningful to [`junction_lets_through`] — nothing else here cares which number is which,
+/// only that leaving in direction `k` and arriving from it are the same `k`.
+const STEP: [(i32, i32); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
 /// Flood the current outward from a set of seeds and act on everything it reaches.
+///
+/// Every step remembers which of the four directions it *arrived* by, not just where it is — a
+/// junction box's own frame decides which of the four is allowed to leave again, and without that
+/// the box cannot do the one thing it exists for (see [`junction_lets_through`]).
+///
+/// **Simplified relative to vanilla's own flood**, and worth knowing about: `HitWire` tracks a
+/// reference count per tile (`_toProcess`) that lets a tile already queued be reached again from a
+/// second direction before it is finally visited, which matters for exactly how a wire diamond or
+/// a loop back into a junction box settles. This keeps the simpler model the rest of the module
+/// already used before junction boxes existed — a tile visited once by any direction is not
+/// revisited by another — which is right for what a junction box is *for* (keeping two ordinary
+/// crossing runs apart) and does not attempt the rarer shapes vanilla's ref-counting also handles.
 fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: &mut Fired) {
     let mut seen: HashSet<(i32, i32)> = seeds.iter().copied().collect();
-    let mut queue: Vec<(i32, i32)> = seeds;
+    // Every seed is treated as having "arrived" from direction 0, exactly as vanilla's own
+    // `_wireDirectionList.PushBack(0)` seeds every tile the flood starts from.
+    let mut queue: Vec<(i32, i32, u8)> = seeds.into_iter().map(|(x, y)| (x, y, 0)).collect();
 
-    while let Some((x, y)) = queue.pop() {
+    while let Some((x, y, arrived_via)) = queue.pop() {
         if seen.len() > MAX_CIRCUIT {
             out.truncated = true;
             break;
@@ -254,7 +444,16 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
         out.reached += 1;
         act(world, x, y, out);
 
-        for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+        // A junction box is never itself acted on (no case for it in `act`), so its frame here is
+        // still whatever it was before the line above.
+        let here = world.tile(x, y);
+        for (leaving_via, &(dx, dy)) in STEP.iter().enumerate() {
+            let leaving_via = leaving_via as u8;
+            if here.block == JUNCTION_BOX
+                && !junction_lets_through(here.frame_x, arrived_via, leaving_via)
+            {
+                continue;
+            }
             let (nx, ny) = (x + dx, y + dy);
             if nx < 2 || ny < 2 || nx >= world.width() - 2 || ny >= world.height() - 2 {
                 continue;
@@ -262,8 +461,40 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
             if !colour.on(world.tile(nx, ny)) || !seen.insert((nx, ny)) {
                 continue;
             }
-            queue.push((nx, ny));
+            queue.push((nx, ny, leaving_via));
         }
+    }
+}
+
+/// The junction box, `TileID.WirePipe` (`424`). Its three frame styles are three different pairs
+/// of sides wired together, which is what lets two circuits cross the same tile without merging
+/// into one — the whole reason anybody places one. Before this the flood had no notion of it at
+/// all, so a junction box was simply open ground: every wire crossing through the same tile joined
+/// into a single circuit, which is the opposite of what the piece is for.
+const JUNCTION_BOX: u16 = 424;
+
+/// Whether current arriving at a junction box from `arrived_via` may leave again via
+/// `leaving_via` — transcribed from `Wiring.cs:900-928`'s own three-armed `switch` on
+/// `frameX / 18`.
+///
+/// Style 0 (the straight frame) only ever lets current leave the way it was already travelling, so
+/// a vertical run and a horizontal run cross the same tile without touching each other. Styles 1
+/// and 2 are the two elbow frames: each is a pair of turns that, again, do not touch each other —
+/// style 1 pairs *down* with *left* and *up* with *right*; style 2 pairs *down* with *right* and
+/// *up* with *left*. A style outside 0..=2 (there is none in the real game, but a frame is just a
+/// number) lets everything through rather than trapping a circuit that reaches it.
+fn junction_lets_through(frame_x: i16, arrived_via: u8, leaving_via: u8) -> bool {
+    match frame_x / 18 {
+        0 => leaving_via == arrived_via,
+        1 => matches!(
+            (arrived_via, leaving_via),
+            (0, 3) | (3, 0) | (1, 2) | (2, 1)
+        ),
+        2 => matches!(
+            (arrived_via, leaving_via),
+            (0, 2) | (2, 0) | (1, 3) | (3, 1)
+        ),
+        _ => true,
     }
 }
 
@@ -360,7 +591,15 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     }
     // An actuator toggles its block between solid and passable. It runs whether or not the block
     // is active, which is the only way a block that has been actuated away can ever come back.
-    if tile.flags.has(TileFlags::ACTUATOR) {
+    //
+    // Coming *back* (`ReActive`, `Wiring.cs:3238-3246`) has no guard at all in vanilla — it is
+    // going the other way, hiding a solid block (`DeActive`, `3208-3236`), that is refused for a
+    // handful of reasons; see [`actuation_allowed`]. Without this an actuator on a Lihzahrd temple
+    // wall let a player walk in before Plantera the way the boss is meant to gate, and an
+    // actuator on a door/gate/track/golf-hole did something vanilla never lets it do at all.
+    if tile.flags.has(TileFlags::ACTUATOR)
+        && (tile.flags.has(TileFlags::ACTUATED) || actuation_allowed(world, y, tile))
+    {
         let mut toggled = tile;
         toggled
             .flags
@@ -373,6 +612,79 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     }
     if tile.is_active() && tile.block == EXPLOSIVES {
         out.mines.push((x, y));
+    }
+    // A land mine a circuit reaches explodes exactly as one that is clicked directly does
+    // (`Wiring.cs`'s own per-tile dispatch, `case 210: ExplodeMine(i, j);` — the same call
+    // `hit_switch`'s own `LAND_MINE` case makes).
+    if tile.is_active() && tile.block == LAND_MINE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        world.set_tile(x, y, Tile::AIR);
+        out.changed.push((x, y));
+        out.land_mines.push((x, y));
+        return;
+    }
+    // A conveyor belt swaps direction — `Wiring.cs:1017-1032`'s own `case 421`/`case 422`, a plain
+    // type swap with no frame or anchor math at all. Vanilla skips the swap while the belt also
+    // carries an actuator; this project's own actuator toggle above already ran this tick, so
+    // `ACTUATOR` here means exactly what vanilla's guard checks.
+    if tile.is_active() && matches!(tile.block, CONVEYOR_LEFT | CONVEYOR_RIGHT) {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        if !tile.flags.has(TileFlags::ACTUATOR) {
+            let mut flipped = tile;
+            flipped.block = if tile.block == CONVEYOR_LEFT {
+                CONVEYOR_RIGHT
+            } else {
+                CONVEYOR_LEFT
+            };
+            world.set_tile(x, y, flipped);
+            out.changed.push((x, y));
+        }
+        return;
+    }
+    // Active Stone Block hides itself; Inactive Stone Block always comes back solid —
+    // `Wiring.cs:1426-1442`. Vanilla also refuses to hide a block whose absence would leave
+    // something above it unsupported (`CanKillTile`, and a `PreventsActuationUnder` check on the
+    // tile directly above); this project has neither piece of machinery yet, so it only checks
+    // that there is *something* above to stand on, which is the common case that check exists for.
+    if tile.is_active() && tile.block == ACTIVE_STONE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        if world.tile(x, y - 1).is_active() {
+            let mut hidden = tile;
+            hidden.block = INACTIVE_STONE;
+            world.set_tile(x, y, hidden);
+            out.changed.push((x, y));
+        }
+        return;
+    }
+    if tile.is_active() && tile.block == INACTIVE_STONE {
+        if !out.skipped.insert((x, y)) {
+            return;
+        }
+        let mut shown = tile;
+        shown.block = ACTIVE_STONE;
+        world.set_tile(x, y, shown);
+        out.changed.push((x, y));
+        return;
+    }
+    // Doors, trapdoors and tall gates all change the *shape* of the world, not merely a frame —
+    // opening a shut door replaces one tile column with two, for instance — which needs the real
+    // functions this project already has for doors (`doors::open`/`doors::close`) or, for
+    // trapdoors and tall gates, functions nobody has ported yet. Either way that is not something
+    // a generic `WiredWorld` can resolve on the spot, so these are reported for the caller.
+    if tile.is_active() && matches!(tile.block, DOOR_CLOSED | DOOR_OPEN) {
+        out.doors.push((x, y));
+    }
+    if tile.is_active() && matches!(tile.block, TRAPDOOR_CLOSED | TRAPDOOR_OPEN) {
+        out.trapdoors.push((x, y));
+    }
+    if tile.is_active() && matches!(tile.block, TALL_GATE_CLOSED | TALL_GATE_OPEN) {
+        out.gates.push((x, y));
     }
     if tile.is_active() && tile.block == TELEPORTER {
         // A teleporter is three tiles wide and the anchor is its left one. Only the first two
@@ -425,6 +737,64 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
             out.statues.push(anchor);
         }
     }
+}
+
+/// `TileID.Conveyorbelt` and its reverse — swapped for each other on a wire signal.
+const CONVEYOR_LEFT: u16 = 421;
+const CONVEYOR_RIGHT: u16 = 422;
+/// `TileID.ActiveStoneBlock`, visible and solid.
+const ACTIVE_STONE: u16 = 130;
+/// `TileID.InactiveStoneBlock`, invisible and passable until a signal brings it back.
+const INACTIVE_STONE: u16 = 131;
+/// `TileID.Trapdoor` and its open form — see [`Fired::trapdoors`] for why these are only
+/// detected, not resolved, here.
+const TRAPDOOR_CLOSED: u16 = 386;
+const TRAPDOOR_OPEN: u16 = 387;
+/// `TileID.TallGateClosed`/`TallGateOpen` — see [`Fired::gates`] for the same reason.
+const TALL_GATE_CLOSED: u16 = 388;
+const TALL_GATE_OPEN: u16 = 389;
+/// `TileID.LihzahrdBrick` — the temple's own walls, which `actuation_allowed` refuses to actuate
+/// away before Plantera falls while still underground, exactly as `DeActive` does.
+const LIHZAHRD_BRICK: u16 = 226;
+/// `TileID.Bubble` — a decorative water/lava bubble; listed in `DeActive`'s own exclusion switch
+/// even though it is not in `Main.tileSolid` to begin with, so excluding it here changes nothing
+/// in practice but matches the source line for line.
+const BUBBLE: u16 = 379;
+/// `TileID.GolfHole` — also one of `DeActive`'s excluded types, and already one of [`is_trigger`]'s
+/// own (a golf hole is hit directly to sink a ball, unrelated to this).
+const GOLF_HOLE: u16 = 476;
+
+/// Whether a solid tile with an actuator on it may be hidden — `Wiring.cs:3208-3236`'s own
+/// `DeActive`, minus the two pieces this project has no equivalent of yet (`WorldGen.CanKillTile`
+/// and `TileID.Sets.PreventsActuationUnder`, both about whether removing *this* tile would strand
+/// something built on top of it — narrower checks than "is there solid ground" and not modelled
+/// here, which is a real simplification, not an oversight: everything a manually-placed actuator
+/// contraption cares about is covered by the checks that are here).
+///
+/// Coming back the other way (hidden to solid) has none of these guards in vanilla — `ReActive`
+/// is unconditional — so this is only ever consulted before hiding a tile, never before showing
+/// one again.
+fn actuation_allowed(world: &impl WiredWorld, y: i32, tile: Tile) -> bool {
+    // The temple's own walls cannot be actuated away before Plantera is down, while still
+    // underground — the one thing standing between an early visit and the boss meant to gate it.
+    if tile.block == LIHZAHRD_BRICK && y > world.surface_y() && !world.downed_plantera() {
+        return false;
+    }
+    // A handful of types are never actuatable at all, whatever `tile_solid` says about them.
+    if matches!(
+        tile.block,
+        MINECART_TRACK
+            | BUBBLE
+            | TRAPDOOR_CLOSED
+            | TRAPDOOR_OPEN
+            | TALL_GATE_CLOSED
+            | TALL_GATE_OPEN
+            | GOLF_HOLE
+    ) {
+        return false;
+    }
+    // Everything else has to actually be solid to have anything to hide.
+    terrustia_proto::tile_solid::solid(tile.block)
 }
 
 /// The tile every dart, flame, spear and spiky-ball trap is a frame of.
@@ -955,6 +1325,98 @@ mod tests {
         );
     }
 
+    /// An actuator cannot hide a Lihzahrd temple wall before Plantera is down, while it is still
+    /// underground — `DeActive`'s own guard (`Wiring.cs:3210`), which stands between an early
+    /// temple visit and the boss meant to gate it.
+    ///
+    /// Fails before the fix: the actuator toggle had no guard at all, so it hid the wall the very
+    /// first hit — a `Board` (this test's `WiredWorld`) never overrides `surface_y`/
+    /// `downed_plantera`, so it gets the trait's own conservative defaults, exactly like a real
+    /// implementation would before being wired up to the world's actual state.
+    #[test]
+    fn an_actuator_cannot_hide_lihzahrd_brick_pre_plantera() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut wall = wired(LIHZAHRD_BRICK, Wire::Red);
+        wall.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, wall);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(
+            !board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the wall should still be solid"
+        );
+    }
+
+    /// An actuator on something that is not solid to begin with — a torch, here — has nothing to
+    /// hide, and `DeActive`'s own `flag` computation (`tileSolid && !NotReallySolid`) never lets
+    /// it try.
+    #[test]
+    fn an_actuator_on_a_non_solid_tile_does_nothing() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut torch = wired(4, Wire::Red); // torch: not in the solid set.
+        torch.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, torch);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// A minecart track is one of `DeActive`'s explicit exclusions — never actuatable, whatever
+    /// `tile_solid` says about the type.
+    #[test]
+    fn an_actuator_on_a_minecart_track_does_nothing() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut track = wired(MINECART_TRACK, Wire::Red);
+        track.frame_x = 1;
+        track.frame_y = -1;
+        track.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, track);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// Coming back the other way has no guard at all — an already-hidden tile always returns to
+    /// solid, exactly the asymmetry `ReActive` has and `DeActive` does not.
+    #[test]
+    fn an_already_hidden_tile_always_reactivates() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut wall = wired(LIHZAHRD_BRICK, Wire::Red);
+        wall.flags.set(TileFlags::ACTUATOR, true);
+        wall.flags.set(TileFlags::ACTUATED, true); // already hidden
+        board.set_tile(105, 100, wall);
+
+        hit_switch(&mut board, 100, 100);
+        assert!(
+            !board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "should have come back solid with no guard to stop it"
+        );
+    }
+
     /// A lever remembers which way it is thrown.
     #[test]
     fn a_lever_flips() {
@@ -1202,6 +1664,141 @@ mod tests {
         assert!(board.tile(100, 101).flags.has(TileFlags::ACTUATED), "blue");
     }
 
+    /// A real Lever (`TileID.Lever`, 132) is two tiles wide and flips *both* halves of its own
+    /// frame before flooding from the pair — `Wiring.cs:345-377`, a different mechanism from the
+    /// single-tile `frameY` flip a Switch (136) uses.
+    ///
+    /// Fails on the code before this fix: `is_trigger` did not recognise 132 at all, so
+    /// `hit_switch` returned immediately without touching the lever's frame or the actuator it is
+    /// wired to — "a Lever currently does NOTHING", as the audit finding put it.
+    #[test]
+    fn a_lever_flips_both_halves_and_actuates() {
+        let mut board = Board(HashMap::new());
+        let mut left = Tile::framed(LEVER, 0, 0);
+        left.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(100, 100, left);
+        let mut right = Tile::framed(LEVER, 18, 0);
+        right.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(101, 100, right);
+        for x in 102..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, actuated(Wire::Red));
+
+        // Click the right-hand half; the anchor should still be found at the left one.
+        hit_switch(&mut board, 101, 100);
+        assert_eq!(board.tile(100, 100).frame_x, 36, "left half flipped on");
+        assert_eq!(board.tile(101, 100).frame_x, 54, "right half flipped on");
+        assert!(
+            board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the circuit it starts should have run"
+        );
+
+        // Click it again, from the same half, and it flips back off.
+        hit_switch(&mut board, 101, 100);
+        assert_eq!(board.tile(100, 100).frame_x, 0);
+        assert_eq!(board.tile(101, 100).frame_x, 18);
+        assert!(!board.tile(105, 100).flags.has(TileFlags::ACTUATED));
+    }
+
+    /// A land mine explodes the instant it is hit — `ExplodeMine` — rather than flooding a
+    /// circuit: no wire is involved at all when it is clicked directly.
+    ///
+    /// Fails before the fix: 210 was not in `is_trigger`, so hitting a buried land mine did
+    /// nothing.
+    #[test]
+    fn a_land_mine_explodes_on_a_direct_hit() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, Tile::framed(LAND_MINE, 0, 0));
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.land_mines, vec![(100, 100)]);
+        assert!(!board.tile(100, 100).is_active(), "the mine tile is gone");
+        assert!(fired.reached == 0, "no circuit ran for it");
+    }
+
+    /// A land mine a circuit reaches also explodes — `Wiring.cs`'s own per-tile dispatch has a
+    /// `case 210` calling the very same `ExplodeMine`, separate from `HitSwitch`'s direct click.
+    #[test]
+    fn a_land_mine_reached_by_a_circuit_also_explodes() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut mine = Tile::framed(LAND_MINE, 0, 0);
+        mine.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(105, 100, mine);
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.land_mines, vec![(105, 100)]);
+        assert!(!board.tile(105, 100).is_active());
+    }
+
+    /// A geyser trap fires the instant it is hit directly, the same as a land mine — but unlike a
+    /// land mine it is *reported*, not resolved on the spot, exactly the way a wire reaching one
+    /// is (`act`'s own `TRAPS | GEYSER` case), so the caller's cooldown and projectile logic does
+    /// not need to know which path found it.
+    ///
+    /// Fails before the fix: 443 was not in `is_trigger`, so clicking a geyser trap did nothing.
+    #[test]
+    fn a_geyser_fires_on_a_direct_hit() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(300, 400, Tile::framed(GEYSER, 0, 0));
+
+        let fired = hit_switch(&mut board, 300, 400);
+        assert_eq!(fired.traps, vec![(300, 400)]);
+        assert_eq!(
+            board.tile(300, 400).block,
+            GEYSER,
+            "firing it does not change the tile"
+        );
+    }
+
+    /// A trapped chest (`TileID.FakeContainers`) is styled to look like an ordinary one, but
+    /// clicking it finds its real two-by-two footprint and floods from there — `Wiring.cs:312-325`
+    /// — regardless of which of the four cells was actually clicked.
+    ///
+    /// Fails before the fix: 441 was not in `is_trigger`, so clicking a trapped chest did nothing.
+    #[test]
+    fn a_trapped_chest_floods_from_its_real_footprint() {
+        let mut board = Board(HashMap::new());
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                let mut cell = Tile::framed(FAKE_CONTAINER, dx as i16 * 18, dy as i16 * 18);
+                cell.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(100 + dx, 100 + dy, cell);
+            }
+        }
+        for x in 102..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, actuated(Wire::Red));
+
+        // Click the bottom-right cell — the anchor should still be found at the top-left one.
+        let fired = hit_switch(&mut board, 101, 101);
+        assert!(
+            board.tile(105, 100).flags.has(TileFlags::ACTUATED),
+            "the flood should have started from the chest's real anchor"
+        );
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                assert_eq!(
+                    board.tile(100 + dx, 100 + dy).block,
+                    FAKE_CONTAINER,
+                    "the chest itself never changes"
+                );
+            }
+        }
+        assert!(fired.changed.contains(&(105, 100)));
+    }
+
     /// Hitting something that is not a trigger does nothing at all.
     #[test]
     fn only_a_trigger_starts_a_circuit() {
@@ -1225,6 +1822,114 @@ mod tests {
         assert!(
             board.tile(102, 100).flags.has(TileFlags::ACTUATED),
             "the current should have passed through the stone"
+        );
+    }
+
+    /// A straight junction box (frame style 0) lets a horizontal run and a vertical run of the
+    /// *same* colour cross the same tile without joining into one circuit — the whole reason
+    /// anybody places one.
+    ///
+    /// Fails on the code before this fix: with no routing at all, the flood left every direction
+    /// open at the junction box, so hitting either switch actuated *both* blocks instead of only
+    /// the one on its own line.
+    #[test]
+    fn a_straight_junction_box_keeps_two_crossing_circuits_apart() {
+        let mut board = Board(HashMap::new());
+        // A horizontal line: switch A at x=80, through the box at (100,100), to a block at x=120.
+        board.set_tile(80, 100, wired(136, Wire::Red));
+        for x in 81..=120 {
+            if x == 100 {
+                continue;
+            }
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(120, 100, actuated(Wire::Red));
+        // A vertical line: switch B at y=80, through the same box, to a block at y=120.
+        board.set_tile(100, 80, wired(136, Wire::Red));
+        for y in 81..=120 {
+            if y == 100 {
+                continue;
+            }
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        board.set_tile(100, 120, actuated(Wire::Red));
+        // The box itself, straight style, carrying the colour both lines share.
+        let mut junction = wired(JUNCTION_BOX, Wire::Red);
+        junction.frame_x = 0;
+        board.set_tile(100, 100, junction);
+
+        hit_switch(&mut board, 80, 100);
+        assert!(
+            board.tile(120, 100).flags.has(TileFlags::ACTUATED),
+            "switch A's own line should have run"
+        );
+        assert!(
+            !board.tile(100, 120).flags.has(TileFlags::ACTUATED),
+            "but not have leaked into the crossing vertical line"
+        );
+
+        hit_switch(&mut board, 100, 80);
+        assert!(
+            board.tile(100, 120).flags.has(TileFlags::ACTUATED),
+            "switch B's own line should have run"
+        );
+    }
+
+    /// An elbow junction box (frame style 1) connects exactly one pair of sides — arriving from
+    /// above and leaving to the left, here — and nothing else: not straight through, not to the
+    /// opposite elbow.
+    ///
+    /// Fails on the code before this fix, which had no routing at all: the current would have
+    /// reached every one of the three other blocks, not only the one the elbow actually connects.
+    #[test]
+    fn an_elbow_junction_box_connects_only_its_own_pair_of_sides() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 80, wired(136, Wire::Red));
+        for y in 81..100 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        let mut junction = wired(JUNCTION_BOX, Wire::Red);
+        junction.frame_x = 18; // style 1: down pairs with left.
+        board.set_tile(100, 100, junction);
+        // The three sides that should each carry their own separate wire and block: left (the
+        // one this style actually connects to "down"), right, and straight on down.
+        for x in 90..100 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(90, 100, actuated(Wire::Red));
+        for x in 101..110 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(110, 100, actuated(Wire::Red));
+        for y in 101..110 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(100, y, wire);
+        }
+        board.set_tile(100, 110, actuated(Wire::Red));
+
+        hit_switch(&mut board, 100, 80);
+        assert!(
+            board.tile(90, 100).flags.has(TileFlags::ACTUATED),
+            "down should connect to left, the pair this style is"
+        );
+        assert!(
+            !board.tile(110, 100).flags.has(TileFlags::ACTUATED),
+            "but not to right"
+        );
+        assert!(
+            !board.tile(100, 110).flags.has(TileFlags::ACTUATED),
+            "nor straight on down"
         );
     }
 
@@ -1388,6 +2093,102 @@ mod tests {
         let fired = hit_switch(&mut board, 100, 100);
         assert_eq!(fired.mines, vec![(105, 100)]);
         assert!(fired.traps.is_empty(), "a mine is not a trap");
+    }
+
+    /// A conveyor belt reverses direction when a circuit reaches it — `Wiring.cs:1017-1032`'s own
+    /// plain type swap between the two directions.
+    ///
+    /// Fails before the fix: the module doc used to call every tile past the reported ones
+    /// "cosmetic", and the flood genuinely did nothing to a conveyor belt at all.
+    #[test]
+    fn a_conveyor_belt_reverses_direction() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(CONVEYOR_LEFT, Wire::Red));
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_RIGHT);
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_LEFT, "and back again");
+    }
+
+    /// A conveyor belt with an actuator on it does not reverse — vanilla's own guard
+    /// (`!tile.actuator()`) on the swap.
+    #[test]
+    fn an_actuated_conveyor_belt_does_not_reverse() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut belt = wired(CONVEYOR_LEFT, Wire::Red);
+        belt.flags.set(TileFlags::ACTUATOR, true);
+        board.set_tile(105, 100, belt);
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, CONVEYOR_LEFT, "did not reverse");
+    }
+
+    /// Active Stone Block hides itself when a circuit reaches it, so long as there is something
+    /// above it to stand on; Inactive Stone Block always comes back solid — `Wiring.cs:1426-1442`.
+    #[test]
+    fn stone_blocks_hide_and_reappear() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(ACTIVE_STONE, Wire::Red));
+        board.set_tile(105, 99, Tile::block(1)); // something to stand on above it
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, INACTIVE_STONE, "hidden");
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, ACTIVE_STONE, "and back again");
+    }
+
+    /// Doors, trapdoors and tall gates are reported to the caller rather than resolved on the
+    /// spot — they change the world's *shape*, not just a frame, which a generic `WiredWorld`
+    /// cannot do by itself.
+    ///
+    /// Fails before the fix: none of the three was recognised at all, so a wired door, trapdoor or
+    /// gate did nothing — the exact gap the module's own doc used to call "cosmetic" and wave away.
+    #[test]
+    fn doors_trapdoors_and_gates_are_reported() {
+        let mut board = Board(HashMap::new());
+        // Three independent switch-and-target pairs, one per row, so each proves the report on
+        // its own rather than relying on one flood happening to touch all three.
+        for (row, block) in [
+            (100i32, DOOR_CLOSED),
+            (101, TRAPDOOR_CLOSED),
+            (102, TALL_GATE_CLOSED),
+        ] {
+            board.set_tile(90, row, wired(136, Wire::Red));
+            for x in 91..95 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(x, row, wire);
+            }
+            board.set_tile(95, row, wired(block, Wire::Red));
+        }
+
+        let doors = hit_switch(&mut board, 90, 100);
+        assert!(doors.doors.contains(&(95, 100)));
+        let trapdoors = hit_switch(&mut board, 90, 101);
+        assert!(trapdoors.trapdoors.contains(&(95, 101)));
+        let gates = hit_switch(&mut board, 90, 102);
+        assert!(gates.gates.contains(&(95, 102)));
     }
 
     /// A pump moves what the inlet holds into the outlet, up to what the outlet can take.

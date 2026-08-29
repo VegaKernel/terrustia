@@ -24,6 +24,7 @@ use terrustia_proto::npc_params::{
 };
 
 use super::drifters::Outcome;
+use crate::game::ai::sight::within_firing_range;
 use crate::game::ai::{Shot, World, face};
 use crate::game::npc::{Npc, TileView};
 
@@ -135,9 +136,8 @@ pub fn stationary_caster(
     materialises: bool,
 ) -> Outcome {
     let mut out = Outcome::default();
-    if let Some(target) = world.target {
-        face(npc, target);
-    }
+    // Vanilla tracks its target with `faceTarget: false` — it picks whom to shoot at without ever
+    // turning to face them, so its sprite direction is whatever it started as.
     npc.velocity.0 *= CASTER_DRAG;
     if npc.velocity.0.abs() < 0.1 {
         npc.velocity.0 = 0.0;
@@ -162,7 +162,11 @@ pub fn stationary_caster(
     npc.invulnerable = false;
     npc.alpha = 0;
 
-    let has_target = world.target.is_some_and(|t| t.alive);
+    // Nobody in range counts the same as nobody at all: casters do not spend a reload on someone
+    // who could not possibly see the shot coming.
+    let has_target = world
+        .target
+        .is_some_and(|t| t.alive && within_firing_range(npc.center(), t.center));
     // With nobody in sight the timer is held at the bottom of its cooldown, so a caster that loses
     // you does not come back with a shot already charged.
     if npc.ai[0] == 0.0 && !has_target {
@@ -381,6 +385,47 @@ mod tests {
             harried < calm,
             "being hit every tick should stop it casting: {harried} vs {calm}"
         );
+    }
+
+    /// A caster will not fire at someone well beyond a screen away — it is not omniscient.
+    #[test]
+    fn a_caster_does_not_fire_at_someone_off_screen() {
+        let tiles = tiles_with_floor(40);
+        // Comfortably past `AI_GlobalFiringDistanceCheck`'s roughly one-screen box.
+        let w = world(&tiles, Some((5000.0, 0.0)));
+        let mut rng = SmallRng::seed_from_u64(5);
+        let mut c = Npc::new(PIRATE_GHOST, (0.0, 0.0), 1).unwrap();
+        c.ai[0] = 0.0;
+
+        let mut shots = 0;
+        for _ in 0..400 {
+            shots += stationary_caster(&mut c, &w, &mut rng, false).shots.len();
+        }
+        assert_eq!(
+            shots, 0,
+            "nobody within range should ever be hit: {shots} shots"
+        );
+    }
+
+    /// A caster tracks whom to shoot without ever turning to face them — vanilla calls
+    /// `TargetClosest` with `faceTarget: false` for this style.
+    #[test]
+    fn a_caster_does_not_turn_to_face_you() {
+        let tiles = tiles_with_floor(40);
+        let mut c = Npc::new(PIRATE_GHOST, (0.0, 0.0), 1).unwrap();
+        let start_direction = c.direction;
+        let mut rng = SmallRng::seed_from_u64(6);
+
+        let left = world(&tiles, Some((c.center().0 - 300.0, c.center().1)));
+        stationary_caster(&mut c, &left, &mut rng, false);
+        assert_eq!(
+            c.direction, start_direction,
+            "someone to the left should not turn it"
+        );
+
+        let right = world(&tiles, Some((c.center().0 + 300.0, c.center().1)));
+        stationary_caster(&mut c, &right, &mut rng, false);
+        assert_eq!(c.direction, start_direction, "nor someone to the right");
     }
 
     /// A dummy is held up by its tile; take the tile away and it goes.

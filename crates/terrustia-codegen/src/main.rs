@@ -1,0 +1,75 @@
+//! The data-table generator: reads a decompiled Terraria tree and writes the extracted tables in
+//! `crates/terrustia-proto/src/`. One binary replacing the old `tools/gen_*.py` scripts.
+//!
+//! ```text
+//! codegen <table|all> <decompiled-root> [out.rs]
+//! ```
+//!
+//! `<table>` is one of the names in [`TABLES`], or `all` to regenerate every one into its own
+//! default path. `<decompiled-root>` is the directory ilspycmd produced (the same `.scratch/
+//! decompiled` the old scripts took). An explicit `out.rs` overrides the default path for a single
+//! table. Run `just regen` to do them all and `cargo fmt` afterward, exactly as before.
+
+mod csharp;
+mod hurt_tiles;
+mod recipes;
+
+use std::path::{Path, PathBuf};
+
+/// One extractable table: its name on the command line, the file it writes by default, and the
+/// function that turns a decompiled tree into that file's contents.
+struct Table {
+    name: &'static str,
+    out: &'static str,
+    generate: fn(&Path) -> String,
+}
+
+const TABLES: &[Table] = &[
+    Table {
+        name: "hurt_tiles",
+        out: "crates/terrustia-proto/src/hurt_tiles.rs",
+        generate: hurt_tiles::generate,
+    },
+    Table {
+        name: "recipes",
+        out: "crates/terrustia-proto/src/recipes.rs",
+        generate: recipes::generate,
+    },
+];
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 {
+        eprintln!("usage: codegen <table|all> <decompiled-root> [out.rs]");
+        eprintln!(
+            "tables: {}",
+            TABLES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
+        );
+        std::process::exit(2);
+    }
+    let which = &args[1];
+    let root = PathBuf::from(&args[2]);
+
+    let run = |table: &Table, out: &Path| {
+        let content = (table.generate)(&root);
+        if let Err(e) = std::fs::write(out, content) {
+            eprintln!("write {}: {e}", out.display());
+            std::process::exit(1);
+        }
+        eprintln!("wrote {}", out.display());
+    };
+
+    if which == "all" {
+        for table in TABLES {
+            run(table, Path::new(table.out));
+        }
+    } else if let Some(table) = TABLES.iter().find(|t| t.name == *which) {
+        let out = args
+            .get(3)
+            .map_or_else(|| PathBuf::from(table.out), PathBuf::from);
+        run(table, &out);
+    } else {
+        eprintln!("unknown table {which:?}");
+        std::process::exit(2);
+    }
+}

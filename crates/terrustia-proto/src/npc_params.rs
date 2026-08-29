@@ -1782,8 +1782,16 @@ pub const SKELETRON_SPIN_TICKS: f32 = 400.0;
 pub const SKELETRON_HOVER_ABOVE: f32 = 250.0;
 /// Hover steering: (vertical accel, vertical cap, horizontal accel, horizontal cap).
 pub const SKELETRON_HOVER: (f32, f32, f32, f32) = (0.02, 2.0, 0.05, 8.0);
-/// How fast it charges while spinning, and how fast it spins.
+/// How fast it charges while spinning, and how fast it spins. Expert mode raises the charge
+/// speed to 3.5 and then keeps adding 10% for every 50px of range beyond 150, up to 600
+/// (`NPC.cs:22284-22341`), which is what `SKELETRON_SPIN_SPEED_EXPERT_RANGE` encodes.
 pub const SKELETRON_SPIN_SPEED: f32 = 1.5;
+pub const SKELETRON_SPIN_SPEED_EXPERT: f32 = 3.5;
+/// Range thresholds (in pixels) beyond which the expert charge speed picks up another 10%.
+pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE: [f32; 10] = [
+    150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0,
+];
+pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR: f32 = 1.1;
 pub const SKELETRON_SPIN_RATE: f32 = 0.3;
 /// How much of its defence it drops while spinning — the window the fight gives you.
 pub const SKELETRON_SPIN_DEFENSE: i32 = 10;
@@ -1792,6 +1800,22 @@ pub const SKELETRON_ENRAGED_SPEED: f32 = 8.0;
 pub const SKELETRON_ENRAGED_STAT: i32 = 9999;
 /// Beyond this on either axis it gives up.
 pub const SKELETRON_GIVE_UP: f32 = 2000.0;
+
+/// Expert mode: each living hand adds this much defence to the head, and once fewer than two
+/// hands are left (or the head has dropped under three quarters health) it starts throwing a
+/// skull barrage while it hovers (`NPC.cs:22059-22114`).
+pub const SKELETRON_EXPERT_HAND_DEFENSE: i32 = 25;
+pub const SKELETRON_BARRAGE_HANDS_THRESHOLD: usize = 2;
+pub const SKELETRON_BARRAGE_HEALTH_AT: f32 = 0.75;
+/// The barrage fires every eighty ticks, or forty once every hand is dead.
+pub const SKELETRON_BARRAGE_INTERVAL: f32 = 80.0;
+pub const SKELETRON_BARRAGE_INTERVAL_NO_HANDS: f32 = 40.0;
+pub const SKELETRON_BARRAGE: u16 = 270;
+pub const SKELETRON_BARRAGE_DAMAGE: i32 = 17;
+/// Its speed, faster still with no hands left to soak hits for it.
+pub const SKELETRON_BARRAGE_SPEED: f32 = 3.0;
+pub const SKELETRON_BARRAGE_SPEED_NO_HANDS: f32 = 5.0;
+pub const SKELETRON_BARRAGE_JITTER: i32 = 50;
 
 /// Where a hand docks relative to the head while the head is hovering, and while it is not.
 pub const HAND_DOCK_HIGH: (f32, f32) = (120.0, -100.0);
@@ -2078,8 +2102,11 @@ pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
 pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
 pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
 
-/// How long a Mothron egg takes to hatch, and what it hatches into.
+/// How long a Mothron egg takes to hatch, and what it hatches into. Expert Mode halves the wait
+/// (but also only sets it back once when hit, rather than twice — the two together are not as
+/// lopsided a change as the raw tick counts alone suggest).
 pub const MOTHRON_EGG_TICKS: f32 = 900.0;
+pub const MOTHRON_EGG_TICKS_EXPERT: f32 = 600.0;
 pub const MOTHRON_SPAWN: u16 = 479;
 
 /// How long a stardust cell takes to grow up, and what into.
@@ -2965,9 +2992,11 @@ pub const TOWER_COLLAPSE_EASE: f32 = 0.02;
 
 /// It will not lay more than this many eggs and spawn at once.
 pub const MOTHRON_BROOD: usize = 7;
-/// The egg it lays, and the spawn that hatches from it.
-pub const MOTHRON_EGG: u16 = 470;
-pub const MOTHRON_SPAWN_TYPE: u16 = 471;
+/// The egg it lays, and the spawn that hatches from it. NPCID: MothronEgg=478, MothronSpawn=479.
+/// These were previously 470/471 — CrimsonPenguin and GoblinSummoner — so during an eclipse Mothron
+/// laid Crimson Penguins and the brood census counted the wrong types.
+pub const MOTHRON_EGG: u16 = 478;
+pub const MOTHRON_SPAWN_TYPE: u16 = 479;
 /// Hovering: it holds two hundred pixels above you and picks an attack every three seconds.
 pub const MOTHRON_ABOVE: f32 = 200.0;
 pub const MOTHRON_HOVER_SPEED: f32 = 6.0;
@@ -3007,6 +3036,22 @@ pub const MOTHRON_SWEEP_PAST: f32 = 260.0;
 /// Where it will lay: within this many tiles of you, on a floor, and not in lava.
 pub const MOTHRON_LAY_RANGE_X: i32 = 30;
 pub const MOTHRON_LAY_RANGE_Y: i32 = 20;
+/// Laying is not instant: it has to fly down to the spot it picked first, easing toward it a
+/// tenth of the way each tick and never faster than the cap.
+pub const MOTHRON_LAY_SPEED_BASE: f32 = 6.0;
+pub const MOTHRON_LAY_SPEED_GAIN: f32 = 150.0;
+pub const MOTHRON_LAY_SPEED_CAP: f32 = 10.0;
+/// How close counts as arrived, for the flight down and then the hover once there.
+pub const MOTHRON_LAY_ARRIVE: f32 = 10.0;
+pub const MOTHRON_SETTLE_ARRIVE: f32 = 4.0;
+pub const MOTHRON_SETTLE_SPEED_CAP: f32 = 4.0;
+/// Once settled it hovers over the spot for this long before the egg actually appears, and the
+/// same again after that before it goes back to hovering — halved in Expert Mode.
+pub const MOTHRON_SETTLE_WAIT: f32 = 70.0;
+pub const MOTHRON_SETTLE_WAIT_EXPERT: f32 = 52.0;
+/// The odds, out of three, that a Mothron with room left in its brood goes straight back down to
+/// lay another egg rather than returning to its hover.
+pub const MOTHRON_RELAY_ODDS: u32 = 3;
 
 // --- The Twins ------------------------------------------------------------------------------------
 
@@ -3027,15 +3072,27 @@ pub struct Twin {
     pub dash_ticks: f32,
     pub dash_brake_at: f32,
     pub dashes: f32,
+    /// The multiplier applied to velocity once braking starts. Retinazer's dash barely bleeds
+    /// speed (0.96); Spazmatism's sheds it much faster (0.9).
+    pub dash_decay: f32,
+    /// Cumulative expert-only speed bumps added to the dash once life drops under each listed
+    /// fraction. Empty for Retinazer, whose dash speed is a flat expert value; Spazmatism's
+    /// climbs from 13 toward ~15.8 as it is worn down (`NPC.cs:27410-27433`).
+    pub dash_speed_ramp: &'static [(f32, f32)],
     /// Its ranged attack in the first form.
     pub shot: u16,
     pub shot_damage: i32,
     pub shot_speed: f32,
     pub shot_speed_expert: f32,
     pub shot_charge: f32,
+    /// How far ahead of the eye the shot is spawned, and how much its aim is scattered.
+    pub shot_lead: f32,
+    pub shot_spread_scale: f32,
     /// Whether it only shoots from above and close, as Retinazer does.
     pub shoots_only_from_above: bool,
-    /// The second form: where it holds, how fast, and what it throws.
+    /// The second form: where it holds, how fast, and what it throws (Retinazer) or breathes
+    /// (Spazmatism's cursed-inferno flame, gated the same way through `second_shot_charge` but
+    /// with a much lower threshold).
     pub second_station: (f32, f32),
     pub second_speed: f32,
     pub second_accel: f32,
@@ -3047,12 +3104,21 @@ pub struct Twin {
     pub second_shot_speed: f32,
     pub second_shot_speed_expert: f32,
     pub second_shot_charge: f32,
-    /// The strafing sub-state of the second form.
+    /// The strafing sub-state of Retinazer's second form. Unused by Spazmatism, whose second
+    /// form dashes instead (`second_dash_*` below).
     pub strafe_offset: f32,
     pub strafe_speed: f32,
     pub strafe_accel: f32,
     pub strafe_speed_expert: f32,
     pub strafe_accel_expert: f32,
+    /// Spazmatism's second-form dash: structurally the same loop as the first form's, but with
+    /// its own speed, timing and decay (`NPC.cs:27733-27795`). Zero and unused for Retinazer.
+    pub second_dash_speed: f32,
+    pub second_dash_speed_expert: f32,
+    pub second_dash_ticks: f32,
+    pub second_dash_brake_at: f32,
+    pub second_dash_decay: f32,
+    pub second_dashes: f32,
 }
 
 pub const RETINAZER: u16 = 125;
@@ -3065,16 +3131,22 @@ pub const RETINAZER_TWIN: Twin = Twin {
     speed_expert: 8.25,
     accel_expert: 0.115,
     hover_ticks: 600.0,
-    dash_speed: 14.0,
-    dash_speed_expert: 17.0,
+    // 12/15, not 14/17: the +2 only applies under getGoodWorld (`NPC.cs:26806-26814`), which is
+    // out of scope here.
+    dash_speed: 12.0,
+    dash_speed_expert: 15.0,
     dash_ticks: 70.0,
     dash_brake_at: 25.0,
     dashes: 4.0,
+    dash_decay: 0.96,
+    dash_speed_ramp: &[],
     shot: 83,
     shot_damage: 20,
     shot_speed: 9.0,
     shot_speed_expert: 10.5,
     shot_charge: 60.0,
+    shot_lead: 15.0,
+    shot_spread_scale: 0.08,
     shoots_only_from_above: true,
     second_station: (0.0, -300.0),
     second_speed: 8.0,
@@ -3092,42 +3164,69 @@ pub const RETINAZER_TWIN: Twin = Twin {
     strafe_accel: 0.2,
     strafe_speed_expert: 9.5,
     strafe_accel_expert: 0.25,
+    second_dash_speed: 0.0,
+    second_dash_speed_expert: 0.0,
+    second_dash_ticks: 0.0,
+    second_dash_brake_at: 0.0,
+    second_dash_decay: 0.0,
+    second_dashes: 0.0,
 };
 
 pub const SPAZMATISM_TWIN: Twin = Twin {
+    // Holds level with the player at 400px, not above (`NPC.cs:27289-27291`).
     station: (400.0, 0.0),
     speed: 12.0,
     accel: 0.4,
     speed_expert: 12.0,
     accel_expert: 0.4,
     hover_ticks: 600.0,
-    dash_speed: 14.0,
-    dash_speed_expert: 17.0,
-    dash_ticks: 70.0,
-    dash_brake_at: 25.0,
-    dashes: 4.0,
+    // Its own dash, not Retinazer's: 10 short 42-tick dashes braking hard at tick 8, decaying
+    // 0.9/tick, base speed 13 climbing toward ~15.8 in expert as it takes damage
+    // (`NPC.cs:27407-27483`).
+    dash_speed: 13.0,
+    dash_speed_expert: 13.0,
+    dash_ticks: 42.0,
+    dash_brake_at: 8.0,
+    dashes: 10.0,
+    dash_decay: 0.9,
+    dash_speed_ramp: &[(0.9, 0.5), (0.8, 0.5), (0.7, 0.55), (0.6, 0.6), (0.5, 0.65)],
     shot: 96,
     shot_damage: 25,
     shot_speed: 12.0,
-    shot_speed_expert: 13.0,
+    shot_speed_expert: 14.0,
     shot_charge: 60.0,
+    shot_lead: 4.0,
+    shot_spread_scale: 0.05,
     shoots_only_from_above: false,
-    second_station: (0.0, -300.0),
-    second_speed: 8.0,
-    second_accel: 0.15,
-    second_speed_expert: 9.5,
-    second_accel_expert: 0.175,
-    second_hover_ticks: 300.0,
+    // Its second form is a close-range flamethrower, not Retinazer's hover-and-throw: station at
+    // player.X +-180 / player.Y, speed 4, cursed-inferno flame (proj 101) gated by
+    // `second_shot_charge` at localAI[1] > 8 instead of 180 — roughly twenty times faster
+    // (`NPC.cs:27558-27732`).
+    second_station: (180.0, 0.0),
+    second_speed: 4.0,
+    second_accel: 0.1,
+    second_speed_expert: 4.0,
+    second_accel_expert: 0.1,
+    second_hover_ticks: 400.0,
     second_shot: 101,
     second_shot_damage: 30,
-    second_shot_speed: 8.5,
-    second_shot_speed_expert: 10.0,
-    second_shot_charge: 180.0,
-    strafe_offset: 340.0,
-    strafe_speed: 8.0,
-    strafe_accel: 0.2,
-    strafe_speed_expert: 9.5,
-    strafe_accel_expert: 0.25,
+    second_shot_speed: 6.0,
+    second_shot_speed_expert: 6.0,
+    second_shot_charge: 8.0,
+    // Unused: Spazmatism's second form dashes instead of strafing.
+    strafe_offset: 0.0,
+    strafe_speed: 0.0,
+    strafe_accel: 0.0,
+    strafe_speed_expert: 0.0,
+    strafe_accel_expert: 0.0,
+    // Six dashes of 80 ticks, braking at 50, decaying 0.93/tick, at 14 (16.5 in expert)
+    // (`NPC.cs:27733-27795`).
+    second_dash_speed: 14.0,
+    second_dash_speed_expert: 16.5,
+    second_dash_ticks: 80.0,
+    second_dash_brake_at: 50.0,
+    second_dash_decay: 0.93,
+    second_dashes: 6.0,
 };
 
 /// Below this fraction of its health an eye transforms.
@@ -3141,10 +3240,10 @@ pub const TWIN_SECOND_DAMAGE: f32 = 1.5;
 pub const TWIN_SECOND_DEFENSE: i32 = 10;
 /// Its first-form shot only comes when it is above you and within this far.
 pub const TWIN_SHOT_RANGE: f32 = 400.0;
-/// Shots are spawned fifteen ticks ahead of the eye, and scattered by this much.
+/// The lead on the second form's heavy throw (both eyes use the same fifteen-tick lead there;
+/// the first-form shot's lead and scatter are per-eye, in the `Twin` table).
 pub const TWIN_SHOT_LEAD: f32 = 15.0;
 pub const TWIN_SHOT_SPREAD: i32 = 40;
-pub const TWIN_SHOT_SPREAD_SCALE: f32 = 0.08;
 /// Daylight sends both of them home.
 pub const TWIN_FLEE_CLIMB: f32 = -0.04;
 
@@ -3186,9 +3285,13 @@ pub const DESTROYER_LASER_LIFE: u16 = 300;
 // --- Skeletron Prime ------------------------------------------------------------------------------
 
 pub const PRIME_HEAD: u16 = 127;
-pub const PRIME_SAW: u16 = 128;
-pub const PRIME_VICE: u16 = 129;
-pub const PRIME_CANNON: u16 = 130;
+// NPCID order (`NPCID.cs`): 128 PrimeCannon, 129 PrimeSaw, 130 PrimeVice, 131 PrimeLaser. These
+// were previously shifted (SAW=128/VICE=129/CANNON=130), which put the bomb-lobbing behavior on
+// the Vice arm and left the real Cannon as a plain melee arm. The head-spawn side list below is
+// written explicitly by arm so it still reproduces vanilla's per-type `ai[0]`.
+pub const PRIME_CANNON: u16 = 128;
+pub const PRIME_SAW: u16 = 129;
+pub const PRIME_VICE: u16 = 130;
 pub const PRIME_LASER: u16 = 131;
 
 /// The head hovers for ten seconds, then spins for six and two thirds, and repeats.
@@ -3345,6 +3448,50 @@ pub const GOLEM_HEAD_CHARGE: f32 = 300.0;
 pub const GOLEM_FIREBALL: u16 = 258;
 pub const GOLEM_FIREBALL_DAMAGE: i32 = 18;
 pub const GOLEM_FIREBALL_SPEED: f32 = 8.0;
+/// Past half health the attached head's fireball hits harder (`NPC.cs:31480`).
+pub const GOLEM_FIREBALL_DAMAGE_UPGRADED: i32 = 24;
+/// The free head's own fireball hits harder still than the attached head's base one
+/// (`NPC.cs:31684`).
+pub const GOLEM_FREE_FIREBALL_DAMAGE: i32 = 20;
+
+/// Eye-lasers. The attached head only grows these past half health, alongside its upgraded
+/// fireball (`NPC.cs:31504-31564`); the free head always has them (`NPC.cs:31736-31801`).
+///
+/// Vanilla's interval is `60 + rand(0..600)` (attached) or `100 + rand(0..4800)` (free), rerolled
+/// every tick until crossed. This module has no source of randomness available to it without
+/// threading one in from outside its lane, so both use the roll's fixed average instead — the
+/// same cadence, without the jitter.
+pub const GOLEM_LASER: u16 = 259;
+pub const GOLEM_LASER_DAMAGE: i32 = 28;
+/// Centred on the player it fires two; off to one side of the body, one.
+pub const GOLEM_LASER_SPEED: f32 = 11.0;
+pub const GOLEM_LASER_SPEED_OFFSIDE: f32 = 12.0;
+/// `60 + 600/2`, plus four more per tick spent unable to see you.
+pub const GOLEM_LASER_INTERVAL: f32 = 360.0;
+pub const GOLEM_LASER_NO_LOS_BONUS: f32 = 4.0;
+
+/// The free head's own laser: a slower cadence that quickens both as it is hurt and while it
+/// cannot see you, and hits harder and faster once badly hurt.
+pub const GOLEM_FREE_LASER_DAMAGE: i32 = 24;
+pub const GOLEM_FREE_LASER_SPEED: f32 = 11.0;
+/// Health fractions (of `life_max`) past which the interval speeds up by one more `pace`.
+pub const GOLEM_FREE_LASER_INTERVAL_STEPS: [f32; 7] = [
+    1.0 / 1.25,
+    1.0 / 1.5,
+    1.0 / 2.0,
+    1.0 / 3.0,
+    1.0 / 4.0,
+    1.0 / 5.0,
+    1.0 / 6.0,
+];
+pub const GOLEM_FREE_LASER_NO_LOS_BONUS: f32 = 10.0;
+/// `100 + 4800/2`.
+pub const GOLEM_FREE_LASER_INTERVAL: f32 = 2500.0;
+/// Health fractions past which each laser hits one harder and a quarter faster.
+pub const GOLEM_FREE_LASER_DAMAGE_STEPS: [f32; 5] = [0.5, 0.4, 0.3, 0.2, 0.1];
+/// Without line of sight, the volley is fired blind but hits much harder and faster.
+pub const GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT: f32 = 1.5;
+pub const GOLEM_FREE_LASER_NO_LOS_SPEED_MULT: f32 = 2.5;
 
 /// A fist: it holds its station, winds up, and punches.
 pub const GOLEM_FIST_RETURN: f32 = 14.0;
@@ -3411,6 +3558,14 @@ pub const PLANTERA_MIX_AT: f32 = 0.8;
 /// The second form: it drops most of its armour, hits far harder, and grows tentacles.
 pub const PLANTERA_SECOND_DEFENSE: i32 = 10;
 pub const PLANTERA_SECOND_DAMAGE: i32 = 70;
+
+/// The second form also spits a Spore at the player every 350 ticks — faster the more it is
+/// hurt, one more tick shaved per threshold crossed at 40/30/20/10% health (`NPC.cs:32277-32315`).
+pub const PLANTERA_SPORE: u16 = 265;
+pub const PLANTERA_SPORE_AT: f32 = 350.0;
+pub const PLANTERA_SPORE_HEALTH_STEPS: [f32; 4] = [0.4, 0.3, 0.2, 0.1];
+pub const PLANTERA_SPORE_SPEED: f32 = 8.0;
+pub const PLANTERA_SPORE_JITTER: i32 = 10;
 
 /// A hook re-anchors somewhere new every five to ten seconds, sooner as Plantera weakens.
 pub const HOOK_REST: (u32, u32) = (300, 600);
@@ -3538,14 +3693,32 @@ pub const FISHRON_EXPERT_PACE: f32 = 1.2;
 /// Where it holds station: three hundred pixels to one side, two hundred above.
 pub const FISHRON_BESIDE: f32 = 300.0;
 pub const FISHRON_ABOVE: f32 = 200.0;
-/// The attack cycle: ten charges, then a sharkron burst, then bubbles, repeating.
+/// The attack cycle: five charges, then a sharkron burst, then bubbles, repeating. Only the
+/// first phase runs this cycle; the second and third use the shorter one below
+/// (`NPC.cs:49624-49646` vs `49889-49907`).
 pub const FISHRON_CYCLE_SHARKRONS: i32 = 10;
 pub const FISHRON_CYCLE_BUBBLES: i32 = 11;
-/// The sharkron burst: one every so many ticks, for this long.
-pub const FISHRON_BURST_TICKS: f32 = 120.0;
-pub const FISHRON_BURST_EVERY: f32 = 20.0;
-pub const FISHRON_BURST_SPEED: f32 = 10.0;
-pub const FISHRON_BURST_ACCEL: f32 = 0.4;
+/// The first phase's burst: it holds station and throws a sharkron every four ticks, for eighty
+/// (`NPC.cs:49354-49357`, `num8`/`num9`/`num10`/`num11` — previously 120/20/10/0.4, roughly a
+/// third the sharkrons vanilla throws).
+pub const FISHRON_BURST_TICKS: f32 = 80.0;
+pub const FISHRON_BURST_EVERY: f32 = 4.0;
+pub const FISHRON_BURST_SPEED: f32 = 5.0;
+pub const FISHRON_BURST_ACCEL: f32 = 0.3;
+
+/// The second and third phases' cycle is three charges to a burst, not five
+/// (`NPC.cs:49889-49907`).
+pub const FISHRON_CYCLE_SHARKRONS_LATER: i32 = 6;
+pub const FISHRON_CYCLE_BUBBLES_LATER: i32 = 7;
+/// Their burst is a different attack entirely: a dash toward the player that curves through the
+/// air for its whole duration, spraying a sharkron out to each side of its own heading every four
+/// ticks instead of holding station (`NPC.cs:49916-50015`).
+pub const FISHRON_BURST_LATER_TICKS: f32 = 120.0;
+pub const FISHRON_BURST_LATER_DASH_SPEED: f32 = 20.0;
+pub const FISHRON_BURST_LATER_SPRAY_EVERY: f32 = 4.0;
+pub const FISHRON_BURST_LATER_SPRAY_SPEED: f32 = 6.0;
+/// How far it turns each tick: a full half-circle spread over the whole burst.
+pub const FISHRON_BURST_LATER_CURVE: f32 = std::f32::consts::TAU / 60.0;
 /// The bubbles: two, thrown from its mouth partway through the wind-up.
 pub const FISHRON_BUBBLE_TICKS: f32 = 90.0;
 pub const FISHRON_BUBBLE_AT: f32 = 30.0;
@@ -3730,6 +3903,44 @@ pub const QUEEN_PACE: [(f32, f32, f32); 4] = [
     (0.25, 0.8, 11.0),
 ];
 
+/// Mode 0's forward mist: fired while above the player and either close or already mid-volley
+/// (`NPC.cs:33751-33796`). The interval already carries vanilla's `+1`; the tick counter here
+/// advances by a flat one a tick rather than vanilla's `rand(1..4)`, since this routine has no
+/// source of randomness available to it without threading one in from outside its lane — the
+/// mode-switch thresholds below inherit the same simplification.
+pub const ICE_QUEEN_MIST: u16 = 348;
+pub const ICE_QUEEN_MIST_DAMAGE: i32 = 42;
+pub const ICE_QUEEN_MIST_INTERVAL: [(f32, f32); 4] =
+    [(1.0, 14.0), (0.75, 13.0), (0.5, 12.0), (0.25, 11.0)];
+pub const ICE_QUEEN_MIST_SPEED: [(f32, f32); 4] =
+    [(1.0, 6.0), (0.75, 7.0), (0.5, 8.0), (0.25, 9.0)];
+pub const ICE_QUEEN_MIST_RANGE: f32 = 500.0;
+
+/// Mode 1: a gentler pursuit that drops ice shards straight down instead of sweeping and firing
+/// forward (`NPC.cs:33811-33919`). Vanilla has a third mode (a random scatter shot) reached the
+/// same way; not implemented here; see `ice_queen`'s doc comment.
+pub const ICE_QUEEN_SHARD: u16 = 349;
+pub const ICE_QUEEN_SHARD_DAMAGE: i32 = 37;
+/// (accel, cap) — already carrying vanilla's flat `-0.05`/`-1` adjustments.
+pub const ICE_QUEEN_MODE2_PACE: [(f32, f32, f32); 4] = [
+    (1.0, 0.10, 6.0),
+    (0.75, 0.12, 7.0),
+    (0.5, 0.15, 8.0),
+    (0.25, 0.20, 9.0),
+];
+/// The shard interval, already carrying vanilla's flat `+3`.
+pub const ICE_QUEEN_SHARD_INTERVAL: [(f32, f32); 5] = [
+    (1.0, 18.0),
+    (0.75, 17.0),
+    (0.5, 15.0),
+    (0.25, 13.0),
+    (0.1, 11.0),
+];
+
+/// How long each mode runs before switching to the other (`NPC.cs:33804-33805`, `33913-33917`).
+pub const ICE_QUEEN_MODE0_AT: f32 = 800.0;
+pub const ICE_QUEEN_MODE1_AT: f32 = 600.0;
+
 /// Santa-NK1 walks and shoots, faster at every quarter of its health.
 pub const SANTA_WALK: [(f32, f32); 4] = [(1.0, 2.0), (0.75, 3.0), (0.5, 4.0), (0.25, 5.0)];
 pub const SANTA_WAIT: f32 = 300.0;
@@ -3749,9 +3960,12 @@ pub const QUEEN_SLIME_FLIES_AT: f32 = 0.5;
 /// It waits this long between attacks: a second on the ground, two in the air.
 pub const QUEEN_SLIME_WAIT: f32 = 60.0;
 pub const QUEEN_SLIME_WAIT_FLYING: f32 = 120.0;
-/// The three-hop set: two low, then one high that ends it.
-pub const QUEEN_SLIME_HOPS: [(f32, f32, f32); 3] = [
+/// The four-hop set: two identical low hops, a slightly higher third, then one high that ends it
+/// (`NPC.cs:45946-46023`; the ground case's first hop repeats because `ai[2]==0` and `ai[2]==1`
+/// both fall through to the same `else` branch).
+pub const QUEEN_SLIME_HOPS: [(f32, f32, f32); 4] = [
     // rise, drift, rest afterwards
+    (-8.0, 4.0, -40.0),
     (-8.0, 4.0, -40.0),
     (-6.0, 4.5, -40.0),
     (-13.0, 3.5, 0.0),
@@ -3773,12 +3987,40 @@ pub const QUEEN_SLIME_LEASH_TILES: f32 = 500.0;
 pub const QUEEN_SLIME_HOVER: f32 = 250.0;
 pub const QUEEN_SLIME_DIVE_RANGE: f32 = 250.0;
 
+/// The dive: a stationary burst dropped where it lands, on the ground or in the air alike
+/// (`NPC.cs:46024-46118`).
+pub const QUEEN_SLIME_DIVE_SHOT: u16 = 922;
+pub const QUEEN_SLIME_DIVE_DAMAGE: i32 = 40;
+/// It hangs above the aim point for up to this many ticks before committing to the fall.
+pub const QUEEN_SLIME_DIVE_WINDUP: f32 = 60.0;
+/// How far above the player it aims before dropping, and how fast it closes on that point.
+pub const QUEEN_SLIME_DIVE_ABOVE: f32 = 384.0;
+pub const QUEEN_SLIME_DIVE_APPROACH_SPEED: f32 = 20.0;
+/// Once it commits, gravity is hand-rolled: this much added to its fall speed each tick, capped.
+pub const QUEEN_SLIME_DIVE_FALL_ACCEL: f32 = 1.0;
+pub const QUEEN_SLIME_DIVE_FALL_CAP: f32 = 14.0;
+
+/// The swoop: a ring of these fired outward once it commits — six on the ground, ten in the air
+/// (`NPC.cs:46159-46236`; vanilla's getGoodWorld bump to fifteen is disclosed and not counted).
+pub const QUEEN_SLIME_RING_SHOT: u16 = 926;
+pub const QUEEN_SLIME_RING_DAMAGE: i32 = 30;
+pub const QUEEN_SLIME_RING_SPEED: f32 = 9.0;
+pub const QUEEN_SLIME_RING_COUNT_GROUND: usize = 6;
+pub const QUEEN_SLIME_RING_COUNT_FLYING: usize = 10;
+/// How long it hangs before firing the ring: fifty ticks of windup, then ten more once committed.
+pub const QUEEN_SLIME_SWOOP_WINDUP: f32 = 50.0;
+pub const QUEEN_SLIME_SWOOP_COMMIT: f32 = 10.0;
+
 // --- The Lunatic Cultist ---------------------------------------------------------------------------
 
 pub const CULTIST: u16 = 439;
 pub const CULTIST_CLONE: u16 = 440;
-pub const CULTIST_DRAGON: u16 = 522;
-pub const CULTIST_ANCIENT_LIGHT: u16 = 523;
+/// Spawned five at a time by the shadowflame attack below.
+pub const CULTIST_ANCIENT_LIGHT: u16 = 522;
+/// Unused here: the NPC an expert-only, chance-triggered variant of that same attack summons
+/// instead (`NPC.cs:65471-65474`, gated on `CountNPCS(523) < 10`). Not implemented — out of the
+/// audited scope, and its trigger is a random substitution into an otherwise-fixed script.
+pub const CULTIST_ANCIENT_DOOM: u16 = 523;
 
 /// It arrives over seven seconds before it will fight.
 pub const CULTIST_ARRIVAL: f32 = 420.0;
@@ -3787,30 +4029,44 @@ pub const CULTIST_PAUSE: f32 = 40.0;
 /// Below half health it sheds a third of its armour.
 pub const CULTIST_HALF_DEFENSE: f32 = 0.65;
 
-/// The attack script, indexed by how many attacks it has made.
-///
-/// Nought is "move", which is why it spends so much of the fight drifting into a new position:
-/// every other entry in the second half of the script is a reposition. The sequence is fixed, so
-/// the fight is memorisable, and that is the point of it.
-pub const CULTIST_SCRIPT: [u8; 13] = [0, 1, 0, 5, 0, 3, 0, 5, 0, 2, 0, 3, 4];
+/// The attack scripts, indexed by how many attacks have been made — one for above half health,
+/// one for at or below it (`NPC.cs:65361-65461`). Nought is "move", which is why it spends so
+/// much of the fight drifting into a new position: every other entry is a reposition. Both
+/// sequences are fixed, so the fight is memorisable, and that is the point of it. The digits here
+/// are this module's own state numbering (1 ice, 2 fireballs, 3 lightning, 4 ritual, 5
+/// shadowflame — see `cultist::state`), translated from vanilla's `num13` codes (1 fire, 2 ice, 3
+/// lightning, 4 ritual, 5 shadowflame) so they route through the existing match arms unchanged.
+pub const CULTIST_SCRIPT_HEALTHY: [u8; 12] = [0, 2, 0, 1, 0, 3, 0, 2, 0, 1, 0, 4];
+pub const CULTIST_SCRIPT_WOUNDED: [u8; 14] = [0, 2, 0, 5, 0, 3, 0, 5, 0, 1, 0, 3, 0, 4];
 
-/// The ice mist: a slow, heavy shot.
-pub const CULTIST_ICE: u16 = 599;
-pub const CULTIST_ICE_DAMAGE: i32 = 45;
-pub const CULTIST_ICE_EVERY: f32 = 80.0;
-pub const CULTIST_ICE_EVERY_EXPERT: f32 = 40.0;
+/// The ice mist: a slow, heavy shot. (`ProjectileID.CultistBossIceMist`, `NPC.cs:65569-65639`.)
+pub const CULTIST_ICE: u16 = 464;
+pub const CULTIST_ICE_DAMAGE: i32 = 35;
+pub const CULTIST_ICE_EVERY: f32 = 120.0;
+pub const CULTIST_ICE_EVERY_EXPERT: f32 = 90.0;
 /// The fireballs: a burst of three, or four in expert.
-pub const CULTIST_FIRE: u16 = 598;
+/// (`ProjectileID.CultistBossFireBall`, `NPC.cs:65640-65719`.)
+pub const CULTIST_FIRE: u16 = 467;
 pub const CULTIST_FIRE_DAMAGE: i32 = 30;
 pub const CULTIST_FIRE_EVERY: f32 = 18.0;
 pub const CULTIST_FIRE_EVERY_EXPERT: f32 = 12.0;
 pub const CULTIST_FIRE_COUNT: i32 = 3;
 pub const CULTIST_FIRE_COUNT_EXPERT: i32 = 4;
-/// The lightning: rarer and harder.
-pub const CULTIST_LIGHTNING: u16 = 600;
-pub const CULTIST_LIGHTNING_DAMAGE: i32 = 35;
-pub const CULTIST_LIGHTNING_EVERY: f32 = 120.0;
-pub const CULTIST_LIGHTNING_EVERY_EXPERT: f32 = 90.0;
+/// The lightning orb: rarer and harder.
+/// (`ProjectileID.CultistBossLightningOrb`, `NPC.cs:65720-65779`.)
+pub const CULTIST_LIGHTNING: u16 = 465;
+pub const CULTIST_LIGHTNING_DAMAGE: i32 = 45;
+pub const CULTIST_LIGHTNING_EVERY: f32 = 80.0;
+pub const CULTIST_LIGHTNING_EVERY_EXPERT: f32 = 40.0;
+/// The shadowflame: five Ancient Lights fanned out toward you, twice — once wounded scripts ever
+/// reach it (`NPC.cs:65949-66020`).
+pub const CULTIST_SHADOWFLAME_EVERY: f32 = 20.0;
+pub const CULTIST_SHADOWFLAME_EVERY_EXPERT: f32 = 30.0;
+pub const CULTIST_SHADOWFLAME_COUNT: i32 = 2;
+pub const CULTIST_SHADOWFLAME_SPAWNS: usize = 5;
+pub const CULTIST_SHADOWFLAME_SPEED: f32 = 8.0;
+/// The angular step between each of the five, and the arc they fan across.
+pub const CULTIST_SHADOWFLAME_ANGLE_STEP: f32 = std::f32::consts::TAU / 25.0;
 /// How it repositions: a two-hundred-by-three-hundred ellipse above you, shared out between it and
 /// its clones so they fan rather than stack.
 pub const CULTIST_ORBIT: (f32, f32) = (300.0, 200.0);
@@ -4208,6 +4464,23 @@ pub const MARTIAN_SAUCER_CANNON: u16 = 394;
 /// Its deathray, fired once at the start of each strafe of the last phase.
 pub const SAUCER_DEATHRAY: u16 = 447;
 pub const SAUCER_DEATHRAY_DAMAGE: i32 = 80;
+/// Whole, it is not toothless: a single, weaker deathray as the strafe of its circuit opens.
+pub const SAUCER_CIRCUIT_RAY_AT: f32 = 20.0;
+pub const SAUCER_CIRCUIT_RAY_DAMAGE: i32 = 50;
+/// Missiles, sprayed loosely outward through the whole overhead hover of an intact circuit.
+pub const SAUCER_MISSILE: u16 = 448;
+pub const SAUCER_MISSILE_DAMAGE: i32 = 50;
+pub const SAUCER_MISSILE_DAMAGE_EXPERT: i32 = 37;
+pub const SAUCER_MISSILE_SPEED: f32 = 8.0;
+pub const SAUCER_MISSILE_FROM: f32 = 440.0;
+pub const SAUCER_MISSILE_PERIOD: f32 = 20.0;
+/// Lasers, aimed at you, through the whole low hold of an intact circuit.
+pub const SAUCER_LASER: u16 = 449;
+pub const SAUCER_LASER_DAMAGE: i32 = 35;
+pub const SAUCER_LASER_DAMAGE_EXPERT: i32 = 30;
+pub const SAUCER_LASER_SPEED: f32 = 16.0;
+pub const SAUCER_LASER_FROM: f32 = 280.0;
+pub const SAUCER_LASER_PERIOD: f32 = 6.0;
 /// How far the parts sit from the core when it puts itself together.
 pub const SAUCER_PART_OUT: f32 = 150.0;
 /// Beyond this it gives up on you.
@@ -4366,9 +4639,12 @@ pub struct Walker {
     /// Whether it keeps re-aiming during the throw, and from when in the throw.
     pub retarget_from: i32,
 
-    /// What it throws, how much it hurts, how fast it goes, and how many at once.
+    /// What it throws, how much it hurts, how fast it goes, and how many at once. Every troop
+    /// that throws something deals noticeably less in Expert Mode — the two are not the same
+    /// number scaled by a fixed ratio, so both have to be stored rather than derived from one.
     pub shot: u16,
     pub shot_damage: i32,
+    pub shot_damage_expert: i32,
     pub shot_speed: f32,
     pub shot_count: i32,
     /// How much the throw arcs upward with distance, and how much it scatters.
@@ -4423,6 +4699,7 @@ impl Walker {
         retarget_from: i32::MAX,
         shot: 81,
         shot_damage: 1,
+        shot_damage_expert: 1,
         shot_speed: 11.0,
         shot_count: 1,
         shot_arc: 0.1,
@@ -4489,6 +4766,11 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_arc: 0.4,
             muzzle: (0.0, -14.0),
             shot_damage: match npc_type {
+                DD2_GOBLIN_BOMBER_T3 => 40,
+                DD2_GOBLIN_BOMBER_T2 => 30,
+                _ => 20,
+            },
+            shot_damage_expert: match npc_type {
                 DD2_GOBLIN_BOMBER_T3 => 35,
                 DD2_GOBLIN_BOMBER_T2 => 25,
                 _ => 15,
@@ -4529,6 +4811,11 @@ pub fn walker(npc_type: u16) -> Walker {
                 _ => 13.0,
             },
             shot_damage: match npc_type {
+                DD2_JAVELINST_T1 => 15,
+                DD2_JAVELINST_T2 => 30,
+                _ => 45,
+            },
+            shot_damage_expert: match npc_type {
                 DD2_JAVELINST_T1 => 10,
                 DD2_JAVELINST_T2 => 20,
                 _ => 30,
@@ -4558,7 +4845,8 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_lead: 0.0,
             muzzle: (22.0, 0.0),
             shot_spread: if npc_type == DD2_DRAKIN_T2 { 2.5 } else { 1.5 },
-            shot_damage: if npc_type == DD2_DRAKIN_T3 { 45 } else { 25 },
+            shot_damage: if npc_type == DD2_DRAKIN_T3 { 60 } else { 35 },
+            shot_damage_expert: if npc_type == DD2_DRAKIN_T3 { 45 } else { 25 },
             max_speed: 0.77,
             ..base
         },
@@ -4612,7 +4900,8 @@ pub fn walker(npc_type: u16) -> Walker {
             shot_cooldown: 150.0,
             shot: GOBLIN_SHARK_SHOT,
             shot_speed: 13.0,
-            shot_damage: 30,
+            shot_damage: 40,
+            shot_damage_expert: 30,
             shot_arc: 0.15,
             shot_spread: 2.5,
             shot_lead: 0.0,
@@ -4650,7 +4939,8 @@ pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
             melee_range: 1000.0,
             melee_cooldown: 240,
             shot: OGRE_SPIT,
-            shot_damage: 30,
+            shot_damage: 40,
+            shot_damage_expert: 30,
             muzzle: (30.0, -70.0),
             ..walker
         },
@@ -4660,7 +4950,8 @@ pub fn ogre_attack(walker: Walker, attack: OgreAttack) -> Walker {
             melee_ticks: 90,
             melee_range: 250.0,
             shot: OGRE_POUND,
-            shot_damage: 40,
+            shot_damage: 60,
+            shot_damage_expert: 40,
             ranged_at: 36,
             leap_at: 56,
             leap_floor: 41,
@@ -4781,6 +5072,46 @@ pub fn town_toughness(down: &[bool; 15], combat_books: (bool, bool)) -> TownToug
         }
     }
     out
+}
+
+#[cfg(test)]
+mod id_pin_tests {
+    use super::*;
+
+    /// Pins the Skeletron Prime limb behavior to the real NPCIDs, not to the (self-consistent)
+    /// constant names: 128 is `PrimeCannon` and must lob a bomb (proj 102); 129/130 (Saw/Vice) are
+    /// melee. Every other Prime test builds its arm from the constants, so they passed whatever the
+    /// constants held — this one catches the shift.
+    #[test]
+    fn the_prime_cannon_is_npcid_128_and_lobs_a_bomb() {
+        assert_eq!(PRIME_CANNON, 128, "NPCID.PrimeCannon");
+        assert_eq!(
+            prime_limb(128).shot,
+            Some(102),
+            "NPC 128 (PrimeCannon) must lob its bomb"
+        );
+        assert_eq!(prime_limb(129).shot, None, "NPC 129 (PrimeSaw) is melee");
+        assert_eq!(prime_limb(130).shot, None, "NPC 130 (PrimeVice) is melee");
+        assert_eq!(
+            prime_limb(131).shot,
+            Some(100),
+            "NPC 131 (PrimeLaser) fires its laser"
+        );
+    }
+
+    /// Mothron must lay its actual egg (478), not CrimsonPenguin (470). Verified through the type
+    /// table so the constant is tied to the real entity, not just a literal.
+    #[test]
+    fn mothron_lays_its_real_egg_not_a_penguin() {
+        assert_eq!(
+            crate::npc_data::npc_stats(MOTHRON_EGG).unwrap().name,
+            "MothronEgg"
+        );
+        assert_eq!(
+            crate::npc_data::npc_stats(MOTHRON_SPAWN_TYPE).unwrap().name,
+            "MothronSpawn"
+        );
+    }
 }
 
 #[cfg(test)]

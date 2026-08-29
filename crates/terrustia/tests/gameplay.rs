@@ -2433,9 +2433,15 @@ async fn a_lunar_pillar_does_not_despawn_while_no_player_is_near_it() {
 }
 
 #[tokio::test]
-async fn a_zombie_works_at_a_door_and_opens_it() {
-    // A door standing on flat ground, with a zombie spawned beside it.
+async fn a_zombie_forces_a_door_on_a_blood_moon() {
+    // A door standing on flat ground, with a zombie spawned beside it — on a blood moon, which is
+    // the only time a polite opener like a zombie forces a door at all. On an ordinary night it
+    // stands and pushes but the door stays shut (the base-defense mechanic); that case is covered
+    // by the `fighter` unit tests, which are cheap, rather than an 18-second negative integration.
     let addr = start_with(Config::default(), |world| {
+        world.blood_moon = true;
+        world.day_time = false; // night, or the blood moon would be over by morning immediately
+
         // Carve a wide, unambiguously open corridor: the generated world is solid rock here, so
         // anything less leaves the zombie spawning inside a wall.
         for x in 380..430 {
@@ -2866,6 +2872,57 @@ async fn an_object_will_not_be_placed_over_something() {
         bob.world().tile(400, 321).map(|t| t.block),
         Some(18),
         "half a workbench should not have been placed"
+    );
+}
+
+/// A socket that has not finished the handshake — not a playing client — must not be able to place
+/// an object. Vanilla's `case 79` (like every other tile-writing handler) only acts for a joined
+/// client; before the gate any raw socket could scatter furniture and tile entities across the
+/// world without ever joining.
+#[tokio::test]
+async fn a_socket_that_has_not_joined_cannot_place_an_object() {
+    let addr = start_with(Config::default(), |world| {
+        for x in 380..420 {
+            for y in 310..322 {
+                world.set_tile(x, y, terrustia_proto::tile::Tile::AIR);
+            }
+            world.set_tile(x, 322, terrustia_proto::tile::Tile::block(1));
+        }
+    })
+    .await;
+
+    // Connect the socket but never handshake, then hand-build a PlaceObject (id 79) frame for a
+    // workbench at (400, 321) and send it raw.
+    let mut sneaky = terrustia_client::Client::connect(addr, "sneaky")
+        .await
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&400i16.to_le_bytes()); // x
+    payload.extend_from_slice(&321i16.to_le_bytes()); // y
+    payload.extend_from_slice(&18i16.to_le_bytes()); // block (workbench)
+    payload.extend_from_slice(&0i16.to_le_bytes()); // style
+    payload.push(0); // alternate
+    payload.push(0); // random
+    payload.push(0); // direction
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&((payload.len() + 3) as u16).to_le_bytes());
+    frame.push(79); // PLACE_OBJECT
+    frame.extend_from_slice(&payload);
+    sneaky.send(&frame).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A real player confirms nothing was placed.
+    let mut watcher = join(addr, "watcher").await;
+    watcher.set_timeout(Duration::from_millis(50));
+    for _ in 0..200 {
+        if watcher.next_event().await.is_err() {
+            break;
+        }
+    }
+    assert_ne!(
+        watcher.world().tile(400, 321).map(|t| t.block),
+        Some(18),
+        "a socket that never joined must not place an object"
     );
 }
 
@@ -5318,7 +5375,12 @@ async fn placing_a_frames_tile_creates_and_shares_its_entity() {
     let mut r = terrustia_proto::PacketReader::new(&frame.payload);
     let _id = r.i32().unwrap();
     assert!(r.bool().unwrap(), "it should say the entity is present");
-    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    let entity = terrustia_proto::tile_entity::TileEntity::read(
+        &mut r,
+        true,
+        terrustia_proto::tile_entity::CURRENT_FILE_VERSION,
+    )
+    .unwrap();
     assert_eq!(
         entity.kind,
         terrustia_proto::tile_entity::EntityKind::ItemFrame
@@ -5420,7 +5482,12 @@ async fn an_item_frame_holds_what_is_put_in_it() {
     let mut r = terrustia_proto::PacketReader::new(&frame.payload);
     r.i32().unwrap();
     r.bool().unwrap();
-    let entity = terrustia_proto::tile_entity::TileEntity::read(&mut r, true).unwrap();
+    let entity = terrustia_proto::tile_entity::TileEntity::read(
+        &mut r,
+        true,
+        terrustia_proto::tile_entity::CURRENT_FILE_VERSION,
+    )
+    .unwrap();
     assert_eq!(entity.held().map(|i| i.id), Some(3507));
 
     // Swapping it should give the first one back rather than destroying it.

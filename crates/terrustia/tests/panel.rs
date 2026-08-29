@@ -537,6 +537,227 @@ async fn the_admin_feature_set_works_over_real_sockets() {
     assert_eq!(status, 404);
 }
 
+/// The four features added while finishing the panel — a live metrics snapshot, the backup/rollback
+/// view and its guards, the groups/accounts admin (including the lock-out guard that stops the last
+/// admin account being stripped), and world-creation validation — over real sockets, in one flow.
+///
+/// `save_file` is set to a unique temp path so `save_path` is real: the backups view reports it is
+/// saving, `/api/save` is accepted, and the admin store the accounts endpoints mutate is written
+/// beside it rather than anywhere permanent. World *generation* itself is not exercised here — it
+/// would write into the real platform world directory and take real time — only its validation and
+/// status endpoints, which is what this in-process shape can cover honestly.
+#[tokio::test]
+async fn the_finishing_features_work_over_real_sockets() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    // A unique save target so no stale admin file from a previous run starts this server claimed,
+    // and so the account mutations below write a throwaway admin file rather than a permanent one.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let save_file = std::env::temp_dir().join(format!(
+        "terrustia-panel-test-{}-{unique}.wld",
+        std::process::id()
+    ));
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        save_file: Some(save_file.clone()),
+        autosave_secs: 0,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "features", 5);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    // Claim as the first account (the `owner` group, which grants Admin).
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let session = extract_session(&body);
+
+    // ---- every new endpoint refuses a request with no session ----
+    for path in [
+        "/api/metrics",
+        "/api/backups",
+        "/api/accounts",
+        "/api/worlds/new/status",
+    ] {
+        let (status, _) = client.get_status(&format!("{base}{path}"), None).await;
+        assert_eq!(status, 401, "{path} must require a session");
+    }
+
+    // ---- metrics: a real, live snapshot ----
+    let (status, body) = client
+        .get_status(&format!("{base}/api/metrics"), Some(&session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    // 16,666,667 ns truncates to 16,666 µs — sixty ticks a second.
+    assert!(
+        body.contains("\"budget_us\":16666"),
+        "the tick budget: {body}"
+    );
+    assert!(body.contains("\"phases\""), "a per-phase breakdown: {body}");
+    assert!(body.contains("\"player_count\":0"), "{body}");
+
+    // ---- backups: this world is being saved, so the view reports it and `save` is accepted ----
+    let (status, body) = client
+        .get_status(&format!("{base}/api/backups"), Some(&session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"saving\":true"), "a saved world: {body}");
+    assert!(body.contains("\"kept\":3"), "the rotation count: {body}");
+    let (status, _) = client
+        .post_json_auth(&format!("{base}/api/save"), "{}", &session)
+        .await;
+    assert_eq!(
+        status, 200,
+        "a save should be accepted when there is a save target"
+    );
+    // Rolling back a backup that does not exist is refused rather than doing something destructive.
+    let (status, body) = client
+        .post_json_auth(&format!("{base}/api/rollback"), r#"{"which":5}"#, &session)
+        .await;
+    assert_eq!(status, 400, "out-of-range rollback must be refused: {body}");
+
+    // ---- accounts: the claim put `owner` in the admin-capable `owner` group ----
+    let (status, body) = client
+        .get_status(&format!("{base}/api/accounts"), Some(&session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("\"name\":\"owner\"") && body.contains("\"can_admin\":true"),
+        "the owner account can administer the server: {body}"
+    );
+    assert!(
+        body.contains("\"name\":\"moderator\"") && body.contains("\"name\":\"default\""),
+        "the default groups are listed: {body}"
+    );
+
+    // The lock-out guard: the only admin account cannot be demoted or deleted.
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/group"),
+            r#"{"name":"owner","group":"default"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "demoting the only admin must be refused");
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/delete"),
+            r#"{"name":"owner"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "deleting the only admin must be refused");
+
+    // Create a moderator, and prove the guards around it.
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"short","password":"abc","group":"moderator"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "a too-short password must be refused");
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"mod1","password":"moderator-pass","group":"nope"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "a nonexistent group must be refused");
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"mod1","password":"moderator-pass","group":"moderator"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "a valid account should be created: {body}");
+    let (_, body) = client
+        .get_status(&format!("{base}/api/accounts"), Some(&session))
+        .await;
+    assert!(
+        body.contains("\"name\":\"mod1\""),
+        "the new account: {body}"
+    );
+    // A duplicate is refused.
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"mod1","password":"moderator-pass","group":"moderator"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "a duplicate name must be refused");
+    // Promote mod1 to owner — now there are two admins, so the owner may be demoted, and mod1 may be
+    // deleted (the other admin still remains).
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/group"),
+            r#"{"name":"mod1","group":"owner"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "promoting to a second admin is allowed");
+    let (status, _) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/delete"),
+            r#"{"name":"mod1"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "deleting one of two admins is allowed");
+
+    // ---- world creation: validation and status, without generating into a real directory ----
+    let (status, _) = client
+        .get_status(&format!("{base}/api/worlds/new/status"), Some(&session))
+        .await;
+    assert_eq!(status, 200);
+    // An ill-sized world (not a whole number of sections) is refused before any slow work starts.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/worlds/new"),
+            r#"{"name":"bad","width":123,"height":45}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 400, "a bad world size must be refused: {body}");
+
+    // Tidy up the throwaway save file and its admin sidecar, best-effort.
+    let _ = std::fs::remove_file(&save_file);
+    let _ = std::fs::remove_file(save_file.with_extension("admin.toml"));
+    let _ = std::fs::remove_file(save_file.with_extension("wld.bak1"));
+}
+
 /// Whether *something* is accepting connections on `addr` right now — a closed port refuses
 /// immediately rather than hanging, so no timeout is needed here.
 async fn port_answers(addr: std::net::SocketAddr) -> bool {

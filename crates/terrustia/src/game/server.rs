@@ -72,6 +72,10 @@ const ITEM_GRAB_RANGE: f32 = 400.0;
 
 /// Vanilla runs at 60 ticks per second and the clock packets assume it.
 const TICK: Duration = Duration::from_nanos(16_666_667);
+/// Ticks in a second, for turning the tick counter into a human uptime on the status footer.
+const TICKS_PER_SECOND: u64 = 60;
+/// How often the live status footer is refreshed — about once a second, off the tick counter.
+const STATUS_EVERY: u64 = 60;
 
 /// How much of a tick a single player's queued section stream may spend before
 /// `drain_section_streams` picks it back up next tick, rather than draining it in one shot.
@@ -477,6 +481,13 @@ const BEACH_MARGIN: i32 = 50;
 const PLAYER_HALF_WIDTH: f32 = 10.0;
 const PLAYER_HEIGHT: f32 = 42.0;
 
+/// Whether two `(left, top, right, bottom)` boxes overlap — the same open-interval test as
+/// `Rectangle.Intersects` (touching edges do not count), used to keep a meteor off any player or
+/// NPC.
+fn boxes_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0 < b.2 && a.2 > b.0 && a.1 < b.3 && a.3 > b.1
+}
+
 /// The world position of a tile's top-left corner.
 fn tile_corner(x: i16, y: i16) -> (f32, f32) {
     (
@@ -782,6 +793,55 @@ pub enum ServerEvent {
         path: PathBuf,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// A live snapshot of the last tick's cost and the current entity counts, for the panel's
+    /// metrics view. Reads [`Self::last_tick`] and a few `len()`s — nothing that costs the tick.
+    PanelMetrics {
+        reply: oneshot::Sender<PanelMetrics>,
+    },
+    /// The world backups on disk right now, for the panel's backup/rollback view. The listing
+    /// itself is a filesystem read, but which file is *current* — and therefore what the backups
+    /// belong to — is game-task state, so it is answered here.
+    PanelBackups {
+        reply: oneshot::Sender<PanelBackups>,
+    },
+    /// The panel's "save now" button. Reuses the same background save the console's `save` command
+    /// runs, so it never blocks the tick.
+    PanelForceSave {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The panel's rollback button. Reuses [`Self::roll_back`] exactly — the same destructive,
+    /// stop-and-reload operation the console `rollback` command performs — and hands its message
+    /// back so the panel can show it.
+    PanelRollback {
+        which: usize,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// The groups and accounts, for the panel's accounts admin view.
+    PanelAccounts {
+        reply: oneshot::Sender<PanelAccounts>,
+    },
+    /// Move an account into a different group. Same rule the console `group` command enforces (the
+    /// group must exist), plus a guard the panel needs and the console does not: it refuses to
+    /// strip the last account that can still administer the server, so nobody locks themselves out
+    /// through the very screen they would use to fix it.
+    PanelSetAccountGroup {
+        name: String,
+        group: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The panel inserting an account it already hashed off the game task, into a chosen group.
+    /// Distinct from [`Self::PanelInsertAccount`], the claim path, which always uses `owner`:
+    /// this one validates the requested group exists first.
+    PanelCreateAccount {
+        account: crate::admin::Account,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
+    /// that can administer the server cannot be removed.
+    PanelDeleteAccount {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// One connected player, as the panel needs to show them: who they are, how they are doing, where
@@ -882,6 +942,10 @@ pub struct PanelAuthLookup {
     pub claim_token: Option<String>,
     /// `(hash, group)` for the named account, if one exists.
     pub hash_and_group: Option<(String, String)>,
+    /// Whether that account's group grants `Permission::Admin` — i.e. may drive the panel, which
+    /// runs unrestricted console commands. A self-registered `default` (look-only) account must
+    /// not, which is what stops it escalating to owner through `/api/console`.
+    pub admin: bool,
 }
 
 /// What [`ServerEvent::PanelStatus`] hands back.
@@ -893,6 +957,78 @@ pub struct PanelStatus {
     /// The file stem of the world currently being served, if it has one, so the panel's world
     /// list can mark which entry is the running one.
     pub world_file: Option<String>,
+}
+
+/// What [`ServerEvent::PanelMetrics`] hands back — a live snapshot for the panel's metrics graphs.
+/// Every duration is in microseconds, on the same clock the tick budget itself uses. No history is
+/// kept here; the panel accumulates its own rolling window client-side.
+#[derive(Debug, Clone, Default)]
+pub struct PanelMetrics {
+    /// The tick budget, so the panel can draw the line a tick is measured against.
+    pub budget_us: u64,
+    /// The most recent tick's processor cost, and how long it actually took to happen.
+    pub last_cpu_us: u64,
+    pub last_wall_us: u64,
+    /// The worst processor cost seen in the current reporting window, before it is reset.
+    pub worst_cpu_us: u64,
+    /// The last tick's per-phase processor breakdown, `(phase name, microseconds)`, in tick order.
+    pub phases: Vec<(&'static str, u64)>,
+    pub player_count: usize,
+    pub npc_count: usize,
+    pub projectile_count: usize,
+    pub item_count: usize,
+    /// Ticks elapsed since the process started — a monotonic clock the panel can label the x-axis
+    /// with without needing wall-clock time.
+    pub ticks: u64,
+}
+
+/// One world backup on disk, for the panel's backup/rollback view.
+#[derive(Debug, Clone)]
+pub struct PanelBackupEntry {
+    /// `1` is the most recent — the number `rollback <n>` takes.
+    pub index: usize,
+    pub size_bytes: u64,
+    /// Seconds since the backup was written, or `None` if the filesystem would not say.
+    pub age_secs: Option<u64>,
+}
+
+/// What [`ServerEvent::PanelBackups`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelBackups {
+    /// Whether this world is being saved at all — `false` means there is nothing to back up or roll
+    /// back, and the panel says so rather than showing an empty list as if saves were merely absent.
+    pub saving: bool,
+    /// The world file the backups belong to, for display.
+    pub world_file: Option<String>,
+    /// How many backups the server keeps, so the panel can explain the rotation.
+    pub kept: usize,
+    pub backups: Vec<PanelBackupEntry>,
+}
+
+/// One admin group, for the panel's accounts view.
+#[derive(Debug, Clone)]
+pub struct PanelGroupInfo {
+    pub name: String,
+    /// The permission names the group holds (or the single entry `*`).
+    pub permissions: Vec<String>,
+    /// Whether this group can administer the server — i.e. change who may do what.
+    pub can_admin: bool,
+}
+
+/// One account, for the panel's accounts view. Never carries the password hash.
+#[derive(Debug, Clone)]
+pub struct PanelAccountInfo {
+    pub name: String,
+    pub group: String,
+    /// Whether the account's group actually resolves to one that can administer the server.
+    pub can_admin: bool,
+}
+
+/// What [`ServerEvent::PanelAccounts`] hands back.
+#[derive(Debug, Clone, Default)]
+pub struct PanelAccounts {
+    pub groups: Vec<PanelGroupInfo>,
+    pub accounts: Vec<PanelAccountInfo>,
 }
 
 /// What the console can offer to complete a command's second argument with.
@@ -1058,6 +1194,13 @@ pub struct GameServer {
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
+    /// The palette the boot chose, so the live status footer can colour itself to match — or emit
+    /// nothing when colour is off. Defaults to plain; `main` sets it via [`Self::with_palette`].
+    palette: crate::term::Palette,
+    /// The most recent tick's cost, surfaced live to the web panel's metrics view. Unlike
+    /// [`Self::worst_tick`] — a windowed maximum that is taken and reset every report — this is
+    /// simply the last tick that ran, so a graph drawn from it moves every frame. Never persisted.
+    last_tick: TickCost,
     /// A trailing, time-windowed log of player tile edits, for `/world undo`. See
     /// [`crate::game::tile_log`]'s own module doc for retention and scope.
     tile_log: crate::game::tile_log::TileLog,
@@ -1197,6 +1340,7 @@ impl GameServer {
             stopping: false,
             worst_tick: TickCost::default(),
             worst_stall: Duration::ZERO,
+            last_tick: TickCost::default(),
             save_path,
             autosave_ticks,
             tile_log: crate::game::tile_log::TileLog::default(),
@@ -1207,6 +1351,7 @@ impl GameServer {
             party: crate::game::party::PartyState::default(),
             slime_rain: crate::game::slime_rain::SlimeRainState::default(),
             lantern_night: crate::game::lantern_night::LanternNightState::default(),
+            palette: crate::term::Palette::PLAIN,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -1239,6 +1384,46 @@ impl GameServer {
     pub fn with_update_notice(mut self, notice: Arc<Mutex<Option<String>>>) -> Self {
         self.update_notice = Some(notice);
         self
+    }
+
+    /// Give the game task the boot's colour palette, so the live status footer it keeps at the
+    /// bottom of the terminal can match it. Builder-style for the same reason as the two above —
+    /// the many test call sites want a plain default, not a palette they have no terminal for.
+    pub fn with_palette(mut self, palette: crate::term::Palette) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    /// Refresh the live status footer: who is online, how long the server has been up, and the last
+    /// tick's cost. Called about once a second from [`Self::note_tick_cost`]. Cheap, and a no-op on
+    /// screen when there is no interactive prompt to sit above (a piped or service console).
+    fn update_status(&self, cost: TickCost) {
+        let p = self.palette;
+        let online = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|player| player.is_playing())
+            .count();
+        // Uptime off the tick counter rather than a wall clock: this is a health read, not a
+        // timestamp, and one that never has to reach for `Instant::now` on the hot path.
+        let secs = self.ticks / TICKS_PER_SECOND;
+        let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+        let tick_us = cost.cpu.as_micros();
+        use crate::term::sgr;
+        let dot_colour = if online > 0 {
+            sgr::BRIGHT_GREEN
+        } else {
+            sgr::DIM
+        };
+        let status = format!(
+            "  {} {} online   {}   {}",
+            p.paint(dot_colour, "●"),
+            p.paint(sgr::BOLD, &online.to_string()),
+            p.paint(sgr::DIM, &format!("up {h:02}:{m:02}:{s:02}")),
+            p.paint(sgr::DIM, &format!("tick {tick_us}µs")),
+        );
+        crate::term::set_status(&status);
     }
 
     /// A handle to whatever [`ServerEvent::PanelSwitchWorld`] requests, for `main` to read once
@@ -1635,50 +1820,49 @@ impl GameServer {
     /// moved, and the next autosave writing the in-memory world straight back over the backup that
     /// was just restored — undoing the rollback within five minutes. Stopping is honest and takes
     /// one restart.
-    fn roll_back(&mut self, which: usize) {
+    ///
+    /// Returns the message describing what happened either way, so a caller that is not the console
+    /// (the web panel) can report it to whoever asked rather than only to the log. The console arm
+    /// logs whatever comes back; on success the same announce/stop side effects happen regardless of
+    /// who called.
+    fn roll_back(&mut self, which: usize) -> Result<String, String> {
         let Some(path) = self.save_path.clone() else {
-            info!("this world is not being saved, so there is nothing to roll back to");
-            return;
+            return Err(
+                "this world is not being saved, so there is nothing to roll back to".into(),
+            );
         };
         if which == 0 || which > crate::world::wld_save::BACKUPS_KEPT {
-            info!(
+            return Err(format!(
                 "there are only {} backups; use `rollback 1` for the most recent",
                 crate::world::wld_save::BACKUPS_KEPT
-            );
-            return;
+            ));
         }
         let bak = path.with_extension(format!("wld.bak{which}"));
         if !bak.exists() {
-            info!(path = %bak.display(), "no such backup");
-            return;
+            return Err(format!("there is no backup #{which} to roll back to"));
         }
         // Check it before trusting it. Restoring an unreadable file over a readable one would turn
         // a rollback into the very thing it exists to undo.
-        match std::fs::read(&bak)
+        std::fs::read(&bak)
             .map_err(|e| e.to_string())
             .and_then(|bytes| {
                 crate::world::wld::parse(&bytes)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
-            }) {
-            Ok(()) => {}
-            Err(e) => {
-                error!(path = %bak.display(), error = %e, "that backup will not load; refusing");
-                return;
-            }
-        }
+            })
+            .map_err(|e| format!("that backup will not load; refusing to roll back to it: {e}"))?;
         // Keep what is being replaced, so a rollback is itself reversible.
         let aside = path.with_extension("wld.before-rollback");
         if path.exists()
             && let Err(e) = std::fs::rename(&path, &aside)
         {
-            error!(error = %e, "could not move the current world aside; refusing to roll back");
-            return;
+            return Err(format!(
+                "could not move the current world aside; refusing to roll back: {e}"
+            ));
         }
         if let Err(e) = std::fs::copy(&bak, &path) {
-            error!(error = %e, "could not restore the backup");
             let _ = std::fs::rename(&aside, &path);
-            return;
+            return Err(format!("could not restore the backup: {e}"));
         }
         self.announce("The world is being rolled back; the server is stopping.");
         info!(
@@ -1689,6 +1873,10 @@ impl GameServer {
         // The in-memory world must not be written over what was just restored.
         self.save_path = None;
         self.stopping = true;
+        Ok(format!(
+            "rolled back to backup #{which}; the server is stopping so it loads cleanly on the \
+             next start"
+        ))
     }
 
     /// Print the one-time claim token, if this server has not been claimed yet.
@@ -1699,21 +1887,22 @@ impl GameServer {
         if !self.admin.unclaimed() {
             return;
         }
-        // Not a password: a short one-time secret that lives for one process. Derived from the
-        // clock rather than a CSPRNG dependency, mixed so it is not simply readable back as a
-        // timestamp. It only has to be unguessable by someone who cannot see this line.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
-        let mut state = now ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let mut token = String::new();
-        for _ in 0..12 {
-            // xorshift64*, which is plenty for a value that is printed and then used once.
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let alphabet = b"abcdefghjkmnpqrstuvwxyz23456789";
-            token.push(alphabet[(state % alphabet.len() as u64) as usize] as char);
+        // Not a password: a short one-time secret that lives for one process. It gates ownership on
+        // two network-reachable paths (`/register <name> <pw> <token>` and an unclaimed panel
+        // login), so it is drawn from a real CSPRNG — the same `rand_core::OsRng` the panel's own
+        // session tokens use — rather than the clock+pid it used to be, whose entropy an attacker
+        // who can estimate the boot time could search. It only has to be unguessable by someone who
+        // cannot see this line.
+        use argon2::password_hash::rand_core::{OsRng, RngCore};
+        const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789"; // 30 symbols
+        let mut token = String::with_capacity(12);
+        while token.len() < 12 {
+            let mut byte = [0u8; 1];
+            OsRng.fill_bytes(&mut byte);
+            // Reject the top of the byte range so the map onto 30 symbols is unbiased (240 = 8*30).
+            if byte[0] < 240 {
+                token.push(ALPHABET[(byte[0] % 30) as usize] as char);
+            }
         }
         warn!(
             "this server has no accounts yet, so everyone connecting has every permission. \
@@ -1930,6 +2119,10 @@ impl GameServer {
     /// The breakdown comes with the first one, because "a tick took 26 ms" is a mystery and "the
     /// spawn scan took 26 ms" is a bug report.
     fn note_tick_cost(&mut self, cost: TickCost) {
+        self.last_tick = cost;
+        if self.ticks.is_multiple_of(STATUS_EVERY) {
+            self.update_status(cost);
+        }
         if cost.cpu > self.worst_tick.cpu {
             self.worst_tick = cost;
         }
@@ -1960,9 +2153,11 @@ impl GameServer {
                 projectiles = self.projectiles.len(),
                 "ticks are using a lot of their budget"
             );
-        } else if stall > TICK {
-            // Not a warning: nothing here is wrong, the machine is just busy. Worth saying,
-            // because a player will feel it either way.
+        } else if stall > TICK * 6 {
+            // Not a warning: nothing here is wrong, the machine is just busy. The threshold is six
+            // ticks (~100 ms) rather than one, because a single-tick stall is a dropped frame nobody
+            // notices, and an idle laptop that naps for a moment should not narrate it. A stall this
+            // size is a real hitch a player feels, and worth one quiet line per ten-second window.
             info!(
                 stall_us = stall.as_micros() as u64,
                 cpu_us = worst.cpu.as_micros() as u64,
@@ -2627,6 +2822,17 @@ impl GameServer {
     }
 
     /// Put an item into the world at a place, as a thing that can be picked up.
+    /// Drop into the world every pickup a mass-wire run reported — one wire or actuator at each
+    /// tile a cut cleared, at that tile's own pixel centre. Vanilla's `KillWire`/`KillActuator`
+    /// spawn these the instant they clear a flag; this is the same, batched by the caller. Without
+    /// it a mistake with the Grand Design simply destroyed the wire the player paid for.
+    fn spawn_wire_drops(&mut self, drops: &[(i32, i32, u16)]) {
+        for &(x, y, item_id) in drops {
+            let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+            self.spawn_item(ItemStack::new(i32::from(item_id), 1, 0), position);
+        }
+    }
+
     fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) {
         if item.is_empty() {
             return;
@@ -2720,14 +2926,29 @@ impl GameServer {
                 let _ = reply.send(ConsoleContext { players, groups });
             }
             ServerEvent::PanelAuthLookup { name, reply } => {
+                let hash_and_group = self.admin.account_hash_and_group(&name);
+                let admin = hash_and_group.as_ref().is_some_and(|(_, group)| {
+                    self.admin
+                        .group_grants(group, crate::admin::Permission::Admin)
+                });
                 let _ = reply.send(PanelAuthLookup {
                     unclaimed: self.admin.unclaimed(),
                     claim_token: self.claim_token.clone(),
-                    hash_and_group: self.admin.account_hash_and_group(&name),
+                    hash_and_group,
+                    admin,
                 });
             }
             ServerEvent::PanelInsertAccount { account, reply } => {
-                let _ = reply.send(self.admin.insert_account(account));
+                // The claim path. Persist and retire the one-time token on success, exactly as the
+                // console `claim` command does (`run_console`'s `"claim"` arm) — without the save, a
+                // server claimed through the panel would forget its owner on the next restart (until
+                // some later admin mutation happened to save), and the spent token would linger.
+                let result = self.admin.insert_account(account);
+                if result.is_ok() {
+                    let _ = self.admin.save();
+                    self.claim_token = None;
+                }
+                let _ = reply.send(result);
             }
             ServerEvent::PanelStatus { reply } => {
                 let player_count = self
@@ -2850,7 +3071,225 @@ impl GameServer {
                 self.stopping = true;
                 let _ = reply.send(Ok(()));
             }
+            ServerEvent::PanelMetrics { reply } => {
+                let _ = reply.send(self.panel_metrics());
+            }
+            ServerEvent::PanelBackups { reply } => {
+                let _ = reply.send(self.panel_backups());
+            }
+            ServerEvent::PanelForceSave { reply } => {
+                if self.save_path.is_none() {
+                    let _ = reply.send(Err(
+                        "this world is not being saved, so there is nothing to save".into(),
+                    ));
+                    return;
+                }
+                // The same background save the console `save` command runs — off the tick, one at a
+                // time. The outcome reaches the operator on the live console feed, the same place
+                // the console command's own "World saved" line goes.
+                self.save_world_in_background("web panel");
+                let _ = reply.send(Ok(()));
+            }
+            ServerEvent::PanelRollback { which, reply } => {
+                let _ = reply.send(self.roll_back(which));
+            }
+            ServerEvent::PanelAccounts { reply } => {
+                let _ = reply.send(self.panel_accounts());
+            }
+            ServerEvent::PanelSetAccountGroup { name, group, reply } => {
+                let _ = reply.send(self.panel_set_account_group(&name, &group));
+            }
+            ServerEvent::PanelCreateAccount { account, reply } => {
+                // The group has to exist — an account pointed at a group that is not there silently
+                // falls back to `default`, which would be a confusing thing to have just created.
+                if !self.admin.groups.iter().any(|g| g.name == account.group) {
+                    let _ = reply.send(Err(format!("there is no group called {}", account.group)));
+                    return;
+                }
+                let result = self.admin.insert_account(account);
+                if result.is_ok() {
+                    let _ = self.admin.save();
+                }
+                let _ = reply.send(result);
+            }
+            ServerEvent::PanelDeleteAccount { name, reply } => {
+                let _ = reply.send(self.panel_delete_account(&name));
+            }
         }
+    }
+
+    /// Whether an account's group resolves to one that can administer the server. The last such
+    /// account is the one the panel refuses to strip or delete — see [`ServerEvent::PanelSetAccountGroup`].
+    fn account_can_admin(&self, account: &crate::admin::Account) -> bool {
+        self.admin
+            .groups
+            .iter()
+            .find(|g| g.name == account.group)
+            .is_some_and(|g| g.may(crate::admin::Permission::Admin))
+    }
+
+    /// How many accounts can still administer the server. Used to refuse the change that would take
+    /// this to zero.
+    fn admin_capable_accounts(&self) -> usize {
+        self.admin
+            .accounts
+            .iter()
+            .filter(|a| self.account_can_admin(a))
+            .count()
+    }
+
+    /// A live snapshot for the panel's metrics view. See [`PanelMetrics`].
+    fn panel_metrics(&self) -> PanelMetrics {
+        let phases = Phase::NAMES
+            .iter()
+            .zip(self.last_tick.phases.iter())
+            .map(|(&name, dur)| (name, dur.as_micros() as u64))
+            .collect();
+        PanelMetrics {
+            budget_us: TICK.as_micros() as u64,
+            last_cpu_us: self.last_tick.cpu.as_micros() as u64,
+            last_wall_us: self.last_tick.wall.as_micros() as u64,
+            worst_cpu_us: self.worst_tick.cpu.as_micros() as u64,
+            phases,
+            player_count: self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .count(),
+            npc_count: self.npcs.len(),
+            projectile_count: self.projectiles.len(),
+            item_count: self.items.len(),
+            ticks: self.ticks,
+        }
+    }
+
+    /// The world backups on disk, newest first. Mirrors [`Self::list_backups`]'s own scan, but hands
+    /// the data back rather than logging it — the panel draws the same rows the console prints.
+    fn panel_backups(&self) -> PanelBackups {
+        let kept = crate::world::wld_save::BACKUPS_KEPT;
+        let Some(path) = self.save_path.clone() else {
+            return PanelBackups {
+                saving: false,
+                world_file: None,
+                kept,
+                backups: Vec::new(),
+            };
+        };
+        let mut backups = Vec::new();
+        for n in 1..=kept {
+            let bak = path.with_extension(format!("wld.bak{n}"));
+            let Ok(meta) = std::fs::metadata(&bak) else {
+                continue;
+            };
+            let age_secs = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_secs());
+            backups.push(PanelBackupEntry {
+                index: n,
+                size_bytes: meta.len(),
+                age_secs,
+            });
+        }
+        PanelBackups {
+            saving: true,
+            world_file: self.current_world_file_stem(),
+            kept,
+            backups,
+        }
+    }
+
+    /// The groups and accounts, for the panel's accounts view. Never carries a password hash.
+    fn panel_accounts(&self) -> PanelAccounts {
+        let groups = self
+            .admin
+            .groups
+            .iter()
+            .map(|g| PanelGroupInfo {
+                name: g.name.clone(),
+                permissions: g.permissions.iter().cloned().collect(),
+                can_admin: g.may(crate::admin::Permission::Admin),
+            })
+            .collect();
+        let accounts = self
+            .admin
+            .accounts
+            .iter()
+            .map(|a| PanelAccountInfo {
+                name: a.name.clone(),
+                group: a.group.clone(),
+                can_admin: self.account_can_admin(a),
+            })
+            .collect();
+        PanelAccounts { groups, accounts }
+    }
+
+    /// Move an account into a different group. The console `group` command's own rule (the group
+    /// must exist), plus the lock-out guard the panel needs.
+    fn panel_set_account_group(&mut self, name: &str, group: &str) -> Result<(), String> {
+        if !self.admin.groups.iter().any(|g| g.name == group) {
+            return Err(format!("there is no group called {group}"));
+        }
+        let Some(account) = self
+            .admin
+            .accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("there is no account called {name}"));
+        };
+        // Would this move strip the last account that can still administer the server?
+        let target_can_admin_now = self.account_can_admin(account);
+        let new_group_can_admin = self
+            .admin
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+            .is_some_and(|g| g.may(crate::admin::Permission::Admin));
+        if target_can_admin_now && !new_group_can_admin && self.admin_capable_accounts() <= 1 {
+            return Err(
+                "that is the only account that can still administer the server; make another \
+                 account an admin before removing this one's access"
+                    .into(),
+            );
+        }
+        let account = self
+            .admin
+            .accounts
+            .iter_mut()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .expect("account existence just checked above");
+        account.group = group.to_string();
+        let _ = self.admin.save();
+        info!(account = name, group, "group changed from the web panel");
+        Ok(())
+    }
+
+    /// Delete an account, guarded so the last admin-capable one cannot be removed.
+    fn panel_delete_account(&mut self, name: &str) -> Result<(), String> {
+        let Some(account) = self
+            .admin
+            .accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+        else {
+            return Err(format!("there is no account called {name}"));
+        };
+        if self.account_can_admin(account) && self.admin_capable_accounts() <= 1 {
+            return Err(
+                "that is the only account that can still administer the server; it cannot be \
+                 deleted, or nobody could sign in to the panel again"
+                    .into(),
+            );
+        }
+        self.admin
+            .accounts
+            .retain(|a| !a.name.eq_ignore_ascii_case(name));
+        let _ = self.admin.save();
+        info!(account = name, "account deleted from the web panel");
+        Ok(())
     }
 
     /// The file stem of the world currently being served, if it has one.
@@ -3033,14 +3472,29 @@ impl GameServer {
                     _ => info!(target: CONSOLE_REPLY, "usage: claim <name> <password>"),
                 }
             }
-            "help" => info!(
-                target: CONSOLE_REPLY,
-                "console: say <text> | players | save | backups | rollback <n> | \
-                 whitelist add|remove|list [name] | \
-                 claim <name> <password> | kick <name> [reason] | \
-                 ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
-                 world undo <player> <duration> | panel | stop"
-            ),
+            "help" => {
+                // One command per line, aligned, rather than a single run-on that wraps hard in any
+                // ordinary terminal. This is often the first thing an operator ever types.
+                for line in [
+                    "commands:",
+                    "  say <text>                          broadcast a message",
+                    "  players                             who is connected",
+                    "  save                                write the world now",
+                    "  backups                             list the rotating backups",
+                    "  rollback <n>                        restore backup n",
+                    "  whitelist add|remove|list [name]    manage the whitelist",
+                    "  claim <name> <password>             claim an unclaimed server",
+                    "  kick <name> [reason]                disconnect a player",
+                    "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
+                    "  unban <value>                       lift a ban",
+                    "  group <account> <group>             set an account's group",
+                    "  world undo <player> <duration>      revert a player's recent tile edits",
+                    "  panel                               toggle the web panel",
+                    "  stop                                save and shut down",
+                ] {
+                    info!(target: CONSOLE_REPLY, "{line}");
+                }
+            }
             // Toggles the web panel: starts it if it is not running, stops it if it is.
             // `panel_toggle`'s other end (`crate::panel::supervise`) owns the actual bind/abort and
             // decides which of those this pulse means — this arm only ever sends one and reports
@@ -3110,7 +3564,10 @@ impl GameServer {
             }
             "rollback" => {
                 let which: usize = argument.trim().parse().unwrap_or(1);
-                self.roll_back(which);
+                match self.roll_back(which) {
+                    Ok(message) => info!(target: CONSOLE_REPLY, "{message}"),
+                    Err(message) => info!(target: CONSOLE_REPLY, "{message}"),
+                }
             }
             "stop" => {
                 info!("stopping on console request");
@@ -4618,6 +5075,18 @@ impl GameServer {
     /// moment the world is saved, invisible to anyone who joins later, and does not count toward a
     /// house.
     fn on_place_object(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        // Same gates every other tile-writing handler has, and that `MessageBuffer.cs`'s own
+        // `case 79` applies: a placement only counts from a client that has actually joined, it is
+        // charged against that client's block-spam budget (`SpamAddBlock++`), and it is refused
+        // outright unless the client owns the section it is placing into
+        // (`Netplay.Clients[whoAmI].TileSections`, mirrored by `Player::sent_sections`). Without
+        // these, any socket — handshake incomplete included — could scatter furniture, chests and
+        // tile entities anywhere in the world at an unthrottled rate, growing `world.tile_entities`
+        // without bound: exactly the illegitimate-edit class the packet-17 fix already closed.
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+
         let mut r = PacketReader::new(payload);
         let x = i32::from(r.i16()?);
         let y = i32::from(r.i16()?);
@@ -4626,6 +5095,10 @@ impl GameServer {
         let _alternate = r.u8()?;
         let random = i32::from(r.i8()?);
         let _direction = r.bool()?;
+
+        if self.note_tile_spam(slot, TileAction::PlaceTile) {
+            return Ok(());
+        }
 
         let Ok(block) = u16::try_from(block) else {
             return Ok(());
@@ -4639,6 +5112,16 @@ impl GameServer {
         };
         // Ten tiles clear of the world's edge, as the game requires.
         if x < 10 || y < 10 || x >= self.world.width() - 10 || y >= self.world.height() - 10 {
+            return Ok(());
+        }
+        // The section the object is placed into must be one this client was actually sent. Vanilla
+        // `break`s here — dropping the placement — rather than relaying a suppressed edit the way
+        // case 17 does.
+        let (sx, sy) = self.world.section_of(x, y);
+        if !self
+            .player(slot)
+            .is_some_and(|p| p.sent_sections.contains(&(sx, sy)))
+        {
             return Ok(());
         }
 
@@ -5735,6 +6218,8 @@ impl GameServer {
                 self.broadcast(frame, None);
             }
         }
+
+        self.spawn_wire_drops(&outcome.drops);
 
         // Tell the player what it cost. Both are sent even when zero, as the game sends both.
         for (item, spent) in [
@@ -7393,7 +7878,7 @@ impl GameServer {
                         direction,
                     });
                 }
-                crate::game::ai::town::DoorAction::Close { x, y } => self.close_door(x, y),
+                crate::game::ai::town::DoorAction::Close { x, y } => self.close_door(x, y, false),
                 crate::game::ai::town::DoorAction::None => {}
             }
         }
@@ -8302,11 +8787,94 @@ impl GameServer {
     /// night that is the difference between a sealed house and an invitation.
     ///
     /// `action: 1` is the game's close, against `0` for open (`MessageBuffer.cs:1310`).
-    fn close_door(&mut self, x: i32, y: i32) {
+    /// Open a door and tell clients, returning whether it actually moved. Moving the tiles rather
+    /// than only broadcasting keeps the *server's* view of the door in step with everyone else's —
+    /// broadcasting alone once left the server sure every door was shut, so an NPC at one opened it
+    /// on every look, for ever (eighteen thousand door packets in five minutes on a real town). The
+    /// bool lets a wired door try the other swing side when this one is blocked.
+    fn open_door_broadcast(&mut self, x: i32, y: i32, direction: i8) -> bool {
+        if !crate::world::doors::open(&mut self.world, x, y, direction) {
+            return false;
+        }
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: 0,
+            x: x as i16,
+            y: y as i16,
+            direction: if direction > 0 { 1 } else { 0 },
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+        true
+    }
+
+    /// A door a circuit reached — `Wiring.cs`'s `type == 10`/`type == 11`. A shut door opens on a
+    /// random swing side, falling back to the other if that one is blocked; an open door is forced
+    /// shut. Resolved against the door's live state each time, so the per-tile toggling vanilla does
+    /// when more than one of a door's three tiles carries wire falls out on its own.
+    fn fire_wired_door(&mut self, x: i32, y: i32) {
+        let tile = self.world.tile(x, y);
+        if !tile.is_active() {
+            return;
+        }
+        match tile.block {
+            crate::world::doors::DOOR_CLOSED => {
+                let side: i8 = if rand::Rng::random_range(&mut self.rng, 0..2) == 0 {
+                    -1
+                } else {
+                    1
+                };
+                if !self.open_door_broadcast(x, y, side) {
+                    self.open_door_broadcast(x, y, -side);
+                }
+            }
+            crate::world::doors::DOOR_OPEN => self.close_door(x, y, true),
+            _ => {}
+        }
+    }
+
+    /// Every playing player's and every active NPC's hitbox, in world pixels as `(left, top, right,
+    /// bottom)` — the boxes vanilla's `Collision.EmptyTile` tests a tile against, so an unforced
+    /// door close can tell whether something is standing in the column it would shut on.
+    fn entity_hitboxes(&self) -> Vec<(f32, f32, f32, f32)> {
+        let mut boxes = Vec::new();
+        for player in self.players.iter().flatten() {
+            if !player.is_playing() {
+                continue;
+            }
+            let (px, py) = player.position;
+            boxes.push((px, py, px + PLAYER_HALF_WIDTH * 2.0, py + PLAYER_HEIGHT));
+        }
+        for (_, npc) in self.npcs.iter() {
+            let (nx, ny) = npc.position;
+            boxes.push((nx, ny, nx + npc.width(), ny + npc.height()));
+        }
+        boxes
+    }
+
+    /// Shut a door, telling clients. Unless `forced`, refuses while a player or NPC is standing in
+    /// the column the shut door lands on (`WorldGen.CloseDoor`'s own `Collision.EmptyTile` guard,
+    /// `WorldGen.cs:32155`) — a resident pulling its door shut must not trap whoever is in the
+    /// doorway. A wire signal forces it, as vanilla's `case 11` does.
+    fn close_door(&mut self, x: i32, y: i32, forced: bool) {
         if !self.world.in_bounds(x, y) {
             return;
         }
-        if !crate::world::doors::close(&mut self.world, x, y) {
+        let occupants = if forced {
+            Vec::new()
+        } else {
+            self.entity_hitboxes()
+        };
+        let moved = crate::world::doors::close_checked(&mut self.world, x, y, forced, |tx, ty| {
+            let tile = (
+                (tx * 16) as f32,
+                (ty * 16) as f32,
+                (tx * 16 + 16) as f32,
+                (ty * 16 + 16) as f32,
+            );
+            occupants.iter().any(|&b| boxes_overlap(tile, b))
+        });
+        if !moved {
             return;
         }
         let toggle = terrustia_proto::objects::DoorToggle {
@@ -8325,23 +8893,7 @@ impl GameServer {
         match action {
             Action::None => {}
             Action::OpenDoor { x, y, direction } => {
-                // Move the tiles, then tell everyone. Broadcasting alone — which this used to do,
-                // on the reasoning that every client would open it for itself — left the *server*
-                // believing the door was still shut, so the NPC standing at it decided to open it
-                // again on its next look, and again, for ever. On a world with a town that came to
-                // eighteen thousand door packets in five minutes and half of all traffic.
-                if !crate::world::doors::open(&mut self.world, x, y, direction) {
-                    return;
-                }
-                let toggle = terrustia_proto::objects::DoorToggle {
-                    action: 0,
-                    x: x as i16,
-                    y: y as i16,
-                    direction: if direction > 0 { 1 } else { 0 },
-                };
-                if let Ok(frame) = toggle.encode() {
-                    self.broadcast(frame, None);
-                }
+                self.open_door_broadcast(x, y, direction);
             }
             Action::BreakDoor { x, y } => {
                 // A broken door really is gone, so the tiles are cleared here and the change is
@@ -9745,6 +10297,21 @@ impl GameServer {
             for (tx, ty) in fired.traps {
                 self.fire_trap(tx, ty);
             }
+            // Wired Explosives (tile 141): the flood leaves the tile standing (unlike a land
+            // mine), so the caller kills it, resyncs it, and throws the explosion — `Wiring.cs`'s
+            // own `case 141`.
+            for (mx, my) in fired.mines {
+                self.detonate_explosives(mx, my);
+            }
+            // A buried land mine (tile 210): the flood already cleared the tile and reported the
+            // change (`ExplodeMine`'s `KillTile`, mirrored in `wiring.rs`), so all that remains is
+            // the explosion projectile.
+            for (mx, my) in fired.land_mines {
+                self.detonate_land_mine(mx, my);
+            }
+            for (dx, dy) in fired.doors {
+                self.fire_wired_door(dx, dy);
+            }
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
@@ -9895,6 +10462,32 @@ impl GameServer {
             shot.damage,
             0,
         ) {
+            self.broadcast_projectile(index);
+        }
+    }
+
+    /// Wired Explosives (tile 141) going off: `Wiring.cs`'s `case 141` — kill the tile, tell
+    /// clients, and throw the explosion projectile (108, 500 damage) from the tile's centre.
+    fn detonate_explosives(&mut self, x: i32, y: i32) {
+        self.world.set_tile(x, y, Tile::AIR);
+        self.broadcast_tile(x, y);
+        self.throw_mine_blast(x, y, 108, 500);
+    }
+
+    /// A buried land mine (tile 210) going off: `Wiring.cs`'s `ExplodeMine` — the tile is already
+    /// gone (the flood cleared it), so this only throws the explosion projectile (164, 250 damage).
+    fn detonate_land_mine(&mut self, x: i32, y: i32) {
+        self.throw_mine_blast(x, y, 164, 250);
+    }
+
+    /// The projectile half both mine detonations share: a still (velocity zero) explosion thrown
+    /// from the tile centre, exactly as `Projectile.NewProjectile(..., i*16+8, j*16+8, 0, 0, ...)`.
+    fn throw_mine_blast(&mut self, x: i32, y: i32, projectile_type: u16, damage: i32) {
+        let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+        if let Some(index) =
+            self.projectiles
+                .launch(projectile_type, position, (0.0, 0.0), damage, 0)
+        {
             self.broadcast_projectile(index);
         }
     }
@@ -10811,10 +11404,21 @@ impl GameServer {
 
     /// Bring a meteor down somewhere out of the way, and tell everyone it happened.
     fn land_meteor(&mut self) {
-        let landed = {
-            let world = &mut self.world;
-            crate::world::meteor::drop(world, &mut self.rng)
-        };
+        // Vanilla refuses a strike whose 35-tile box overlaps any player's spawn-safe zone or any
+        // active NPC (`WorldGen.cs:6324-6345`) — a meteor should not bury the player who summoned
+        // it, or a town. The boxes are gathered up front because the drop borrows the world and the
+        // rng, and the refusal closure must not also reach back into `self`.
+        let blockers = self.meteor_entity_boxes();
+        let landed = crate::world::meteor::drop_checked(&mut self.world, &mut self.rng, |x, y| {
+            // The crater's own box, in world pixels: `num * 2 * 16` on a side, `num == 35`.
+            let strike = (
+                ((x - 35) * 16) as f32,
+                ((y - 35) * 16) as f32,
+                ((x + 35) * 16) as f32,
+                ((y + 35) * 16) as f32,
+            );
+            blockers.iter().any(|&b| boxes_overlap(strike, b))
+        });
         let Some((x, y)) = landed else {
             debug!("nowhere for a meteor to land");
             return;
@@ -10822,6 +11426,40 @@ impl GameServer {
         self.announce("A meteorite has landed!");
         info!(x, y, "meteorite landed");
         self.push_region(x, y, METEOR_REACH);
+    }
+
+    /// Every playing player's spawn-safe rectangle and every active NPC's hitbox, in world pixels
+    /// as `(left, top, right, bottom)` — the boxes a meteor strike is tested against
+    /// (`WorldGen.cs:6324-6345`). A player's box is the on-screen spawn area (`NPC.sWidth`/`sHeight`)
+    /// widened by `NPC.safeRangeX`/`Y`, centred on the player; an NPC's is simply its own hitbox.
+    fn meteor_entity_boxes(&self) -> Vec<(f32, f32, f32, f32)> {
+        // `NPC.sWidth => 1920`, `sHeight => 1200`, and `safeRangeX = (int)(sWidth/16 * 0.52) = 62`,
+        // `safeRangeY = (int)(sHeight/16 * 0.52) = 39`.
+        const S_WIDTH: f32 = 1920.0;
+        const S_HEIGHT: f32 = 1200.0;
+        const SAFE_X: f32 = 62.0;
+        const SAFE_Y: f32 = 39.0;
+
+        let mut boxes = Vec::new();
+        for player in self.players.iter().flatten() {
+            if !player.is_playing() {
+                continue;
+            }
+            let (px, py) = player.position;
+            let left = px + PLAYER_HALF_WIDTH - S_WIDTH / 2.0 - SAFE_X;
+            let top = py + PLAYER_HEIGHT / 2.0 - S_HEIGHT / 2.0 - SAFE_Y;
+            boxes.push((
+                left,
+                top,
+                left + S_WIDTH + SAFE_X * 2.0,
+                top + S_HEIGHT + SAFE_Y * 2.0,
+            ));
+        }
+        for (_, npc) in self.npcs.iter() {
+            let (nx, ny) = npc.position;
+            boxes.push((nx, ny, nx + npc.width(), ny + npc.height()));
+        }
+        boxes
     }
 
     /// Push a square region of the world at every client.
@@ -11541,6 +12179,7 @@ impl GameServer {
             wind: self.weather.wind,
             desert: biome == crate::game::spawn::Biome::Desert,
             sandstorm: self.weather.sandstorm,
+            slime_rain: self.slime_rain.is_active(),
             surface_y: f32::from(self.world.surface) * crate::game::npc::TILE,
             // `Main.expertMode` itself — `Difficulty >= Expert`, not a raw game-mode check, so a
             // Journey world's `DifficultySlider` reaches AI branches that ask this too.
@@ -12599,6 +13238,216 @@ mod panic_path {
         let server = GameServer::new(Config::default(), tiny_world());
         drop(tx);
         assert_eq!(server.run(rx).await, Stopped::Cleanly);
+    }
+}
+
+/// The wire-flood consumer resolves buried mines and doors it reaches, not only the traps and
+/// statues it always has. Each of these fails on the pre-fix `apply_circuit`, which read
+/// `Fired::traps`/`statues`/… but dropped `mines`, `land_mines`, and `doors` on the floor — so a
+/// wired mine never went off and a wired door never moved.
+#[cfg(test)]
+mod wired_mines_and_doors {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::doors::{DOOR_CLOSED, DOOR_OPEN};
+    use crate::world::wiring::Fired;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "wire probe"),
+        )
+    }
+
+    fn threw(server: &GameServer, projectile_type: u16) -> bool {
+        server
+            .projectiles
+            .iter()
+            .any(|(_, p)| p.projectile_type == projectile_type)
+    }
+
+    #[test]
+    fn a_wired_land_mine_throws_its_explosion() {
+        // The flood has already cleared the mine tile, so the consumer owes only the projectile —
+        // `ExplodeMine`'s type 164.
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.land_mines.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            threw(&server, 164),
+            "a land mine a circuit reaches should throw projectile 164"
+        );
+    }
+
+    #[test]
+    fn a_wired_explosive_kills_its_tile_and_throws_a_bomb() {
+        // Unlike a land mine, the flood leaves the Explosives tile (141) standing, so the consumer
+        // both kills it and throws projectile 108 — `Wiring.cs`'s `case 141`.
+        let mut server = server();
+        server.world.set_tile(100, 100, Tile::framed(141, 0, 0));
+        let mut fired = Fired::default();
+        fired.mines.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            !server.world.tile(100, 100).is_active(),
+            "the Explosives tile should be gone (case 141 KillTile)"
+        );
+        assert!(threw(&server, 108), "and it should throw projectile 108");
+    }
+
+    #[test]
+    fn a_wired_door_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        for dy in 0..3 {
+            server.world.set_tile(
+                100,
+                100 + dy,
+                Tile::framed(DOOR_CLOSED, 0, (dy as i16) * 18),
+            );
+        }
+        // First pulse: the shut door swings open.
+        let mut fired = Fired::default();
+        fired.doors.push((100, 101));
+        server.apply_circuit(fired, (100, 101));
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            DOOR_OPEN,
+            "a circuit reaching a shut door opens it"
+        );
+        // Second pulse: the now-open door is forced shut.
+        let mut fired = Fired::default();
+        fired.doors.push((100, 101));
+        server.apply_circuit(fired, (100, 101));
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            DOOR_CLOSED,
+            "and a circuit reaching it again forces it shut"
+        );
+    }
+
+    #[test]
+    fn a_resident_will_not_shut_a_door_on_someone_standing_in_it() {
+        let mut server = server();
+        // A shut door, opened so there is an open door to close again.
+        for dy in 0..3 {
+            server
+                .world
+                .set_tile(100, 50 + dy, Tile::framed(DOOR_CLOSED, 0, (dy as i16) * 18));
+        }
+        assert!(
+            crate::world::doors::open(&mut server.world, 100, 50, 1),
+            "the door should open"
+        );
+        // Someone stands in the doorway.
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 50.0 * 16.0))
+            .expect("a slime should spawn");
+
+        // The town-NPC path is unforced, so `Collision.EmptyTile` refuses while the slime is there.
+        server.close_door(100, 50, false);
+        assert!(
+            server.world.tile(100, 50).block == DOOR_OPEN
+                || server.world.tile(101, 50).block == DOOR_OPEN,
+            "an unforced close is blocked by the occupant"
+        );
+
+        // A wire signal forces it shut regardless.
+        server.close_door(100, 50, true);
+        assert!(
+            server.world.tile(100, 50).block != DOOR_OPEN
+                && server.world.tile(101, 50).block != DOOR_OPEN,
+            "a forced (wired) close ignores the occupant"
+        );
+    }
+
+    #[test]
+    fn cut_wire_drops_become_world_pickups() {
+        // What a mass-wire cut reports back: a wire at one tile, an actuator at the next. The
+        // pre-fix `on_mass_wire` ignored `Outcome::drops`, so a mistake with the Grand Design
+        // destroyed the materials outright.
+        let mut server = server();
+        server.spawn_wire_drops(&[(50, 50, WIRE_ITEM as u16), (51, 50, ACTUATOR_ITEM as u16)]);
+        let mut found: Vec<(i32, (f32, f32))> = server
+            .items
+            .iter()
+            .map(|(_, it)| (it.item.id, it.position))
+            .collect();
+        found.sort_by_key(|(id, _)| *id);
+        assert_eq!(found.len(), 2, "both cuts should drop a pickup");
+        assert_eq!(found[0].0, i32::from(WIRE_ITEM));
+        assert_eq!(found[1].0, i32::from(ACTUATOR_ITEM));
+        assert_eq!(
+            found[0].1,
+            (50.0 * 16.0 + 8.0, 50.0 * 16.0 + 8.0),
+            "dropped at the cut tile's own centre"
+        );
+    }
+}
+
+/// A meteor refuses a landing site that overlaps a player or an NPC — the `blocked_by_entity`
+/// closure `land_meteor` now feeds `meteor::drop_checked`, which the pre-fix code (a bare
+/// `meteor::drop`) had no way to express, so a meteor could bury the player who summoned it.
+#[cfg(test)]
+mod meteor_entity_safety {
+    use super::*;
+    use crate::config::Config;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(400, 300, "meteor probe"),
+        )
+    }
+
+    /// The open-interval overlap: a shared edge is not an overlap.
+    #[test]
+    fn touching_boxes_do_not_count_as_overlap() {
+        assert!(boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (5.0, 5.0, 15.0, 15.0)
+        ));
+        assert!(!boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (10.0, 0.0, 20.0, 10.0)
+        ));
+        assert!(!boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (20.0, 20.0, 30.0, 30.0)
+        ));
+    }
+
+    #[test]
+    fn a_meteor_will_not_land_on_an_npc() {
+        let mut server = server();
+        let at = (2000.0, 2000.0);
+        server.npcs.spawn(1, at).expect("a slime should spawn");
+
+        let boxes = server.meteor_entity_boxes();
+        assert_eq!(boxes.len(), 1, "one NPC, no players");
+        let npc_box = boxes[0];
+        assert_eq!((npc_box.0, npc_box.1), at, "the box starts at the NPC");
+
+        // The 35-tile strike box centred on the slime's tile overlaps it and is refused...
+        let (tx, ty) = ((at.0 / 16.0) as i32, (at.1 / 16.0) as i32);
+        let strike = |cx: i32, cy: i32| {
+            (
+                ((cx - 35) * 16) as f32,
+                ((cy - 35) * 16) as f32,
+                ((cx + 35) * 16) as f32,
+                ((cy + 35) * 16) as f32,
+            )
+        };
+        assert!(
+            boxes_overlap(strike(tx, ty), npc_box),
+            "a strike on the slime is blocked"
+        );
+        // ...but one a couple of hundred tiles away is fine.
+        assert!(
+            !boxes_overlap(strike(tx + 200, ty), npc_box),
+            "a strike far from the slime is allowed"
+        );
     }
 }
 

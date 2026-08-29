@@ -15,7 +15,10 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    PUMPKING_ABOVE, PUMPKING_BLADE, PUMPKING_BLADES, PUMPKING_CHARGE, PUMPKING_CHARGE_SMOOTH,
+    ICE_QUEEN_MIST, ICE_QUEEN_MIST_DAMAGE, ICE_QUEEN_MIST_INTERVAL, ICE_QUEEN_MIST_RANGE,
+    ICE_QUEEN_MIST_SPEED, ICE_QUEEN_MODE0_AT, ICE_QUEEN_MODE1_AT, ICE_QUEEN_MODE2_PACE,
+    ICE_QUEEN_SHARD, ICE_QUEEN_SHARD_DAMAGE, ICE_QUEEN_SHARD_INTERVAL, PUMPKING_ABOVE,
+    PUMPKING_BLADE, PUMPKING_BLADES, PUMPKING_CHARGE, PUMPKING_CHARGE_SMOOTH,
     PUMPKING_CHARGE_TICKS, PUMPKING_HOVER, PUMPKING_HOVER_SMOOTH, PUMPKING_LEASH,
     PUMPKING_MOOD_TICKS, PUMPKING_MOODS, PUMPKING_RUSH_STEPS, PUMPKING_SPHERE,
     PUMPKING_SPHERE_DAMAGE, PUMPKING_SPHERE_EVERY, PUMPKING_SPHERE_SPAN, PUMPKING_SPHERE_SPEED,
@@ -200,8 +203,14 @@ pub fn pumpking_blade(npc: &mut Npc, owner: Option<Parent>) -> MoonOutcome {
 }
 
 /// Style 60: the Ice Queen.
+///
+/// Mode 0 sweeps back and forth, firing a mist forward while above you. Mode 1 gives up the
+/// sweep for a gentler pursuit and drops ice shards straight down instead. Each runs for a while
+/// before handing off to the other. Vanilla also has a third mode — a random scatter shot reached
+/// the same way — that is not implemented here; see the module notes on why this routine cannot
+/// draw randomness of its own.
 pub fn ice_queen(npc: &mut Npc, world: &World<'_, impl TileView>) -> MoonOutcome {
-    let out = MoonOutcome::default();
+    let mut out = MoonOutcome::default();
     npc.dirty = true;
     npc.no_gravity = true;
     npc.no_tile_collide = true;
@@ -217,9 +226,74 @@ pub fn ice_queen(npc: &mut Npc, world: &World<'_, impl TileView>) -> MoonOutcome
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
-    let (cx, _) = npc.center();
+    let (cx, cy) = npc.center();
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
 
-    // `ai[2]` is which way it is sweeping. It only turns once it is well past you.
+    if npc.ai[0] == 1.0 {
+        // Mode 1: gentler pursuit, and ice shards dropped straight down.
+        let (accel, cap) = {
+            let mut chosen = (ICE_QUEEN_MODE2_PACE[0].1, ICE_QUEEN_MODE2_PACE[0].2);
+            for (threshold, a, c) in ICE_QUEEN_MODE2_PACE {
+                if health < threshold {
+                    chosen = (a, c);
+                }
+            }
+            chosen
+        };
+        if cx < target.center.0 {
+            npc.velocity.0 += accel;
+            if npc.velocity.0 < 0.0 {
+                npc.velocity.0 *= 0.98;
+            }
+        }
+        if cx > target.center.0 {
+            npc.velocity.0 -= accel;
+            if npc.velocity.0 > 0.0 {
+                npc.velocity.0 *= 0.98;
+            }
+        }
+        if npc.velocity.0 > cap || npc.velocity.0 < -cap {
+            npc.velocity.0 *= 0.95;
+        }
+        let below = target.center.1 - (npc.position.1 + npc.height());
+        if below < 180.0 {
+            npc.velocity.1 -= 0.1;
+        }
+        if below > 200.0 {
+            npc.velocity.1 += 0.1;
+        }
+        npc.velocity.1 = npc.velocity.1.clamp(-6.0, 6.0);
+        npc.rotation = npc.velocity.0 * 0.01;
+
+        npc.ai[3] += 1.0;
+        let interval = by_health(health, ICE_QUEEN_SHARD_INTERVAL);
+        if npc.ai[3] >= interval {
+            npc.ai[3] = 0.0;
+            let drop = (cx, npc.position.1 + npc.height() - 14.0);
+            let tx = (drop.0 / TILE) as i32;
+            let ty = (drop.1 / TILE) as i32;
+            let tile = world.tiles.tile(tx, ty);
+            let blocked = tile.is_active() && terrustia_proto::tile_solid::solid(tile.block);
+            if !blocked {
+                out.shots.push(Shot {
+                    projectile: ICE_QUEEN_SHARD,
+                    damage: ICE_QUEEN_SHARD_DAMAGE,
+                    position: drop,
+                    velocity: (npc.velocity.0 * 0.25, npc.velocity.1.max(0.0) + 3.0),
+                    time_left: 600,
+                });
+            }
+        }
+
+        npc.ai[1] += 1.0;
+        if npc.ai[1] > ICE_QUEEN_MODE1_AT {
+            npc.ai = [0.0, 0.0, 0.0, 0.0];
+        }
+        return out;
+    }
+
+    // Mode 0: the sweep. `ai[2]` is which way it is going, and it only turns once it is well
+    // past you.
     if npc.ai[2] == 0.0 {
         npc.ai[2] = if cx < target.center.0 { 1.0 } else { -1.0 };
     }
@@ -230,7 +304,6 @@ pub fn ice_queen(npc: &mut Npc, world: &World<'_, impl TileView>) -> MoonOutcome
         npc.ai[2] = 0.0;
     }
 
-    let health = npc.life as f32 / npc.life_max.max(1) as f32;
     let (accel, cap) = {
         let mut chosen = (QUEEN_PACE[0].1, QUEEN_PACE[0].2);
         for (threshold, a, c) in QUEEN_PACE {
@@ -252,6 +325,36 @@ pub fn ice_queen(npc: &mut Npc, world: &World<'_, impl TileView>) -> MoonOutcome
     }
     npc.velocity.1 = npc.velocity.1.clamp(-QUEEN_CLIMB_CAP, QUEEN_CLIMB_CAP);
     npc.rotation = npc.velocity.0 * 0.05;
+
+    // The forward mist: only while above you, and either close or already mid-volley.
+    let above_player = npc.position.1 < target.center.1;
+    if (across < ICE_QUEEN_MIST_RANGE || npc.ai[3] < 0.0) && above_player {
+        npc.ai[3] += 1.0;
+        let interval = by_health(health, ICE_QUEEN_MIST_INTERVAL);
+        if npc.ai[3] > interval {
+            npc.ai[3] = -interval;
+        }
+        if npc.ai[3] == 0.0 {
+            let speed = by_health(health, ICE_QUEEN_MIST_SPEED);
+            let from = (cx + npc.velocity.0 * 7.0, cy);
+            let aim = (target.center.0 - from.0, target.center.1 - from.1);
+            let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+            out.shots.push(Shot {
+                projectile: ICE_QUEEN_MIST,
+                damage: ICE_QUEEN_MIST_DAMAGE,
+                position: from,
+                velocity: (aim.0 / length * speed, aim.1 / length * speed),
+                time_left: 600,
+            });
+        }
+    } else if npc.ai[3] < 0.0 {
+        npc.ai[3] += 1.0;
+    }
+
+    npc.ai[1] += 1.0;
+    if npc.ai[1] > ICE_QUEEN_MODE0_AT {
+        npc.ai = [1.0, 0.0, 0.0, 0.0];
+    }
     out
 }
 
@@ -428,6 +531,70 @@ mod tests {
         assert!(
             crossings >= 2,
             "it should keep sweeping across: {crossings}"
+        );
+    }
+
+    /// B12: the Ice Queen fires a mist forward while above you, in its first mode.
+    #[test]
+    fn the_ice_queen_fires_a_mist_while_above_you() {
+        let tiles = Sky(HashMap::new());
+        let mut q = boss(terrustia_proto::npc_params::ICE_QUEEN, 0.0, 0.0);
+        let w = night(&tiles, Some((0.0, 400.0)));
+
+        let mut shots = Vec::new();
+        for _ in 0..800 {
+            let out = ice_queen(&mut q, &w);
+            shots.extend(out.shots);
+            q.position.0 += q.velocity.0;
+            q.position.1 += q.velocity.1;
+        }
+        assert!(!shots.is_empty(), "it should have fired the mist");
+        assert!(
+            shots
+                .iter()
+                .all(|s| s.projectile == ICE_QUEEN_MIST && s.damage == ICE_QUEEN_MIST_DAMAGE)
+        );
+    }
+
+    /// B12: after a while it hands off to its second mode.
+    #[test]
+    fn the_ice_queen_switches_from_mode_zero_to_mode_one() {
+        let tiles = Sky(HashMap::new());
+        let mut q = boss(terrustia_proto::npc_params::ICE_QUEEN, 0.0, 0.0);
+        let w = night(&tiles, Some((0.0, 400.0)));
+        for _ in 0..(ICE_QUEEN_MODE0_AT as i32 + 2) {
+            ice_queen(&mut q, &w);
+            q.position.0 += q.velocity.0;
+            q.position.1 += q.velocity.1;
+        }
+        assert_eq!(q.ai[0], 1.0, "it should have switched to its second mode");
+    }
+
+    /// B12: the second mode drops falling ice shards instead of firing the forward mist.
+    #[test]
+    fn the_ice_queen_drops_shards_in_its_second_mode() {
+        let tiles = Sky(HashMap::new());
+        let mut q = boss(terrustia_proto::npc_params::ICE_QUEEN, 0.0, 0.0);
+        q.ai[0] = 1.0;
+        let w = night(&tiles, Some((0.0, 400.0)));
+
+        let mut shots = Vec::new();
+        for _ in 0..400 {
+            let out = ice_queen(&mut q, &w);
+            shots.extend(out.shots);
+            q.position.0 += q.velocity.0;
+            q.position.1 += q.velocity.1;
+        }
+        assert!(!shots.is_empty(), "it should drop shards");
+        assert!(
+            shots
+                .iter()
+                .all(|s| s.projectile == ICE_QUEEN_SHARD && s.damage == ICE_QUEEN_SHARD_DAMAGE)
+        );
+        assert!(
+            shots.iter().all(|s| s.velocity.1 > 0.0),
+            "falling, not rising: {:?}",
+            shots.iter().map(|s| s.velocity).collect::<Vec<_>>()
         );
     }
 

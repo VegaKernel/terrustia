@@ -244,9 +244,13 @@ pub fn validate_chat(text: &str, max_len: usize) -> Result<()> {
     Ok(())
 }
 
-/// Module 4: Journey (creative) mode powers.
-/// `Terraria.GameContent.NetModules.NetCreativePowersModule`, fifth in the registration order.
-pub const MODULE_CREATIVE_POWERS: u16 = 4;
+/// Module 6: Journey (creative) mode powers.
+/// `Terraria.GameContent.NetModules.NetCreativePowersModule`, seventh in the registration order
+/// (`NetworkInitializer.RegisterAll`: 0 Liquid, 1 Text, 2 Ping, 3 Ambience, 4 Bestiary,
+/// 5 CreativeUnlocks, 6 CreativePowers — the id is the 0-based registration counter). It was
+/// previously `4`, which is `NetBestiaryModule`: with that value a real client's creative-power
+/// requests were dropped and its bestiary packets misrouted here (and vice-versa outbound).
+pub const MODULE_CREATIVE_POWERS: u16 = 6;
 
 /// Power ids, in `CreativePowerManager`'s own registration order
 /// (`CreativePowerManager.cs:90-104`) — the order *is* the wire format, a power's id is its
@@ -566,6 +570,37 @@ mod tests {
                 "power id {id}"
             );
         }
+    }
+
+    /// Pins the module id to vanilla's registration index, NOT to `MODULE_CREATIVE_POWERS` — every
+    /// other creative-power test builds its packet with that constant, so all of them pass whatever
+    /// value it holds (a closed loop). `NetworkInitializer.RegisterAll` registers modules in order
+    /// and their id is the 0-based counter: 0 Liquid, 1 Text, 2 Ping, 3 Ambience, 4 Bestiary,
+    /// 5 CreativeUnlocks, **6 CreativePowers**. A real 1.4.5.8 client sends creative-power requests
+    /// as module 6 and its Bestiary as module 4; getting this wrong routes powers to the bestiary
+    /// deserializer (and vice-versa). This is the test that catches the constant drifting.
+    #[test]
+    fn the_creative_powers_module_id_is_the_vanilla_registration_index() {
+        assert_eq!(
+            MODULE_CREATIVE_POWERS, 6,
+            "creative powers is the 7th-registered module (index 6); 4 is Bestiary"
+        );
+        // A frame carrying the real wire id 6 must decode as a creative-power request...
+        let mut w = Writer::new();
+        w.u16(6).u16(power::START_DAY);
+        assert_eq!(
+            decode_creative_power(w.as_slice()).unwrap(),
+            Some(CreativePowerMessage::Button(power::START_DAY)),
+            "a real client's module-6 creative-power frame must decode"
+        );
+        // ...and a frame carrying id 4 (Bestiary) must NOT be mistaken for one.
+        let mut bestiary = Writer::new();
+        bestiary.u16(4).u16(power::START_DAY);
+        assert_eq!(
+            decode_creative_power(bestiary.as_slice()).unwrap(),
+            None,
+            "module 4 is Bestiary, not creative powers"
+        );
     }
 
     #[test]

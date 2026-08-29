@@ -35,7 +35,10 @@ const FILE_TYPE_WORLD: u8 = 2;
 /// A world loaded from a file keeps whatever version it came with, because its header is copied
 /// verbatim and patched. A generated one has no header to copy, so it is written fresh at the
 /// version this server was transcribed from.
-pub const SAVE_VERSION: i32 = 325;
+// 326 is what real 1.4.5.8 writes; its section layout is byte-for-byte identical to 325 (no
+// write-path field is gated between 323 and 326), so a freshly generated world is marked as the
+// build this server transcribes rather than one release behind.
+pub const SAVE_VERSION: i32 = 326;
 
 /// How many sections the format has at [`SAVE_VERSION`].
 const SECTIONS: usize = 11;
@@ -130,9 +133,11 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
             // Rewritten only when the load understood the whole section. Rewriting one we read
             // partially would write back what we managed to decode and silently drop the rest —
             // which for these two sections means a world's residents or its pylons.
-            TOWN_NPC_SECTION if preserved.town_npcs_understood => write_town_npcs(&mut w, world),
+            TOWN_NPC_SECTION if preserved.town_npcs_understood => {
+                write_town_npcs(&mut w, world, preserved.version)
+            }
             TILE_ENTITY_SECTION if preserved.tile_entities_understood => {
-                write_tile_entities(&mut w, world)
+                write_tile_entities(&mut w, world, preserved.version)
             }
             _ => {
                 w.bytes(section);
@@ -404,9 +409,9 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
     // that has just been made has none of them, and one this server has been running keeps them
     // elsewhere, so each is written empty in the shape its loader expects.
     pointers[4] = w.len() as i32;
-    write_town_npcs(&mut w, world);
+    write_town_npcs(&mut w, world, SAVE_VERSION);
     pointers[5] = w.len() as i32;
-    write_tile_entities(&mut w, world);
+    write_tile_entities(&mut w, world, SAVE_VERSION);
     pointers[6] = w.len() as i32;
     w.i32(0); // no pressure plates held down
     pointers[7] = w.len() as i32;
@@ -440,7 +445,7 @@ const TOWN_NPC_SECTION: usize = 0;
 /// Two lists, each led by a boolean per entry and closed by a bare `false`. The second holds the
 /// non-town NPCs the game persists; this server does not model those, so it writes an empty list —
 /// which is valid, and means they respawn rather than being carried.
-fn write_town_npcs(w: &mut Writer, world: &World) {
+fn write_town_npcs(w: &mut Writer, world: &World, version: i32) {
     w.i32(world.shimmered_town_npcs.len() as i32);
     for kind in &world.shimmered_town_npcs {
         w.i32(*kind);
@@ -457,8 +462,14 @@ fn write_town_npcs(w: &mut Writer, world: &World) {
             .i32(npc.home.1)
             // Bit zero says a variation index follows, which it always does for a townsperson.
             .u8(1)
-            .i32(npc.variation)
-            .bool(npc.homeless_despawn);
+            .i32(npc.variation);
+        // `homelessDespawn` only exists in the file from version 315. Rewriting a preserved world
+        // that predates it (its header still says <315) must NOT emit the byte, or a real client
+        // reads it as the next entry's lead boolean and the section desyncs. Fresh saves are at
+        // SAVE_VERSION, so they always write it.
+        if version >= super::wld::HOMELESS_DESPAWN_VERSION {
+            w.bool(npc.homeless_despawn);
+        }
     }
     w.bool(false);
     w.bool(false);
@@ -468,10 +479,10 @@ fn write_town_npcs(w: &mut Writer, world: &World) {
 ///
 /// The file form, which carries each entity's id and a logic sensor's state — neither of which
 /// goes over the network.
-fn write_tile_entities(w: &mut Writer, world: &World) {
+fn write_tile_entities(w: &mut Writer, world: &World, version: i32) {
     w.i32(world.tile_entities.len() as i32);
     for entity in &world.tile_entities {
-        entity.write(w, false);
+        entity.write(w, false, version);
     }
 }
 

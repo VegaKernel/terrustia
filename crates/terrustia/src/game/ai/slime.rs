@@ -35,7 +35,7 @@ fn hop_kind(ai0: f32, window: f32) -> u8 {
 }
 
 /// Drive one slime. Only acts while it is standing on something.
-pub fn update(npc: &mut Npc, target: Option<Target>, on_ground: bool) {
+pub fn update(npc: &mut Npc, target: Option<Target>, on_ground: bool, active: bool) {
     if !on_ground {
         return;
     }
@@ -46,7 +46,10 @@ pub fn update(npc: &mut Npc, target: Option<Target>, on_ground: bool) {
         npc.velocity.0 = 0.0;
     }
 
-    npc.ai[0] += 1.0 + slime_timer_bonus(npc.npc_type);
+    // Vanilla ticks the hop clock once a frame, and a second time when the slime is "active"
+    // (`NPC.AI_001_Slimes`' own `flag3`) — so an active slime reaches its next hop in half the
+    // frames, on top of whatever per-type bonus it carries.
+    npc.ai[0] += 1.0 + slime_timer_bonus(npc.npc_type) + f32::from(u8::from(active));
     let window = slime_hop_window(npc.npc_type);
     let kind = hop_kind(npc.ai[0], window);
     if kind == 0 {
@@ -102,7 +105,7 @@ mod tests {
     fn a_slime_does_nothing_in_the_air() {
         let mut s = slime(1);
         s.ai[0] = 0.0;
-        update(&mut s, Some(player(2000.0)), false);
+        update(&mut s, Some(player(2000.0)), false, false);
         assert_eq!(s.velocity, (0.0, 0.0), "no hop while airborne");
     }
 
@@ -110,7 +113,7 @@ mod tests {
     fn a_slime_hops_toward_its_target_when_the_timer_comes_round() {
         let mut s = slime(1);
         s.ai[0] = -1.0; // one tick from the first window
-        update(&mut s, Some(player(5000.0)), true);
+        update(&mut s, Some(player(5000.0)), true, false);
         assert_eq!(s.velocity.1, HOP_Y, "should hop");
         assert!(s.velocity.0 > 0.0, "and lean toward the player");
         assert_eq!(s.direction, 1);
@@ -120,7 +123,7 @@ mod tests {
     fn the_long_hop_is_higher_and_further_than_the_short_one() {
         let mut s = slime(1);
         s.ai[0] = -1751.0; // one tick from the third window
-        update(&mut s, Some(player(5000.0)), true);
+        update(&mut s, Some(player(5000.0)), true, false);
         assert_eq!(s.velocity.1, BIG_HOP_Y);
         assert_eq!(s.ai[0], -200.0, "the long hop resets the timer to -200");
         // The long hop is the one that carries a slime across a gap.
@@ -132,7 +135,7 @@ mod tests {
     fn the_timer_resets_deep_enough_to_pause_between_hops() {
         let mut s = slime(1);
         s.ai[0] = 0.0;
-        update(&mut s, Some(player(5000.0)), true);
+        update(&mut s, Some(player(5000.0)), true, false);
         // Window 1 resets to -120 + -1000.
         assert_eq!(s.ai[0], -1120.0);
         assert_eq!(
@@ -148,13 +151,34 @@ mod tests {
         let mut lava = slime(59);
         plain.ai[0] = -5000.0;
         lava.ai[0] = -5000.0;
-        update(&mut plain, None, true);
-        update(&mut lava, None, true);
+        update(&mut plain, None, true, false);
+        update(&mut lava, None, true, false);
         assert!(
             lava.ai[0] > plain.ai[0],
             "LavaSlime should gain more per tick: {} vs {}",
             lava.ai[0],
             plain.ai[0]
+        );
+    }
+
+    #[test]
+    fn an_active_slime_fills_its_hop_clock_twice_as_fast() {
+        // Type 1 has no per-type bonus, so the only difference between these two is the active flag
+        // (night / hurt / below the surface / slime rain). Both start far below every hop window so
+        // the tick only advances the clock — it does not fire a hop and reset it.
+        let mut passive = slime(1);
+        let mut active = slime(1);
+        passive.ai[0] = -5000.0;
+        active.ai[0] = -5000.0;
+        update(&mut passive, None, true, false);
+        update(&mut active, None, true, true);
+        assert_eq!(
+            passive.ai[0], -4999.0,
+            "a passive slime ticks its clock once"
+        );
+        assert_eq!(
+            active.ai[0], -4998.0,
+            "an active slime ticks it twice, so it reaches its next hop in half the frames"
         );
     }
 
@@ -166,7 +190,7 @@ mod tests {
         let mut hops = 0;
         for _ in 0..3000 {
             let before = s.velocity.1;
-            update(&mut s, Some(player(5000.0)), true);
+            update(&mut s, Some(player(5000.0)), true, false);
             if s.velocity.1 < 0.0 && before >= 0.0 {
                 hops += 1;
             }

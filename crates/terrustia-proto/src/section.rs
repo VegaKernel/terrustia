@@ -134,7 +134,7 @@ pub fn write_section_stream<F>(
     // `TileEntity.Write`'s default argument, which is easy to miss.
     out.i16(extras.tile_entities.len() as i16);
     for entity in &extras.tile_entities {
-        entity.write(out, false);
+        entity.write(out, false, crate::tile_entity::CURRENT_FILE_VERSION);
     }
 }
 
@@ -384,7 +384,11 @@ pub fn decode_section_stream(stream: &[u8]) -> Result<(SectionBounds, Vec<Tile>,
     for _ in 0..entities {
         extras
             .tile_entities
-            .push(crate::tile_entity::TileEntity::read(&mut r, false)?);
+            .push(crate::tile_entity::TileEntity::read(
+                &mut r,
+                false,
+                crate::tile_entity::CURRENT_FILE_VERSION,
+            )?);
     }
 
     Ok((bounds, tiles, extras))

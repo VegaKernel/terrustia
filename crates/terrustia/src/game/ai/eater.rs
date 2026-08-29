@@ -154,8 +154,12 @@ fn sting<T: TileView>(
     let length = (aim.0 * aim.0 + aim.1 * aim.1).sqrt();
     let scale = spec.speed / length;
     aim = (aim.0 * scale, aim.1 * scale);
-    // The charge parks just past the trigger while the sound plays, then clears next tick.
-    npc.ai[1] = spec.charge_needed - 29.0;
+    // Reset the charge fully on firing. Vanilla parks it at 101 for one tick and clears it to 0 on
+    // the next (`if (ai[1] == 101) ai[1] = 0`), giving a full recharge between shots — but that
+    // clear depended on the value being *exactly* 101, which the per-tick random increment here
+    // never leaves it at, so the charge sat at ~101 and the hornet re-fired every ~25 ticks instead
+    // of ~113. Clearing to 0 now is the same net cadence without the fragile equality.
+    npc.ai[1] = 0.0;
     npc.dirty = true;
     Some(Shot {
         projectile: spec.projectile,
@@ -465,6 +469,36 @@ mod tests {
         let speed = (shot.velocity.0.powi(2) + shot.velocity.1.powi(2)).sqrt();
         assert!((speed - 8.0).abs() < 1e-3, "got {speed}");
         assert!(shot.velocity.0 > 0.0, "and fly toward the player");
+    }
+
+    #[test]
+    fn a_hornet_recharges_fully_between_stingers() {
+        let tiles = Cave::default();
+        let mut h = chaser(42);
+        let (cx, cy) = h.center();
+        let t = Some(player_at(cx + 300.0, cy));
+        let mut rng = rng();
+        let mut shot_ticks = Vec::new();
+        for tick in 0..1500 {
+            h.velocity.0 = 3.0;
+            if update(&mut h, &night(&tiles, t), &mut rng, false).is_some() {
+                shot_ticks.push(tick);
+                if shot_ticks.len() == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            shot_ticks.len(),
+            2,
+            "a hornet in range should fire at least twice"
+        );
+        let gap = shot_ticks[1] - shot_ticks[0];
+        // A full recharge is ~113 ticks. The old parked-at-101 bug refired in ~25.
+        assert!(
+            gap > 60,
+            "a hornet fully recharges between stingers (~113 ticks), not ~25; got {gap}"
+        );
     }
 
     #[test]

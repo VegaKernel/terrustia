@@ -677,12 +677,23 @@ pub(crate) fn biome_chest_loot(
     use terrustia_proto::ItemStack;
 
     if layout.jungle.contains(x) {
-        // WorldGen.cs:36429 `num10 = Utils.SelectRandom(genRand, new short[7] { 670, 724, 950,
-        // 1319, 987, 1579, 6153 })`, then a further one-in-twenty reroll to 997 at :36444.
-        const JUNGLE: [i32; 7] = [670, 724, 950, 1319, 987, 1579, 6153];
+        // The array `{ 670, 724, 950, 1319, 987, 1579, 6153 }` this branch used to draw from
+        // (WorldGen.cs:36464) is the *ice/snow biome* chest table — that call is gated on tile
+        // 147/161/162/197 (ice/snow variants) a few lines above, not on the jungle at all. The
+        // real jungle signature item is `GetNextJungleChestItem` (`WorldGen.cs:10146-10173`): a
+        // non-repeating cycle through Feral Claws(211)/Anklet of the Wind(212)/Staff of
+        // Regrowth(213)/Boomstick(964), with a further reroll — 1/15 to Fiberglass Fishing
+        // Pole(2292), else 1/20 to Flower Boots(3017). This function has no persistent
+        // `JungleItemCount` to cycle (each call is a fresh site, not a shared per-world counter),
+        // so the cycle is approximated with a uniform draw across the same four items — a real,
+        // disclosed narrowing of `GetNextJungleChestItem`'s own non-repeating guarantee, not a
+        // wrong item set.
+        const JUNGLE: [i32; 4] = [211, 212, 213, 964];
         let mut signature = JUNGLE[rand.next_max(JUNGLE.len() as i32) as usize];
-        if rand.next_max(20) == 0 {
-            signature = 997;
+        if rand.next_max(15) == 0 {
+            signature = 2292;
+        } else if rand.next_max(20) == 0 {
+            signature = 3017;
         }
         let mut items = vec![ItemStack::new(signature, 1, 0)];
         items.push(ItemStack::new(8, rand.next_range(10, 30) as i16, 0));
@@ -721,21 +732,29 @@ pub(crate) fn cavern_loot(
 ) -> Vec<terrustia_proto::ItemStack> {
     use terrustia_proto::ItemStack;
     // The signature item, which is what a player opens a chest hoping for.
+    //
+    // Every id below used to disagree with its own comment (`ItemID.cs` says 965 is Rope, not
+    // Shoe Spikes; 930 is Flare Gun, not Cloud in a Bottle; 158 is Lucky Horseshoe, not Hermes
+    // Boots; 963 is Black Belt — a post-Plantera item, wrong for an ungated cavern chest — not
+    // Bandage; 997 is Extractinator, not Magic Mirror; and in `deep`, 119 is Flamarang, 155 is
+    // Muramasa, 1300 is Rifle Scope — hardmode — 281 is Blowpipe, and 3068 is Cordage Guide, a
+    // guide book, not a chest reward). Replaced with each id the comment actually meant, all
+    // verified against `ItemID.cs` directly, keeping the same shallow/deep split.
     let shallow = [
-        49,  // Blue Phaseblade... a placeholder tier
-        965, // Shoe Spikes
-        930, // Cloud in a Bottle
-        158, // Hermes Boots
-        963, // Bandage
-        997, // Magic Mirror
+        49,  // Band of Regeneration
+        965, // Rope
+        930, // Flare Gun
+        158, // Lucky Horseshoe
+        975, // Shoe Spikes
+        50,  // Magic Mirror
     ];
     let deep = [
-        119,  // Band of Regeneration
-        155,  // Enchanted Boomerang
-        1300, // Spelunker Potion... treated as a find
-        997,  // Magic Mirror
-        281,  // Aqua Scepter
-        3068, // Extractinator-adjacent tier
+        55,  // Enchanted Boomerang
+        53,  // Cloud in a Bottle
+        54,  // Hermes Boots
+        296, // Spelunker Potion
+        157, // Aqua Scepter
+        997, // Extractinator
     ];
     let pool: &[i32] = if y > layout.rock + 120 {
         &deep
@@ -754,15 +773,22 @@ pub(crate) fn cavern_loot(
 }
 
 /// ...and what a dungeon chest holds, which is a tier above.
+///
+/// Every id below used to disagree with its own comment: 327 is Golden Key in `ItemID.cs`, not
+/// Muramasa; 328 is Shadow Chest, not Cobalt Shield; 329 is Shadow Key, not Aqua Scepter; 330 is
+/// Obsidian Brick Wall, not Blue Moon; 676 (Frostbrand) and 1266 (Magnet Sphere) are real items,
+/// but a hardmode reforge and a post-Plantera drop respectively — both too advanced for an
+/// always-pre-hardmode dungeon table. Replaced with the classic dungeon weapon family each
+/// original comment actually named, IDs verified against `ItemID.cs` directly: Muramasa(155),
+/// Cobalt Shield(156), Blade of Grass(190), Blue Moon(163), Handgun(164).
 fn dungeon_loot(rand: &mut UnifiedRandom) -> Vec<terrustia_proto::ItemStack> {
     use terrustia_proto::ItemStack;
     let signature = [
-        327,  // Muramasa
-        328,  // Cobalt Shield
-        329,  // Aqua Scepter
-        330,  // Blue Moon
-        676,  // Shadow Key adjacent
-        1266, // Handgun tier
+        155, // Muramasa
+        156, // Cobalt Shield
+        190, // Blade of Grass
+        163, // Blue Moon
+        164, // Handgun
     ];
     let pick = signature[rand.next_max(signature.len() as i32) as usize];
     vec![
@@ -837,32 +863,36 @@ mod chest_loot_tests {
     use super::*;
     use crate::world::worldgen::layout::Band;
 
-    /// A biome-tagged chest carries vanilla's real signature item, not the generic cavern table.
-    ///
-    /// Transcribed from `AddBuriedChest`'s own item lists (`WorldGen.cs:36429` jungle,
-    /// `:36404` desert) rather than guessed — asserted against the exact vanilla item id set
-    /// rather than merely "some item", since the whole point is that these are *vanilla's* ids.
+    /// A biome-tagged chest carries vanilla's real jungle signature item — the
+    /// `GetNextJungleChestItem` cycle (`WorldGen.cs:10146-10173`) — not the ice/snow-biome chest
+    /// table (`670, 724, 950, 1319, 987, 1579, 6153`, gated on tile 147/161/162/197 at
+    /// `WorldGen.cs:36464`, nothing to do with the jungle) this table used to draw from. Feral
+    /// Claws(211), Anklet of the Wind(212), Staff of Regrowth(213) and Boomstick(964) must show
+    /// up, and neither of the real reroll targets — Fiberglass Fishing Pole(2292) at 1/15,
+    /// Flower Boots(3017) at 1/20 — nor any ice-table id may ever appear.
     #[test]
     fn a_jungle_column_gets_vanillas_jungle_chest_items() {
         let mut layout = test_layout();
         layout.jungle = Band { from: 100, to: 200 };
 
-        // Enough draws that both the main roll and the one-in-twenty 997 reroll are exercised.
         let mut seen_signature = false;
-        let mut seen_reroll = false;
-        for seed in 0..200i32 {
+        let mut seen_fishing_pole = false;
+        let mut seen_flower_boots = false;
+        for seed in 0..400i32 {
             let mut rand = UnifiedRandom::new(seed);
             let items = biome_chest_loot(&layout, 150, 500, &mut rand)
                 .expect("a jungle-biome column must not fall through to the generic table");
             let signature = items[0].id;
             assert!(
-                [670, 724, 950, 1319, 987, 1579, 6153, 997].contains(&signature),
-                "unexpected jungle chest item id {signature}"
+                [211, 212, 213, 964, 2292, 3017].contains(&signature),
+                "unexpected jungle chest item id {signature} — the frozen-chest set \
+                 (670/724/950/1319/987/1579/6153/997) must never appear here"
             );
-            if signature != 997 {
-                seen_signature = true;
-            } else {
-                seen_reroll = true;
+            match signature {
+                211 | 212 | 213 | 964 => seen_signature = true,
+                2292 => seen_fishing_pole = true,
+                3017 => seen_flower_boots = true,
+                _ => unreachable!(),
             }
         }
         assert!(
@@ -870,8 +900,12 @@ mod chest_loot_tests {
             "the jungle table should produce its own items"
         );
         assert!(
-            seen_reroll,
-            "the one-in-twenty 997 reroll should show up over 200 draws"
+            seen_fishing_pole,
+            "the one-in-fifteen Fiberglass Fishing Pole reroll should show up over 400 draws"
+        );
+        assert!(
+            seen_flower_boots,
+            "the one-in-twenty Flower Boots reroll should show up over 400 draws"
         );
     }
 
@@ -907,6 +941,68 @@ mod chest_loot_tests {
         assert!(biome_chest_loot(&layout, 350, 100, &mut rand).is_none());
         // Plain caverns, in neither band.
         assert!(biome_chest_loot(&layout, 250, 500, &mut rand).is_none());
+    }
+
+    /// `dungeon_loot`'s old signature array (327/328/329/330/676/1266) disagreed with its own
+    /// comments: `ItemID.cs` says 327 is Golden Key (not Muramasa), 328 is Shadow Chest (not
+    /// Cobalt Shield), 329 is Shadow Key (not Aqua Scepter), 330 is Obsidian Brick Wall (not Blue
+    /// Moon) — and 676/1266 really are Frostbrand/Magnet Sphere, but a hardmode reforge and a
+    /// post-Plantera drop are both too advanced for an always-pre-hardmode dungeon chest. Pins
+    /// the real classic family (Muramasa/Cobalt Shield/Blade of Grass/Blue Moon/Handgun) instead.
+    #[test]
+    fn dungeon_chests_hold_the_real_classics_not_the_mislabeled_ids() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..300i32 {
+            let mut rand = UnifiedRandom::new(seed);
+            let signature = dungeon_loot(&mut rand)[0].id;
+            assert!(
+                [155, 156, 190, 163, 164].contains(&signature),
+                "unexpected dungeon chest item id {signature} — the old mislabeled set \
+                 (327/328/329/330/676/1266) must never appear"
+            );
+            seen.insert(signature);
+        }
+        assert_eq!(
+            seen,
+            [155, 156, 190, 163, 164].into_iter().collect(),
+            "every real classic should show up over 300 draws"
+        );
+    }
+
+    /// `cavern_loot`'s old shallow/deep arrays disagreed with their own comments the same way —
+    /// e.g. 963 really is Black Belt (a post-Plantera item, wrong for an ungated cavern chest,
+    /// not "Bandage") and 1300 really is Rifle Scope (hardmode, not "Spelunker Potion"). Pins
+    /// each pool to ids that now actually match what the chest is supposed to hold, and confirms
+    /// neither of those two wrongly-tiered ids can appear at either depth.
+    #[test]
+    fn cavern_chests_hold_ids_that_match_their_own_comments() {
+        let mut layout = test_layout();
+        layout.rock = 500;
+        let mut seen_shallow = std::collections::HashSet::new();
+        let mut seen_deep = std::collections::HashSet::new();
+        for seed in 0..400i32 {
+            let mut rand = UnifiedRandom::new(seed);
+            seen_shallow.insert(cavern_loot(&layout, layout.rock + 10, &mut rand)[0].id);
+            let mut rand2 = UnifiedRandom::new(seed + 10_000);
+            seen_deep.insert(cavern_loot(&layout, layout.rock + 200, &mut rand2)[0].id);
+        }
+        for wrong in [963, 1300] {
+            assert!(
+                !seen_shallow.contains(&wrong) && !seen_deep.contains(&wrong),
+                "post-Plantera/hardmode item {wrong} must never come out of an ungated cavern \
+                 chest"
+            );
+        }
+        assert_eq!(
+            seen_shallow,
+            [49, 965, 930, 158, 975, 50].into_iter().collect(),
+            "shallow pool"
+        );
+        assert_eq!(
+            seen_deep,
+            [55, 53, 54, 296, 157, 997].into_iter().collect(),
+            "deep pool"
+        );
     }
 
     fn test_layout() -> Layout {

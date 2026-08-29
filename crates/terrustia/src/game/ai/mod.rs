@@ -81,6 +81,10 @@ pub struct Conditions {
     pub desert: bool,
     /// Whether a sandstorm is blowing. A tumbleweed in one is a different creature.
     pub sandstorm: bool,
+    /// Whether a Slime Rain is falling — one of the four conditions that make a slime "active" and
+    /// hop at twice the rate (`NPC.AI_001_Slimes`' own `flag3`, alongside night, being hurt, and
+    /// being below the surface).
+    pub slime_rain: bool,
     /// Pixel depth of the surface layer, below which "outdoors" stops applying.
     pub surface_y: f32,
     /// Whether the world is expert or better.
@@ -115,6 +119,7 @@ impl Default for Conditions {
             wind: 0.0,
             desert: false,
             sandstorm: false,
+            slime_rain: false,
             surface_y: 0.0,
             expert: false,
             hardmode: false,
@@ -570,7 +575,15 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
     let target = world.target;
     match npc.stats.ai_style {
         0 => inert::update(npc, target),
-        1 => slime::update(npc, target, npc.on_ground),
+        1 => {
+            // A slime is "active" — and hops at twice the rate — at night, when hurt, below the
+            // surface, or during a Slime Rain (`NPC.AI_001_Slimes`' own `flag3`).
+            let active = !world.conditions.day
+                || npc.life != npc.life_max
+                || npc.position.1 > world.conditions.surface_y
+                || world.conditions.slime_rain;
+            slime::update(npc, target, npc.on_ground, active);
+        }
         // No graveyard biome yet, so nothing keeps the eyes out past dawn.
         2 => eye::update(npc, world, false),
         6 => worm::update(npc, world, false),
@@ -627,7 +640,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         67 => snail::update(npc, world, rng),
         4 => effects.spawn.extend(boss::eye::update(npc, world)),
-        11 => effects.spawn.extend(boss::skeletron::head(npc, world)),
+        11 => {
+            let head = boss::skeletron::head(npc, world, rng);
+            effects.spawn.extend(head.spawn);
+            effects.shots.extend(head.shots);
+        }
         27 => {
             let advance = boss::wall::wall(
                 npc,
@@ -904,7 +921,8 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         63 => hardmode::drifters::flocko(npc, world),
         89 => {
-            let out = hardmode::drifters::mothron_egg(npc, world.was_hurt, rng);
+            let out =
+                hardmode::drifters::mothron_egg(npc, world.was_hurt, world.conditions.expert, rng);
             effects.transform = out.became;
         }
         95 => effects.transform = hardmode::drifters::stardust_cell(npc).became,
@@ -1131,6 +1149,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         121 => {
             let out = boss::queen_slime::queen_slime(npc, world, rng);
+            effects.shots.extend(out.shots);
             effects.teleport_to = out.teleport_to;
         }
         style => unreachable!("style {style} claims parity but has no routine here"),

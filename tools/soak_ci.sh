@@ -48,11 +48,30 @@ done
 grep -q "accepting connections" "$WORK/server.log" || { echo "server never started:"; cat "$WORK/server.log"; exit 1; }
 
 echo "putting three players on it for ${SECONDS_TO_RUN}s"
+CLIENT_PIDS=()
 for i in 1 2 3; do
-    "$ROOT/target/release/examples/soak" "127.0.0.1:$PORT" "$SECONDS_TO_RUN" \
+    # Unique name per client (the server kicks duplicates) and a different depth so they spread out.
+    "$ROOT/target/release/examples/soak" "127.0.0.1:$PORT" "$SECONDS_TO_RUN" "$((i * 8))" "soak$i" \
         > "$WORK/client$i.log" 2>&1 &
+    CLIENT_PIDS+=($!)
 done
-wait $(jobs -p | grep -v "$SERVER_PID") 2>/dev/null || true
+
+# Each client must actually exit 0. A client kicked at the door (duplicate name, server full) exits
+# non-zero, which used to be swallowed by `wait ... || true` — turning a three-player soak into a
+# one-player one with nothing red.
+client_failures=0
+for i in 1 2 3; do
+    if ! wait "${CLIENT_PIDS[$((i - 1))]}"; then
+        echo "FAIL: soak client $i did not exit cleanly:"
+        cat "$WORK/client$i.log"
+        client_failures=$((client_failures + 1))
+    fi
+    if ! grep -q "joined at" "$WORK/client$i.log"; then
+        echo "FAIL: soak client $i never reported joining:"
+        cat "$WORK/client$i.log"
+        client_failures=$((client_failures + 1))
+    fi
+done
 
 # Give the last tick a moment to land in the log, then stop cleanly so the shutdown save runs.
 sleep 2
@@ -66,6 +85,11 @@ check() { if [[ $2 -eq 0 ]]; then note "ok    $1"; else note "FAIL  $1"; fail=1;
 
 echo
 echo "checks:"
+
+# 0. All three clients had to connect and run. Two of three used to be kicked for a duplicate name
+#    and exit non-zero silently, quietly turning a three-player soak into a one-player one.
+[[ ${client_failures:-0} -eq 0 ]]
+check "all three soak clients connected and ran" $?
 
 # 1. It has to have survived. A panic now exits non-zero and says so.
 ! grep -qE "panicked|the game loop panicked|game task died" "$WORK/server.log"

@@ -23,14 +23,18 @@ async fn main() -> ExitCode {
         .nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
+    // The server refuses duplicate names at the door, so multiple soak clients against one server
+    // must each be given their own — otherwise only the first joins and the rest exit failing,
+    // silently reducing a "three real players" soak to one. Defaults to "soak" for a lone run.
+    let name = env::args().nth(4).unwrap_or_else(|| "soak".to_string());
     let Ok(addr) = addr.parse() else {
         eprintln!("bad address");
         return ExitCode::FAILURE;
     };
-    let mut client = match Client::join(addr, "soak").await {
+    let mut client = match Client::join(addr, &name).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("could not join: {e}");
+            eprintln!("could not join as {name:?}: {e}");
             return ExitCode::FAILURE;
         }
     };

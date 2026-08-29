@@ -36,6 +36,7 @@ pub mod sgr {
     pub const BRIGHT_YELLOW: &str = "\x1b[93m";
     pub const BRIGHT_BLUE: &str = "\x1b[94m";
     pub const BRIGHT_CYAN: &str = "\x1b[96m";
+    pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
 }
 
 /// Whether this process should emit colour, decided once at startup.
@@ -101,7 +102,7 @@ fn level_style(level: Level) -> (&'static str, &'static str) {
         Level::WARN => ("WARN ", sgr::BRIGHT_YELLOW),
         Level::INFO => ("INFO ", sgr::BRIGHT_GREEN),
         Level::DEBUG => ("DEBUG", sgr::BRIGHT_BLUE),
-        Level::TRACE => ("TRACE", sgr::MAGENTA),
+        Level::TRACE => ("TRACE", sgr::BRIGHT_MAGENTA),
     }
 }
 
@@ -212,6 +213,25 @@ impl TermLayer {
         line
     }
 
+    /// Render a player's chat line: an uptime and a coloured `CHAT` tag, then the message — no
+    /// level and no target column, so a conversation reads as a conversation rather than as a
+    /// column of identical `INFO … chat` operational events.
+    fn render_chat(&self, parts: &Parts, uptime: Duration) -> String {
+        let p = self.palette;
+        let mut line = String::with_capacity(64);
+        line.push_str(p.on(sgr::DIM));
+        stamp(uptime, &mut line);
+        line.push_str(p.off());
+        line.push(' ');
+        line.push_str(p.on(sgr::BRIGHT_CYAN));
+        line.push_str(p.on(sgr::BOLD));
+        line.push_str("CHAT ");
+        line.push_str(p.off());
+        line.push(' ');
+        line.push_str(&parts.message);
+        line
+    }
+
     /// Render a console command's own reply: no timestamp, no level tag, no target column — the
     /// furniture that makes sense for a stream of log events reads as noise around the one line
     /// somebody just asked for by typing a command. A REPL prints its own output plainly; this is
@@ -279,85 +299,304 @@ pub fn console_feed() -> &'static tokio::sync::broadcast::Sender<ConsoleLine> {
     CONSOLE_FEED.get_or_init(|| tokio::sync::broadcast::channel(500).0)
 }
 
-/// Coordination between the sticky console prompt (`console.rs`) and ordinary log lines, so a log
-/// line can never land in the middle of a half-typed command.
+/// The live furniture the terminal keeps at the bottom of the screen beneath the scrolling log: an
+/// optional one-line status footer (`status`) and the console's own prompt (`prompt`), plus the
+/// cursor's offset into the prompt (`cursor_back`) so a status refresh can put it back where the
+/// user was typing.
 ///
-/// The console owns raw mode and knows what it has drawn; `TermLayer::on_event` can run on
-/// whichever thread `tracing`'s dispatch happens to use, which is not necessarily the console's
-/// own. Both go through this one lock before touching stdout — the console updates it on every
-/// keystroke, `on_event` erases-and-redraws around it for every line it writes.
-///
-/// An empty string means no prompt is currently shown, which is the state a non-interactive
-/// console (piped stdin, no TTY) never leaves — so log lines there fall straight through to a
-/// plain `writeln!`, exactly today's behaviour.
-static PROMPT: OnceLock<Mutex<String>> = OnceLock::new();
-
-fn prompt_lock() -> &'static Mutex<String> {
-    PROMPT.get_or_init(|| Mutex::new(String::new()))
+/// Both writers — the console's keystrokes (`console.rs`) and `on_event`'s log lines, which can run
+/// on whichever thread `tracing`'s dispatch happens to use — go through this one lock before
+/// touching stdout, so neither can land in the middle of the other. An empty `prompt` means nothing
+/// interactive is shown, the state a non-interactive console (piped stdin, no TTY) never leaves — so
+/// log lines there fall straight through to a plain `writeln!`, exactly today's behaviour, and a
+/// status set in that state is stored but never drawn.
+#[derive(Default)]
+struct Footer {
+    status: String,
+    prompt: String,
+    cursor_back: usize,
+    /// Physical rows the footer occupied after its last draw, so the next redraw erases exactly
+    /// that many. A prompt or status wider than the terminal wraps onto several rows, and erasing
+    /// only one left the rest on screen, stacking a fresh copy below on every keystroke; tracking
+    /// the real count is what stops that.
+    drawn_rows: usize,
 }
 
-/// Tell the shared state what the console currently has drawn. Called by `console.rs` after every
-/// keystroke, immediately after it draws the same text to the terminal itself — this function does
-/// not draw anything on its own, it only updates what a concurrent log write should redraw.
-pub fn set_prompt_drawn(current: &str) {
-    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    guard.push_str(current);
+static FOOTER: OnceLock<Mutex<Footer>> = OnceLock::new();
+
+fn footer_lock() -> &'static Mutex<Footer> {
+    FOOTER.get_or_init(|| Mutex::new(Footer::default()))
 }
 
-/// Erase whatever is currently drawn, return the cursor to column 0. Pulled out as a constant
-/// rather than inlined so the composition logic below is one string operation, not several.
-const ERASE: &str = "\r\x1b[2K";
+/// The terminal width in columns, for working out how many physical rows a line wraps into. Falls
+/// back to 80 when there is no terminal to ask; a footer is only ever drawn when one exists.
+fn terminal_cols() -> usize {
+    crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(80)
+        .max(1)
+}
 
-/// Build the exact bytes a log write should emit: the erase sequence and a trailing redraw of the
-/// prompt when one is shown, nothing extra when it is not. Split out from the actual stdout write
-/// so it can be tested without a terminal — this is the entire concurrency contract, and it is
-/// worth being able to check it as a pure function.
-fn compose_log_write(prompt: &str, line: &str) -> String {
-    if prompt.is_empty() {
-        format!("{line}\n")
+/// Whether the sticky console currently has the terminal in raw mode. Raw mode turns off the
+/// terminal's own `\n` -> `\r\n` translation, so a plain `\n` moves the cursor down without
+/// returning it to column 0, and a line printed after one lands mid-column. Every line this module
+/// prints while this is set has to carry its own carriage return. `console.rs` sets and clears it
+/// around `enable_raw_mode`/`disable_raw_mode`; while it is false (piped output, a service with no
+/// terminal, or before the console starts) a bare `\n` is correct and a `\r` would be litter.
+static RAW_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell this module whether the terminal is in raw mode; see [`RAW_MODE`]. Called by the console.
+pub fn set_raw_mode(on: bool) {
+    RAW_MODE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The line ending to use right now: `\r\n` while the raw-mode console holds the terminal, a bare
+/// `\n` otherwise. One place decides it, so every writer here agrees.
+fn newline() -> &'static str {
+    if RAW_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        "\r\n"
     } else {
-        format!("{ERASE}{line}\r\n{prompt}")
+        "\n"
     }
 }
 
-/// Write one already-rendered line, erasing and redrawing the console prompt around it under one
-/// lock so a second writer — another log line, or the console's own next keystroke — can never
-/// interleave with this one.
-fn write_line_coordinated(line: &str) {
-    let guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let composed = compose_log_write(&guard, line);
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(composed.as_bytes());
-    let _ = out.flush();
+/// The visible column an ordinary log line's message begins at: the width of the timestamp, level
+/// tag and target columns [`TermLayer::render`] lays down before it (12 + 1 + 5 + 1 + 18 + 1). A
+/// wrapped log line indents its continuation rows to here so the message reads as one block rather
+/// than sprawling back to column 0. Tied to `render`'s layout by
+/// `the_message_column_matches_render`.
+const MESSAGE_COL: usize = 38;
+
+/// The same, for a chat line, which carries only a timestamp and a `CHAT` tag (12 + 1 + 5 + 1).
+const CHAT_COL: usize = 19;
+
+/// Re-flow `line` to `cols` columns, indenting every row after the first to `indent`, so a log line
+/// wider than the terminal wraps into an aligned block instead of spilling back to column 0. ANSI
+/// colour and cursor escapes are copied through without counting toward the width, and characters
+/// (not words) are the break unit, matching what the terminal's own wrap would have done. A line
+/// that fits is returned unchanged.
+fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
+    // Nothing sane to do if the terminal is narrower than the indent itself; leave it to wrap on
+    // its own rather than emit rows that are all indent and no room.
+    if cols <= indent || visible_len(line) <= cols {
+        return line.to_string();
+    }
+    let pad = " ".repeat(indent);
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len() + line.len() / cols.max(1) + indent);
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            // Copy a CSI escape verbatim; it takes no visible columns.
+            let start = i;
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            out.push_str(&line[start..i]);
+            continue;
+        }
+        // The start of a UTF-8 character. Wrap before it if the row is full.
+        if col >= cols {
+            out.push_str("\r\n");
+            out.push_str(&pad);
+            col = indent;
+        }
+        let char_len = utf8_len(bytes[i]);
+        let end = (i + char_len).min(bytes.len());
+        out.push_str(&line[i..end]);
+        col += 1;
+        i = end;
+    }
+    out
 }
 
-/// Print a line under the same coordination as a log write, for output that has nothing to do
-/// with `tracing` at all — Tab completion's candidate list, for one. Public so `console.rs` can
-/// print without going back through the game task for something the console already knows.
+/// Byte length of a UTF-8 character from its lead byte.
+fn utf8_len(lead: u8) -> usize {
+    match lead {
+        b if b >= 0xF0 => 4,
+        b if b >= 0xE0 => 3,
+        b if b >= 0xC0 => 2,
+        _ => 1,
+    }
+}
+
+/// How many visible columns a rendered line occupies, skipping ANSI CSI escapes (colour and cursor
+/// moves) and counting each UTF-8 character as one column. Good enough for the narrow content a
+/// prompt and status line hold; it is not a full character-width table.
+fn visible_len(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut cols = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            if bytes[i] & 0xC0 != 0x80 {
+                cols += 1;
+            }
+            i += 1;
+        }
+    }
+    cols
+}
+
+/// Physical rows one logical line takes at this width.
+fn line_rows(line: &str, cols: usize) -> usize {
+    visible_len(line).div_ceil(cols).max(1)
+}
+
+/// Physical rows the whole footer (the status line, if any, above the prompt) takes at this width.
+fn footer_rows(f: &Footer, cols: usize) -> usize {
+    if f.prompt.is_empty() {
+        return 0;
+    }
+    let mut rows = line_rows(&f.prompt, cols);
+    if !f.status.is_empty() {
+        rows += line_rows(&f.status, cols);
+    }
+    rows
+}
+
+/// The bytes that erase a footer of `drawn_rows` physical rows, given the cursor sits somewhere on
+/// its bottom row: return to column 0, move up to the top row, and clear from there to the end of
+/// the screen. Clearing to end of screen rather than one row at a time is what keeps a wrapped
+/// prompt from leaving stranded copies above the cursor.
+fn erase_seq(drawn_rows: usize) -> String {
+    if drawn_rows == 0 {
+        return String::new();
+    }
+    let mut s = String::from("\r");
+    if drawn_rows > 1 {
+        let _ = write!(s, "\x1b[{}A", drawn_rows - 1);
+    }
+    s.push_str("\x1b[0J");
+    s
+}
+
+/// The bytes that draw the footer from column 0 of its top row, leaving the cursor at the prompt's
+/// edit point. `cursor_back` is honoured only while the prompt fits on one row, since positioning
+/// the cursor back across a wrap is not worth the arithmetic for a rare case.
+fn draw_seq(f: &Footer, cols: usize) -> String {
+    if f.prompt.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    if !f.status.is_empty() {
+        s.push_str(&f.status);
+        s.push_str("\r\n");
+    }
+    s.push_str(&f.prompt);
+    if f.cursor_back > 0 && line_rows(&f.prompt, cols) == 1 {
+        let _ = write!(s, "\x1b[{}D", f.cursor_back);
+    }
+    s
+}
+
+/// Redraw the footer in place after its state changed, emitting `middle` (a log line and its line
+/// break, or nothing) between erasing the rows it drew last and drawing the new ones. Every writer
+/// funnels through here, so the erase always matches what was last drawn, and the new physical row
+/// count is remembered for next time.
+fn redraw_footer(f: &mut Footer, middle: &str) {
+    let cols = terminal_cols();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+    if !middle.is_empty() {
+        let _ = out.write_all(middle.as_bytes());
+    }
+    let _ = out.write_all(draw_seq(f, cols).as_bytes());
+    let _ = out.flush();
+    f.drawn_rows = footer_rows(f, cols);
+}
+
+/// Erase the drawn footer and forget it, for the console's exit path so it does not leave a stale
+/// prompt row glued onto whatever prints next.
+pub fn clear_footer() {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.drawn_rows > 0 {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+        let _ = out.flush();
+    }
+    *f = Footer::default();
+}
+
+/// Write one already-rendered line, floating the footer above it under one lock so a second writer
+/// (another log line, or the console's next keystroke) can never interleave. `indent` is the column
+/// a wrapped line's continuation rows align to (0 to leave wrapping to the terminal). With no prompt
+/// shown (a non-interactive console) it is a plain write, with the line ending [`newline`] chose.
+fn write_line_coordinated(line: &str, indent: usize) {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.prompt.is_empty() {
+        // No sticky footer: piped output, or a service console. Wrapping would bake hard breaks and
+        // carriage returns into a captured log, so print the line untouched with the right ending.
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "{line}{}", newline());
+        let _ = out.flush();
+        return;
+    }
+    // A sticky console is up. Re-flow a too-wide line so its continuation rows sit under the message
+    // column rather than sprawling back to column 0, and let `redraw_footer` handle the coordination.
+    let body = if indent > 0 {
+        wrap_ansi(line, terminal_cols(), indent)
+    } else {
+        line.to_string()
+    };
+    redraw_footer(&mut f, &format!("{body}\r\n"));
+}
+
+/// Print a line under the same coordination as a log write, for output unrelated to `tracing` —
+/// Tab completion's candidate list and the console's own command echo, for two. Public so
+/// `console.rs` can print directly.
 pub fn print_notice(line: &str) {
-    write_line_coordinated(line);
+    write_line_coordinated(line, 0);
 }
 
-/// Redraw the console's own prompt line, under the same lock `write_line_coordinated` uses, so a
-/// concurrent log write can never land in the middle of it. `console.rs` calls this instead of
-/// writing to stdout directly and calling `set_prompt_drawn` separately — doing both under one
-/// lock is what makes the two writers safe together.
-///
-/// `cursor_back` moves the terminal cursor left that many columns after drawing, for when the
-/// edit point is not at the end of the line (arrowed left, then typed). Done under the same write
-/// as the redraw itself, not a second one — a separate call here would open a window where a log
-/// line could land between the text landing and the cursor settling on it.
-pub fn redraw_prompt(current: &str, cursor_back: usize) {
-    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    guard.push_str(current);
-    let mut out = std::io::stdout().lock();
-    let _ = write!(out, "{ERASE}{current}");
-    if cursor_back > 0 {
-        let _ = write!(out, "\x1b[{cursor_back}D");
+/// Set the one-line status footer shown above the prompt (an empty string clears it). Called by the
+/// game task as players join, the tick cost moves, and so on. Redrawn in place under the shared
+/// lock, with the cursor restored to the prompt's edit point, so it never disturbs a half-typed
+/// command. While no prompt is shown (a non-interactive console) it is stored but not drawn.
+pub fn set_status(status: &str) {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.status == status {
+        return;
     }
-    let _ = out.flush();
+    f.status.clear();
+    f.status.push_str(status);
+    if f.prompt.is_empty() {
+        return;
+    }
+    redraw_footer(&mut f, "");
+}
+
+/// Redraw the console's own prompt line under the shared lock, storing the cursor offset so a status
+/// refresh can restore it. Only the prompt row is touched — a status line above it stays put.
+///
+/// `cursor_back` moves the terminal cursor left that many columns after drawing, for when the edit
+/// point is not at the end of the line (arrowed left, then typed). Done under the same write as the
+/// redraw, so no log line can land between the text landing and the cursor settling on it.
+pub fn redraw_prompt(current: &str, cursor_back: usize) {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    f.prompt.clear();
+    f.prompt.push_str(current);
+    f.cursor_back = cursor_back;
+    redraw_footer(&mut f, "");
 }
 
 impl<S> Layer<S> for TermLayer
@@ -369,19 +608,32 @@ where
         event.record(&mut parts);
         let meta = event.metadata();
         let is_reply = meta.target() == CONSOLE_REPLY_TARGET;
+        let is_chat = meta.target() == CHAT_TARGET;
         let line = if is_reply {
             self.render_reply(&parts)
+        } else if is_chat {
+            self.render_chat(&parts, self.started.elapsed())
         } else {
             self.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
-        write_line_coordinated(&line);
+        // A console reply is meant to read like a REPL's own output, so it wraps at column 0 like
+        // anything typed; a chat and an ordinary log line indent their continuation rows under where
+        // their message began.
+        let indent = if is_reply {
+            0
+        } else if is_chat {
+            CHAT_COL
+        } else {
+            MESSAGE_COL
+        };
+        write_line_coordinated(&line, indent);
 
         // A second, ANSI-free rendering for the web panel's live feed. `broadcast::Sender::send`
         // on a channel nobody is subscribed to just returns an error immediately, so this costs
         // nothing on every run that never starts the panel.
         let kind = if is_reply {
             ConsoleLineKind::Reply
-        } else if meta.target() == CHAT_TARGET {
+        } else if is_chat {
             ConsoleLineKind::Chat
         } else {
             ConsoleLineKind::Log
@@ -392,6 +644,8 @@ where
         };
         let text = if is_reply {
             plain.render_reply(&parts)
+        } else if is_chat {
+            plain.render_chat(&parts, self.started.elapsed())
         } else {
             plain.render(*meta.level(), meta.target(), &parts, self.started.elapsed())
         };
@@ -442,80 +696,178 @@ pub fn banner(palette: Palette, version: &str, game: &str, protocol: u32) -> Str
     out
 }
 
-/// The width `panel` would draw these rows at on their own, before alignment with a sibling
-/// panel. A caller with two panels to print side by side in spirit (if not in fact, since they
-/// print one above the other) computes this for both and passes the larger back in as `panel`'s
-/// `min_inner`, so neither panel decides its width without knowing about the other.
-pub fn panel_width(title: &str, rows: &[(&str, String)]) -> usize {
-    let widest_label = rows
-        .iter()
-        .map(|(l, _)| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    let widest_value = rows
-        .iter()
-        .map(|(_, v)| v.chars().count())
-        .max()
-        .unwrap_or(0);
-    // Two spaces of padding either side, plus the gap between the columns.
-    (widest_label + widest_value + 3).max(title.chars().count() + 2)
+/// Braille spinner frames for the boot stages.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// One step of the boot sequence, shown live: a spinner while it runs, a green ✓ when it finishes.
+///
+/// Falls back to a single plain line when stdout is not a terminal (piped, or a log file), so a
+/// captured boot log carries no cursor games. The spinner rides the same prompt-redraw coordination
+/// the sticky console uses ([`redraw_prompt`]/[`write_line_coordinated`]), so a log line arriving
+/// mid-stage floats it rather than smearing it.
+pub struct Stage {
+    label: String,
+    palette: Palette,
+    tty: bool,
+    stop: Option<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::thread::JoinHandle<()>,
+    )>,
 }
 
-/// A titled box of `label: value` rows, used for the summaries a server prints once.
-///
-/// `min_inner` widens the panel beyond what its own rows need, so a caller can line up two panels
-/// to the same width — pass `0` for a panel with no sibling to match.
-pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)], min_inner: usize) -> String {
-    let p = palette;
-    let widest_label = rows
-        .iter()
-        .map(|(l, _)| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    let widest_value = rows
-        .iter()
-        .map(|(_, v)| v.chars().count())
-        .max()
-        .unwrap_or(0);
-    let natural = panel_width(title, rows);
-    let inner = natural.max(min_inner);
-    // Any width forced on top of what the rows need goes entirely to the value column, so a
-    // panel widened to match a sibling stays rectangular instead of opening a gap before its
-    // right border.
-    let value_width = widest_value + (inner - natural);
+impl Stage {
+    /// Begin a stage. On a terminal this starts the spinner animating on its own thread; piped, it
+    /// draws nothing until [`Stage::finish`].
+    pub fn begin(palette: Palette, label: &str) -> Self {
+        use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+        let tty = std::io::stdout().is_terminal();
+        let stop = if tty {
+            let flag = Arc::new(AtomicBool::new(false));
+            let f = flag.clone();
+            let label = label.to_string();
+            let handle = std::thread::spawn(move || {
+                let mut i = 0usize;
+                while !f.load(Ordering::Relaxed) {
+                    let frame = SPINNER[i % SPINNER.len()];
+                    let line = format!(
+                        "  {}{frame}{} {label}{} …{}",
+                        palette.on(sgr::BRIGHT_CYAN),
+                        palette.off(),
+                        palette.on(sgr::DIM),
+                        palette.off(),
+                    );
+                    redraw_prompt(&line, 0);
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+            });
+            Some((flag, handle))
+        } else {
+            None
+        };
+        Self {
+            label: label.to_string(),
+            palette,
+            tty,
+            stop,
+        }
+    }
 
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{}╭─ {}{title}{}{} {}╮{}",
-        p.on(sgr::DIM),
+    /// Finish a stage: stop the spinner and leave a green ✓ in its place, with an optional trailing
+    /// detail (dimmed). `detail` may be empty for a bare tick.
+    pub fn finish(mut self, detail: &str) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        let done = done_line(self.palette, &self.label, detail);
+        if self.tty {
+            // Erase the spinner (however many rows it wrapped into) and print the finished line in
+            // its place, then forget the prompt so a later log line does not redraw a stage that
+            // has already ended.
+            let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+            let _ = writeln!(out, "{done}");
+            let _ = out.flush();
+            f.prompt.clear();
+            f.drawn_rows = 0;
+        } else {
+            write_line_coordinated(&done, 0);
+        }
+    }
+
+    /// Finish a stage by erasing its spinner and leaving nothing in its place, for when what
+    /// replaces it is drawn separately — the boot card printed below it. Stops the spinner thread
+    /// and forgets the prompt exactly the way [`Stage::finish`] does, minus the ✓ line. Piped,
+    /// where the spinner never drew anything, this is a no-op and the card alone stands in for it.
+    pub fn clear(mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+        if self.tty {
+            let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+            let _ = out.flush();
+            f.prompt.clear();
+            f.drawn_rows = 0;
+        }
+    }
+}
+
+impl Drop for Stage {
+    /// If a stage is dropped without [`Stage::finish`] — an error propagated out from under it —
+    /// stop the spinner thread so it cannot keep redrawing over the error on its way out.
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some((flag, handle)) = self.stop.take() {
+            flag.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+}
+
+/// An instant ✓ line, for a step that does no work worth a spinner — a disabled panel, say.
+pub fn tick(palette: Palette, label: &str, detail: &str) {
+    write_line_coordinated(&done_line(palette, label, detail), 0);
+}
+
+/// The shared shape of a finished stage line: a green ✓, the label, and an optional dimmed detail.
+fn done_line(palette: Palette, label: &str, detail: &str) -> String {
+    let p = palette;
+    if detail.is_empty() {
+        format!("  {}✓{} {label}", p.on(sgr::BRIGHT_GREEN), p.off())
+    } else {
+        format!(
+            "  {}✓{} {label}   {}{detail}{}",
+            p.on(sgr::BRIGHT_GREEN),
+            p.off(),
+            p.on(sgr::DIM),
+            p.off(),
+        )
+    }
+}
+
+/// The line that closes the boot: a bold, green "ready in Xs".
+pub fn ready_line(palette: Palette, elapsed: Duration) -> String {
+    let p = palette;
+    format!(
+        "\n  {}✓{} {}ready{} in {}{:.2}s{}\n",
+        p.on(sgr::BRIGHT_GREEN),
         p.off(),
-        p.on(sgr::DIM),
         p.on(sgr::BOLD),
-        "─".repeat(inner.saturating_sub(title.chars().count() + 2)),
-        p.off()
-    );
-    for (label, value) in rows {
+        p.off(),
+        p.on(sgr::BRIGHT_CYAN),
+        elapsed.as_secs_f64(),
+        p.off(),
+    )
+}
+
+/// An aligned block of `key   value` lines for the summary a server prints once at boot: a dim key
+/// padded to a shared width, then the value. One left margin, no boxes, so the block sits in the
+/// same rhythm as the ✓ stage lines above it rather than each row hugging its own width the way the
+/// old two boxes did.
+pub fn info_block(palette: Palette, rows: &[(&str, String)]) -> String {
+    let p = palette;
+    let key_width = rows
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (key, value) in rows {
         let _ = writeln!(
             out,
-            "{}│{} {}{label:<widest_label$}{}  {}{value:<value_width$}{} {}│{}",
+            "    {}{key:<key_width$}{}   {}",
             p.on(sgr::DIM),
             p.off(),
-            p.on(sgr::DIM),
-            p.off(),
-            p.on(sgr::BRIGHT_CYAN),
-            p.off(),
-            p.on(sgr::DIM),
-            p.off(),
+            value
         );
     }
-    let _ = writeln!(
-        out,
-        "{}╰{}╯{}",
-        p.on(sgr::DIM),
-        "─".repeat(inner + 1),
-        p.off()
-    );
     out
 }
 
@@ -593,91 +945,119 @@ mod tests {
         assert_eq!(unquote(r#"say "hi""#), r#"say "hi""#);
     }
 
+    /// The boot summary block pads its keys to a shared width, so every value starts in the same
+    /// column and the block reads as one aligned unit rather than ragged rows.
     #[test]
-    fn a_panel_is_rectangular() {
-        let text = panel(
+    fn an_info_block_aligns_every_value_to_the_same_column() {
+        let text = info_block(
             Palette::PLAIN,
-            "world",
-            &[("name", "Test".into()), ("size", "4200 x 1200".into())],
-            0,
+            &[("world", "Alpha".into()), ("saves to", "Beta".into())],
         );
-        let widths: Vec<usize> = text.lines().map(|l| l.chars().count()).collect();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
         assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "ragged panel: {widths:?}\n{text}"
-        );
-    }
-
-    /// The mechanism `main.rs` relies on to make the world and server panels the same width: ask
-    /// each its natural width, pass the larger to both as `min_inner`, and the narrower one still
-    /// comes out rectangular — not just as wide, but without a ragged gap before its border.
-    #[test]
-    fn a_panel_widened_to_match_a_sibling_stays_rectangular() {
-        let narrow_rows = [("name", "Test".into())];
-        let wide_rows = [
-            ("listening", "0.0.0.0:7777".into()),
-            (
-                "save destination",
-                "/home/brooklyn/.local/share/terrustia/worlds/my great big world name.wld".into(),
-            ),
-        ];
-        let width = panel_width("world", &narrow_rows).max(panel_width("server", &wide_rows));
-
-        let narrow = panel(Palette::PLAIN, "world", &narrow_rows, width);
-        let wide = panel(Palette::PLAIN, "server", &wide_rows, width);
-
-        let narrow_widths: Vec<usize> = narrow.lines().map(|l| l.chars().count()).collect();
-        assert!(
-            narrow_widths.windows(2).all(|w| w[0] == w[1]),
-            "ragged narrow panel: {narrow_widths:?}\n{narrow}"
+            lines.iter().all(|l| l.starts_with("    ")),
+            "every row shares the four-space margin: {text}"
         );
         assert_eq!(
-            narrow_widths[0],
-            wide.lines().next().unwrap().chars().count(),
-            "panels do not match: {narrow_widths:?} vs {wide}"
+            lines[0].find("Alpha"),
+            lines[1].find("Beta"),
+            "values must start at the same column:\n{text}"
         );
     }
 
-    /// The whole concurrency contract, as a pure function: what should a log write actually send
-    /// to the terminal, given what the console currently has drawn? This is the piece that matters
-    /// most and the one a real terminal cannot easily prove — get this string right and the actual
-    /// `write_all` call underneath it is not where a bug could hide.
+    /// The wrap arithmetic is the whole concurrency contract, and the one a real terminal cannot
+    /// easily prove. `visible_len` counts the columns a line occupies, ignoring the ANSI colour and
+    /// cursor escapes that take no space.
     #[test]
-    fn a_log_line_with_no_prompt_showing_is_written_plainly() {
-        assert_eq!(compose_log_write("", "world ready"), "world ready\n");
+    fn visible_len_ignores_ansi_escapes() {
+        assert_eq!(visible_len("hello"), 5);
+        assert_eq!(visible_len("\x1b[92m✓\x1b[0m done"), 6);
+        assert_eq!(visible_len("\x1b[2m00:00:01\x1b[0m"), 8);
+        assert_eq!(visible_len(""), 0);
     }
 
+    /// A line wider than the terminal wraps onto more than one physical row, and the footer counts
+    /// every one of them.
     #[test]
-    fn a_log_line_erases_and_redraws_a_shown_prompt() {
-        let composed = compose_log_write("> kick bri", "a player joined");
-        // Erased first, or the old prompt bleeds into the new line.
-        assert!(
-            composed.starts_with(ERASE),
-            "must erase before writing: {composed:?}"
-        );
-        // The log line itself is in there, terminated so the redrawn prompt starts a fresh line.
-        assert!(composed.contains("a player joined\r\n"));
-        // And the prompt is redrawn afterward, verbatim — nothing typed should be lost.
-        assert!(
-            composed.ends_with("> kick bri"),
-            "the typed line must survive the write: {composed:?}"
-        );
-    }
-
-    /// `set_prompt_drawn` and `write_line_coordinated` share one lock; a log write must pick up
-    /// whatever the console most recently drew, not a stale value from before it typed.
-    #[test]
-    fn a_log_write_sees_the_most_recently_drawn_prompt() {
-        set_prompt_drawn("> first");
-        set_prompt_drawn("> first draft");
-        let guard = prompt_lock().lock().unwrap();
+    fn a_line_wider_than_the_terminal_takes_more_than_one_row() {
+        assert_eq!(line_rows("short", 80), 1);
+        assert_eq!(line_rows(&"x".repeat(80), 40), 2);
+        assert_eq!(line_rows(&"x".repeat(81), 40), 3);
+        let f = Footer {
+            status: "x".repeat(100),
+            prompt: "❯ ".into(),
+            cursor_back: 0,
+            drawn_rows: 0,
+        };
         assert_eq!(
-            compose_log_write(&guard, "x"),
-            "\r\x1b[2Kx\r\n> first draft"
+            footer_rows(&f, 40),
+            4,
+            "status wraps to 3 rows, prompt fits on 1"
         );
-        drop(guard);
-        // Leave the shared state clean for any test that runs after this one.
-        set_prompt_drawn("");
+    }
+
+    /// The erase clears exactly as many rows as were drawn, by moving to the top of the footer and
+    /// clearing to the end of the screen. This is the fix for the wrapped-prompt storm: a three-row
+    /// footer is fully erased, not just its bottom row.
+    #[test]
+    fn erase_clears_the_whole_footer_however_many_rows_it_wrapped_into() {
+        assert_eq!(erase_seq(0), "");
+        assert_eq!(erase_seq(1), "\r\x1b[0J");
+        assert_eq!(erase_seq(3), "\r\x1b[2A\x1b[0J");
+    }
+
+    /// Drawing a footer lays the status above the prompt and restores the cursor into the prompt,
+    /// but only while the prompt fits on one row; positioning across a wrap is skipped on purpose.
+    #[test]
+    fn draw_lays_status_above_the_prompt_and_restores_the_cursor() {
+        let f = Footer {
+            status: "● 3 online".into(),
+            prompt: "❯ kick bri".into(),
+            cursor_back: 3,
+            drawn_rows: 0,
+        };
+        assert_eq!(draw_seq(&f, 80), "● 3 online\r\n❯ kick bri\x1b[3D");
+        let bare = Footer {
+            status: String::new(),
+            prompt: "❯ ".into(),
+            cursor_back: 0,
+            drawn_rows: 0,
+        };
+        assert_eq!(draw_seq(&bare, 80), "❯ ");
+        let wrapped = Footer {
+            status: String::new(),
+            prompt: format!("❯ {}", "x".repeat(100)),
+            cursor_back: 5,
+            drawn_rows: 0,
+        };
+        assert!(
+            !draw_seq(&wrapped, 40).contains("\x1b[5D"),
+            "a wrapped prompt should not get the one-row cursor-back move"
+        );
+    }
+
+    /// A chat line gets its own `CHAT` tag and its message, but none of the level/target furniture
+    /// an operational log line carries — so a room full of chatter does not read as a wall of
+    /// identical `INFO … chat` events.
+    #[test]
+    fn a_chat_line_reads_as_chat_not_as_a_log_event() {
+        let layer = TermLayer::new(Palette::PLAIN);
+        let parts = Parts {
+            message: "<bri> hello everyone".into(),
+            fields: vec![],
+        };
+        let line = layer.render_chat(&parts, Duration::from_millis(65_432));
+        assert!(line.contains("CHAT"), "missing the chat tag: {line:?}");
+        assert!(
+            line.contains("<bri> hello everyone"),
+            "lost the message: {line:?}"
+        );
+        assert!(
+            !line.contains("INFO"),
+            "chat must not look like an INFO log: {line:?}"
+        );
+        assert!(line.contains("00:01:05.432"), "uptime missing: {line:?}");
     }
 
     /// A `console_reply`-tagged event is rendered without the timestamp/level/target furniture
@@ -695,5 +1075,80 @@ mod tests {
             !line.contains("INFO"),
             "a reply must not look like a log line: {line:?}"
         );
+    }
+
+    /// The hanging-indent constants are only right if they match the columns `render` actually lays
+    /// down before the message. Pin them to the real output so a change to the prefix layout that
+    /// forgets to update them fails here rather than misaligning every wrapped line at runtime.
+    #[test]
+    fn the_message_column_matches_render() {
+        let layer = TermLayer::new(Palette::PLAIN);
+        let parts = Parts {
+            message: "MARKER".into(),
+            fields: vec![],
+        };
+        let log = layer.render(
+            Level::INFO,
+            "terrustia::game::server",
+            &parts,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            log.find("MARKER"),
+            Some(MESSAGE_COL),
+            "a log line's message must begin at MESSAGE_COL: {log:?}"
+        );
+        let chat = layer.render_chat(&parts, Duration::ZERO);
+        assert_eq!(
+            chat.find("MARKER"),
+            Some(CHAT_COL),
+            "a chat line's message must begin at CHAT_COL: {chat:?}"
+        );
+    }
+
+    /// A line wider than the terminal is re-flowed so its continuation rows begin at the indent
+    /// column, the escapes ride along without counting toward the width, and a line that fits is
+    /// left exactly as it was.
+    #[test]
+    fn wrap_ansi_reflows_with_a_hanging_indent() {
+        // 20 visible columns, indent 4, at a width of 10: rows are "aaaaaaaaaa", then
+        // "    aaaaaa", "    aaaa" (indent 4 + 6 message cols per continuation).
+        let wrapped = wrap_ansi(&"a".repeat(20), 10, 4);
+        let rows: Vec<&str> = wrapped.split("\r\n").collect();
+        assert_eq!(rows[0], "a".repeat(10), "the first row is full width");
+        assert!(
+            rows[1..].iter().all(|r| r.starts_with("    ")),
+            "every continuation row is indented to column 4: {rows:?}"
+        );
+        assert!(
+            rows[1..].iter().all(|r| visible_len(r) <= 10),
+            "no row is wider than the terminal: {rows:?}"
+        );
+        let msg_chars: usize = rows
+            .iter()
+            .enumerate()
+            .map(|(k, r)| {
+                if k == 0 {
+                    visible_len(r)
+                } else {
+                    visible_len(r) - 4
+                }
+            })
+            .sum();
+        assert_eq!(
+            msg_chars, 20,
+            "no visible characters are lost or duplicated: {rows:?}"
+        );
+
+        // Colour escapes do not count toward the width, so this fits on one row untouched.
+        let coloured = format!("\x1b[92m{}\x1b[0m", "x".repeat(8));
+        assert_eq!(
+            wrap_ansi(&coloured, 10, 4),
+            coloured,
+            "8 visible chars fit in 10 columns even wrapped in escapes"
+        );
+
+        // A short plain line is returned unchanged.
+        assert_eq!(wrap_ansi("short", 80, 38), "short");
     }
 }

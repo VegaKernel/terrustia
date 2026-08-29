@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,6 +9,48 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::{config::Config, game::ServerEvent, net::connection};
+
+/// Bind a listening socket, turning the kernel's terse refusal into a message that says what to do
+/// about it. A raw `Os { code: 28 }` in a server log tells an operator nothing; the same failure
+/// carrying "the OS is out of socket resources, raise the open-file limit" tells them where to look.
+/// Used for both the game port and the web panel's own bind, so neither surfaces a bare errno.
+pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    TcpListener::bind(addr)
+        .await
+        .map_err(|e| explain_bind_failure(addr, e))
+}
+
+/// Rewrite a bind failure into an explanation, keeping the original [`std::io::ErrorKind`] so a
+/// caller that matches on the kind still can.
+fn explain_bind_failure(addr: SocketAddr, e: std::io::Error) -> std::io::Error {
+    use std::io::ErrorKind;
+    let advice = match e.kind() {
+        ErrorKind::AddrInUse => format!(
+            "{addr} is already in use; another server is probably bound there. Stop it, or choose a \
+             different address with --listen."
+        ),
+        ErrorKind::PermissionDenied => format!(
+            "not permitted to bind {addr}; ports below 1024 need elevated privileges. Pick a port \
+             at or above 1024, or grant the privilege to bind a low one."
+        ),
+        ErrorKind::AddrNotAvailable => format!(
+            "{addr} is not an address this machine holds; bind 0.0.0.0 to listen on every \
+             interface, or use an address the host actually has."
+        ),
+        // ENOSPC (error 28) on a bind is not the disk: the kernel has no socket or port resources
+        // left to hand out, which on a busy machine means too many sockets are already open. Matched
+        // on `raw_os_error` rather than an `ErrorKind`, since std does not give this one a stable
+        // kind on every platform.
+        _ if e.raw_os_error() == Some(28) => format!(
+            "the operating system has no socket resources left to bind {addr} (error 28, \"no space \
+             left on device\"): too many sockets and ports are already open across the machine, not \
+             a full disk. Close other servers, or raise the open-file limit (for example \
+             `ulimit -n`), then try again."
+        ),
+        _ => format!("could not bind {addr}: {e}"),
+    };
+    std::io::Error::new(e.kind(), advice)
+}
 
 /// How many sockets are open, and from where.
 ///
@@ -191,5 +233,34 @@ mod tests {
             claim(&open, addr(1), 1, 1).is_ok(),
             "a panicking connection must not leak its place, or the server fills up with ghosts"
         );
+    }
+
+    /// A bind failure should name the address and say what to do, not surface a bare errno. The
+    /// ENOSPC case is the one that prompted this: `os error 28` on a port bind is socket-resource
+    /// exhaustion, and the message has to say so rather than let an operator chase a full disk.
+    #[test]
+    fn a_bind_failure_explains_itself() {
+        use std::io::{Error, ErrorKind};
+        let a: SocketAddr = "0.0.0.0:7777".parse().unwrap();
+
+        let in_use = explain_bind_failure(a, Error::from(ErrorKind::AddrInUse));
+        assert_eq!(in_use.kind(), ErrorKind::AddrInUse, "kind is preserved");
+        assert!(in_use.to_string().contains("7777") && in_use.to_string().contains("in use"));
+
+        let denied = explain_bind_failure(a, Error::from(ErrorKind::PermissionDenied));
+        assert!(denied.to_string().contains("privilege"));
+
+        let unavailable = explain_bind_failure(a, Error::from(ErrorKind::AddrNotAvailable));
+        assert!(unavailable.to_string().contains("0.0.0.0"));
+
+        let no_space = explain_bind_failure(a, Error::from_raw_os_error(28));
+        let msg = no_space.to_string();
+        assert!(
+            msg.contains("error 28") && msg.contains("socket") && msg.contains("not a full disk"),
+            "ENOSPC must be explained as socket exhaustion, got: {msg}"
+        );
+
+        let other = explain_bind_failure(a, Error::from(ErrorKind::ConnectionReset));
+        assert!(other.to_string().contains("could not bind"));
     }
 }

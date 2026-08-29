@@ -252,14 +252,20 @@ fn roll_gem_frame(rand: &mut UnifiedRandom) -> i16 {
 
 const GEM_TILE: u16 = 178;
 
-fn place_gem_at(world: &mut World, x: i32, y: i32, frame: i16) -> bool {
+/// `PlaceTile`'s dedicated `num == 178` branch (`WorldGen.cs:60190-60200`) — not the generic
+/// `Place1x1` default case: `frameX = style * 18` (the actual gem species — `KillTile`'s own drop
+/// table reads this back as `frameX / 18`, `WorldGen.cs:66018`) and `frameY = genRand.Next(3) *
+/// 18` (a purely cosmetic variant, no gameplay meaning). The old code had this backwards — species
+/// on `frameY`, `frameX` left at the -1 "unframed" sentinel — which corrupted every placed gem and
+/// made every one of them drop as Amethyst (`-1 / 18 == 0` truncates to the frame-0 case).
+fn place_gem_at(world: &mut World, x: i32, y: i32, frame: i16, rand: &mut UnifiedRandom) -> bool {
     if world.tile(x, y).is_active() {
         return false;
     }
     let mut t = Tile::AIR;
     t.block = GEM_TILE;
-    t.frame_x = -1;
-    t.frame_y = frame * 18;
+    t.frame_x = frame * 18;
+    t.frame_y = rand.next_max(3) as i16 * 18;
     t.flags.set(TileFlags::ACTIVE, true);
     world.set_tile(x, y, t);
     true
@@ -295,7 +301,7 @@ pub fn exposed_gems_in_ice_biome(
         );
         for j in x - a..x + b {
             for k in y - c..y + d {
-                if place_gem_at(world, j, k, frame) {
+                if place_gem_at(world, j, k, frame, rand) {
                     placed += 1;
                 }
             }
@@ -321,7 +327,7 @@ pub fn exposed_gems_underground(
         let t = world.tile(x, y);
         if !t.is_active() && t.liquid == 0 && t.wall != tiles::walls::LIHZAHRD_BRICK {
             let frame = roll_gem_frame(rand);
-            if place_gem_at(world, x, y, frame) {
+            if place_gem_at(world, x, y, frame, rand) {
                 placed += 1;
             }
         }
@@ -344,7 +350,7 @@ pub fn exposed_gems_underground(
                 for k in y - c..y + d {
                     // Vanilla's own frame here is a fixed 6 (a specific desert-gem-cluster frame),
                     // not a fresh `roll_gem_frame` draw.
-                    if place_gem_at(world, j, k, 6) {
+                    if place_gem_at(world, j, k, 6, rand) {
                         placed += 1;
                     }
                 }
@@ -474,6 +480,32 @@ mod tests {
         assert!(
             placed > 0,
             "expected exposed gems inside a real ice-biome mass"
+        );
+    }
+
+    /// `KillTile`'s own drop table for tile 178 reads `frameX / 18` to pick the item
+    /// (`WorldGen.cs:66018`: 0→Amethyst, 1→Topaz, 2→Sapphire, 3→Emerald, 4→Ruby, 5→Diamond). The
+    /// old code stored the species on `frameY` and left `frameX` at the -1 "unframed" sentinel —
+    /// so every exposed gem was frame-corrupt and would have dropped Amethyst regardless of which
+    /// species it was meant to be (`-1 / 18` truncates to 0). Fails on the pre-fix code
+    /// (`frame_x == -1`).
+    #[test]
+    fn a_placed_gems_species_is_stored_in_frame_x_not_frame_y() {
+        let mut world = World::empty(50, 50, "gem-frame");
+        let mut rand = UnifiedRandom::new(1);
+        // frame 3 = Emerald.
+        assert!(place_gem_at(&mut world, 10, 10, 3, &mut rand));
+        let t = world.tile(10, 10);
+        assert_eq!(t.block, GEM_TILE);
+        assert_eq!(
+            t.frame_x,
+            3 * 18,
+            "the gem species must be stored in frame_x (real vanilla reads frameX/18 to pick \
+             the drop), not corrupted to -1"
+        );
+        assert_ne!(
+            t.frame_y, -1,
+            "frame_y must not carry the -1 corruption sentinel either"
         );
     }
 
