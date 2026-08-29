@@ -162,6 +162,13 @@ codegen crate and the last `tools/gen_*.py` are deleted. The three checker scrip
 by decision (`check_drops.py`, `check_recipes.py`, `packet_audit.py`); note they need the
 decompiled tree, so they run locally at qualification time, never in hosted CI (`just check-data`).
 
+Two of the eight, `gen_shimmer.py` and `gen_travel_shop.py`, initially failed byte-identical for a
+reason unrelated to the port: past hand-edits (`78d07de`, `65f4be3`) had updated `shimmer.rs`'s
+decraft doc paragraph and added `travel_shop.rs`'s BlackCounterweight/YellowCounterweight source
+comment and regression test straight to the committed tables, without updating either generator's
+`emit()` to match, in violation of "generated tables are never hand-edited". Reconciled by teaching
+both generators to emit exactly what is committed rather than touching either table.
+
 ### Cross-cutting through Phase 1
 
 - **Dense-file splits**, paired with panic-clearing and idiomatic cleanup in the same visit:

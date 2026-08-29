@@ -23,3 +23,7 @@ path = "src/main.rs"
 
 [dependencies]
 regex = "1"
+# Only for town_names: the localisation file is JSON with trailing commas (stripped before
+# parsing, same as the Python original). "preserve_order" keeps object keys in file order, since
+# a category's name list is read out as `.values()` in that order, not sorted.
+serde_json = { version = "1.0", features = ["preserve_order"] }

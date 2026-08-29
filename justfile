@@ -147,15 +147,15 @@ check-data: check-drops check-recipes
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:
     cargo run -q -p terrustia-codegen -- recipes {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
-    python3 tools/gen_drops.py       {{DECOMPILED}} crates/terrustia-proto/src/npc_drops.rs
-    python3 tools/gen_projectiles.py {{DECOMPILED}} crates/terrustia-proto/src/projectile_data.rs
-    python3 tools/gen_banners.py     {{DECOMPILED}} crates/terrustia-proto/src/banners.rs
-    python3 tools/gen_buffs.py       {{DECOMPILED}} crates/terrustia-proto/src/buffs.rs
-    python3 tools/gen_angler.py      {{DECOMPILED}} crates/terrustia-proto/src/angler.rs
-    python3 tools/gen_shimmer.py     {{DECOMPILED}} crates/terrustia-proto/src/shimmer.rs
+    cargo run -q -p terrustia-codegen -- drops       {{DECOMPILED}} crates/terrustia-proto/src/npc_drops.rs
+    cargo run -q -p terrustia-codegen -- projectiles {{DECOMPILED}} crates/terrustia-proto/src/projectile_data.rs
+    cargo run -q -p terrustia-codegen -- banners     {{DECOMPILED}} crates/terrustia-proto/src/banners.rs
+    cargo run -q -p terrustia-codegen -- buffs       {{DECOMPILED}} crates/terrustia-proto/src/buffs.rs
+    cargo run -q -p terrustia-codegen -- angler      {{DECOMPILED}} crates/terrustia-proto/src/angler.rs
+    cargo run -q -p terrustia-codegen -- shimmer     {{DECOMPILED}} crates/terrustia-proto/src/shimmer.rs
     cargo run -q -p terrustia-codegen -- hurt_tiles {{DECOMPILED}} crates/terrustia-proto/src/hurt_tiles.rs
-    python3 tools/gen_town_names.py  {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
-    python3 tools/gen_travel_shop.py {{DECOMPILED}} crates/terrustia-proto/src/travel_shop.rs
+    cargo run -q -p terrustia-codegen -- town_names {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
+    cargo run -q -p terrustia-codegen -- travel_shop {{DECOMPILED}} crates/terrustia-proto/src/travel_shop.rs
     cargo fmt --all
     @echo "Regenerated the data tables. Review the diff before committing."
 
