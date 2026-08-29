@@ -640,14 +640,14 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     }
 }
 
-/// How far down the game looks for ground from a chosen point (`FindGroundTile`).
+/// How far down the game looks for the solid spawning tile from a chosen point.
 pub const GROUND_SCAN: i32 = 30;
 
-/// Scan downward for the first solid tile, returning its row.
+/// Scan downward from the chosen point for the first solid spawning tile, returning its row.
 ///
-/// The game does this rather than requiring a random point to land exactly on the surface: at any
-/// column there is usually one standable row in a 90-tile band, so picking blind would almost
-/// never find it.
+/// The chosen point and the spawning tile are deliberately different coordinates. Vanilla first
+/// validates the random point in the spawn area, then resolves the solid spawning tile below it;
+/// biome/source rules use that resolved tile rather than pretending the random point was ground.
 pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     (from_y..from_y + GROUND_SCAN).find(|&y| {
         let tile = world.tile(x, y);
@@ -655,12 +655,9 @@ pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     })
 }
 
-/// Whether the vanilla-shaped 2x3 rectangle above a solid spawning tile is clear.
-///
-/// Kept as a tiny wrapper so the geometry and its tests live in `spawn_clearance.rs` rather than
-/// growing more coordinate arithmetic inside the already-large spawn selector.
-fn has_room(world: &World, x: i32, y: i32) -> bool {
-    crate::game::spawn_clearance::has_room(world, x, y)
+/// Whether the vanilla-shaped 2x3 rectangle at the random chosen point is clear.
+fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
+    crate::game::spawn_clearance::chosen_point_is_clear(world, x, chosen_y)
 }
 
 /// Pick spawns for this tick.
@@ -845,22 +842,24 @@ pub fn try_spawn(
         // Try a handful of candidate tiles rather than scanning the whole area.
         for _ in 0..20 {
             let x = px + rng.random_range(-SPAWN_RANGE_X..=SPAWN_RANGE_X);
-            let from_y = py + rng.random_range(-SPAWN_RANGE_Y..=SPAWN_RANGE_Y);
-            if x < 10 || from_y < 10 || x >= world.width() - 10 || from_y >= world.height() - 40 {
+            let chosen_y = py + rng.random_range(-SPAWN_RANGE_Y..=SPAWN_RANGE_Y);
+            if x < 10 || chosen_y < 10 || x >= world.width() - 10 || chosen_y >= world.height() - 40 {
                 continue;
             }
 
-            // Drop to whatever ground is under the chosen point, then stand on top of it.
-            let Some(ground) = find_ground(world, x, from_y) else {
+            // The random chosen point is validated before it is resolved to a ground tile. Keeping
+            // these coordinates distinct matters when the point is several tiles above the floor.
+            if !chosen_point_is_clear(world, x, chosen_y) {
+                continue;
+            }
+
+            let Some(ground) = find_ground(world, x, chosen_y) else {
                 continue;
             };
             let y = ground - 1;
 
             // Never spawn on top of somebody.
             if (x - px).abs() < SAFE_RANGE_X && (y - py).abs() < SAFE_RANGE_Y {
-                continue;
-            }
-            if !has_room(world, x, y) {
                 continue;
             }
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
@@ -1266,7 +1265,11 @@ mod tests {
                     (x - tx).abs() >= SAFE_RANGE_X || (y - ty).abs() >= SAFE_RANGE_Y,
                     "spawned inside the safe zone at ({x}, {y}) vs player ({tx}, {ty})"
                 );
-                assert!(has_room(&world, x, y), "spawned somewhere with no room");
+                let floor = world.tile(x, y + 1);
+                assert!(
+                    floor.is_active() && solid(floor.block),
+                    "spawned dry forest NPC without solid ground at ({x}, {y})"
+                );
             }
             if seen > 20 {
                 break;
@@ -1284,7 +1287,7 @@ mod tests {
             .find(|y| world.tile(x, *y).is_active())
             .expect("the column has ground");
         assert_eq!(find_ground(&world, x, surface - 10), Some(surface));
-        // And starting on the ground finds it immediately.
+        // Ground resolution itself is separate from chosen-point validation.
         assert_eq!(find_ground(&world, x, surface), Some(surface));
     }
 
@@ -1296,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn deep_water_has_room_but_lava_does_not() {
+    fn deep_water_chosen_space_is_clear_but_lava_is_not() {
         let mut world = World::empty(100, 100, "water room");
         world.set_tile(50, 50, terrustia_proto::Tile::block(1));
         for y in 47..=49 {
@@ -1306,7 +1309,8 @@ mod tests {
                 terrustia_proto::Tile::AIR.with_liquid(terrustia_proto::Liquid::Water, u8::MAX),
             );
         }
-        assert!(has_room(&world, 50, 49));
+        assert!(chosen_point_is_clear(&world, 50, 49));
+        assert_eq!(find_ground(&world, 50, 49), Some(50));
         assert_eq!(
             crate::game::spawn_medium::classify(&world, 50, 50),
             Some(crate::game::spawn_medium::SpawnMedium::Water)
@@ -1317,7 +1321,7 @@ mod tests {
             48,
             terrustia_proto::Tile::AIR.with_liquid(terrustia_proto::Liquid::Lava, 1),
         );
-        assert!(!has_room(&world, 50, 49));
+        assert!(!chosen_point_is_clear(&world, 50, 49));
     }
 
     #[test]
