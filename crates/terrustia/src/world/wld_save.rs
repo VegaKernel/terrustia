@@ -801,10 +801,6 @@ fn write_signs(w: &mut Writer, world: &World) {
     }
 }
 
-/// Write a world to disk.
-///
-/// The bytes go to a temporary file next to the target and are renamed into place, so an
-/// interrupted save cannot leave a half-written world where the real one was.
 /// How many previous worlds to keep beside the current one.
 ///
 /// Verifying before replacing means a save can refuse rather than destroy; backups are what makes
@@ -850,6 +846,26 @@ fn rotate_backups(path: &Path) {
     }
 }
 
+/// Write a world to disk, so that a failure anywhere costs nothing that was already there.
+///
+/// Four steps, in this order and for these reasons:
+///
+/// 1. **Write** the bytes to a temporary file beside the target, synced to the disk rather than
+///    left in the page cache.
+/// 2. **Verify** them by parsing them back. An atomic rename over a file that turned out to be
+///    corrupt is an atomic loss; we already own a reader, and this costs a fraction of the write.
+/// 3. **Rotate** the backup chain - only now, because rotating first would push a healthy world out
+///    of the chain to make room for one that turned out not to be writable.
+/// 4. **Rename** into place, then sync the directory entry so the replacement survives a power cut
+///    and not merely a process crash.
+///
+/// Every failure removes the temporary file (nothing else would ever clean it up, and the next save
+/// needs the name back) and leaves the previous world byte-identical. Failures are explained
+/// through [`crate::safe_write::explain`], so an operator gets "the filesystem holding
+/// /srv/worlds/Terrustia.wld is full" rather than `Os { code: 28 }`.
+///
+/// A failed backup is a warning, not a refusal: refusing to save because the safety net could not
+/// be made would turn a full disk into actual data loss rather than a missing spare copy.
 pub fn save(world: &World, path: &Path) -> Result<()> {
     let bytes = serialize(world)?;
     let temp = path.with_extension("wld.tmp");
