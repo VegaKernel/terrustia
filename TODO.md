@@ -54,7 +54,16 @@ then fixing what it finds. Not started.
 
 ## TUI and hosting
 
-Landing under the current TUI/hosting work; anything not finished there moves here.
+The wrap-corruption bug, Ctrl-D, the flat boot, the status footer, the worlds/ directory and the
+`--headless` flag all landed. Two lower-impact polish items from the TUI audit remain:
+
+- **Hanging indent for wrapped log lines.** A long operational log line wraps back to column 0,
+  misaligned from where its message started (around column 38). Padding continuation lines to the
+  message column would make a wrapped line read as intentional. Needs manual wrapping at the terminal
+  width rather than relying on the terminal's own wrap.
+- **Narrow-terminal awareness.** Nothing consults the terminal width when laying out the boot block,
+  so in a terminal narrower than the content the info lines wrap mid-value. Low priority now that the
+  boxes are gone, but a documented minimum width or a narrower fallback layout would be tidy.
 
 ## Release
 
