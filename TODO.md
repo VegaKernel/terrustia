@@ -129,9 +129,11 @@ polish leftovers from the TUI audit also remain:
   The only way to genuinely match the SVG is to put real pixels on the screen with a terminal image
   protocol. Plan:
   - **Image: bake, do not rasterise at runtime.** The logo is fixed, so render it once offline to a
-    transparent-background PNG at about 2x the on-screen cell size (from `banner.svg` via
-    `rsvg-convert`) and `include_bytes!` it. Transparent alpha so it sits on light and dark
-    terminals; 2x for Retina crispness. No `image`/`resvg` rasteriser enters the build.
+    transparent-background PNG at about 2x the on-screen cell size (from `docs/assets/boot-logo.svg`,
+    the text-free transparent source split off from `banner.svg` for exactly this, via `rsvg-convert`)
+    and `include_bytes!` it. Transparent alpha so it sits on light and dark terminals; 2x for Retina
+    crispness. No `image`/`resvg` rasteriser enters the build. `banner.svg` keeps its dark card and
+    tagline for the README hero; `boot-logo.svg` is just the gradient letterforms.
   - **Protocol: hand-roll two small emitters.** iTerm2 `OSC 1337`
     (`ESC ]1337;File=inline=1;...:<base64 PNG> ST`, trivial) covers iTerm2, WezTerm and the VSCode
     terminal; the kitty graphics protocol (chunked `ESC _ G a=T,f=100,...;<base64> ESC \`) covers
