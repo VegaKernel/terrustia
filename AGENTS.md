@@ -133,8 +133,8 @@ Playwright. When you fix a bug, add a test that fails against the bug first, the
 
 - `README.md` - the feature-by-feature status, the audit findings worth telling, and the layout.
 - `CONTRIBUTING.md` - the bar a change is held to and the contributor license terms.
-- `AUDIT.md` / `GAPS.md` / `SECURITY.md` - the audit trail, the known gaps, and the security posture.
-- `plan.md` - remaining worldgen and feature scope, sized, mostly deferred to v0.1.0.
-- `TODO.md` - active work: the error-handling sweep, the dependency-pruning analysis and decision,
-  and the dense-file refactor.
+- `AUDIT.md` / `SECURITY.md` - the audit trail and the security posture.
+- `TODO.md` - the single backlog and the v0.0.1 roadmap: lanes, gates, deferred work, and the
+  dependency-pruning record. The former `plan.md` and `GAPS.md` are folded into it; their full
+  text lives in git history.
 - `docs/` - protocol notes, world-file notes, performance method, and the generated-table provenance.

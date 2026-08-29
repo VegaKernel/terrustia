@@ -26,6 +26,8 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          # Built natively on GitHub's arm64 Windows runner, no cross toolchain involved.
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,8 +63,10 @@ jobs:
 
       # Deliberately no terrustia.toml in the archive. It is the *default* config filename, so
       # shipping one would have every install silently pick up settings nobody chose.
+      # Keyed on runner.os, not the runner label, so the arm64 Windows runner takes the zip path
+      # rather than falling into the tar branch and shipping an extensionless binary.
       - name: Archive (unix)
-        if: matrix.os != 'windows-latest'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           name="terrustia-${GITHUB_REF_NAME}-${{ matrix.target }}"
@@ -73,7 +77,7 @@ jobs:
           tar -czf "dist/$name.tar.gz" -C dist "$name"
 
       - name: Archive (windows)
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           name="terrustia-${GITHUB_REF_NAME}-${{ matrix.target }}"

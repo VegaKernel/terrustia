@@ -10,9 +10,17 @@
 //! decompiled` the old scripts took). An explicit `out.rs` overrides the default path for a single
 //! table. Run `just regen` to do them all and `cargo fmt` afterward, exactly as before.
 
+mod angler;
+mod banners;
+mod buffs;
 mod csharp;
+mod drops;
 mod hurt_tiles;
+mod projectiles;
 mod recipes;
+mod shimmer;
+mod town_names;
+mod travel_shop;
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +42,46 @@ const TABLES: &[Table] = &[
         name: "recipes",
         out: "crates/terrustia-proto/src/recipes.rs",
         generate: recipes::generate,
+    },
+    Table {
+        name: "drops",
+        out: "crates/terrustia-proto/src/npc_drops.rs",
+        generate: drops::generate,
+    },
+    Table {
+        name: "projectiles",
+        out: "crates/terrustia-proto/src/projectile_data.rs",
+        generate: projectiles::generate,
+    },
+    Table {
+        name: "banners",
+        out: "crates/terrustia-proto/src/banners.rs",
+        generate: banners::generate,
+    },
+    Table {
+        name: "buffs",
+        out: "crates/terrustia-proto/src/buffs.rs",
+        generate: buffs::generate,
+    },
+    Table {
+        name: "angler",
+        out: "crates/terrustia-proto/src/angler.rs",
+        generate: angler::generate,
+    },
+    Table {
+        name: "town_names",
+        out: "crates/terrustia-proto/src/town_names.rs",
+        generate: town_names::generate,
+    },
+    Table {
+        name: "shimmer",
+        out: "crates/terrustia-proto/src/shimmer.rs",
+        generate: shimmer::generate,
+    },
+    Table {
+        name: "travel_shop",
+        out: "crates/terrustia-proto/src/travel_shop.rs",
+        generate: travel_shop::generate,
     },
 ];
 
