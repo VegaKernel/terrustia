@@ -100,7 +100,8 @@ built.
 7. **Generated data tables are codegen output. Never hand-edit them.** These files are produced by
    `just regen` from a decompiled tree and are checked in only so an ordinary build needs nothing but
    Rust: `recipes.rs`, `npc_drops.rs`, `projectile_data.rs`, `banners.rs`, `buffs.rs`, `angler.rs`,
-   `shimmer.rs`, `hurt_tiles.rs`, `town_names.rs`, `travel_shop.rs` (all in `terrustia-proto/src`).
+   `shimmer.rs`, `hurt_tiles.rs`, `town_names.rs`, `travel_shop.rs`, `tile_death.rs` (all in
+   `terrustia-proto/src`).
    To change one, change the generator and rerun `just regen`, then review the diff before committing.
    Their size is fine; they are excluded from the file-splitting refactor in `TODO.md`.
 
