@@ -38,7 +38,7 @@ pub fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use terrustia_proto::Tile;
+    use terrustia_proto::{Tile, tile_solid::solid_top};
 
     fn candidate() -> World {
         World::empty(100, 100, "spawn clearance")
@@ -62,6 +62,10 @@ mod tests {
             let mut world = candidate();
             assert!(world.set_tile(50, 40, Tile::block(block)));
             assert!(solid(block), "tile {block} must be in Main.tileSolid");
+            assert!(
+                solid_top(block),
+                "tile {block} must be marked solid-top/platform-like"
+            );
             assert!(
                 !chosen_point_is_clear(&world, 50, 40),
                 "platform-like tile {block} must reject a chosen point"
