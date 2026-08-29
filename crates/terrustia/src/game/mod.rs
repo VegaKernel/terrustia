@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod army;
 pub mod arrivals;
+pub mod bound_spawn;
 pub mod buffs;
 pub mod cavern_monsters;
 pub mod clock;
