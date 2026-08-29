@@ -77,8 +77,6 @@ the single-writer actor preserved; suite, clippy and fmt green per extraction.
   player controls, the chest-open (packet 80) rigged-input check.
 - Persistence: `wld.rs` refuses out-of-order section pointers with an error instead of an empty
   blob, with a corrupt-`.wld` fixture.
-- D1: teach the recipe generator to enumerate the ~566 loop-built decraft recipes so shimmer
-  decraft is complete (a behavioural table change, distinct from the Lane H port).
 
 **C2, the from-scratch audit** in about six consolidated lanes against the decompiled source, real
 clients and captures, producing a ledger; fixes fold into the subsystem visits. Seed list carried
