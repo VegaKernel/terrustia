@@ -1,233 +1,169 @@
 # TODO
 
-What is left, in the order it is worth doing. Everything here is either something you asked for and
-I have not started, something measured and left open, or something deferred with a reason.
+What is still worth doing, in priority order.
 
-`GAPS.md` is the other half of this: what was *found and fixed*, and how. This file is only the
-remainder.
+This file is intentionally the **current remainder**, not a history log. `GAPS.md` records what was
+found and fixed and is therefore full of old intermediate states by design. A finished item does
+not stay here as a zombie task just because nobody remembered to delete the paragraph.
 
----
-
-## Decided but not started
-
-Both of these you chose explicitly, and neither has been begun.
-
-### 1. REST / web admin API
-
-A lightweight HTTP surface over the administration system that already exists (`admin/`: groups,
-permissions, argon2 accounts, bans by name/address/UUID, and a stdin console).
-
-- Player list, kick, ban, unban, broadcast, save, backup trigger.
-- The tick-phase metrics the server already collects and currently only logs.
-- Token-authenticated, bound to localhost by default.
-- `hyper` 1.x with `http1` + `server` only — tokio-native, and the runtime is already here. You
-  approved "a lightweight http software, its fine"; a full framework is not needed for a dozen
-  routes.
-
-**Why it is worth doing:** the console only works if you are attached to the terminal. Everything
-underneath it is already built and tested.
-
-### 2. Backups and rollback
-
-- Timestamped rotating world backups with a retention policy.
-- A `/rollback` command.
-- Builds directly on the atomic temp-file-and-rename save path in `world/wld_save.rs`.
-
-**Why it is worth doing:** the server can now write worlds that the real game reads back correctly
-(GAPS §31), which is exactly when losing one starts to matter.
+Last reconciled against `master`: 2026-08-29.
 
 ---
 
-## Deferred by you
+## In flight
 
-### 3. tShock feature menu
+### 1. Pin delayed distant-NPC state with a real regression guard
 
-You said "come back to this after we are done". Not planned in detail beyond the Stage 2 admin
-foundation everything would hang off, which is built. The usual list: world protection and regions,
-warps / `/tp` / `/home`, item and tile bans, server-side characters.
+GAPS §30 fixed a real state-desync bug: a one-off change to a distant NPC could be withheld by the
+per-player sync throttle and then lost forever when the NPC's `dirty` flag was cleared.
 
-### 4. Steam friend-invite joins (P2P)
+That bug used to lack a deterministic integration test because every convenient NPC moved or
+otherwise became dirty again and accidentally rescued the missing update. The server now has a real
+`aiStyle == 0` inert path (`game/ai/inert.rs`), so the missing guard is finally expressible.
 
-**Protocol-level Steam support is already complete** — a Steam-launched client connecting by IP is
-byte-identical to any other, packet 93 never crosses TCP, and the one wire item (the `u64` lobby id
-in packet 7) is already written correctly. What remains is only accepting *friend invites* over
-Steam P2P, which sits entirely below the packet parser: a `trait Socket` with a TCP impl now and a
-Steam impl later, behind an off-by-default cargo feature.
+PR #1 adds a two-client test using Bound Goblin (105): both clients receive the initial state, one
+moves outside section reach, the other applies a one-HP zero-knockback change, and the distant
+client must receive the delayed state after the bounded skip window rather than remain stale.
 
-**Blocked on a decision that is yours, not mine.** This project is AGPL-3.0-or-later and the
-Steamworks SDK is proprietary and non-redistributable. Linking them needs an explicit
-additional-permission clause under GPL §7. You hold the copyright, so you can add one — but I am
-not going to quietly link them and leave the licence conflict sitting there.
+Do not merge this merely because the code looks right: the repository's Actions API currently
+reports no workflow runs at all, so the test still needs an actual run somewhere before it becomes
+the proof it was written to be.
 
 ---
 
-## Measured and left open
+## Highest-value gameplay gaps
 
-These are known quantities, not unknowns. Each has a number attached.
+### 2. Bound-town-NPC spawn parity is wrong
 
-### 5. About 123 ordinary enemies still have missing drops
+The rescue **interaction** is implemented correctly in `game/rescues.rs`, but the way bound NPCs
+enter the live world is not vanilla-like.
 
-Tracked by `tools/check_drops.py`, which exits non-zero when a **boss** lacks loot (bosses are all
-covered). The remainder are almost all *conditional* forms — condition chains and option pools —
-which `tools/gen_drops.py` deliberately refuses to emit, because a generator that flattened them
-would hand out wrong loot for ever while looking authoritative. They belong in
-`conditional_drops.rs`, by hand, a few at a time.
+`game/spawn.rs::pick_bound` currently throws all six rescue candidates into one lottery and may
+spawn any of them whenever an ordinary spawn candidate lands Underground or in the Cavern layer.
+The only filters are "not already rescued" and "not already alive".
 
-### 6. Bandwidth is about 2.9× vanilla's, and it is a difference in shape
+That is materially wrong. The six have different progression and place requirements:
 
-Over five minutes on the same world: 180,548 bytes from this server against 62,008 from vanilla.
-Three fixes in GAPS §32 took it from 378,554, and frame *count* is now within 8% of vanilla's
-(3,676 against 3,980).
+- **Bound Goblin (105)**: after the Goblin Army has been defeated, in the Cavern layer.
+- **Bound Wizard (106)**: Hardmode, in the Cavern layer.
+- **Bound Mechanic (123)**: after Skeletron, in the Dungeon.
+- **Webbed Stylist (354)**: in a Spider Nest / unsafe spider-wall area.
+- **Sleeping Angler (376)**: at the Ocean, on sand or the water surface.
+- **Unconscious Man / Tavernkeep (579)**: only after the Eater of Worlds or Brain of Cthulhu has
+  been defeated; unlike the first four he is not a generic cavern-only rescue.
 
-What remains is not waste in the same sense: ours is NPC-heavy where vanilla's spreads across many
-small packets, because this server does not yet produce the item churn, ambient projectile traffic
-and liquid modules that make up about a third of vanilla's frames on the same world. Closing it
-means *adding* those features, not trimming.
+The fix should make eligibility a named rule rather than growing another opaque `match` inside the
+spawn loop, then pin every progression gate and location class independently. In particular, a
+fresh world must be unable to produce the Wizard, Mechanic or Tavernkeep just because somebody went
+mining for long enough.
 
-### 7. The world clock is sent in a way vanilla does not
+### 3. Real Terraria client against Terrustia
 
-This server sends packet 18 (`SetTime`) roughly once a second — 308 times in a five-minute capture.
-**Vanilla never sends packet 18 at all**; it syncs the clock by resending packet 7 whenever
-something changes, 8 times in the same window. Clients do apply packet 18, so this works and costs
-about 12 bytes a second, but it is not what the game does. Left alone deliberately: changing it
-trades a robust correction for clock drift between events, for a negligible saving.
+The protocol tests are strong but still share `terrustia-proto` on both ends. The independent blind
+spot is therefore unchanged: a real Terraria GUI client has not yet been recorded reading what this
+server writes.
 
-### 8. Bound NPCs are not placed by worldgen
+Use the existing recorder and replay path documented in `docs/real-client.md`:
 
-`game/rescues.rs` can free all six bound townsfolk, and they spawn rarely underground while still
-bound — but a world *generated by this server* does not place them at generation time the way
-Terraria does. On a real Terraria world this does not arise.
+```sh
+cargo run --release -- --record capture.trcap
+cargo run --release -p terrustia --example replay -- capture.trcap
+```
 
-### 9. Cacti do not grow
+The useful session is not merely "connected once": join fully, walk far enough to stream new
+sections, edit tiles, use a chest, talk to a town NPC/shop, exchange damage, disconnect and rejoin.
+Check the resulting capture in so future CI can replay bytes that this repository did not produce.
 
-Everything else in `world/growth.rs` does: grass spreads, herbs grow and ripen, saplings become
-trees, vines hang and pair to their biome, unsupported sand falls. Trees are deliberately simplified
-to the plain trunk — not the eight branch-and-root styles — because a wrong frame renders as
-garbage.
+### 4. Ordinary enemy drop coverage
 
-### 10. Seed-identical world generation
+`tools/check_drops.py` remains the source of truth. The last audited figure was about 123 ordinary
+enemies with missing loot while boss coverage was complete.
 
-The generator builds a complete, finishable world and the file round-trips through Re-Logic's own
-reader and writer (GAPS §31). What it does **not** do is reproduce Terraria's own world for a given
-seed. Sized separately in `docs/worldgen-parity.md`. A seed shared with another player will not give
-you their world.
+Most remainder is conditional: condition chains and option pools that `tools/gen_drops.py`
+deliberately refuses to flatten. Add them to `conditional_drops.rs` in small reviewed batches and
+re-run the checker after each batch. Do not replace a known incomplete table with a generated table
+that is silently wrong about conditions.
+
+### 5. Seed-identical world generation
+
+The current generator builds a complete playable world and the save format round-trips through the
+real game's reader/writer. It does **not** reproduce Terraria's world for a shared seed.
+
+That is a separate, much larger parity project. Progress and the oracle live in
+`docs/worldgen-parity.md` and `world/worldgen/manifest.rs`; continue pass-by-pass rather than mixing
+seed parity into ordinary playability fixes.
 
 ---
 
 ## Structurally unverified
 
-Not known to be broken. Known to be **unchecked**, which is a different and in some ways worse
-category — the first ten sections of `GAPS.md` are all things that looked fine until someone looked.
+These are not known broken. They are known **unchecked**, which is precisely how many of the old
+`GAPS.md` defects survived for so long.
 
-### 11. No real Terraria *client* has read what this server writes
+### 6. AI behaviour parity
 
-The blind spot this project started with was that both ends of every test were built on
-`terrustia-proto`. That is now largely closed from the other side: our client has been pointed at
-the real 1.4.5.8 server, and every packet a client will read is either re-encoded byte-for-byte from
-Re-Logic's own bytes or diffed against them field by field (GAPS §28–§32).
+`ai/mod.rs` has routines wired for the used styles, but "a routine exists" is not behavioural
+parity. Boss phase transitions, long-running fights and stalls need measurement against the game,
+not just per-style unit coverage.
 
-What is still untested is a real client *rendering* it. "The encoder agrees with theirs on the
-packets we captured" is not "a client draws it correctly", and a session only ever covers what it
-contains.
+### 7. NPC spawn-pool composition
 
-### 12. AI parity is claimed per style, not measured
+Spawn rates and caps are modelled and measured. The exact *composition* of what appears under each
+combination of biome, depth, time, progression and event is not comprehensively diffed against
+vanilla. The bound-NPC defect above is already one example of why that distinction matters.
 
-`ai/mod.rs` marks styles 0–127 as ported and a test asserts every style claiming parity has a
-routine wired up. Nothing compares *behaviour* against the game. Coverage itself is complete: style
-98 is unused in 1.4.5.7 and no NPC uses a style above 127.
+### 8. Drop probabilities and ordering
 
-### 13. Drop *rates* are unverified
+Presence of registered drops was audited. `one_in` probabilities, stack ranges, conditional-chain
+ordering and expert/master variants have not been comprehensively re-derived and compared.
 
-Presence was checked for every entry that exists. The `one_in` values, stack ranges and chain
-ordering were not re-derived from the source.
+### 9. Liquid, wiring and housing in motion
 
-### 14. Liquid, wiring and housing are unit-tested, never compared in motion
+These systems have tests, but have not been exercised side-by-side against the real game for long
+sessions. Static unit parity does not prove timing, interaction ordering or eventual convergence.
 
-Ported and covered, but never watched side by side against the real game.
+### 10. Features still largely unexamined
 
-### 15. Still entirely unexamined
-
-Fishing mechanics, golf, dyes, painting, pets, mounts, minecart tracks, and the cosmetic layer.
-Boss phase transitions and whether any AI routine can stall. NPC spawn *pool* composition — the
-rates are right, but not necessarily what appears.
+Fishing mechanics, golf, dyes, painting, pets, mounts, minecart tracks and much of the cosmetic
+layer still need dedicated passes rather than assumptions based on packet coverage.
 
 ---
 
-## Measured against vanilla
+## Deferred by project decision
 
-Both servers on the same 4200x1200 world, same machine, each measured **alone**, with the process
-id captured from the shell that launched it rather than looked up afterwards. That last detail
-matters: earlier readings swung between 21% and 99% of a core for the same idle server because
-`pgrep` was picking up a previous run that had not finished exiting.
+### 11. tShock-style feature menu
 
-CPU is processor time over the sample divided by wall clock — "how much of a core is this using" —
-rather than `ps`'s since-launch average.
+Deferred until the core server work is in better shape. The admin foundation already exists. The
+usual candidates remain regions/world protection, warps and homes, item/tile bans and server-side
+characters.
 
-| | vanilla 1.4.5.8 | terrustia | |
-|---|---|---|---|
-| Startup to accepting connections | 2.26 s | **0.41 s** | 5.5x faster |
-| CPU, nobody connected | 104.0% of a core | **0.7%** | ~150x less |
-| CPU, one player | 103.6% of a core | **0.7%** | ~150x less |
-| Memory, nobody connected | 641.8 MB | **45.4 MB** | 14x less |
-| Memory, one player | 549.7 MB | **40.2 MB** | 13.7x less |
+### 12. Steam friend-invite joins (P2P)
 
-The CPU figure is not a measurement error: **vanilla burns a full core with nobody connected at
-all**, and this server uses under one percent of one while running a verified full 60 Hz tick — 600
-ticks in exactly 10.000 s, worst tick around 600 microseconds of the 16,666 available.
-
-### Where the memory went
-
-`Tile` is a comfortable value type: ten named fields, sixteen bytes with padding. Fine on the stack,
-ruinous in an array five million long — every byte costs five megabytes, and sixteen came to 80.6 MB
-before the server had done anything.
-
-Most of those bytes were paid by tiles with no use for them. Measured on a real world: frames matter
-to **1.87%** of tiles and cost 20.2 MB inline; paint matters to **0.00%** and costs 10.1 MB; slope
-needs three bits and was given eight; the liquid kind needs two.
-
-The array now holds an eight-byte packed tile, with frames and paint in side tables that cost 1.0 MB
-and nothing respectively. **The `Tile` API is unchanged** — the world reassembles one on the way out
-and takes it apart on the way in — so the hundred-odd places that read `tile.frame_x` were never
-touched.
-
-### Where the traffic went
-
-On the same world as the table above — a real one, with a town on it:
-
-| five minutes, one player | vanilla | before | after |
-|---|---|---|---|
-| **Total** | 148,874 | 338,146 | **133,400** |
-| NPC syncs | 77,994 | 114,990 | **73,550** |
-| Tile sections | 54,437 | 54,187 | 54,187 |
-| Door toggles | 0 | 163,485 | **27** |
-| Clock | 0 | 3,648 | 60 |
-
-Four changes.
-
-**Doors** were the big one and only appeared on a world with houses. Opening one was broadcast to
-clients and never applied to the server's own tiles, so the server believed every door was shut, and
-a town NPC standing at one decided to open it sixty times a second for ever — 48% of all traffic,
-and the NPC never got through either. `world/doors.rs` now ports `WorldGen.OpenDoor` properly.
-
-**NPC syncs**: `dirty` now means *a decision a client could not have extrapolated* — a turn, a new
-target, a change of speed beyond what gravity explains — rather than any movement at all.
-
-**The clock** went from once a second to once a minute; vanilla never sends that packet at all and
-keeps clients right by resending world state when something changes.
-
-**Sections** are compressed at best rather than default, which is free: they are encoded once and
-cached.
+Ordinary Steam-launched clients connecting by IP use the same TCP protocol and need no special
+packet handling. Friend-invite P2P is a transport-layer feature and remains deferred behind an
+off-by-default implementation and an explicit licensing decision for the proprietary Steamworks
+SDK in this AGPL project.
 
 ---
 
-## One regression guard that could not be written
+## Closed: do not reopen from stale notes
 
-GAPS §30 fixed a real defect: a change to a distant NPC was dropped rather than delayed, so a player
-who was elsewhere kept the stale value for the rest of the session. Four versions of an integration
-test for it all passed against the *unfixed* server, for three different reasons in turn. The last
-one asserted its own precondition and failed on it honestly.
+The following items used to be TODOs and are already implemented on `master`:
 
-A test that passes whether or not the defect is present is worse than none, so there is not one. The
-fix rests on the probe, which reproduced the fault three times out of three before and passes three
-out of three after. Writing a real guard needs an NPC that can be made genuinely inert, which this
-server does not currently have.
+- **REST/web administration**: `crates/terrustia/src/panel/` serves the embedded Axum panel with
+  authentication, players, kick/ban/unban, whitelist, world switching, settings, console/chat,
+  WebSockets and the live world view.
+- **World backups and rollback**: saves rotate a bounded `.bak1..bak3` chain and the console exposes
+  `backups` and `rollback <n>`, validating a backup before restoration and stopping for a clean
+  reload.
+- **Cactus growth**: runtime `world/growth.rs` contains `grow_cactus`, and world generation also
+  tracks generated cacti. Do not preserve the old "cacti do not grow" task.
+- **The old once-per-second packet-18 claim**: later bandwidth work changed the clock correction;
+  the old paragraph predates that work and must not be used as a current measurement.
+- **The claim that no inert NPC exists**: `game/ai/inert.rs` now supplies the exact deterministic
+  case the distant-NPC regression test needed.
+
+Likewise, do not quote the old "2.9× vanilla bandwidth" headline as current: the same historical
+TODO later contains a newer five-minute table where Terrustia sends 133,400 bytes against
+vanilla's 148,874. Any new bandwidth claim needs a fresh paired capture with the commit hashes and
+world recorded beside it.
