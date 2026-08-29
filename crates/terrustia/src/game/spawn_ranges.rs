@@ -32,6 +32,16 @@ pub fn choose_offset(rng: &mut SmallRng) -> (i32, i32) {
     )
 }
 
+/// Exclusive bottom row of the normal spawn area for a player's top-left hitbox tile row.
+///
+/// Candidate Y sampling is `player_y-46 .. player_y+46` (upper bound exclusive), so the final row
+/// inside that same normal spawn area is `player_y+45`. Ordinary non-Space floor search must not
+/// invent a separate fixed depth: it searches below the sampled tile only while it remains inside
+/// this area.
+pub const fn normal_spawn_bottom_exclusive(player_y: i32) -> i32 {
+    player_y + SPAWN_DOWN + 1
+}
+
 /// Whether the resolved solid floor lies in the early player-safe rectangle.
 ///
 /// Both offsets are relative to the tile containing the top-left corner of the player's hitbox.
@@ -49,6 +59,18 @@ mod tests {
     fn spawn_rectangle_has_the_vanilla_asymmetric_edges() {
         assert_eq!((-SPAWN_WEST, SPAWN_EAST), (-84, 83));
         assert_eq!((-SPAWN_UP, SPAWN_DOWN), (-46, 45));
+    }
+
+    #[test]
+    fn normal_floor_search_uses_the_spawn_area_bottom_not_a_fixed_depth() {
+        let player_y = 100;
+        assert_eq!(normal_spawn_bottom_exclusive(player_y), 146);
+        assert_eq!(normal_spawn_bottom_exclusive(player_y) - 1, player_y + SPAWN_DOWN);
+
+        // A candidate at the top of the range can therefore search much farther than 30 rows.
+        let top_candidate = player_y - SPAWN_UP;
+        assert_eq!(top_candidate, 54);
+        assert_eq!(normal_spawn_bottom_exclusive(player_y) - top_candidate, 92);
     }
 
     #[test]
