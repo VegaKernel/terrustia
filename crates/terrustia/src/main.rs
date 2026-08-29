@@ -325,7 +325,8 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 
     let game_server = GameServer::new(config.clone(), world)
         .with_panel_toggle(panel_toggle_tx)
-        .with_update_notice(update_notice);
+        .with_update_notice(update_notice)
+        .with_palette(palette);
     // Cloned out before `run` consumes `game_server` — see the field's own doc comment in
     // `game::server` for why a shared cell, read only after the task ends, is how a world switch
     // requested from the panel reaches this function at all.

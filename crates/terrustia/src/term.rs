@@ -298,79 +298,146 @@ pub fn console_feed() -> &'static tokio::sync::broadcast::Sender<ConsoleLine> {
     CONSOLE_FEED.get_or_init(|| tokio::sync::broadcast::channel(500).0)
 }
 
-/// Coordination between the sticky console prompt (`console.rs`) and ordinary log lines, so a log
-/// line can never land in the middle of a half-typed command.
+/// The live furniture the terminal keeps at the bottom of the screen beneath the scrolling log: an
+/// optional one-line status footer (`status`) and the console's own prompt (`prompt`), plus the
+/// cursor's offset into the prompt (`cursor_back`) so a status refresh can put it back where the
+/// user was typing.
 ///
-/// The console owns raw mode and knows what it has drawn; `TermLayer::on_event` can run on
-/// whichever thread `tracing`'s dispatch happens to use, which is not necessarily the console's
-/// own. Both go through this one lock before touching stdout — the console updates it on every
-/// keystroke, `on_event` erases-and-redraws around it for every line it writes.
-///
-/// An empty string means no prompt is currently shown, which is the state a non-interactive
-/// console (piped stdin, no TTY) never leaves — so log lines there fall straight through to a
-/// plain `writeln!`, exactly today's behaviour.
-static PROMPT: OnceLock<Mutex<String>> = OnceLock::new();
-
-fn prompt_lock() -> &'static Mutex<String> {
-    PROMPT.get_or_init(|| Mutex::new(String::new()))
+/// Both writers — the console's keystrokes (`console.rs`) and `on_event`'s log lines, which can run
+/// on whichever thread `tracing`'s dispatch happens to use — go through this one lock before
+/// touching stdout, so neither can land in the middle of the other. An empty `prompt` means nothing
+/// interactive is shown, the state a non-interactive console (piped stdin, no TTY) never leaves — so
+/// log lines there fall straight through to a plain `writeln!`, exactly today's behaviour, and a
+/// status set in that state is stored but never drawn.
+#[derive(Default)]
+struct Footer {
+    status: String,
+    prompt: String,
+    cursor_back: usize,
 }
 
-/// Tell the shared state what the console currently has drawn. Called by `console.rs` after every
-/// keystroke, immediately after it draws the same text to the terminal itself — this function does
-/// not draw anything on its own, it only updates what a concurrent log write should redraw.
+static FOOTER: OnceLock<Mutex<Footer>> = OnceLock::new();
+
+fn footer_lock() -> &'static Mutex<Footer> {
+    FOOTER.get_or_init(|| Mutex::new(Footer::default()))
+}
+
+/// Tell the shared state what the console currently has drawn. Called by `console.rs` on exit to
+/// clear the prompt; the drawing on every keystroke is done by [`redraw_prompt`].
 pub fn set_prompt_drawn(current: &str) {
-    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    guard.push_str(current);
+    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    guard.prompt.clear();
+    guard.prompt.push_str(current);
 }
 
-/// Erase whatever is currently drawn, return the cursor to column 0. Pulled out as a constant
-/// rather than inlined so the composition logic below is one string operation, not several.
+/// Erase one row and return the cursor to column 0. Pulled out as a constant so the composition
+/// below is one string operation, not several.
 const ERASE: &str = "\r\x1b[2K";
 
-/// Build the exact bytes a log write should emit: the erase sequence and a trailing redraw of the
-/// prompt when one is shown, nothing extra when it is not. Split out from the actual stdout write
-/// so it can be tested without a terminal — this is the entire concurrency contract, and it is
-/// worth being able to check it as a pure function.
-fn compose_log_write(prompt: &str, line: &str) -> String {
-    if prompt.is_empty() {
-        format!("{line}\n")
+/// The bytes that erase the whole footer from the screen, leaving the cursor at column 0 of its
+/// topmost row: nothing when no prompt is shown, one erased row for a bare prompt, two when a
+/// status line sits above it.
+fn footer_erase(f: &Footer) -> String {
+    if f.prompt.is_empty() {
+        String::new()
+    } else if f.status.is_empty() {
+        ERASE.to_string()
     } else {
-        format!("{ERASE}{line}\r\n{prompt}")
+        format!("{ERASE}\x1b[1A{ERASE}")
     }
 }
 
-/// Write one already-rendered line, erasing and redrawing the console prompt around it under one
-/// lock so a second writer — another log line, or the console's own next keystroke — can never
-/// interleave with this one.
+/// The bytes that draw the footer, assuming the cursor starts at column 0 of where its top row
+/// goes, and leaving it at the prompt's own edit point (`cursor_back` columns from the end).
+fn footer_draw(f: &Footer) -> String {
+    if f.prompt.is_empty() {
+        return String::new();
+    }
+    let mut s = if f.status.is_empty() {
+        f.prompt.clone()
+    } else {
+        format!("{}\r\n{}", f.status, f.prompt)
+    };
+    if f.cursor_back > 0 {
+        let _ = write!(s, "\x1b[{}D", f.cursor_back);
+    }
+    s
+}
+
+/// Build the exact bytes a log write should emit: erase the footer, write the line, redraw the
+/// footer beneath it. Split from the stdout write so it can be checked as a pure function — this is
+/// the whole concurrency contract. The no-status paths are byte-for-byte what they always were.
+fn compose_log_write(footer: &Footer, line: &str) -> String {
+    if footer.prompt.is_empty() {
+        format!("{line}\n")
+    } else if footer.status.is_empty() {
+        format!("{ERASE}{line}\r\n{}", footer.prompt)
+    } else {
+        format!(
+            "{ERASE}\x1b[1A{ERASE}{line}\r\n{}\r\n{}",
+            footer.status, footer.prompt
+        )
+    }
+}
+
+/// Write one already-rendered line, erasing and redrawing the footer around it under one lock so a
+/// second writer — another log line, or the console's own next keystroke — can never interleave.
 fn write_line_coordinated(line: &str) {
-    let guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
     let composed = compose_log_write(&guard, line);
     let mut out = std::io::stdout().lock();
     let _ = out.write_all(composed.as_bytes());
     let _ = out.flush();
 }
 
-/// Print a line under the same coordination as a log write, for output that has nothing to do
-/// with `tracing` at all — Tab completion's candidate list, for one. Public so `console.rs` can
-/// print without going back through the game task for something the console already knows.
+/// Print a line under the same coordination as a log write, for output unrelated to `tracing` —
+/// Tab completion's candidate list, for one. Public so `console.rs` can print directly.
 pub fn print_notice(line: &str) {
     write_line_coordinated(line);
 }
 
-/// Redraw the console's own prompt line, under the same lock `write_line_coordinated` uses, so a
-/// concurrent log write can never land in the middle of it. `console.rs` calls this instead of
-/// writing to stdout directly and calling `set_prompt_drawn` separately — doing both under one
-/// lock is what makes the two writers safe together.
+/// Set the one-line status footer shown above the prompt (an empty string clears it). Called by the
+/// game task as players join, the tick cost moves, and so on. Redrawn in place under the shared
+/// lock, with the cursor restored to the prompt's edit point, so it never disturbs a half-typed
+/// command. While no prompt is shown (a non-interactive console) it is stored but not drawn.
+pub fn set_status(status: &str) {
+    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.status == status {
+        return;
+    }
+    if guard.prompt.is_empty() {
+        guard.status.clear();
+        guard.status.push_str(status);
+        return;
+    }
+    let before = Footer {
+        status: guard.status.clone(),
+        prompt: guard.prompt.clone(),
+        cursor_back: guard.cursor_back,
+    };
+    guard.status.clear();
+    guard.status.push_str(status);
+    let after = Footer {
+        status: guard.status.clone(),
+        prompt: guard.prompt.clone(),
+        cursor_back: guard.cursor_back,
+    };
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{}{}", footer_erase(&before), footer_draw(&after));
+    let _ = out.flush();
+}
+
+/// Redraw the console's own prompt line under the shared lock, storing the cursor offset so a status
+/// refresh can restore it. Only the prompt row is touched — a status line above it stays put.
 ///
-/// `cursor_back` moves the terminal cursor left that many columns after drawing, for when the
-/// edit point is not at the end of the line (arrowed left, then typed). Done under the same write
-/// as the redraw itself, not a second one — a separate call here would open a window where a log
-/// line could land between the text landing and the cursor settling on it.
+/// `cursor_back` moves the terminal cursor left that many columns after drawing, for when the edit
+/// point is not at the end of the line (arrowed left, then typed). Done under the same write as the
+/// redraw, so no log line can land between the text landing and the cursor settling on it.
 pub fn redraw_prompt(current: &str, cursor_back: usize) {
-    let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.clear();
-    guard.push_str(current);
+    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    guard.prompt.clear();
+    guard.prompt.push_str(current);
+    guard.cursor_back = cursor_back;
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "{ERASE}{current}");
     if cursor_back > 0 {
@@ -535,8 +602,8 @@ impl Stage {
         if self.tty {
             // Replace the spinner in place and clear the shared prompt, so a later log line does not
             // try to redraw a stage that has already ended.
-            let mut guard = prompt_lock().lock().unwrap_or_else(|e| e.into_inner());
-            guard.clear();
+            let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+            guard.prompt.clear();
             let mut out = std::io::stdout().lock();
             let _ = writeln!(out, "{ERASE}{done}");
             let _ = out.flush();
@@ -796,12 +863,20 @@ mod tests {
     /// `write_all` call underneath it is not where a bug could hide.
     #[test]
     fn a_log_line_with_no_prompt_showing_is_written_plainly() {
-        assert_eq!(compose_log_write("", "world ready"), "world ready\n");
+        assert_eq!(
+            compose_log_write(&Footer::default(), "world ready"),
+            "world ready\n"
+        );
     }
 
     #[test]
     fn a_log_line_erases_and_redraws_a_shown_prompt() {
-        let composed = compose_log_write("> kick bri", "a player joined");
+        let footer = Footer {
+            status: String::new(),
+            prompt: "> kick bri".into(),
+            cursor_back: 0,
+        };
+        let composed = compose_log_write(&footer, "a player joined");
         // Erased first, or the old prompt bleeds into the new line.
         assert!(
             composed.starts_with(ERASE),
@@ -816,13 +891,35 @@ mod tests {
         );
     }
 
+    /// With a status footer shown, a log line erases both rows, lands above them, and both the
+    /// status and the prompt are redrawn beneath it — nothing on either line is lost.
+    #[test]
+    fn a_status_footer_floats_a_log_line_above_both_of_its_rows() {
+        let footer = Footer {
+            status: "● 3 online".into(),
+            prompt: "❯ ".into(),
+            cursor_back: 0,
+        };
+        let composed = compose_log_write(&footer, "a player joined");
+        // Two rows erased: the prompt, then up one and the status.
+        assert!(
+            composed.starts_with("\r\x1b[2K\x1b[1A\r\x1b[2K"),
+            "must erase both footer rows: {composed:?}"
+        );
+        // The log, then the status and prompt redrawn under it.
+        assert!(
+            composed.contains("a player joined\r\n● 3 online\r\n❯ "),
+            "status and prompt must survive beneath the log: {composed:?}"
+        );
+    }
+
     /// `set_prompt_drawn` and `write_line_coordinated` share one lock; a log write must pick up
     /// whatever the console most recently drew, not a stale value from before it typed.
     #[test]
     fn a_log_write_sees_the_most_recently_drawn_prompt() {
         set_prompt_drawn("> first");
         set_prompt_drawn("> first draft");
-        let guard = prompt_lock().lock().unwrap();
+        let guard = footer_lock().lock().unwrap();
         assert_eq!(
             compose_log_write(&guard, "x"),
             "\r\x1b[2Kx\r\n> first draft"

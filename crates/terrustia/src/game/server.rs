@@ -72,6 +72,10 @@ const ITEM_GRAB_RANGE: f32 = 400.0;
 
 /// Vanilla runs at 60 ticks per second and the clock packets assume it.
 const TICK: Duration = Duration::from_nanos(16_666_667);
+/// Ticks in a second, for turning the tick counter into a human uptime on the status footer.
+const TICKS_PER_SECOND: u64 = 60;
+/// How often the live status footer is refreshed — about once a second, off the tick counter.
+const STATUS_EVERY: u64 = 60;
 
 /// How much of a tick a single player's queued section stream may spend before
 /// `drain_section_streams` picks it back up next tick, rather than draining it in one shot.
@@ -1190,6 +1194,9 @@ pub struct GameServer {
     worst_tick: TickCost,
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
+    /// The palette the boot chose, so the live status footer can colour itself to match — or emit
+    /// nothing when colour is off. Defaults to plain; `main` sets it via [`Self::with_palette`].
+    palette: crate::term::Palette,
     /// The most recent tick's cost, surfaced live to the web panel's metrics view. Unlike
     /// [`Self::worst_tick`] — a windowed maximum that is taken and reset every report — this is
     /// simply the last tick that ran, so a graph drawn from it moves every frame. Never persisted.
@@ -1344,6 +1351,7 @@ impl GameServer {
             party: crate::game::party::PartyState::default(),
             slime_rain: crate::game::slime_rain::SlimeRainState::default(),
             lantern_night: crate::game::lantern_night::LanternNightState::default(),
+            palette: crate::term::Palette::PLAIN,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
         // A server that waited would give the first day's players nothing to do for him.
@@ -1376,6 +1384,46 @@ impl GameServer {
     pub fn with_update_notice(mut self, notice: Arc<Mutex<Option<String>>>) -> Self {
         self.update_notice = Some(notice);
         self
+    }
+
+    /// Give the game task the boot's colour palette, so the live status footer it keeps at the
+    /// bottom of the terminal can match it. Builder-style for the same reason as the two above —
+    /// the many test call sites want a plain default, not a palette they have no terminal for.
+    pub fn with_palette(mut self, palette: crate::term::Palette) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    /// Refresh the live status footer: who is online, how long the server has been up, and the last
+    /// tick's cost. Called about once a second from [`Self::note_tick_cost`]. Cheap, and a no-op on
+    /// screen when there is no interactive prompt to sit above (a piped or service console).
+    fn update_status(&self, cost: TickCost) {
+        let p = self.palette;
+        let online = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|player| player.is_playing())
+            .count();
+        // Uptime off the tick counter rather than a wall clock: this is a health read, not a
+        // timestamp, and one that never has to reach for `Instant::now` on the hot path.
+        let secs = self.ticks / TICKS_PER_SECOND;
+        let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
+        let tick_us = cost.cpu.as_micros();
+        use crate::term::sgr;
+        let dot_colour = if online > 0 {
+            sgr::BRIGHT_GREEN
+        } else {
+            sgr::DIM
+        };
+        let status = format!(
+            "  {} {} online   {}   {}",
+            p.paint(dot_colour, "●"),
+            p.paint(sgr::BOLD, &online.to_string()),
+            p.paint(sgr::DIM, &format!("up {h:02}:{m:02}:{s:02}")),
+            p.paint(sgr::DIM, &format!("tick {tick_us}µs")),
+        );
+        crate::term::set_status(&status);
     }
 
     /// A handle to whatever [`ServerEvent::PanelSwitchWorld`] requests, for `main` to read once
@@ -2072,6 +2120,9 @@ impl GameServer {
     /// spawn scan took 26 ms" is a bug report.
     fn note_tick_cost(&mut self, cost: TickCost) {
         self.last_tick = cost;
+        if self.ticks.is_multiple_of(STATUS_EVERY) {
+            self.update_status(cost);
+        }
         if cost.cpu > self.worst_tick.cpu {
             self.worst_tick = cost;
         }
