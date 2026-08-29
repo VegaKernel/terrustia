@@ -5,7 +5,11 @@
 //! deep water where they actually belong. This module mirrors vanilla's high-level water-source
 //! priority and keeps the two media separate.
 
-use super::spawn::{Biome, Depth};
+use super::{
+    spawn::{Biome, Depth},
+    spawn_source::SpawnSource,
+};
+use crate::world::World;
 
 // Preserve Terrustia's existing 1:1:1 weighting between Pink Jellyfish, Shark and Squid while
 // restoring Sea Snail at its source-backed rate of one third as often as Squid. Multiplying the
@@ -47,46 +51,42 @@ fn sand(block: u16) -> bool {
 /// - regular Sand only in the outer 380-tile band, above a ceiling 40 tiles above the midpoint of
 ///   the Underground layer.
 ///
+/// `spawn_y` is vanilla's preserved `SpawnTileY`, the physical floor row accepted by the location
+/// search. It is deliberately distinct from [`SpawnSource::source_y`]: platform-like floors may
+/// resolve their source block from a lower row without moving the actual spawn row.
+///
 /// The edge comparison follows Terraria's long-standing world-border checks (`x < band` or
-/// `x > maxTilesX - band`): a source exactly at 250/380 is outside that band. This helper is kept
-/// separate from [`pool`] until the remaining source-Y/fallback pipeline is carried through
-/// `try_spawn`, so the documented geometry can be reviewed without silently changing selection.
+/// `x > maxTilesX - band`): a source exactly at 250/380 is outside that band.
 pub fn ocean_source_eligible(
     world_width: i32,
     x: i32,
-    source_y: i32,
+    spawn_y: i32,
     surface: i32,
     rock_layer: i32,
     source_block: u16,
 ) -> bool {
     let inner = x < OCEAN_INNER_BAND || x > world_width - OCEAN_INNER_BAND;
-    if inner && sand(source_block) && source_y < rock_layer {
+    if inner && sand(source_block) && spawn_y < rock_layer {
         return true;
     }
 
     let outer = x < OCEAN_OUTER_BAND || x > world_width - OCEAN_OUTER_BAND;
     let underground_midpoint = (surface + rock_layer) / 2;
     let outer_ceiling = underground_midpoint - OCEAN_OUTER_CEILING_OFFSET;
-    outer && source_block == 53 && source_y < outer_ceiling
+    outer && source_block == 53 && spawn_y < outer_ceiling
 }
 
-/// The water-specific pool for one solid spawning tile.
-///
-/// This deliberately follows source priority rather than combining every matching biome into one
-/// bag. A Hardmode Jungle water candidate becomes Arapaima territory before the generic Jungle
-/// water source is considered; Crimson water likewise gets Blood Jelly/Feeder first. Ocean comes
-/// before the generic underground-water Jellyfish source.
-pub fn pool(depth: Depth, biome: Biome, hard_mode: bool, spawning_block: u16) -> &'static [u16] {
+fn event_water_pool(biome: Biome, hard_mode: bool) -> Option<&'static [u16]> {
     if hard_mode && biome == Biome::Jungle {
-        return ARAPAIMA;
+        return Some(ARAPAIMA);
     }
     if hard_mode && biome == Biome::Crimson {
-        return BLOOD_WATER;
+        return Some(BLOOD_WATER);
     }
-    if biome == Biome::Ocean && sand(spawning_block) {
-        return OCEAN;
-    }
+    None
+}
 
+fn fallback_water_pool(depth: Depth, hard_mode: bool, spawning_block: u16) -> &'static [u16] {
     // Jungle water is keyed by the spawning tile, or by being in Cavern and below. The current
     // biome classifier is player-area based and cannot replace the tile condition here.
     if spawning_block == 60 || matches!(depth, Depth::Cavern | Depth::Underworld) {
@@ -110,9 +110,68 @@ pub fn pool(depth: Depth, biome: Biome, hard_mode: bool, spawning_block: u16) ->
     &[]
 }
 
+/// The water-specific pool for one solid spawning tile.
+///
+/// Compatibility entry point for the current runtime. It retains the old coarse `Biome::Ocean`
+/// decision until `try_spawn` is migrated to [`pool_for_source`].
+pub fn pool(depth: Depth, biome: Biome, hard_mode: bool, spawning_block: u16) -> &'static [u16] {
+    if let Some(pool) = event_water_pool(biome, hard_mode) {
+        return pool;
+    }
+    if biome == Biome::Ocean && sand(spawning_block) {
+        return OCEAN;
+    }
+    fallback_water_pool(depth, hard_mode, spawning_block)
+}
+
+/// Water pool selection with the resolved spawn source and exact Ocean geometry available.
+///
+/// This is the target API for `try_spawn`. The source block may come from below a Platform,
+/// Planter Box, Metal Bar or Conveyor Belt, while Ocean's vertical checks continue to consume the
+/// physical `SpawnTileY` retained in [`SpawnSource::physical_floor_y`].
+pub fn pool_for_source(
+    world: &World,
+    x: i32,
+    depth: Depth,
+    biome: Biome,
+    hard_mode: bool,
+    source: SpawnSource,
+) -> &'static [u16] {
+    if let Some(pool) = event_water_pool(biome, hard_mode) {
+        return pool;
+    }
+    if ocean_source_eligible(
+        world.width(),
+        x,
+        source.physical_floor_y,
+        i32::from(world.surface),
+        i32::from(world.rock_layer),
+        source.block,
+    ) {
+        return OCEAN;
+    }
+    fallback_water_pool(depth, hard_mode, source.block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(block: u16, floor_y: i32, source_y: i32) -> SpawnSource {
+        SpawnSource {
+            block,
+            physical_floor_y: floor_y,
+            source_y,
+            used_chosen_fallback: false,
+        }
+    }
+
+    fn world() -> World {
+        let mut world = World::empty(2000, 600, "water spawn");
+        world.surface = 200;
+        world.rock_layer = 300;
+        world
+    }
 
     #[test]
     fn inner_ocean_band_accepts_every_sand_variant_above_caverns() {
@@ -151,6 +210,92 @@ mod tests {
         for block in [0, 1, 60, 147, 161] {
             assert!(!ocean_source_eligible(2000, 1, 100, 200, 300, block));
         }
+    }
+
+    #[test]
+    fn source_aware_outer_ocean_does_not_depend_on_the_coarse_biome_classifier() {
+        let world = world();
+        let pool = pool_for_source(
+            &world,
+            300,
+            Depth::Surface,
+            Biome::Forest,
+            false,
+            source(53, 209, 240),
+        );
+        assert_eq!(pool, OCEAN);
+    }
+
+    #[test]
+    fn source_aware_ocean_uses_physical_spawn_row_not_the_lower_source_row() {
+        let world = world();
+        assert_eq!(
+            pool_for_source(
+                &world,
+                300,
+                Depth::Surface,
+                Biome::Forest,
+                false,
+                source(53, 209, 250),
+            ),
+            OCEAN
+        );
+        assert!(
+            pool_for_source(
+                &world,
+                300,
+                Depth::Surface,
+                Biome::Forest,
+                false,
+                source(53, 210, 100),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn source_aware_inner_ocean_accepts_sand_variants() {
+        let world = world();
+        for block in [53, 112, 116, 234] {
+            assert_eq!(
+                pool_for_source(
+                    &world,
+                    249,
+                    Depth::Surface,
+                    Biome::Forest,
+                    false,
+                    source(block, 299, 299),
+                ),
+                OCEAN
+            );
+        }
+    }
+
+    #[test]
+    fn hardmode_crimson_and_jungle_still_preempt_ocean_selection() {
+        let world = world();
+        assert_eq!(
+            pool_for_source(
+                &world,
+                100,
+                Depth::Surface,
+                Biome::Crimson,
+                true,
+                source(53, 100, 100),
+            ),
+            BLOOD_WATER
+        );
+        assert_eq!(
+            pool_for_source(
+                &world,
+                100,
+                Depth::Surface,
+                Biome::Jungle,
+                true,
+                source(53, 100, 100),
+            ),
+            ARAPAIMA
+        );
     }
 
     #[test]
