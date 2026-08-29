@@ -155,7 +155,10 @@ mod tests {
     #[test]
     fn dungeon_postcheck_accepts_all_six_dungeon_brick_types_with_a_wall() {
         for block in [41, 43, 44, 481, 482, 483] {
-            assert!(dungeon_source_is_valid(true, block, 1), "Dungeon brick {block}");
+            assert!(
+                dungeon_source_is_valid(true, block, 1),
+                "Dungeon brick {block}"
+            );
         }
     }
 
@@ -171,12 +174,30 @@ mod tests {
     #[test]
     fn every_documented_event_disables_mowed_grass_rejection() {
         let cases = [
-            MowedGrassEvents { blood_moon: true, ..Default::default() },
-            MowedGrassEvents { eclipse: true, ..Default::default() },
-            MowedGrassEvents { pumpkin_moon: true, ..Default::default() },
-            MowedGrassEvents { frost_moon: true, ..Default::default() },
-            MowedGrassEvents { slime_rain: true, ..Default::default() },
-            MowedGrassEvents { invasion: true, ..Default::default() },
+            MowedGrassEvents {
+                blood_moon: true,
+                ..Default::default()
+            },
+            MowedGrassEvents {
+                eclipse: true,
+                ..Default::default()
+            },
+            MowedGrassEvents {
+                pumpkin_moon: true,
+                ..Default::default()
+            },
+            MowedGrassEvents {
+                frost_moon: true,
+                ..Default::default()
+            },
+            MowedGrassEvents {
+                slime_rain: true,
+                ..Default::default()
+            },
+            MowedGrassEvents {
+                invasion: true,
+                ..Default::default()
+            },
         ];
         for events in cases {
             assert!(!mowed_grass_rejects(MOWED_GRASS, events, true));
@@ -204,11 +225,7 @@ mod tests {
         for rows in [&[39][..], &[38][..], &[38, 39][..]] {
             let mut world = world();
             for &y in rows {
-                assert!(world.set_tile(
-                    50,
-                    y,
-                    Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-                ));
+                assert!(world.set_tile(50, y, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
             }
             assert!(direct_above_liquid_is_water(&world, 50, 40));
         }
@@ -217,44 +234,28 @@ mod tests {
     #[test]
     fn honey_in_the_first_tile_above_fails() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            39,
-            Tile::AIR.with_liquid(Liquid::Honey, 1)
-        ));
+        assert!(world.set_tile(50, 39, Tile::AIR.with_liquid(Liquid::Honey, 1)));
         assert!(!direct_above_liquid_is_water(&world, 50, 40));
     }
 
     #[test]
     fn shimmer_in_the_second_tile_above_fails() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            38,
-            Tile::AIR.with_liquid(Liquid::Shimmer, 1)
-        ));
+        assert!(world.set_tile(50, 38, Tile::AIR.with_liquid(Liquid::Shimmer, 1)));
         assert!(!direct_above_liquid_is_water(&world, 50, 40));
     }
 
     #[test]
     fn lava_also_fails_the_postcheck() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            39,
-            Tile::AIR.with_liquid(Liquid::Lava, 1)
-        ));
+        assert!(world.set_tile(50, 39, Tile::AIR.with_liquid(Liquid::Lava, 1)));
         assert!(!direct_above_liquid_is_water(&world, 50, 40));
     }
 
     #[test]
     fn liquid_three_tiles_above_is_outside_this_rule() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            37,
-            Tile::AIR.with_liquid(Liquid::Honey, 1)
-        ));
+        assert!(world.set_tile(50, 37, Tile::AIR.with_liquid(Liquid::Honey, 1)));
         assert!(direct_above_liquid_is_water(&world, 50, 40));
     }
 }

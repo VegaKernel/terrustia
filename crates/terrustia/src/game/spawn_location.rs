@@ -39,8 +39,8 @@ pub fn evaluate_normal_candidate(
         return NormalCandidate::Retry;
     }
 
-    let bottom = crate::game::spawn_ranges::normal_spawn_bottom_exclusive(player_tile.1)
-        .min(world.height());
+    let bottom =
+        crate::game::spawn_ranges::normal_spawn_bottom_exclusive(player_tile.1).min(world.height());
     if random_y >= bottom {
         return NormalCandidate::Retry;
     }
@@ -173,11 +173,7 @@ mod tests {
     fn water_directly_above_floor_remains_valid() {
         let mut world = world();
         assert!(world.set_tile(80, 120, Tile::block(1)));
-        assert!(world.set_tile(
-            80,
-            119,
-            Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-        ));
+        assert!(world.set_tile(80, 119, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         assert_eq!(
             evaluate_normal_candidate(&world, (150, 100), &[], 80, 90),
             NormalCandidate::Accept { floor_y: 120 }

@@ -137,22 +137,14 @@ mod tests {
     #[test]
     fn lava_in_left_column_above_floor_rejects_clearance() {
         let mut world = candidate();
-        assert!(world.set_tile(
-            49,
-            39,
-            Tile::AIR.with_liquid(Liquid::Lava, 1)
-        ));
+        assert!(world.set_tile(49, 39, Tile::AIR.with_liquid(Liquid::Lava, 1)));
         assert!(!floor_space_is_clear(&world, 50, 40));
     }
 
     #[test]
     fn water_above_floor_is_not_an_early_obstruction() {
         let mut world = candidate();
-        assert!(world.set_tile(
-            49,
-            39,
-            Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-        ));
+        assert!(world.set_tile(49, 39, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         assert!(floor_space_is_clear(&world, 50, 40));
     }
 

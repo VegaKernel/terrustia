@@ -20,14 +20,7 @@ const CAVERN_RESCUE_BOTTOM_MARGIN: i32 = 210;
 /// Generic room, safe-zone and water checks remain in `spawn::try_spawn`. Secret-seed layer
 /// inversions are not guessed here because the project does not yet implement most Remix/Zenith
 /// gameplay branches; ordinary-world rules are kept exact rather than pretending partial parity.
-pub fn eligible(
-    world: &World,
-    bound: u16,
-    x: i32,
-    y: i32,
-    depth: Depth,
-    biome: Biome,
-) -> bool {
+pub fn eligible(world: &World, bound: u16, x: i32, y: i32, depth: Depth, biome: Biome) -> bool {
     // Surface events replace the ordinary surface spawn pool. A rescue roll must not steal one of
     // those attempts just because the Angler or Tavernkeep happens to be otherwise eligible. The
     // same events do not own underground/cavern spawning, so only Surface is suppressed here.
@@ -49,9 +42,7 @@ pub fn eligible(
                 && y < world.height() - CAVERN_RESCUE_BOTTOM_MARGIN
         }
         // Bound Mechanic: Skeletron first, then the Cavern-layer Dungeon.
-        123 => {
-            world.progress.downed_boss3 && depth == Depth::Cavern && biome == Biome::Dungeon
-        }
+        123 => world.progress.downed_boss3 && depth == Depth::Cavern && biome == Biome::Dungeon,
         // Webbed Stylist: unsafe Spider Wall in Cavern.
         354 => depth == Depth::Cavern && world.tile(x, y).wall == SPIDER_UNSAFE_WALL,
         // Sleeping Angler's extra dry-land path: effective spawn-source sand near a true world
@@ -214,14 +205,7 @@ mod tests {
         let mut world = world();
         let y = 100;
         assert!(world.set_tile(100, y + 1, Tile::block(53)));
-        assert!(eligible(
-            &world,
-            376,
-            100,
-            y,
-            Depth::Surface,
-            Biome::Ocean
-        ));
+        assert!(eligible(&world, 376, 100, y, Depth::Surface, Biome::Ocean));
 
         assert!(world.set_tile(500, y + 1, Tile::block(53)));
         assert!(!eligible(
@@ -248,14 +232,7 @@ mod tests {
         let (x, y) = (100, 100);
         assert!(world.set_tile(x, y + 1, Tile::block(19)));
         assert!(world.set_tile(x, y + 5, Tile::block(53)));
-        assert!(eligible(
-            &world,
-            376,
-            x,
-            y,
-            Depth::Surface,
-            Biome::Ocean
-        ));
+        assert!(eligible(&world, 376, x, y, Depth::Surface, Biome::Ocean));
     }
 
     #[test]
@@ -348,28 +325,16 @@ mod tests {
         world.progress.downed_boss3 = true;
         let mut npcs = NpcStore::new();
 
-        let initial = candidates(
-            &world,
-            &npcs,
-            500,
-            400,
-            Depth::Cavern,
-            Biome::Dungeon,
+        let initial = candidates(&world, &npcs, 500, 400, Depth::Cavern, Biome::Dungeon);
+        assert!(
+            initial.contains(&123),
+            "the Mechanic should initially be findable"
         );
-        assert!(initial.contains(&123), "the Mechanic should initially be findable");
 
         npcs.spawn(124, (0.0, 0.0))
             .expect("the freed Mechanic should have a slot");
         assert!(
-            !candidates(
-                &world,
-                &npcs,
-                500,
-                400,
-                Depth::Cavern,
-                Biome::Dungeon,
-            )
-            .contains(&123),
+            !candidates(&world, &npcs, 500, 400, Depth::Cavern, Biome::Dungeon,).contains(&123),
             "a live freed Mechanic must suppress another bound Mechanic"
         );
 
@@ -377,15 +342,7 @@ mod tests {
         npcs.spawn(123, (0.0, 0.0))
             .expect("the bound Mechanic should have a slot");
         assert!(
-            !candidates(
-                &world,
-                &npcs,
-                500,
-                400,
-                Depth::Cavern,
-                Biome::Dungeon,
-            )
-            .contains(&123),
+            !candidates(&world, &npcs, 500, 400, Depth::Cavern, Biome::Dungeon,).contains(&123),
             "a live bound Mechanic must suppress a duplicate bound Mechanic"
         );
     }
@@ -398,15 +355,7 @@ mod tests {
         let npcs = NpcStore::new();
 
         assert!(
-            !candidates(
-                &world,
-                &npcs,
-                500,
-                400,
-                Depth::Cavern,
-                Biome::Dungeon,
-            )
-            .contains(&123)
+            !candidates(&world, &npcs, 500, 400, Depth::Cavern, Biome::Dungeon,).contains(&123)
         );
     }
 }
