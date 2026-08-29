@@ -137,6 +137,14 @@ pub struct PanelStatus {
     /// The file stem of the world currently being served, if it has one, so the panel's world
     /// list can mark which entry is the running one.
     pub world_file: Option<String>,
+    /// How many world saves have failed in a row: the saves-failing indicator.
+    ///
+    /// `0` is healthy and is what a panel should show nothing for. Anything else means the world on
+    /// disk is older than the world being played, and by roughly this many autosave intervals - the
+    /// one server-health fact a player-facing dashboard has no other way to learn, since a failing
+    /// save is otherwise only a line in a log nobody has open. Crosses
+    /// [`super::SAVE_FAILURES_BEFORE_ALARM`] and the players have been told in chat as well.
+    pub save_failures: u32,
 }
 
 /// What [`ServerEvent::PanelMetrics`](super::ServerEvent::PanelMetrics) hands back — a live

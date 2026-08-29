@@ -12,6 +12,7 @@ pub mod console;
 pub mod game;
 pub mod net;
 pub mod panel;
+pub mod safe_write;
 pub mod setup;
 pub mod term;
 pub mod update;

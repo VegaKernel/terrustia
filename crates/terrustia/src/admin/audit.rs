@@ -143,14 +143,31 @@ impl AuditLog {
     }
 
     fn append(&self, path: &Path, event: &AuditEvent) -> std::io::Result<()> {
-        self.rotate_if_needed(path)?;
-        let line = serde_json::to_string(event)
+        // A rotation that cannot happen must not also silence the log. Rotation exists to stop the
+        // file growing without bound, which is a housekeeping concern; losing the record of a ban
+        // is an accountability one, and the second is worse. So this warns and carries on writing
+        // to whatever file is there, rather than returning early and dropping the event.
+        if let Err(e) = self.rotate_if_needed(path) {
+            warn!(
+                error = %e,
+                "could not rotate the audit log; still appending to the live file"
+            );
+        }
+        // Built as one buffer, newline included, and written with a single `write_all`. `writeln!`
+        // goes through `write_fmt`, which is free to reach the kernel more than once, and a second
+        // call that fails after the first succeeded leaves a line with no terminator: the next
+        // event then lands on the same line and both are unreadable. One append-mode write of a
+        // short buffer is the closest a portable program gets to an atomic line.
+        let mut line = serde_json::to_string(event)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        line.push('\n');
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)?;
-        writeln!(file, "{line}")
+            .open(path)
+            .map_err(|e| crate::safe_write::explain("writing the audit log", path, &e))?;
+        file.write_all(line.as_bytes())
+            .map_err(|e| crate::safe_write::explain("writing the audit log", path, &e))
     }
 
     /// One segment's path: `<file>.<n>` — appended to the whole file name, not swapped in as an
@@ -174,13 +191,19 @@ impl AuditLog {
         }
         let oldest = Self::segment_path(path, self.keep_segments);
         let _ = std::fs::remove_file(&oldest);
+        // Renames throughout, so a failure part-way leaves a shorter chain rather than a segment
+        // that is half of two different logs. Nothing here ever copies bytes.
         for n in (1..self.keep_segments).rev() {
             let from = Self::segment_path(path, n);
+            let to = Self::segment_path(path, n + 1);
             if from.exists() {
-                std::fs::rename(&from, Self::segment_path(path, n + 1))?;
+                std::fs::rename(&from, &to)
+                    .map_err(|e| crate::safe_write::explain("rotating the audit log", &to, &e))?;
             }
         }
-        std::fs::rename(path, Self::segment_path(path, 1))
+        let first = Self::segment_path(path, 1);
+        std::fs::rename(path, &first)
+            .map_err(|e| crate::safe_write::explain("rotating the audit log", &first, &e))
     }
 
     /// The most recent `n` events from the live file, oldest first (so it reads top-to-bottom the
@@ -308,6 +331,115 @@ mod tests {
             !AuditLog::segment_path(&path, 3).exists(),
             "only 2 segments were asked to be kept"
         );
+    }
+
+    /// A rotation that cannot happen must not also silence the log.
+    ///
+    /// Rotation is housekeeping: it stops the file growing without bound. The record of a ban is
+    /// accountability. `rotate_if_needed`'s failure used to propagate out of `append` through a
+    /// `?`, so a segment that could not be replaced meant every later event was dropped without a
+    /// word - the second concern sacrificed for the first. Restoring that `?` in place of the
+    /// `if let Err(..)` arm makes this test fail on its final assertion.
+    ///
+    /// The blocker is a directory sitting where the live file wants to rotate to, with
+    /// `keep_segments = 1` so nothing shuffles it out of the way first: renaming a file onto a
+    /// directory is refused by the kernel, while the live file itself stays perfectly writable.
+    #[test]
+    fn a_rotation_that_cannot_happen_still_records_the_event() {
+        let dir = crate::safe_write::tests::temp_dir("audit-blocked-rotation");
+        let path = dir.join("world.audit.jsonl");
+        let log = AuditLog::new(path.clone(), 10, 1);
+        log.record("brook", AuditAction::Ban, "griefer", "the first line");
+
+        let blocker = AuditLog::segment_path(&path, 1);
+        std::fs::create_dir_all(&blocker).expect("blocking directory");
+        std::fs::write(blocker.join("occupant"), b"in the way").expect("occupant");
+
+        log.record("brook", AuditAction::Kick, "someone", "the second line");
+        assert!(
+            blocker.is_dir(),
+            "the blocker should still be in the way, or this test proved nothing"
+        );
+        assert_eq!(
+            log.tail(10).len(),
+            2,
+            "a failed rotation must not swallow the event it was rotating for"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A read-only directory stops rotation and nothing else.
+    ///
+    /// Worth pinning because it is the opposite of the intuition: POSIX permits appending to an
+    /// existing writable file inside a directory that permits no renames at all, so the log keeps
+    /// its accountability even while its housekeeping is blocked. Under the old propagating `?`
+    /// this same situation lost every event from the moment the file first reached its size cap.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_directory_blocks_rotation_but_not_the_record() {
+        let dir = crate::safe_write::tests::temp_dir("audit-readonly-dir");
+        let path = dir.join("world.audit.jsonl");
+        // A tiny cap, so the next write is one that wants to rotate.
+        let log = AuditLog::new(path.clone(), 10, DEFAULT_KEEP_SEGMENTS);
+        log.record("brook", AuditAction::Ban, "griefer", "wrecked spawn");
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyDir::new(&dir) else {
+            eprintln!("skipping: this environment cannot make a directory read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        log.record("brook", AuditAction::Kick, "someone", "");
+        let rotated = AuditLog::segment_path(&path, 1).exists();
+        let recorded = log.tail(10).len();
+        drop(_guard);
+
+        assert!(!rotated, "a read-only directory cannot rotate");
+        assert_eq!(recorded, 2, "and must still record");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A log file that genuinely cannot be written costs the line and nothing else.
+    ///
+    /// `record` has no `Result` by design (this module's own doc comment says why): a ban must
+    /// happen whether or not the line describing it could be written. What must not happen is a
+    /// panic, or damage to what is already in the file.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_log_file_costs_the_line_and_nothing_else() {
+        let dir = crate::safe_write::tests::temp_dir("audit-readonly-file");
+        let path = dir.join("world.audit.jsonl");
+        let log = AuditLog::new(path.clone(), DEFAULT_MAX_BYTES, DEFAULT_KEEP_SEGMENTS);
+        log.record("brook", AuditAction::Ban, "griefer", "wrecked spawn");
+        let before = std::fs::read(&path).expect("reading the log back");
+        assert!(!before.is_empty(), "there should be a line to protect");
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyFile::new(&path) else {
+            eprintln!("skipping: this environment cannot make a file read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        log.record("brook", AuditAction::Kick, "someone", "");
+        let after = std::fs::read(&path).expect("reading the log back");
+        drop(_guard);
+
+        assert_eq!(
+            after, before,
+            "a refused write must leave the existing log byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory that has gone away entirely: no file to append to, and none can be created.
+    #[test]
+    fn a_vanished_directory_costs_the_line_and_does_not_panic() {
+        let dir = crate::safe_write::tests::temp_dir("audit-vanished");
+        let path = dir.join("world.audit.jsonl");
+        let log = AuditLog::new(path.clone(), DEFAULT_MAX_BYTES, DEFAULT_KEEP_SEGMENTS);
+        std::fs::remove_dir_all(&dir).expect("removing the directory out from under it");
+
+        log.record("brook", AuditAction::Ban, "griefer", "wrecked spawn");
+        assert!(!path.exists(), "nothing should have been conjured up");
+        assert!(log.tail(10).is_empty());
     }
 
     /// A malformed line is skipped, not fatal to the rest of the read.
