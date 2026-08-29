@@ -230,7 +230,7 @@ mod tests {
     fn angler_dry_spawn_looks_through_a_platform_to_sand() {
         let mut world = world();
         let (x, y) = (100, 100);
-        assert!(world.set_tile(x, y + 1, Tile::block(19)));
+        assert!(world.set_tile(x, y + 1, Tile::framed(19, 0, 0)));
         assert!(world.set_tile(x, y + 5, Tile::block(53)));
         assert!(eligible(&world, 376, x, y, Depth::Surface, Biome::Ocean));
     }
