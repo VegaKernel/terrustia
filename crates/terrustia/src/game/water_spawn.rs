@@ -9,6 +9,7 @@ use super::{
     spawn::{Biome, Depth},
     spawn_source::SpawnSource,
 };
+use crate::world::World;
 
 // Preserve Terrustia's existing 1:1:1 weighting between Pink Jellyfish, Shark and Squid while
 // restoring Sea Snail at its source-backed rate of one third as often as Squid. Multiplying the
@@ -129,9 +130,7 @@ pub fn pool(depth: Depth, biome: Biome, hard_mode: bool, spawning_block: u16) ->
 /// Planter Box, Metal Bar or Conveyor Belt, while Ocean's vertical checks continue to consume the
 /// physical `SpawnTileY` retained in [`SpawnSource::physical_floor_y`].
 pub fn pool_for_source(
-    world_width: i32,
-    surface: i32,
-    rock_layer: i32,
+    world: &World,
     x: i32,
     depth: Depth,
     biome: Biome,
@@ -142,11 +141,11 @@ pub fn pool_for_source(
         return pool;
     }
     if ocean_source_eligible(
-        world_width,
+        world.width(),
         x,
         source.physical_floor_y,
-        surface,
-        rock_layer,
+        i32::from(world.surface),
+        i32::from(world.rock_layer),
         source.block,
     ) {
         return OCEAN;
@@ -165,6 +164,13 @@ mod tests {
             source_y,
             used_chosen_fallback: false,
         }
+    }
+
+    fn world() -> World {
+        let mut world = World::empty(2000, 600, "water spawn");
+        world.surface = 200;
+        world.rock_layer = 300;
+        world
     }
 
     #[test]
@@ -208,10 +214,9 @@ mod tests {
 
     #[test]
     fn source_aware_outer_ocean_does_not_depend_on_the_coarse_biome_classifier() {
+        let world = world();
         let pool = pool_for_source(
-            2000,
-            200,
-            300,
+            &world,
             300,
             Depth::Surface,
             Biome::Forest,
@@ -223,11 +228,10 @@ mod tests {
 
     #[test]
     fn source_aware_ocean_uses_physical_spawn_row_not_the_lower_source_row() {
+        let world = world();
         assert_eq!(
             pool_for_source(
-                2000,
-                200,
-                300,
+                &world,
                 300,
                 Depth::Surface,
                 Biome::Forest,
@@ -238,9 +242,7 @@ mod tests {
         );
         assert!(
             pool_for_source(
-                2000,
-                200,
-                300,
+                &world,
                 300,
                 Depth::Surface,
                 Biome::Forest,
@@ -253,12 +255,11 @@ mod tests {
 
     #[test]
     fn source_aware_inner_ocean_accepts_sand_variants() {
+        let world = world();
         for block in [53, 112, 116, 234] {
             assert_eq!(
                 pool_for_source(
-                    2000,
-                    200,
-                    300,
+                    &world,
                     249,
                     Depth::Surface,
                     Biome::Forest,
@@ -272,11 +273,10 @@ mod tests {
 
     #[test]
     fn hardmode_crimson_and_jungle_still_preempt_ocean_selection() {
+        let world = world();
         assert_eq!(
             pool_for_source(
-                2000,
-                200,
-                300,
+                &world,
                 100,
                 Depth::Surface,
                 Biome::Crimson,
@@ -287,9 +287,7 @@ mod tests {
         );
         assert_eq!(
             pool_for_source(
-                2000,
-                200,
-                300,
+                &world,
                 100,
                 Depth::Surface,
                 Biome::Jungle,
