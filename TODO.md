@@ -12,53 +12,68 @@ Last reconciled against `master`: 2026-08-29.
 
 ## In flight
 
-### 1. Finish spawn-location postchecks and aquatic composition
+### 1. Finish spawn-location parity and aquatic composition
 
-Deep water is a real spawn medium (`987c005f`). The spawn-location pipeline now keeps the random
-chosen point separate from the physical floor, validates the chosen tile plus the left-shifted 2x3
-clearance rectangle, retries the vanilla 50 candidate points (`5cd286da`), uses asymmetric vanilla
-normal spawn/safe rectangles and the resolved solid floor for the early safe check (`e11fafef`),
-rejects `Main.wallHouse` safe walls (`9a5704fd`), and applies the post-selection two-cell overhead
-liquid gate with the required no-retry semantics (`06dc3de3`).
+Deep water is a real spawn medium (`987c005f`). The spawn-location pipeline keeps the random
+candidate coordinate separate from the physical floor, validates safe walls and clearance, retries
+50 candidates (`5cd286da`), uses asymmetric normal spawn/safe rectangles (`e11fafef`), applies the
+two-cell overhead-liquid no-retry gate (`06dc3de3`), and rejects a candidate visible inside the
+2088x1172 rectangle of **any** active ordinary 20x42 player (`6e253e43`; geometry substrate
+`2bab8904`). Mounted-player hitbox geometry is still not modelled.
 
-Source selection is also less conflated now: `spawn_source.rs` resolves Platform / Metal Bars /
-Planter Box style floors and the Terraria 1.4.5 Conveyor Belt rule (`f3de39f8`), the deep-water caller
-actually consumes that resolved source (`267b28e9`), and Sea Snail (220) is back in Ocean water with
-the independently verified 3:1 Squid:Sea Snail relation (`17d688b4`).
+Source selection is also explicit now. `spawn_source.rs` handles Platform / Metal Bars / Planter Box
+look-through and Terraria 1.4.5 Conveyor Belt semantics (`f3de39f8`). `SpawnSource` now preserves the
+physical floor, resolved source row, source block and whether the documented no-source fallback was
+used (`ab8ace0d`), instead of collapsing everything to one block id. The existing water path still
+uses the compatibility `block()` wrapper; migrating it to `resolve(..., chosen_y, floor_y)` is what
+will make the original-chosen-tile fallback live in runtime.
+
+Ocean work is deliberately split from that migration. The documented 250/380 edge geometry is
+pinned (`b3665d92`) and a source-aware water-pool API exists (`30b736c2`), but it is **not wired into
+`try_spawn` yet**. Current upstream material is not phrased consistently enough to pretend the
+250/380 environment precheck and the later Ocean-water source condition are the same operation:
+the official spawning documentation describes both 250- and 380-tile environment routes, while
+current tModLoader `SpawnCondition.Ocean` exposes the 250-tile water condition. Keep runtime on the
+coarse path until the exact 1.4.5.x `SpawnAnNPC` ordering/coordinates are recovered.
 
 The remaining work is narrower and should stay explicit:
 
-- the post-selection **all-player visibility** rule is not integrated yet: the 16x16 chosen-tile
-  space must be completely outside a 2088x1172-pixel rectangle centered on every active player's
-  hitbox center. A pixel-exact ordinary 20x42 hitbox helper is drafted on
-  `chatgpt/all-player-spawn-visibility`; mounted hitbox dimensions are not modelled by `Player` yet;
-- Dungeon post-selection still needs its chosen-tile Dungeon Brick + wall requirement;
-- Mowed Grass / Mowed Hallowed Grass still need their event-sensitive 1/10 no-retry failure rule;
+- **Floor-search bound / coordinate ownership needs a source-backed re-audit.** Terrustia currently
+  uses `GROUND_SCAN = 30` for `find_ground`. The independently confirmed 29/30-tile bound belongs to
+  `GetProperGroundSpawnTileTypeAndWallType`'s later Platform/Planter/Metal-Bar source lookup. The
+  earlier spawn-location floor search has its own bound tied to the spawn area. Do not call the
+  current fixed-30 `find_ground` vanilla-exact until `FindSpawnTile` itself is recovered;
+- Dungeon post-selection has a tested helper (`259d2654`) for the six Dungeon Brick types and a
+  non-zero wall, but runtime still needs source-backed `ZoneDungeon` and exact `spawnWallType`
+  semantics before it can be enabled honestly;
+- Mowed Grass / Mowed Hallowed Grass has a tested event-sensitive 1/10 helper (`259d2654`), but the
+  runtime caller still needs to carry the existing `GameServer` Slime Rain and invasion state into
+  spawn context. Do not introduce a second copy of those event states just to wire this rule;
 - the special Space spawn-location path is not modelled. Vanilla does not require the same ground /
   early safe-area path for Space attempts, so ordinary ground-search logic must not be advertised as
   universal;
 - scope / binocular / Sniper Rifle spawn-range modifiers are not modelled; `e11fafef` pins only the
-  normal rectangle;
+  normal rectangle. The current tModLoader preview still exposes `NPC.sHeight = 1080`; an official
+  wiki talk-page report claims 1.4.5 may have changed the fixed spawning height to 1200, but that is
+  not yet sufficiently source-backed to change Terrustia's constants;
 - the generic Surface-water critter source is not implemented. Goldfish (55) was removed from the
   dry Ocean pool rather than left spawning on land, so it needs its real critter-pool route and the
   world/time/weather context that route actually depends on;
-- Ocean spawning still uses the project's coarse `Biome::Ocean` classification. Vanilla also has a
-  secondary regular-Sand band out to 380 tiles from a true world edge plus vertical restrictions;
+- Ocean runtime still uses the project's coarse `Biome::Ocean` classification. The 250/380 helper
+  and source-aware pool are substrate only until the exact environment-vs-source distinction above
+  is resolved;
 - a single `Biome` enum cannot express overlaps such as a Crimson/Jungle Ocean, so water-source
   priority in hybrid areas is not yet a complete SceneMetrics replacement;
 - the exact Blood Feeder/Blood Jelly relative probability was not independently recovered from a
   1.4.5.x oracle. The current water pool preserves Terrustia's previous 1:1 relative weighting rather
   than pretending that weighting has been certified;
-- the full Pink Jellyfish / Shark / Squid Ocean relative table is likewise not oracle-derived. The
-  Sea Snail change preserves the old relative weights and pins only the independently verified
-  Squid:Sea Snail relation;
-- `spawn_source::block` still has one known fallback mismatch: if a platform-like physical floor has
-  no qualifying source below, vanilla falls back to the original chosen tile, while the helper has
-  no `chosen_y` and currently retains the physical solid-top type. Fixing this correctly requires
-  carrying the original chosen coordinate through source consumers rather than guessing a fallback.
+- the full Pink Jellyfish / Shark / Squid Ocean relative table is likewise not oracle-derived. Sea
+  Snail (220) is present with the independently verified Squid:Sea Snail 3:1 relation (`17d688b4`),
+  while the older Pink/Shark/Squid relative weights remain an explicit approximation.
 
-Finish the all-player no-retry rectangle next, then the other post-selection rules. Keep Goldfish /
-critter-pool work separate so geometry and composition remain independently reviewable.
+Next priority: recover/verify `FindSpawnTile`'s exact returned coordinate and floor-search bound,
+then wire `SpawnSource::resolve` into the water caller. That removes ambiguity before Dungeon,
+Ocean-380 and the remaining postchecks are layered on top.
 
 ### 2. Real Terraria client against Terrustia
 
@@ -154,6 +169,21 @@ SDK in this AGPL project.
 
 The following items used to be TODOs and are already implemented on `master`:
 
+- **All-player post-selection visibility gate**: the chosen 16x16 spawn space is checked against a
+  pixel-exact 2088x1172 rectangle for every active ordinary 20x42 player and an overlap aborts the
+  current attempt without retrying another candidate. Geometry merged as `2bab8904`; runtime as
+  `6e253e43`. Mounted hitbox geometry remains tracked above.
+- **Spawn-source descriptor / fallback representation**: `SpawnSource` preserves the physical floor,
+  resolved source row/block and original-chosen fallback state; tests pin Platform/Metal Bar/Planter,
+  1.4.5 Conveyor and the exact 29-tile source lookup boundary. Merged as `ab8ace0d`. Runtime caller
+  migration is tracked above rather than falsely claiming the compatibility wrapper uses `chosen_y`.
+- **Ocean geometry/source-aware substrate**: the documented 250/380 edge geometry is pinned in
+  `water_spawn.rs` (`b3665d92`) and a `SpawnSource`-aware selection API exists (`30b736c2`). Neither
+  commit is a claim that the 380 branch is live in `try_spawn`; that remaining integration/oracle
+  question is explicitly tracked above.
+- **Dungeon and Mowed-Grass postcheck substrate**: deterministic helpers pin all six Dungeon Brick
+  types plus the wall requirement and the event-sensitive Mowed/Mowed-Hallow 1/10 rule. Merged as
+  `259d2654`; runtime context wiring remains tracked above.
 - **Post-selection overhead-liquid gate**: after a candidate survives the retryable location checks,
   Honey/Lava/Shimmer in either of the two cells directly above the chosen tile abort the current
   spawn attempt without trying another point; Water/dry cells remain valid. Merged as `06dc3de3`.
@@ -161,20 +191,20 @@ The following items used to be TODOs and are already implemented on `master`:
   property through wall id 366, including natural unsafe variants, and chosen-point validation now
   rejects player-safe walls without suppressing natural cave/Dungeon/Spider walls. Merged as
   `9a5704fd`.
-- **Normal asymmetric spawn/safe rectangles**: candidate sampling now uses the vanilla 84 west / 83
-  east / 46 up / 45 down normal rectangle; the early safe rectangle uses 62 west / 61 east / 35 up /
-  34 down and is checked against the resolved solid floor rather than the NPC stand row. Merged as
-  `e11fafef`.
-- **Water source-resolver integration**: deep-water source selection consumes
+- **Normal asymmetric spawn/safe rectangles**: candidate sampling uses the pinned 84 west / 83 east /
+  46 up / 45 down normal rectangle; the early safe rectangle uses 62 west / 61 east / 35 up / 34
+  down. Merged as `e11fafef`. The 1.4.5 fixed-height question is explicitly tracked above.
+- **Water source-resolver integration (legacy block API)**: deep-water source selection consumes
   `spawn_source::block(...)`, so Platform/Metal Bar/Planter floors no longer hide Sand/Jungle source
-  tiles from aquatic selection. Merged as `267b28e9`.
-- **Chosen-point / 2x3 spawn clearance**: natural spawn location search keeps `chosen_y` separate
-  from the physical floor, rejects a solid chosen tile, validates the left-shifted 2x3 rectangle
-  above it for solids/lava, and uses the vanilla 50 candidate attempts. Merged as `5cd286da`.
+  tiles from aquatic selection in the ordinary found-source case. Merged as `267b28e9`; migration to
+  the richer descriptor is tracked above.
+- **Chosen-point / 2x3 spawn clearance**: the search tracks a random candidate separately from the
+  physical floor, rejects a solid/safe-wall candidate, validates the left-shifted 2x3 clearance and
+  retries 50 candidates. Merged as `5cd286da`. Exact `FindSpawnTile` coordinate ownership and floor
+  search bounds are being re-audited above rather than inferred from this older port.
 - **Spawn-source tile resolver**: `game/spawn_source.rs` distinguishes the physical floor from the
   effective source block, looks through `tileSolidTop` Platform/Metal Bar/Planter floors, and handles
-  the Terraria 1.4.5 Conveyor Belt rule. Sleeping Angler's dry Sand route consumes it. Merged as
-  `f3de39f8`; the no-source fallback mismatch is explicitly tracked above.
+  the Terraria 1.4.5 Conveyor Belt rule. Merged as `f3de39f8` and generalized by `ab8ace0d`.
 - **Sea Snail Ocean source**: NPC 220 is present in Ocean water with the independently verified
   Squid:Sea Snail 3:1 relation while preserving Terrustia's previous relative weights among Pink
   Jellyfish, Shark and Squid. Merged as `17d688b4`; this is not a claim that the entire Ocean table
