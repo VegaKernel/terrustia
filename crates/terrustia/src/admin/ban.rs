@@ -41,15 +41,27 @@ pub struct Ban {
     pub reason: String,
     /// Unix seconds after which it lapses, or `None` for permanent.
     pub until: Option<u64>,
+    /// Who placed it: an account name, or `"console"`. `#[serde(default)]` so a ban list written
+    /// before this field existed still loads — an old entry simply reads back as `""`, which
+    /// [`crate::admin::store::Admin::ban_for`] and everything else here treats as an ordinary
+    /// (if anonymous) string, never a parse failure.
+    #[serde(default)]
+    pub issuer: String,
+    /// Unix seconds when it was placed. `#[serde(default)]` for the same reason `issuer` has it —
+    /// an old entry reads back as `0`, honestly reporting "unknown" rather than inventing a time.
+    #[serde(default)]
+    pub issued_at: u64,
 }
 
 impl Ban {
-    pub fn permanent(kind: BanKind, value: &str, reason: &str) -> Self {
+    pub fn permanent(kind: BanKind, value: &str, reason: &str, issuer: &str) -> Self {
         Self {
             kind,
             value: value.to_string(),
             reason: reason.to_string(),
             until: None,
+            issuer: issuer.to_string(),
+            issued_at: now(),
         }
     }
 
@@ -85,7 +97,7 @@ mod tests {
     /// A permanent ban never lapses.
     #[test]
     fn a_permanent_ban_stays() {
-        let ban = Ban::permanent(BanKind::Name, "griefer", "wrecked spawn");
+        let ban = Ban::permanent(BanKind::Name, "griefer", "wrecked spawn", "brook");
         assert!(ban.in_force(0));
         assert!(ban.in_force(u64::MAX - 1));
     }
@@ -95,7 +107,7 @@ mod tests {
     fn a_timed_ban_expires() {
         let ban = Ban {
             until: Some(1_000),
-            ..Ban::permanent(BanKind::Name, "hothead", "language")
+            ..Ban::permanent(BanKind::Name, "hothead", "language", "brook")
         };
         assert!(ban.in_force(999));
         assert!(!ban.in_force(1_000));
@@ -105,7 +117,7 @@ mod tests {
     /// A name matches whatever its capitals, and does not reach across kinds.
     #[test]
     fn matching_is_by_kind_and_case_insensitive_for_names() {
-        let ban = Ban::permanent(BanKind::Name, "Griefer", "");
+        let ban = Ban::permanent(BanKind::Name, "Griefer", "", "brook");
         assert!(ban.matches(&BanKind::Name, "griefer"));
         assert!(ban.matches(&BanKind::Name, "GRIEFER"));
         assert!(
@@ -117,8 +129,33 @@ mod tests {
     /// Addresses match exactly, so a loose comparison cannot widen one.
     #[test]
     fn addresses_match_exactly() {
-        let ban = Ban::permanent(BanKind::Address, "10.0.0.5", "");
+        let ban = Ban::permanent(BanKind::Address, "10.0.0.5", "", "brook");
         assert!(ban.matches(&BanKind::Address, "10.0.0.5"));
         assert!(!ban.matches(&BanKind::Address, "10.0.0.50"));
+    }
+
+    /// Issuer and timestamp survive construction, and an old ban with neither (the pre-audit
+    /// shape) still deserializes rather than refusing to load — `#[serde(default)]` doing its job.
+    #[test]
+    fn bans_carry_issuer_and_timestamp() {
+        let ban = Ban::permanent(BanKind::Name, "griefer", "wrecked spawn", "brook");
+        assert_eq!(ban.issuer, "brook");
+        assert!(
+            ban.issued_at > 0,
+            "a freshly placed ban has a real timestamp"
+        );
+
+        let old_shape =
+            r#"{"kind":"name","value":"griefer","reason":"wrecked spawn","until":null}"#;
+        let loaded: Ban = serde_json::from_str(old_shape)
+            .expect("an old ban with no issuer/timestamp fields must still load");
+        assert_eq!(
+            loaded.issuer, "",
+            "missing issuer reads back as empty, not a parse failure"
+        );
+        assert_eq!(
+            loaded.issued_at, 0,
+            "missing timestamp reads back as 0, honestly unknown"
+        );
     }
 }

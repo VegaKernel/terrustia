@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { watchStatus, logout, type StatusResponse, type ConsoleFeedLine } from "./api";
+  import {
+    watchStatus,
+    logout,
+    hasPermission,
+    type StatusResponse,
+    type ConsoleFeedLine,
+  } from "./api";
   import Players from "./Players.svelte";
   import Whitelist from "./Whitelist.svelte";
   import Worlds from "./Worlds.svelte";
@@ -10,6 +16,7 @@
   import Metrics from "./Metrics.svelte";
   import Backups from "./Backups.svelte";
   import Accounts from "./Accounts.svelte";
+  import Audit from "./Audit.svelte";
 
   let { session, onLoggedOut }: { session: string; onLoggedOut: () => void } = $props();
 
@@ -23,23 +30,39 @@
     | "backups"
     | "console"
     | "world"
-    | "settings";
-  const TABS: { id: Tab; label: string }[] = [
-    { id: "overview", label: "overview" },
-    { id: "metrics", label: "metrics" },
-    { id: "players", label: "players" },
-    { id: "whitelist", label: "whitelist" },
-    { id: "accounts", label: "accounts" },
-    { id: "worlds", label: "worlds" },
-    { id: "backups", label: "backups" },
-    { id: "console", label: "console" },
-    { id: "world", label: "world" },
-    { id: "settings", label: "settings" },
+    | "settings"
+    | "audit";
+  // Every tab except "overview" needs a permission to be worth showing — this is a UX convenience
+  // only, gating which buttons a session sees; every route the tab talks to re-checks its own
+  // permission on the backend regardless (see `panel/mod.rs`'s module doc for the full map), so a
+  // stale or wrong entry here is a display bug, never a way past the real check.
+  const ALL_TABS: { id: Tab; label: string; needs: string | null }[] = [
+    { id: "overview", label: "overview", needs: null },
+    { id: "metrics", label: "metrics", needs: "panel.view" },
+    { id: "players", label: "players", needs: "panel.view" },
+    { id: "whitelist", label: "whitelist", needs: "panel.view" },
+    { id: "accounts", label: "accounts", needs: "admin.accounts" },
+    { id: "worlds", label: "worlds", needs: "panel.view" },
+    { id: "backups", label: "backups", needs: "panel.view" },
+    { id: "console", label: "console", needs: "panel.console" },
+    { id: "world", label: "world", needs: "panel.view" },
+    { id: "settings", label: "settings", needs: "panel.view" },
+    { id: "audit", label: "audit", needs: "admin.audit" },
   ];
 
   let tab = $state<Tab>("overview");
   let status = $state<StatusResponse | null>(null);
   let live = $state(false);
+
+  let TABS = $derived(
+    ALL_TABS.filter((t) => t.needs === null || hasPermission(status?.permissions ?? [], t.needs)),
+  );
+
+  // If the tab currently open stops being one this session may see (permissions loaded in after
+  // the initial render, or were changed mid-session), fall back to the one tab everyone always has.
+  $effect(() => {
+    if (!TABS.some((t) => t.id === tab)) tab = "overview";
+  });
   const MAX_LINES = 400;
   let consoleLines = $state<ConsoleFeedLine[]>([]);
 
@@ -128,6 +151,8 @@
     <WorldView {session} />
   {:else if tab === "settings"}
     <Settings {session} />
+  {:else if tab === "audit"}
+    <Audit {session} />
   {/if}
 </main>
 

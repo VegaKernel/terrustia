@@ -14,7 +14,7 @@ use std::{
 
 use tracing::{info, warn};
 
-use super::{Account, Ban, BanKind, Group, Permission, ban::now, group::defaults};
+use super::{Account, Ban, BanKind, Group, Mute, Permission, ban::now, group, group::defaults};
 
 /// Everything the server knows about who may do what.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -25,6 +25,10 @@ pub struct Admin {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub bans: Vec<Ban>,
+    /// Active (or not-yet-cleaned-up expired) mutes. `#[serde(default)]` so a store written before
+    /// this field existed still loads with an empty list rather than refusing to parse.
+    #[serde(default)]
+    pub mutes: Vec<Mute>,
     /// Who is allowed in, when the list is not empty.
     ///
     /// Bans are reactive: they keep out somebody who has already been and done something. A
@@ -86,6 +90,29 @@ impl Admin {
             admin.groups = defaults();
         }
         admin.path = Some(path.to_path_buf());
+
+        // A store written before permissions were namespaced still has the old coarse words
+        // (`look`/`world`/`players`/`admin`) in one or more groups. Map them across once — see
+        // `group::migrate`'s own doc comment for exactly what each word becomes and why — and save
+        // immediately so the rewrite happens exactly once rather than on every boot.
+        let mut migrated = false;
+        for group in &mut admin.groups {
+            if group::migrate(&mut group.permissions) {
+                migrated = true;
+            }
+        }
+        if migrated {
+            info!(
+                path = %path.display(),
+                "migrated legacy coarse group permissions to the namespaced vocabulary",
+            );
+            if let Err(e) = admin.save() {
+                warn!(
+                    error = %e,
+                    "could not persist the migrated admin file; migration will be retried next boot",
+                );
+            }
+        }
         admin
     }
 
@@ -137,6 +164,48 @@ impl Admin {
         self.groups
             .iter()
             .any(|g| g.name == group_name && g.may(permission))
+    }
+
+    /// The raw-string form of [`Self::group_grants`], for a permission name that arrived over the
+    /// wire (the panel's per-route `PanelAuthorize` check) rather than as a compile-time constant.
+    pub fn group_grants_str(&self, group_name: &str, permission: &str) -> bool {
+        self.groups
+            .iter()
+            .any(|g| g.name == group_name && g.grants_str(permission))
+    }
+
+    /// The group an account belongs to, by name, if the account exists. Used alongside
+    /// [`Self::group_within_reach`] wherever an actor's own group needs to be found first.
+    pub fn account_group(&self, name: &str) -> Option<&str> {
+        self.accounts
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .map(|a| a.group.as_str())
+    }
+
+    /// Whether everything `target_group` may do is already something `actor_group` may do — the
+    /// general rule that stops any account/group change from ever handing out more power than the
+    /// person making the change already holds themselves.
+    ///
+    /// This is what actually keeps `admin.accounts` safe to grant to the `admin` tier even though
+    /// `admin` lacks `admin.groups`: without it, an `admin`-tier account could reassign *itself* into
+    /// `owner` through the ordinary account-group-change route, which is exactly the
+    /// self-escalation the ladder in `group::defaults` is trying to rule out. Both an unknown actor
+    /// group and an unknown target group return `false` — nothing is "within reach" of a group that
+    /// does not exist, and a target that does not exist cannot be reached either.
+    ///
+    /// Used for two different edits, both of which are really "does this change grant power the
+    /// actor doesn't have": moving an account into a different group (every permission the *target*
+    /// group holds must already be within the *actor*'s reach), and adding a permission to a group
+    /// (the single permission being added must be within the actor's reach).
+    pub fn group_within_reach(&self, actor_group: &str, target_group: &str) -> bool {
+        let Some(actor) = self.groups.iter().find(|g| g.name == actor_group) else {
+            return false;
+        };
+        let Some(target) = self.groups.iter().find(|g| g.name == target_group) else {
+            return false;
+        };
+        target.permissions.iter().all(|p| actor.grants_str(p))
     }
 
     /// Sign in, returning whether the password was right.
@@ -277,8 +346,8 @@ impl Admin {
     }
 
     /// Add a ban and write the file.
-    pub fn ban(&mut self, kind: BanKind, value: &str, reason: &str) {
-        self.bans.push(Ban::permanent(kind, value, reason));
+    pub fn ban(&mut self, kind: BanKind, value: &str, reason: &str, issuer: &str) {
+        self.bans.push(Ban::permanent(kind, value, reason, issuer));
         if let Err(e) = self.save() {
             warn!(error = %e, "could not write the admin file; the ban is only in memory");
         }
@@ -297,10 +366,76 @@ impl Admin {
         }
         removed
     }
+
+    /// Mute a name, replacing any mute already in force for it (a second `/mute` on an already-
+    /// muted name updates the reason and duration rather than stacking a second entry). `duration`
+    /// is `None` for permanent, or seconds from now.
+    pub fn mute(&mut self, name: &str, reason: &str, duration: Option<u64>, issuer: &str) {
+        let until = duration.map(|secs| now().saturating_add(secs));
+        self.mutes.retain(|m| !m.name.eq_ignore_ascii_case(name));
+        self.mutes.push(Mute::new(name, reason, until, issuer));
+        if let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file; the mute is only in memory");
+        }
+    }
+
+    /// Lift every mute on this name (ordinarily just one — `mute` itself never stacks them, but an
+    /// old hand-edited file could). Returns whether anything was actually removed.
+    pub fn unmute(&mut self, name: &str) -> bool {
+        let before = self.mutes.len();
+        self.mutes.retain(|m| !m.name.eq_ignore_ascii_case(name));
+        let removed = self.mutes.len() != before;
+        if removed && let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file after unmuting");
+        }
+        removed
+    }
+
+    /// Whether this name is currently muted (an expired mute does not count — it is left in the
+    /// list rather than swept, the same way a lapsed ban is).
+    pub fn is_muted(&self, name: &str) -> bool {
+        let when = now();
+        self.mutes
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))
+    }
+
+    /// The reason a currently-in-force mute gives, if this name is muted at all.
+    pub fn mute_reason(&self, name: &str) -> Option<&str> {
+        let when = now();
+        self.mutes
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))
+            .map(|m| m.reason.as_str())
+    }
+
+    /// Extend an already-active, non-permanent mute by `extra_secs`, capped so it never reaches
+    /// more than `cap_secs` from now (`0` means no cap) — the mechanism behind
+    /// `Config::mute_escalation_enabled`. Returns the new expiry, or `None` if the name is not
+    /// currently muted, or its mute is already permanent (nothing to extend: it cannot get any
+    /// "longer" than forever).
+    pub fn extend_mute(&mut self, name: &str, extra_secs: u64, cap_secs: u64) -> Option<u64> {
+        let when = now();
+        let mute = self
+            .mutes
+            .iter_mut()
+            .find(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))?;
+        let current_until = mute.until?;
+        let mut extended = current_until.max(when).saturating_add(extra_secs);
+        if cap_secs > 0 {
+            extended = extended.min(when.saturating_add(cap_secs));
+        }
+        mute.until = Some(extended);
+        if let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file after extending a mute");
+        }
+        Some(extended)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::group::perm;
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
@@ -318,29 +453,63 @@ mod tests {
         let admin = Admin::load(&temp("does-not-exist.toml"));
         assert!(!admin.groups.is_empty());
         assert!(admin.unclaimed());
-        assert!(admin.may(0, Permission::World));
-        assert!(admin.may(0, Permission::Admin));
+        assert!(admin.may(0, perm::WORLD_TIME));
+        assert!(admin.may(0, perm::ADMIN_GROUPS));
     }
 
-    /// Only an admin-capable group may drive the web panel (which runs unrestricted console
-    /// commands). This is what stops a self-registered `default` account escalating through it — and
-    /// it also pins that the bogus `"everything"` group name grants nothing, since it is not a real
-    /// group (the owner group is named `"owner"`).
+    /// Only `owner` may edit who is allowed to do what (`admin.groups`) — not even `admin`, since
+    /// that permission is exactly the one that would let a group grant itself anything, up to and
+    /// including `owner` itself. This also pins that the bogus `"everything"` group name grants
+    /// nothing, since it is not a real group (the owner group is named `"owner"`).
     #[test]
-    fn only_an_admin_group_may_drive_the_panel() {
-        let admin = Admin::load(&temp("panel-authz.toml"));
-        assert!(admin.group_grants("owner", Permission::Admin), "owner may");
+    fn only_owner_may_edit_group_permissions() {
+        let admin = Admin::load(&temp("group-edit-authz.toml"));
+        assert!(admin.group_grants("owner", perm::ADMIN_GROUPS), "owner may");
         assert!(
-            !admin.group_grants("moderator", Permission::Admin),
+            !admin.group_grants("admin", perm::ADMIN_GROUPS),
+            "admin must not be able to grant itself anything"
+        );
+        assert!(
+            !admin.group_grants("moderator", perm::ADMIN_GROUPS),
             "a moderator is not an admin"
         );
         assert!(
-            !admin.group_grants("default", Permission::Admin),
-            "a look-only default account must not reach the panel"
+            !admin.group_grants("default", perm::ADMIN_GROUPS),
+            "a look-only default account must not administer permissions"
         );
         assert!(
-            !admin.group_grants("everything", Permission::Admin),
+            !admin.group_grants("everything", perm::ADMIN_GROUPS),
             "\"everything\" is not a real group name, so it grants nothing"
+        );
+    }
+
+    /// The escalation guard: an `admin`-tier account cannot reach `owner` through account/group
+    /// reassignment, because `owner` holds `*` and `admin` does not. It *can* reach `moderator` and
+    /// its own tier, since everything those groups hold is already within its own reach.
+    #[test]
+    fn group_within_reach_blocks_reassignment_above_ones_own_ceiling() {
+        let admin = Admin::load(&temp("within-reach.toml"));
+        assert!(
+            !admin.group_within_reach("admin", "owner"),
+            "admin must not be able to promote anyone to owner"
+        );
+        assert!(admin.group_within_reach("admin", "moderator"));
+        assert!(admin.group_within_reach("admin", "admin"));
+        assert!(
+            admin.group_within_reach("owner", "owner"),
+            "owner reaches anything"
+        );
+        assert!(
+            !admin.group_within_reach("moderator", "admin"),
+            "moderator cannot promote anyone into admin either"
+        );
+        assert!(
+            !admin.group_within_reach("nonsense", "moderator"),
+            "an unknown actor group reaches nothing"
+        );
+        assert!(
+            !admin.group_within_reach("admin", "nonsense"),
+            "an unknown target group cannot be reached"
         );
     }
 
@@ -353,12 +522,12 @@ mod tests {
             .expect("register");
 
         assert!(!admin.unclaimed());
-        assert!(admin.may(0, Permission::Look), "looking is always allowed");
+        assert!(admin.may(0, perm::SERVER_LOOK), "looking is always allowed");
         assert!(
-            !admin.may(0, Permission::World),
+            !admin.may(0, perm::WORLD_TIME),
             "once claimed, a stranger cannot reshape the world",
         );
-        assert!(!admin.may(0, Permission::Admin));
+        assert!(!admin.may(0, perm::ADMIN_GROUPS));
     }
 
     /// Signing in with the right password moves you into your group; a wrong one changes nothing.
@@ -369,19 +538,19 @@ mod tests {
             .register("brook", "a good password", "owner")
             .expect("register");
 
-        assert!(!admin.may(3, Permission::Admin), "not until signed in");
+        assert!(!admin.may(3, perm::ADMIN_GROUPS), "not until signed in");
         assert!(
             !admin.sign_in(3, "brook", "wrong"),
             "a wrong password fails"
         );
-        assert!(!admin.may(3, Permission::Admin), "and grants nothing");
+        assert!(!admin.may(3, perm::ADMIN_GROUPS), "and grants nothing");
 
         assert!(admin.sign_in(3, "brook", "a good password"));
-        assert!(admin.may(3, Permission::Admin));
+        assert!(admin.may(3, perm::ADMIN_GROUPS));
 
         // And leaving gives it up, so whoever reuses the slot does not inherit it.
         admin.sign_out(3);
-        assert!(!admin.may(3, Permission::Admin));
+        assert!(!admin.may(3, perm::ADMIN_GROUPS));
     }
 
     /// A name cannot be registered twice, and a short password is refused.
@@ -399,7 +568,7 @@ mod tests {
     #[test]
     fn bans_apply_and_lift() {
         let mut admin = Admin::load(&temp("bans.toml"));
-        admin.ban(BanKind::Uuid, "abc-123", "griefing");
+        admin.ban(BanKind::Uuid, "abc-123", "griefing", "brook");
 
         assert!(
             admin
@@ -418,6 +587,95 @@ mod tests {
         );
     }
 
+    /// A mute applies, survives being re-checked, and lifts on `/unmute` — the same shape as bans,
+    /// and it persists across an `Admin` reload, which is the whole point of storing it rather than
+    /// keeping it in memory on the connection.
+    #[test]
+    fn a_mute_applies_persists_and_lifts() {
+        let path = temp("mute.toml");
+        {
+            let mut admin = Admin::load(&path);
+            assert!(!admin.is_muted("chatty"));
+            admin.mute("chatty", "spamming caps", None, "brook");
+            assert!(admin.is_muted("chatty"));
+            assert!(
+                admin.is_muted("CHATTY"),
+                "case-insensitive, like a name ban"
+            );
+            assert_eq!(admin.mute_reason("chatty"), Some("spamming caps"));
+        }
+
+        // Reloading finds the same mute — it was written to disk, not only held in memory.
+        let mut reloaded = Admin::load(&path);
+        assert!(
+            reloaded.is_muted("chatty"),
+            "a mute must survive a reconnect/restart, which is what persisting it is for"
+        );
+        assert!(reloaded.unmute("chatty"));
+        assert!(!reloaded.is_muted("chatty"));
+        assert!(
+            !reloaded.unmute("chatty"),
+            "nothing left to lift a second time"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A timed mute lapses on its own, exactly like a timed ban.
+    #[test]
+    fn a_timed_mute_expires_on_its_own() {
+        let mut admin = Admin::load(&temp("mute-expiry.toml"));
+        admin.mute("chatty", "cooldown", Some(0), "brook");
+        // `duration = Some(0)` means "until right now" — already expired by the time this reads it.
+        assert!(!admin.is_muted("chatty"));
+    }
+
+    /// Re-muting an already-muted name replaces the entry rather than stacking a second one.
+    #[test]
+    fn re_muting_replaces_rather_than_stacks() {
+        let mut admin = Admin::load(&temp("mute-restack.toml"));
+        admin.mute("chatty", "first reason", None, "brook");
+        admin.mute("chatty", "second reason", None, "brook");
+        assert_eq!(
+            admin.mutes.iter().filter(|m| m.name == "chatty").count(),
+            1,
+            "muting twice must not leave two entries"
+        );
+        assert_eq!(admin.mute_reason("chatty"), Some("second reason"));
+    }
+
+    /// The escalation mechanism: extending a mute pushes its expiry out, capped so it never grows
+    /// past `cap_secs` from now, and does nothing to a mute that is already permanent.
+    #[test]
+    fn extending_a_mute_pushes_its_expiry_out_and_respects_the_cap() {
+        let mut admin = Admin::load(&temp("mute-extend.toml"));
+        admin.mute("chatty", "spam", Some(60), "brook");
+        let extended = admin
+            .extend_mute("chatty", 300, 0)
+            .expect("an active timed mute should extend");
+        let now = now();
+        assert!(
+            extended >= now + 300,
+            "extending by 300s should push the expiry at least 300s out"
+        );
+
+        // A cap of 100s from now must never be exceeded, even though the raw extension would.
+        let capped = admin
+            .extend_mute("chatty", 10_000, 100)
+            .expect("still active");
+        assert!(capped <= now + 100, "the cap must be respected: {capped}");
+
+        admin.mute("permanent", "no expiry", None, "brook");
+        assert!(
+            admin.extend_mute("permanent", 60, 0).is_none(),
+            "a permanent mute has nothing to extend"
+        );
+
+        assert!(
+            admin.extend_mute("nobody", 60, 0).is_none(),
+            "extending a name that is not muted at all does nothing"
+        );
+    }
+
     /// It survives a write and a read, which is the whole point of having a file.
     #[test]
     fn the_file_round_trips() {
@@ -428,7 +686,7 @@ mod tests {
             admin
                 .register("brook", "a good password", "owner")
                 .expect("register");
-            admin.ban(BanKind::Name, "griefer", "wrecked spawn");
+            admin.ban(BanKind::Name, "griefer", "wrecked spawn", "brook");
             admin.save().expect("save");
         }
 
@@ -439,6 +697,67 @@ mod tests {
             back.sign_in(0, "brook", "a good password"),
             "the hash has to survive the round trip or nobody can log in again",
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A store written before permissions were namespaced (a literal, hand-written coarse-word
+    /// TOML file — no `Admin` in this test build ever writes that format any more) loads with the
+    /// old words transparently mapped to their namespaced equivalents, and the mapping is persisted
+    /// so a second load sees the namespaced form already on disk. This is the fail-then-pass for
+    /// `group::migrate`: before the migration call was wired into `Admin::load`, `admin.may(0,
+    /// perm::WORLD_TIME)` here returned `false` for a group whose file said `"world"`, because
+    /// nothing recognised the old word as the new permission.
+    #[test]
+    fn an_old_coarse_store_migrates_transparently_and_the_migration_persists() {
+        let path = temp("legacy-migrate.toml");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            r#"
+            [[groups]]
+            name = "default"
+            permissions = ["look"]
+
+            [[groups]]
+            name = "moderator"
+            permissions = ["look", "world", "players"]
+            "#,
+        )
+        .expect("write legacy admin file");
+
+        let admin = Admin::load(&path);
+        let moderator = admin
+            .groups
+            .iter()
+            .find(|g| g.name == "moderator")
+            .expect("moderator group");
+        assert_eq!(
+            moderator.permissions,
+            std::collections::BTreeSet::from([
+                "server.look".to_string(),
+                "world.*".to_string(),
+                "server.*".to_string(),
+            ]),
+            "the old words must be rewritten to their namespaced equivalents",
+        );
+        assert!(
+            admin.may(0, perm::WORLD_TIME),
+            "world -> world.* keeps world access"
+        );
+        assert!(
+            admin.group_grants("moderator", perm::SERVER_KICK),
+            "players -> server.* keeps kick access",
+        );
+
+        // And the file on disk now says the namespaced form, so a second load finds nothing left to
+        // migrate — the on-disk text itself changed, not just the in-memory value.
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            !text.contains("\"world\""),
+            "the raw legacy word must be gone: {text}"
+        );
+        assert!(text.contains("world.*"), "{text}");
+
         let _ = std::fs::remove_file(&path);
     }
 

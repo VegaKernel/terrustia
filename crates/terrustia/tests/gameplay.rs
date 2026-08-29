@@ -413,6 +413,187 @@ async fn chat_commands_answer() {
         .unwrap();
 }
 
+/// A shadow-mute: the muted player's own ordinary chat line is suppressed for everyone else, but
+/// echoed straight back to the sender — nothing about the client-visible behaviour changes for the
+/// person who is muted — while the reply to `/unmute` proves the mute actually lifts.
+///
+/// An unclaimed server grants every permission to everyone (see
+/// `a_stranger_cannot_claim_an_unclaimed_server`'s own comment), so `witness` may run `/mute`
+/// without registering first — this needs `server.mute`, not `server.look`.
+///
+/// Fail-then-pass: before the mute check was wired into `on_net_module`'s chat path, `griefer`'s
+/// line reached `witness` exactly like any other broadcast — `try_wait_for` below would have found
+/// it well within the one-second window instead of timing out.
+#[tokio::test]
+async fn mute_suppresses_a_broadcast_but_shadow_echoes_to_the_sender() {
+    let addr = start().await;
+    let mut griefer = join(addr, "griefer").await;
+    let mut witness = join(addr, "witness").await;
+
+    // witness mutes griefer.
+    witness.say("/mute griefer spamming").await.unwrap();
+    witness
+        .wait_for(
+            "the mute confirmation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("griefer is muted")),
+        )
+        .await
+        .unwrap();
+
+    // griefer's ordinary chat line (not a command) is shadow-muted.
+    griefer.say("hello from the shadows").await.unwrap();
+
+    // The sender still sees their own line, as their own author slot.
+    let echoed = griefer
+        .wait_for(
+            "the shadow echo back to the sender",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("hello from the shadows")),
+        )
+        .await
+        .unwrap();
+    if let Event::Chat { author, .. } = echoed {
+        assert_eq!(
+            author,
+            griefer.slot(),
+            "the echo must carry the sender's own slot"
+        );
+    }
+
+    // The witness never receives it at all — checked with a bounded wait rather than the full
+    // timeout, since asserting an absence should not make the test slow.
+    let leaked = witness
+        .try_wait_for(
+            "the muted line, which must not arrive",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("hello from the shadows")),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(
+        leaked.is_none(),
+        "a shadow-muted line must never reach anyone but its own sender: {leaked:?}"
+    );
+
+    // /unmute lifts it, and a subsequent line reaches the witness normally again.
+    witness.say("/unmute griefer").await.unwrap();
+    witness
+        .wait_for(
+            "the unmute confirmation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("griefer is unmuted")),
+        )
+        .await
+        .unwrap();
+
+    griefer.say("back in the light").await.unwrap();
+    witness
+        .wait_for(
+            "the line to reach the witness now that the mute is lifted",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("back in the light")),
+        )
+        .await
+        .unwrap();
+}
+
+/// `chat_cooldown_ms` — a config-enabled mechanism, off by default (`Config::default()` leaves it
+/// `0`) — drops a line sent before the cooldown has elapsed since the sender's last accepted one,
+/// but lets a later line through once it has.
+#[tokio::test]
+async fn chat_cooldown_drops_a_rapid_second_line_but_lets_a_later_one_through() {
+    let config = Config {
+        chat_cooldown_ms: 600,
+        ..Config::default()
+    };
+    let addr = start_with(config, |_| {}).await;
+    let mut speaker = join(addr, "speaker").await;
+    let mut witness = join(addr, "witness").await;
+
+    speaker.say("first line").await.unwrap();
+    witness
+        .wait_for(
+            "the first line",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("first line")),
+        )
+        .await
+        .unwrap();
+
+    // Sent immediately after — well inside the 600ms cooldown.
+    speaker.say("too soon").await.unwrap();
+    let leaked = witness
+        .try_wait_for(
+            "the dropped line, which must not arrive",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("too soon")),
+            Duration::from_millis(400),
+        )
+        .await;
+    assert!(
+        leaked.is_none(),
+        "a line sent before the cooldown elapses must be dropped: {leaked:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    speaker.say("after the cooldown").await.unwrap();
+    witness
+        .wait_for(
+            "the line once the cooldown has elapsed",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("after the cooldown")),
+        )
+        .await
+        .unwrap();
+}
+
+/// `mute_escalation_enabled` — a config-enabled mechanism, off by default — extends a still-active
+/// mute every time the muted player speaks again, so a short mute placed on a repeat offender does
+/// not simply lapse while they keep going. Proven end to end, without reaching into server state:
+/// mute for one second, have the player talk once while muted (triggering escalation), then show
+/// they are *still* muted well past that original one-second window.
+#[tokio::test]
+async fn mute_escalation_extends_an_active_mute_when_the_player_keeps_talking() {
+    let config = Config {
+        mute_escalation_enabled: true,
+        mute_escalation_secs: 30,
+        mute_escalation_max_secs: 0,
+        ..Config::default()
+    };
+    let addr = start_with(config, |_| {}).await;
+    let mut griefer = join(addr, "griefer").await;
+    let mut witness = join(addr, "witness").await;
+
+    witness.say("/mute griefer 1s spam").await.unwrap();
+    witness
+        .wait_for(
+            "the mute confirmation",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("griefer is muted")),
+        )
+        .await
+        .unwrap();
+
+    // Speak once while muted — the shadow echo back proves the line was actually processed
+    // (and, since escalation is on, this is what pushes the mute's expiry out).
+    griefer.say("still talking").await.unwrap();
+    griefer
+        .wait_for(
+            "the shadow echo, proving the line reached the chat path",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("still talking")),
+        )
+        .await
+        .unwrap();
+
+    // Past the *original* one-second duration. Without escalation the mute would have lapsed by
+    // now and this line would reach the witness; with it, griefer is still muted.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    griefer.say("after the original duration").await.unwrap();
+    let leaked = witness
+        .try_wait_for(
+            "a line that must still be suppressed if escalation worked",
+            |e| matches!(e, Event::Chat { text, .. } if text.contains("after the original duration")),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(
+        leaked.is_none(),
+        "escalation should have pushed the mute well past its original 1s duration: {leaked:?}"
+    );
+}
+
 /// A generated world with nowhere to be saved says so, rather than pretending it saved.
 #[tokio::test]
 async fn a_world_with_no_save_target_says_so() {
@@ -506,7 +687,7 @@ async fn a_generated_world_saves_and_reloads() {
 ///
 /// An unclaimed server grants every permission to everyone (see
 /// `a_stranger_cannot_claim_an_unclaimed_server`'s own comment on that), so this needs no
-/// registration step to exercise `/world undo`'s `Permission::Players` gate.
+/// registration step to exercise `/world undo`'s `server.undo` gate.
 #[tokio::test]
 async fn world_undo_reverts_a_players_tile_edits_and_a_witness_sees_it() {
     let addr = start_with(Config::default(), |world| {

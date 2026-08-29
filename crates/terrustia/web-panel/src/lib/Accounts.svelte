@@ -5,6 +5,9 @@
     setAccountGroup,
     createAccount,
     deleteAccount,
+    fetchKnownPermissions,
+    setGroupPermission,
+    ApiCallError,
     type AccountsState,
     type AccountInfo,
   } from "./api";
@@ -23,6 +26,15 @@
 
   let deleteTarget = $state<AccountInfo | null>(null);
 
+  // The group-permission editor. `known` is `null` until it loads and stays `null` (rather than an
+  // empty list) if the session lacks `admin.groups` — a `403` here means "you may see the accounts
+  // list but not edit what a group can do", so the editor controls simply do not appear, matching
+  // exactly what the backend would refuse anyway.
+  let known = $state<string[] | null>(null);
+  let editingGroup = $state<string | null>(null);
+  let permBusy = $state(false);
+  let permError = $state("");
+
   async function refresh() {
     try {
       view = await fetchAccounts(session);
@@ -31,9 +43,29 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    try {
+      known = await fetchKnownPermissions(session);
+    } catch (e) {
+      // A 403 (no `admin.groups`) is expected and quiet; anything else is worth knowing about.
+      known = null;
+      if (!(e instanceof ApiCallError)) throw e;
+    }
   }
 
   onMount(refresh);
+
+  async function togglePermission(group: string, permission: string, grant: boolean) {
+    permBusy = true;
+    permError = "";
+    try {
+      await setGroupPermission(session, group, permission, grant);
+      await refresh();
+    } catch (e) {
+      permError = e instanceof Error ? e.message : String(e);
+    } finally {
+      permBusy = false;
+    }
+  }
 
   async function changeGroup(a: AccountInfo, group: string) {
     if (group === a.group) return;
@@ -91,16 +123,45 @@
 {#if view}
   <section>
     <h3 class="dim">groups</h3>
+    {#if permError}<p class="danger">{permError}</p>{/if}
     <div class="groups">
       {#each view.groups as g (g.name)}
         <div class="group" class:admin={g.can_admin}>
           <span class="group-name">{g.name}</span>
           {#if g.can_admin}<span class="badge">admin</span>{/if}
+          {#if known}
+            <button
+              class="edit-link"
+              onclick={() => (editingGroup = editingGroup === g.name ? null : g.name)}
+            >
+              {editingGroup === g.name ? "done" : "edit"}
+            </button>
+          {/if}
           <div class="perms">
             {#each g.permissions as p (p)}
               <span class="perm" class:star={p === "*"}>{p === "*" ? "all (*)" : p}</span>
             {/each}
+            {#if g.permissions.length === 0}<span class="dim">(none)</span>{/if}
           </div>
+          {#if known && editingGroup === g.name}
+            <div class="perm-editor">
+              {#each known as p (p)}
+                <label class="perm-toggle">
+                  <input
+                    type="checkbox"
+                    checked={g.permissions.includes(p)}
+                    disabled={permBusy}
+                    onchange={(e) =>
+                      togglePermission(g.name, p, (e.currentTarget as HTMLInputElement).checked)}
+                  />
+                  <span class:star={p === "*"}>{p === "*" ? "all (*)" : p}</span>
+                </label>
+              {/each}
+              <p class="hint">
+                you can only grant a permission you hold yourself; the backend refuses anything else.
+              </p>
+            </div>
+          {/if}
         </div>
       {/each}
     </div>
@@ -281,6 +342,47 @@
   .perm.star {
     color: var(--accent);
     border-color: var(--accent-dim);
+  }
+
+  .edit-link {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    font-size: 0.72rem;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .edit-link:hover {
+    text-decoration: underline;
+  }
+
+  .perm-editor {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.9rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+  }
+
+  .perm-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+
+  .perm-toggle .star {
+    color: var(--accent);
+  }
+
+  .perm-editor .hint {
+    width: 100%;
+    margin: 0.3rem 0 0;
   }
 
   table {

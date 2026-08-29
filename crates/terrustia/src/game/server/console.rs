@@ -58,6 +58,12 @@ impl GameServer {
                                     Ok(()) => {
                                         let _ = self.admin.save();
                                         self.claim_token = None;
+                                        self.audit.record(
+                                            name,
+                                            crate::admin::AuditAction::Claim,
+                                            name,
+                                            "claimed from the console",
+                                        );
                                         info!(target: CONSOLE_REPLY, account = name, "server claimed from the console");
                                     }
                                     Err(e) => info!(target: CONSOLE_REPLY, "{e}"),
@@ -84,8 +90,11 @@ impl GameServer {
                     "  kick <name> [reason]                disconnect a player",
                     "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
                     "  unban <value>                       lift a ban",
+                    "  mute <name> [duration] [reason]     mute a player, e.g. 10m, 2h, 1d",
+                    "  unmute <value>                      lift a mute",
                     "  group <account> <group>             set an account's group",
                     "  world undo <player> <duration>      revert a player's recent tile edits",
+                    "  audit [n]                           show the last n audit-log entries",
                     "  panel                               toggle the web panel",
                     "  stop                                save and shut down",
                 ] {
@@ -166,13 +175,19 @@ impl GameServer {
                     Err(message) => info!(target: CONSOLE_REPLY, "{message}"),
                 }
             }
+            "audit" => {
+                let n: usize = argument.trim().parse().unwrap_or(20);
+                for line in self.format_audit_tail(n) {
+                    info!(target: CONSOLE_REPLY, "{line}");
+                }
+            }
             "stop" => {
                 info!("stopping on console request");
                 self.stopping = true;
             }
             // The player-facing ones do the same thing here, reporting to the log. Slot 255 is
             // "the server", which `tell` already knows how to address.
-            "kick" | "ban" | "unban" | "group" | "world" => {
+            "kick" | "ban" | "unban" | "mute" | "unmute" | "group" | "world" => {
                 let _ = self.run_admin_command(net_module::SERVER_AUTHOR, name, argument);
             }
             other => {
@@ -275,6 +290,13 @@ impl GameServer {
                         Some(target) => {
                             self.announce(&format!("{who} was kicked: {reason}"));
                             self.kick(target, &reason);
+                            let issuer = self.audit_issuer(slot);
+                            self.audit.record(
+                                &issuer,
+                                crate::admin::AuditAction::Kick,
+                                who,
+                                &reason,
+                            );
                         }
                         None => self.tell(slot, &format!("nobody here is called {who}.")),
                     }
@@ -293,12 +315,19 @@ impl GameServer {
                     } else {
                         "banned".to_string()
                     };
-                    self.admin.ban(kind, &value, &reason);
+                    let issuer = self.audit_issuer(slot);
+                    self.admin.ban(kind.clone(), &value, &reason, &issuer);
                     self.announce(&format!("{value} is banned: {reason}"));
                     // And remove them if they are standing here.
                     if let Some(target) = self.slot_named(&value) {
                         self.kick(target, &reason);
                     }
+                    self.audit.record(
+                        &issuer,
+                        crate::admin::AuditAction::Ban,
+                        &value,
+                        &format!("{kind:?}: {reason}"),
+                    );
                     info!(value, reason, "ban added");
                 }
                 _ => self.tell(slot, "usage: /ban <name|ip|uuid> <value> [reason]"),
@@ -306,15 +335,86 @@ impl GameServer {
             "unban" => match words.as_slice() {
                 [value] => {
                     let removed = self.admin.unban(value);
+                    if removed > 0 {
+                        let issuer = self.audit_issuer(slot);
+                        self.audit
+                            .record(&issuer, crate::admin::AuditAction::Unban, value, "");
+                    }
                     self.tell(slot, &format!("{removed} ban(s) lifted for {value}."));
                 }
                 _ => self.tell(slot, "usage: /unban <value>"),
+            },
+            // `<duration>` is optional and, when present, must parse (`parse_duration`, the same
+            // `10m`/`2h`/`1d` grammar `/world undo` uses) — everything after the name is otherwise
+            // taken whole as the reason, so a duration-shaped word never accidentally swallows part
+            // of one (`/mute chatty 500 for spamming` mutes for 500 seconds with reason "for
+            // spamming", not with a reason that starts "500 for").
+            "mute" => match words.split_first() {
+                Some((who, rest)) => {
+                    let (duration, reason) = match rest.split_first() {
+                        Some((maybe_duration, reason_words)) => {
+                            match crate::game::tile_log::parse_duration(maybe_duration) {
+                                Some(d) => (Some(d), reason_words.join(" ")),
+                                None => (None, rest.join(" ")),
+                            }
+                        }
+                        None => (None, String::new()),
+                    };
+                    let reason = if reason.is_empty() {
+                        "muted".to_string()
+                    } else {
+                        reason
+                    };
+                    let issuer = self.audit_issuer(slot);
+                    self.admin
+                        .mute(who, &reason, duration.map(|d| d.as_secs()), &issuer);
+                    self.audit
+                        .record(&issuer, crate::admin::AuditAction::Mute, who, &reason);
+                    self.tell(slot, &format!("{who} is muted: {reason}"));
+                    info!(who, reason, "mute added");
+                }
+                None => self.tell(slot, "usage: /mute <name> [duration] [reason]"),
+            },
+            "unmute" => match words.as_slice() {
+                [value] => {
+                    let removed = self.admin.unmute(value);
+                    if removed {
+                        let issuer = self.audit_issuer(slot);
+                        self.audit
+                            .record(&issuer, crate::admin::AuditAction::Unmute, value, "");
+                    }
+                    let message = if removed {
+                        format!("{value} is unmuted.")
+                    } else {
+                        "that name was not muted.".to_string()
+                    };
+                    self.tell(slot, &message);
+                }
+                _ => self.tell(slot, "usage: /unmute <value>"),
             },
             "group" => match words.as_slice() {
                 [account, group] => {
                     if !self.admin.groups.iter().any(|g| &g.name == group) {
                         self.tell(slot, &format!("there is no group called {group}."));
                         return Ok(());
+                    }
+                    // The console (slot 255, "the server") is unconditionally trusted — see this
+                    // module's own doc comment — so this reach check only applies to a real
+                    // player's own `/group`, where it is what actually stops an `admin.accounts`
+                    // holder promoting themselves (or anyone else) into a group that holds more
+                    // than they do, `owner` above all. See `Admin::group_within_reach`.
+                    if slot != net_module::SERVER_AUTHOR {
+                        let actor_group = self.admin.group_of(slot).name.clone();
+                        if !self.admin.group_within_reach(&actor_group, group) {
+                            self.tell(
+                                slot,
+                                &format!(
+                                    "you cannot move anyone into '{group}': it holds permissions \
+                                     you do not have yourself."
+                                ),
+                            );
+                            return Ok(());
+                        }
                     }
                     match self
                         .admin
@@ -325,6 +425,13 @@ impl GameServer {
                         Some(found) => {
                             found.group = (*group).to_string();
                             let _ = self.admin.save();
+                            let issuer = self.audit_issuer(slot);
+                            self.audit.record(
+                                &issuer,
+                                crate::admin::AuditAction::GroupChange,
+                                account,
+                                &format!("-> {group}"),
+                            );
                             self.tell(slot, &format!("{account} is now in {group}."));
                             info!(account, group, "group changed");
                         }
@@ -364,6 +471,46 @@ impl GameServer {
         Ok(())
     }
 
+    /// Who to blame an audit-log entry on, for an action taken by `slot`: `"console"` for the
+    /// server's own trusted terminal (slot 255, "the server" — see this module's own doc comment),
+    /// the signed-in account name if there is one, or the connected player's own name as a
+    /// fallback (an unclaimed server lets anyone act before anyone has registered at all, and that
+    /// still deserves an attributable line rather than a blank one).
+    fn audit_issuer(&self, slot: u8) -> String {
+        if slot == net_module::SERVER_AUTHOR {
+            return "console".to_string();
+        }
+        if let Some(account) = self.admin.signed_in_as(slot) {
+            return account.to_string();
+        }
+        self.player(slot)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| format!("slot {slot}"))
+    }
+
+    /// The last `n` audit-log entries, one per line, for the `audit` command (console and chat
+    /// alike). Timestamps are raw Unix seconds — this workspace has no date/time-formatting
+    /// dependency, and inventing one just for a log line is not worth it.
+    fn format_audit_tail(&self, n: usize) -> Vec<String> {
+        let events = self.audit.tail(n);
+        if events.is_empty() {
+            return vec!["no audit events recorded yet.".to_string()];
+        }
+        events
+            .iter()
+            .map(|e| {
+                let detail = if e.detail.is_empty() { "-" } else { &e.detail };
+                format!(
+                    "{} [{}] {} {} -> {detail}",
+                    e.when,
+                    e.issuer,
+                    e.action.as_str(),
+                    e.target,
+                )
+            })
+            .collect()
+    }
+
     /// The slot of whoever is playing under this name.
     pub(super) fn slot_named(&self, name: &str) -> Option<u8> {
         self.players
@@ -386,12 +533,14 @@ impl GameServer {
 
     /// Handle a chat line beginning with `/`.
     ///
-    /// Commands are gated by the permission table below: `time`, `save`, `spawn` and `butcher`
-    /// need `World`, `kick`/`ban`/`unban` need `Players`, `group` needs `Admin`, and the rest are
-    /// read-only or something any player could do anyway. Until somebody registers, the server is
-    /// unclaimed and every check passes — see `Admin::unclaimed`.
+    /// Commands are gated per-command against the namespaced vocabulary in `admin::group::perm` —
+    /// see the table below. Self-service (`register`/`login`/`logout`/`whoami`) and the read-only
+    /// "look" commands (`help`/`players`/`npcs`/`house`/`where`) need no permission at all, matching
+    /// the behaviour before this system existed (`Permission::Look`, its predecessor, never gated
+    /// anything in this dispatcher either). Until somebody registers, the server is unclaimed and
+    /// every check passes regardless — see `Admin::unclaimed`.
     pub(super) fn run_command(&mut self, slot: u8, command: &str) -> terrustia_proto::Result<()> {
-        use crate::admin::Permission;
+        use crate::admin::perm;
 
         let mut parts = command.split_whitespace();
         let name = parts.next().unwrap_or("").to_ascii_lowercase();
@@ -408,9 +557,22 @@ impl GameServer {
 
         // What each command costs. Anything absent needs nothing beyond being here.
         let needed = match name.as_str() {
-            "time" | "save" | "spawn" | "butcher" => Some(Permission::World),
-            "kick" | "ban" | "unban" | "world" => Some(Permission::Players),
-            "group" => Some(Permission::Admin),
+            "time" => Some(perm::WORLD_TIME),
+            "save" => Some(perm::WORLD_SAVE),
+            "spawn" => Some(perm::WORLD_SPAWN),
+            "butcher" => Some(perm::WORLD_BUTCHER),
+            "kick" => Some(perm::SERVER_KICK),
+            "ban" => Some(perm::SERVER_BAN),
+            "unban" => Some(perm::SERVER_UNBAN),
+            "mute" => Some(perm::SERVER_MUTE),
+            "unmute" => Some(perm::SERVER_UNMUTE),
+            // `world undo <player> <duration>` — the only subcommand `world` has as a chat command.
+            "world" => Some(perm::SERVER_UNDO),
+            // Moving an account between groups, which is exactly the lever a self-escalation would
+            // pull — see `Admin::group_within_reach`, checked again inside `run_admin_command`'s own
+            // `"group"` arm on top of this.
+            "group" => Some(perm::ADMIN_ACCOUNTS),
+            "audit" => Some(perm::ADMIN_AUDIT),
             _ => None,
         };
         if let Some(permission) = needed
@@ -429,8 +591,8 @@ impl GameServer {
         }
 
         match name.as_str() {
-            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "group" | "whoami"
-            | "world" => {
+            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "mute" | "unmute"
+            | "group" | "whoami" | "world" => {
                 return self.run_admin_command(slot, &name, &raw_argument);
             }
             "help" => {
@@ -451,11 +613,20 @@ impl GameServer {
                     "/kick <name> [reason]",
                     "/ban <name|uuid|ip> <value> [reason]",
                     "/unban <value>",
+                    "/mute <name> [duration] [reason]   e.g. 10m, 2h, 1d",
+                    "/unmute <value>",
                     "/group <account> <group>      move somebody between groups",
                     "/world undo <player> <duration>   revert their tile edits from the last",
                     "                                   <duration> (e.g. 10m, 2h) — up to 72h back",
+                    "/audit [n]       the last n audit-log entries",
                 ] {
                     self.tell(slot, line);
+                }
+            }
+            "audit" => {
+                let n: usize = argument.trim().parse().unwrap_or(20);
+                for line in self.format_audit_tail(n) {
+                    self.tell(slot, &line);
                 }
             }
             "players" => {

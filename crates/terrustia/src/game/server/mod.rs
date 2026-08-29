@@ -642,22 +642,42 @@ pub enum ServerEvent {
     },
     /// The web panel's kick button. Reuses exactly what `/kick` and the console's `kick` already
     /// call ([`Self::kick`]/[`Self::announce`] by way of `run_admin_command`'s own logic) rather
-    /// than a second copy of it.
+    /// than a second copy of it. `actor` is the signed-in account making the request, for the audit
+    /// log's own `issuer` field.
     PanelKick {
+        actor: String,
         name: String,
         reason: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The web panel's ban button. Same reasoning as `PanelKick`.
     PanelBan {
+        actor: String,
         kind: crate::admin::BanKind,
         value: String,
         reason: String,
         reply: oneshot::Sender<()>,
     },
     PanelUnban {
+        actor: String,
         value: String,
         reply: oneshot::Sender<usize>,
+    },
+    /// The web panel's mute button. `duration_secs` is `None` for permanent, matching `/mute`'s own
+    /// optional-duration grammar (parsed in the panel handler, not here — the panel accepts a plain
+    /// number of seconds rather than the console's `10m`/`2h` words, since it has a form field
+    /// rather than a chat line to parse).
+    PanelMute {
+        actor: String,
+        name: String,
+        reason: String,
+        duration_secs: Option<u64>,
+        reply: oneshot::Sender<()>,
+    },
+    PanelUnmute {
+        actor: String,
+        name: String,
+        reply: oneshot::Sender<bool>,
     },
     /// The web panel asking who is on the guest list, and whether it is currently in force.
     PanelWhitelist {
@@ -724,26 +744,62 @@ pub enum ServerEvent {
         reply: oneshot::Sender<PanelAccounts>,
     },
     /// Move an account into a different group. Same rule the console `group` command enforces (the
-    /// group must exist), plus a guard the panel needs and the console does not: it refuses to
-    /// strip the last account that can still administer the server, so nobody locks themselves out
-    /// through the very screen they would use to fix it.
+    /// group must exist), plus two guards: the lock-out guard the panel has always had (refuses to
+    /// strip the last account that can still edit permissions, so nobody locks themselves out
+    /// through the very screen they would use to fix it), and the anti-escalation guard every
+    /// account/group change needs — `actor` (the signed-in account making the request) must already
+    /// be able to reach every permission `group` holds, or the change is refused. See
+    /// [`crate::admin::store::Admin::group_within_reach`].
     PanelSetAccountGroup {
+        actor: String,
         name: String,
         group: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The panel inserting an account it already hashed off the game task, into a chosen group.
     /// Distinct from [`Self::PanelInsertAccount`], the claim path, which always uses `owner`:
-    /// this one validates the requested group exists first.
+    /// this one validates the requested group exists first, and applies the same anti-escalation
+    /// guard [`Self::PanelSetAccountGroup`] does — `actor` must already reach everything the new
+    /// account's group holds.
     PanelCreateAccount {
+        actor: String,
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
-    /// that can administer the server cannot be removed.
+    /// that can still edit permissions cannot be removed.
     PanelDeleteAccount {
         name: String,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Whether the named account's group grants a permission — the per-route authorization check
+    /// every panel handler makes, fresh on every request rather than cached at login, since a
+    /// group's permissions (or an account's group) can change mid-session. Runs on the game task
+    /// because only it holds the live `Admin` store. See `panel/mod.rs`'s module doc for the full
+    /// route-to-permission mapping.
+    PanelAuthorize {
+        name: String,
+        permission: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Add or remove a single permission string on a group — the group-editor's own mutation.
+    /// `actor` must already hold `permission` themselves (checked the same way
+    /// [`Self::PanelSetAccountGroup`]'s reach guard is, just for one permission instead of a whole
+    /// group's worth), so nobody can use the editor to grant a group — including their own — a
+    /// permission they do not already have. Refuses an unrecognised permission name outright,
+    /// before it ever reaches the guard, so a typo is reported rather than silently doing nothing.
+    PanelSetGroupPermission {
+        actor: String,
+        group: String,
+        permission: String,
+        grant: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The last `n` audit-log entries, for the panel's audit view. See
+    /// [`crate::admin::AuditLog::tail`].
+    PanelAuditTail {
+        n: usize,
+        reply: oneshot::Sender<Vec<crate::admin::audit::AuditEvent>>,
     },
 }
 
@@ -905,6 +961,9 @@ pub struct GameServer {
     liquids: crate::world::liquid::Liquids,
     /// Who may do what, and who is kept out. Read from disk beside the world.
     admin: crate::admin::Admin,
+    /// The append-only record of every moderation and permission-affecting action. Beside the world
+    /// too, like `admin`.
+    audit: crate::admin::AuditLog,
     /// Set by the console's `stop`, so the loop ends and the world is saved on the way out.
     stopping: bool,
     worst_tick: TickCost,
@@ -970,6 +1029,8 @@ impl GameServer {
         let spare_world = Some(world.snapshot());
         let slots = config.max_players;
         let save_path = config.save_target().map(Path::to_path_buf);
+        let audit_log_max_bytes = config.audit_log_max_bytes;
+        let audit_log_keep_segments = config.audit_log_keep_segments;
         let autosave_ticks = match (save_path.is_some(), config.autosave_secs) {
             (true, secs) if secs > 0 => Some(secs * 60),
             _ => None,
@@ -1052,6 +1113,14 @@ impl GameServer {
             admin: match &save_path {
                 Some(path) => crate::admin::Admin::load(&path.with_extension("admin.toml")),
                 None => crate::admin::Admin::in_memory(),
+            },
+            audit: match &save_path {
+                Some(path) => crate::admin::AuditLog::new(
+                    path.with_extension("audit.jsonl"),
+                    audit_log_max_bytes,
+                    audit_log_keep_segments,
+                ),
+                None => crate::admin::AuditLog::in_memory(),
             },
             stopping: false,
             worst_tick: TickCost::default(),
@@ -1566,6 +1635,18 @@ impl GameServer {
                                             "you are the first account here, so you own it.",
                                         );
                                     }
+                                    // Self-registration: whoever is registering is the only
+                                    // identity there is to attribute it to.
+                                    self.audit.record(
+                                        &name,
+                                        if first {
+                                            crate::admin::AuditAction::Claim
+                                        } else {
+                                            crate::admin::AuditAction::Register
+                                        },
+                                        &name,
+                                        &format!("group: {group}"),
+                                    );
                                     info!(account = %name, group = %group, "account registered");
                                 }
                                 // Somebody else took the name while this was hashing.
@@ -1596,12 +1677,13 @@ impl GameServer {
         }
     }
 
-    /// Hands `slot` the pending update notice, if there is one and `slot` just signed in with the
-    /// `Admin` permission — "the first recognised admin who connects" from `update`'s own module
-    /// doc. `.take()` on the shared cell delivers it exactly once, to whoever this turns out to
-    /// be; every sign-in after that finds the cell already empty and says nothing.
+    /// Hands `slot` the pending update notice, if there is one and `slot` just signed in holding
+    /// `panel.console` (or `*`) — "the first recognised admin who connects" from `update`'s own
+    /// module doc, now spelled as "whoever holds the same standing power a raw console line does".
+    /// `.take()` on the shared cell delivers it exactly once, to whoever this turns out to be;
+    /// every sign-in after that finds the cell already empty and says nothing.
     fn notify_update_if_pending(&mut self, slot: u8) {
-        if !self.admin.may(slot, crate::admin::Permission::Admin) {
+        if !self.admin.may(slot, crate::admin::perm::PANEL_CONSOLE) {
             return;
         }
         let Some(handle) = &self.update_notice else {
@@ -1656,15 +1738,19 @@ impl GameServer {
             }
             ServerEvent::PanelAuthLookup { name, reply } => {
                 let hash_and_group = self.admin.account_hash_and_group(&name);
-                let admin = hash_and_group.as_ref().is_some_and(|(_, group)| {
-                    self.admin
-                        .group_grants(group, crate::admin::Permission::Admin)
-                });
+                let group_of = hash_and_group
+                    .as_ref()
+                    .and_then(|(_, group)| self.admin.groups.iter().find(|g| &g.name == group));
+                let panel_view = group_of.is_some_and(|g| g.may(crate::admin::perm::PANEL_VIEW));
+                let permissions = group_of
+                    .map(|g| g.permissions.iter().cloned().collect())
+                    .unwrap_or_default();
                 let _ = reply.send(PanelAuthLookup {
                     unclaimed: self.admin.unclaimed(),
                     claim_token: self.claim_token.clone(),
                     hash_and_group,
-                    admin,
+                    panel_view,
+                    permissions,
                 });
             }
             ServerEvent::PanelInsertAccount { account, reply } => {
@@ -1672,10 +1758,17 @@ impl GameServer {
                 // console `claim` command does (`run_console`'s `"claim"` arm) — without the save, a
                 // server claimed through the panel would forget its owner on the next restart (until
                 // some later admin mutation happened to save), and the spent token would linger.
+                let name = account.name.clone();
                 let result = self.admin.insert_account(account);
                 if result.is_ok() {
                     let _ = self.admin.save();
                     self.claim_token = None;
+                    self.audit.record(
+                        &name,
+                        crate::admin::AuditAction::Claim,
+                        &name,
+                        "claimed from the web panel",
+                    );
                 }
                 let _ = reply.send(result);
             }
@@ -1697,6 +1790,7 @@ impl GameServer {
                 let _ = reply.send(self.panel_players());
             }
             ServerEvent::PanelKick {
+                actor,
                 name,
                 reason,
                 reply,
@@ -1713,9 +1807,12 @@ impl GameServer {
                 // The exact two calls `run_admin_command`'s own "kick" arm makes.
                 self.announce(&format!("{name} was kicked: {reason}"));
                 self.kick(target, &reason);
+                self.audit
+                    .record(&actor, crate::admin::AuditAction::Kick, &name, &reason);
                 let _ = reply.send(Ok(()));
             }
             ServerEvent::PanelBan {
+                actor,
                 kind,
                 value,
                 reason,
@@ -1727,16 +1824,57 @@ impl GameServer {
                     reason
                 };
                 // The exact sequence `run_admin_command`'s own "ban" arm runs.
-                self.admin.ban(kind, &value, &reason);
+                self.admin.ban(kind.clone(), &value, &reason, &actor);
                 self.announce(&format!("{value} is banned: {reason}"));
                 if let Some(target) = self.slot_named(&value) {
                     self.kick(target, &reason);
                 }
+                self.audit.record(
+                    &actor,
+                    crate::admin::AuditAction::Ban,
+                    &value,
+                    &format!("{kind:?}: {reason}"),
+                );
                 info!(value, reason, "ban added from the web panel");
                 let _ = reply.send(());
             }
-            ServerEvent::PanelUnban { value, reply } => {
-                let _ = reply.send(self.admin.unban(&value));
+            ServerEvent::PanelUnban {
+                actor,
+                value,
+                reply,
+            } => {
+                let removed = self.admin.unban(&value);
+                if removed > 0 {
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Unban, &value, "");
+                }
+                let _ = reply.send(removed);
+            }
+            ServerEvent::PanelMute {
+                actor,
+                name,
+                reason,
+                duration_secs,
+                reply,
+            } => {
+                let reason = if reason.trim().is_empty() {
+                    "muted from the web panel".to_string()
+                } else {
+                    reason
+                };
+                self.admin.mute(&name, &reason, duration_secs, &actor);
+                self.audit
+                    .record(&actor, crate::admin::AuditAction::Mute, &name, &reason);
+                info!(name, reason, "mute added from the web panel");
+                let _ = reply.send(());
+            }
+            ServerEvent::PanelUnmute { actor, name, reply } => {
+                let removed = self.admin.unmute(&name);
+                if removed {
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Unmute, &name, "");
+                }
+                let _ = reply.send(removed);
             }
             ServerEvent::PanelWhitelist { reply } => {
                 let _ = reply.send(PanelWhitelist {
@@ -1825,24 +1963,47 @@ impl GameServer {
             ServerEvent::PanelAccounts { reply } => {
                 let _ = reply.send(self.panel_accounts());
             }
-            ServerEvent::PanelSetAccountGroup { name, group, reply } => {
-                let _ = reply.send(self.panel_set_account_group(&name, &group));
+            ServerEvent::PanelSetAccountGroup {
+                actor,
+                name,
+                group,
+                reply,
+            } => {
+                let _ = reply.send(self.panel_set_account_group(&actor, &name, &group));
             }
-            ServerEvent::PanelCreateAccount { account, reply } => {
-                // The group has to exist — an account pointed at a group that is not there silently
-                // falls back to `default`, which would be a confusing thing to have just created.
-                if !self.admin.groups.iter().any(|g| g.name == account.group) {
-                    let _ = reply.send(Err(format!("there is no group called {}", account.group)));
-                    return;
-                }
-                let result = self.admin.insert_account(account);
-                if result.is_ok() {
-                    let _ = self.admin.save();
-                }
-                let _ = reply.send(result);
+            ServerEvent::PanelCreateAccount {
+                actor,
+                account,
+                reply,
+            } => {
+                let _ = reply.send(self.panel_create_account(&actor, account));
             }
             ServerEvent::PanelDeleteAccount { name, reply } => {
                 let _ = reply.send(self.panel_delete_account(&name));
+            }
+            ServerEvent::PanelAuditTail { n, reply } => {
+                let _ = reply.send(self.audit.tail(n));
+            }
+            ServerEvent::PanelAuthorize {
+                name,
+                permission,
+                reply,
+            } => {
+                let allowed = self
+                    .admin
+                    .account_hash_and_group(&name)
+                    .is_some_and(|(_, group)| self.admin.group_grants_str(&group, &permission));
+                let _ = reply.send(allowed);
+            }
+            ServerEvent::PanelSetGroupPermission {
+                actor,
+                group,
+                permission,
+                grant,
+                reply,
+            } => {
+                let _ =
+                    reply.send(self.panel_set_group_permission(&actor, &group, &permission, grant));
             }
         }
     }
