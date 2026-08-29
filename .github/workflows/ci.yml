@@ -72,6 +72,12 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          # Windows ARM64 checks on GitHub's native arm64 runner, so this is a real host-native
+          # compile rather than a cross-check. It is an official release target.
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
+          # riscv64 is compile-only by decision: it must keep building, but it is not a release
+          # or qualification target yet.
+          - { target: riscv64gc-unknown-linux-gnu, os: ubuntu-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -84,10 +90,10 @@ jobs:
       # `ring` (pulled in transitively through `rustls`, via `ureq`'s HTTPS client for the update
       # checker) runs real C compiler-family detection in its build script — a linker alone is not
       # enough for it, unlike everything else in this dependency graph. This installs an actual
-      # musl C cross-toolchain (and points CC/AR/the linker at it) for both musl targets, x86_64 and
-      # aarch64 alike, cross-compiling from this x86_64 runner.
+      # C cross-toolchain (and points CC/AR/the linker at it) for the cross-compiled targets: both
+      # musl targets, and the riscv64 compile-only check.
       - uses: taiki-e/setup-cross-toolchain-action@v1
-        if: endsWith(matrix.target, '-musl')
+        if: endsWith(matrix.target, '-musl') || startsWith(matrix.target, 'riscv64')
         with:
           target: ${{ matrix.target }}
 
