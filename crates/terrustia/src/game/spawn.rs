@@ -800,7 +800,7 @@ pub fn try_spawn(
     }
 
     let mut out = Vec::new();
-    for player in active {
+    for &player in &active {
         let (px, py) = (
             (player.position.0 / 16.0) as i32,
             (player.position.1 / 16.0) as i32,
@@ -866,6 +866,19 @@ pub fn try_spawn(
             // Vanilla tests the resolved solid floor against the early safe rectangle.
             if crate::game::spawn_ranges::in_safe_rectangle(x - px, ground - py) {
                 continue;
+            }
+
+            // After a candidate survives the retryable search, its 16x16 chosen-tile space must be
+            // completely outside the 2088x1172 post-selection rectangle of every active player.
+            // Failure here aborts the current spawn attempt rather than searching another point.
+            if active.iter().any(|other| {
+                !crate::game::spawn_postcheck::chosen_tile_outside_player_rectangle(
+                    x,
+                    chosen_y,
+                    other.position,
+                )
+            }) {
+                break;
             }
 
             // This is a post-selection failure, not another reason to search for a different point:
