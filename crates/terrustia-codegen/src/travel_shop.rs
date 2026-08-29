@@ -7,10 +7,12 @@
 //!
 //! Ported from `gen_travel_shop.py`.
 //!
-//! Not wired into [`crate::main`]'s `TABLES` yet: the `OFFERS` data is byte-identical, but a past
-//! hand-edit (commit `65f4be3`) added a source comment and a regression test straight to the
-//! committed `.rs` without adding either to this generator's `emit()`. Wiring this in as-is would
-//! delete that regression test on the next regen. See the Codegen entry in `TODO.md`.
+//! The leading source comment on the two inline-guarded offers, and the
+//! `the_travelling_merchant_can_offer_both_counterweights` regression test, were reconciled to
+//! what commit `65f4be3` ("Fix travel shop generator skipping leading-guard chain candidates")
+//! hand-added to the committed `.rs` after regenerating the `OFFERS` data itself through the
+//! fixed regex, without adding either to `gen_travel_shop.py`'s own `emit()`. Both are now part
+//! of this generator's output, not carried by hand.
 
 use std::path::Path;
 
@@ -36,6 +38,10 @@ struct Entry {
     item: i64,
     needs: Vec<&'static str>,
     floor: i64,
+    /// Whether this candidate carried its own leading `minimumRarity <= F &&` guard rather than
+    /// relying on one of the function's checkpoints (`Chest.cs:980-987`: BlackCounterweight and
+    /// YellowCounterweight, the two candidates the old anchored regex could not see at all).
+    inline_guard: bool,
 }
 
 pub fn generate(root: &Path) -> String {
@@ -103,6 +109,7 @@ pub fn generate(root: &Path) -> String {
             item,
             needs,
             floor,
+            inline_guard: inline_floor.is_some(),
         });
     }
     assert!(
@@ -161,7 +168,18 @@ pub fn generate(root: &Path) -> String {
 
     lines.push("/// The chain, in the order the game walks it. Later entries win.".to_string());
     lines.push(format!("pub const OFFERS: [Offer; {}] = [", entries.len()));
+    let mut noted_inline_guard = false;
     for e in &entries {
+        if e.inline_guard && !noted_inline_guard {
+            noted_inline_guard = true;
+            lines.push(
+                "    // `Chest.cs:980-987` — BlackCounterweight and YellowCounterweight each carry their own\n    \
+                 // leading `minimumRarity <= F &&` guard rather than sitting behind one of the\n    \
+                 // `if (minimumRarity > N) return;` checkpoints the rest of the chain uses, and both sit\n    \
+                 // ahead of item 1987 in source, so they are tried (and can be overwritten by it) first."
+                    .to_string(),
+            );
+        }
         let bits = if e.needs.is_empty() {
             "0".to_string()
         } else {
@@ -216,6 +234,17 @@ pub fn generate(root: &Path) -> String {
                  let late = open(Needs(u16::MAX));\n        \
                  assert!(fresh > 0, \"a fresh world should have stock\");\n        \
                  assert!(late > fresh, \"{late} late against {fresh} fresh\");\n    \
+             }\n\
+             \n    \
+             /// BlackCounterweight (3309) and YellowCounterweight (3314) each carry their own leading\n    \
+             /// `minimumRarity <= F &&` guard in `Chest.cs:980-987` instead of an enclosing\n    \
+             /// `if (minimumRarity > N) return;` checkpoint, which the old anchored regex in\n    \
+             /// `gen_travel_shop.py` could not see at all — both items were silently absent, with no\n    \
+             /// other drop or craft source anywhere in this project, making them unobtainable.\n    \
+             #[test]\n    \
+             fn the_travelling_merchant_can_offer_both_counterweights() {\n        \
+                 assert!(OFFERS.iter().any(|o| o.item == 3309), \"BlackCounterweight\");\n        \
+                 assert!(OFFERS.iter().any(|o| o.item == 3314), \"YellowCounterweight\");\n    \
              }\n\
              \n    \
              /// The condition test is a subset check, not equality: a world that has been through more\n    \

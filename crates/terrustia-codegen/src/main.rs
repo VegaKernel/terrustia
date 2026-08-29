@@ -18,7 +18,9 @@ mod drops;
 mod hurt_tiles;
 mod projectiles;
 mod recipes;
+mod shimmer;
 mod town_names;
+mod travel_shop;
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +72,16 @@ const TABLES: &[Table] = &[
         name: "town_names",
         out: "crates/terrustia-proto/src/town_names.rs",
         generate: town_names::generate,
+    },
+    Table {
+        name: "shimmer",
+        out: "crates/terrustia-proto/src/shimmer.rs",
+        generate: shimmer::generate,
+    },
+    Table {
+        name: "travel_shop",
+        out: "crates/terrustia-proto/src/travel_shop.rs",
+        generate: travel_shop::generate,
     },
 ];
 
