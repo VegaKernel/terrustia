@@ -5,7 +5,10 @@
 //! prevents a generic lottery from producing, for example, a Wizard before Hardmode or a Mechanic
 //! in an ordinary cave.
 
-use super::spawn::{Biome, Depth};
+use super::{
+    npc::NpcStore,
+    spawn::{Biome, Depth},
+};
 use crate::world::World;
 
 const SPIDER_UNSAFE_WALL: u16 = 62;
@@ -57,6 +60,37 @@ pub fn eligible(
         579 => world.progress.downed_boss2,
         _ => false,
     }
+}
+
+/// Every not-yet-rescued NPC that may actually appear at this candidate tile.
+///
+/// Availability has three independent gates, all of which matter:
+/// - the world has not already recorded the rescue;
+/// - this exact candidate satisfies that rescue's progression/location rules;
+/// - neither the bound form nor the resident it becomes is already alive.
+///
+/// The third gate fixes a subtle duplicate hole in the old `spawn::pick_bound`: it checked only
+/// whether another bound copy was waiting nearby. A live freed Mechanic, Wizard, etc. therefore did
+/// not stop another bound copy being manufactured by the random rescue roll.
+pub fn candidates(
+    world: &World,
+    npcs: &NpcStore,
+    x: i32,
+    y: i32,
+    depth: Depth,
+    biome: Biome,
+) -> Vec<u16> {
+    crate::game::rescues::RESCUES
+        .iter()
+        .filter(|rescue| crate::game::rescues::still_bound(&world.progress, rescue.bound))
+        .filter(|rescue| eligible(world, rescue.bound, x, y, depth, biome))
+        .filter(|rescue| {
+            !npcs.iter().any(|(_, npc)| {
+                npc.is_alive() && (npc.npc_type == rescue.bound || npc.npc_type == rescue.freed)
+            })
+        })
+        .map(|rescue| rescue.bound)
+        .collect()
 }
 
 #[cfg(test)]
@@ -222,5 +256,65 @@ mod tests {
         ] {
             assert!(eligible(&world, 579, 500, 400, depth, Biome::Forest));
         }
+    }
+
+    #[test]
+    fn a_live_bound_or_freed_form_suppresses_another_copy() {
+        let mut world = world();
+        world.progress.downed_boss3 = true;
+        let mut npcs = NpcStore::new();
+
+        let available = || {
+            candidates(
+                &world,
+                &npcs,
+                500,
+                400,
+                Depth::Cavern,
+                Biome::Dungeon,
+            )
+        };
+        assert!(available().contains(&123), "the Mechanic should initially be findable");
+
+        npcs.spawn(124, (0.0, 0.0));
+        assert!(
+            !available().contains(&123),
+            "a live freed Mechanic must suppress another bound Mechanic"
+        );
+
+        let mut npcs = NpcStore::new();
+        npcs.spawn(123, (0.0, 0.0));
+        assert!(
+            !candidates(
+                &world,
+                &npcs,
+                500,
+                400,
+                Depth::Cavern,
+                Biome::Dungeon,
+            )
+            .contains(&123),
+            "a live bound Mechanic must suppress a duplicate bound Mechanic"
+        );
+    }
+
+    #[test]
+    fn a_recorded_rescue_is_not_offered_again() {
+        let mut world = world();
+        world.progress.downed_boss3 = true;
+        world.progress.saved_mechanic = true;
+        let npcs = NpcStore::new();
+
+        assert!(
+            !candidates(
+                &world,
+                &npcs,
+                500,
+                400,
+                Depth::Cavern,
+                Biome::Dungeon,
+            )
+            .contains(&123)
+        );
     }
 }
