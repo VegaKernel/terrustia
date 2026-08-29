@@ -167,6 +167,9 @@ pub struct AiOutput {
     pub shots: Vec<super::ai::Shot>,
     /// A town NPC's melee attack landing on a nearby hostile.
     pub melee_hits: Vec<super::ai::MeleeHit>,
+    /// A buff the NPC just updated wants put straight onto a player, as (player slot, buff id,
+    /// ticks) — see [`super::ai::Effects::player_buff`].
+    pub player_buff: Option<(u8, u16, i32)>,
 }
 
 /// Move a worm segment to trail the one in front of it.
@@ -287,6 +290,7 @@ pub fn update_with(
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         out.roared = effects.roared;
+        out.player_buff = effects.player_buff;
         // A routine that is bouncing projectiles this tick is one nothing should be able to hurt,
         // and the flag has to survive out of the routine for the server to hold that line.
         npc.invulnerable |= effects.reflecting;

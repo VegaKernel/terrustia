@@ -244,6 +244,10 @@ impl GameServer {
         let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
+        // A buff a routine wants put straight onto one named player, as (slot, buff id, ticks) —
+        // a latched nebula headcrab's Obstructed is currently the only source of these
+        // (`Effects::player_buff`'s own doc comment, `NPC.cs:37508-37526`).
+        let mut player_buffs: Vec<(u8, u16, i32)> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -620,6 +624,10 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.roared) {
                     roars.push(npc.center());
                 }
+                // A latched nebula headcrab wants Obstructed put on the player it is riding.
+                if let Some(buff) = ai_out.player_buff.take() {
+                    player_buffs.push(buff);
+                }
                 // A wither beast standing in its aura weakens whoever is standing in it too.
                 if let Some(reach) = ai_out.aura.take() {
                     let here = npc.center();
@@ -767,6 +775,22 @@ impl GameServer {
                 ) {
                     self.broadcast(frame, None);
                 }
+            }
+        }
+
+        // Same shape as the roar/aura broadcasts above, but each one names its own player rather
+        // than catching everyone in a radius. `!player22.creativeGodMode` (`NPC.cs:37522`) is
+        // this server's own `journey.is_godmode` gate, the same one `hurt_player` uses for the
+        // one other place this server decides something on a player's behalf.
+        for (slot, buff, ticks) in player_buffs {
+            let alive = self.players[slot as usize]
+                .as_ref()
+                .is_some_and(|p| p.is_playing() && p.life > 0);
+            if alive
+                && !self.journey.is_godmode(slot)
+                && let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, buff, ticks)
+            {
+                self.broadcast(frame, None);
             }
         }
 
@@ -5921,6 +5945,117 @@ mod godmode {
             server.players[1].as_ref().unwrap().life,
             70,
             "slot 1 was never given godmode"
+        );
+    }
+}
+
+/// A latched nebula headcrab (`ai_style` 85, `ai[0] == 5.0`, `hunter::path::LATCHED`) keeps
+/// putting `Obstructed` (buff 163) on the player it is riding, every tick, per
+/// `NPC.cs:37508-37526` (`player22.AddBuff(163, 59)`) — exercising the whole channel end to end:
+/// `ai::run`'s `85 =>` arm sets `Effects::player_buff`, `npc_ai::update_with` carries it into
+/// `AiOutput`, and `tick_npcs` broadcasts it as packet 55 the same way the roar/aura/touch-debuff
+/// buffs already do.
+#[cfg(test)]
+mod nebula_headcrab_buff {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::npc_params::HEADCRAB;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "nebula headcrab buff probe")
+    }
+
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        player.life = 100;
+        player.life_max = 100;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    /// Whether an `ADD_PLAYER_BUFF_PV_P` (packet 55) frame for buff 163 sits anywhere in the
+    /// queue. `tick_npcs` also runs `tick_npc_syncs` at its own end, which broadcasts an ordinary
+    /// NPC sync for the headcrab on every call (`hunter::pathfinder` sets `npc.dirty = true`
+    /// unconditionally) — draining and filtering is what keeps that unrelated packet from being
+    /// mistaken for the buff this module is actually testing.
+    fn obstructed_was_sent(rx: &mut mpsc::Receiver<Bytes>) -> bool {
+        let mut found = false;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.len() >= 6
+                && frame[2] == terrustia_proto::id::ADD_PLAYER_BUFF_PV_P
+                && u16::from_le_bytes([frame[4], frame[5]]) == 163
+            {
+                found = true;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_latched_headcrab_puts_obstructed_on_its_rider() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let index = server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+        server.npcs.get_mut(index).expect("just spawned").ai[0] = 5.0;
+
+        server.tick_npcs();
+
+        // `tick_npcs` also runs `tick_npc_syncs` at its own end, which sends an ordinary NPC sync
+        // for the headcrab too (`hunter::pathfinder` sets `npc.dirty = true` unconditionally) — so
+        // the buff frame is found among the queue rather than assumed to be the only one in it.
+        let frame = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|f| f.len() >= 6 && f[2] == terrustia_proto::id::ADD_PLAYER_BUFF_PV_P)
+            .expect("a buff packet should have been sent");
+        assert_eq!(frame[3], 0, "aimed at player slot 0");
+        assert_eq!(u16::from_le_bytes([frame[4], frame[5]]), 163, "Obstructed");
+        assert_eq!(
+            i32::from_le_bytes([frame[6], frame[7], frame[8], frame[9]]),
+            59
+        );
+    }
+
+    /// The control case: a headcrab that has not latched on (`ai[0]` at its default, `DECIDING`)
+    /// sends nothing, so the test above is proving the latch check does something.
+    #[test]
+    fn an_unlatched_headcrab_sends_nothing() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+
+        server.tick_npcs();
+
+        assert!(
+            !obstructed_was_sent(&mut rx),
+            "a headcrab that has not latched on should not be buffing anyone"
+        );
+    }
+
+    /// `NPC.cs:37522`'s own `!player22.creativeGodMode` gate, mirrored the same way `hurt_player`
+    /// mirrors it for damage — see the `godmode` module above.
+    #[test]
+    fn a_player_in_creative_godmode_is_not_buffed() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.journey.set_godmode(0, true);
+        let index = server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+        server.npcs.get_mut(index).expect("just spawned").ai[0] = 5.0;
+
+        server.tick_npcs();
+
+        assert!(
+            !obstructed_was_sent(&mut rx),
+            "creative god mode should have gated this"
         );
     }
 }

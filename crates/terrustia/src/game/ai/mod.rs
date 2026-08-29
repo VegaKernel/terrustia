@@ -561,6 +561,10 @@ pub struct Effects {
     pub teleport_to: Option<(f32, f32)>,
     /// Set on the tick the Cultists' tablet finishes breaking, which is what raises their master.
     pub ritual_complete: bool,
+    /// A buff this NPC wants put straight onto a player, as (player slot, buff id, ticks) — a
+    /// latched nebula headcrab riding a head applies `Obstructed` to its rider every tick it sits
+    /// there (`NPC.cs:37508-37526`, `player22.AddBuff(163, 59)`).
+    pub player_buff: Option<(u8, u16, i32)>,
 }
 
 /// Drive an NPC whose style is [`Parity::Ported`].
@@ -823,6 +827,14 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // Another of its kind already on the player's head is what stops this one trying.
             let taken = world.target_taken;
             hardmode::hunter::pathfinder(npc, world, taken);
+            // Latched (`hunter::path::LATCHED`, ai[0] == 5.0): a nebula headcrab riding a head
+            // keeps applying Obstructed to its rider, every tick it sits there, for as long as
+            // that player is still there to receive it (`NPC.cs:37508-37526`).
+            if npc.ai[0] == 5.0
+                && let Some(t) = target.filter(|t| t.alive)
+            {
+                effects.player_buff = Some((t.slot, 163, 59));
+            }
         }
         90 => {
             hardmode::hunter::mothron_spawn(npc, world);
