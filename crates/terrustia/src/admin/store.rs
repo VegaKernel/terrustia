@@ -117,15 +117,36 @@ impl Admin {
     }
 
     /// Write it back, atomically.
+    ///
+    /// Through [`crate::safe_write::write_atomic`], which is the same temp-file-and-rename this
+    /// always did plus the three things it did not: the bytes are synced to the disk rather than
+    /// left in the page cache, a failed write removes its own scratch file instead of leaving one
+    /// for nobody to clean up, and the failure comes back explained rather than as a bare errno.
+    /// A bans list that quietly stopped being written because the disk filled is exactly the kind
+    /// of thing an operator finds out about at the worst moment.
     pub fn save(&self) -> std::io::Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
         };
         let text = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let temp = path.with_extension("toml.tmp");
-        std::fs::write(&temp, text)?;
-        std::fs::rename(&temp, path)
+        crate::safe_write::write_atomic("writing the admin file", path, text.as_bytes())
+    }
+
+    /// A group that exists so [`Self::group_of`] always has something to return, and that grants
+    /// nothing.
+    ///
+    /// Reached only when the store holds no groups at all, which `load` and `in_memory` both rule
+    /// out by filling in [`defaults`]. `Admin::default()` does not, though, and it is `pub` and
+    /// derived: a caller that built one directly and asked what a slot may do used to hit
+    /// `self.groups[0]` on an empty `Vec` and panic. A panic in the game task loses the world back
+    /// to the last autosave, which is a steep price for a question whose honest answer is "nothing".
+    fn nothing_at_all() -> &'static Group {
+        static NOTHING: std::sync::OnceLock<Group> = std::sync::OnceLock::new();
+        NOTHING.get_or_init(|| Group {
+            name: String::new(),
+            permissions: std::collections::BTreeSet::new(),
+        })
     }
 
     /// The group somebody belongs to, or the default group.
@@ -139,7 +160,10 @@ impl Admin {
             .iter()
             .find(|g| g.name == name)
             .or_else(|| self.groups.iter().find(|g| g.name == "default"))
-            .unwrap_or_else(|| &self.groups[0])
+            .or_else(|| self.groups.first())
+            // Typed explicitly so the `'static` fallback is shortened to `&self`'s lifetime rather
+            // than forcing the whole chain to be `'static`.
+            .unwrap_or(Self::nothing_at_all())
     }
 
     /// Whether anybody has claimed this server yet.
@@ -803,5 +827,89 @@ mod tests {
             !admin.remove_from_whitelist("nobody"),
             "and says when it did nothing"
         );
+    }
+
+    /// An admin file that cannot be written must leave the previous one byte-identical.
+    ///
+    /// The bans, the accounts and the whitelist are the one file here that an operator cannot
+    /// reconstruct from anything else. Losing half of it to a full disk would be worse than losing
+    /// the change that was being made, so a refused write has to cost exactly the change.
+    #[cfg(unix)]
+    #[test]
+    fn an_admin_file_that_cannot_be_written_leaves_the_previous_one_byte_identical() {
+        let dir = crate::safe_write::tests::temp_dir("admin-readonly");
+        let path = dir.join("world.admin.toml");
+        let mut admin = Admin::load(&path);
+        admin.add_to_whitelist("brooklyn");
+        admin.save().expect("the first, good write");
+        let before = std::fs::read(&path).expect("reading it back");
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyDir::new(&dir) else {
+            eprintln!("skipping: this environment cannot make a directory read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        admin.add_to_whitelist("someone-else");
+        let e = admin
+            .save()
+            .expect_err("a read-only directory must refuse the write");
+        let message = e.to_string();
+        drop(_guard);
+
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{message}");
+        assert!(
+            message.contains("admin file") && message.contains("writable by the account"),
+            "the failure must name what it was doing and what to check, got: {message}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("reading it back"),
+            before,
+            "a failed write must leave the admin file byte-identical"
+        );
+        assert!(
+            !crate::safe_write::temp_path(&path).exists(),
+            "a failed write must clean up its own scratch file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The directory the admin file lives in going away must be reported, not fatal.
+    #[test]
+    fn a_vanished_directory_is_reported_rather_than_fatal() {
+        let dir = crate::safe_write::tests::temp_dir("admin-vanished");
+        let path = dir.join("world.admin.toml");
+        let admin = Admin::load(&path);
+        std::fs::remove_dir_all(&dir).expect("removing the directory out from under it");
+
+        let e = admin
+            .save()
+            .expect_err("a missing directory must refuse the write");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            e.to_string().contains("directory no longer exists"),
+            "got: {e}"
+        );
+    }
+
+    /// An `Admin` with no groups at all must answer "may this slot do X?" rather than panic.
+    ///
+    /// `Admin::default()` is derived and public, and leaves `groups` empty; `group_of` used to end
+    /// in `self.groups[0]`, which on that value is an out-of-bounds index. A panic in the game task
+    /// loses the world back to the last autosave, so the honest answer to a permission question
+    /// asked of an empty store is "nothing", not a lost world.
+    #[test]
+    fn a_store_with_no_groups_grants_nothing_instead_of_panicking() {
+        let mut admin = Admin::default();
+        // Not `unclaimed`, or `may` would short-circuit to true before reaching `group_of`.
+        admin.accounts.push(Account {
+            name: "somebody".into(),
+            hash: String::new(),
+            group: "owner".into(),
+        });
+        assert!(admin.groups.is_empty(), "the case being pinned");
+        assert!(!admin.may(0, perm::WORLD_TIME));
+        assert!(!admin.may(0, perm::ADMIN_GROUPS));
+        assert_eq!(admin.group_of(0).name, "");
     }
 }

@@ -803,23 +803,35 @@ pub const BACKUPS_KEPT: usize = 3;
 /// Failures are logged rather than fatal. A backup that cannot be made is worth knowing about, and
 /// is not a reason to refuse to save the world — that would turn a full disk into data loss
 /// instead of merely a missing safety net.
+///
+/// The copy into `.bak1` goes through [`crate::safe_write::copy_atomic`] rather than a plain
+/// `std::fs::copy`, which truncates its destination before it fills it: a disk that ran out
+/// halfway through would otherwise replace the newest healthy backup with a fragment of a world,
+/// and a fragment is exactly what nobody wants to find on the day they reach for a backup.
 fn rotate_backups(path: &Path) {
     if !path.exists() {
         return;
     }
     let bak = |n: usize| path.with_extension(format!("wld.bak{n}"));
 
-    // Drop the oldest, then walk upward so nothing is overwritten before it has been moved.
+    // Drop the oldest, then walk upward so nothing is overwritten before it has been moved. A
+    // rename is atomic, so a failure here leaves the chain shorter rather than damaged.
     let _ = std::fs::remove_file(bak(BACKUPS_KEPT));
     for n in (1..BACKUPS_KEPT).rev() {
         if bak(n).exists()
             && let Err(e) = std::fs::rename(bak(n), bak(n + 1))
         {
+            let e = crate::safe_write::explain("rotating the world backups", &bak(n + 1), &e);
             tracing::warn!(error = %e, "could not rotate a world backup");
         }
     }
-    if let Err(e) = std::fs::copy(path, bak(1)) {
-        tracing::warn!(error = %e, "could not back up the world before saving over it");
+    if let Err(e) =
+        crate::safe_write::copy_atomic("backing the world up before saving", path, &bak(1))
+    {
+        tracing::warn!(
+            error = %e,
+            "could not back up the world before saving over it; the previous backup is still intact"
+        );
     }
 }
 
@@ -852,43 +864,29 @@ pub fn save(world: &World, path: &Path) -> Result<()> {
         // On Windows this fails outright if anything else holds the destination open — Terraria
         // itself, a backup tool, a virus scanner. The previous world is untouched either way.
         let _ = std::fs::remove_file(&temp);
-        return Err(WldError::Io {
+        return Err(WldError::Write {
             path: path.display().to_string(),
-            source: e,
+            source: crate::safe_write::explain("saving the world", path, &e),
         });
     }
     // The rename is only durable once the *directory* entry is. Without this the world can be
     // atomically replaced and still not be there after a power cut.
-    if let Some(parent) = path.parent()
-        && let Ok(dir) = std::fs::File::open(parent)
-    {
-        let _ = dir.sync_all();
-    }
+    crate::safe_write::sync_parent_dir(path);
     Ok(())
 }
 
-/// Write a file and get it onto the disk, rather than into the page cache.
+/// Write the scratch file and get it onto the disk, rather than into the page cache.
 ///
-/// `std::fs::write` returns as soon as the kernel has the bytes, so a crash of the *machine* — as
-/// opposed to the process — can leave a renamed file whose contents never landed. That is the
-/// classic false durability: atomic with respect to a process crash, and not with respect to a
-/// power cut.
+/// The failure is explained against the *world's* path, not the scratch file's: an operator does
+/// not care that `world.wld.tmp` could not be created, they care that the world could not be
+/// saved and why. [`crate::safe_write::explain`] keeps the [`std::io::ErrorKind`] intact while
+/// adding the sentence that says where to look.
 fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let mut file = std::fs::File::create(path).map_err(|e| WldError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    file.write_all(bytes).map_err(|e| WldError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    file.sync_all().map_err(|e| WldError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    Ok(())
+    let target = path.with_extension("");
+    crate::safe_write::write_and_sync(path, bytes).map_err(|e| WldError::Write {
+        path: target.display().to_string(),
+        source: crate::safe_write::explain("saving the world", &target, &e),
+    })
 }
 
 #[cfg(test)]
@@ -1283,6 +1281,120 @@ mod tests {
             "the previous good save must be exactly as it was"
         );
         assert!(!temp.exists(), "no half-written temp file left behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A world that cannot be written must cost nothing that was already written.
+    ///
+    /// The failure is a real one, not a mocked `io::Error`: the directory holding the world is
+    /// made unwritable, which is what a wrong `chown` after a package upgrade, a container volume
+    /// mounted read-only, or an operator's own `chmod` all look like from in here. The three things
+    /// asserted are the three an operator would ask about, in order: is my world still there and
+    /// byte-for-byte what it was, did the server tell me anything useful, and did it leave rubbish
+    /// behind for the next attempt to trip over.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_that_cannot_be_written_leaves_the_previous_one_byte_identical() {
+        let dir = crate::safe_write::tests::temp_dir("wld-readonly");
+        let path = dir.join("world.wld");
+
+        let world = crate::world::worldgen::generate(400, 300, "readonly", 1);
+        save(&world, &path).expect("the first, good save");
+        let before = std::fs::read(&path).expect("reading the good save");
+        let backup_before = std::fs::read(path.with_extension("wld.bak1")).ok();
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyDir::new(&dir) else {
+            eprintln!("skipping: this environment cannot make a directory read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let e = save(&world, &path).expect_err("a read-only directory must refuse the save");
+        let message = e.to_string();
+        drop(_guard);
+
+        assert_eq!(
+            std::fs::read(&path).expect("reading the world back"),
+            before,
+            "a failed save must leave the world byte-identical"
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("wld.bak1")).ok(),
+            backup_before,
+            "a failed save must not disturb the backup chain either"
+        );
+        assert!(
+            message.contains("world.wld") && message.contains("writable by the account"),
+            "the failure must say what it was doing and what to check, got: {message}"
+        );
+        assert!(
+            !path.with_extension("wld.tmp").exists(),
+            "a failed save must clean up its own scratch file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other everyday external failure: the world's directory is simply gone - unmounted, or
+    /// deleted by a tidy-up script - while the server is running. It must be reported, not fatal.
+    #[test]
+    fn a_vanished_directory_is_reported_rather_than_fatal() {
+        let dir = crate::safe_write::tests::temp_dir("wld-vanished");
+        let path = dir.join("world.wld");
+        let world = crate::world::worldgen::generate(400, 300, "vanished", 1);
+        std::fs::remove_dir_all(&dir).expect("removing the directory out from under it");
+
+        let e = save(&world, &path).expect_err("a missing directory must refuse the save");
+        assert!(
+            e.to_string().contains("directory no longer exists"),
+            "got: {e}"
+        );
+    }
+
+    /// A backup that cannot be made must be reported, and must leave the previous backup alone.
+    ///
+    /// What this test actually pins is the reported case: rotation warns and returns rather than
+    /// propagating, the existing `.bak1` is untouched, and no scratch file is left behind (that
+    /// last assertion is the one that fails without `copy_atomic`'s cleanup path).
+    ///
+    /// It deliberately does **not** claim to reproduce the unreported case, and it is worth being
+    /// exact about why, because that case is the real reason `rotate_backups` no longer uses
+    /// `std::fs::copy`. `copy` opens the destination with truncation and then fills it, so a
+    /// failure *during* the copy - ENOSPC, an I/O error, or the process being killed - leaves the
+    /// newest healthy backup replaced by a fragment of a world. Reaching that window needs a
+    /// genuinely full filesystem or a dying process; neither is portably injectable from a unit
+    /// test without root. `safe_write`'s own `/dev/full` test covers a real ENOSPC where the
+    /// platform provides one, and the mapping test covers what the operator is then told.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_that_cannot_be_made_leaves_the_previous_backup_alone() {
+        let dir = crate::safe_write::tests::temp_dir("wld-backup-readonly");
+        let path = dir.join("world.wld");
+        let world = crate::world::worldgen::generate(400, 300, "backup", 1);
+        save(&world, &path).expect("the first save");
+        save(&world, &path).expect("the second save, which makes .bak1");
+        let bak1 = path.with_extension("wld.bak1");
+        let before = std::fs::read(&bak1).expect("reading the backup");
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyDir::new(&dir) else {
+            eprintln!("skipping: this environment cannot make a directory read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        // Rotation on its own, so the read-only failure lands on the backup rather than on the
+        // world write that would otherwise fail first.
+        rotate_backups(&path);
+        drop(_guard);
+
+        assert_eq!(
+            std::fs::read(&bak1).expect("reading the backup back"),
+            before,
+            "a backup that could not be made must not damage the one that was already there"
+        );
+        assert!(
+            !crate::safe_write::temp_path(&bak1).exists(),
+            "a failed backup must clean up its own scratch file"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

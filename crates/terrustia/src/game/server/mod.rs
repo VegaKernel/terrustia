@@ -1526,7 +1526,12 @@ impl GameServer {
                 "could not move the current world aside; refusing to roll back: {e}"
             ));
         }
-        if let Err(e) = std::fs::copy(&bak, &path) {
+        // Through a temporary file, not a plain `std::fs::copy`: that truncates the destination
+        // before it fills it, so a disk that ran out (or a process killed) halfway would leave the
+        // world path holding a fragment of a world. The `aside` rename below undoes it for the
+        // error we can see, but not for the process dying mid-copy, and a rollback is exactly the
+        // moment somebody cannot afford a second accident.
+        if let Err(e) = crate::safe_write::copy_atomic("restoring a world backup", &bak, &path) {
             let _ = std::fs::rename(&aside, &path);
             return Err(format!("could not restore the backup: {e}"));
         }
