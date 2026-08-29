@@ -71,6 +71,24 @@ pub struct Config {
     /// table at all can turn it off. The panel is never affected either way: `panel_listen` is
     /// always loopback-only regardless (see above), so there is nothing for UPnP to forward there.
     pub upnp_enabled: bool,
+    /// Rotate the audit log (`admin::audit`) once its live file would reach this many bytes. See
+    /// `admin::audit::DEFAULT_MAX_BYTES` for the default and why it is that size.
+    pub audit_log_max_bytes: u64,
+    /// How many rotated audit-log segments to keep beyond the live file before the oldest is
+    /// dropped. See `admin::audit::DEFAULT_KEEP_SEGMENTS`.
+    pub audit_log_keep_segments: usize,
+    /// Escalate a repeat offender's mute automatically — a config-enabled mechanism, off by
+    /// default. When on, a muted player who keeps talking while muted has their mute duration
+    /// extended by `mute_escalation_secs` each time, up to `mute_escalation_max_secs`.
+    pub mute_escalation_enabled: bool,
+    /// How long each escalation step adds to an active mute, in seconds.
+    pub mute_escalation_secs: u64,
+    /// The longest an escalated mute may reach, in seconds. `0` means no ceiling.
+    pub mute_escalation_max_secs: u64,
+    /// A per-account cooldown between chat lines, in milliseconds — a config-enabled mechanism, off
+    /// by default (`0`). When set, a line sent before the cooldown has elapsed since the account's
+    /// last one is dropped rather than broadcast.
+    pub chat_cooldown_ms: u64,
 }
 
 impl Default for Config {
@@ -98,6 +116,12 @@ impl Default for Config {
             panel_listen: "127.0.0.1:7778".parse().expect("valid default address"),
             update_check_enabled: true,
             upnp_enabled: true,
+            audit_log_max_bytes: crate::admin::audit::DEFAULT_MAX_BYTES,
+            audit_log_keep_segments: crate::admin::audit::DEFAULT_KEEP_SEGMENTS,
+            mute_escalation_enabled: false,
+            mute_escalation_secs: 300,
+            mute_escalation_max_secs: 3600,
+            chat_cooldown_ms: 0,
         }
     }
 }
@@ -208,6 +232,24 @@ impl Config {
         }
         if let Some(v) = get("TERRUSTIA_UPNP_ENABLED") {
             self.upnp_enabled = parsed("TERRUSTIA_UPNP_ENABLED", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_AUDIT_LOG_MAX_BYTES") {
+            self.audit_log_max_bytes = parsed("TERRUSTIA_AUDIT_LOG_MAX_BYTES", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_AUDIT_LOG_KEEP_SEGMENTS") {
+            self.audit_log_keep_segments = parsed("TERRUSTIA_AUDIT_LOG_KEEP_SEGMENTS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_MUTE_ESCALATION_ENABLED") {
+            self.mute_escalation_enabled = parsed("TERRUSTIA_MUTE_ESCALATION_ENABLED", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_MUTE_ESCALATION_SECS") {
+            self.mute_escalation_secs = parsed("TERRUSTIA_MUTE_ESCALATION_SECS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_MUTE_ESCALATION_MAX_SECS") {
+            self.mute_escalation_max_secs = parsed("TERRUSTIA_MUTE_ESCALATION_MAX_SECS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_CHAT_COOLDOWN_MS") {
+            self.chat_cooldown_ms = parsed("TERRUSTIA_CHAT_COOLDOWN_MS", &v)?;
         }
         Ok(())
     }

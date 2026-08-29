@@ -218,6 +218,7 @@ export interface Player {
   pvp: boolean;
   appearance: Appearance | null;
   equipped: number[];
+  muted: boolean;
 }
 
 export async function fetchPlayers(session: string): Promise<Player[]> {
@@ -226,6 +227,21 @@ export async function fetchPlayers(session: string): Promise<Player[]> {
 
 export async function kickPlayer(session: string, name: string, reason: string): Promise<void> {
   await postJson("/api/players/kick", session, { name, reason });
+}
+
+/** `duration_secs` is `undefined`/omitted for a permanent mute. */
+export async function mutePlayer(
+  session: string,
+  name: string,
+  reason: string,
+  duration_secs?: number,
+): Promise<void> {
+  await postJson("/api/players/mute", session, { name, reason, duration_secs });
+}
+
+export async function unmutePlayer(session: string, name: string): Promise<boolean> {
+  const res = await postJson<{ changed: boolean }>("/api/players/unmute", session, { name });
+  return res.changed;
 }
 
 export type BanKind = "name" | "ip" | "uuid";
@@ -461,6 +477,20 @@ export async function setGroupPermission(
   grant: boolean,
 ): Promise<void> {
   await postJson("/api/groups/permissions", session, { group, permission, grant });
+}
+
+// ---- audit log -----------------------------------------------------------------------------
+
+export interface AuditEntry {
+  when: number;
+  issuer: string;
+  action: string;
+  target: string;
+  detail: string;
+}
+
+export async function fetchAuditLog(session: string, n = 50): Promise<AuditEntry[]> {
+  return getJson<AuditEntry[]>(`/api/audit?n=${n}`, session);
 }
 
 // ---- world creation --------------------------------------------------------------------------

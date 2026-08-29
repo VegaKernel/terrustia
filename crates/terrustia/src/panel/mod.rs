@@ -238,6 +238,8 @@ pub async fn run(
         .route("/api/players/kick", post(kick_player))
         .route("/api/players/ban", post(ban_player))
         .route("/api/players/unban", post(unban_player))
+        .route("/api/players/mute", post(mute_player))
+        .route("/api/players/unmute", post(unmute_player))
         .route("/api/whitelist", get(whitelist))
         .route("/api/whitelist/add", post(whitelist_add))
         .route("/api/whitelist/remove", post(whitelist_remove))
@@ -259,6 +261,7 @@ pub async fn run(
         .route("/api/accounts/delete", post(delete_account))
         .route("/api/permissions", get(known_permissions))
         .route("/api/groups/permissions", post(set_group_permission))
+        .route("/api/audit", get(audit_log))
         .fallback(static_handler)
         .with_state(state);
 
@@ -767,6 +770,7 @@ struct PlayerResponse {
     pvp: bool,
     appearance: Option<AppearanceResponse>,
     equipped: Vec<i32>,
+    muted: bool,
 }
 
 impl From<PanelPlayer> for PlayerResponse {
@@ -784,6 +788,7 @@ impl From<PanelPlayer> for PlayerResponse {
             pvp: p.pvp,
             appearance: p.appearance.map(AppearanceResponse::from),
             equipped: p.equipped,
+            muted: p.muted,
         }
     }
 }
@@ -816,10 +821,12 @@ async fn kick_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<KickRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::SERVER_KICK).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::SERVER_KICK).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelKick {
+        actor,
         name: req.name,
         reason: req.reason,
         reply,
@@ -846,13 +853,15 @@ async fn ban_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<BanRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::SERVER_BAN).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::SERVER_BAN).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     let Some(kind) = BanKind::parse(&req.kind) else {
         return err(StatusCode::BAD_REQUEST, "kind must be name, ip or uuid");
     };
     match ask(&state, |reply| ServerEvent::PanelBan {
+        actor,
         kind,
         value: req.value,
         reason: req.reason,
@@ -880,16 +889,78 @@ async fn unban_player(
     headers: axum::http::HeaderMap,
     Json(req): Json<UnbanRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::SERVER_UNBAN).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::SERVER_UNBAN).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelUnban {
+        actor,
         value: req.value,
         reply,
     })
     .await
     {
         Ok(removed) => Json(UnbanResponse { removed }).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct MuteRequest {
+    name: String,
+    #[serde(default)]
+    reason: String,
+    /// Seconds, or absent/`null` for a permanent mute. A plain number rather than the console's
+    /// `10m`/`2h` duration words, since this is a form field, not a chat line to parse.
+    #[serde(default)]
+    duration_secs: Option<u64>,
+}
+
+async fn mute_player(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<MuteRequest>,
+) -> Response {
+    let actor = match authorized(&state, &headers, perm::SERVER_MUTE).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
+    match ask(&state, |reply| ServerEvent::PanelMute {
+        actor,
+        name: req.name,
+        reason: req.reason,
+        duration_secs: req.duration_secs,
+        reply,
+    })
+    .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(resp) => resp,
+    }
+}
+
+#[derive(Deserialize)]
+struct UnmuteRequest {
+    name: String,
+}
+
+async fn unmute_player(
+    State(state): State<PanelState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<UnmuteRequest>,
+) -> Response {
+    let actor = match authorized(&state, &headers, perm::SERVER_UNMUTE).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
+    match ask(&state, |reply| ServerEvent::PanelUnmute {
+        actor,
+        name: req.name,
+        reply,
+    })
+    .await
+    {
+        Ok(removed) => Json(ChangedResponse { changed: removed }).into_response(),
         Err(resp) => resp,
     }
 }
@@ -1687,6 +1758,64 @@ async fn set_group_permission(
     {
         Ok(Ok(())) => StatusCode::OK.into_response(),
         Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(resp) => resp,
+    }
+}
+
+// ---- audit log -----------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct AuditEntryResponse {
+    when: u64,
+    issuer: String,
+    action: String,
+    target: String,
+    detail: String,
+}
+
+impl From<crate::admin::audit::AuditEvent> for AuditEntryResponse {
+    fn from(e: crate::admin::audit::AuditEvent) -> Self {
+        Self {
+            when: e.when,
+            issuer: e.issuer,
+            action: e.action.as_str().to_string(),
+            target: e.target,
+            detail: e.detail,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    #[serde(default = "default_audit_n")]
+    n: usize,
+}
+
+fn default_audit_n() -> usize {
+    50
+}
+
+async fn audit_log(
+    State(state): State<PanelState>,
+    Query(q): Query<AuditQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(resp) = authorized(&state, &headers, perm::ADMIN_AUDIT).await {
+        return resp;
+    }
+    match ask(&state, |reply| ServerEvent::PanelAuditTail {
+        n: q.n,
+        reply,
+    })
+    .await
+    {
+        Ok(events) => Json(
+            events
+                .into_iter()
+                .map(AuditEntryResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(resp) => resp,
     }
 }

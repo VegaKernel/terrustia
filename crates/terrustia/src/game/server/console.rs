@@ -58,6 +58,12 @@ impl GameServer {
                                     Ok(()) => {
                                         let _ = self.admin.save();
                                         self.claim_token = None;
+                                        self.audit.record(
+                                            name,
+                                            crate::admin::AuditAction::Claim,
+                                            name,
+                                            "claimed from the console",
+                                        );
                                         info!(target: CONSOLE_REPLY, account = name, "server claimed from the console");
                                     }
                                     Err(e) => info!(target: CONSOLE_REPLY, "{e}"),
@@ -84,8 +90,11 @@ impl GameServer {
                     "  kick <name> [reason]                disconnect a player",
                     "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
                     "  unban <value>                       lift a ban",
+                    "  mute <name> [duration] [reason]     mute a player, e.g. 10m, 2h, 1d",
+                    "  unmute <value>                      lift a mute",
                     "  group <account> <group>             set an account's group",
                     "  world undo <player> <duration>      revert a player's recent tile edits",
+                    "  audit [n]                           show the last n audit-log entries",
                     "  panel                               toggle the web panel",
                     "  stop                                save and shut down",
                 ] {
@@ -166,13 +175,19 @@ impl GameServer {
                     Err(message) => info!(target: CONSOLE_REPLY, "{message}"),
                 }
             }
+            "audit" => {
+                let n: usize = argument.trim().parse().unwrap_or(20);
+                for line in self.format_audit_tail(n) {
+                    info!(target: CONSOLE_REPLY, "{line}");
+                }
+            }
             "stop" => {
                 info!("stopping on console request");
                 self.stopping = true;
             }
             // The player-facing ones do the same thing here, reporting to the log. Slot 255 is
             // "the server", which `tell` already knows how to address.
-            "kick" | "ban" | "unban" | "group" | "world" => {
+            "kick" | "ban" | "unban" | "mute" | "unmute" | "group" | "world" => {
                 let _ = self.run_admin_command(net_module::SERVER_AUTHOR, name, argument);
             }
             other => {
@@ -275,6 +290,13 @@ impl GameServer {
                         Some(target) => {
                             self.announce(&format!("{who} was kicked: {reason}"));
                             self.kick(target, &reason);
+                            let issuer = self.audit_issuer(slot);
+                            self.audit.record(
+                                &issuer,
+                                crate::admin::AuditAction::Kick,
+                                who,
+                                &reason,
+                            );
                         }
                         None => self.tell(slot, &format!("nobody here is called {who}.")),
                     }
@@ -293,12 +315,19 @@ impl GameServer {
                     } else {
                         "banned".to_string()
                     };
-                    self.admin.ban(kind, &value, &reason);
+                    let issuer = self.audit_issuer(slot);
+                    self.admin.ban(kind.clone(), &value, &reason, &issuer);
                     self.announce(&format!("{value} is banned: {reason}"));
                     // And remove them if they are standing here.
                     if let Some(target) = self.slot_named(&value) {
                         self.kick(target, &reason);
                     }
+                    self.audit.record(
+                        &issuer,
+                        crate::admin::AuditAction::Ban,
+                        &value,
+                        &format!("{kind:?}: {reason}"),
+                    );
                     info!(value, reason, "ban added");
                 }
                 _ => self.tell(slot, "usage: /ban <name|ip|uuid> <value> [reason]"),
@@ -306,9 +335,62 @@ impl GameServer {
             "unban" => match words.as_slice() {
                 [value] => {
                     let removed = self.admin.unban(value);
+                    if removed > 0 {
+                        let issuer = self.audit_issuer(slot);
+                        self.audit
+                            .record(&issuer, crate::admin::AuditAction::Unban, value, "");
+                    }
                     self.tell(slot, &format!("{removed} ban(s) lifted for {value}."));
                 }
                 _ => self.tell(slot, "usage: /unban <value>"),
+            },
+            // `<duration>` is optional and, when present, must parse (`parse_duration`, the same
+            // `10m`/`2h`/`1d` grammar `/world undo` uses) — everything after the name is otherwise
+            // taken whole as the reason, so a duration-shaped word never accidentally swallows part
+            // of one (`/mute chatty 500 for spamming` mutes for 500 seconds with reason "for
+            // spamming", not with a reason that starts "500 for").
+            "mute" => match words.split_first() {
+                Some((who, rest)) => {
+                    let (duration, reason) = match rest.split_first() {
+                        Some((maybe_duration, reason_words)) => {
+                            match crate::game::tile_log::parse_duration(maybe_duration) {
+                                Some(d) => (Some(d), reason_words.join(" ")),
+                                None => (None, rest.join(" ")),
+                            }
+                        }
+                        None => (None, String::new()),
+                    };
+                    let reason = if reason.is_empty() {
+                        "muted".to_string()
+                    } else {
+                        reason
+                    };
+                    let issuer = self.audit_issuer(slot);
+                    self.admin
+                        .mute(who, &reason, duration.map(|d| d.as_secs()), &issuer);
+                    self.audit
+                        .record(&issuer, crate::admin::AuditAction::Mute, who, &reason);
+                    self.tell(slot, &format!("{who} is muted: {reason}"));
+                    info!(who, reason, "mute added");
+                }
+                None => self.tell(slot, "usage: /mute <name> [duration] [reason]"),
+            },
+            "unmute" => match words.as_slice() {
+                [value] => {
+                    let removed = self.admin.unmute(value);
+                    if removed {
+                        let issuer = self.audit_issuer(slot);
+                        self.audit
+                            .record(&issuer, crate::admin::AuditAction::Unmute, value, "");
+                    }
+                    let message = if removed {
+                        format!("{value} is unmuted.")
+                    } else {
+                        "that name was not muted.".to_string()
+                    };
+                    self.tell(slot, &message);
+                }
+                _ => self.tell(slot, "usage: /unmute <value>"),
             },
             "group" => match words.as_slice() {
                 [account, group] => {
@@ -343,6 +425,13 @@ impl GameServer {
                         Some(found) => {
                             found.group = (*group).to_string();
                             let _ = self.admin.save();
+                            let issuer = self.audit_issuer(slot);
+                            self.audit.record(
+                                &issuer,
+                                crate::admin::AuditAction::GroupChange,
+                                account,
+                                &format!("-> {group}"),
+                            );
                             self.tell(slot, &format!("{account} is now in {group}."));
                             info!(account, group, "group changed");
                         }
@@ -380,6 +469,46 @@ impl GameServer {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Who to blame an audit-log entry on, for an action taken by `slot`: `"console"` for the
+    /// server's own trusted terminal (slot 255, "the server" — see this module's own doc comment),
+    /// the signed-in account name if there is one, or the connected player's own name as a
+    /// fallback (an unclaimed server lets anyone act before anyone has registered at all, and that
+    /// still deserves an attributable line rather than a blank one).
+    fn audit_issuer(&self, slot: u8) -> String {
+        if slot == net_module::SERVER_AUTHOR {
+            return "console".to_string();
+        }
+        if let Some(account) = self.admin.signed_in_as(slot) {
+            return account.to_string();
+        }
+        self.player(slot)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| format!("slot {slot}"))
+    }
+
+    /// The last `n` audit-log entries, one per line, for the `audit` command (console and chat
+    /// alike). Timestamps are raw Unix seconds — this workspace has no date/time-formatting
+    /// dependency, and inventing one just for a log line is not worth it.
+    fn format_audit_tail(&self, n: usize) -> Vec<String> {
+        let events = self.audit.tail(n);
+        if events.is_empty() {
+            return vec!["no audit events recorded yet.".to_string()];
+        }
+        events
+            .iter()
+            .map(|e| {
+                let detail = if e.detail.is_empty() { "-" } else { &e.detail };
+                format!(
+                    "{} [{}] {} {} -> {detail}",
+                    e.when,
+                    e.issuer,
+                    e.action.as_str(),
+                    e.target,
+                )
+            })
+            .collect()
     }
 
     /// The slot of whoever is playing under this name.
@@ -462,8 +591,8 @@ impl GameServer {
         }
 
         match name.as_str() {
-            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "group" | "whoami"
-            | "world" => {
+            "register" | "login" | "logout" | "kick" | "ban" | "unban" | "mute" | "unmute"
+            | "group" | "whoami" | "world" => {
                 return self.run_admin_command(slot, &name, &raw_argument);
             }
             "help" => {
@@ -484,11 +613,20 @@ impl GameServer {
                     "/kick <name> [reason]",
                     "/ban <name|uuid|ip> <value> [reason]",
                     "/unban <value>",
+                    "/mute <name> [duration] [reason]   e.g. 10m, 2h, 1d",
+                    "/unmute <value>",
                     "/group <account> <group>      move somebody between groups",
                     "/world undo <player> <duration>   revert their tile edits from the last",
                     "                                   <duration> (e.g. 10m, 2h) — up to 72h back",
+                    "/audit [n]       the last n audit-log entries",
                 ] {
                     self.tell(slot, line);
+                }
+            }
+            "audit" => {
+                let n: usize = argument.trim().parse().unwrap_or(20);
+                for line in self.format_audit_tail(n) {
+                    self.tell(slot, &line);
                 }
             }
             "players" => {

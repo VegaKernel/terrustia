@@ -1047,6 +1047,125 @@ async fn the_group_permission_editor_is_reach_limited() {
     assert_eq!(status, 400, "the last admin.groups-capable account: {body}");
 }
 
+/// A ban placed through the panel shows up in the audit log, attributed to the real signed-in
+/// account, and `/api/audit` is itself gated on `admin.audit` — a `moderator` session (no
+/// `admin.audit`) is refused even though it can place the ban it is trying to look up.
+#[tokio::test]
+async fn banning_through_the_panel_appears_in_the_audit_log() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    // A unique save target: the audit log lives beside the world file, and a fresh path means a
+    // fresh (empty) log to read back rather than one left over from an earlier run.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let save_file = std::env::temp_dir().join(format!(
+        "terrustia-audit-test-{}-{unique}.wld",
+        std::process::id()
+    ));
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        save_file: Some(save_file.clone()),
+        autosave_secs: 0,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "audit", 17);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let owner_session = extract_session(&body);
+
+    // Before a ban happens, the log holds only the claim itself (claiming is audited too).
+    let (status, body) = client
+        .get_status(&format!("{base}/api/audit"), Some(&owner_session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""action":"claim""#), "{body}");
+    assert!(
+        !body.contains(r#""action":"ban""#),
+        "no ban has happened yet: {body}"
+    );
+
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/ban"),
+            r#"{"kind":"name","value":"griefer","reason":"wrecked spawn"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = client
+        .get_status(&format!("{base}/api/audit"), Some(&owner_session))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""action":"ban""#), "{body}");
+    assert!(body.contains(r#""issuer":"owner""#), "{body}");
+    assert!(body.contains(r#""target":"griefer""#), "{body}");
+
+    // A moderator (no admin.audit) can place a ban — it holds server.ban — but cannot read the log
+    // it just wrote a line into.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"modacct","password":"moderator-pass","group":"moderator"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            r#"{"name":"modacct","password":"moderator-pass"}"#,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let mod_session = extract_session(&body);
+
+    let (status, body) = client
+        .get_status(&format!("{base}/api/audit"), Some(&mod_session))
+        .await;
+    assert_eq!(
+        status, 403,
+        "a moderator lacks admin.audit, so the log route must refuse it: {body}"
+    );
+
+    // Tidy up the throwaway save file and its admin/audit sidecars, best-effort.
+    let _ = std::fs::remove_file(&save_file);
+    let _ = std::fs::remove_file(save_file.with_extension("admin.toml"));
+    let _ = std::fs::remove_file(save_file.with_extension("audit.jsonl"));
+    let _ = std::fs::remove_file(save_file.with_extension("wld.bak1"));
+}
+
 /// Whether *something* is accepting connections on `addr` right now — a closed port refuses
 /// immediately rather than hanging, so no timeout is needed here.
 async fn port_answers(addr: std::net::SocketAddr) -> bool {

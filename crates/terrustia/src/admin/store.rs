@@ -14,7 +14,7 @@ use std::{
 
 use tracing::{info, warn};
 
-use super::{Account, Ban, BanKind, Group, Permission, ban::now, group, group::defaults};
+use super::{Account, Ban, BanKind, Group, Mute, Permission, ban::now, group, group::defaults};
 
 /// Everything the server knows about who may do what.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -25,6 +25,10 @@ pub struct Admin {
     pub accounts: Vec<Account>,
     #[serde(default)]
     pub bans: Vec<Ban>,
+    /// Active (or not-yet-cleaned-up expired) mutes. `#[serde(default)]` so a store written before
+    /// this field existed still loads with an empty list rather than refusing to parse.
+    #[serde(default)]
+    pub mutes: Vec<Mute>,
     /// Who is allowed in, when the list is not empty.
     ///
     /// Bans are reactive: they keep out somebody who has already been and done something. A
@@ -342,8 +346,8 @@ impl Admin {
     }
 
     /// Add a ban and write the file.
-    pub fn ban(&mut self, kind: BanKind, value: &str, reason: &str) {
-        self.bans.push(Ban::permanent(kind, value, reason));
+    pub fn ban(&mut self, kind: BanKind, value: &str, reason: &str, issuer: &str) {
+        self.bans.push(Ban::permanent(kind, value, reason, issuer));
         if let Err(e) = self.save() {
             warn!(error = %e, "could not write the admin file; the ban is only in memory");
         }
@@ -361,6 +365,71 @@ impl Admin {
             warn!(error = %e, "could not write the admin file after unbanning");
         }
         removed
+    }
+
+    /// Mute a name, replacing any mute already in force for it (a second `/mute` on an already-
+    /// muted name updates the reason and duration rather than stacking a second entry). `duration`
+    /// is `None` for permanent, or seconds from now.
+    pub fn mute(&mut self, name: &str, reason: &str, duration: Option<u64>, issuer: &str) {
+        let until = duration.map(|secs| now().saturating_add(secs));
+        self.mutes.retain(|m| !m.name.eq_ignore_ascii_case(name));
+        self.mutes.push(Mute::new(name, reason, until, issuer));
+        if let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file; the mute is only in memory");
+        }
+    }
+
+    /// Lift every mute on this name (ordinarily just one — `mute` itself never stacks them, but an
+    /// old hand-edited file could). Returns whether anything was actually removed.
+    pub fn unmute(&mut self, name: &str) -> bool {
+        let before = self.mutes.len();
+        self.mutes.retain(|m| !m.name.eq_ignore_ascii_case(name));
+        let removed = self.mutes.len() != before;
+        if removed && let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file after unmuting");
+        }
+        removed
+    }
+
+    /// Whether this name is currently muted (an expired mute does not count — it is left in the
+    /// list rather than swept, the same way a lapsed ban is).
+    pub fn is_muted(&self, name: &str) -> bool {
+        let when = now();
+        self.mutes
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))
+    }
+
+    /// The reason a currently-in-force mute gives, if this name is muted at all.
+    pub fn mute_reason(&self, name: &str) -> Option<&str> {
+        let when = now();
+        self.mutes
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))
+            .map(|m| m.reason.as_str())
+    }
+
+    /// Extend an already-active, non-permanent mute by `extra_secs`, capped so it never reaches
+    /// more than `cap_secs` from now (`0` means no cap) — the mechanism behind
+    /// `Config::mute_escalation_enabled`. Returns the new expiry, or `None` if the name is not
+    /// currently muted, or its mute is already permanent (nothing to extend: it cannot get any
+    /// "longer" than forever).
+    pub fn extend_mute(&mut self, name: &str, extra_secs: u64, cap_secs: u64) -> Option<u64> {
+        let when = now();
+        let mute = self
+            .mutes
+            .iter_mut()
+            .find(|m| m.name.eq_ignore_ascii_case(name) && m.in_force(when))?;
+        let current_until = mute.until?;
+        let mut extended = current_until.max(when).saturating_add(extra_secs);
+        if cap_secs > 0 {
+            extended = extended.min(when.saturating_add(cap_secs));
+        }
+        mute.until = Some(extended);
+        if let Err(e) = self.save() {
+            warn!(error = %e, "could not write the admin file after extending a mute");
+        }
+        Some(extended)
     }
 }
 
@@ -499,7 +568,7 @@ mod tests {
     #[test]
     fn bans_apply_and_lift() {
         let mut admin = Admin::load(&temp("bans.toml"));
-        admin.ban(BanKind::Uuid, "abc-123", "griefing");
+        admin.ban(BanKind::Uuid, "abc-123", "griefing", "brook");
 
         assert!(
             admin
@@ -518,6 +587,95 @@ mod tests {
         );
     }
 
+    /// A mute applies, survives being re-checked, and lifts on `/unmute` — the same shape as bans,
+    /// and it persists across an `Admin` reload, which is the whole point of storing it rather than
+    /// keeping it in memory on the connection.
+    #[test]
+    fn a_mute_applies_persists_and_lifts() {
+        let path = temp("mute.toml");
+        {
+            let mut admin = Admin::load(&path);
+            assert!(!admin.is_muted("chatty"));
+            admin.mute("chatty", "spamming caps", None, "brook");
+            assert!(admin.is_muted("chatty"));
+            assert!(
+                admin.is_muted("CHATTY"),
+                "case-insensitive, like a name ban"
+            );
+            assert_eq!(admin.mute_reason("chatty"), Some("spamming caps"));
+        }
+
+        // Reloading finds the same mute — it was written to disk, not only held in memory.
+        let mut reloaded = Admin::load(&path);
+        assert!(
+            reloaded.is_muted("chatty"),
+            "a mute must survive a reconnect/restart, which is what persisting it is for"
+        );
+        assert!(reloaded.unmute("chatty"));
+        assert!(!reloaded.is_muted("chatty"));
+        assert!(
+            !reloaded.unmute("chatty"),
+            "nothing left to lift a second time"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A timed mute lapses on its own, exactly like a timed ban.
+    #[test]
+    fn a_timed_mute_expires_on_its_own() {
+        let mut admin = Admin::load(&temp("mute-expiry.toml"));
+        admin.mute("chatty", "cooldown", Some(0), "brook");
+        // `duration = Some(0)` means "until right now" — already expired by the time this reads it.
+        assert!(!admin.is_muted("chatty"));
+    }
+
+    /// Re-muting an already-muted name replaces the entry rather than stacking a second one.
+    #[test]
+    fn re_muting_replaces_rather_than_stacks() {
+        let mut admin = Admin::load(&temp("mute-restack.toml"));
+        admin.mute("chatty", "first reason", None, "brook");
+        admin.mute("chatty", "second reason", None, "brook");
+        assert_eq!(
+            admin.mutes.iter().filter(|m| m.name == "chatty").count(),
+            1,
+            "muting twice must not leave two entries"
+        );
+        assert_eq!(admin.mute_reason("chatty"), Some("second reason"));
+    }
+
+    /// The escalation mechanism: extending a mute pushes its expiry out, capped so it never grows
+    /// past `cap_secs` from now, and does nothing to a mute that is already permanent.
+    #[test]
+    fn extending_a_mute_pushes_its_expiry_out_and_respects_the_cap() {
+        let mut admin = Admin::load(&temp("mute-extend.toml"));
+        admin.mute("chatty", "spam", Some(60), "brook");
+        let extended = admin
+            .extend_mute("chatty", 300, 0)
+            .expect("an active timed mute should extend");
+        let now = now();
+        assert!(
+            extended >= now + 300,
+            "extending by 300s should push the expiry at least 300s out"
+        );
+
+        // A cap of 100s from now must never be exceeded, even though the raw extension would.
+        let capped = admin
+            .extend_mute("chatty", 10_000, 100)
+            .expect("still active");
+        assert!(capped <= now + 100, "the cap must be respected: {capped}");
+
+        admin.mute("permanent", "no expiry", None, "brook");
+        assert!(
+            admin.extend_mute("permanent", 60, 0).is_none(),
+            "a permanent mute has nothing to extend"
+        );
+
+        assert!(
+            admin.extend_mute("nobody", 60, 0).is_none(),
+            "extending a name that is not muted at all does nothing"
+        );
+    }
+
     /// It survives a write and a read, which is the whole point of having a file.
     #[test]
     fn the_file_round_trips() {
@@ -528,7 +686,7 @@ mod tests {
             admin
                 .register("brook", "a good password", "owner")
                 .expect("register");
-            admin.ban(BanKind::Name, "griefer", "wrecked spawn");
+            admin.ban(BanKind::Name, "griefer", "wrecked spawn", "brook");
             admin.save().expect("save");
         }
 

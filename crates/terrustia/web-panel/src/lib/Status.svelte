@@ -16,6 +16,7 @@
   import Metrics from "./Metrics.svelte";
   import Backups from "./Backups.svelte";
   import Accounts from "./Accounts.svelte";
+  import Audit from "./Audit.svelte";
 
   let { session, onLoggedOut }: { session: string; onLoggedOut: () => void } = $props();
 
@@ -29,7 +30,8 @@
     | "backups"
     | "console"
     | "world"
-    | "settings";
+    | "settings"
+    | "audit";
   // Every tab except "overview" needs a permission to be worth showing — this is a UX convenience
   // only, gating which buttons a session sees; every route the tab talks to re-checks its own
   // permission on the backend regardless (see `panel/mod.rs`'s module doc for the full map), so a
@@ -45,6 +47,7 @@
     { id: "console", label: "console", needs: "panel.console" },
     { id: "world", label: "world", needs: "panel.view" },
     { id: "settings", label: "settings", needs: "panel.view" },
+    { id: "audit", label: "audit", needs: "admin.audit" },
   ];
 
   let tab = $state<Tab>("overview");
@@ -148,6 +151,8 @@
     <WorldView {session} />
   {:else if tab === "settings"}
     <Settings {session} />
+  {:else if tab === "audit"}
+    <Audit {session} />
   {/if}
 </main>
 

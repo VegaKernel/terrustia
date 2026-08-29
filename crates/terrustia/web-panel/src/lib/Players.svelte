@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { fetchPlayers, kickPlayer, banPlayer, type Player, type BanKind } from "./api";
+  import {
+    fetchPlayers,
+    kickPlayer,
+    banPlayer,
+    mutePlayer,
+    unmutePlayer,
+    type Player,
+    type BanKind,
+  } from "./api";
 
   let { session }: { session: string } = $props();
 
@@ -11,6 +19,9 @@
   let banKind = $state<BanKind>("name");
   let banValue = $state("");
   let banReason = $state("");
+  let muteTarget = $state<Player | null>(null);
+  let muteDuration = $state("");
+  let muteReason = $state("");
 
   async function refresh() {
     try {
@@ -60,6 +71,50 @@
     }
   }
 
+  function openMute(p: Player) {
+    muteTarget = p;
+    muteDuration = "";
+    muteReason = "";
+  }
+
+  /** A bare number is seconds; a trailing `m`/`h`/`d` scales it. Empty means permanent. Mirrors
+   *  the shape the console's `/mute` command accepts, in a form field instead of a chat line. */
+  function parseDurationSecs(text: string): number | undefined {
+    const trimmed = text.trim().toLowerCase();
+    if (!trimmed) return undefined;
+    const match = trimmed.match(/^(\d+)([smhd]?)$/);
+    if (!match) return undefined;
+    const n = Number(match[1]);
+    const scale = { s: 1, m: 60, h: 3600, d: 86400, "": 1 }[match[2]] ?? 1;
+    return n * scale;
+  }
+
+  async function confirmMute() {
+    if (!muteTarget) return;
+    acting = muteTarget.name;
+    try {
+      await mutePlayer(session, muteTarget.name, muteReason, parseDurationSecs(muteDuration));
+      muteTarget = null;
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      acting = null;
+    }
+  }
+
+  async function unmute(p: Player) {
+    acting = p.name;
+    try {
+      await unmutePlayer(session, p.name);
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      acting = null;
+    }
+  }
+
   function health(p: Player): string {
     return `${p.life} / ${p.life_max}`;
   }
@@ -97,7 +152,7 @@
               <span class="swatch" style:background={rgb(p.appearance.skin_color)}></span>
             {/if}
           </td>
-          <td>{p.name}</td>
+          <td>{p.name}{#if p.muted}<span class="badge">muted</span>{/if}</td>
           <td>{health(p)}</td>
           <td>{p.mana} / {p.mana_max}</td>
           <td class="dim">{Math.round(p.x / 16)}, {Math.round(p.y / 16)}</td>
@@ -105,6 +160,11 @@
           <td>{p.pvp ? "on" : "off"}</td>
           <td class="actions">
             <button disabled={acting === p.name} onclick={() => kick(p)}>kick</button>
+            {#if p.muted}
+              <button disabled={acting === p.name} onclick={() => unmute(p)}>unmute</button>
+            {:else}
+              <button disabled={acting === p.name} onclick={() => openMute(p)}>mute</button>
+            {/if}
             <button class="danger-btn" disabled={acting === p.name} onclick={() => openBan(p)}>ban</button>
           </td>
         </tr>
@@ -145,6 +205,34 @@
   </div>
 {/if}
 
+{#if muteTarget}
+  <div
+    class="overlay"
+    role="presentation"
+    onkeydown={(e) => e.key === "Escape" && (muteTarget = null)}
+  >
+    <div class="dialog" role="dialog" aria-label="mute player" tabindex="-1">
+      <h3>mute {muteTarget.name}</h3>
+      <p class="dim">
+        the muted player still sees their own messages; nobody else does. staff still see them,
+        flagged, in the console/live feed.
+      </p>
+      <label>
+        duration
+        <input bind:value={muteDuration} placeholder="e.g. 10m, 2h, 1d — empty for permanent" />
+      </label>
+      <label>
+        reason
+        <input bind:value={muteReason} placeholder="muted from the web panel" />
+      </label>
+      <div class="dialog-actions">
+        <button onclick={() => (muteTarget = null)}>cancel</button>
+        <button class="danger-btn" onclick={confirmMute}>confirm mute</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   h2 {
     margin: 0 0 1rem;
@@ -179,6 +267,17 @@
     height: 12px;
     border-radius: 50%;
     border: 1px solid var(--border);
+  }
+
+  .badge {
+    margin-left: 0.5rem;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--bg);
+    background: var(--danger);
+    border-radius: 2px;
+    padding: 0.05rem 0.35rem;
   }
 
   .actions {

@@ -36,6 +36,8 @@ pub struct PanelPlayer {
     /// `SLOT_RUNS` run 2, slots 59..79) — real equipped gear, not decoration invented for the
     /// avatar.
     pub equipped: Vec<i32>,
+    /// Whether this player's name is currently muted. See `Admin::is_muted`.
+    pub muted: bool,
 }
 
 /// What [`ServerEvent::PanelWhitelist`](super::ServerEvent::PanelWhitelist) hands back.
@@ -382,6 +384,12 @@ impl GameServer {
         };
         account.group = group.to_string();
         let _ = self.admin.save();
+        self.audit.record(
+            actor,
+            crate::admin::AuditAction::GroupChange,
+            name,
+            &format!("-> {group}"),
+        );
         info!(
             account = name,
             group, actor, "group changed from the web panel"
@@ -417,6 +425,12 @@ impl GameServer {
         let result = self.admin.insert_account(account);
         if result.is_ok() {
             let _ = self.admin.save();
+            self.audit.record(
+                actor,
+                crate::admin::AuditAction::Register,
+                &name,
+                &format!("group: {group}"),
+            );
             info!(
                 account = name,
                 group, actor, "account created from the web panel"
@@ -457,6 +471,12 @@ impl GameServer {
         };
         if changed {
             let _ = self.admin.save();
+            self.audit.record(
+                actor,
+                crate::admin::AuditAction::PermissionChange,
+                group,
+                &format!("{permission} grant={grant}"),
+            );
             info!(
                 group,
                 permission, grant, actor, "group permissions changed from the web panel"
@@ -522,6 +542,7 @@ impl GameServer {
                     terrustia_proto::player_info::PlayerAppearance::decode(bytes).ok()
                 }),
                 equipped: Self::equipped_items(p),
+                muted: self.admin.is_muted(&p.name),
             })
             .collect()
     }
@@ -658,6 +679,7 @@ mod panel_admin_events {
 
         let (reply, mut rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelKick {
+            actor: "owner".into(),
             name: "griefer".into(), // case-insensitive, matching `/kick`
             reason: "wrecked spawn".into(),
             reply,
@@ -674,6 +696,7 @@ mod panel_admin_events {
         let mut server = GameServer::new(Config::default(), tiny_world());
         let (reply, mut rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelKick {
+            actor: "owner".into(),
             name: "nobody-here".into(),
             reason: String::new(),
             reply,
@@ -688,6 +711,7 @@ mod panel_admin_events {
 
         let (reply, mut rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelBan {
+            actor: "owner".into(),
             kind: BanKind::Name,
             value: "Griefer".into(),
             reason: "wrecked spawn".into(),
@@ -704,11 +728,14 @@ mod panel_admin_events {
     #[test]
     fn unbanning_lifts_a_real_ban() {
         let mut server = GameServer::new(Config::default(), tiny_world());
-        server.admin.ban(BanKind::Name, "Griefer", "wrecked spawn");
+        server
+            .admin
+            .ban(BanKind::Name, "Griefer", "wrecked spawn", "owner");
         assert!(server.admin.ban_for("Griefer", "0.0.0.0", None).is_some());
 
         let (reply, mut rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelUnban {
+            actor: "owner".into(),
             value: "Griefer".into(),
             reply,
         });

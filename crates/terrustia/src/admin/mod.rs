@@ -5,25 +5,35 @@
 //! above was not as harmless as that suggests. Any connected player could set the world to night,
 //! summon a boss beside somebody, or delete every NPC in the world with `/butcher`.
 //!
-//! Three pieces, deliberately small:
+//! Five pieces, deliberately small:
 //!
-//! * **Groups** carry permissions; a player belongs to one. The default group can do the read-only
-//!   things, and nothing else.
+//! * **Groups** carry permissions, dotted and namespaced (`server.kick`, `world.time`, ...) — see
+//!   [`group`] for the vocabulary and the wildcard rule. A player belongs to one. The default group
+//!   can register and sign in, and nothing else.
 //! * **Accounts** bind a name to a password so a group survives a reconnect. Hashed with argon2 —
 //!   the one place in this workspace where taking a dependency beats writing it, because a KDF
 //!   written from memory is a security bug with a long fuse.
 //! * **Bans** by name, address or the client UUID the server already receives and, until now,
 //!   never read.
+//! * **Mutes** ([`mute`]) — chat suppression by name, persisted the same way a ban is, off by
+//!   default in the sense that nothing does anything until an operator actually mutes somebody.
+//! * **The audit log** ([`audit`]) — an append-only, rotating record of who did what: every ban,
+//!   kick, mute, group change and permission edit, attributed to an account, `"console"`, or (never
+//!   yet, but the vocabulary is there) `"system"`.
 //!
 //! Stored as TOML beside the world, written atomically through the same temp-file-and-rename the
 //! world save uses. Admin data is hundreds of rows; a database would be machinery for its own sake.
 
+pub mod audit;
 pub mod ban;
 pub mod group;
+pub mod mute;
 pub mod store;
 
+pub use audit::{AuditAction, AuditLog};
 pub use ban::{Ban, BanKind};
 pub use group::{Group, Permission, perm};
+pub use mute::Mute;
 pub use store::Admin;
 
 /// An account: a name, a hashed password, and the group it belongs to.

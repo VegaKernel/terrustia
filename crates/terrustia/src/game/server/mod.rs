@@ -642,22 +642,42 @@ pub enum ServerEvent {
     },
     /// The web panel's kick button. Reuses exactly what `/kick` and the console's `kick` already
     /// call ([`Self::kick`]/[`Self::announce`] by way of `run_admin_command`'s own logic) rather
-    /// than a second copy of it.
+    /// than a second copy of it. `actor` is the signed-in account making the request, for the audit
+    /// log's own `issuer` field.
     PanelKick {
+        actor: String,
         name: String,
         reason: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The web panel's ban button. Same reasoning as `PanelKick`.
     PanelBan {
+        actor: String,
         kind: crate::admin::BanKind,
         value: String,
         reason: String,
         reply: oneshot::Sender<()>,
     },
     PanelUnban {
+        actor: String,
         value: String,
         reply: oneshot::Sender<usize>,
+    },
+    /// The web panel's mute button. `duration_secs` is `None` for permanent, matching `/mute`'s own
+    /// optional-duration grammar (parsed in the panel handler, not here — the panel accepts a plain
+    /// number of seconds rather than the console's `10m`/`2h` words, since it has a form field
+    /// rather than a chat line to parse).
+    PanelMute {
+        actor: String,
+        name: String,
+        reason: String,
+        duration_secs: Option<u64>,
+        reply: oneshot::Sender<()>,
+    },
+    PanelUnmute {
+        actor: String,
+        name: String,
+        reply: oneshot::Sender<bool>,
     },
     /// The web panel asking who is on the guest list, and whether it is currently in force.
     PanelWhitelist {
@@ -774,6 +794,12 @@ pub enum ServerEvent {
         permission: String,
         grant: bool,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// The last `n` audit-log entries, for the panel's audit view. See
+    /// [`crate::admin::AuditLog::tail`].
+    PanelAuditTail {
+        n: usize,
+        reply: oneshot::Sender<Vec<crate::admin::audit::AuditEvent>>,
     },
 }
 
@@ -935,6 +961,9 @@ pub struct GameServer {
     liquids: crate::world::liquid::Liquids,
     /// Who may do what, and who is kept out. Read from disk beside the world.
     admin: crate::admin::Admin,
+    /// The append-only record of every moderation and permission-affecting action. Beside the world
+    /// too, like `admin`.
+    audit: crate::admin::AuditLog,
     /// Set by the console's `stop`, so the loop ends and the world is saved on the way out.
     stopping: bool,
     worst_tick: TickCost,
@@ -1000,6 +1029,8 @@ impl GameServer {
         let spare_world = Some(world.snapshot());
         let slots = config.max_players;
         let save_path = config.save_target().map(Path::to_path_buf);
+        let audit_log_max_bytes = config.audit_log_max_bytes;
+        let audit_log_keep_segments = config.audit_log_keep_segments;
         let autosave_ticks = match (save_path.is_some(), config.autosave_secs) {
             (true, secs) if secs > 0 => Some(secs * 60),
             _ => None,
@@ -1082,6 +1113,14 @@ impl GameServer {
             admin: match &save_path {
                 Some(path) => crate::admin::Admin::load(&path.with_extension("admin.toml")),
                 None => crate::admin::Admin::in_memory(),
+            },
+            audit: match &save_path {
+                Some(path) => crate::admin::AuditLog::new(
+                    path.with_extension("audit.jsonl"),
+                    audit_log_max_bytes,
+                    audit_log_keep_segments,
+                ),
+                None => crate::admin::AuditLog::in_memory(),
             },
             stopping: false,
             worst_tick: TickCost::default(),
@@ -1596,6 +1635,18 @@ impl GameServer {
                                             "you are the first account here, so you own it.",
                                         );
                                     }
+                                    // Self-registration: whoever is registering is the only
+                                    // identity there is to attribute it to.
+                                    self.audit.record(
+                                        &name,
+                                        if first {
+                                            crate::admin::AuditAction::Claim
+                                        } else {
+                                            crate::admin::AuditAction::Register
+                                        },
+                                        &name,
+                                        &format!("group: {group}"),
+                                    );
                                     info!(account = %name, group = %group, "account registered");
                                 }
                                 // Somebody else took the name while this was hashing.
@@ -1707,10 +1758,17 @@ impl GameServer {
                 // console `claim` command does (`run_console`'s `"claim"` arm) — without the save, a
                 // server claimed through the panel would forget its owner on the next restart (until
                 // some later admin mutation happened to save), and the spent token would linger.
+                let name = account.name.clone();
                 let result = self.admin.insert_account(account);
                 if result.is_ok() {
                     let _ = self.admin.save();
                     self.claim_token = None;
+                    self.audit.record(
+                        &name,
+                        crate::admin::AuditAction::Claim,
+                        &name,
+                        "claimed from the web panel",
+                    );
                 }
                 let _ = reply.send(result);
             }
@@ -1732,6 +1790,7 @@ impl GameServer {
                 let _ = reply.send(self.panel_players());
             }
             ServerEvent::PanelKick {
+                actor,
                 name,
                 reason,
                 reply,
@@ -1748,9 +1807,12 @@ impl GameServer {
                 // The exact two calls `run_admin_command`'s own "kick" arm makes.
                 self.announce(&format!("{name} was kicked: {reason}"));
                 self.kick(target, &reason);
+                self.audit
+                    .record(&actor, crate::admin::AuditAction::Kick, &name, &reason);
                 let _ = reply.send(Ok(()));
             }
             ServerEvent::PanelBan {
+                actor,
                 kind,
                 value,
                 reason,
@@ -1762,16 +1824,57 @@ impl GameServer {
                     reason
                 };
                 // The exact sequence `run_admin_command`'s own "ban" arm runs.
-                self.admin.ban(kind, &value, &reason);
+                self.admin.ban(kind.clone(), &value, &reason, &actor);
                 self.announce(&format!("{value} is banned: {reason}"));
                 if let Some(target) = self.slot_named(&value) {
                     self.kick(target, &reason);
                 }
+                self.audit.record(
+                    &actor,
+                    crate::admin::AuditAction::Ban,
+                    &value,
+                    &format!("{kind:?}: {reason}"),
+                );
                 info!(value, reason, "ban added from the web panel");
                 let _ = reply.send(());
             }
-            ServerEvent::PanelUnban { value, reply } => {
-                let _ = reply.send(self.admin.unban(&value));
+            ServerEvent::PanelUnban {
+                actor,
+                value,
+                reply,
+            } => {
+                let removed = self.admin.unban(&value);
+                if removed > 0 {
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Unban, &value, "");
+                }
+                let _ = reply.send(removed);
+            }
+            ServerEvent::PanelMute {
+                actor,
+                name,
+                reason,
+                duration_secs,
+                reply,
+            } => {
+                let reason = if reason.trim().is_empty() {
+                    "muted from the web panel".to_string()
+                } else {
+                    reason
+                };
+                self.admin.mute(&name, &reason, duration_secs, &actor);
+                self.audit
+                    .record(&actor, crate::admin::AuditAction::Mute, &name, &reason);
+                info!(name, reason, "mute added from the web panel");
+                let _ = reply.send(());
+            }
+            ServerEvent::PanelUnmute { actor, name, reply } => {
+                let removed = self.admin.unmute(&name);
+                if removed {
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Unmute, &name, "");
+                }
+                let _ = reply.send(removed);
             }
             ServerEvent::PanelWhitelist { reply } => {
                 let _ = reply.send(PanelWhitelist {
@@ -1877,6 +1980,9 @@ impl GameServer {
             }
             ServerEvent::PanelDeleteAccount { name, reply } => {
                 let _ = reply.send(self.panel_delete_account(&name));
+            }
+            ServerEvent::PanelAuditTail { n, reply } => {
+                let _ = reply.send(self.audit.tail(n));
             }
             ServerEvent::PanelAuthorize {
                 name,

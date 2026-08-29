@@ -2742,9 +2742,26 @@ impl GameServer {
             .player(slot)
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        // Tagged so the web panel's live feed can tell an in-game chat line apart from an
-        // operational one — both are `info!`, and only the target says which is which.
-        info!(target: crate::term::CHAT_TARGET, "<{name}> {}", chat.text);
+
+        // The per-account chat cooldown — `Config::chat_cooldown_ms`, off by default (`0`). Checked
+        // (and, on acceptance, its clock updated) before the mute check: it is about the *pace* a
+        // connection is sending at, independent of whether the line ends up shadow-muted below.
+        // Dropped silently rather than told to the sender — a cooldown that announced itself would
+        // just teach a determined spammer exactly how fast they are allowed to go.
+        if self.config.chat_cooldown_ms > 0 {
+            let cooldown = Duration::from_millis(self.config.chat_cooldown_ms);
+            let now = Instant::now();
+            if let Some(player) = self.player(slot)
+                && player
+                    .last_chat
+                    .is_some_and(|last| now.duration_since(last) < cooldown)
+            {
+                return Ok(());
+            }
+            if let Some(player) = self.player_mut(slot) {
+                player.last_chat = Some(now);
+            }
+        }
 
         // The text goes out bare, with the author's slot beside it. The client adds the name
         // itself — `ChatHelper.DisplayMessage` prefixes `Main.player[author].name` whenever the
@@ -2752,13 +2769,46 @@ impl GameServer {
         // rendered with the speaker's name twice, and puts the tag inside the speech bubble over
         // their head as well. Found by asking a real server to relay a line and comparing: it
         // sends `"provoke: hello"` where this sent `"<provoke-actor> provoke: hello"`.
-        //
-        // The console line above keeps its own `<name>` because nothing is going to add one there.
         let frame = net_module::chat_broadcast(
             slot,
             &NetworkText::literal(chat.text.clone()),
             [255, 255, 255],
         )?;
+
+        if self.admin.is_muted(&name) {
+            // Shadow-mute: the muted player still sees their own line go out (nothing about the
+            // client-visible behaviour changes, so muting is not obviously detectable and a muted
+            // player cannot simply try a different client/workaround having learned they are
+            // muted), staff see it flagged in the console/live feed, and nobody else receives
+            // anything at all.
+            info!(target: crate::term::CHAT_TARGET, "<{name}> {} [MUTED]", chat.text);
+            self.send(slot, frame);
+
+            // Escalation — `Config::mute_escalation_enabled`, off by default: a still-muted player
+            // who keeps talking has their mute pushed further out each time, capped at
+            // `mute_escalation_max_secs`. Attributed to `"system"`, since the extension itself was
+            // nobody's direct instruction — the original mute's own issuer is unchanged.
+            if self.config.mute_escalation_enabled
+                && let Some(new_until) = self.admin.extend_mute(
+                    &name,
+                    self.config.mute_escalation_secs,
+                    self.config.mute_escalation_max_secs,
+                )
+            {
+                self.audit.record(
+                    "system",
+                    crate::admin::AuditAction::Mute,
+                    &name,
+                    &format!("escalated, now until unix {new_until}"),
+                );
+            }
+            return Ok(());
+        }
+
+        // Tagged so the web panel's live feed can tell an in-game chat line apart from an
+        // operational one — both are `info!`, and only the target says which is which. The console
+        // line above (the muted branch) keeps its own `<name>` for the same reason.
+        info!(target: crate::term::CHAT_TARGET, "<{name}> {}", chat.text);
         self.broadcast(frame, None);
         Ok(())
     }

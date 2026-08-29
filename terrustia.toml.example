@@ -68,3 +68,24 @@ update_check_enabled = true
 # and non-fatal — when no UPnP-capable router answers, or it refuses, this logs a specific fallback
 # message and moves on. Has nothing to do with the panel, which stays loopback-only regardless.
 upnp_enabled = true
+
+# The audit log (admin::audit): every ban, kick, mute, group change and permission edit, one JSON
+# line per event, beside the world. Rotates once the live file would reach audit_log_max_bytes,
+# keeping audit_log_keep_segments rotated segments beyond it.
+audit_log_max_bytes = 8388608
+audit_log_keep_segments = 5
+
+# Moderation toolkit knobs. `/mute` and `/unmute` always work (gated by the server.mute/
+# server.unmute permissions, not by a config flag) — everything below is OFF by default, so a
+# fresh server behaves exactly like vanilla until an operator opts in.
+#
+# Escalate a repeat offender automatically: each time a still-muted player speaks again, their
+# mute is pushed out by mute_escalation_secs, capped at mute_escalation_max_secs from the moment
+# of that escalation (0 means no cap).
+mute_escalation_enabled = false
+mute_escalation_secs = 300
+mute_escalation_max_secs = 3600
+
+# A minimum gap, in milliseconds, between one account's chat lines — a line sent before the
+# previous one's cooldown has elapsed is dropped rather than broadcast. 0 disables it.
+chat_cooldown_ms = 0
