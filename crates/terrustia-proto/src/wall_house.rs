@@ -33,6 +33,39 @@ pub const fn safe(wall: u16) -> bool {
 mod tests {
     use super::*;
 
+    fn expected_unsafe(wall: u16) -> bool {
+        matches!(
+            wall,
+            2 | 3
+                | 7..=9
+                | 13..=15
+                | 28
+                | 40
+                | 48..=59
+                | 61..=65
+                | 69..=71
+                | 79..=81
+                | 83
+                | 86..=87
+                | 94..=99
+                | 170..=171
+                | 178
+                | 180
+                | 185
+                | 187..=222
+                | 244
+                | 349..=350
+        )
+    }
+
+    #[test]
+    fn every_vanilla_wall_bit_matches_the_audited_safe_table() {
+        for wall in 0..WALL_COUNT {
+            let expected = wall != 0 && !expected_unsafe(wall);
+            assert_eq!(safe(wall), expected, "wall {wall}");
+        }
+    }
+
     #[test]
     fn ordinary_player_walls_are_safe() {
         for wall in [1, 4, 16, 17, 66, 108, 112, 236, 304] {
