@@ -53,6 +53,11 @@ pub struct Conditions {
     /// all" and "a frost moon is running instead" alike, since `PumpkinMoonDropGatingChance` only
     /// ever applies to the pumpkin moon's own NPCs, which cannot be alive during the other event.
     pub pumpkin_moon_wave: Option<i32>,
+    /// `NPC.RedHatSkeletronAdjustmentsEnabled()` for *this* Skeletron (`NPC.cs:67435-67446`) —
+    /// per-instance state, not a fact about npc_type 35 in general: the ordinary boss and the
+    /// Clothier's repeatable vanity re-fight share a type and are told apart only by `ai[3]`. The
+    /// caller reads it off the dying NPC itself, the same way `npc_from_statue` does.
+    pub red_hat_skeletron: bool,
 }
 
 /// One conditional drop.
@@ -205,6 +210,19 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     }
     if let Some(trophy) = trophy(npc_type) {
         out.push(sometimes(trophy, 10));
+    }
+
+    // Skeletron's own RedHatSkeletron variant (the Clothier's repeatable, "Chippy" vanity
+    // re-fight): five unconditional items, `ai[3] == 1` on this exact instance
+    // (`NPC.RedHatSkeletronAdjustmentsEnabled`, `NPC.cs:67435-67446`). Independent of
+    // expert/classic mode — `RegisterBoss_Skeletron`'s own `ByCondition(RedHatSkeletron, item)`
+    // calls carry no `NotExpert` wrapper the way the rest of Skeletron's loot does
+    // (`ItemDropDatabase.cs:565-569`), so this sits outside the `!at.expert` gate below rather
+    // than inside `classic_only`.
+    if npc_type == 35 && at.red_hat_skeletron {
+        for item in [5624, 5625, 5626, 5628, 5737] {
+            out.push(always(item));
+        }
     }
 
     // Hardmode's crafting materials. Every one of these is what gates the tier above it, so
@@ -444,6 +462,14 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if npc_type == 253 && at.downed_all_mech_bosses {
         out.push(sometimes(1327, 40));
     }
+    // Mothron: `RegisterEclipse`'s own `LeadingConditionRule(DownedAllMechBosses).OnSuccess(
+    // ExpertGetsRerolls(1570, 4, 1))` (`ItemDropDatabase.cs:201-203`) — the Broken Hero Sword,
+    // modelled at its flat classic rate in every mode, the same `ExpertGetsRerolls` simplification
+    // this module already documents and uses elsewhere (see this function's own comment above the
+    // dungeon-guardian family).
+    if npc_type == 477 && at.downed_all_mech_bosses {
+        out.push(sometimes(1570, 4));
+    }
     // Pixie: `Conditions.BeatAnyMechBoss` (`ItemDropDatabase.cs:75`) — any *one*, not all three,
     // the weaker sibling of the Reaper's gate just above.
     if npc_type == 75 && at.downed_mech_any {
@@ -474,6 +500,21 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
             min: 1,
             max: 1,
         });
+    }
+
+    // Pumpking's and Mourning Wood's own trophies: `rule.OnSuccess(ByCondition(
+    // PumpkinMoonDropGateForTrophies, item))` (`ItemDropDatabase.cs:350`/`360`) — a genuinely
+    // separate roll from the weapon pool in `chance_pools`, both hanging off the same shared
+    // `LeadingConditionRule(PumpkinMoonDropGatingChance)`; see `pumpkin_moon_trophy_gate_denominator`'s
+    // own doc for the formula and its one disclosed simplification.
+    if let Some(wave) = at.pumpkin_moon_wave
+        && let Some(gate) = pumpkin_moon_trophy_gate_denominator(wave)
+    {
+        match npc_type {
+            325 => out.push(sometimes(1855, gate)), // Pumpking (ItemID names these swapped)
+            327 => out.push(sometimes(1856, gate)), // Mourning Wood
+            _ => {}
+        }
     }
 
     // Santa-NK1's Reindeer Bells: `rule2.OnSuccess(ItemDropRule.ByCondition(
@@ -631,6 +672,11 @@ pub fn moon_lord_weapons(npc_type: u16, at: Conditions) -> &'static [u16] {
 pub fn bundled_with(item: u16) -> Option<(u16, i16, i16)> {
     match item {
         1258 => Some((1261, 60, 180)), // Stynger -> Stynger Bolt
+        // Pumpking's own pool (`ItemDropDatabase.cs:347-349`): the Stake Launcher's own ammunition.
+        1835 => Some((1836, 30, 60)), // StakeLauncher -> Stake
+        // Mourning Wood's own pool (`ItemDropDatabase.cs:354-357`): both weapons' own ammunition.
+        1782 => Some((1783, 50, 100)), // CandyCornRifle -> CandyCorn
+        1784 => Some((1785, 25, 50)),  // JackOLanternLauncher -> ExplosiveJackOLantern
         _ => None,
     }
 }
@@ -660,6 +706,30 @@ fn pumpkin_moon_gate_denominator(wave: i32, expert: bool) -> u32 {
         denominator -= 1.0;
     }
     (denominator as i64).max(1) as u32
+}
+
+/// `Conditions.PumpkinMoonDropGateForTrophies.CanDrop` (`Conditions.cs:179-217`) — Pumpking's and
+/// Mourning Wood's own trophies (`ItemID.MourningWoodTrophy`/`PumpkingTrophy`, the constant names
+/// swapped from what they actually drop, the same way the Frost Moon's own three are — see
+/// `trophy`'s own doc comment). Unreachable before wave 15; the denominator then steps
+/// 4 (waves 15-16) -> 3 (17-18) -> 2 (19+).
+///
+/// Expert mode's own further reduction (`if (Main.expertMode && Main.rand.Next(3) == 0) num--;`)
+/// is a *second*, independent, un-seeded roll — not even on `info.rng`, the RNG every other gate
+/// in this module already treats as the one this project's rolls model — so it is left out rather
+/// than approximated with a coin flip this project's drop resolution has nowhere to carry. Modelled
+/// at the wave-only denominator in every mode, a documented under-roll in expert specifically (a
+/// smaller true chance there, never a larger one), the same direction this module's other luck/
+/// expert simplifications already take.
+fn pumpkin_moon_trophy_gate_denominator(wave: i32) -> Option<u32> {
+    if wave < 15 {
+        return None;
+    }
+    Some(match wave {
+        15 | 16 => 4,
+        17 | 18 => 3,
+        _ => 2,
+    })
 }
 
 /// Chance-gated pools: a kill rolls `1` in `one_in` first, and only on success draws one item from
@@ -728,6 +798,30 @@ pub fn chance_pools(npc_type: u16, at: Conditions) -> Vec<ChancePool> {
                 vec![]
             }
         }
+        // Pumpking's own weapon pool: `rule.OnSuccess(new OneFromRulesRule(1, Common(1829),
+        // Common(1831), Common(1835)/*+Stake, via bundled_with*/, Common(1837), Common(1845)))`
+        // (`ItemDropDatabase.cs:347-349`) — a bare `chanceDenominator: 1` pick of one of five once
+        // the shared wave gate passes, so (unlike the scarecrow pool just above) nothing multiplies
+        // it further. The trophy this same `rule` also carries (item 1855) is a separate roll, in
+        // `conditional`.
+        325 => match at.pumpkin_moon_wave {
+            Some(wave) => vec![pool(
+                pumpkin_moon_gate_denominator(wave, at.expert),
+                &[1829, 1831, 1835, 1837, 1845],
+            )],
+            None => vec![],
+        },
+        // Mourning Wood's own pool, the same shape: `rule2.OnSuccess(new OneFromRulesRule(1,
+        // Common(1782)/*+CandyCorn*/, Common(1784)/*+ExplosiveJackOLantern*/, Common(1811),
+        // Common(1826), Common(1801), Common(1802), Common(4680), Common(1798)))`
+        // (`ItemDropDatabase.cs:354-359`). Its own trophy (1856) is likewise in `conditional`.
+        327 => match at.pumpkin_moon_wave {
+            Some(wave) => vec![pool(
+                pumpkin_moon_gate_denominator(wave, at.expert),
+                &[1782, 1784, 1811, 1826, 1801, 1802, 4680, 1798],
+            )],
+            None => vec![],
+        },
         _ => vec![],
     }
 }
@@ -952,23 +1046,10 @@ pub fn conditional_chains(npc_type: u16, at: Conditions) -> Vec<ConditionalChain
         // 7)).OnFailedRoll(Common(1313, 7))` (`ItemDropDatabase.cs:563`) — at most one of
         // Skeletron Hand, Bone Sword and Muramasa per kill, never independently.
         //
-        // NOT modelled here despite being confirmed missing (audit finding D3): npc 35's own
-        // five-item RedHatSkeletron set — `RegisterToNPC(35, ByCondition(RedHatSkeletron, item))`
-        // for 5624/5625/5626/5628/5737, each unconditional (bare default `chanceDenominator: 1`)
-        // once `Conditions.RedHatSkeletron` (`info.npc.RedHatSkeletronAdjustmentsEnabled()`, which
-        // this project's own `spawn_skeletron_from(.., red_hat: bool)` reads back from `ai[3]` —
-        // `crates/terrustia/src/game/server.rs:4222-4230`) is true (`ItemDropDatabase.cs:565-569`).
-        // That is *per-instance* state — the same npc_type 35 fights both the ordinary boss and
-        // this Chippy-vanity re-fight — which `Conditions` has nowhere to carry: every field here
-        // is a fact about the world or the kill site, never about which variant of an npc_type
-        // this particular kill was, and `drop_loot`'s own struct literal
-        // (`crates/terrustia/src/game/server.rs:8613`) lists every field explicitly with no
-        // `..Default::default()`, so adding one breaks that literal — a `server.rs` change, and
-        // this lane's own instructions are explicit that file is out of bounds. Implementing this
-        // unconditionally instead (on every Skeletron kill, red hat or not) was considered and
-        // rejected: it would hand out five vanity items on ordinary Skeletron kills that real
-        // vanilla never gives there at all, trading "missing" for "wrong" rather than fixing
-        // anything. Left for whichever lane owns `server.rs` to wire `ai[3]` through.
+        // npc 35's own five-item RedHatSkeletron set (audit finding D3) is a *separate*,
+        // unconditional roll per item, not part of this fallback chain — see `conditional`'s own
+        // `at.red_hat_skeletron` arm, now that `Conditions` carries the per-instance state it
+        // needs.
         35 | 36 => vec![vec![
             a_few(1281, 7, 1, 1),
             a_few(1273, 7, 1, 1),
@@ -1566,6 +1647,7 @@ mod tests {
             downed_mech_any: true,
             downed_all_mech_bosses: true,
             pumpkin_moon_wave: Some(1),
+            red_hat_skeletron: true,
         };
         // A bunny, a goldfish, a guide.
         for ordinary in [46u16, 1, 22] {
@@ -2203,5 +2285,154 @@ mod tests {
             },
         );
         assert_eq!(expert.len(), 1, "must survive expert mode: {expert:?}");
+    }
+
+    /// `ai[3] == 1` (`Conditions.red_hat_skeletron`, `NPC.cs:67435-67446`) is what unlocks
+    /// Skeletron's own RedHatSkeletron set, and it is unconditional on expert/classic mode
+    /// (`ItemDropDatabase.cs:565-569` carries no `NotExpert` wrapper the way the weapon chain
+    /// does) — audit finding D3.
+    #[test]
+    fn red_hat_skeletron_only_drops_its_own_set_when_ai3_is_set() {
+        const SKELETRON: u16 = 35;
+        const RED_HAT_SET: [u16; 5] = [5624, 5625, 5626, 5628, 5737];
+
+        let ordinary = conditional(SKELETRON, plain());
+        for item in RED_HAT_SET {
+            assert!(
+                !ordinary.iter().any(|d| d.item == item),
+                "an ordinary Skeletron should not drop item {item}"
+            );
+        }
+
+        let red_hat = conditional(
+            SKELETRON,
+            Conditions {
+                red_hat_skeletron: true,
+                ..plain()
+            },
+        );
+        for item in RED_HAT_SET {
+            let drop = red_hat.iter().find(|d| d.item == item).unwrap_or_else(|| {
+                panic!("red-hat Skeletron should drop item {item}: {red_hat:?}")
+            });
+            assert_eq!(drop.one_in, 1, "item {item} should be unconditional");
+        }
+
+        // Expert mode does not gate this set the way it gates the rest of Skeletron's loot.
+        let red_hat_expert = conditional(
+            SKELETRON,
+            Conditions {
+                red_hat_skeletron: true,
+                expert: true,
+                ..plain()
+            },
+        );
+        for item in RED_HAT_SET {
+            assert!(
+                red_hat_expert.iter().any(|d| d.item == item),
+                "item {item} should survive expert mode too: {red_hat_expert:?}"
+            );
+        }
+    }
+
+    /// Mothron's Broken Hero Sword (`ItemDropDatabase.cs:201-203`) only drops once all three
+    /// mechanical bosses are down, the same gate the Reaper Tooth Necklace already uses just
+    /// above this test's own sibling in `conditional_drops.rs`.
+    #[test]
+    fn mothron_only_drops_the_broken_hero_sword_after_all_three_mechs() {
+        const MOTHRON: u16 = 477;
+
+        let too_early = conditional(MOTHRON, plain());
+        assert!(!too_early.iter().any(|d| d.item == 1570));
+
+        let ready = conditional(
+            MOTHRON,
+            Conditions {
+                downed_all_mech_bosses: true,
+                ..plain()
+            },
+        );
+        assert!(ready.iter().any(|d| d.item == 1570 && d.one_in == 4));
+    }
+
+    /// Pumpking's own weapon pool and trophy, both gated on the shared pumpkin-moon wave —
+    /// `ItemDropDatabase.cs:346-353`.
+    #[test]
+    fn pumpking_drops_its_weapon_pool_and_trophy_only_during_a_pumpkin_moon() {
+        const PUMPKING: u16 = 325;
+
+        assert!(
+            chance_pools(PUMPKING, plain()).is_empty(),
+            "no pumpkin moon running at all"
+        );
+        assert!(
+            !conditional(PUMPKING, plain())
+                .iter()
+                .any(|d| d.item == 1855)
+        );
+
+        let at = Conditions {
+            pumpkin_moon_wave: Some(20),
+            ..plain()
+        };
+        let pools = chance_pools(PUMPKING, at);
+        assert_eq!(pools.len(), 1, "{pools:?}");
+        for item in [1829, 1831, 1835, 1837, 1845] {
+            assert!(
+                pools[0].options.contains(&item),
+                "item {item} missing from Pumpking's pool: {pools:?}"
+            );
+        }
+        assert!(
+            conditional(PUMPKING, at).iter().any(|d| d.item == 1855),
+            "wave 20 clears the trophy gate's wave-15 floor"
+        );
+        // Before wave 15 the trophy is unreachable even with the weapon-pool gate open.
+        let early_wave = Conditions {
+            pumpkin_moon_wave: Some(3),
+            ..plain()
+        };
+        assert!(
+            !conditional(PUMPKING, early_wave)
+                .iter()
+                .any(|d| d.item == 1855)
+        );
+    }
+
+    /// Mourning Wood's own pool and trophy, the same shape as Pumpking's —
+    /// `ItemDropDatabase.cs:354-362`.
+    #[test]
+    fn mourning_wood_drops_its_own_pool_and_trophy() {
+        const MOURNING_WOOD: u16 = 327;
+
+        let at = Conditions {
+            pumpkin_moon_wave: Some(20),
+            ..plain()
+        };
+        let pools = chance_pools(MOURNING_WOOD, at);
+        assert_eq!(pools.len(), 1, "{pools:?}");
+        for item in [1782, 1784, 1811, 1826, 1801, 1802, 4680, 1798] {
+            assert!(
+                pools[0].options.contains(&item),
+                "item {item} missing from Mourning Wood's pool: {pools:?}"
+            );
+        }
+        assert!(
+            conditional(MOURNING_WOOD, at)
+                .iter()
+                .any(|d| d.item == 1856)
+        );
+    }
+
+    /// The bundled ammunition for the two new pools, alongside Golem's Stynger.
+    #[test]
+    fn the_pumpkin_moon_bosses_own_weapons_bring_their_own_ammunition() {
+        assert_eq!(bundled_with(1835), Some((1836, 30, 60)), "StakeLauncher");
+        assert_eq!(bundled_with(1782), Some((1783, 50, 100)), "CandyCornRifle");
+        assert_eq!(
+            bundled_with(1784),
+            Some((1785, 25, 50)),
+            "JackOLanternLauncher"
+        );
     }
 }

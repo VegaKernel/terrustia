@@ -1770,11 +1770,17 @@ impl GameServer {
     /// one of these still has to happen.
     pub(super) fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
         // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
-        // *this* NPC came from a statue, not just whether one exists somewhere in the world.
-        let from_statue = self.npcs.remove(index).is_some_and(|npc| npc.from_statue);
+        // *this* NPC came from a statue, not just whether one exists somewhere in the world, and
+        // `RedHatSkeletronAdjustmentsEnabled` (`NPC.cs:67435-67446`) reads `ai[3]` off this exact
+        // instance, not off npc_type 35 in general — the ordinary boss and the Clothier's
+        // repeatable vanity re-fight (`spawn_skeletron_from`'s own `red_hat` flag) share a type.
+        let removed = self.npcs.remove(index);
+        let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
+        let red_hat_skeletron =
+            npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
         self.broadcast_npc_death(index);
         self.drop_coins(value, center);
-        self.drop_loot(npc_type, center, from_statue);
+        self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
         self.note_army_kill(npc_type);
@@ -1829,7 +1835,13 @@ impl GameServer {
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
     /// has fallen.
-    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32), from_statue: bool) {
+    fn drop_loot(
+        &mut self,
+        npc_type: u16,
+        center: (f32, f32),
+        from_statue: bool,
+        red_hat_skeletron: bool,
+    ) {
         let (tx, ty) = (
             (center.0 / crate::game::npc::TILE) as i32,
             (center.1 / crate::game::npc::TILE) as i32,
@@ -1868,6 +1880,7 @@ impl GameServer {
             downed_all_mech_bosses: p.downed_mech1 && p.downed_mech2 && p.downed_mech3,
             pumpkin_moon_wave: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin))
                 .then_some(self.moon.wave),
+            red_hat_skeletron,
         };
 
         // Pools that give exactly one of their options.
@@ -1880,24 +1893,9 @@ impl GameServer {
                 self.broadcast_item(index);
             }
             // Some picks bring a companion item along automatically — Golem's Stynger with its
-            // own ammunition (`ItemDropDatabase.cs:654-656`), the only one of these this
-            // project's drop tables have found so far. Unconditional once the pick lands: real
-            // vanilla's own nested `OnSuccess` has no further gate of its own.
-            if let Some((companion, min, max)) =
-                terrustia_proto::conditional_drops::bundled_with(pick)
-            {
-                let stack = if max > min {
-                    rand::Rng::random_range(&mut self.rng, min..=max)
-                } else {
-                    min
-                };
-                if let Some(index) = self
-                    .items
-                    .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
-                {
-                    self.broadcast_item(index);
-                }
-            }
+            // own ammunition (`ItemDropDatabase.cs:654-656`). Unconditional once the pick lands:
+            // real vanilla's own nested `OnSuccess` has no further gate of its own.
+            self.drop_bundled_companion(pick, center);
         }
         // Moon Lord: two *distinct* items drawn from his own ten-weapon pool
         // (`FromOptionsWithoutRepeatsDropRule`) — empty for every other npc and in expert mode, so
@@ -1932,6 +1930,10 @@ impl GameServer {
             {
                 self.broadcast_item(index);
             }
+            // Pumpking's Stake Launcher and Mourning Wood's own two weapons each bring their own
+            // ammunition the same way Golem's Stynger does above — `bundled_with` is shared rather
+            // than re-checked only from `one_from`'s own loop.
+            self.drop_bundled_companion(pick, center);
         }
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
@@ -1982,6 +1984,28 @@ impl GameServer {
             }
         }
         self.drop_flat_loot(npc_type, center);
+    }
+
+    /// The item a `one_from`/`chance_pools` pick brings with it automatically, if any — Golem's
+    /// Stynger with its own ammunition, Pumpking's Stake Launcher with its own, Mourning Wood's
+    /// two weapons with theirs (`terrustia_proto::conditional_drops::bundled_with`'s own doc).
+    /// Unconditional once the pick lands: real vanilla's own nested `OnSuccess` has no further
+    /// gate of its own.
+    fn drop_bundled_companion(&mut self, pick: u16, center: (f32, f32)) {
+        if let Some((companion, min, max)) = terrustia_proto::conditional_drops::bundled_with(pick)
+        {
+            let stack = if max > min {
+                rand::Rng::random_range(&mut self.rng, min..=max)
+            } else {
+                min
+            };
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
+            {
+                self.broadcast_item(index);
+            }
+        }
     }
 
     /// The unconditional table.
@@ -6199,7 +6223,7 @@ mod difficulty_slider {
         const TREASURE_BAG: i32 = 3318;
 
         let mut gentle = journey_at(0.0);
-        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
         assert!(
             !gentle
                 .items
@@ -6209,7 +6233,7 @@ mod difficulty_slider {
         );
 
         let mut fierce = journey_at(1.0);
-        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
         assert!(
             fierce
                 .items
@@ -6915,7 +6939,7 @@ mod boss_drop_table_fixes {
     /// afterward belongs to that kill alone — no need to diff against a running total.
     fn kill_and_collect(server: &mut GameServer, npc_type: u16) -> Vec<(i32, i16)> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false);
+        server.drop_loot(npc_type, (0.0, 0.0), false, false);
         let mut items: Vec<(i16, i32, i16)> = server
             .items
             .iter()
@@ -7103,6 +7127,96 @@ mod boss_drop_table_fixes {
             "300 trials never drew the Stynger — check the odds"
         );
     }
+
+    /// The four AI-state drop gaps (C1-b item 2): Pumpking's own pool now brings the Stake
+    /// Launcher's ammunition along the same way Golem's Stynger does — the fix threading
+    /// `bundled_with` into `chance_pools`'s own consumer, not just `one_from`'s, alongside the
+    /// weapon pool actually existing for npc 325 at all.
+    #[test]
+    fn pumpkings_stake_launcher_pick_always_brings_its_own_stakes() {
+        const PUMPKING: u16 = 325;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.moon.moon = Some(crate::game::moons::Moon::Pumpkin);
+        server.moon.wave = 1;
+        let mut saw_launcher = false;
+        for trial in 0..300 {
+            let dropped = kill_and_collect(&mut server, PUMPKING);
+            let launcher = dropped.iter().filter(|(id, _)| *id == 1835).count();
+            let stakes = dropped.iter().find(|(id, _)| *id == 1836);
+            assert!(launcher <= 1, "trial {trial}: the pool draws one item");
+            if launcher == 1 {
+                saw_launcher = true;
+                let (_, stack) = *stakes.unwrap_or_else(|| {
+                    panic!("trial {trial}: Stake Launcher without its own Stakes: {dropped:?}")
+                });
+                assert!(
+                    (30..=60).contains(&stack),
+                    "trial {trial}: stake stack {stack} out of the real 30-60 range"
+                );
+            } else {
+                assert!(
+                    stakes.is_none(),
+                    "trial {trial}: stakes without the launcher: {dropped:?}"
+                );
+            }
+        }
+        assert!(saw_launcher, "300 trials never drew the Stake Launcher");
+    }
+
+    /// The RedHatSkeletron seam (C1-b item 2): `npc_died` has to read `ai[3]` off the exact NPC
+    /// instance that just died, before it removes it from the table, and carry that into
+    /// `drop_loot`'s own `Conditions.red_hat_skeletron` — driven through the real `npc_died` entry
+    /// point rather than `drop_loot` directly, since that is where the plumbing this item added
+    /// actually lives.
+    #[test]
+    fn a_red_hat_skeletron_kill_drops_its_own_vanity_set_through_npc_died() {
+        const SKELETRON: u16 = 35;
+        const RED_HAT_SET: [i32; 5] = [5624, 5625, 5626, 5628, 5737];
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(SKELETRON, (0.0, 0.0))
+            .expect("a slot for Skeletron");
+        server.npcs.get_mut(index).expect("just spawned").ai[3] = 1.0;
+        server.items = ItemStore::new();
+
+        server.npc_died(index, SKELETRON, (0.0, 0.0), 0.0);
+
+        let dropped: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+        for item in RED_HAT_SET {
+            assert!(
+                dropped.contains(&item),
+                "item {item} missing from a red-hat Skeletron kill: {dropped:?}"
+            );
+        }
+    }
+
+    /// The control case: an ordinary Skeletron kill (`ai[3]` left at its default) must not carry
+    /// the vanity set — otherwise every Skeletron kill would hand it out, which real vanilla never
+    /// does outside the Clothier's own repeatable re-fight.
+    #[test]
+    fn an_ordinary_skeletron_kill_does_not_drop_the_red_hat_set_through_npc_died() {
+        const SKELETRON: u16 = 35;
+        const RED_HAT_SET: [i32; 5] = [5624, 5625, 5626, 5628, 5737];
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(SKELETRON, (0.0, 0.0))
+            .expect("a slot for Skeletron");
+        server.items = ItemStore::new();
+
+        server.npc_died(index, SKELETRON, (0.0, 0.0), 0.0);
+
+        let dropped: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+        for item in RED_HAT_SET {
+            assert!(
+                !dropped.contains(&item),
+                "an ordinary Skeletron kill should not carry item {item}: {dropped:?}"
+            );
+        }
+    }
 }
 
 /// Real server-side coverage for the numerator fix in `conditional_drops.rs`: `Conditional` used
@@ -7131,7 +7245,7 @@ mod conditional_numerator_fixes {
     /// `boss_drop_table_fixes` for why resetting the store first makes this exact.
     fn kill_and_collect_ids(server: &mut GameServer, npc_type: u16) -> Vec<i32> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false);
+        server.drop_loot(npc_type, (0.0, 0.0), false, false);
         let mut items: Vec<(i16, i32)> = server
             .items
             .iter()
