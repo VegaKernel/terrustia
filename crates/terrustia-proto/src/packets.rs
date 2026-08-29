@@ -980,6 +980,78 @@ mod tests {
         assert!(rewrite_owner(id::PLAYER_CONTROLS, &[], 0).is_err());
     }
 
+    /// Packet `13` at its real, fully-flagged size: every optional trailing block present at once,
+    /// built field-by-field from `MessageBuffer.cs`'s own read order for `case 13`
+    /// (`MessageBuffer.cs:952-1051`), not the two-field minimal frame the tests above use.
+    ///
+    /// This is the single highest-traffic packet in the protocol — every connected client sends one
+    /// on every network tick it moves or acts — and until now nothing pinned its byte layout at
+    /// this size: the two tests above only ever exercise the velocity flag, and
+    /// `relayed_packets_are_attributed_to_the_sender` relays a synthetic three-byte payload that
+    /// happens to have no optional blocks to lose.
+    ///
+    /// Field order and sizes, cited to source:
+    /// `player` (u8) — `MessageBuffer.cs:954`
+    /// `bitsByte24..27` (four u8 flag bytes) — `MessageBuffer.cs:964-967`
+    /// `selectedItemState` (u8) — `MessageBuffer.cs:991`
+    /// `position` (Vector2, 8 bytes) — `MessageBuffer.cs:992`
+    /// `velocity`, gated on `bitsByte25[2]` (Vector2, 8 bytes) — `MessageBuffer.cs:994-997`
+    /// `mount`, gated on `bitsByte25[7]` (u16) — `MessageBuffer.cs:1021-1023`
+    /// `PotionOfReturn` pair, gated on `bitsByte26[6]` (two Vector2, 16 bytes) —
+    ///   `MessageBuffer.cs:1029-1033`
+    /// `netCameraTarget`, gated on `bitsByte27[5]` (Vector2, 8 bytes) — `MessageBuffer.cs:1051`
+    #[test]
+    fn player_controls_round_trips_every_optional_block_at_once() {
+        let mut w = Writer::new();
+        w.u8(7) // player slot
+            .u8(0x40) // bitsByte24: bit 6 -> facing right
+            .u8(0x84) // bitsByte25: bit 2 (velocity) | bit 7 (mount)
+            .u8(0x44) // bitsByte26: bit 2 (sitting) | bit 6 (potion of return)
+            .u8(0x20) // bitsByte27: bit 5 (camera target)
+            .u8(3) // selected item slot
+            .vec2(123.5, 456.25) // position
+            .vec2(-1.5, 2.0) // velocity
+            .u16(5) // mount type
+            .vec2(10.0, 20.0) // PotionOfReturnOriginalUsePosition
+            .vec2(30.0, 40.0) // PotionOfReturnHomePosition
+            .vec2(500.0, 600.0); // netCameraTarget
+        let raw = w.as_slice();
+        assert_eq!(raw.len(), 48, "1 + 4 + 1 + 8 + 8 + 2 + 8 + 8 + 8");
+
+        // Our decoder only needs the fields the server actually uses, and must not choke on — or
+        // silently misread — the trailing mount/potion/camera bytes it does not parse.
+        let controls = PlayerControls::decode(raw).unwrap();
+        assert_eq!(controls.player, 7);
+        assert_eq!(controls.control_flags, [0x40, 0x84, 0x44, 0x20]);
+        assert_eq!(controls.selected_item, 3);
+        assert_eq!(controls.position, (123.5, 456.25));
+        assert_eq!(controls.velocity, Some((-1.5, 2.0)));
+        assert!(controls.facing_right());
+        assert!(controls.sitting());
+
+        // The relay path must reproduce every byte of the optional blocks it cannot itself parse,
+        // not only the fields our own decoder happens to read.
+        let verbatim_frame = verbatim(id::PLAYER_CONTROLS, raw).unwrap();
+        assert_eq!(
+            payload(&verbatim_frame),
+            raw,
+            "verbatim must not touch a byte"
+        );
+        assert_eq!(
+            PlayerControls::decode(payload(&verbatim_frame)).unwrap(),
+            controls
+        );
+
+        let owned_frame = rewrite_owner(id::PLAYER_CONTROLS, raw, 2).unwrap();
+        let owned = payload(&owned_frame);
+        assert_eq!(owned[0], 2, "the owner byte is rewritten");
+        assert_eq!(
+            &owned[1..],
+            &raw[1..],
+            "every byte after the owner, including the mount/potion/camera blocks, is untouched"
+        );
+    }
+
     #[test]
     fn world_data_payload_is_exactly_the_documented_size() {
         // This is the packet that silently hangs a client when a field drifts, so its size is
