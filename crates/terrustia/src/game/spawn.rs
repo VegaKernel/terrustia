@@ -876,7 +876,7 @@ pub fn try_spawn(
             let biome = biome_at(world, x, y);
 
             if medium == crate::game::spawn_medium::SpawnMedium::Water {
-                let spawning_block = world.tile(x, ground).block;
+                let spawning_block = crate::game::spawn_source::block(world, x, ground);
                 let water_pool = crate::game::water_spawn::pool(
                     depth,
                     biome,
