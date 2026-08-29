@@ -640,14 +640,16 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     }
 }
 
-/// How far down the game looks for the solid spawning tile from a chosen point.
+/// How far down the game looks for a solid floor from a chosen point.
 pub const GROUND_SCAN: i32 = 30;
 
-/// Scan downward from the chosen point for the first solid spawning tile, returning its row.
+/// Number of random candidate points vanilla will try before abandoning one spawn attempt.
+pub const SPAWN_SEARCH_ATTEMPTS: usize = 50;
+
+/// Scan downward from the chosen point for the first solid floor, returning its row.
 ///
-/// The chosen point and the spawning tile are deliberately different coordinates. Vanilla first
-/// validates the random point in the spawn area, then resolves the solid spawning tile below it;
-/// biome/source rules use that resolved tile rather than pretending the random point was ground.
+/// This is the early position-validity floor. It deliberately includes platform-like solid-top
+/// tiles; the later spawn-source tile/type resolution is a separate rule and may look through them.
 pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     (from_y..from_y + GROUND_SCAN).find(|&y| {
         let tile = world.tile(x, y);
@@ -839,11 +841,15 @@ pub fn try_spawn(
             continue;
         }
 
-        // Try a handful of candidate tiles rather than scanning the whole area.
-        for _ in 0..20 {
+        // Vanilla retries up to 50 random candidate points before abandoning this spawn attempt.
+        for _ in 0..SPAWN_SEARCH_ATTEMPTS {
             let x = px + rng.random_range(-SPAWN_RANGE_X..=SPAWN_RANGE_X);
             let chosen_y = py + rng.random_range(-SPAWN_RANGE_Y..=SPAWN_RANGE_Y);
-            if x < 10 || chosen_y < 10 || x >= world.width() - 10 || chosen_y >= world.height() - 40 {
+            if x < 10
+                || chosen_y < 10
+                || x >= world.width() - 10
+                || chosen_y >= world.height() - 40
+            {
                 continue;
             }
 
