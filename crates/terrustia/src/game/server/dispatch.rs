@@ -6,47 +6,16 @@
 //! Nothing here is trusted: a handler validates first and gives up quietly rather than panicking,
 //! because the loop that calls it owns the world.
 
-use std::collections::VecDeque;
-
-use bytes::Bytes;
-use rand::Rng;
-use terrustia_proto::{
-    ItemStack, NetworkText, Tile, TileFlags, id,
-    items::ItemOwner,
-    net_module::{self, IncomingChat},
-    npc::damage_taken,
-    npc_data::npc_stats,
-    objects::{
-        self, DoorToggle, RequestChestOpen, RequestSign, SignText, SyncChestItem, SyncPlayerChest,
-    },
-    packets::{
-        self, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn, SpawnTileData,
-        TileAction, TileManipulation,
-    },
-    reader::PacketReader,
-    section::encode_section_packet,
-    square::TileSquare,
-    tile_sets::frame_important,
-};
-use tracing::{debug, info, warn};
-
-use crate::{
-    game::player::{ConnState, Player},
-    game::{housing, spawn},
-    net::Frame,
-    world::{Sign, items},
-};
-
-use super::{
-    GameServer, ITEM_GRAB_RANGE, MAX_QUICK_STACK_SLOTS, MAX_SIGN_TEXT, SECTION_STREAM_BUDGET,
-    SPAM_BREAK_MAX, SPAM_PLACE_MAX, near_section, section_of,
-};
+// The parent module's prelude, wholesale, rather than a copy of it. Sixty-odd packet handlers
+// between them name most of what `server/mod.rs` imports plus about twenty of its own private
+// constants and helpers, and restating all of that here would be a second list to keep in step
+// with the first. The smaller siblings (`console`, `panel`, `tick`) each name what they use.
+use super::*;
 
 impl GameServer {
-
     // ---------------------------------------------------------------- packets
 
-    fn handle_packet(&mut self, slot: u8, frame: Frame) {
+    pub(super) fn handle_packet(&mut self, slot: u8, frame: Frame) {
         let payload = frame.payload;
         let result = match frame.id {
             id::HELLO => self.on_hello(slot, &payload),
@@ -436,7 +405,7 @@ impl GameServer {
     /// earlier-numbered ones finish loading first rather than everyone progressing in lockstep — a
     /// disclosed ordering bias, not a fairness guarantee, since the problem this fixes (one join
     /// stalling everyone already playing) does not depend on joiners being served evenly.
-    fn drain_section_streams(&mut self) {
+    pub(super) fn drain_section_streams(&mut self) {
         let slots: Vec<u8> = self
             .players
             .iter()
@@ -985,7 +954,7 @@ impl GameServer {
     /// place — the ordinary Old Man/Clothier curse (`red_hat = false`) and the Clothier's own
     /// repeatable vanity re-fight (`red_hat = true`, `SpawnSkeletron`'s own `redHatMode` argument,
     /// `NPC.cs:81232-81233`) differ only in that one flag.
-    fn spawn_skeletron_from(&mut self, index: u8, at: (f32, f32), red_hat: bool) {
+    pub(super) fn spawn_skeletron_from(&mut self, index: u8, at: (f32, f32), red_hat: bool) {
         const SKELETRON: u16 = 35;
 
         self.npcs.remove(index);
@@ -1495,7 +1464,7 @@ impl GameServer {
     /// sends packet 7 should go through this rather than `self.world.world_data()` directly, or a
     /// joining client learns everything about the world except whether a party is happening in it
     /// right now.
-    fn world_data(&self) -> terrustia_proto::packets::WorldData {
+    pub(super) fn world_data(&self) -> terrustia_proto::packets::WorldData {
         use terrustia_proto::packets::WorldFlag;
         let mut data = self.world.world_data();
         data.flags
@@ -1508,7 +1477,7 @@ impl GameServer {
     }
 
     /// Tell everyone the world itself has changed — an eclipse begun, a blood moon risen.
-    fn broadcast_world_data(&mut self) {
+    pub(super) fn broadcast_world_data(&mut self) {
         if let Ok(frame) = self.world_data().encode() {
             self.broadcast(frame, None);
         }
@@ -1585,7 +1554,7 @@ impl GameServer {
 
     /// Put a boss somewhere near a player: on the ground, out of arm's reach, or overhead when
     /// there is no ground to be found.
-    fn summon_on_player(&mut self, slot: u8, npc_type: u16) {
+    pub(super) fn summon_on_player(&mut self, slot: u8, npc_type: u16) {
         use terrustia_proto::npc_params::{
             SUMMON_ABOVE, SUMMON_ATTEMPTS, SUMMON_RANGE_X, SUMMON_RANGE_Y, SUMMON_SAFE_X,
             SUMMON_SAFE_Y,
@@ -1776,7 +1745,7 @@ impl GameServer {
     }
 
     /// Let every player's spam budget recover, once a tick.
-    fn tick_tile_spam(&mut self) {
+    pub(super) fn tick_tile_spam(&mut self) {
         for player in self.players.iter_mut().flatten() {
             player.spam_place = (player.spam_place - SPAM_PLACE_DECAY).max(0.0);
             player.spam_break = (player.spam_break - SPAM_BREAK_DECAY).max(0.0);
@@ -2456,7 +2425,7 @@ impl GameServer {
     /// The countdown on screen is this and nothing else. Without it the gap between waves is a
     /// blank pause of unknown length, which is exactly the part of the event a group needs to
     /// plan around.
-    fn broadcast_army_wait(&mut self, ticks: i32) {
+    pub(super) fn broadcast_army_wait(&mut self, ticks: i32) {
         let mut w = terrustia_proto::PacketWriter::new(id::CRYSTAL_INVASION_SEND_WAIT_TIME);
         w.i32(ticks);
         if let Ok(frame) = w.finish() {
@@ -2811,7 +2780,6 @@ fn other_slots(slots: &[u8]) -> Vec<u8> {
     slots.to_vec()
 }
 
-
 /// A join's own tile stream is spread across ticks (`drain_section_streams`) rather than sent in
 /// one synchronous loop inside `on_spawn_tile_data`'s own packet handler — see
 /// `SECTION_STREAM_BUDGET`'s own doc comment for the measured cost this bounds.
@@ -3120,4 +3088,3 @@ mod tile_spam {
     const _: () = assert!(SPAM_BREAK_MAX > SPAM_PLACE_MAX);
     const _: () = assert!(SPAM_BREAK_DECAY > SPAM_PLACE_DECAY);
 }
-
