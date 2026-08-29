@@ -2110,6 +2110,31 @@ impl GameServer {
         self.players.get_mut(slot as usize)?.as_mut()
     }
 
+    /// Take a player out of their slot.
+    ///
+    /// **Known gap, deliberately recorded here rather than left to be rediscovered.** Removing a
+    /// player does not end their connection's read task. Dropping the [`Player`] drops the last
+    /// sender for its outbound queue, which ends `write_loop` and shuts down the *write* half of
+    /// the socket - but `read_loop` keeps going until the client closes or `idle_timeout_secs`
+    /// expires, and keeps forwarding `ServerEvent::Packet { slot }` and, finally,
+    /// `ServerEvent::Leave { slot }` for a slot the game no longer associates with it.
+    ///
+    /// While the slot stays empty that is harmless: every handler goes through
+    /// [`Self::player_mut`], which returns `None`. The gap is that [`Self::allocate_slot`] hands
+    /// out the first free slot, so a newcomer arriving inside that window inherits the number - and
+    /// then the ghost connection's packets are attributed to them, and its eventual `Leave` removes
+    /// them.
+    ///
+    /// This is not new and is not specific to any one caller. Three paths reach here without the
+    /// connection having ended: `/kick`, [`crate::game::server::GameServer::reap_stalled_handshakes`],
+    /// and - reachable by any client with no privilege at all - [`Self::send_bytes`] dropping a
+    /// player whose outbound queue filled up.
+    ///
+    /// The fix is a per-connection epoch: `allocate_slot` hands back `(slot, epoch)`, the
+    /// connection stamps both onto every `Packet` and its `Leave`, and `handle_event` ignores any
+    /// that do not match the epoch currently in the slot. It is contained - the only three places
+    /// that build these events are in `net/connection.rs` - but it changes the shape of
+    /// [`ServerEvent`], so it is called out rather than smuggled in beside an unrelated change.
     fn remove_player(&mut self, slot: u8) {
         // Before the early return, not after it. A client that disconnects mid-check would
         // otherwise hold one of the server's few hashing slots until its worker happened to
