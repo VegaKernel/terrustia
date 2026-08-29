@@ -7,10 +7,15 @@
 
 use super::spawn::{Biome, Depth};
 
+// Preserve Terrustia's existing 1:1:1 weighting between Pink Jellyfish, Shark and Squid while
+// restoring Sea Snail at its source-backed rate of one third as often as Squid. Multiplying the
+// old entries by three keeps their relative probabilities unchanged; one Sea Snail entry then
+// gives Squid:Sea Snail = 3:1 without pretending the whole Ocean distribution is oracle-exact.
 const OCEAN: &[u16] = &[
-    64,  // PinkJellyfish
-    65,  // Shark
-    221, // Squid
+    64, 64, 64, // PinkJellyfish
+    65, 65, 65, // Shark
+    221, 221, 221, // Squid
+    220, // SeaSnail
 ];
 const BLOOD_WATER: &[u16] = &[
     241, // BloodFeeder
@@ -75,10 +80,22 @@ mod tests {
     #[test]
     fn ocean_water_has_existing_aquatic_enemies_and_never_the_crab() {
         let pool = pool(Depth::Surface, Biome::Ocean, false, 53);
-        for npc in [64, 65, 221] {
+        for npc in [64, 65, 220, 221] {
             assert!(pool.contains(&npc), "missing ocean-water npc {npc}");
         }
         assert!(!pool.contains(&67), "Crab is a ground spawn, not a water spawn");
+    }
+
+    #[test]
+    fn sea_snail_is_one_third_as_common_as_squid_without_reweighting_old_ocean_entries() {
+        let squid = OCEAN.iter().filter(|&&npc| npc == 221).count();
+        let snail = OCEAN.iter().filter(|&&npc| npc == 220).count();
+        assert_eq!(squid, snail * 3);
+
+        let pink = OCEAN.iter().filter(|&&npc| npc == 64).count();
+        let shark = OCEAN.iter().filter(|&&npc| npc == 65).count();
+        assert_eq!(pink, squid, "preserve the old Pink Jellyfish:Squid ratio");
+        assert_eq!(shark, squid, "preserve the old Shark:Squid ratio");
     }
 
     #[test]
@@ -130,7 +147,7 @@ mod tests {
 
     #[test]
     fn every_water_pool_id_exists_in_this_build() {
-        for npc in [58, 63, 64, 65, 102, 103, 157, 221, 241, 242] {
+        for npc in [58, 63, 64, 65, 102, 103, 157, 220, 221, 241, 242] {
             assert!(
                 terrustia_proto::npc_data::npc_stats(npc).is_some(),
                 "water pool names unknown NPC {npc}"
