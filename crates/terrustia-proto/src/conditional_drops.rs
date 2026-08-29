@@ -1337,16 +1337,212 @@ mod tests {
         );
     }
 
+    /// The progression chain's items exist, at the exact vanilla roll — not just presence.
+    ///
+    /// `the_progression_chain_is_unbroken` above only checks that each item can drop at all. That
+    /// caught missing items, but a rate that quietly drifted (an `OnFailedRoll` fallback promoted to
+    /// the primary roll, a `min`/`max` transposed, a `ByCondition` denominator typo'd) would pass it
+    /// just as happily — a link that drops the right item nine times rarer than vanilla is still "on
+    /// the chain" by that test's own standard. This is the other half: the exact `one_in` and stack
+    /// range each link uses in a classic, non-expert world, each cited to the `ItemDropDatabase.cs`
+    /// call that registers it. Expert/master replace the item with (or add to) a treasure bag instead
+    /// — covered separately by `expert_turns_a_boss_into_a_bag` — so every row here is evaluated
+    /// under the same `Conditions.NotExpert` gate real vanilla uses.
+    #[test]
+    fn the_progression_chain_rates_match_vanilla() {
+        /// One progression-critical drop, pinned against the exact call that registers it.
+        struct Row {
+            boss: u16,
+            item: u16,
+            one_in: u32,
+            min: i16,
+            max: i16,
+            world_is_crimson: bool,
+            source: &'static str,
+        }
+
+        const ROWS: &[Row] = &[
+            Row {
+                boss: 4,
+                item: 56,
+                one_in: 1,
+                min: 30,
+                max: 90,
+                world_is_crimson: false,
+                source: "Eye of Cthulhu -> Demonite Ore (corruption world): \
+                         `ByCondition(condition3, 56, 1, 30, 90)`, ItemDropDatabase.cs:487",
+            },
+            // Item 56 has *two* independent registrations against npc 13-15 in source: a small
+            // per-segment roll every worm piece can drop (`by_mode`'s own
+            // `DropBasedOnMasterAndExpertMode`, ItemDropDatabase.cs:512) and this one, gated on
+            // `LegacyHack_IsBossAndNotExpert` (true only for the segment the game itself flags as
+            // the boss, ordinarily the head) at a flat, always-on `chanceDenominator: 1`. `conditional`
+            // registers `classic_only`'s entries before `by_mode`'s (`conditional_drops.rs:253` runs
+            // ahead of `:492`), so this is the one a plain `.find()` on item 56 actually reaches —
+            // and, being unconditional rather than a 1-in-2 roll, it is the more reliable source of
+            // the ore for progression purposes regardless.
+            Row {
+                boss: 13,
+                item: 56,
+                one_in: 1,
+                min: 20,
+                max: 60,
+                world_is_crimson: false,
+                source: "Eater of Worlds -> Demonite Ore (boss-flagged segment): \
+                         `ByCondition(condition2, 56, 1, 20, 60)`, ItemDropDatabase.cs:517",
+            },
+            Row {
+                boss: 266,
+                item: 880,
+                one_in: 1,
+                min: 40,
+                max: 90,
+                world_is_crimson: false,
+                source: "Brain of Cthulhu -> Crimtane Ore: `ByCondition(condition, 880, 1, 40, 90)`, \
+                         ItemDropDatabase.cs:498",
+            },
+            Row {
+                boss: 113,
+                item: 367,
+                one_in: 1,
+                min: 1,
+                max: 1,
+                world_is_crimson: false,
+                source: "Wall of Flesh -> Pwnhammer: `ByCondition(condition, 367)`, \
+                         ItemDropDatabase.cs:580",
+            },
+            Row {
+                boss: 134,
+                item: 548,
+                one_in: 1,
+                min: 25,
+                max: 40,
+                world_is_crimson: false,
+                source: "The Destroyer -> Soul of Might: `ByCondition(condition, 548, 1, 25, 40)`, \
+                         ItemDropDatabase.cs:453",
+            },
+            Row {
+                boss: 125,
+                item: 549,
+                one_in: 1,
+                min: 25,
+                max: 40,
+                world_is_crimson: false,
+                source: "The Twins -> Soul of Sight: `Common(549, 1, 25, 40)`, \
+                         ItemDropDatabase.cs:465",
+            },
+            Row {
+                boss: 127,
+                item: 547,
+                one_in: 1,
+                min: 25,
+                max: 40,
+                world_is_crimson: false,
+                source: "Skeletron Prime -> Soul of Fright: `ByCondition(condition, 547, 1, 25, \
+                         40)`, ItemDropDatabase.cs:440",
+            },
+            Row {
+                boss: 134,
+                item: 1225,
+                one_in: 1,
+                min: 15,
+                max: 30,
+                world_is_crimson: false,
+                source: "a mechanical boss -> Hallowed Bar: `ByCondition(condition, 1225, 1, 15, \
+                         30)`, ItemDropDatabase.cs:452",
+            },
+            Row {
+                boss: 262,
+                item: 1141,
+                one_in: 1,
+                min: 1,
+                max: 1,
+                world_is_crimson: false,
+                source: "Plantera -> Temple Key: `Common(1141)`, ItemDropDatabase.cs:420",
+            },
+            Row {
+                boss: 245,
+                item: 1294,
+                one_in: 4,
+                min: 1,
+                max: 1,
+                world_is_crimson: false,
+                source: "Golem -> Picksaw: `ByCondition(condition, 1294, 4)`, \
+                         ItemDropDatabase.cs:652",
+            },
+            Row {
+                boss: 398,
+                item: 3460,
+                one_in: 1,
+                min: 70,
+                max: 90,
+                world_is_crimson: false,
+                source: "Moon Lord -> Luminite: `ByCondition(condition, 3460, 1, 70, 90)`, \
+                         ItemDropDatabase.cs:604",
+            },
+        ];
+
+        let mut wrong = Vec::new();
+        for row in ROWS {
+            let at = Conditions {
+                hard_mode: true,
+                other_twin_dead: true,
+                world_is_crimson: row.world_is_crimson,
+                ..plain()
+            };
+            let got = conditional(row.boss, at)
+                .into_iter()
+                .find(|d| d.item == row.item);
+            match got {
+                Some(d)
+                    if d.one_in == row.one_in
+                        && d.numerator == 1
+                        && d.min == row.min
+                        && d.max == row.max => {}
+                Some(d) => wrong.push(format!(
+                    "{}\n    got one_in={} numerator={} min={} max={}, want one_in={} min={} max={}",
+                    row.source, d.one_in, d.numerator, d.min, d.max, row.one_in, row.min, row.max
+                )),
+                None => wrong.push(format!("{}\n    not found", row.source)),
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} progression rate(s) drifted from vanilla:\n  {}",
+            wrong.len(),
+            wrong.join("\n  "),
+        );
+    }
+
     /// The Lunatic Cultist gives up the Ancient Manipulator.
     ///
     /// Not on the chain above because the Moon Lord can be reached without it — but every Luminite
     /// item in the game is crafted at it, so without this the ending leads nowhere.
+    ///
+    /// This test used to assert item **3372** — `ItemID.BossMaskCultist`, the Lunatic Cultist's
+    /// cosmetic boss mask (`ItemDropDatabase.cs:590`), not the Ancient Manipulator at all
+    /// (`ItemID.LunarCraftingStation`, item **3549**, `ItemDropDatabase.cs:591`). It passed anyway,
+    /// because `npc_drops::drops(439)` genuinely does carry both entries — so the test was checking
+    /// the wrong claim and the doc comment's own claim went unverified. Same failure mode the
+    /// `plantera_drops_the_temple_key` test above already documents finding once: a passing test
+    /// naming the wrong item. Now checks 3549, and its exact rate alongside it.
     #[test]
     fn the_cultist_drops_the_ancient_manipulator() {
-        assert!(
-            crate::npc_drops::drops(439)
-                .iter()
-                .any(|chain| chain.iter().any(|d| d.item == 3372)),
+        const ANCIENT_MANIPULATOR: u16 = 3549;
+        let found = crate::npc_drops::drops(439)
+            .iter()
+            .flat_map(|chain| chain.iter())
+            .find(|d| d.item == ANCIENT_MANIPULATOR);
+        // `RegisterToNPC(type, ItemDropRule.Common(3549));` (`ItemDropDatabase.cs:591`) — no
+        // `ByCondition`, so this is unconditional and always lands: one_in 1, min/max 1.
+        assert_eq!(
+            found.copied(),
+            Some(crate::npc_drops::Drop {
+                item: ANCIENT_MANIPULATOR,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }),
         );
     }
 
