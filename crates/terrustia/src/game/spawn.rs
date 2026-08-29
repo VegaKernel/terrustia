@@ -737,21 +737,20 @@ fn town_npcs_near(npcs: &NpcStore, at: (f32, f32)) -> u32 {
 /// cannot otherwise have, so they want to be a find rather than a fixture.
 const BOUND_RARITY: u32 = 120;
 
-/// Somebody still tied up somewhere in this world, if any are left to find.
+/// Somebody still tied up who is actually allowed to appear at this candidate tile.
 ///
-/// Refuses anyone already rescued *and* anyone already standing about waiting to be talked to, so
-/// a world cannot end up with two Mechanics or a corridor full of bound wizards.
-fn pick_bound(world: &World, npcs: &NpcStore, rng: &mut SmallRng) -> Option<u16> {
-    let waiting: Vec<u16> = crate::game::rescues::RESCUES
-        .iter()
-        .map(|r| r.bound)
-        .filter(|bound| crate::game::rescues::still_bound(&world.progress, *bound))
-        .filter(|bound| {
-            !npcs
-                .iter()
-                .any(|(_, n)| n.npc_type == *bound && n.is_alive())
-        })
-        .collect();
+/// Progression, location, already-rescued state and both the bound/freed live forms are filtered by
+/// `bound_spawn::candidates`; this function owns only the random choice among legal candidates.
+fn pick_bound(
+    world: &World,
+    npcs: &NpcStore,
+    x: i32,
+    y: i32,
+    depth: Depth,
+    biome: Biome,
+    rng: &mut SmallRng,
+) -> Option<u16> {
+    let waiting = crate::game::bound_spawn::candidates(world, npcs, x, y, depth, biome);
     if waiting.is_empty() {
         return None;
     }
@@ -872,6 +871,7 @@ pub fn try_spawn(
             }
 
             let depth = depth_at(world, y);
+            let biome = biome_at(world, x, y);
             // An event owns the surface while it runs, and nothing below it.
             let event_type = if events.running() && depth == Depth::Surface {
                 match (events.moon, events.eclipse) {
@@ -893,14 +893,12 @@ pub fn try_spawn(
             } else {
                 None
             };
-            // Somebody tied up, once in a long while, deep enough down to be worth finding.
-            //
-            // Rare and unique on purpose: these six are the *only* way their residents ever
-            // arrive, so one of them failing to appear is a whole townsperson missing — the
-            // Mechanic, and with her every piece of wire in the game.
-            if matches!(depth, Depth::Underground | Depth::Cavern)
-                && rng.random_range(0..BOUND_RARITY) == 0
-                && let Some(bound) = pick_bound(world, npcs, rng)
+            // Somebody tied up, once in a long while, wherever that particular rescue is actually
+            // legal. The eligibility table owns progression and location; the old generic
+            // Underground/Cavern gate made the surface Angler impossible and let the wrong rescue
+            // appear in whatever cave happened to roll first.
+            if rng.random_range(0..BOUND_RARITY) == 0
+                && let Some(bound) = pick_bound(world, npcs, x, y, depth, biome, rng)
             {
                 out.push((bound, (x as f32 * 16.0, y as f32 * 16.0)));
                 break;
@@ -909,7 +907,6 @@ pub fn try_spawn(
             let npc_type = match event_type {
                 Some(npc_type) => npc_type,
                 None => {
-                    let biome = biome_at(world, x, y);
                     let ordinary = pool(depth, biome, world.day_time);
                     // Hardmode adds to what a place had rather than replacing it, so a hardmode
                     // forest still has zombies in it. The underworld's additions wait for a
@@ -1396,7 +1393,7 @@ mod tests {
 
 /// Whether an NPC type counts against an invasion's remaining size.
 ///
-/// Only the invasion's own members count. A goblin army is not shortened by killing the bats that
+/// Only an invasion's own members count. A goblin army is not shortened by killing the bats that
 /// happened to be in the way, and the game keeps these rosters as flat lists for exactly that
 /// reason.
 pub fn belongs_to(kind: crate::game::event::Invasion, npc_type: u16) -> bool {
