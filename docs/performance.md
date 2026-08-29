@@ -64,8 +64,8 @@ player, unconditionally, roughly once a tick — genuinely O(n²) in player coun
 *how* the population arrived. `OUTBOUND_PER_PLAYER` (256) was sized against the join-time theory's
 own numbers (~200 frames per peer, paid once) — comfortably inside the old 73,472-frame queue — not
 against steady-state movement relay, which is what actually overflowed it. See
-`net/connection.rs`'s own doc comment on `OUTBOUND_PER_PLAYER` and `plan.md`'s corrections section
-for the full account.
+`net/connection.rs`'s own doc comment on `OUTBOUND_PER_PLAYER` and the pre-roadmap ledger's
+corrections section (`plan.md`, in git history) for the full account.
 
 **The fix**: `OUTBOUND_PER_PLAYER` is now 4,096. The depth formula's shape did not need to change,
 only its per-player calibration — real, disclosed simplicity over cleverness. This is a mitigation,
@@ -164,7 +164,7 @@ threaded through the whole ~50-pass sequence. Two passes running on different th
 need their own RNG state to be sound at all, which means reseeding, which means every pass
 downstream of the split draws different random numbers than it does today. That is not an
 implementation detail — it would silently change the *already-measured, already-published*
-per-seed counts this project's own `plan.md` Done table carries for roughly twenty Tier 2/3 passes
+per-seed counts this project's pre-roadmap ledger (`plan.md`, in git history) carries for roughly twenty Tier 2/3 passes
 (jungle shrines, pyramids, cabins, ruins, speleothems and more, each pinned against seeds
 999/4242/12345). Chasing pass-level concurrency here would mean re-verifying every one of those
 rows for a codebase-wide behaviour change well outside this task's own brief.
@@ -180,7 +180,8 @@ their own loop; `quick_cleanup`/`tile_cleanup`/`final_cleanup` are RNG-free but 
 horizontal neighbour (`x-1`/`x+1`) whose value, inside the current sequential pass, can itself
 already have been modified earlier in that same run — genuinely ambiguous to parallelize safely
 without either a fresh read of vanilla's own source (unavailable this session — the decompiled tree
-was wiped by a tmp-reaper earlier in this project's history, see `plan.md`) or an expensive
+was wiped by a tmp-reaper earlier in this project's history, see the pre-roadmap ledger in git
+history) or an expensive
 per-pass empirical proof that a snapshot-based rewrite changes nothing; `broken_trap_cleanup` is a
 wire-circuit flood that can span the whole world, not local to any column range at all.
 
@@ -268,7 +269,7 @@ instead of one. The items/NPCs/`TilesSent`/`INITIAL_SPAWN` steps that used to ru
 loop now run once a player's own queue actually empties, in a new `finish_join_stream`. A joining
 player was already sitting on a loading screen for the whole burst regardless, so a few extra ticks
 of load time costs them nothing visible, in exchange for never freezing everyone else already
-playing. See `plan.md`'s own Done entry for this fix for the full writeup and its three pinned
+playing. See the pre-roadmap ledger's Done entry for this fix (`plan.md`, in git history) for the full writeup and its three pinned
 tests. `section_cache` itself was never the problem — it does exactly what this page already
 documented it doing; the problem was only ever the first, uncached pass through a join burst, now
 paced rather than synchronous.

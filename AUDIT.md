@@ -3,8 +3,8 @@
 What's actually been checked, what was wrong when it was, and how each finding was verified fixed
 rather than assumed fixed. This is not a marketing document — a finding that's still open says so.
 
-`plan.md` is the live, line-by-line ledger this is drawn from; that file gets updated the moment a
-finding lands, this one is the readable summary of it.
+The pre-roadmap ledger this was drawn from (`plan.md`, folded into `TODO.md` and kept in git
+history) was updated the moment a finding landed; this file is the readable summary of it.
 
 ## How audits happen here
 
@@ -107,5 +107,5 @@ actual `release.yml` run; the two jobs share the same fix but a real tag push ha
   — vanilla trusts the client for both, and diverging would change how the game plays. See
   `SECURITY.md` for the full reasoning.
 - The remaining feature-completeness gaps (worldgen biome set-pieces, Journey mode, the rest of town
-  NPC combat, most enemy drop tables, and more) are tracked in `plan.md`, not repeated here — this
+  NPC combat, most enemy drop tables, and more) are tracked in `TODO.md`, not repeated here — this
   document is about what's been checked for correctness and safety, not a feature checklist.
