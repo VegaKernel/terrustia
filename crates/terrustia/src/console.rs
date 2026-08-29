@@ -61,11 +61,11 @@ const PLAYER_ARG_COMMANDS: &[&str] = &["kick", "ban", "unban"];
 /// Commands whose second word is worth completing against the known groups.
 const GROUP_ARG_COMMANDS: &[&str] = &["group"];
 
-/// Start the console. Sticky raw-mode editing when both ends of stdio are a real terminal;
-/// otherwise exactly the behaviour this replaces — a plain line reader — so a service started
-/// with no terminal, or a piped `echo stop | terrustia`, keeps working unchanged.
-pub fn spawn(events: mpsc::Sender<ServerEvent>) -> tokio::task::JoinHandle<()> {
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+/// Start the console. Sticky raw-mode editing when both ends of stdio are a real terminal and the
+/// operator did not ask for headless; otherwise the plain line reader, so a service started with no
+/// terminal, a piped `echo stop | terrustia`, or an explicit `--headless` keeps working unchanged.
+pub fn spawn(events: mpsc::Sender<ServerEvent>, headless: bool) -> tokio::task::JoinHandle<()> {
+    if !headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         // `event::read()` blocks the OS thread it runs on waiting for a keypress; a tokio worker
         // thread must never be parked like that, which is exactly what `spawn_blocking` is for.
         // Sending the resulting `ServerEvent`s back onto the async side uses the blocking
@@ -361,7 +361,7 @@ fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
         }
     })();
 
-    term::set_prompt_drawn("");
+    term::clear_footer();
     let _ = terminal::disable_raw_mode();
     if let Err(e) = result {
         tracing::warn!(error = %e, "console input closed");
@@ -395,7 +395,14 @@ fn dispatch(events: &mpsc::Sender<ServerEvent>, editor: &mut Editor, key: KeyEve
             term::redraw_prompt(&editor.rendered(), 0);
         }
         KeyCode::Char('d') if ctrl => {
-            return Dispatch::Stop;
+            // Ctrl-D exits only on an empty line, the way a shell does. On a half-typed command it
+            // clears the line instead, so an adjacent-key typo cannot silently discard the text and
+            // take the whole server down with it.
+            if editor.buf.is_empty() {
+                return Dispatch::Stop;
+            }
+            editor.clear();
+            term::redraw_prompt(&editor.rendered(), 0);
         }
         KeyCode::Char(c) if !ctrl => {
             editor.insert(c);

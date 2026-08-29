@@ -314,6 +314,11 @@ struct Footer {
     status: String,
     prompt: String,
     cursor_back: usize,
+    /// Physical rows the footer occupied after its last draw, so the next redraw erases exactly
+    /// that many. A prompt or status wider than the terminal wraps onto several rows, and erasing
+    /// only one left the rest on screen, stacking a fresh copy below on every keystroke; tracking
+    /// the real count is what stops that.
+    drawn_rows: usize,
 }
 
 static FOOTER: OnceLock<Mutex<Footer>> = OnceLock::new();
@@ -322,72 +327,136 @@ fn footer_lock() -> &'static Mutex<Footer> {
     FOOTER.get_or_init(|| Mutex::new(Footer::default()))
 }
 
-/// Tell the shared state what the console currently has drawn. Called by `console.rs` on exit to
-/// clear the prompt; the drawing on every keystroke is done by [`redraw_prompt`].
-pub fn set_prompt_drawn(current: &str) {
-    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.prompt.clear();
-    guard.prompt.push_str(current);
+/// The terminal width in columns, for working out how many physical rows a line wraps into. Falls
+/// back to 80 when there is no terminal to ask; a footer is only ever drawn when one exists.
+fn terminal_cols() -> usize {
+    crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .unwrap_or(80)
+        .max(1)
 }
 
-/// Erase one row and return the cursor to column 0. Pulled out as a constant so the composition
-/// below is one string operation, not several.
-const ERASE: &str = "\r\x1b[2K";
-
-/// The bytes that erase the whole footer from the screen, leaving the cursor at column 0 of its
-/// topmost row: nothing when no prompt is shown, one erased row for a bare prompt, two when a
-/// status line sits above it.
-fn footer_erase(f: &Footer) -> String {
-    if f.prompt.is_empty() {
-        String::new()
-    } else if f.status.is_empty() {
-        ERASE.to_string()
-    } else {
-        format!("{ERASE}\x1b[1A{ERASE}")
+/// How many visible columns a rendered line occupies, skipping ANSI CSI escapes (colour and cursor
+/// moves) and counting each UTF-8 character as one column. Good enough for the narrow content a
+/// prompt and status line hold; it is not a full character-width table.
+fn visible_len(line: &str) -> usize {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    let mut cols = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            i += 1;
+            if i < bytes.len() && bytes[i] == b'[' {
+                i += 1;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            if bytes[i] & 0xC0 != 0x80 {
+                cols += 1;
+            }
+            i += 1;
+        }
     }
+    cols
 }
 
-/// The bytes that draw the footer, assuming the cursor starts at column 0 of where its top row
-/// goes, and leaving it at the prompt's own edit point (`cursor_back` columns from the end).
-fn footer_draw(f: &Footer) -> String {
+/// Physical rows one logical line takes at this width.
+fn line_rows(line: &str, cols: usize) -> usize {
+    visible_len(line).div_ceil(cols).max(1)
+}
+
+/// Physical rows the whole footer (the status line, if any, above the prompt) takes at this width.
+fn footer_rows(f: &Footer, cols: usize) -> usize {
+    if f.prompt.is_empty() {
+        return 0;
+    }
+    let mut rows = line_rows(&f.prompt, cols);
+    if !f.status.is_empty() {
+        rows += line_rows(&f.status, cols);
+    }
+    rows
+}
+
+/// The bytes that erase a footer of `drawn_rows` physical rows, given the cursor sits somewhere on
+/// its bottom row: return to column 0, move up to the top row, and clear from there to the end of
+/// the screen. Clearing to end of screen rather than one row at a time is what keeps a wrapped
+/// prompt from leaving stranded copies above the cursor.
+fn erase_seq(drawn_rows: usize) -> String {
+    if drawn_rows == 0 {
+        return String::new();
+    }
+    let mut s = String::from("\r");
+    if drawn_rows > 1 {
+        let _ = write!(s, "\x1b[{}A", drawn_rows - 1);
+    }
+    s.push_str("\x1b[0J");
+    s
+}
+
+/// The bytes that draw the footer from column 0 of its top row, leaving the cursor at the prompt's
+/// edit point. `cursor_back` is honoured only while the prompt fits on one row, since positioning
+/// the cursor back across a wrap is not worth the arithmetic for a rare case.
+fn draw_seq(f: &Footer, cols: usize) -> String {
     if f.prompt.is_empty() {
         return String::new();
     }
-    let mut s = if f.status.is_empty() {
-        f.prompt.clone()
-    } else {
-        format!("{}\r\n{}", f.status, f.prompt)
-    };
-    if f.cursor_back > 0 {
+    let mut s = String::new();
+    if !f.status.is_empty() {
+        s.push_str(&f.status);
+        s.push_str("\r\n");
+    }
+    s.push_str(&f.prompt);
+    if f.cursor_back > 0 && line_rows(&f.prompt, cols) == 1 {
         let _ = write!(s, "\x1b[{}D", f.cursor_back);
     }
     s
 }
 
-/// Build the exact bytes a log write should emit: erase the footer, write the line, redraw the
-/// footer beneath it. Split from the stdout write so it can be checked as a pure function — this is
-/// the whole concurrency contract. The no-status paths are byte-for-byte what they always were.
-fn compose_log_write(footer: &Footer, line: &str) -> String {
-    if footer.prompt.is_empty() {
-        format!("{line}\n")
-    } else if footer.status.is_empty() {
-        format!("{ERASE}{line}\r\n{}", footer.prompt)
-    } else {
-        format!(
-            "{ERASE}\x1b[1A{ERASE}{line}\r\n{}\r\n{}",
-            footer.status, footer.prompt
-        )
+/// Redraw the footer in place after its state changed, emitting `middle` (a log line and its line
+/// break, or nothing) between erasing the rows it drew last and drawing the new ones. Every writer
+/// funnels through here, so the erase always matches what was last drawn, and the new physical row
+/// count is remembered for next time.
+fn redraw_footer(f: &mut Footer, middle: &str) {
+    let cols = terminal_cols();
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+    if !middle.is_empty() {
+        let _ = out.write_all(middle.as_bytes());
     }
+    let _ = out.write_all(draw_seq(f, cols).as_bytes());
+    let _ = out.flush();
+    f.drawn_rows = footer_rows(f, cols);
 }
 
-/// Write one already-rendered line, erasing and redrawing the footer around it under one lock so a
-/// second writer — another log line, or the console's own next keystroke — can never interleave.
+/// Erase the drawn footer and forget it, for the console's exit path so it does not leave a stale
+/// prompt row glued onto whatever prints next.
+pub fn clear_footer() {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.drawn_rows > 0 {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+        let _ = out.flush();
+    }
+    *f = Footer::default();
+}
+
+/// Write one already-rendered line, floating the footer above it under one lock so a second writer
+/// (another log line, or the console's next keystroke) can never interleave. With no prompt shown
+/// (a non-interactive console) it is a plain `writeln!`, exactly as before.
 fn write_line_coordinated(line: &str) {
-    let guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let composed = compose_log_write(&guard, line);
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(composed.as_bytes());
-    let _ = out.flush();
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.prompt.is_empty() {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+        return;
+    }
+    redraw_footer(&mut f, &format!("{line}\r\n"));
 }
 
 /// Print a line under the same coordination as a log write, for output unrelated to `tracing` —
@@ -401,30 +470,16 @@ pub fn print_notice(line: &str) {
 /// lock, with the cursor restored to the prompt's edit point, so it never disturbs a half-typed
 /// command. While no prompt is shown (a non-interactive console) it is stored but not drawn.
 pub fn set_status(status: &str) {
-    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
-    if guard.status == status {
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if f.status == status {
         return;
     }
-    if guard.prompt.is_empty() {
-        guard.status.clear();
-        guard.status.push_str(status);
+    f.status.clear();
+    f.status.push_str(status);
+    if f.prompt.is_empty() {
         return;
     }
-    let before = Footer {
-        status: guard.status.clone(),
-        prompt: guard.prompt.clone(),
-        cursor_back: guard.cursor_back,
-    };
-    guard.status.clear();
-    guard.status.push_str(status);
-    let after = Footer {
-        status: guard.status.clone(),
-        prompt: guard.prompt.clone(),
-        cursor_back: guard.cursor_back,
-    };
-    let mut out = std::io::stdout().lock();
-    let _ = write!(out, "{}{}", footer_erase(&before), footer_draw(&after));
-    let _ = out.flush();
+    redraw_footer(&mut f, "");
 }
 
 /// Redraw the console's own prompt line under the shared lock, storing the cursor offset so a status
@@ -434,16 +489,11 @@ pub fn set_status(status: &str) {
 /// point is not at the end of the line (arrowed left, then typed). Done under the same write as the
 /// redraw, so no log line can land between the text landing and the cursor settling on it.
 pub fn redraw_prompt(current: &str, cursor_back: usize) {
-    let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
-    guard.prompt.clear();
-    guard.prompt.push_str(current);
-    guard.cursor_back = cursor_back;
-    let mut out = std::io::stdout().lock();
-    let _ = write!(out, "{ERASE}{current}");
-    if cursor_back > 0 {
-        let _ = write!(out, "\x1b[{cursor_back}D");
-    }
-    let _ = out.flush();
+    let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
+    f.prompt.clear();
+    f.prompt.push_str(current);
+    f.cursor_back = cursor_back;
+    redraw_footer(&mut f, "");
 }
 
 impl<S> Layer<S> for TermLayer
@@ -600,13 +650,16 @@ impl Stage {
         }
         let done = done_line(self.palette, &self.label, detail);
         if self.tty {
-            // Replace the spinner in place and clear the shared prompt, so a later log line does not
-            // try to redraw a stage that has already ended.
-            let mut guard = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
-            guard.prompt.clear();
+            // Erase the spinner (however many rows it wrapped into) and print the finished line in
+            // its place, then forget the prompt so a later log line does not redraw a stage that
+            // has already ended.
+            let mut f = footer_lock().lock().unwrap_or_else(|e| e.into_inner());
             let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{ERASE}{done}");
+            let _ = out.write_all(erase_seq(f.drawn_rows).as_bytes());
+            let _ = writeln!(out, "{done}");
             let _ = out.flush();
+            f.prompt.clear();
+            f.drawn_rows = 0;
         } else {
             write_line_coordinated(&done);
         }
@@ -857,76 +910,71 @@ mod tests {
         );
     }
 
-    /// The whole concurrency contract, as a pure function: what should a log write actually send
-    /// to the terminal, given what the console currently has drawn? This is the piece that matters
-    /// most and the one a real terminal cannot easily prove — get this string right and the actual
-    /// `write_all` call underneath it is not where a bug could hide.
+    /// The wrap arithmetic is the whole concurrency contract, and the one a real terminal cannot
+    /// easily prove. `visible_len` counts the columns a line occupies, ignoring the ANSI colour and
+    /// cursor escapes that take no space.
     #[test]
-    fn a_log_line_with_no_prompt_showing_is_written_plainly() {
-        assert_eq!(
-            compose_log_write(&Footer::default(), "world ready"),
-            "world ready\n"
-        );
+    fn visible_len_ignores_ansi_escapes() {
+        assert_eq!(visible_len("hello"), 5);
+        assert_eq!(visible_len("\x1b[92m✓\x1b[0m done"), 6);
+        assert_eq!(visible_len("\x1b[2m00:00:01\x1b[0m"), 8);
+        assert_eq!(visible_len(""), 0);
     }
 
+    /// A line wider than the terminal wraps onto more than one physical row, and the footer counts
+    /// every one of them.
     #[test]
-    fn a_log_line_erases_and_redraws_a_shown_prompt() {
-        let footer = Footer {
-            status: String::new(),
-            prompt: "> kick bri".into(),
-            cursor_back: 0,
-        };
-        let composed = compose_log_write(&footer, "a player joined");
-        // Erased first, or the old prompt bleeds into the new line.
-        assert!(
-            composed.starts_with(ERASE),
-            "must erase before writing: {composed:?}"
-        );
-        // The log line itself is in there, terminated so the redrawn prompt starts a fresh line.
-        assert!(composed.contains("a player joined\r\n"));
-        // And the prompt is redrawn afterward, verbatim — nothing typed should be lost.
-        assert!(
-            composed.ends_with("> kick bri"),
-            "the typed line must survive the write: {composed:?}"
-        );
-    }
-
-    /// With a status footer shown, a log line erases both rows, lands above them, and both the
-    /// status and the prompt are redrawn beneath it — nothing on either line is lost.
-    #[test]
-    fn a_status_footer_floats_a_log_line_above_both_of_its_rows() {
-        let footer = Footer {
-            status: "● 3 online".into(),
+    fn a_line_wider_than_the_terminal_takes_more_than_one_row() {
+        assert_eq!(line_rows("short", 80), 1);
+        assert_eq!(line_rows(&"x".repeat(80), 40), 2);
+        assert_eq!(line_rows(&"x".repeat(81), 40), 3);
+        let f = Footer {
+            status: "x".repeat(100),
             prompt: "❯ ".into(),
             cursor_back: 0,
+            drawn_rows: 0,
         };
-        let composed = compose_log_write(&footer, "a player joined");
-        // Two rows erased: the prompt, then up one and the status.
-        assert!(
-            composed.starts_with("\r\x1b[2K\x1b[1A\r\x1b[2K"),
-            "must erase both footer rows: {composed:?}"
-        );
-        // The log, then the status and prompt redrawn under it.
-        assert!(
-            composed.contains("a player joined\r\n● 3 online\r\n❯ "),
-            "status and prompt must survive beneath the log: {composed:?}"
-        );
+        assert_eq!(footer_rows(&f, 40), 4, "status wraps to 3 rows, prompt fits on 1");
     }
 
-    /// `set_prompt_drawn` and `write_line_coordinated` share one lock; a log write must pick up
-    /// whatever the console most recently drew, not a stale value from before it typed.
+    /// The erase clears exactly as many rows as were drawn, by moving to the top of the footer and
+    /// clearing to the end of the screen. This is the fix for the wrapped-prompt storm: a three-row
+    /// footer is fully erased, not just its bottom row.
     #[test]
-    fn a_log_write_sees_the_most_recently_drawn_prompt() {
-        set_prompt_drawn("> first");
-        set_prompt_drawn("> first draft");
-        let guard = footer_lock().lock().unwrap();
-        assert_eq!(
-            compose_log_write(&guard, "x"),
-            "\r\x1b[2Kx\r\n> first draft"
+    fn erase_clears_the_whole_footer_however_many_rows_it_wrapped_into() {
+        assert_eq!(erase_seq(0), "");
+        assert_eq!(erase_seq(1), "\r\x1b[0J");
+        assert_eq!(erase_seq(3), "\r\x1b[2A\x1b[0J");
+    }
+
+    /// Drawing a footer lays the status above the prompt and restores the cursor into the prompt,
+    /// but only while the prompt fits on one row; positioning across a wrap is skipped on purpose.
+    #[test]
+    fn draw_lays_status_above_the_prompt_and_restores_the_cursor() {
+        let f = Footer {
+            status: "● 3 online".into(),
+            prompt: "❯ kick bri".into(),
+            cursor_back: 3,
+            drawn_rows: 0,
+        };
+        assert_eq!(draw_seq(&f, 80), "● 3 online\r\n❯ kick bri\x1b[3D");
+        let bare = Footer {
+            status: String::new(),
+            prompt: "❯ ".into(),
+            cursor_back: 0,
+            drawn_rows: 0,
+        };
+        assert_eq!(draw_seq(&bare, 80), "❯ ");
+        let wrapped = Footer {
+            status: String::new(),
+            prompt: format!("❯ {}", "x".repeat(100)),
+            cursor_back: 5,
+            drawn_rows: 0,
+        };
+        assert!(
+            !draw_seq(&wrapped, 40).contains("\x1b[5D"),
+            "a wrapped prompt should not get the one-row cursor-back move"
         );
-        drop(guard);
-        // Leave the shared state clean for any test that runs after this one.
-        set_prompt_drawn("");
     }
 
     /// A chat line gets its own `CHAT` tag and its message, but none of the level/target furniture

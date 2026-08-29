@@ -341,7 +341,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // Whoever has the terminal already has the world file, so the console is not gated. Reading
     // stdin has to be its own task: a blocking read would otherwise hold up the accept loop, and a
     // closed stdin (a service with no terminal) simply ends the task rather than the server.
-    let console = console::spawn(events_tx.clone());
+    let console = console::spawn(events_tx.clone(), args.headless);
 
     // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
     // than moved so it is still here afterwards to be waited on.
@@ -576,6 +576,11 @@ struct Args {
     list_worlds: bool,
     /// Always run the interactive setup wizard — see `setup.rs`.
     setup: bool,
+    /// Run without the interactive sticky console: start and serve straight away, with only the
+    /// plain line reader for input. For services and daemons that have no terminal to be sticky
+    /// about, and for anyone who just wants it to autostart. `-h` stays `--help`, so this is
+    /// `--headless` with no short form.
+    headless: bool,
     help: bool,
 }
 
@@ -591,6 +596,7 @@ impl Args {
             record: None,
             list_worlds: false,
             setup: false,
+            headless: false,
             help: false,
         };
         let mut args = args.peekable();
@@ -618,6 +624,7 @@ impl Args {
                 }
                 "--worlds" => parsed.list_worlds = true,
                 "--setup" => parsed.setup = true,
+                "--headless" => parsed.headless = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }
@@ -692,6 +699,11 @@ fn print_usage(palette: Palette) {
         (
             "    --setup",
             "Interactive first-run wizard: writes a terrustia.toml and starts",
+            "",
+        ),
+        (
+            "    --headless",
+            "Start and serve without the interactive console (for services)",
             "",
         ),
         ("-h, --help", "Show this message", ""),
