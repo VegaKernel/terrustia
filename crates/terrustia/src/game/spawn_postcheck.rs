@@ -17,6 +17,31 @@ pub const PLAYER_HITBOX_HEIGHT: f32 = 42.0;
 pub const PLAYER_VIEW_EXCLUSION_WIDTH: f32 = 2088.0;
 pub const PLAYER_VIEW_EXCLUSION_HEIGHT: f32 = 1172.0;
 
+const MOWED_GRASS: u16 = 477;
+const MOWED_HALLOWED_GRASS: u16 = 492;
+
+/// Events that disable mowed grass's ordinary 1/10 natural-spawn rejection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MowedGrassEvents {
+    pub blood_moon: bool,
+    pub eclipse: bool,
+    pub pumpkin_moon: bool,
+    pub frost_moon: bool,
+    pub slime_rain: bool,
+    pub invasion: bool,
+}
+
+impl MowedGrassEvents {
+    pub const fn any(self) -> bool {
+        self.blood_moon
+            || self.eclipse
+            || self.pumpkin_moon
+            || self.frost_moon
+            || self.slime_rain
+            || self.invasion
+    }
+}
+
 /// Whether the 16x16 chosen-tile space is completely outside one player's exclusion rectangle.
 ///
 /// `player_position` is Terraria's top-left entity position. Terrustia does not yet model mount-
@@ -43,6 +68,37 @@ pub fn chosen_tile_outside_player_rectangle(
         || tile_left >= exclusion_right
         || tile_bottom <= exclusion_top
         || tile_top >= exclusion_bottom
+}
+
+/// Whether a resolved spawn source satisfies vanilla's Dungeon post-check.
+///
+/// Outside the Dungeon this check is irrelevant. Inside it, the resolved source must be one of the
+/// three ordinary or three cracked Dungeon Brick tile types and the wall immediately above that
+/// source must be non-zero. Vanilla accepts any wall here, including a player-safe wall.
+pub fn dungeon_source_is_valid(
+    player_in_dungeon: bool,
+    spawn_tile_type: u16,
+    spawn_wall_type: u16,
+) -> bool {
+    if !player_in_dungeon {
+        return true;
+    }
+    matches!(spawn_tile_type, 41 | 43 | 44 | 481 | 482 | 483) && spawn_wall_type != 0
+}
+
+/// Whether mowed grass rejects an otherwise-valid spawn attempt.
+///
+/// Vanilla makes exactly a one-in-ten roll on Mowed grass / Mowed Hallowed grass when none of the
+/// six listed events are active. The caller owns the random roll so this helper remains deterministic
+/// and the no-retry `break` semantics stay visible at the integration site.
+pub fn mowed_grass_rejects(
+    spawn_tile_type: u16,
+    events: MowedGrassEvents,
+    one_in_ten_roll: bool,
+) -> bool {
+    matches!(spawn_tile_type, MOWED_GRASS | MOWED_HALLOWED_GRASS)
+        && !events.any()
+        && one_in_ten_roll
 }
 
 /// Whether liquid in the two tiles directly above the chosen tile is allowed.
@@ -94,6 +150,48 @@ mod tests {
             player.1 + PLAYER_HITBOX_HEIGHT / 2.0,
         );
         assert_eq!(center, (1044.0, 586.0));
+    }
+
+    #[test]
+    fn dungeon_postcheck_accepts_all_six_dungeon_brick_types_with_a_wall() {
+        for block in [41, 43, 44, 481, 482, 483] {
+            assert!(dungeon_source_is_valid(true, block, 1), "Dungeon brick {block}");
+        }
+    }
+
+    #[test]
+    fn dungeon_postcheck_requires_both_dungeon_brick_and_a_wall() {
+        assert!(!dungeon_source_is_valid(true, 41, 0));
+        assert!(!dungeon_source_is_valid(true, 1, 1));
+        assert!(!dungeon_source_is_valid(true, 1, 0));
+        // Outside a Dungeon, neither restriction is part of this post-check.
+        assert!(dungeon_source_is_valid(false, 1, 0));
+    }
+
+    #[test]
+    fn every_documented_event_disables_mowed_grass_rejection() {
+        let cases = [
+            MowedGrassEvents { blood_moon: true, ..Default::default() },
+            MowedGrassEvents { eclipse: true, ..Default::default() },
+            MowedGrassEvents { pumpkin_moon: true, ..Default::default() },
+            MowedGrassEvents { frost_moon: true, ..Default::default() },
+            MowedGrassEvents { slime_rain: true, ..Default::default() },
+            MowedGrassEvents { invasion: true, ..Default::default() },
+        ];
+        for events in cases {
+            assert!(!mowed_grass_rejects(MOWED_GRASS, events, true));
+            assert!(!mowed_grass_rejects(MOWED_HALLOWED_GRASS, events, true));
+        }
+    }
+
+    #[test]
+    fn mowed_grass_rejects_only_on_the_one_in_ten_roll() {
+        let quiet = MowedGrassEvents::default();
+        assert!(mowed_grass_rejects(MOWED_GRASS, quiet, true));
+        assert!(mowed_grass_rejects(MOWED_HALLOWED_GRASS, quiet, true));
+        assert!(!mowed_grass_rejects(MOWED_GRASS, quiet, false));
+        assert!(!mowed_grass_rejects(2, quiet, true));
+        assert!(!mowed_grass_rejects(109, quiet, true));
     }
 
     #[test]
