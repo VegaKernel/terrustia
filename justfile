@@ -149,7 +149,7 @@ regen:
     cargo run -q -p terrustia-codegen -- angler      {{DECOMPILED}} crates/terrustia-proto/src/angler.rs
     python3 tools/gen_shimmer.py     {{DECOMPILED}} crates/terrustia-proto/src/shimmer.rs
     cargo run -q -p terrustia-codegen -- hurt_tiles {{DECOMPILED}} crates/terrustia-proto/src/hurt_tiles.rs
-    python3 tools/gen_town_names.py  {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
+    cargo run -q -p terrustia-codegen -- town_names {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
     python3 tools/gen_travel_shop.py {{DECOMPILED}} crates/terrustia-proto/src/travel_shop.rs
     cargo fmt --all
     @echo "Regenerated the data tables. Review the diff before committing."

@@ -18,6 +18,7 @@ mod drops;
 mod hurt_tiles;
 mod projectiles;
 mod recipes;
+mod town_names;
 
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,11 @@ const TABLES: &[Table] = &[
         name: "angler",
         out: "crates/terrustia-proto/src/angler.rs",
         generate: angler::generate,
+    },
+    Table {
+        name: "town_names",
+        out: "crates/terrustia-proto/src/town_names.rs",
+        generate: town_names::generate,
     },
 ];
 
