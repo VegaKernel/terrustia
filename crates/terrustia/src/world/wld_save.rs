@@ -92,13 +92,13 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     let mut pointers = vec![0i32; section_count];
 
     // --- section 0: world header, verbatim with the clock patched -------------------------
-    pointers[0] = w.len() as i32;
+    pointers[0] = section_pointer(w.len())?;
     let mut header = preserved.header_bytes.clone();
     patch_clock(&mut header, preserved, world);
     w.bytes(&header);
 
     // --- section 1: tiles ------------------------------------------------------------------
-    pointers[1] = w.len() as i32;
+    pointers[1] = section_pointer(w.len())?;
     let importance = |tile: u16| {
         preserved
             .importance
@@ -109,11 +109,11 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     write_tiles(&mut w, world, &importance);
 
     // --- section 2: chests -----------------------------------------------------------------
-    pointers[2] = w.len() as i32;
+    pointers[2] = section_pointer(w.len())?;
     write_chests(&mut w, world, preserved.chest_slots);
 
     // --- section 3: signs ------------------------------------------------------------------
-    pointers[3] = w.len() as i32;
+    pointers[3] = section_pointer(w.len())?;
     write_signs(&mut w, world);
 
     // --- sections 4..: carried through, except the tile entities ---------------------------
@@ -126,9 +126,7 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     // Because that section can change length, the pointers cannot be a single shift any more —
     // each is taken from where its section actually lands.
     for (index, section) in preserved.trailing_sections.iter().enumerate() {
-        pointers[4 + index] = i32::try_from(w.len()).map_err(|_| WldError::SaveTooLarge {
-            bytes: w.len() as i64,
-        })?;
+        pointers[4 + index] = section_pointer(w.len())?;
         match index {
             // Rewritten only when the load understood the whole section. Rewriting one we read
             // partially would write back what we managed to decode and silently drop the rest —
@@ -151,6 +149,23 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
         bytes[at..at + 4].copy_from_slice(&pointer.to_le_bytes());
     }
     Ok(bytes)
+}
+
+/// One entry in the format's section-pointer table, refused rather than truncated.
+///
+/// The table is `i32`, so a world that serialised past 2 GiB would write a negative offset and
+/// produce a file whose sections point outside it. The *trailing* pointers were already checked
+/// this way; the first four were a bare `as i32` that would have wrapped silently. `save` verifies
+/// what it wrote before replacing anything, so a wrapped pointer could never have reached the real
+/// file - but the operator would have been told "the world was written but could not be read back",
+/// which sounds like a bug in the writer, rather than "this world is too big for the format", which
+/// is what actually happened.
+fn section_pointer(at: usize) -> Result<i32> {
+    i32::try_from(at).map_err(|_| WldError::SaveTooLarge {
+        // Only for the message. A `usize` past `i64::MAX` cannot exist on any machine that got
+        // this far, and reporting the ceiling beats reporting a wrapped negative.
+        bytes: i64::try_from(at).unwrap_or(i64::MAX),
+    })
 }
 
 /// Overwrite the world clock inside the preserved header.
@@ -1348,6 +1363,32 @@ mod tests {
         assert!(
             e.to_string().contains("directory no longer exists"),
             "got: {e}"
+        );
+    }
+
+    /// A section pointer past the format's `i32` table is refused, not wrapped.
+    ///
+    /// The first four pointers were a bare `as i32`. A world that serialised past 2 GiB would have
+    /// written a negative offset, and the operator would have been told "the world was written but
+    /// could not be read back" by the verify step - which reads as a bug in the writer rather than
+    /// as the world being too big for the format it is being written in. Tested on the helper
+    /// rather than on a real world for the obvious reason: building a 2 GiB one in a unit test to
+    /// prove a boundary is not a trade worth making.
+    #[test]
+    fn a_section_pointer_past_two_gigabytes_is_refused_rather_than_wrapped() {
+        assert_eq!(section_pointer(0).expect("zero is a fine pointer"), 0);
+        assert_eq!(
+            section_pointer(i32::MAX as usize).expect("the last pointer that fits"),
+            i32::MAX
+        );
+        let over = section_pointer(i32::MAX as usize + 1).expect_err("one past the ceiling");
+        assert!(
+            matches!(over, WldError::SaveTooLarge { bytes } if bytes == i64::from(i32::MAX) + 1),
+            "it must say the world is too large, and how large: {over}"
+        );
+        assert!(
+            over.to_string().contains("2 GiB"),
+            "and the message must name the format's limit: {over}"
         );
     }
 
