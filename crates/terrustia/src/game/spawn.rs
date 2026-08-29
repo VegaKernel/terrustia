@@ -238,13 +238,11 @@ pub const SPAWN_RATE: u32 = 600;
 /// Spawn slots a single player supports.
 pub const MAX_SPAWNS: f32 = 5.0;
 
-/// Spawn area around the player, in tiles: roughly 0.7 of a 1080p screen.
-pub const SPAWN_RANGE_X: i32 = 84;
-pub const SPAWN_RANGE_Y: i32 = 47;
-
-/// Nothing spawns inside this box around the player.
-pub const SAFE_RANGE_X: i32 = 62;
-pub const SAFE_RANGE_Y: i32 = 35;
+/// Vanilla's screen-relative spawn/safe half-ranges. The actual integer rectangles are asymmetric;
+/// `spawn_ranges` owns their west/east/up/down edges and the sampling/checking helpers.
+pub use crate::game::spawn_ranges::{
+    SAFE_RANGE_X, SAFE_RANGE_Y, SPAWN_RANGE_X, SPAWN_RANGE_Y,
+};
 
 /// How deep below the world's bottom the underworld begins.
 pub const UNDERWORLD_DEPTH: i32 = 200;
@@ -843,8 +841,9 @@ pub fn try_spawn(
 
         // Vanilla retries up to 50 random candidate points before abandoning this spawn attempt.
         for _ in 0..SPAWN_SEARCH_ATTEMPTS {
-            let x = px + rng.random_range(-SPAWN_RANGE_X..=SPAWN_RANGE_X);
-            let chosen_y = py + rng.random_range(-SPAWN_RANGE_Y..=SPAWN_RANGE_Y);
+            let (dx, dy) = crate::game::spawn_ranges::choose_offset(rng);
+            let x = px + dx;
+            let chosen_y = py + dy;
             if x < 10
                 || chosen_y < 10
                 || x >= world.width() - 10
@@ -864,8 +863,8 @@ pub fn try_spawn(
             };
             let y = ground - 1;
 
-            // Never spawn on top of somebody.
-            if (x - px).abs() < SAFE_RANGE_X && (y - py).abs() < SAFE_RANGE_Y {
+            // Vanilla tests the resolved solid floor against the early safe rectangle.
+            if crate::game::spawn_ranges::in_safe_rectangle(x - px, ground - py) {
                 continue;
             }
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
@@ -1267,11 +1266,13 @@ mod tests {
                     "spawned an unknown type {npc_type}"
                 );
                 let (x, y) = ((px / 16.0) as i32, (py / 16.0) as i32);
+                let floor_y = y + 1;
                 assert!(
-                    (x - tx).abs() >= SAFE_RANGE_X || (y - ty).abs() >= SAFE_RANGE_Y,
-                    "spawned inside the safe zone at ({x}, {y}) vs player ({tx}, {ty})"
+                    !crate::game::spawn_ranges::in_safe_rectangle(x - tx, floor_y - ty),
+                    "spawned with floor inside the safe rectangle at ({x}, {floor_y}) vs player \
+                     ({tx}, {ty})"
                 );
-                let floor = world.tile(x, y + 1);
+                let floor = world.tile(x, floor_y);
                 assert!(
                     floor.is_active() && solid(floor.block),
                     "spawned dry forest NPC without solid ground at ({x}, {y})"
