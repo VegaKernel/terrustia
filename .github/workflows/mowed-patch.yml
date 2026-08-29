@@ -16,90 +16,42 @@ jobs:
         with:
           ref: chatgpt/mowed-grass-spawn-gate
       - name: Apply exact runtime wiring
-        shell: python
         run: |
+          python3 - <<'PY'
           from pathlib import Path
 
           server_path = Path("crates/terrustia/src/game/server.rs")
           server = server_path.read_text()
-          old = """            eclipse: self.world.eclipse,
-            downed_plantera: progress.downed_plantera,
-"""
-          new = """            eclipse: self.world.eclipse,
-            slime_rain: self.slime_rain.is_active(),
-            invasion: self.invasion.is_some(),
-            downed_plantera: progress.downed_plantera,
-"""
+          old = "            eclipse: self.world.eclipse,\n            downed_plantera: progress.downed_plantera,\n"
+          new = "            eclipse: self.world.eclipse,\n            slime_rain: self.slime_rain.is_active(),\n            invasion: self.invasion.is_some(),\n            downed_plantera: progress.downed_plantera,\n"
           assert server.count(old) == 1, "server EventSpawns constructor shape changed"
           server_path.write_text(server.replace(old, new, 1))
 
           spawn_path = Path("crates/terrustia/src/game/spawn.rs")
           spawn = spawn_path.read_text()
 
-          old = """    pub eclipse: bool,
-    pub downed_plantera: bool,
-"""
-          new = """    pub eclipse: bool,
-    pub slime_rain: bool,
-    pub invasion: bool,
-    pub downed_plantera: bool,
-"""
+          old = "    pub eclipse: bool,\n    pub downed_plantera: bool,\n"
+          new = "    pub eclipse: bool,\n    pub slime_rain: bool,\n    pub invasion: bool,\n    pub downed_plantera: bool,\n"
           assert spawn.count(old) == 1, "EventSpawns field shape changed"
           spawn = spawn.replace(old, new, 1)
 
-          old = """            let y = ground - 1;
-
-            let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
-"""
-          new = """            let y = ground - 1;
-            let source = crate::game::spawn_source::resolve(world, x, ground);
-            let mowed_events = crate::game::spawn_postcheck::MowedGrassEvents {
-                blood_moon: world.blood_moon,
-                eclipse: world.eclipse,
-                pumpkin_moon: world.pumpkin_moon,
-                frost_moon: world.snow_moon,
-                slime_rain: events.slime_rain,
-                invasion: events.invasion,
-            };
-            if crate::game::spawn_postcheck::mowed_grass_rejects(source.block, mowed_events, || {
-                rng.random_range(0..10) == 0
-            }) {
-                break;
-            }
-
-            let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
-"""
+          old = "            let y = ground - 1;\n\n            let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {\n"
+          new = "            let y = ground - 1;\n            let source = crate::game::spawn_source::resolve(world, x, ground);\n            let mowed_events = crate::game::spawn_postcheck::MowedGrassEvents {\n                blood_moon: world.blood_moon,\n                eclipse: world.eclipse,\n                pumpkin_moon: world.pumpkin_moon,\n                frost_moon: world.snow_moon,\n                slime_rain: events.slime_rain,\n                invasion: events.invasion,\n            };\n            if crate::game::spawn_postcheck::mowed_grass_rejects(source.block, mowed_events, || {\n                rng.random_range(0..10) == 0\n            }) {\n                break;\n            }\n\n            let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {\n"
           assert spawn.count(old) == 1, "accepted-floor wiring shape changed"
           spawn = spawn.replace(old, new, 1)
 
-          old = """                let spawning_block = crate::game::spawn_source::block(world, x, ground);
-                let water_pool = crate::game::water_spawn::pool(
-                    depth,
-                    biome,
-                    world.progress.hard_mode,
-                    spawning_block,
-                );
-"""
-          new = """                let water_pool = crate::game::water_spawn::pool(
-                    depth,
-                    biome,
-                    world.progress.hard_mode,
-                    source.block,
-                );
-"""
+          old = "                let spawning_block = crate::game::spawn_source::block(world, x, ground);\n                let water_pool = crate::game::water_spawn::pool(\n                    depth,\n                    biome,\n                    world.progress.hard_mode,\n                    spawning_block,\n                );\n"
+          new = "                let water_pool = crate::game::water_spawn::pool(\n                    depth,\n                    biome,\n                    world.progress.hard_mode,\n                    source.block,\n                );\n"
           assert spawn.count(old) == 1, "water source wiring shape changed"
           spawn = spawn.replace(old, new, 1)
 
-          old = """            eclipse: false,
-            downed_plantera: false,
-"""
-          new = """            eclipse: false,
-            slime_rain: false,
-            invasion: false,
-            downed_plantera: false,
-"""
+          old = "            eclipse: false,\n            downed_plantera: false,\n"
+          new = "            eclipse: false,\n            slime_rain: false,\n            invasion: false,\n            downed_plantera: false,\n"
           assert spawn.count(old) == 1, "quiet EventSpawns fixture shape changed"
           spawn_path.write_text(spawn.replace(old, new, 1))
+          PY
+      - name: Verify formatting
+        run: cargo fmt --all --check
       - name: Commit runtime wiring
         run: |
           git config user.name "github-actions[bot]"
