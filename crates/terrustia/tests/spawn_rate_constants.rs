@@ -21,6 +21,8 @@
 //! two truncation orders cannot disagree here. That is a property of these specific inputs, not a
 //! general proof the two orders always agree.
 
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use terrustia::game::spawn::{Conditions, Depth, MAX_SPAWNS, SPAWN_RATE, rates};
 
 fn plain() -> Conditions {
@@ -35,13 +37,23 @@ fn plain() -> Conditions {
     }
 }
 
+/// A fresh RNG for a call with `town_npcs: 0` (or an event overruling the town), which never
+/// touches `rates`'s own town-suppression roll and so cannot care which one it gets.
+fn any_rng() -> SmallRng {
+    SmallRng::seed_from_u64(0)
+}
+
 /// `NPC.cs:6190`: `private static int defaultSpawnRate = 600;`
 /// `NPC.cs:6192`: `private static int defaultMaxSpawns = 5;`
 #[test]
 fn the_baseline_matches_defaultspawnrate_and_defaultmaxspawns() {
     assert_eq!(SPAWN_RATE, 600, "NPC.cs:6190, defaultSpawnRate");
     assert_eq!(MAX_SPAWNS, 5.0, "NPC.cs:6192, defaultMaxSpawns");
-    assert_eq!(rates(plain()), (600, 5.0), "a plain surface daytime world");
+    assert_eq!(
+        rates(plain(), &mut any_rng()),
+        (600, 5.0, false),
+        "a plain surface daytime world"
+    );
 }
 
 /// `NPC.cs:478-482`:
@@ -55,10 +67,13 @@ fn the_baseline_matches_defaultspawnrate_and_defaultmaxspawns() {
 /// modifier in this file is multiplicative and it would be easy to fold this one in wrongly.
 #[test]
 fn hardmode_is_09_times_the_rate_and_one_more_slot() {
-    let (rate, cap) = rates(Conditions {
-        hard_mode: true,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            hard_mode: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, (600.0 * 0.9) as u32, "NPC.cs:480");
     assert_eq!(cap, 6.0, "NPC.cs:481, defaultMaxSpawns + 1");
 }
@@ -73,10 +88,13 @@ fn hardmode_is_09_times_the_rate_and_one_more_slot() {
 /// all — every other depth branch changes both numbers.
 #[test]
 fn the_underworld_only_doubles_the_cap() {
-    let (rate, cap) = rates(Conditions {
-        depth: Depth::Underworld,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            depth: Depth::Underworld,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, 600, "NPC.cs:483-486 never assigns spawnRate");
     assert_eq!(cap, 10.0, "NPC.cs:485, maxSpawns * 2f");
 }
@@ -88,10 +106,13 @@ fn the_underworld_only_doubles_the_cap() {
 /// ```
 #[test]
 fn caverns_are_04_times_the_rate_and_19_times_the_cap() {
-    let (rate, cap) = rates(Conditions {
-        depth: Depth::Cavern,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            depth: Depth::Cavern,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, (600.0 * 0.4) as u32, "NPC.cs:504");
     assert_eq!(cap, 5.0 * 1.9, "NPC.cs:505");
 }
@@ -110,18 +131,24 @@ fn caverns_are_04_times_the_rate_and_19_times_the_cap() {
 /// discounted, so the two stack: `600 * 0.9 * 0.45 = 243`, not `600 * 0.45 = 270`.
 #[test]
 fn underground_is_05_17_pre_hardmode_and_045_18_stacked_with_hardmode() {
-    let (rate, cap) = rates(Conditions {
-        depth: Depth::Underground,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            depth: Depth::Underground,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, (600.0 * 0.5) as u32, "NPC.cs:522, pre-hardmode");
     assert_eq!(cap, 5.0 * 1.7, "NPC.cs:523, pre-hardmode");
 
-    let (rate, cap) = rates(Conditions {
-        depth: Depth::Underground,
-        hard_mode: true,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            depth: Depth::Underground,
+            hard_mode: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(
         rate, 243,
         "NPC.cs:517 stacked on NPC.cs:480: 600 * 0.9 * 0.45"
@@ -140,10 +167,13 @@ fn underground_is_05_17_pre_hardmode_and_045_18_stacked_with_hardmode() {
 /// ```
 #[test]
 fn surface_night_is_06_times_the_rate_and_13_times_the_cap() {
-    let (rate, cap) = rates(Conditions {
-        day_time: false,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            day_time: false,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, (600.0 * 0.6) as u32, "NPC.cs:536");
     assert_eq!(cap, 5.0 * 1.3, "NPC.cs:537");
 }
@@ -158,11 +188,14 @@ fn surface_night_is_06_times_the_rate_and_13_times_the_cap() {
 /// Stacks on the night discount just above: `600 * 0.6 * 0.3 = 108`.
 #[test]
 fn a_blood_moon_is_03_times_the_already_nighttime_rate() {
-    let (rate, cap) = rates(Conditions {
-        day_time: false,
-        blood_moon: true,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            day_time: false,
+            blood_moon: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(
         rate, 108,
         "NPC.cs:540 stacked on NPC.cs:536: 600 * 0.6 * 0.3"
@@ -181,11 +214,14 @@ fn a_blood_moon_is_03_times_the_already_nighttime_rate() {
 /// false` here, the same as the game's own nesting.
 #[test]
 fn an_event_moon_is_02_times_the_already_nighttime_rate() {
-    let (rate, cap) = rates(Conditions {
-        day_time: false,
-        event_moon: true,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            day_time: false,
+            event_moon: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(
         rate, 72,
         "NPC.cs:545 stacked on NPC.cs:536: 600 * 0.6 * 0.2"
@@ -202,10 +238,13 @@ fn an_event_moon_is_02_times_the_already_nighttime_rate() {
 /// ```
 #[test]
 fn a_daytime_eclipse_is_02_times_the_rate_and_19_times_the_cap() {
-    let (rate, cap) = rates(Conditions {
-        eclipse: true,
-        ..plain()
-    });
+    let (rate, cap, _) = rates(
+        Conditions {
+            eclipse: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
     assert_eq!(rate, (600.0 * 0.2) as u32, "NPC.cs:551");
     assert_eq!(cap, 5.0 * 1.9, "NPC.cs:552");
 }
@@ -237,42 +276,38 @@ fn the_bounds_are_exactly_60_and_15() {
     );
     assert_eq!(MAX_SPAWNS * 3.0, 15.0, "NPC.cs:756, defaultMaxSpawns * 3");
 
-    let worst = rates(Conditions {
-        depth: Depth::Surface,
-        hard_mode: true,
-        day_time: false,
-        blood_moon: true,
-        eclipse: false,
-        event_moon: true,
-        town_npcs: 0,
-    });
+    let worst = rates(
+        Conditions {
+            depth: Depth::Surface,
+            hard_mode: true,
+            day_time: false,
+            blood_moon: true,
+            eclipse: false,
+            event_moon: true,
+            town_npcs: 0,
+        },
+        &mut any_rng(),
+    );
     assert_eq!(worst.0, 60, "clamped at the floor");
     assert_eq!(worst.1, 15.0, "clamped at the ceiling");
 }
 
-/// Town suppression's real shape does not survive being pinned as a golden.
+/// Town suppression's real shape (C1-b item 8, fixed): `spawn.rs` used to model it as one
+/// deterministic `(slower, fewer)` pair per headcount, applied the same way regardless of what the
+/// game itself actually rolls. Real vanilla (`NPC.cs:795-924`) is gated on the same event
+/// exclusions `spawn.rs` already models (no invasion, no active blood/pumpkin/snow moon at night,
+/// no daytime eclipse, not in a corrupt/crimson/meteor/Old One's Army zone — `NPC.cs:800`), which
+/// `spawn.rs`'s own `event` guard correctly mirrors in spirit. Past that gate, in the ordinary
+/// surface/underground branch that covers every base a player actually builds (`NPC.cs:856-923`,
+/// the underworld's own separate, simpler fork at `NPC.cs:802-855` is not modelled — a base built
+/// in the underworld is the rare exception, not the case this quiets), it is a per-attempt coin
+/// flip between two outcomes (`Main.rand.Next(...)`) rather than a fixed multiplier: some attempts
+/// scale `spawnRate`, others leave it untouched and instead shrink `maxSpawns` and force the spawn
+/// to be a friendly critter (`spawnFriendly = true`) instead of a monster. `rates` now returns that
+/// third element directly (`(rate, cap, spawn_friendly)`) and takes an `&mut SmallRng` to roll it,
+/// matching the shape of a genuinely probabilistic function rather than a table lookup.
 ///
-/// `spawn.rs` models it as one deterministic `(slower, fewer)` pair per headcount
-/// (`0 => (1.0, 1.0)`, `1 => (2.0, 0.6)`, `2 | _ => (3.0, 0.6)`, at `spawn.rs:95-100`), applied the
-/// same way regardless of where the player is standing.
-///
-/// Real vanilla's town suppression (`NPC.cs:795-924`) is neither of those things. It is gated on the
-/// same event exclusions `spawn.rs` already models (no invasion, no active blood/pumpkin/snow moon
-/// at night, no daytime eclipse, not in a corrupt/crimson/meteor/Old One's Army zone —
-/// `NPC.cs:800`), which `spawn.rs`'s own `event` guard at `spawn.rs:93-94` correctly mirrors in
-/// spirit. But past that gate it forks on a *second* axis `Conditions` has no field for at all —
-/// whether the player is in the underworld region (`NPC.cs:802`, `Center.Y / 16f >
-/// Main.UnderworldLayer`) — and, in the ordinary surface/underground branch that covers every base
-/// a player actually builds (`NPC.cs:856-923`), it is a per-tick coin flip between two outcomes
-/// (`Main.rand.Next(...)`) rather than a fixed multiplier: some ticks scale `spawnRate`, others
-/// leave it untouched and instead shrink `maxSpawns` and force the spawn to be a friendly critter
-/// (`spawnFriendly = true`) instead of a monster. There is no single number source assigns for "the"
-/// rate multiplier at a given headcount, so nothing here pins one for `townNPCs == 1` or `== 2` —
-/// per this lane's own rule, a value that cannot be derived from source is left out rather than
-/// guessed at.
-///
-/// `townNPCs >= 3` is the one headcount where classic (non-expert) mode *is* deterministic, and it
-/// is a real, clean divergence:
+/// `townNPCs >= 3` is the one headcount where classic (non-expert) mode is fully deterministic:
 /// ```csharp
 /// // NPC.cs:903-923, the townNPCs >= 3 branch, ordinary (non-graveyard) case:
 /// else if (townNPCs >= 3) {
@@ -287,26 +322,28 @@ fn the_bounds_are_exactly_60_and_15() {
 /// }
 /// ```
 /// `!Main.expertMode` is unconditionally `true` in classic mode, so `spawnFriendly` is set on
-/// *every* tick — `spawnRate` is never assigned in this branch at all. The real classic-mode rate
-/// multiplier for three or more townsfolk is `1.0` (unchanged): every attempt still happens on
-/// schedule, it just always rolls a friendly critter instead of a monster. `spawn.rs` instead scales
-/// `spawnRate` by `3.0`, which does not correspond to anything this branch does.
-///
-/// Marked `#[ignore]`: fixing this needs a `spawnFriendly`-shaped outcome (a fork on *what* spawns,
-/// not a further multiplier on *how often*), which is a modelling change to production code and out
-/// of this lane's scope (tests only).
+/// *every* attempt — `spawnRate` is never assigned in this branch at all. `spawn.rs::rates` mirrors
+/// this exactly: `town_npcs >= 3` always returns `spawn_friendly: true` and the unchanged base rate.
 #[test]
-#[ignore = "divergence: NPC.cs:903-923 leaves spawnRate at 1.0x for townNPCs>=3 in classic mode \
-            (spawnFriendly replaces the roll instead of throttling it); spawn.rs:99 scales it 3.0x. \
-            Needs a production change (a friendly-vs-hostile fork), out of scope for a test-only lane."]
 fn town_suppression_at_three_residents_leaves_the_rate_unchanged_in_classic_mode() {
-    let (base, _) = rates(plain());
-    let (three, _) = rates(Conditions {
-        town_npcs: 3,
-        ..plain()
-    });
+    let (base, base_cap, base_friendly) = rates(plain(), &mut any_rng());
+    assert!(
+        !base_friendly,
+        "no town at all never forces a friendly spawn"
+    );
+
+    let mut rng = SmallRng::seed_from_u64(7);
+    let (three, three_cap, three_friendly) = rates(
+        Conditions {
+            town_npcs: 3,
+            ..plain()
+        },
+        &mut rng,
+    );
     assert_eq!(
         three, base,
         "NPC.cs:917-921: classic mode always sets spawnFriendly instead of touching spawnRate"
     );
+    assert!(three_friendly, "and always forces a friendly spawn");
+    assert_eq!(three_cap, base_cap * 0.6, "NPC.cs:921, maxSpawns * 0.6");
 }
