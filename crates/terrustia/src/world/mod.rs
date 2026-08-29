@@ -11,6 +11,7 @@ pub mod objects;
 pub mod packed;
 pub mod progress;
 pub mod quick_stack;
+pub mod trapdoors;
 pub mod trees;
 pub mod wiring;
 pub mod wld;

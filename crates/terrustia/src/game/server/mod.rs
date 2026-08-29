@@ -22,10 +22,11 @@ use terrustia_proto::{
     npc::{DamageNpc, SyncNpc, damage_ack, damage_taken},
     objects::{
         self, DoorToggle, RequestChestOpen, RequestSign, SignText, SyncChestItem, SyncPlayerChest,
+        SyncPlayerChestIndex,
     },
     packets::{
-        self, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn, SpawnTileData,
-        TileAction, TileManipulation,
+        self, HealPlayer, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn,
+        SpawnTileData, TileAction, TileManipulation,
     },
     reader::PacketReader,
     section::encode_section_packet,

@@ -233,6 +233,7 @@ fn in_the_tables(link: &Link) -> bool {
     let at = Conditions {
         hard_mode: true,
         other_twin_dead: true,
+        red_hat_skeletron: false,
         downed_plantera: false,
         expert: false,
         master: false,

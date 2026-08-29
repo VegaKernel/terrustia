@@ -103,6 +103,7 @@ impl GameServer {
             }
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
             id::TELEPORT_ENTITY => self.on_teleport(slot, &payload),
+            id::UNKNOWN66 => self.on_heal_player(slot, &payload),
             // Which town NPC a player is talking to. The owner byte is first, so the ordinary
             // relay handles it, and remembering it is what a shop will need.
             id::SYNC_TALK_N_P_C => self.on_talk_npc(slot, &payload),
@@ -847,13 +848,21 @@ impl GameServer {
         let controls = PlayerControls::decode(payload)?;
 
         if let Some(player) = self.player_mut(slot) {
-            // Velocity is what actually changed since the last update, not what the client
-            // claims: the routines that lead a running player want the real thing.
-            player.velocity = (
-                controls.position.0 - player.position.0,
-                controls.position.1 - player.position.1,
-            );
-            player.position = controls.position;
+            // A server-issued teleport this client has not yet acknowledged means the position
+            // and velocity it just reported may still describe where it was *before* that
+            // teleport — trusting it would snap the player straight back
+            // (`MessageBuffer.cs:998-1002`, `player13.unacknowledgedTeleports > 0`). Everything
+            // else in the packet (facing, sitting, the selected slot) is unaffected in source,
+            // so only position and velocity are held back here.
+            if player.unacknowledged_teleports == 0 {
+                // Velocity is what actually changed since the last update, not what the client
+                // claims: the routines that lead a running player want the real thing.
+                player.velocity = (
+                    controls.position.0 - player.position.0,
+                    controls.position.1 - player.position.1,
+                );
+                player.position = controls.position;
+            }
             // Which way they are looking. Only one thing reads it — a wiring tool's L turns the
             // other way depending on it — but that one thing is visible the moment it is wrong.
             player.facing_right = controls.facing_right();
@@ -1138,8 +1147,22 @@ impl GameServer {
         let y = r.f32()?;
         let style = r.u8()?;
 
-        // Bits 0 and 1 together say what is being teleported; only zero — a player — is ours.
+        // Bits 0 and 1 together say what is being teleported (`MessageBuffer.cs:2985-3034`'s own
+        // `num84` switch): 0 a player, which is the only case relayed below; 3 is a client's own
+        // acknowledgement of a teleport the server issued, handled on its own just underneath;
+        // 1 (an NPC) and 2 (a player-to-player warp with its own chat announcement) are neither
+        // modelled here.
         let what = (flags & 1) + ((flags & 2) >> 1) * 2;
+        if what == 3 {
+            // The client has caught up with a teleport the server told it about — the position it
+            // reports in its next controls packet can be trusted again
+            // (`Invariant.Assert(Main.player[num82].unacknowledgedTeleports-- >= 0, ...)`,
+            // `MessageBuffer.cs:3033`; see `on_player_controls`'s own guard).
+            if let Some(player) = self.player_mut(slot) {
+                player.unacknowledged_teleports = player.unacknowledged_teleports.saturating_sub(1);
+            }
+            return Ok(());
+        }
         if what != 0 {
             return Ok(());
         }
@@ -1176,6 +1199,38 @@ impl GameServer {
         let frame = w.finish()?;
         self.broadcast(frame, Some(slot));
         debug!(slot, x = at.0, y = at.1, "player teleported");
+        Ok(())
+    }
+
+    /// Packet 66 (`id::UNKNOWN66`): a heal-on-touch projectile's effect landing on a player
+    /// (`Projectile.cs:28951`, `aiStyle == 52`).
+    ///
+    /// The owning client already applied this to its own local copy before sending it — real
+    /// vanilla's own receive side (`MessageBuffer.cs:3038-3056`) still applies it again to the
+    /// server's authoritative copy rather than trusting the sender's math, and this does the same:
+    /// only a positive amount is ever applied (`if (num72 > 0)`, matching real vanilla exactly —
+    /// zero and negative heals are silently ignored, not clamped to zero and applied), a target
+    /// outside the connected slots is a no-op rather than a panic, and life is clamped to the
+    /// target's own max the same way `statLife`/`statLifeMax2` are. Relayed to everyone but the
+    /// sender either way vanilla does (`NetMessage.TrySendData(66, -1, whoAmI, ...)`).
+    fn on_heal_player(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let heal = HealPlayer::decode(payload)?;
+        if heal.amount <= 0 {
+            return Ok(());
+        }
+        let Some(target) = self.player_mut(heal.player) else {
+            return Ok(());
+        };
+        // Saturating: `statLife` is a real `int` in source, wide enough that `+=` never overflows
+        // it; this project's own `Player::life` is an `i16` to match the wire, which a maliciously
+        // large claimed heal on an already-high life total genuinely can — panicking on the packet
+        // path is worse than a heal simply capping out.
+        target.life = target.life.saturating_add(heal.amount).min(target.life_max);
+
+        self.broadcast(heal.encode()?, Some(slot));
         Ok(())
     }
 
@@ -1294,6 +1349,12 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.position = at;
             player.velocity = (0.0, 0.0);
+            // The server is moving this player without their own client having done so first, so
+            // it owes them an acknowledgement round trip before trusting their next reported
+            // position again — see `unacknowledged_teleports`'s own doc, and
+            // `NetMessage.cs:1108-1111`'s own `number == 0 && number2 != ignoreClient` (true here:
+            // this broadcast excludes nobody, unlike a player's own client-initiated teleport).
+            player.unacknowledged_teleports += 1;
         }
 
         // Style 2 is the potion's swirl, 11 the phone's. They are only an effect, but a client
@@ -1539,6 +1600,23 @@ impl GameServer {
                     self.announce_key("LegacyMisc.8", Vec::new());
                     self.broadcast_world_data();
                 }
+            }
+            // Advanced Combat Techniques (item 4382) and its Volume Two (5336) — furniture-free
+            // world unlocks, permanent once read. `Player.ItemCheck_UseCombatBook` sends this the
+            // moment the client's own animation finishes; the receive side has no `!alreadyUsed`
+            // guard of its own in source (`MessageBuffer.cs:2822-2827`, `2848-2853`), unlike the
+            // blood moon/eclipse cases just above, so a repeat send re-announces rather than being
+            // refused — transcribed as-is rather than "improved" with a guard vanilla itself
+            // never had.
+            -11 => {
+                self.world.progress.combat_book = true;
+                self.announce_key("Misc.CombatBookUsed", Vec::new());
+                self.broadcast_world_data();
+            }
+            -17 => {
+                self.world.progress.combat_book_two = true;
+                self.announce_key("Misc.CombatBookVolumeTwoUsed", Vec::new());
+                self.broadcast_world_data();
             }
             // The rest of the negative range is the invasions, numbered from -1.
             other => {
@@ -1975,6 +2053,12 @@ impl GameServer {
     }
 
     /// Packet 31: a client asking to open a chest.
+    ///
+    /// Two things real vanilla's own receive handler does beyond handing the opener their items
+    /// (`MessageBuffer.cs:1868-1895`) were missing entirely: telling *other* clients which chest
+    /// this player now has open (packet 80, `SyncPlayerChestIndex` — without it their own UI never
+    /// shows the chest as already in use), and `WorldGen.IsChestRigged`'s own check, which treats
+    /// opening a wired chest (tile 467, style 4) as hitting a switch.
     fn on_chest_open(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
@@ -2023,6 +2107,34 @@ impl GameServer {
 
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = id;
+        }
+        // Everyone else's own client wants to know too, so it can show the chest as taken
+        // (`NetMessage.cs:1182-1185`, `MessageBuffer.cs:1886`) rather than letting them also try
+        // to open it and only find out it is refused.
+        if let Ok(frame) = (SyncPlayerChestIndex {
+            player: slot,
+            chest: id,
+        })
+        .encode()
+        {
+            self.broadcast(frame, Some(slot));
+        }
+        // `WorldGen.IsChestRigged` (`WorldGen.cs:36135-36142`): tile 467 (`Containers2`), frame
+        // style 4 — a wired chest that fires its own circuit the instant it is opened, exactly as
+        // a lever would (`MessageBuffer.cs:1887-1893`, `Wiring.SetCurrentUser`/`HitSwitch`).
+        let (rx, ry) = (i32::from(request.x), i32::from(request.y));
+        let clicked = self.world.tile(rx, ry);
+        if clicked.block == 467 && clicked.frame_x / 36 == 4 {
+            let fired = {
+                let world = &mut self.world;
+                crate::world::wiring::hit_switch(world, rx, ry)
+            };
+            self.apply_circuit(fired, (rx, ry));
+            let mut w = terrustia_proto::PacketWriter::new(id::HIT_SWITCH);
+            w.i16(request.x).i16(request.y);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, Some(slot));
+            }
         }
         Ok(())
     }
@@ -2865,6 +2977,9 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.position = to;
             player.velocity = (0.0, 0.0);
+            // Server-decided, same as a Teleportation Potion — see `on_server_teleport`'s own
+            // comment on why this owes the client an acknowledgement round trip.
+            player.unacknowledged_teleports += 1;
         }
         // Style 9 is the pylon's own animation; the extra value picks the colour by network.
         let mut w = terrustia_proto::PacketWriter::new(id::TELEPORT_ENTITY);
@@ -4440,4 +4555,401 @@ mod tile_spam {
     /// A `const` block, so swapping the two by accident fails the build rather than a test run.
     const _: () = assert!(SPAM_BREAK_MAX > SPAM_PLACE_MAX);
     const _: () = assert!(SPAM_BREAK_DECAY > SPAM_PLACE_DECAY);
+}
+
+/// Server MINOR (C1-b item 5): opening a chest now tells everyone else which chest this player
+/// has open (packet 80), and opening a *rigged* one (`WorldGen.IsChestRigged`, tile 467 style 4)
+/// fires its own wiring circuit — `MessageBuffer.cs:1868-1895`.
+#[cfg(test)]
+mod chest_open_minors {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::objects::Chest;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "chest open minors probe")
+    }
+
+    fn with_two_players(
+        mut server: GameServer,
+    ) -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        // Wide enough that opening a chest's own flood of per-slot item packets (`DEFAULT_CHEST_SLOTS`
+        // = 40, plus the size and `SyncPlayerChest` frames) never fills the queue and gets the
+        // opener dropped as "cannot keep up" (`send_bytes`'s own `TrySendError::Full` branch).
+        let (opener_tx, opener_rx) = mpsc::channel(64);
+        let (other_tx, other_rx) = mpsc::channel(64);
+        for (slot, tx) in [(0u8, opener_tx), (1u8, other_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, opener_rx, other_rx)
+    }
+
+    fn open_chest_payload(x: i16, y: i16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn opening_a_chest_tells_the_other_player_via_packet_80() {
+        let (mut server, mut opener_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(Chest::empty_at(10, 10))
+            .expect("room for a chest");
+
+        server
+            .on_chest_open(0, &open_chest_payload(10, 10))
+            .unwrap();
+
+        assert_eq!(server.player(0).unwrap().open_chest, id);
+        // Drain the opener's own stream (chest size, its items, SyncPlayerChest) without caring
+        // about their exact count, then confirm the *other* player got told which chest it was.
+        let mut found = false;
+        while let Ok(frame) = other_rx.try_recv() {
+            if frame[2] == terrustia_proto::id::SYNC_PLAYER_CHEST_INDEX {
+                let sync = SyncPlayerChestIndex::decode(&frame[3..]).unwrap();
+                assert_eq!(
+                    sync,
+                    SyncPlayerChestIndex {
+                        player: 0,
+                        chest: id
+                    }
+                );
+                found = true;
+            }
+        }
+        assert!(found, "the other player should hear packet 80");
+        // The opener already knows its own state from packet 33; it should not also get packet 80.
+        assert!(
+            std::iter::from_fn(|| opener_rx.try_recv().ok())
+                .all(|frame| frame[2] != terrustia_proto::id::SYNC_PLAYER_CHEST_INDEX),
+            "the opener itself should be excluded from the packet 80 broadcast"
+        );
+    }
+
+    // `TileID.ActiveStoneBlock`/`InactiveStoneBlock` — a plain, already-proven wiring effect
+    // (`wiring.rs`'s own `stone_blocks_hide_and_reappear`) reused here as the observable half of
+    // an end-to-end trigger, rather than re-deriving a fresh mechanism just for this test.
+    const ACTIVE_STONE: u16 = 130;
+
+    fn wired_tile(block: u16, frame: (i16, i16)) -> terrustia_proto::Tile {
+        let mut tile = if terrustia_proto::tile_sets::frame_important(block) {
+            terrustia_proto::Tile::framed(block, frame.0, frame.1)
+        } else {
+            terrustia_proto::Tile::block(block)
+        };
+        tile.flags
+            .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+        tile
+    }
+
+    #[test]
+    fn opening_a_rigged_chest_fires_its_wiring_circuit() {
+        let (mut server, _opener_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        server
+            .world
+            .add_chest(Chest::empty_at(10, 10))
+            .expect("room for a chest");
+        // Tile 467 (Containers2), style 4 — `WorldGen.IsChestRigged`'s own exact test — wired
+        // straight to an active stone block a few tiles over.
+        for x in 10..12 {
+            server.world.set_tile(x, 10, wired_tile(467, (4 * 36, 0)));
+        }
+        for x in 12..15 {
+            let mut wire = terrustia_proto::Tile::AIR;
+            wire.flags
+                .set(terrustia_proto::tile::TileFlags::WIRE_RED, true);
+            server.world.set_tile(x, 10, wire);
+        }
+        server
+            .world
+            .set_tile(15, 10, wired_tile(ACTIVE_STONE, (0, 0)));
+        server
+            .world
+            .set_tile(15, 9, terrustia_proto::Tile::block(1)); // something to stand on
+
+        server
+            .on_chest_open(0, &open_chest_payload(10, 10))
+            .unwrap();
+
+        assert_eq!(
+            server.world.tile(15, 10).block,
+            131, // InactiveStoneBlock
+            "the stone block should have been hidden by the circuit"
+        );
+        let told_switch_hit = std::iter::from_fn(|| other_rx.try_recv().ok())
+            .any(|frame| frame[2] == terrustia_proto::id::HIT_SWITCH);
+        assert!(told_switch_hit, "packet 59 should announce the switch hit");
+    }
+
+    /// The control case: an ordinary chest (not tile 467 at all) never touches wiring.
+    #[test]
+    fn opening_an_ordinary_chest_does_not_touch_wiring() {
+        let (mut server, _opener_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        server
+            .world
+            .add_chest(Chest::empty_at(10, 10))
+            .expect("room for a chest");
+        server
+            .world
+            .set_tile(10, 10, terrustia_proto::Tile::framed(21, 0, 0));
+
+        server
+            .on_chest_open(0, &open_chest_payload(10, 10))
+            .unwrap();
+
+        assert!(
+            std::iter::from_fn(|| other_rx.try_recv().ok())
+                .all(|frame| frame[2] != terrustia_proto::id::HIT_SWITCH),
+            "an ordinary chest should never fire a switch"
+        );
+    }
+}
+
+/// Server MINOR (C1-b item 5): the summon-book sub-actions -11/-17
+/// (`MessageBuffer.cs:2822-2827`, `2848-2853`) used to fall into `on_summon`'s own
+/// unrecognised-negative-id fallback and do nothing.
+#[cfg(test)]
+mod combat_book_summons {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "combat book summon probe")
+    }
+
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    fn summon_payload(what: i16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&0i16.to_le_bytes()); // claimed player slot, ignored
+        payload.extend_from_slice(&what.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn sub_action_negative_eleven_marks_the_first_combat_book_read() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        assert!(!server.world.progress.combat_book);
+
+        server.on_summon(0, &summon_payload(-11)).unwrap();
+
+        assert!(server.world.progress.combat_book);
+    }
+
+    #[test]
+    fn sub_action_negative_seventeen_marks_the_second_combat_book_read() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        assert!(!server.world.progress.combat_book_two);
+
+        server.on_summon(0, &summon_payload(-17)).unwrap();
+
+        assert!(server.world.progress.combat_book_two);
+    }
+}
+
+/// Server MINOR (C1-b item 5): the teleport guard on player controls
+/// (`MessageBuffer.cs:998-1002`, `player13.unacknowledgedTeleports > 0`).
+#[cfg(test)]
+mod teleport_controls_guard {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "teleport controls guard probe")
+    }
+
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    /// Just the payload `on_player_controls` reads: player slot, four control-flag bytes, the
+    /// selected item, and a position, with no trailing velocity block.
+    fn controls_payload(position: (f32, f32)) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(11);
+        payload.push(0); // player slot, ignored in favour of the connection's own
+        payload.extend_from_slice(&[0, 0, 0, 0]); // control flags
+        payload.push(0); // selected item
+        payload.extend_from_slice(&position.0.to_le_bytes());
+        payload.extend_from_slice(&position.1.to_le_bytes());
+        payload
+    }
+
+    /// Just the payload `on_teleport` reads for an ack: `flags = 3` (both bit 0 and bit 1 set),
+    /// the claimed player slot, a zeroed position, and a zeroed style — matching what real
+    /// vanilla's own `NetMessage.TrySendData(65, -1, -1, null, 3, num82)` call actually puts on
+    /// the wire (`NetMessage.cs:1092-1112`'s writer has no optional fields for this case).
+    fn teleport_ack_payload() -> Vec<u8> {
+        let mut payload = Vec::with_capacity(12);
+        payload.push(3);
+        payload.extend_from_slice(&0i16.to_le_bytes());
+        payload.extend_from_slice(&0f32.to_le_bytes());
+        payload.extend_from_slice(&0f32.to_le_bytes());
+        payload.push(0);
+        payload
+    }
+
+    #[test]
+    fn an_unacknowledged_teleport_makes_controls_ignore_the_reported_position() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().position = (100.0, 100.0);
+        server.player_mut(0).unwrap().unacknowledged_teleports = 1;
+
+        server
+            .on_player_controls(0, &controls_payload((9999.0, 9999.0)))
+            .unwrap();
+
+        assert_eq!(
+            server.player(0).unwrap().position,
+            (100.0, 100.0),
+            "the stale pre-teleport position should have been ignored"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_controls_update_is_trusted_once_acknowledged() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().position = (100.0, 100.0);
+        server.player_mut(0).unwrap().unacknowledged_teleports = 0;
+
+        server
+            .on_player_controls(0, &controls_payload((9999.0, 9999.0)))
+            .unwrap();
+
+        assert_eq!(server.player(0).unwrap().position, (9999.0, 9999.0));
+    }
+
+    #[test]
+    fn the_client_ack_clears_the_guard() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().unacknowledged_teleports = 1;
+
+        server.on_teleport(0, &teleport_ack_payload()).unwrap();
+
+        assert_eq!(server.player(0).unwrap().unacknowledged_teleports, 0);
+    }
+
+    /// A server-issued teleport (a Teleportation Potion) sets the guard, which the very next
+    /// controls packet — the one already in flight when the teleport landed — must not undo.
+    #[test]
+    fn a_server_teleport_sets_the_guard_end_to_end() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().position = (100.0, 100.0);
+
+        // The Shellphone's spawn setting: unlike a potion's roaming search, it always finds
+        // somewhere (the world's own spawn point), which keeps this test's world plain and empty.
+        let payload = vec![SHELLPHONE_SPAWN];
+        server.on_server_teleport(0, &payload).unwrap();
+        // Drain whatever landing spot it found; only the guard state matters here.
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        assert_eq!(server.player(0).unwrap().unacknowledged_teleports, 1);
+
+        let after_teleport = server.player(0).unwrap().position;
+        server
+            .on_player_controls(0, &controls_payload((100.0, 100.0)))
+            .unwrap();
+        assert_eq!(
+            server.player(0).unwrap().position,
+            after_teleport,
+            "the stale controls packet must not undo the teleport"
+        );
+    }
+}
+
+/// Packet 66 (C1-b item 6): a heal-on-touch projectile's own effect (`Projectile.cs:28951`,
+/// `aiStyle == 52`), applied server-side and relayed — `MessageBuffer.cs:3038-3056`.
+#[cfg(test)]
+mod heal_on_touch {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "heal on touch probe")
+    }
+
+    fn with_two_players(
+        mut server: GameServer,
+    ) -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        let (sender_tx, sender_rx) = mpsc::channel(16);
+        let (healed_tx, healed_rx) = mpsc::channel(16);
+        for (slot, tx) in [(0u8, sender_tx), (1u8, healed_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            player.life = 50;
+            player.life_max = 100;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, sender_rx, healed_rx)
+    }
+
+    fn heal_payload(player: u8, amount: i16) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(3);
+        payload.push(player);
+        payload.extend_from_slice(&amount.to_le_bytes());
+        payload
+    }
+
+    #[test]
+    fn a_positive_heal_is_applied_and_relayed() {
+        let (mut server, mut sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 30)).unwrap();
+
+        assert_eq!(server.player(1).unwrap().life, 80);
+        // Relayed to everyone but the sender.
+        assert!(sender_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_heal_never_exceeds_the_targets_own_life_max() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 9999)).unwrap();
+
+        assert_eq!(server.player(1).unwrap().life, 100, "clamped to life_max");
+    }
+
+    /// Matches `if (num72 > 0)` exactly: zero and negative amounts are ignored outright, not
+    /// clamped to zero and applied.
+    #[test]
+    fn a_non_positive_heal_amount_is_ignored() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        server.on_heal_player(0, &heal_payload(1, 0)).unwrap();
+        assert_eq!(server.player(1).unwrap().life, 50);
+
+        server.on_heal_player(0, &heal_payload(1, -10)).unwrap();
+        assert_eq!(server.player(1).unwrap().life, 50);
+    }
+
+    /// A target slot with nobody connected there is a no-op, not a panic.
+    #[test]
+    fn an_out_of_range_target_does_not_panic() {
+        let (mut server, _sender_rx, _healed_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+
+        assert!(server.on_heal_player(0, &heal_payload(200, 30)).is_ok());
+    }
 }

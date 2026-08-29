@@ -121,6 +121,32 @@ impl SyncPlayerChest {
     }
 }
 
+/// Packet `80`: which chest a player currently has open, relayed to everyone else — real
+/// vanilla's own client uses this to show a chest as already in use before it ever tries to open
+/// it itself (`MessageBuffer.cs:1886`, `NetMessage.cs:1182-1185`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncPlayerChestIndex {
+    pub player: u8,
+    /// The chest index, or `-1` when the player has none open.
+    pub chest: i16,
+}
+
+impl SyncPlayerChestIndex {
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let mut r = PacketReader::new(payload);
+        Ok(Self {
+            player: r.u8()?,
+            chest: r.i16()?,
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let mut w = PacketWriter::new(id::SYNC_PLAYER_CHEST_INDEX);
+        w.u8(self.player).i16(self.chest);
+        w.finish()
+    }
+}
+
 /// Packet `46`: a client asking to read the sign at a tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestSign {
@@ -186,12 +212,19 @@ impl SignText {
 /// Packet `19`: open or close a door.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DoorToggle {
-    /// 0 open door, 1 close door, 2 open trapdoor, 3 close trapdoor, 4 open tall gate,
-    /// 5 close tall gate.
+    /// 0 open door, 1 close door, 2 close trapdoor, 3 open trapdoor, 4 open tall gate,
+    /// 5 close tall gate — `Wiring.cs:1443-1461`. The trapdoor pair reads backwards from the door
+    /// and tall-gate ones either side of it: `bool value = type == 387` (the trapdoor is
+    /// currently *open*) then `3 - value.ToInt()` gives `2` exactly when this operation is a
+    /// close, not an open, verified against source rather than assumed from the door/gate
+    /// pattern either side of it.
     pub action: u8,
     pub x: i16,
     pub y: i16,
-    /// Which way the player was facing, which decides the door's frame.
+    /// For a door, which way the player was facing, which decides the door's frame. For a
+    /// trapdoor, whether the shift used `playerAbove: true` (`Wiring.cs:1446`,
+    /// `WorldGen.ShiftTrapdoor`'s own `playerAbove` argument) — 1 if it did, 0 if the
+    /// `playerAbove: false` fallback is what actually succeeded.
     pub direction: u8,
 }
 
@@ -342,10 +375,22 @@ mod tests {
     }
 
     #[test]
+    fn sync_player_chest_index_round_trips() {
+        let sync = SyncPlayerChestIndex {
+            player: 5,
+            chest: 42,
+        };
+        let frame = sync.encode().unwrap();
+        assert_eq!(frame[2], id::SYNC_PLAYER_CHEST_INDEX);
+        assert_eq!(SyncPlayerChestIndex::decode(payload(&frame)).unwrap(), sync);
+    }
+
+    #[test]
     fn truncated_object_packets_error_rather_than_panic() {
         assert!(RequestChestOpen::decode(&[1]).is_err());
         assert!(SyncChestItem::decode(&[1, 0, 0]).is_err());
         assert!(DoorToggle::decode(&[0, 1]).is_err());
         assert!(SyncPlayerChest::decode(&[0, 0]).is_err());
+        assert!(SyncPlayerChestIndex::decode(&[0]).is_err());
     }
 }

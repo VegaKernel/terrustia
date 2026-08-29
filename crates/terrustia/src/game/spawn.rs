@@ -41,9 +41,13 @@ pub struct Conditions {
 /// were about two and a half times too quiet, the underworld half as busy as it should be, and
 /// neither hardmode nor a blood moon made any difference at all.
 ///
-/// Returns `(one_in_n_per_tick, cap)`. A *lower* rate means more spawning, which is the game's
-/// own convention and reads backwards until you know it.
-pub fn rates(at: Conditions) -> (u32, f32) {
+/// Returns `(one_in_n_per_tick, cap, spawn_friendly)`. A *lower* rate means more spawning, which
+/// is the game's own convention and reads backwards until you know it. `spawn_friendly` is real
+/// vanilla's own `spawnFriendly` (`NPC.cs`): when true, this attempt should draw a friendly
+/// critter instead of a monster rather than being throttled by the rate at all — see the town
+/// suppression block below for where it comes from. `rng` is only ever consulted there; every
+/// other modifier in this function is a deterministic fact about the world.
+pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     let mut rate = SPAWN_RATE as f32;
     let mut max = MAX_SPAWNS;
 
@@ -87,30 +91,65 @@ pub fn rates(at: Conditions) -> (u32, f32) {
     }
 
     // Townsfolk quiet the place down, but only when nothing else is happening: an event overrules
-    // them, so a blood moon still comes to a full town. The multipliers escalate steeply — three
-    // residents is three times the interval and roughly half the cap, which is the difference
-    // between a base and a field.
+    // them, so a blood moon still comes to a full town. Real vanilla (`NPC.cs:795-924`) is not a
+    // flat multiplier here: past the event gate, every attempt is a coin flip between throttling
+    // `spawnRate` and leaving it alone while shrinking `maxSpawns` and forcing the spawn to be a
+    // friendly critter instead of a monster (`spawnFriendly`). Two things are deliberately not
+    // modelled: the underworld's own separate, simpler fork (`NPC.cs:802-855`) — a base built in
+    // the underworld is the rare exception, not the case this quiets — and the `ZoneGraveyard`
+    // sub-case inside each branch below, since this project has no notion of a graveyard zone at
+    // all yet (the same reason `ZonePeaceCandle` and the rest of a player's own buffs are already
+    // out of `Conditions`' scope, per this struct's own doc comment).
     let event = at.blood_moon || at.eclipse || at.event_moon;
+    let mut spawn_friendly = false;
     if !event {
-        let (slower, fewer) = match at.town_npcs {
-            0 => (1.0, 1.0),
-            1 => (2.0, 0.6),
-            2 => (3.0, 0.6),
-            _ => (3.0, 0.6),
-        };
-        rate *= slower;
-        max *= fewer;
+        match at.town_npcs {
+            0 => {}
+            // NPC.cs:870-878, the ordinary (non-graveyard) case: a one-in-three chance forces a
+            // friendly spawn and shrinks the cap; the other two-in-three simply double the rate.
+            1 => {
+                if rng.random_ratio(1, 3) {
+                    spawn_friendly = true;
+                    max *= 0.6;
+                } else {
+                    rate *= 2.0;
+                }
+            }
+            // NPC.cs:893-901: the odds flip to two-in-three for the friendly fork, and the rate
+            // triples on the remaining one-in-three.
+            2 => {
+                if !rng.random_ratio(1, 3) {
+                    spawn_friendly = true;
+                    max *= 0.6;
+                } else {
+                    rate *= 3.0;
+                }
+            }
+            // NPC.cs:917-921: `!Main.expertMode` is unconditionally true in classic mode, so this
+            // branch sets `spawnFriendly` on *every* attempt rather than rolling for it —
+            // `spawnRate` is never assigned here at all. Expert mode's own further
+            // `Main.rand.Next(30) != 0` (a 29-in-30 chance) is folded into the same unconditional
+            // case rather than threading a whole difficulty flag through `Conditions` for a
+            // 1-in-30 edge: friendly wins the overwhelming majority of the time in expert mode
+            // too, and this module already accepts small, disclosed over-approximations like it
+            // elsewhere.
+            _ => {
+                spawn_friendly = true;
+                max *= 0.6;
+            }
+        }
     }
 
     // The game's own floor and ceiling, which stop a stack of modifiers running away.
     rate = rate.max(SPAWN_RATE as f32 * 0.1);
     max = max.min(MAX_SPAWNS * 3.0);
-    (rate as u32, max.max(1.0))
+    (rate as u32, max.max(1.0), spawn_friendly)
 }
 
 #[cfg(test)]
 mod rate_tests {
     use super::*;
+    use rand::SeedableRng;
 
     fn plain() -> Conditions {
         Conditions {
@@ -124,14 +163,23 @@ mod rate_tests {
         }
     }
 
+    /// A fresh RNG for a call that never touches the town-suppression roll (`town_npcs: 0`, or an
+    /// event overruling it) and so does not care which one it gets.
+    fn any_rng() -> SmallRng {
+        SmallRng::seed_from_u64(0)
+    }
+
     /// Going down makes the world busier, which is most of what depth is for.
     #[test]
     fn caverns_are_busier_than_the_surface() {
-        let (surface, surface_cap) = rates(plain());
-        let (cavern, cavern_cap) = rates(Conditions {
-            depth: Depth::Cavern,
-            ..plain()
-        });
+        let (surface, surface_cap, _) = rates(plain(), &mut any_rng());
+        let (cavern, cavern_cap, _) = rates(
+            Conditions {
+                depth: Depth::Cavern,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
         assert!(
             cavern < surface,
             "a lower rate means more spawning: {cavern} vs {surface}",
@@ -144,20 +192,29 @@ mod rate_tests {
     /// Night, a blood moon and an eclipse each raise the surface's rate.
     #[test]
     fn events_make_the_surface_dangerous() {
-        let (day, _) = rates(plain());
-        let (night, _) = rates(Conditions {
-            day_time: false,
-            ..plain()
-        });
-        let (blood, blood_cap) = rates(Conditions {
-            day_time: false,
-            blood_moon: true,
-            ..plain()
-        });
-        let (eclipse, _) = rates(Conditions {
-            eclipse: true,
-            ..plain()
-        });
+        let (day, _, _) = rates(plain(), &mut any_rng());
+        let (night, _, _) = rates(
+            Conditions {
+                day_time: false,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
+        let (blood, blood_cap, _) = rates(
+            Conditions {
+                day_time: false,
+                blood_moon: true,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
+        let (eclipse, _, _) = rates(
+            Conditions {
+                eclipse: true,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
 
         assert!(night < day, "night is busier than day");
         assert!(
@@ -165,68 +222,119 @@ mod rate_tests {
             "a blood moon is busier than an ordinary night"
         );
         assert!(eclipse < day, "an eclipse is busier than a plain day");
-        assert!(blood_cap > rates(plain()).1);
+        assert!(blood_cap > rates(plain(), &mut any_rng()).1);
     }
 
-    /// A town with residents is quieter than open ground, and more of them is quieter still.
-    ///
-    /// This is what makes a base a base. Without it a house full of townsfolk was exactly as
-    /// dangerous as the middle of a forest.
+    /// A town of one or two residents forks every attempt between throttling the rate and
+    /// shrinking the cap while forcing a friendly spawn — real vanilla is not a flat multiplier
+    /// here (`NPC.cs:870-901`), so this samples many attempts rather than asserting one.
     #[test]
-    fn townsfolk_quiet_the_place_down() {
-        let (wild, wild_cap) = rates(plain());
-        let (one, one_cap) = rates(Conditions {
-            town_npcs: 1,
-            ..plain()
-        });
-        let (three, _) = rates(Conditions {
-            town_npcs: 3,
-            ..plain()
-        });
+    fn one_or_two_residents_fork_between_a_slower_rate_and_a_smaller_friendly_cap() {
+        let (wild, wild_cap, wild_friendly) = rates(plain(), &mut any_rng());
+        assert!(
+            !wild_friendly,
+            "no town at all never forces a friendly spawn"
+        );
 
-        assert!(
-            one > wild,
-            "one resident should slow spawns: {one} vs {wild}"
-        );
-        assert!(
-            three > one,
-            "three should slow them further: {three} vs {one}"
-        );
-        assert!(one_cap < wild_cap, "and hold fewer at once");
+        let mut rng = SmallRng::seed_from_u64(1);
+        for town_npcs in [1, 2] {
+            let mut saw_slower_rate = false;
+            let mut saw_smaller_friendly_cap = false;
+            for _ in 0..200 {
+                let (rate, cap, friendly) = rates(
+                    Conditions {
+                        town_npcs,
+                        ..plain()
+                    },
+                    &mut rng,
+                );
+                if friendly {
+                    assert_eq!(cap, wild_cap * 0.6, "the friendly fork shrinks the cap");
+                    assert_eq!(rate, wild, "and leaves the rate exactly where it was");
+                    saw_smaller_friendly_cap = true;
+                } else {
+                    assert!(rate > wild, "the other fork should slow the rate");
+                    assert_eq!(cap, wild_cap, "and leaves the cap exactly where it was");
+                    saw_slower_rate = true;
+                }
+            }
+            assert!(
+                saw_slower_rate,
+                "town_npcs {town_npcs}: 200 trials never rolled the rate fork"
+            );
+            assert!(
+                saw_smaller_friendly_cap,
+                "town_npcs {town_npcs}: 200 trials never rolled the friendly fork"
+            );
+        }
+    }
+
+    /// Three or more residents is the one headcount classic mode makes fully deterministic:
+    /// every attempt forces a friendly spawn and shrinks the cap, and the rate is never touched
+    /// at all (`NPC.cs:917-921`) — not throttled further, the way a flat multiplier would.
+    #[test]
+    fn three_or_more_residents_always_forces_a_friendly_spawn_at_the_unchanged_rate() {
+        let (wild, wild_cap, _) = rates(plain(), &mut any_rng());
+        let mut rng = SmallRng::seed_from_u64(2);
+        for town_npcs in 3..8 {
+            let (rate, cap, friendly) = rates(
+                Conditions {
+                    town_npcs,
+                    ..plain()
+                },
+                &mut rng,
+            );
+            assert_eq!(rate, wild, "townNPCs >= 3 never assigns spawnRate");
+            assert!(friendly, "and always forces a friendly spawn");
+            assert_eq!(cap, wild_cap * 0.6);
+        }
     }
 
     /// An event overrules the town: a blood moon still comes to a full street.
     #[test]
     fn an_event_ignores_the_town() {
-        let quiet_night = rates(Conditions {
-            day_time: false,
-            town_npcs: 3,
-            ..plain()
-        });
-        let blood_night = rates(Conditions {
-            day_time: false,
-            blood_moon: true,
-            town_npcs: 3,
-            ..plain()
-        });
+        let quiet_night = rates(
+            Conditions {
+                day_time: false,
+                town_npcs: 3,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
+        let blood_night = rates(
+            Conditions {
+                day_time: false,
+                blood_moon: true,
+                town_npcs: 3,
+                ..plain()
+            },
+            &mut any_rng(),
+        );
         assert!(
             blood_night.0 < quiet_night.0,
             "a town that could switch off a blood moon would not be much of an event",
+        );
+        assert!(
+            !blood_night.2,
+            "and an event never forces a friendly spawn either"
         );
     }
 
     /// However the modifiers stack, they stay inside the game's own floor and ceiling.
     #[test]
     fn the_rate_is_bounded() {
-        let worst = rates(Conditions {
-            depth: Depth::Underworld,
-            hard_mode: true,
-            day_time: false,
-            blood_moon: true,
-            eclipse: false,
-            event_moon: true,
-            town_npcs: 0,
-        });
+        let worst = rates(
+            Conditions {
+                depth: Depth::Underworld,
+                hard_mode: true,
+                day_time: false,
+                blood_moon: true,
+                eclipse: false,
+                event_moon: true,
+                town_npcs: 0,
+            },
+            &mut any_rng(),
+        );
         assert!(worst.0 >= (SPAWN_RATE as f32 * 0.1) as u32, "{worst:?}");
         assert!(worst.1 <= MAX_SPAWNS * 3.0, "{worst:?}");
     }
@@ -795,15 +903,18 @@ pub fn try_spawn(
         .map(|p| town_npcs_near(npcs, p.position))
         .min()
         .unwrap_or(0);
-    let (_, band) = rates(Conditions {
-        depth: deepest,
-        hard_mode: world.progress.hard_mode,
-        day_time: world.day_time,
-        blood_moon: world.blood_moon,
-        eclipse: world.eclipse,
-        event_moon: world.pumpkin_moon || world.snow_moon,
-        town_npcs: loneliest,
-    });
+    let (_, band, _) = rates(
+        Conditions {
+            depth: deepest,
+            hard_mode: world.progress.hard_mode,
+            day_time: world.day_time,
+            blood_moon: world.blood_moon,
+            eclipse: world.eclipse,
+            event_moon: world.pumpkin_moon || world.snow_moon,
+            town_npcs: loneliest,
+        },
+        rng,
+    );
     let cap = band * (1.0 + 0.3 * active.len() as f32);
     if npcs.used_slots() >= cap {
         return Vec::new();
@@ -832,20 +943,32 @@ pub fn try_spawn(
 
         // The rate is the player's own, not one number for the world: two people in the same
         // world can be standing in a quiet forest and a busy cavern at the same moment.
-        let (mut rate, _) = rates(Conditions {
-            depth: depth_at(world, py),
-            hard_mode: world.progress.hard_mode,
-            day_time: world.day_time,
-            blood_moon: world.blood_moon,
-            eclipse: world.eclipse,
-            event_moon: world.pumpkin_moon || world.snow_moon,
-            town_npcs: town_npcs_near(npcs, player.position),
-        });
+        let (mut rate, _, spawn_friendly) = rates(
+            Conditions {
+                depth: depth_at(world, py),
+                hard_mode: world.progress.hard_mode,
+                day_time: world.day_time,
+                blood_moon: world.blood_moon,
+                eclipse: world.eclipse,
+                event_moon: world.pumpkin_moon || world.snow_moon,
+                town_npcs: town_npcs_near(npcs, player.position),
+            },
+            rng,
+        );
         if journey_world {
             let multiplier = journey.spawn_rate_multiplier(player.slot);
             rate = ((rate as f32) / multiplier).max(1.0) as u32;
         }
         if rng.random_range(0..rate.max(1)) != 0 {
+            continue;
+        }
+        // `spawnFriendly` (`NPC.cs:795-924`, see `rates`'s own doc): this attempt should draw a
+        // friendly critter instead of a monster. This project has no friendly-critter table to
+        // draw from yet — a disclosed, separate gap, not this one's to close — so the honest thing
+        // is to skip the attempt rather than spawn a monster real vanilla would not have here.
+        // What the town suppression this item exists to fix is actually for — fewer hostile
+        // spawns near a populated base — still holds either way.
+        if spawn_friendly {
             continue;
         }
 
@@ -1163,6 +1286,50 @@ mod tests {
                 0
             )
             .is_empty()
+        );
+    }
+
+    /// A base with three or more residents stops producing monsters entirely (C1-b item 8):
+    /// `NPC.cs:917-921`'s own classic-mode `spawnFriendly = true` on every attempt, which this
+    /// project's own `try_spawn` skips outright rather than fabricate a friendly critter it has no
+    /// table for (see `try_spawn`'s own comment on the fork). Fails before the fix, when town
+    /// suppression was a flat `3.0x` rate multiplier that still let monsters through.
+    #[test]
+    fn a_populated_base_produces_no_monsters_at_all() {
+        const GUIDE: u16 = 22;
+        let world = test_world();
+        let mut npcs = NpcStore::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (
+            f32::from(world.spawn_x) * 16.0,
+            f32::from(world.spawn_y) * 16.0,
+        );
+        // Three townsfolk standing right where the player is, well inside town_npcs_near's reach.
+        for _ in 0..3 {
+            npcs.spawn(GUIDE, player.position);
+        }
+        let players = vec![Some(player)];
+
+        let mut rng = SmallRng::seed_from_u64(13);
+        let mut spawned = 0;
+        for _ in 0..3600 {
+            spawned += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            )
+            .len();
+        }
+        assert_eq!(
+            spawned, 0,
+            "a minute of ticks in a populated base should produce no monsters at all"
         );
     }
 

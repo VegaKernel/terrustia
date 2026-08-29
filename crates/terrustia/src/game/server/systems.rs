@@ -12,6 +12,21 @@
 
 use super::*;
 
+/// Whether a player or NPC's hitbox overlaps the pixel square one tile occupies — the entity half
+/// of `Collision.EmptyTile(x, y, ignoreTiles: true)`, which skips the ordinary "is a block
+/// already there" check entirely and tests only entities. `occupants` is
+/// [`GameServer::entity_hitboxes`]'s own list, built once per call site rather than once per tile
+/// tested.
+fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
+    let tile = (
+        (x * 16) as f32,
+        (y * 16) as f32,
+        (x * 16 + 16) as f32,
+        (y * 16 + 16) as f32,
+    );
+    occupants.iter().any(|&b| boxes_overlap(tile, b))
+}
+
 impl GameServer {
     /// Advance every NPC and tell clients about the ones that changed.
     /// Run every NPC's buffs: count the timers down, work out what they cost, and tell clients.
@@ -126,15 +141,20 @@ impl GameServer {
     ///
     /// Not optional decoration: a client computes its own armour penetration from the buff list
     /// it believes the target has, so an enemy covered in ichor that nobody was told about takes
-    /// fifteen points less from every hit than it should.
+    /// fifteen points less from every hit than it should. A real, unconditional broadcast, not
+    /// [`Self::broadcast_near`]'s distance-gated one: every real send site (`NPC.cs:81959`,
+    /// `91090`, `91130`, `93029`) is `NetMessage.SendData(54, -1, -1, ...)` — `remoteClient` and
+    /// `ignoreClient` both `-1`, vanilla's own shape for "everyone, no exceptions" — with no
+    /// proximity check anywhere in source. A distant player still needs the right armour
+    /// penetration the moment they come back into range, which withholding this exactly like an
+    /// ordinary position sync would risk losing to the same skip budget.
     pub(super) fn broadcast_npc_buffs(&mut self, index: u8) {
         let Some(npc) = self.npcs.get(index) else {
             return;
         };
         let slots: Vec<(u16, i32)> = npc.buffs.active().map(|s| (s.kind, s.time)).collect();
-        let at = npc.position;
         if let Ok(frame) = packets::npc_buffs(index, slots) {
-            self.broadcast_near(frame, at, index);
+            self.broadcast(frame, None);
         }
     }
 
@@ -244,6 +264,10 @@ impl GameServer {
         let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
+        // A buff a routine wants put straight onto one named player, as (slot, buff id, ticks) —
+        // a latched nebula headcrab's Obstructed is currently the only source of these
+        // (`Effects::player_buff`'s own doc comment, `NPC.cs:37508-37526`).
+        let mut player_buffs: Vec<(u8, u16, i32)> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -620,6 +644,10 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.roared) {
                     roars.push(npc.center());
                 }
+                // A latched nebula headcrab wants Obstructed put on the player it is riding.
+                if let Some(buff) = ai_out.player_buff.take() {
+                    player_buffs.push(buff);
+                }
                 // A wither beast standing in its aura weakens whoever is standing in it too.
                 if let Some(reach) = ai_out.aura.take() {
                     let here = npc.center();
@@ -767,6 +795,22 @@ impl GameServer {
                 ) {
                     self.broadcast(frame, None);
                 }
+            }
+        }
+
+        // Same shape as the roar/aura broadcasts above, but each one names its own player rather
+        // than catching everyone in a radius. `!player22.creativeGodMode` (`NPC.cs:37522`) is
+        // this server's own `journey.is_godmode` gate, the same one `hurt_player` uses for the
+        // one other place this server decides something on a player's behalf.
+        for (slot, buff, ticks) in player_buffs {
+            let alive = self.players[slot as usize]
+                .as_ref()
+                .is_some_and(|p| p.is_playing() && p.life > 0);
+            if alive
+                && !self.journey.is_godmode(slot)
+                && let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, buff, ticks)
+            {
+                self.broadcast(frame, None);
             }
         }
 
@@ -1679,6 +1723,81 @@ impl GameServer {
         }
     }
 
+    /// A trapdoor a circuit reached — `Wiring.cs:1443-1456`. Tries `player_above: true` first and
+    /// falls back to `false`, exactly the wire trigger's own two-attempt order
+    /// (`WorldGen.ShiftTrapdoor(i, j, playerAbove: true)`, then `playerAbove: false` only if that
+    /// failed) — there is no real player standing anywhere in this path; it is only which of the
+    /// two possible landing rows the shift tries first. `shift_trapdoor` mutates nothing when it
+    /// refuses, so retrying on the same still-unchanged tile is safe.
+    fn fire_wired_trapdoor(&mut self, x: i32, y: i32) {
+        use crate::world::trapdoors::{TRAPDOOR_CLOSED, TRAPDOOR_OPEN, shift_trapdoor};
+
+        let before = self.world.tile(x, y);
+        if !before.is_active() || !matches!(before.block, TRAPDOOR_CLOSED | TRAPDOOR_OPEN) {
+            return;
+        }
+        let occupants = self.entity_hitboxes();
+        let mut player_above = true;
+        let mut moved = shift_trapdoor(&mut self.world, x, y, true, |tx, ty| {
+            tile_occupied(tx, ty, &occupants)
+        });
+        if !moved {
+            player_above = false;
+            moved = shift_trapdoor(&mut self.world, x, y, false, |tx, ty| {
+                tile_occupied(tx, ty, &occupants)
+            });
+        }
+        if !moved {
+            return;
+        }
+        // `3 - value.ToInt()` (`Wiring.cs:1453`) with `value = (type == TRAPDOOR_OPEN)`: closing
+        // (the tile was open) sends action 2, opening sends 3 — see `DoorToggle::action`'s own
+        // doc for why that reads backwards from the door/gate pair either side of it in source.
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: if before.block == TRAPDOOR_OPEN { 2 } else { 3 },
+            x: x as i16,
+            y: y as i16,
+            direction: u8::from(player_above),
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// A tall gate a circuit reached — `Wiring.cs:1457-1463`. Unforced, so it still refuses while
+    /// a player or NPC stands in the column, the same as a wired trapdoor's own opening refuses —
+    /// real vanilla's own wire trigger never passes `forced` here either.
+    fn fire_wired_gate(&mut self, x: i32, y: i32) {
+        use crate::world::trapdoors::{TALL_GATE_CLOSED, TALL_GATE_OPEN, shift_tall_gate};
+
+        let before = self.world.tile(x, y);
+        if !before.is_active() || !matches!(before.block, TALL_GATE_CLOSED | TALL_GATE_OPEN) {
+            return;
+        }
+        let closing = before.block == TALL_GATE_OPEN;
+        let occupants = self.entity_hitboxes();
+        let moved = shift_tall_gate(&mut self.world, x, y, closing, false, |tx, ty| {
+            tile_occupied(tx, ty, &occupants)
+        });
+        if !moved {
+            return;
+        }
+        // `4 + flag4.ToInt()` (`Wiring.cs:1461`) with `flag4 = (type == TALL_GATE_OPEN)`: closing
+        // sends action 5, opening sends 4 — matching this project's own `DoorToggle::action` doc.
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: if closing { 5 } else { 4 },
+            x: x as i16,
+            y: y as i16,
+            // Real vanilla's own `SendData` call for this case never passes a fourth number, so
+            // the wire's direction byte defaults to 0 (`NetMessage.cs:544`,
+            // `(number4 == 1f) ? 1 : 0` against the unset default).
+            direction: 0,
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
     fn apply_door_action(&mut self, action: crate::game::ai::fighter::Action) {
         use crate::game::ai::fighter::Action;
         match action {
@@ -1746,11 +1865,17 @@ impl GameServer {
     /// one of these still has to happen.
     pub(super) fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
         // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
-        // *this* NPC came from a statue, not just whether one exists somewhere in the world.
-        let from_statue = self.npcs.remove(index).is_some_and(|npc| npc.from_statue);
+        // *this* NPC came from a statue, not just whether one exists somewhere in the world, and
+        // `RedHatSkeletronAdjustmentsEnabled` (`NPC.cs:67435-67446`) reads `ai[3]` off this exact
+        // instance, not off npc_type 35 in general — the ordinary boss and the Clothier's
+        // repeatable vanity re-fight (`spawn_skeletron_from`'s own `red_hat` flag) share a type.
+        let removed = self.npcs.remove(index);
+        let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
+        let red_hat_skeletron =
+            npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
         self.broadcast_npc_death(index);
         self.drop_coins(value, center);
-        self.drop_loot(npc_type, center, from_statue);
+        self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
         self.note_army_kill(npc_type);
@@ -1805,7 +1930,13 @@ impl GameServer {
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
     /// has fallen.
-    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32), from_statue: bool) {
+    fn drop_loot(
+        &mut self,
+        npc_type: u16,
+        center: (f32, f32),
+        from_statue: bool,
+        red_hat_skeletron: bool,
+    ) {
         let (tx, ty) = (
             (center.0 / crate::game::npc::TILE) as i32,
             (center.1 / crate::game::npc::TILE) as i32,
@@ -1844,6 +1975,7 @@ impl GameServer {
             downed_all_mech_bosses: p.downed_mech1 && p.downed_mech2 && p.downed_mech3,
             pumpkin_moon_wave: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin))
                 .then_some(self.moon.wave),
+            red_hat_skeletron,
         };
 
         // Pools that give exactly one of their options.
@@ -1856,24 +1988,9 @@ impl GameServer {
                 self.broadcast_item(index);
             }
             // Some picks bring a companion item along automatically — Golem's Stynger with its
-            // own ammunition (`ItemDropDatabase.cs:654-656`), the only one of these this
-            // project's drop tables have found so far. Unconditional once the pick lands: real
-            // vanilla's own nested `OnSuccess` has no further gate of its own.
-            if let Some((companion, min, max)) =
-                terrustia_proto::conditional_drops::bundled_with(pick)
-            {
-                let stack = if max > min {
-                    rand::Rng::random_range(&mut self.rng, min..=max)
-                } else {
-                    min
-                };
-                if let Some(index) = self
-                    .items
-                    .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
-                {
-                    self.broadcast_item(index);
-                }
-            }
+            // own ammunition (`ItemDropDatabase.cs:654-656`). Unconditional once the pick lands:
+            // real vanilla's own nested `OnSuccess` has no further gate of its own.
+            self.drop_bundled_companion(pick, center);
         }
         // Moon Lord: two *distinct* items drawn from his own ten-weapon pool
         // (`FromOptionsWithoutRepeatsDropRule`) — empty for every other npc and in expert mode, so
@@ -1908,6 +2025,10 @@ impl GameServer {
             {
                 self.broadcast_item(index);
             }
+            // Pumpking's Stake Launcher and Mourning Wood's own two weapons each bring their own
+            // ammunition the same way Golem's Stynger does above — `bundled_with` is shared rather
+            // than re-checked only from `one_from`'s own loop.
+            self.drop_bundled_companion(pick, center);
         }
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
@@ -1958,6 +2079,28 @@ impl GameServer {
             }
         }
         self.drop_flat_loot(npc_type, center);
+    }
+
+    /// The item a `one_from`/`chance_pools` pick brings with it automatically, if any — Golem's
+    /// Stynger with its own ammunition, Pumpking's Stake Launcher with its own, Mourning Wood's
+    /// two weapons with theirs (`terrustia_proto::conditional_drops::bundled_with`'s own doc).
+    /// Unconditional once the pick lands: real vanilla's own nested `OnSuccess` has no further
+    /// gate of its own.
+    fn drop_bundled_companion(&mut self, pick: u16, center: (f32, f32)) {
+        if let Some((companion, min, max)) = terrustia_proto::conditional_drops::bundled_with(pick)
+        {
+            let stack = if max > min {
+                rand::Rng::random_range(&mut self.rng, min..=max)
+            } else {
+                min
+            };
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
+            {
+                self.broadcast_item(index);
+            }
+        }
     }
 
     /// The unconditional table.
@@ -2510,6 +2653,12 @@ impl GameServer {
             for (dx, dy) in fired.doors {
                 self.fire_wired_door(dx, dy);
             }
+            for (tx, ty) in fired.trapdoors {
+                self.fire_wired_trapdoor(tx, ty);
+            }
+            for (gx, gy) in fired.gates {
+                self.fire_wired_gate(gx, gy);
+            }
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
@@ -2966,6 +3115,7 @@ impl GameServer {
             let world = &mut self.world;
             self.liquids.tick(world)
         };
+        self.kill_drowned_furniture(&settled.drowned);
         let mut touched: Vec<(i32, i32)> = settled.changed;
         touched.extend(settled.reacted.iter().map(|(x, y, _)| (*x, *y)));
         if touched.is_empty() {
@@ -2995,6 +3145,65 @@ impl GameServer {
         // large enough disturbance has to go out as several frames or the tail is simply lost.
         for batch in changes.chunks(net_module::MAX_LIQUID_CHANGES) {
             if let Ok(frame) = net_module::liquid_changes(batch) {
+                self.broadcast(frame, None);
+            }
+        }
+    }
+
+    /// Kill whatever furniture a liquid just reached, the tiles [`crate::world::liquid::Settled::drowned`]
+    /// reports.
+    ///
+    /// `Liquid.AddWater`'s own inline check (`Liquid.cs:1196-1215`): a lava or water tile
+    /// (honey included — the real check is `if (tile.lava()) CheckLavaDeath else
+    /// CheckWaterDeath`, with no separate branch for honey or shimmer) spreading onto an active
+    /// tile kills it outright when the generated `tile_death::LAVA_DEATH`/`WATER_DEATH` table says
+    /// so, via a bare `WorldGen.KillTile(x, y)` — items still drop (`noItem` defaults `false`),
+    /// and the kill is told to every client the same way a player's own break is
+    /// (`NetMessage.SendData(17, -1, -1, null, 0, x, y)`, packet 17 with no exclusion).
+    fn kill_drowned_furniture(&mut self, drowned: &[(i32, i32)]) {
+        for &(x, y) in drowned {
+            let tile = self.world.tile(x, y);
+            if !tile.is_active() {
+                continue;
+            }
+            let table = if tile.liquid_kind == terrustia_proto::tile::Liquid::Lava {
+                &terrustia_proto::tile_death::LAVA_DEATH
+            } else {
+                &terrustia_proto::tile_death::WATER_DEATH
+            };
+            if !table.get(tile.block as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let (block, frame_x, frame_y) = (tile.block, tile.frame_x, tile.frame_y);
+            let mut cleared = tile;
+            cleared.flags.set(TileFlags::ACTIVE, false);
+            cleared.block = 0;
+            cleared.frame_x = -1;
+            cleared.frame_y = -1;
+            cleared.slope = 0;
+            cleared.flags.set(TileFlags::HALF_BRICK, false);
+            self.world.set_tile(x, y, cleared);
+            self.spawn_tile_drop(block, frame_x, frame_y, x, y);
+            // Plantera's bulb has no crafted summon: breaking it, by whatever means, is the
+            // summon (`wake_from_tile`'s own doc comment) — the one tile in either table this
+            // project's own machinery gates on a boss, so it is the one special case carried over
+            // from the player-edit path's own `broke` handling (`on_tile_manipulation`).
+            // `BULB` (238) is `LAVA_DEATH`-true and `WATER_DEATH`-false, verified against the
+            // generated table directly, so this is only ever reached on the lava branch above.
+            if block == crate::world::bulbs::BULB {
+                self.wake_from_tile(x, y, PLANTERA);
+                if !self.world.progress.downed_plantera {
+                    self.grow_plantera_bulb();
+                }
+            }
+            let edit = TileManipulation {
+                action: 0,
+                x: x as i16,
+                y: y as i16,
+                arg: 0,
+                style: 0,
+            };
+            if let Ok(frame) = edit.encode() {
                 self.broadcast(frame, None);
             }
         }
@@ -5761,6 +5970,161 @@ mod wired_mines_and_doors {
     }
 }
 
+/// Trapdoor and tall-gate wiring (C1-b item 4): `Fired::trapdoors`/`Fired::gates` used to be
+/// reported by the flood and then dropped on the floor here, the same way `doors` once was — see
+/// `wired_mines_and_doors`'s own doc comment for that precedent. `world::trapdoors` now has the
+/// real `ShiftTrapdoor`/`ShiftTallGate` logic; these drive it end to end through `apply_circuit`.
+#[cfg(test)]
+mod wired_trapdoors_and_gates {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::trapdoors::{
+        TALL_GATE_CLOSED, TALL_GATE_OPEN, TRAPDOOR_CLOSED, TRAPDOOR_OPEN,
+    };
+    use crate::world::wiring::Fired;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "trapdoor/gate wire probe"),
+        )
+    }
+
+    fn shut_trapdoor(server: &mut GameServer, x: i32, y: i32) {
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                server.world.set_tile(
+                    x + dx,
+                    y + dy,
+                    Tile::framed(TRAPDOOR_CLOSED, dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wired_trapdoor_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        shut_trapdoor(&mut server, 100, 100);
+
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            server.world.tile(100, 100).block == TRAPDOOR_OPEN
+                || server.world.tile(100, 101).block == TRAPDOOR_OPEN,
+            "a circuit reaching a shut trapdoor should open it"
+        );
+
+        let opened_at_row = if server.world.tile(100, 100).block == TRAPDOOR_OPEN {
+            100
+        } else {
+            101
+        };
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, opened_at_row));
+        server.apply_circuit(fired, (100, opened_at_row));
+        assert_eq!(
+            server.world.tile(100, opened_at_row).block,
+            TRAPDOOR_CLOSED,
+            "and a circuit reaching it again shuts it"
+        );
+    }
+
+    /// The fail-then-pass case: nothing shifts unless the circuit reaches whichever tile actually
+    /// holds the trapdoor, matching real vanilla's own retry logic rather than always succeeding.
+    #[test]
+    fn nothing_happens_where_there_is_no_trapdoor() {
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(!server.world.tile(100, 100).is_active());
+    }
+
+    /// Someone standing where the doorway would open blocks a wired trapdoor from opening at all
+    /// — `Collision.EmptyTile(..., ignoreTiles: true)`'s own entity-only check, which has no
+    /// `forced` override the way a door's own wired close does.
+    #[test]
+    fn a_wired_trapdoor_will_not_open_onto_someone_standing_there() {
+        let mut server = server();
+        shut_trapdoor(&mut server, 100, 100);
+        // Both possible doorway rows (100 and 101) are occupied, so neither of ShiftTrapdoor's
+        // two attempts (`player_above: true` then `false`) can succeed.
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 100.0 * 16.0))
+            .expect("a slime should spawn");
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 101.0 * 16.0))
+            .expect("a slime should spawn");
+
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            TRAPDOOR_CLOSED,
+            "still shut: both landing rows are occupied"
+        );
+    }
+
+    fn tall_gate(server: &mut GameServer, x: i32, y: i32, block: u16) {
+        let heights = [18i16, 16, 16, 16, 18];
+        let mut frame_y = 0i16;
+        for (row, &height) in heights.iter().enumerate() {
+            server
+                .world
+                .set_tile(x, y + row as i32, Tile::framed(block, 0, frame_y));
+            frame_y += height;
+        }
+    }
+
+    #[test]
+    fn a_wired_tall_gate_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        tall_gate(&mut server, 100, 100, TALL_GATE_CLOSED);
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 102)); // hitting a middle row of the five
+        server.apply_circuit(fired, (100, 102));
+        for row in 0..5 {
+            assert_eq!(server.world.tile(100, 100 + row).block, TALL_GATE_OPEN);
+        }
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        for row in 0..5 {
+            assert_eq!(server.world.tile(100, 100 + row).block, TALL_GATE_CLOSED);
+        }
+    }
+
+    /// An unforced wired close still refuses while something stands in the gate's own column —
+    /// real vanilla's own wire trigger never passes `forced` for a tall gate either.
+    #[test]
+    fn a_wired_tall_gate_will_not_close_on_someone_standing_in_it() {
+        let mut server = server();
+        tall_gate(&mut server, 100, 100, TALL_GATE_OPEN);
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 102.0 * 16.0))
+            .expect("a slime should spawn");
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            TALL_GATE_OPEN,
+            "still open: something stands in the column"
+        );
+    }
+}
+
 /// A meteor refuses a landing site that overlaps a player or an NPC — the `blocked_by_entity`
 /// closure `land_meteor` now feeds `meteor::drop_checked`, which the pre-fix code (a bare
 /// `meteor::drop`) had no way to express, so a meteor could bury the player who summoned it.
@@ -5823,6 +6187,54 @@ mod meteor_entity_safety {
             !boxes_overlap(strike(tx + 200, ty), npc_box),
             "a strike far from the slime is allowed"
         );
+    }
+}
+
+/// Server MINOR (C1-b item 5): `broadcast_npc_buffs` used to go through `broadcast_near`, the
+/// same distance-gated path an ordinary position sync takes, and could withhold the buff list
+/// from a distant player for several ticks running (`MAX_NPC_SYNC_SKIPS`). Every real send site
+/// for this packet (`NPC.cs:81959`, `91090`, `91130`, `93029`) is `SendData(54, -1, -1, ...)` —
+/// no proximity check anywhere in source — so this is a real, unconditional broadcast now.
+#[cfg(test)]
+mod npc_buff_broadcast_scope {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(4000, 1200, "npc buff broadcast probe")
+    }
+
+    #[test]
+    fn a_far_away_player_still_hears_an_npcs_buff_change_immediately() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        const ZOMBIE: u16 = 3;
+        let index = server
+            .npcs
+            .spawn(ZOMBIE, (0.0, 0.0))
+            .expect("a slot for a zombie");
+
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        // Comfortably outside `SECTION_REACH`'s one-section radius of the NPC at the origin.
+        player.position = (3000.0 * 16.0, 0.0);
+        server.players[0] = Some(player);
+
+        let npc = server.npcs.get_mut(index).expect("just spawned");
+        assert!(
+            npc.buffs.add(ZOMBIE, 20, 600),
+            "adding Poisoned should succeed"
+        );
+
+        server.broadcast_npc_buffs(index);
+
+        let frame = out_rx.try_recv();
+        assert!(
+            frame.is_ok(),
+            "a distant player should still hear about the buff on the very first call, \
+             not have it withheld the way an ordinary position sync would be"
+        );
+        assert_eq!(frame.unwrap()[2], terrustia_proto::id::N_P_C_BUFFS);
     }
 }
 
@@ -5921,6 +6333,117 @@ mod godmode {
             server.players[1].as_ref().unwrap().life,
             70,
             "slot 1 was never given godmode"
+        );
+    }
+}
+
+/// A latched nebula headcrab (`ai_style` 85, `ai[0] == 5.0`, `hunter::path::LATCHED`) keeps
+/// putting `Obstructed` (buff 163) on the player it is riding, every tick, per
+/// `NPC.cs:37508-37526` (`player22.AddBuff(163, 59)`) — exercising the whole channel end to end:
+/// `ai::run`'s `85 =>` arm sets `Effects::player_buff`, `npc_ai::update_with` carries it into
+/// `AiOutput`, and `tick_npcs` broadcasts it as packet 55 the same way the roar/aura/touch-debuff
+/// buffs already do.
+#[cfg(test)]
+mod nebula_headcrab_buff {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::npc_params::HEADCRAB;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "nebula headcrab buff probe")
+    }
+
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        player.life = 100;
+        player.life_max = 100;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    /// Whether an `ADD_PLAYER_BUFF_PV_P` (packet 55) frame for buff 163 sits anywhere in the
+    /// queue. `tick_npcs` also runs `tick_npc_syncs` at its own end, which broadcasts an ordinary
+    /// NPC sync for the headcrab on every call (`hunter::pathfinder` sets `npc.dirty = true`
+    /// unconditionally) — draining and filtering is what keeps that unrelated packet from being
+    /// mistaken for the buff this module is actually testing.
+    fn obstructed_was_sent(rx: &mut mpsc::Receiver<Bytes>) -> bool {
+        let mut found = false;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.len() >= 6
+                && frame[2] == terrustia_proto::id::ADD_PLAYER_BUFF_PV_P
+                && u16::from_le_bytes([frame[4], frame[5]]) == 163
+            {
+                found = true;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_latched_headcrab_puts_obstructed_on_its_rider() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let index = server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+        server.npcs.get_mut(index).expect("just spawned").ai[0] = 5.0;
+
+        server.tick_npcs();
+
+        // `tick_npcs` also runs `tick_npc_syncs` at its own end, which sends an ordinary NPC sync
+        // for the headcrab too (`hunter::pathfinder` sets `npc.dirty = true` unconditionally) — so
+        // the buff frame is found among the queue rather than assumed to be the only one in it.
+        let frame = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(|f| f.len() >= 6 && f[2] == terrustia_proto::id::ADD_PLAYER_BUFF_PV_P)
+            .expect("a buff packet should have been sent");
+        assert_eq!(frame[3], 0, "aimed at player slot 0");
+        assert_eq!(u16::from_le_bytes([frame[4], frame[5]]), 163, "Obstructed");
+        assert_eq!(
+            i32::from_le_bytes([frame[6], frame[7], frame[8], frame[9]]),
+            59
+        );
+    }
+
+    /// The control case: a headcrab that has not latched on (`ai[0]` at its default, `DECIDING`)
+    /// sends nothing, so the test above is proving the latch check does something.
+    #[test]
+    fn an_unlatched_headcrab_sends_nothing() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+
+        server.tick_npcs();
+
+        assert!(
+            !obstructed_was_sent(&mut rx),
+            "a headcrab that has not latched on should not be buffing anyone"
+        );
+    }
+
+    /// `NPC.cs:37522`'s own `!player22.creativeGodMode` gate, mirrored the same way `hurt_player`
+    /// mirrors it for damage — see the `godmode` module above.
+    #[test]
+    fn a_player_in_creative_godmode_is_not_buffed() {
+        let (mut server, mut rx) =
+            with_one_player(GameServer::new(Config::default(), tiny_world()));
+        server.journey.set_godmode(0, true);
+        let index = server
+            .npcs
+            .spawn(HEADCRAB, (0.0, 0.0))
+            .expect("a slot for the headcrab");
+        server.npcs.get_mut(index).expect("just spawned").ai[0] = 5.0;
+
+        server.tick_npcs();
+
+        assert!(
+            !obstructed_was_sent(&mut rx),
+            "creative god mode should have gated this"
         );
     }
 }
@@ -6064,7 +6587,7 @@ mod difficulty_slider {
         const TREASURE_BAG: i32 = 3318;
 
         let mut gentle = journey_at(0.0);
-        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
         assert!(
             !gentle
                 .items
@@ -6074,7 +6597,7 @@ mod difficulty_slider {
         );
 
         let mut fierce = journey_at(1.0);
-        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false);
+        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
         assert!(
             fierce
                 .items
@@ -6780,7 +7303,7 @@ mod boss_drop_table_fixes {
     /// afterward belongs to that kill alone — no need to diff against a running total.
     fn kill_and_collect(server: &mut GameServer, npc_type: u16) -> Vec<(i32, i16)> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false);
+        server.drop_loot(npc_type, (0.0, 0.0), false, false);
         let mut items: Vec<(i16, i32, i16)> = server
             .items
             .iter()
@@ -6968,6 +7491,96 @@ mod boss_drop_table_fixes {
             "300 trials never drew the Stynger — check the odds"
         );
     }
+
+    /// The four AI-state drop gaps (C1-b item 2): Pumpking's own pool now brings the Stake
+    /// Launcher's ammunition along the same way Golem's Stynger does — the fix threading
+    /// `bundled_with` into `chance_pools`'s own consumer, not just `one_from`'s, alongside the
+    /// weapon pool actually existing for npc 325 at all.
+    #[test]
+    fn pumpkings_stake_launcher_pick_always_brings_its_own_stakes() {
+        const PUMPKING: u16 = 325;
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.moon.moon = Some(crate::game::moons::Moon::Pumpkin);
+        server.moon.wave = 1;
+        let mut saw_launcher = false;
+        for trial in 0..300 {
+            let dropped = kill_and_collect(&mut server, PUMPKING);
+            let launcher = dropped.iter().filter(|(id, _)| *id == 1835).count();
+            let stakes = dropped.iter().find(|(id, _)| *id == 1836);
+            assert!(launcher <= 1, "trial {trial}: the pool draws one item");
+            if launcher == 1 {
+                saw_launcher = true;
+                let (_, stack) = *stakes.unwrap_or_else(|| {
+                    panic!("trial {trial}: Stake Launcher without its own Stakes: {dropped:?}")
+                });
+                assert!(
+                    (30..=60).contains(&stack),
+                    "trial {trial}: stake stack {stack} out of the real 30-60 range"
+                );
+            } else {
+                assert!(
+                    stakes.is_none(),
+                    "trial {trial}: stakes without the launcher: {dropped:?}"
+                );
+            }
+        }
+        assert!(saw_launcher, "300 trials never drew the Stake Launcher");
+    }
+
+    /// The RedHatSkeletron seam (C1-b item 2): `npc_died` has to read `ai[3]` off the exact NPC
+    /// instance that just died, before it removes it from the table, and carry that into
+    /// `drop_loot`'s own `Conditions.red_hat_skeletron` — driven through the real `npc_died` entry
+    /// point rather than `drop_loot` directly, since that is where the plumbing this item added
+    /// actually lives.
+    #[test]
+    fn a_red_hat_skeletron_kill_drops_its_own_vanity_set_through_npc_died() {
+        const SKELETRON: u16 = 35;
+        const RED_HAT_SET: [i32; 5] = [5624, 5625, 5626, 5628, 5737];
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(SKELETRON, (0.0, 0.0))
+            .expect("a slot for Skeletron");
+        server.npcs.get_mut(index).expect("just spawned").ai[3] = 1.0;
+        server.items = ItemStore::new();
+
+        server.npc_died(index, SKELETRON, (0.0, 0.0), 0.0);
+
+        let dropped: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+        for item in RED_HAT_SET {
+            assert!(
+                dropped.contains(&item),
+                "item {item} missing from a red-hat Skeletron kill: {dropped:?}"
+            );
+        }
+    }
+
+    /// The control case: an ordinary Skeletron kill (`ai[3]` left at its default) must not carry
+    /// the vanity set — otherwise every Skeletron kill would hand it out, which real vanilla never
+    /// does outside the Clothier's own repeatable re-fight.
+    #[test]
+    fn an_ordinary_skeletron_kill_does_not_drop_the_red_hat_set_through_npc_died() {
+        const SKELETRON: u16 = 35;
+        const RED_HAT_SET: [i32; 5] = [5624, 5625, 5626, 5628, 5737];
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(SKELETRON, (0.0, 0.0))
+            .expect("a slot for Skeletron");
+        server.items = ItemStore::new();
+
+        server.npc_died(index, SKELETRON, (0.0, 0.0), 0.0);
+
+        let dropped: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+        for item in RED_HAT_SET {
+            assert!(
+                !dropped.contains(&item),
+                "an ordinary Skeletron kill should not carry item {item}: {dropped:?}"
+            );
+        }
+    }
 }
 
 /// Real server-side coverage for the numerator fix in `conditional_drops.rs`: `Conditional` used
@@ -6996,7 +7609,7 @@ mod conditional_numerator_fixes {
     /// `boss_drop_table_fixes` for why resetting the store first makes this exact.
     fn kill_and_collect_ids(server: &mut GameServer, npc_type: u16) -> Vec<i32> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false);
+        server.drop_loot(npc_type, (0.0, 0.0), false, false);
         let mut items: Vec<(i16, i32)> = server
             .items
             .iter()
@@ -7407,5 +8020,84 @@ mod wood_from_trees {
             (70..130).contains(&bonus),
             "bonus wood landed {bonus}/{TRIALS} — real item-independent rate is 1-in-3 (~100)"
         );
+    }
+}
+
+/// L2, the liquid-destroys-furniture consumer: `tick_liquids` now resolves
+/// `crate::world::liquid::Settled::drowned` against the generated `tile_death` table and
+/// actually kills what needs killing — `Liquid.AddWater`'s own inline
+/// `CheckLavaDeath`/`CheckWaterDeath` check (`Liquid.cs:1196-1215`), which the table alone,
+/// landed separately, was deliberately left unwired until this item.
+#[cfg(test)]
+mod liquid_furniture_death {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::tile::{Liquid, Tile};
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(50, 50, "liquid death probe")
+    }
+
+    // `WATER_DEATH[4] == true`, `LAVA_DEATH[4] == false` — a torch goes out in a flood but does
+    // not burn any further in a fire it is already part of.
+    const TORCH: u16 = 4;
+
+    fn full_of(kind: Liquid) -> Tile {
+        let mut t = Tile::AIR;
+        t.liquid = 255;
+        t.liquid_kind = kind;
+        t
+    }
+
+    /// A torch sitting under a full column of water is killed the moment the water reaches it:
+    /// the tile is cleared and every client hears about it as packet 17, the same shape
+    /// `on_tile_manipulation`'s own player-break path already uses.
+    #[test]
+    fn water_reaching_a_torch_kills_it_and_tells_every_client() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (x, y) = (10, 10);
+        server.world.set_tile(x, y, Tile::framed(TORCH, 0, 0));
+        server.world.set_tile(x, y - 1, full_of(Liquid::Water));
+
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+
+        server.liquids.wake(x, y - 1);
+        for _ in 0..5 {
+            server.tick_liquids();
+        }
+
+        let tile = server.world.tile(x, y);
+        assert!(!tile.is_active(), "the torch should have been killed");
+        assert_eq!(tile.block, 0, "and the tile cleared, not merely flagged");
+
+        let told_every_client = std::iter::from_fn(|| out_rx.try_recv().ok())
+            .any(|frame| frame.len() > 2 && frame[2] == terrustia_proto::id::TILE_MANIPULATION);
+        assert!(
+            told_every_client,
+            "packet 17 should have gone out, matching NetMessage.SendData(17, -1, -1, ...)"
+        );
+    }
+
+    /// The control case: the same torch under lava (`LAVA_DEATH[4] == false`) survives — proving
+    /// the fix reads the right table for the liquid that actually arrived, not merely "any liquid
+    /// kills anything".
+    #[test]
+    fn lava_reaching_a_torch_leaves_it_alone() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (x, y) = (10, 10);
+        server.world.set_tile(x, y, Tile::framed(TORCH, 0, 0));
+        server.world.set_tile(x, y - 1, full_of(Liquid::Lava));
+
+        server.liquids.wake(x, y - 1);
+        for _ in 0..40 {
+            server.tick_liquids();
+        }
+
+        let tile = server.world.tile(x, y);
+        assert!(tile.is_active(), "a torch should survive a lava flow");
+        assert_eq!(tile.block, TORCH);
     }
 }
