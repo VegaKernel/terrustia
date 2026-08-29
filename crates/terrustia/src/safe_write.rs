@@ -155,12 +155,12 @@ pub fn copy_atomic(doing: &str, from: &Path, to: &Path) -> std::io::Result<()> {
     let temp = temp_path(to);
     let copied = std::fs::copy(from, &temp).and_then(|_| {
         // `copy` goes through the page cache like any other write, so the same durability argument
-        // as `write_and_sync` applies. Reopening for write is the cheap way to get a syncable
-        // handle without reading the bytes back through this process.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&temp)?
-            .sync_all()
+        // as `write_and_sync` applies. Reopening is the cheap way to get a syncable handle without
+        // reading the bytes back through this process - read-only, deliberately: `fsync` does not
+        // need write access, and `std::fs::copy` gives the temporary file the *source's*
+        // permissions, so opening it for write would fail on a world an operator had made
+        // read-only. Same shape as `sync_parent_dir`, which syncs a directory it only opened.
+        std::fs::File::open(&temp)?.sync_all()
     });
     if let Err(e) = copied {
         let _ = std::fs::remove_file(&temp);
@@ -416,6 +416,36 @@ pub(crate) mod tests {
             "a failed copy must not leave a fragment where the old file was"
         );
         drop(_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A read-only *source* is still backed up.
+    ///
+    /// `std::fs::copy` gives the temporary file the source's permissions, so the durability sync
+    /// has to open it read-only. Opening it for write instead - the obvious way to get a syncable
+    /// handle - fails here with `PermissionDenied`, and a world an operator had chmod'd read-only
+    /// would silently stop being backed up while its saves carried on working (the rename that
+    /// replaces it needs no permission on the file itself, only on the directory).
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_source_can_still_be_copied() {
+        let dir = temp_dir("safe-copy-readonly-source");
+        let source = dir.join("source.bin");
+        let dest = dir.join("dest.bin");
+        std::fs::write(&source, b"a protected original").expect("write the source");
+
+        let Some(_guard) = ReadOnlyFile::new(&source) else {
+            eprintln!("skipping: this environment cannot make a file read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        copy_atomic("backing something up", &source, &dest).expect("a read-only source is fine");
+        drop(_guard);
+
+        assert_eq!(
+            std::fs::read(&dest).expect("read back"),
+            b"a protected original"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
