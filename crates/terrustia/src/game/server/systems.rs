@@ -12,6 +12,21 @@
 
 use super::*;
 
+/// Whether a player or NPC's hitbox overlaps the pixel square one tile occupies — the entity half
+/// of `Collision.EmptyTile(x, y, ignoreTiles: true)`, which skips the ordinary "is a block
+/// already there" check entirely and tests only entities. `occupants` is
+/// [`GameServer::entity_hitboxes`]'s own list, built once per call site rather than once per tile
+/// tested.
+fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
+    let tile = (
+        (x * 16) as f32,
+        (y * 16) as f32,
+        (x * 16 + 16) as f32,
+        (y * 16 + 16) as f32,
+    );
+    occupants.iter().any(|&b| boxes_overlap(tile, b))
+}
+
 impl GameServer {
     /// Advance every NPC and tell clients about the ones that changed.
     /// Run every NPC's buffs: count the timers down, work out what they cost, and tell clients.
@@ -1703,6 +1718,81 @@ impl GameServer {
         }
     }
 
+    /// A trapdoor a circuit reached — `Wiring.cs:1443-1456`. Tries `player_above: true` first and
+    /// falls back to `false`, exactly the wire trigger's own two-attempt order
+    /// (`WorldGen.ShiftTrapdoor(i, j, playerAbove: true)`, then `playerAbove: false` only if that
+    /// failed) — there is no real player standing anywhere in this path; it is only which of the
+    /// two possible landing rows the shift tries first. `shift_trapdoor` mutates nothing when it
+    /// refuses, so retrying on the same still-unchanged tile is safe.
+    fn fire_wired_trapdoor(&mut self, x: i32, y: i32) {
+        use crate::world::trapdoors::{TRAPDOOR_CLOSED, TRAPDOOR_OPEN, shift_trapdoor};
+
+        let before = self.world.tile(x, y);
+        if !before.is_active() || !matches!(before.block, TRAPDOOR_CLOSED | TRAPDOOR_OPEN) {
+            return;
+        }
+        let occupants = self.entity_hitboxes();
+        let mut player_above = true;
+        let mut moved = shift_trapdoor(&mut self.world, x, y, true, |tx, ty| {
+            tile_occupied(tx, ty, &occupants)
+        });
+        if !moved {
+            player_above = false;
+            moved = shift_trapdoor(&mut self.world, x, y, false, |tx, ty| {
+                tile_occupied(tx, ty, &occupants)
+            });
+        }
+        if !moved {
+            return;
+        }
+        // `3 - value.ToInt()` (`Wiring.cs:1453`) with `value = (type == TRAPDOOR_OPEN)`: closing
+        // (the tile was open) sends action 2, opening sends 3 — see `DoorToggle::action`'s own
+        // doc for why that reads backwards from the door/gate pair either side of it in source.
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: if before.block == TRAPDOOR_OPEN { 2 } else { 3 },
+            x: x as i16,
+            y: y as i16,
+            direction: u8::from(player_above),
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// A tall gate a circuit reached — `Wiring.cs:1457-1463`. Unforced, so it still refuses while
+    /// a player or NPC stands in the column, the same as a wired trapdoor's own opening refuses —
+    /// real vanilla's own wire trigger never passes `forced` here either.
+    fn fire_wired_gate(&mut self, x: i32, y: i32) {
+        use crate::world::trapdoors::{TALL_GATE_CLOSED, TALL_GATE_OPEN, shift_tall_gate};
+
+        let before = self.world.tile(x, y);
+        if !before.is_active() || !matches!(before.block, TALL_GATE_CLOSED | TALL_GATE_OPEN) {
+            return;
+        }
+        let closing = before.block == TALL_GATE_OPEN;
+        let occupants = self.entity_hitboxes();
+        let moved = shift_tall_gate(&mut self.world, x, y, closing, false, |tx, ty| {
+            tile_occupied(tx, ty, &occupants)
+        });
+        if !moved {
+            return;
+        }
+        // `4 + flag4.ToInt()` (`Wiring.cs:1461`) with `flag4 = (type == TALL_GATE_OPEN)`: closing
+        // sends action 5, opening sends 4 — matching this project's own `DoorToggle::action` doc.
+        let toggle = terrustia_proto::objects::DoorToggle {
+            action: if closing { 5 } else { 4 },
+            x: x as i16,
+            y: y as i16,
+            // Real vanilla's own `SendData` call for this case never passes a fourth number, so
+            // the wire's direction byte defaults to 0 (`NetMessage.cs:544`,
+            // `(number4 == 1f) ? 1 : 0` against the unset default).
+            direction: 0,
+        };
+        if let Ok(frame) = toggle.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
     fn apply_door_action(&mut self, action: crate::game::ai::fighter::Action) {
         use crate::game::ai::fighter::Action;
         match action {
@@ -2557,6 +2647,12 @@ impl GameServer {
             }
             for (dx, dy) in fired.doors {
                 self.fire_wired_door(dx, dy);
+            }
+            for (tx, ty) in fired.trapdoors {
+                self.fire_wired_trapdoor(tx, ty);
+            }
+            for (gx, gy) in fired.gates {
+                self.fire_wired_gate(gx, gy);
             }
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
@@ -5865,6 +5961,161 @@ mod wired_mines_and_doors {
             found[0].1,
             (50.0 * 16.0 + 8.0, 50.0 * 16.0 + 8.0),
             "dropped at the cut tile's own centre"
+        );
+    }
+}
+
+/// Trapdoor and tall-gate wiring (C1-b item 4): `Fired::trapdoors`/`Fired::gates` used to be
+/// reported by the flood and then dropped on the floor here, the same way `doors` once was — see
+/// `wired_mines_and_doors`'s own doc comment for that precedent. `world::trapdoors` now has the
+/// real `ShiftTrapdoor`/`ShiftTallGate` logic; these drive it end to end through `apply_circuit`.
+#[cfg(test)]
+mod wired_trapdoors_and_gates {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::trapdoors::{
+        TALL_GATE_CLOSED, TALL_GATE_OPEN, TRAPDOOR_CLOSED, TRAPDOOR_OPEN,
+    };
+    use crate::world::wiring::Fired;
+
+    fn server() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "trapdoor/gate wire probe"),
+        )
+    }
+
+    fn shut_trapdoor(server: &mut GameServer, x: i32, y: i32) {
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                server.world.set_tile(
+                    x + dx,
+                    y + dy,
+                    Tile::framed(TRAPDOOR_CLOSED, dx as i16 * 18, dy as i16 * 18),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wired_trapdoor_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        shut_trapdoor(&mut server, 100, 100);
+
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            server.world.tile(100, 100).block == TRAPDOOR_OPEN
+                || server.world.tile(100, 101).block == TRAPDOOR_OPEN,
+            "a circuit reaching a shut trapdoor should open it"
+        );
+
+        let opened_at_row = if server.world.tile(100, 100).block == TRAPDOOR_OPEN {
+            100
+        } else {
+            101
+        };
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, opened_at_row));
+        server.apply_circuit(fired, (100, opened_at_row));
+        assert_eq!(
+            server.world.tile(100, opened_at_row).block,
+            TRAPDOOR_CLOSED,
+            "and a circuit reaching it again shuts it"
+        );
+    }
+
+    /// The fail-then-pass case: nothing shifts unless the circuit reaches whichever tile actually
+    /// holds the trapdoor, matching real vanilla's own retry logic rather than always succeeding.
+    #[test]
+    fn nothing_happens_where_there_is_no_trapdoor() {
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(!server.world.tile(100, 100).is_active());
+    }
+
+    /// Someone standing where the doorway would open blocks a wired trapdoor from opening at all
+    /// — `Collision.EmptyTile(..., ignoreTiles: true)`'s own entity-only check, which has no
+    /// `forced` override the way a door's own wired close does.
+    #[test]
+    fn a_wired_trapdoor_will_not_open_onto_someone_standing_there() {
+        let mut server = server();
+        shut_trapdoor(&mut server, 100, 100);
+        // Both possible doorway rows (100 and 101) are occupied, so neither of ShiftTrapdoor's
+        // two attempts (`player_above: true` then `false`) can succeed.
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 100.0 * 16.0))
+            .expect("a slime should spawn");
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 101.0 * 16.0))
+            .expect("a slime should spawn");
+
+        let mut fired = Fired::default();
+        fired.trapdoors.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            TRAPDOOR_CLOSED,
+            "still shut: both landing rows are occupied"
+        );
+    }
+
+    fn tall_gate(server: &mut GameServer, x: i32, y: i32, block: u16) {
+        let heights = [18i16, 16, 16, 16, 18];
+        let mut frame_y = 0i16;
+        for (row, &height) in heights.iter().enumerate() {
+            server
+                .world
+                .set_tile(x, y + row as i32, Tile::framed(block, 0, frame_y));
+            frame_y += height;
+        }
+    }
+
+    #[test]
+    fn a_wired_tall_gate_opens_then_shuts_on_the_next_pulse() {
+        let mut server = server();
+        tall_gate(&mut server, 100, 100, TALL_GATE_CLOSED);
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 102)); // hitting a middle row of the five
+        server.apply_circuit(fired, (100, 102));
+        for row in 0..5 {
+            assert_eq!(server.world.tile(100, 100 + row).block, TALL_GATE_OPEN);
+        }
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        for row in 0..5 {
+            assert_eq!(server.world.tile(100, 100 + row).block, TALL_GATE_CLOSED);
+        }
+    }
+
+    /// An unforced wired close still refuses while something stands in the gate's own column —
+    /// real vanilla's own wire trigger never passes `forced` for a tall gate either.
+    #[test]
+    fn a_wired_tall_gate_will_not_close_on_someone_standing_in_it() {
+        let mut server = server();
+        tall_gate(&mut server, 100, 100, TALL_GATE_OPEN);
+        server
+            .npcs
+            .spawn(1, (100.0 * 16.0, 102.0 * 16.0))
+            .expect("a slime should spawn");
+
+        let mut fired = Fired::default();
+        fired.gates.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+
+        assert_eq!(
+            server.world.tile(100, 100).block,
+            TALL_GATE_OPEN,
+            "still open: something stands in the column"
         );
     }
 }

@@ -33,7 +33,7 @@ const DOOR_HEIGHT_PX: i16 = 54;
 /// `OpenDoor`'s own guard checks alongside it (`WorldGen.cs:38093` and `38101`). Vines, herbs,
 /// torches on a wall bracket, banners and the like: things a door swinging through would obviously
 /// just knock out of the way in real life, as opposed to a wall, which stops it dead.
-fn cuttable(block: u16) -> bool {
+pub(super) fn cuttable(block: u16) -> bool {
     matches!(
         block,
         3 | 24

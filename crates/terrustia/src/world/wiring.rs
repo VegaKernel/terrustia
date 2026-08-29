@@ -34,9 +34,9 @@
 //! are *reported*: firing a trap needs a die roll, a cooldown and the projectile store; a statue
 //! needs the NPC table; a teleporter needs the players; a gate needs to start a new circuit, which
 //! cannot happen from inside the one that is running; a door, trapdoor or tall gate needs the real
-//! function that reshapes it, which either lives elsewhere in this module (doors, by way of
-//! [`super::doors`]) or has not been ported yet (trapdoors, tall gates — see [`Fired::trapdoors`]
-//! and [`Fired::gates`]). All of that lives on the caller, so the flood hands back which tiles it
+//! function that reshapes it, which lives elsewhere in this module tree (doors, by way of
+//! [`super::doors`]; trapdoors and tall gates, by way of [`super::trapdoors`] — see
+//! [`Fired::trapdoors`] and [`Fired::gates`]). All of that lives on the caller, so the flood hands back which tiles it
 //! reached and the caller does the work — [`trap_shot`] and [`check_logic_gate`] are the tables it
 //! calls.
 //!
@@ -52,6 +52,7 @@ use std::collections::HashSet;
 use terrustia_proto::tile::{Tile, TileFlags};
 
 use super::doors::{DOOR_CLOSED, DOOR_OPEN};
+use super::trapdoors::{TALL_GATE_CLOSED, TALL_GATE_OPEN, TRAPDOOR_CLOSED, TRAPDOOR_OPEN};
 
 /// The four wire colours, which are four independent circuits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,16 +205,18 @@ pub struct Fired {
     pub doors: Vec<(i32, i32)>,
     /// Trapdoors the current reached (`Wiring.cs:1443-1456`, `WorldGen.ShiftTrapdoor`).
     ///
-    /// Reported rather than resolved here: shifting one is a real animation — it moves between a
+    /// Reported rather than resolved here: shifting one is real domain logic — it moves between a
     /// vertical and a horizontal two-tile form depending on which side has room, and kills a
-    /// cuttable plant in the way rather than refusing — and porting that whole mechanism is not
-    /// part of this fix. Left for a caller that has it.
+    /// cuttable plant in the way rather than refusing — which lives in
+    /// [`super::trapdoors::shift_trapdoor`] now, and needs to know whether a player or NPC stands
+    /// where the doorway would open, which only the caller (holding the entity table) can answer.
     pub trapdoors: Vec<(i32, i32)>,
     /// Tall gates the current reached (`Wiring.cs:1457-1463`, `WorldGen.ShiftTallGate`).
     ///
-    /// Reported for the same reason `trapdoors` is: shifting one is real domain logic (a three-
-    /// tile column swapping type, refused unforced while anything occupies it) that has not been
-    /// ported, not something this flood can resolve on its own.
+    /// Reported for the same reason `trapdoors` is: shifting one is real domain logic (a
+    /// five-tile column swapping type, refused unforced while anything occupies it) that lives in
+    /// [`super::trapdoors::shift_tall_gate`], which likewise needs the caller's own occupancy
+    /// check.
     pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
@@ -746,13 +749,6 @@ const CONVEYOR_RIGHT: u16 = 422;
 const ACTIVE_STONE: u16 = 130;
 /// `TileID.InactiveStoneBlock`, invisible and passable until a signal brings it back.
 const INACTIVE_STONE: u16 = 131;
-/// `TileID.Trapdoor` and its open form — see [`Fired::trapdoors`] for why these are only
-/// detected, not resolved, here.
-const TRAPDOOR_CLOSED: u16 = 386;
-const TRAPDOOR_OPEN: u16 = 387;
-/// `TileID.TallGateClosed`/`TallGateOpen` — see [`Fired::gates`] for the same reason.
-const TALL_GATE_CLOSED: u16 = 388;
-const TALL_GATE_OPEN: u16 = 389;
 /// `TileID.LihzahrdBrick` — the temple's own walls, which `actuation_allowed` refuses to actuate
 /// away before Plantera falls while still underground, exactly as `DeActive` does.
 const LIHZAHRD_BRICK: u16 = 226;

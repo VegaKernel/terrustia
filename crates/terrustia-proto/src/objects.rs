@@ -186,12 +186,19 @@ impl SignText {
 /// Packet `19`: open or close a door.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DoorToggle {
-    /// 0 open door, 1 close door, 2 open trapdoor, 3 close trapdoor, 4 open tall gate,
-    /// 5 close tall gate.
+    /// 0 open door, 1 close door, 2 close trapdoor, 3 open trapdoor, 4 open tall gate,
+    /// 5 close tall gate — `Wiring.cs:1443-1461`. The trapdoor pair reads backwards from the door
+    /// and tall-gate ones either side of it: `bool value = type == 387` (the trapdoor is
+    /// currently *open*) then `3 - value.ToInt()` gives `2` exactly when this operation is a
+    /// close, not an open, verified against source rather than assumed from the door/gate
+    /// pattern either side of it.
     pub action: u8,
     pub x: i16,
     pub y: i16,
-    /// Which way the player was facing, which decides the door's frame.
+    /// For a door, which way the player was facing, which decides the door's frame. For a
+    /// trapdoor, whether the shift used `playerAbove: true` (`Wiring.cs:1446`,
+    /// `WorldGen.ShiftTrapdoor`'s own `playerAbove` argument) — 1 if it did, 0 if the
+    /// `playerAbove: false` fallback is what actually succeeded.
     pub direction: u8,
 }
 
