@@ -20,8 +20,10 @@ pub mod rescues;
 pub mod server;
 pub mod slime_rain;
 pub mod spawn;
+pub mod spawn_medium;
 pub mod teleport;
 pub mod tile_log;
+pub mod water_spawn;
 pub mod weather;
 
 pub use player::{ConnState, Player};

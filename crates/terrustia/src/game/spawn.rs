@@ -300,10 +300,9 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             170, // PigronCorruption
             473, // BigMimicCorruption
         ],
+        // Blood Feeder and Blood Jelly are water-source enemies and live in `water_spawn`.
         (Surface, Crimson) => &[
             183, // Crimslime
-            241, // BloodFeeder
-            242, // BloodJelly
         ],
         (Underground | Cavern, Crimson) => &[
             174, // Herpling
@@ -354,7 +353,7 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             206, // IcyMerman
             629, // IceMimic
         ],
-        // The jungle.
+        // Arapaima is a water-source enemy; the rest are dry Jungle additions.
         (Surface, Jungle) => {
             if day {
                 &[
@@ -369,7 +368,6 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             }
         }
         (Underground | Cavern, Jungle) => &[
-            157, // Arapaima
             176, // MossHornet
             205, // Moth
             236, // JungleCreeper
@@ -535,13 +533,9 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             34, // CursedSkull
             71, // DungeonSlime
         ],
+        // Ocean fish and Jellyfish are selected by the deep-water source; Crab stays on ground.
         (_, Ocean) => &[
-            67,  // Crab
-            63,  // BlueJellyfish
-            64,  // PinkJellyfish
-            65,  // Shark
-            221, // Squid
-            55,  // Goldfish
+            67, // Crab
         ],
         (Surface, Corruption) => &[
             6,  // EaterofSouls
@@ -661,15 +655,20 @@ pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
     })
 }
 
-/// Whether an NPC can stand at this tile: open space with something solid underneath.
+/// Whether the three tiles above a solid spawning tile have enough clearance.
+///
+/// Liquid is not itself an obstruction: vanilla classifies it after finding the solid spawning
+/// tile. Lava is the exception and invalidates the candidate outright. Deep water is therefore
+/// allowed through to `spawn_medium`, while walking enemies still cannot reach it because the
+/// medium-specific pool selection below never falls back from Water to Dry.
 fn has_room(world: &World, x: i32, y: i32) -> bool {
     for dy in 0..3 {
         let tile = world.tile(x, y - dy);
         if tile.is_active() && solid(tile.block) {
             return false;
         }
-        if tile.liquid > 200 {
-            return false; // deep water is not a walking spot
+        if tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Lava {
+            return false;
         }
     }
     let floor = world.tile(x, y + 1);
@@ -755,6 +754,13 @@ fn pick_bound(
         return None;
     }
     Some(waiting[rng.random_range(0..waiting.len())])
+}
+
+fn sleeping_angler_available(world: &World, npcs: &NpcStore) -> bool {
+    crate::game::rescues::still_bound(&world.progress, 376)
+        && !npcs.iter().any(|(_, npc)| {
+            npc.is_alive() && matches!(npc.npc_type, 369 | 376)
+        })
 }
 
 pub fn try_spawn(
@@ -869,10 +875,44 @@ pub fn try_spawn(
             if !has_room(world, x, y) {
                 continue;
             }
+            let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
+                continue;
+            };
 
             let depth = depth_at(world, y);
             let biome = biome_at(world, x, y);
-            // An event owns the surface while it runs, and nothing below it.
+
+            if medium == crate::game::spawn_medium::SpawnMedium::Water {
+                let spawning_block = world.tile(x, ground).block;
+                let water_pool = crate::game::water_spawn::pool(
+                    depth,
+                    biome,
+                    world.progress.hard_mode,
+                    spawning_block,
+                );
+                if water_pool.is_empty() {
+                    continue;
+                }
+
+                // Sleeping Angler shares the Ocean water source but appears on the water surface,
+                // not on the seabed where ordinary aquatic enemies use the spawning tile.
+                if biome == Biome::Ocean
+                    && rng.random_range(0..BOUND_RARITY) == 0
+                    && sleeping_angler_available(world, npcs)
+                {
+                    let surface_y = crate::game::spawn_medium::water_surface_y(world, x, ground);
+                    out.push((376, (x as f32 * 16.0, surface_y as f32 * 16.0)));
+                    break;
+                }
+
+                let npc_type = water_pool[rng.random_range(0..water_pool.len())];
+                out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                break;
+            }
+
+            // Events and ordinary bound rescues are dry-source decisions. In particular, this
+            // keeps an Eclipse enemy from replacing an Ocean-water spawn and keeps the Unconscious
+            // Man (whose source requires <= 1 tile of water) out of deep water.
             let event_type = if events.running() && depth == Depth::Surface {
                 match (events.moon, events.eclipse) {
                     (Some((moon, wave)), _) if !world.day_time => crate::game::moons::moon_spawn(
@@ -1119,6 +1159,44 @@ mod tests {
     }
 
     #[test]
+    fn dry_pools_do_not_contain_water_only_npcs() {
+        let water_only = [63, 64, 65, 102, 103, 157, 220, 221, 241, 242];
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for biome in [
+                Biome::Forest,
+                Biome::Corruption,
+                Biome::Crimson,
+                Biome::Jungle,
+                Biome::Snow,
+                Biome::Desert,
+                Biome::Ocean,
+                Biome::Dungeon,
+                Biome::Hallow,
+            ] {
+                for day in [true, false] {
+                    assert!(
+                        pool(depth, biome, day)
+                            .iter()
+                            .all(|npc| !water_only.contains(npc)),
+                        "ordinary {depth:?}/{biome:?} contains a water-only NPC"
+                    );
+                    assert!(
+                        hardmode_pool(depth, biome, day)
+                            .iter()
+                            .all(|npc| !water_only.contains(npc)),
+                        "hardmode {depth:?}/{biome:?} contains a water-only NPC"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn surface_forest_swaps_between_day_and_night() {
         let day = pool(Depth::Surface, Biome::Forest, true);
         let night = pool(Depth::Surface, Biome::Forest, false);
@@ -1227,6 +1305,31 @@ mod tests {
         let world = test_world();
         // Deep sky above the terrain, more than the scan depth.
         assert_eq!(find_ground(&world, world.width() / 2, 0), None);
+    }
+
+    #[test]
+    fn deep_water_has_room_but_lava_does_not() {
+        let mut world = World::empty(100, 100, "water room");
+        world.set_tile(50, 50, terrustia_proto::Tile::block(1));
+        for y in 47..=49 {
+            world.set_tile(
+                50,
+                y,
+                terrustia_proto::Tile::AIR.with_liquid(terrustia_proto::Liquid::Water, u8::MAX),
+            );
+        }
+        assert!(has_room(&world, 50, 49));
+        assert_eq!(
+            crate::game::spawn_medium::classify(&world, 50, 50),
+            Some(crate::game::spawn_medium::SpawnMedium::Water)
+        );
+
+        world.set_tile(
+            50,
+            48,
+            terrustia_proto::Tile::AIR.with_liquid(terrustia_proto::Liquid::Lava, 1),
+        );
+        assert!(!has_room(&world, 50, 49));
     }
 
     #[test]
