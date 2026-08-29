@@ -67,7 +67,7 @@ the glowing mushroom biome, and the full cosmetic and cleanup tail. Vanilla's se
 plus two more real ones an earlier pass had missed, are detected by their real magic strings (`--seed
 "getfixedboi"` works and persists), and one of the nine, No Traps World, is fully wired. What is left
 of worldgen is 7 of 15 micro-biome classes and the other eight seeds' own generation-content
-differences, sized in [`plan.md`](plan.md) and deferred to v0.1.0.
+differences, sized in [`TODO.md`](TODO.md)'s v0.0.2 section and deferred to v0.0.2.
 
 ## Running
 
@@ -131,7 +131,7 @@ winget, AUR) are all documented and supported equally; see [Packaging](#packagin
 | AUR | `packaging/aur/PKGBUILD` | Builds from source, matches Arch's Rust packaging guidelines, `shellcheck`-clean. `makepkg` and `namcap` need a real Arch environment. Publishing needs an AUR account |
 
 Every `url` or checksum above that points at a `v0.0.1` release asset is a disclosed placeholder;
-that tag does not exist yet (see [`plan.md`](plan.md)).
+that tag does not exist yet (see [`TODO.md`](TODO.md)).
 
 ---
 
@@ -229,7 +229,7 @@ against these notes. [`AUDIT.md`](AUDIT.md) has the findings behind it, and
 Tier 1 (the passes that make a world stop looking like a prototype), Tier 2 (biome set pieces) and
 Tier 3 (the cosmetic and cleanup tail) are all done. What is left: 7 of 15 real `MicroBiome`
 classes, and eight of the nine known secret seeds' own generation-content differences (the ninth, No
-Traps World, is done). Both are v0.1.0 scope.
+Traps World, is done). Both are v0.0.2 scope.
 
 | | Feature | Notes |
 |---|---|---|
@@ -248,9 +248,9 @@ Traps World, is done). Both are v0.1.0 scope.
 | ✅ | Traps | Dart traps, land mines, boulder traps, geysers, and the desert's sand trap, transcribed from `placeTrap` and `PlaceSandTrap`. A real 4200×1200 world: 72 dart traps, 10 mines, 4 boulder traps, 1 geyser |
 | ✅ | Smoothed terrain (`SmoothWorld`) | Transcribed, with one deliberate reordering: this generator smooths last, after decoration; see `smooth.rs`. 30,107 tiles smoothed on the same world |
 | ✅ | Floating islands, spider and gem caves, pyramids, living trees, jungle shrines, underground cabins, oasis, glowing mushroom biome (Tier 2) | A roughly 200-line structure-overlap tracker (`StructureMap`) turned out to be enough for all nine, with no port of vanilla's shape and structure DSL needed |
-| 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes done. The other 7 each need a genuinely separate subsystem this project does not have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape, and so on); sized individually in `plan.md` |
-| ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads, coral, cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed, each with its own disclosed narrowing; see `plan.md`'s Done rows |
-| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve, For the Worthy, Skyblock) | All nine detected by their real magic strings (an earlier pass had six of seven wrong: Remix's real trigger is `dontdigup`, Drunk World has only the numeric 5162020, and so on), fixed against source, plus two more the original investigation never named. All nine persist through save and reload and reach a client's packet 7. No Traps World is fully wired (0 trap tiles versus 397 on an ordinary seed). The other eight seeds' generation-content differences are detected and persisted but not yet implemented; sized in `plan.md`, deferred to v0.1.0 |
+| 🟡 | Micro-biomes | 8 of 15 real `MicroBiome` classes done. The other 7 each need a genuinely separate subsystem this project does not have yet (a trappable-chest mechanism, a second tree-growth engine, a wandering-tunnel shape, and so on); sized in `TODO.md`'s v0.0.2 section |
+| ✅ | Moss, wall variety, waterfalls, thin ice, speleothems, exposed gems, lily pads, coral, cacti, the seven-pass tile-cleanup bundle (Tier 3) | All 8 sizing-table items landed, each with its own disclosed narrowing; see the pre-roadmap ledger's Done rows (`plan.md`, in git history) |
+| 🟡 | Secret seeds (Celebrationmk10, Drunk World, Not the Bees, Remix, No Traps, "get fixed boi", Don't Starve, For the Worthy, Skyblock) | All nine detected by their real magic strings (an earlier pass had six of seven wrong: Remix's real trigger is `dontdigup`, Drunk World has only the numeric 5162020, and so on), fixed against source, plus two more the original investigation never named. All nine persist through save and reload and reach a client's packet 7. No Traps World is fully wired (0 trap tiles versus 397 on an ordinary seed). The other eight seeds' generation-content differences are detected and persisted but not yet implemented; sized in `TODO.md`'s v0.0.2 section, deferred to v0.0.2 |
 | ⬜ | Seed-identical worlds | Sized at 219 to 372 engineer-days. Feature-complete is the goal; byte-identical is not |
 
 </details>

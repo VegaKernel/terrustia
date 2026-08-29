@@ -74,9 +74,8 @@ real `TerrariaServer`. For a protocol or gameplay change, run the relevant one a
 
 ### Where to look
 
-`docs/` holds the protocol notes and subsystem write-ups. `plan.md` is the live, evidenced tracker of
-what is done. `AUDIT.md` records what the audits found and fixed. `TODO.md` is the backlog of known,
-deferred work.
+`docs/` holds the protocol notes and subsystem write-ups. `AUDIT.md` records what the audits found
+and fixed. `TODO.md` is the roadmap and the single backlog of known, deferred work.
 
 ## The bar for a change
 
@@ -91,7 +90,7 @@ Every change is held to the same standard the rest of the project follows:
 4. It is honest about its own limits. A partial implementation says what it does not do, in the code
    and in the README row, rather than implying completeness.
 
-`docs/` and `plan.md` describe how the project is put together and how it verifies itself against
+`docs/` and `TODO.md` describe how the project is put together and how it verifies itself against
 the real game. Reading the relevant part before a large change saves a round trip.
 
 ## AI-assisted contributions

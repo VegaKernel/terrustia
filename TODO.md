@@ -1,353 +1,291 @@
-# TODO
+# TODO: the v0.0.1 roadmap and the single backlog
 
-Work that is known and deferred, not hidden. Grouped by area. This is the single backlog; there is
-no separate GAPS file.
+This file IS the plan. Work that is known and deferred, not hidden, organised as the release
+roadmap. The former `plan.md` (the pre-roadmap working ledger) and `GAPS.md` (the seven-pass audit
+trail) are folded into this file and removed; their full text lives in git history, and everything
+in them that is still live appears below. There is no separate gaps file.
 
-## Integration pass (gameplay parity leftovers)
+## What v0.0.1 means
 
-The wire, door, meteor and slime items already landed. These remain:
+A fully working, stable, production-usable, vanilla-identical replacement for the Terraria 1.4.5.8
+dedicated server. The one deliberate exception is worldgen: the remaining secret-seed
+generation-content differences and remaining micro-biomes are deferred to v0.0.2. That narrow
+deferral does not excuse unrelated inaccuracies. Versioning collapses to v0.0.x from here: the next
+release after v0.0.1 is v0.0.2 (the worldgen release), and the old v0.1.0 label is retired.
 
-- **HC8: nebula headcrab buff.** A hit from the nebula headcrab should apply buff 163 to the player.
-  Needs a player-buff channel on the AI `Effects`/`Outcome` and a consumer in `server.rs`.
-- **HC9 / HC10: collision physics for two enemies.** Solar Sroller's multi-bounce and the Sand
-  Shark's sand-swim, ported as `Collision_MoveSolarSroller` / `Collision_MoveSandshark` in `npc.rs`.
-- **Drop gaps that need an AI-state condition.** Four boss/miniboss drops are gated on runtime NPC
-  state the drop table has no way to read yet: Skeletron's RedHatSkeletron variant (items
-  5624/5625/5626/5628/5737 when `ai[3] == 1`), Pumpking's weapon pool (1829/1831/1837/1845/1855),
-  Mourning Wood (327), Mothron (477, item 1570). Needs a conditions field threaded into drop
-  resolution.
-- **L2: liquid destroys furniture.** `tick_liquids` should consume `Settled::drowned` and KillTile
-  the tiles that actually die in that liquid. This needs the `tileLavaDeath` / `tileWaterDeath`
-  classification (a per-tile table), so it pairs with the codegen work below. A partial table would
-  destroy the wrong tiles, so it is left as a safe no-op until the table exists.
-- **Trapdoor and tall-gate wiring.** `Fired::trapdoors` / `Fired::gates` are reported by the flood
-  but not acted on. They need real `ShiftTrapdoor` / `ShiftTallGate` domain logic (a moving
-  two/three-tile form), which is more than a wire-up.
-- **Server MINORs.** NPC-buff broadcast scope, the summon combat books (-11/-17), a teleport guard
-  on player controls, and the chest-open (packet 80) rigged-input check.
-- **Persistence MINOR.** `wld.rs` should refuse a file whose section pointers are out of order
-  rather than reading past them. Needs a corrupt-`.wld` fixture to test against.
-- **BI8: slime facing.** A slime should re-target only during an active (flag3) hop, not on every
-  hop. Small follow-on to the BI4 hop-rate fix.
-- **B13: Empress of Light damage.** The Empress's damage values still need a full re-derivation from
-  vanilla's seven `case` blocks. The boss-AI pass left them alone rather than doing the column swap
-  the other bosses took, since a wrong swap here is worse than the current placeholder. A boss-parity
-  gap, not a wire-up.
+**The v0.0.1 gates:** parity completion plus a from-scratch re-audit; the error-handling and
+data-safety sweep; the `server.rs` architectural split; a zero-unknown-ID protocol classification;
+the admin overhaul (namespaced permissions, audit log, moderation toolkit); Windows ARM64 in the
+release matrix; the codegen port finished in Rust; and a 255-player qualification run per release
+candidate. A human fresh-character Moon Lord playthrough is a strongly-expected but waivable
+qualification step.
 
-## Codegen (finish moving the data generators off Python)
+## Phase 0: preconditions (complete)
 
-The Rust `terrustia-codegen` crate now generates eight of the ten tables, all verified
-byte-identical: `hurt_tiles`, `recipes`, `drops`, `projectiles`, `banners`, `buffs`, `angler` and
-`town_names`. `just regen` calls `codegen` for all eight and their `tools/gen_*.py` are deleted.
+Recorded for the trail: the Container CI musl-toolchain fix landed and the workflow is green; the
+~20 stranded agent worktrees were surveyed (nothing unique) and removed; every MASTER-FIXPLAN P0
+item was verified against `main` with the gaps ticketed into the lanes below; the audit-wave branch
+is retired in favour of one topic branch per lane off `main`; and the fork-collaboration review
+(spawn parity, VegaKernel/Xekep) was posted to PR #1 with the CLA-affirmation ask.
 
-- **Two generators are stuck on a pre-existing drift, not a porting bug.** `gen_shimmer.py` and
-  `gen_travel_shop.py`, run unmodified right now, already fail to reproduce their own committed
-  tables — proven by running them directly and diffing, with no codegen work involved. Both are
-  the same root cause: a past commit hand-edited the committed `.rs` (in violation of "generated
-  tables are never hand-edited") without updating the generator's `emit()` to match.
-  - `shimmer.rs`: commit `78d07de` ("Split the licence, and make the lints and licences
-    enforceable") rewrote the module doc's decraft paragraph to describe decraft as now
-    implemented (accurate, since `recipes.rs`/`decraft_recipe` had just landed), but never touched
-    `gen_shimmer.py`'s embedded docstring. Only that one paragraph differs; every table and test is
-    unaffected.
-  - `travel_shop.rs`: commit `65f4be3` ("Fix travel shop generator skipping leading-guard chain
-    candidates") correctly regenerated the two new `OFFERS` entries (BlackCounterweight,
-    YellowCounterweight) through the fixed generator, but then hand-added a source comment above
-    them and a regression test (`the_travelling_merchant_can_offer_both_counterweights`) straight
-    into the `.rs`, without adding either to `gen_travel_shop.py`'s `emit()`. Porting this generator
-    as specified would delete that regression test on the next regen — worth fixing the drift
-    first, not blindly porting past it.
-  - Fix either by updating the generator's docstring/emit to match what is now hand-carried in the
-    committed table (then porting is a clean byte-identical job), or by deciding the hand-edit was
-    wrong and reverting the table — a call for whoever owns that call, not something to guess at
-    silently. `terrustia-codegen/src/shimmer.rs` and `.../travel_shop.rs` exist already, fully
-    ported and verified against everything except the drifted text; wiring them into `main.rs`'s
-    `TABLES` and `regen` is a few lines once the drift is resolved.
-- **Keep the three checker scripts in Python.** `check_drops.py`, `check_recipes.py` and
-  `packet_audit.py` stay as Python: they only run in CI, never in the build or data path, and are
-  genuinely useful there. Full Python removal is a longer-term goal, not this pass.
-- **D1: unroll the loop-generated recipes.** `Recipe.SetupRecipes` builds families of recipes
-  inside `for` loops (roughly 566 shimmer-decraft entries) that the regex extractor cannot see.
-  Capturing them is a behavioural change that adds rows to `recipes.rs`, separate from the faithful
-  port that is already done.
+## Phase 1: the v0.0.1 core campaign
 
-## Second audit wave
+Integrated, parity-first, per-subsystem. The from-scratch audit produces a findings ledger per
+subsystem, and fixes fold into that subsystem's single visit (split the file, clear its panics,
+apply the audit fixes, tidy) so heavy files are churned once. Single-owner hot files
+(`game/server.rs`, `world/worldgen/mod.rs`) take one change at a time.
 
-A full second pass over the whole codebase for bugs, performance, and idiomatic-Rust improvements,
-then fixing what it finds. Not started.
+### Lane A: split `game/server.rs` by responsibility (in flight)
 
-## Error handling
+The 16,058-line, 108-panic-site elephant becomes a `game/server/` directory: `dispatch` (the
+`handle_packet` receive match), `tick` (the loop and phase orchestration), `panel` (panel-request
+handlers), `console` (`run_command`/`run_admin_command`/`run_console`), `systems` (per-system
+update calls), and a thin `mod.rs` keeping the `GameServer` state and actor entry. Zero behaviour
+change; production panics on caller- or environment-triggerable paths cleared in the moved code;
+the single-writer actor preserved; suite, clippy and fmt green per extraction.
 
-- **Clear every non-test `.unwrap()` / `.expect()` from the production paths.** The server should
-  never take a caller-triggered or environment-triggered fault out as a panic when it could return
-  or log an explained error instead. Sweep the crates for `.unwrap()`, `.expect()`, panicking
-  indexing, and integer casts that truncate on hostile input, and replace each production one with
-  real propagation and an operator-facing message. Test-only unwraps (the `update.rs` fixture
-  server, unit tests) are fine and out of scope. The `net::listener::bind` mapping added for the
-  `os error 28` port-exhaustion case is the pattern to follow: keep the error kind, add advice that
-  says what to do about it.
-- **Back off the accept loop on a persistent error.** `net::listener::run` logs and retries on an
-  `accept()` failure with no delay, so a sticky error (descriptor exhaustion, a broken listener)
-  turns into a hot loop that pegs a core while filling the log. A short, capped backoff between
-  repeated failures fixes that without slowing the normal one-off case.
-- **Handle out-of-space and other storage errors on the write paths.** A full disk (ENOSPC), a
-  read-only filesystem, or a vanished directory can hit any place the server writes: the world save
-  and autosave, the rotating backups, the admin/account store, and the config the setup wizard
-  writes. Today those surface as a bare OS error or, worse, risk a partial or truncated `.wld`. Each
-  writer should fail with an explained, operator-facing message (the way `net::listener::bind` now
-  does for `os error 28`), never lose the last good save to a half-written file (write to a temp
-  path and rename into place), and keep the server running where the failure is recoverable (an
-  autosave that could not write should warn and retry, not take the process down). Pairs with the
-  `.unwrap()` sweep above.
+### Lane B: error handling and data safety
 
-## Refactoring and dense-file splitting
+- Clear every non-test `.unwrap()`/`.expect()`/panicking index/truncating cast from paths the
+  outside world can trigger; replace each with propagation and an operator-facing message. The
+  `net::listener::bind` mapping for `os error 28` is the pattern: keep the error kind, add advice.
+- Capped backoff in the accept loop on persistent `accept()` failure, so descriptor exhaustion does
+  not become a hot loop.
+- ENOSPC, read-only filesystems and vanished directories handled on every write path: world save
+  and autosave, rotating backups, the admin store, the setup-wizard config. Write to a temp path
+  and rename into place everywhere; never lose the last good save to a half write. A failed
+  autosave warns and retries: console and panel on the first failure, and after a few consecutive
+  failures an in-game broadcast that saves are failing and progress is at risk.
+- From the P0 verification: a game-side reaper for stale non-Playing slots older than
+  `handshake_timeout` (the connection-level 64-frame deadline is escapable by sending frames), and
+  the persistence refusal in Lane C1 below.
 
-A codebase-wide pass to clean up the code and break the overgrown files into cohesive modules. Run
-it as one campaign with the `## Error handling` sweep above (the "unwrap saga") and the
-`## Second audit wave`, over the same files: the densest files are also where the panic sites
-concentrate, so split each heavy file, clear its non-test `.unwrap()`/`.expect()`/`panic!`, and tidy
-its non-idiomatic code in a single visit rather than churning it three times.
+### Lane C: parity completion and the from-scratch re-audit
 
-Quick investigation (2026-08-29):
+**C1, the known tail**, each with a fail-then-pass test:
+- HC8: nebula headcrab applies buff 163 (needs a player-buff channel on the AI `Effects`/`Outcome`).
+- HC9/HC10: Solar Sroller multi-bounce and Sand Shark sand-swim collision physics in `npc.rs`.
+- The four AI-state drop gaps: Skeletron's RedHatSkeletron set (5624/5625/5626/5628/5737 when
+  `ai[3] == 1`), Pumpking's weapon pool, Mourning Wood 327, Mothron 477 item 1570; needs a
+  conditions field threaded into drop resolution.
+- L2: liquid destroys furniture (`tileLavaDeath`/`tileWaterDeath` table via codegen; a partial
+  table would kill the wrong tiles, so it stays a no-op until the table exists).
+- Trapdoor and tall-gate wiring: real `ShiftTrapdoor`/`ShiftTallGate` domain logic.
+- B13: Empress of Light damage re-derived from vanilla's seven case blocks.
+- BI8: slime re-targets only during an active (flag3) hop.
+- Server MINORs: NPC-buff broadcast scope, summon combat books (-11/-17), the teleport guard on
+  player controls, the chest-open (packet 80) rigged-input check.
+- Persistence: `wld.rs` refuses out-of-order section pointers with an error instead of an empty
+  blob, with a corrupt-`.wld` fixture.
+- D1: teach the recipe generator to enumerate the ~566 loop-built decraft recipes so shimmer
+  decraft is complete (a behavioural table change, distinct from the Lane H port).
 
-- `src` holds 239 hand-written `.rs` files, ~212k lines including the generated tables. The
-  panic-site surface across `src` is **502 `.unwrap()` + 305 `.expect()` + 28 `panic!` = 835**. That
-  is the raw upper bound; a large share sit inside `#[cfg(test)]` modules and are out of scope per
-  the Error-handling note, so the real production count is lower and the sweep separates the two as
-  it goes.
-- **`game/server.rs` is the elephant: 16,058 lines and 108 panic sites**, the worst file on both
-  axes and the natural centerpiece. Split it by responsibility into a `game/server/` module
-  directory (packet/event dispatch, the tick loop, the panel-request handlers, the per-system update
-  calls) rather than by an arbitrary line budget.
-- Other hand-written files over ~1,000 lines, in rough priority: `world/wiring.rs` (2,575),
-  `panel/mod.rs` (1,746), `world/world.rs` (1,636), `world/wld.rs` (1,511), `game/spawn.rs` (1,432),
-  `world/worldgen/traps.rs` (1,404), `game/ai/mod.rs` (1,365), `world/worldgen/mod.rs` (1,281),
-  `world/wld_save.rs` (1,233), `world/worldgen/structures.rs` (1,197), `game/npc.rs` (1,179),
-  `game/npc_ai.rs` (1,164), `term.rs` (1,154), `game/ai/town.rs` (1,150), `game/buffs.rs` (1,136),
-  `game/ai/critter.rs` (1,123), `game/army.rs` (1,088).
-- Explicitly out of scope: the generated proto data tables (`recipes.rs` 25k, `npc_data.rs` 13k,
-  `projectile_data.rs` 11k, `tile_object.rs`, `npc_drops.rs`, `placed_items.rs`, `town_names.rs`).
-  Those are codegen output, never hand-edited; their size is fine and splitting is only for
-  hand-written logic.
+**C2, the from-scratch audit** in about six consolidated lanes against the decompiled source, real
+clients and captures, producing a ledger; fixes fold into the subsystem visits. Seed list carried
+from the audit trail, still unverified or unchecked: drop *rates* (presence is checked, `one_in`
+values and chain ordering only partly), AI behavioural parity per style measured against the game
+in motion (coverage is complete, behaviour is asserted per-style not compared), liquid/wiring/
+housing compared against the real game in motion, boss phase transitions and stall-ability, NPC
+spawn *pool* composition, fishing, golf, dyes, painting and the cosmetic layer, plus the known
+minor divergences: `SendSection` does not sync the section's NPCs the way vanilla does at
+`NetMessage.cs:2732`, no `Main.SyncAnInvasion` on packet 6 (cosmetic), and section batching
+stricter than `Tile.isTheSameAs` (correct output, more bytes).
 
-Approach: split along real seams (one module per cohesive responsibility), keep public paths stable
-or update the call sites in the same change, and run the full test suite plus `clippy` and `fmt`
-after each file. Because `warnings = "deny"`, a split cannot leave a dead-code or unused-import
-warning behind, which is a useful forcing function. Pair every split with the panic-clearing and
-idiomatic cleanup for that same file so it is only churned once.
+**C3, the spawn lane**: adopt the fork's spawn-parity module structure once Xekep affirms the CLA
+and the posted punch-list is fixed (or take the punch-list over if the fork goes quiet).
 
-## TUI and hosting
+**C4**: expand the golden/deterministic vanilla-derived tests that CAN run per-commit in CI; the
+live differential against a real `TerrariaServer` is a Phase 2 qualification step, since decompiled
+or installed game material can never ship to hosted CI.
 
-The wrap-corruption bug, Ctrl-D, the flat boot, the status footer, the worlds/ directory and the
-`--headless` flag all landed. A smooth-gradient boot logo is the next enhancement; two lower-impact
-polish leftovers from the TUI audit also remain:
+### Lane D: protocol classification, zero unknown IDs (in flight)
 
-- **Smooth-gradient boot logo via a terminal image protocol.** The boot logo is a 5-row block-glyph
-  `TERRUSTIA` with a 256-colour cyan-to-blue ramp (`term::banner`). It cannot be made to match the
-  smooth gradient of `docs/assets/banner.svg` as text: five rows give at most ten vertical colour
-  samples even with half-blocks (`▀`), which still reads as banding and adds a fg/bg seam per cell.
-  The only way to genuinely match the SVG is to put real pixels on the screen with a terminal image
-  protocol. Plan:
-  - **Image: bake, do not rasterise at runtime.** The logo is fixed, so render it once offline to a
-    transparent-background PNG at about 2x the on-screen cell size (from `docs/assets/boot-logo.svg`,
-    the text-free transparent source split off from `banner.svg` for exactly this, via `rsvg-convert`)
-    and `include_bytes!` it. Transparent alpha so it sits on light and dark terminals; 2x for Retina
-    crispness. No `image`/`resvg` rasteriser enters the build. `banner.svg` keeps its dark card and
-    tagline for the README hero; `boot-logo.svg` is just the gradient letterforms.
-  - **Protocol: hand-roll two small emitters.** iTerm2 `OSC 1337`
-    (`ESC ]1337;File=inline=1;...:<base64 PNG> ST`, trivial) covers iTerm2, WezTerm and the VSCode
-    terminal; the kitty graphics protocol (chunked `ESC _ G a=T,f=100,...;<base64> ESC \`) covers
-    kitty and Ghostty (the maintainer's own terminal) plus WezTerm and Konsole, and those do not
-    accept the iTerm2 one. Skip sixel: on macOS almost nothing needs it and it costs palette
-    quantisation.
-  - **Detection: env vars, gated behind the existing colour precedence.** Reuse the
-    `supports-terminal-graphics` heuristics (`LC_TERMINAL`, `TERM_PROGRAM`, `KITTY_WINDOW_ID` /
-    `KITTY_PID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_*`, `TERM`). Require `Palette::is_enabled()` first,
-    so `NO_COLOR`, a pipe and `TERM=dumb` already suppress it; treat `TMUX` as unsupported and fall
-    back to text, since tmux strips the escapes without a passthrough wrapper.
-  - **Fallback ladder:** image protocol if detected, else the current 256-colour `banner()`, else
-    plain text. Deliberately not the half-block, which was tried and reads as weird.
-  - **Dependencies: none new.** `include_bytes!` plus a roughly 15-line base64 encoder (std has none,
-    and a base64 encoder is exactly the narrow, well-defined thing this workspace hand-rolls) plus
-    the two escape emitters. Explicitly not `viuer`: it pulls `image`, `console`, `crossterm 0.29`
-    (a second copy beside the pinned `0.28`), `termcolor` and more, and decodes at runtime, all to
-    draw one logo already held as bytes. Wrong shape here, and against the dependency decision below.
-  - **Gotcha:** cursor advance after the image differs between iTerm2 and kitty, so the emitter must
-    leave the cursor at a known row for the tagline and boot card beneath it to land right.
+One authoritative, machine-readable per-ID table for the full 0..=162 surface (direction,
+client/server send, live/dead/legacy, dedicated-server applicability, Steam/social/host-only,
+terrustia recv and send implementation, source evidence, tests), validated against the actual code
+by the evolved `tools/packet_audit.py` so drift is a red check, with `docs/packet-coverage.md`
+generated from it. Classifications carried from the audit trail: `DevCommands` (94) deliberately
+unhandled (a public server that honours it can be rewritten by anyone); host migration
+(`SpectatePlayer` 150, `HostToken` 161) not applicable to a dedicated server; `ShopOverride` (104)
+unimplemented and classified rather than faked.
 
-- **Hanging indent for wrapped log lines.** A long operational log line wraps back to column 0,
-  misaligned from where its message started (around column 38). Padding continuation lines to the
-  message column would make a wrapped line read as intentional. Needs manual wrapping at the terminal
-  width rather than relying on the terminal's own wrap.
-- **Narrow-terminal awareness.** Nothing consults the terminal width when laying out the boot block,
-  so in a terminal narrower than the content the info lines wrap mid-value. Low priority now that the
-  boxes are gone, but a documented minimum width or a narrower fallback layout would be tidy.
+### Lane E: the admin overhaul
 
-## Docs
+- **E1, namespaced permissions**: per-command leaves with dotted families and wildcards
+  (`server.kick`, `server.ban`, `server.mute`, `world.time`, `panel.console`; `server.*`, `*`),
+  extending the existing string-set store. Ships a four-tier ladder: `default` (self-service
+  only), `moderator` (kick/mute/look, panel view), `admin` (bans, world and panel management, no
+  group-editing and no raw console, so it cannot self-escalate), `owner` (`*`). Includes the
+  registration path a future plugin uses to declare its own permissions; the plugin API itself is
+  post-v0.0.1.
+- **E2**: the coarse match table in `run_command` becomes specific namespaced checks.
+- **E3, panel roles and management**: a moderator logs in and does only what its permissions allow
+  (today it cannot log in at all); `/api/console` behind its own high permission; a
+  permissions-management view extending the existing groups/accounts views; the raw stdin console
+  stays fully privileged, unchanged.
+- **E4, the audit log**: a dedicated append-only file beside the world (issuer, timestamp, target,
+  reason for ban/unban/kick/mute/register/group-change/claim), independent of the admin TOML store,
+  with issuer and timestamp added to `Ban` as current-state, a read surface (console command and
+  panel view), and size-based rotation with generous configurable caps.
+- **E5, moderation**: real `mute` (chat suppression, duration, persistence, permission-gated,
+  audited) plus temp-mute escalation, shadow-mute (the muted player sees their own messages echoed,
+  staff see them flagged) and per-account chat cooldowns. All off by default: a fresh server feels
+  exactly like vanilla until the operator opts in.
 
-- **De-slop the remaining docs.** The em-dash and AI-slop cleanup so far covered `README.md` only.
-  `AUDIT.md`, `docs/*.md` and `plan.md` still carry em-dashes and the same tells (aphoristic reveals,
-  rule-of-three lists, "not X, it's Y"). The house style is now plain prose everywhere, so the rest
-  of the docs should get the same pass. De-em-dashing code comments across the whole codebase is a
-  much larger, lower-priority sweep, optional rather than committed to here.
+Out of scope for v0.0.1, planned after: regions and spawn protection, warps, item/tile/projectile
+restrictions, general policy machinery, server-side characters, stronger anti-cheat (today the
+server trusts client health/mana and has no stack validation or ban lists; the audit trail's
+detail is preserved under Phase 3).
 
-## Dependency pruning
+### Lane F: plaintext-transport hardening
 
-The default server build (the three default-members: `terrustia-proto`, `terrustia-client`,
-`terrustia`) resolves **171 external crates**. `Cargo.lock` holds 228 and a full `cargo tree`
-across dev-dependencies and the `terrustia-codegen` `regex` reaches into the 240s; 171 is the
-number that actually compiles into the shipped server.
+Document the plaintext transport plainly; keep Argon2; guarantee passwords are never logged; add
+login-attempt throttling (per-IP and per-account exponential backoff with jitter, in-memory, reset
+on success, no lockout, so brute force is impractical and account-name lockout-griefing is
+impossible); never treat the Terraria UUID as proof of identity. From the P0 verification:
+constant-time comparison for the claim token (both the console and panel paths still compare with
+plain `!=`) and an fsync in the admin store's save.
 
-**Decision (2026-08-29): stability over crate count.** After measuring the whole tree, the only cut
-being made is hand-rolling UPnP away from `igd-next` (below): it is the largest single win, adds no
-new dependencies, and its worst failure is a non-fatal boot convenience that already falls back to a
-logged manual-port-forward message. Everything else that could be cut is a working, in several cases
-already-verified subsystem and is deliberately KEPT. A mature dependency is worth more than the
-crates it costs, and rewriting one resets verification that has already been earned (the web panel
-is Playwright-verified; hand-rolling its `axum` transport would reset that to zero). The rest of this
-section keeps the full measurement so the trade stays visible, and records the larger levers that
-were weighed and declined.
+### Lane G: platforms
 
-**How the numbers were measured.** Feature resolution matters here and the obvious tool lies about
-it. Plain `cargo metadata` returns a feature-*unified maximal* graph: it speculatively turns on
-`ureq`'s `cookies` feature, which drags `cookie_store` and `url` back in, and makes the ICU stack
-look shared when it is not. The honest source is `cargo tree -e no-dev --workspace --no-dedupe`,
-which reflects the features that actually compile. Every count below is from that tree. A first
-pass off `cargo metadata` got this wrong and undercounted `igd-next` by 20 crates; do not trust
-`cargo metadata` for feature-gated ownership questions.
+Add `aarch64-pc-windows-msvc` to the CI and release matrices (six official targets), built and
+smoke-tested on GitHub's native `windows-11-arm` runner (falling back to cross-compilation if
+runner availability disappoints); keep `riscv64gc` compiling as a compile-only target; keep the
+matrix affordable.
 
-**Exclusive ownership** (crates that leave the build if this one direct dependency is dropped):
+### Lane H: finish the codegen port (in flight)
 
-| Direct dep | Crates | Purpose | Verdict |
-| --- | --- | --- | --- |
-| `igd-next` | 31 | UPnP auto-port-forward at boot | **hand-roll (decided)** |
-| `ureq` | 13 (+`tempfile` 2) | `terrustia update` over TLS | keep |
-| `rust-embed` | 8 | embed the web panel into the binary | keep |
-| `crossterm` | 7 | console raw mode + key decoding, incl. Windows | keep |
-| `toml` | 6 | config read + admin-store write | keep (deferred) |
-| `tracing-subscriber` | 4 | log formatting layer | keep (deferred) |
-| `argon2` | 4 | admin password hashing | keep |
-| `axum` | 0 alone / 23 with `rust-embed` | panel HTTP + WebSocket server | keep (deferred) |
+The eight remaining Python generators (`gen_drops`, `gen_projectiles`, `gen_banners`, `gen_buffs`,
+`gen_angler`, `gen_shimmer`, `gen_town_names`, `gen_travel_shop`) become `terrustia-codegen`
+modules, each verified byte-identical against its committed table; `just regen` points at the
+codegen crate and the last `tools/gen_*.py` are deleted. The three checker scripts stay in Python
+by decision (`check_drops.py`, `check_recipes.py`, `packet_audit.py`); note they need the
+decompiled tree, so they run locally at qualification time, never in hosted CI (`just check-data`).
 
-**The combined win.** `igd-next` and `axum` secretly share the same `hyper` + `hyper-util` +
-`futures-*` + `http-body` machinery, and `url` (with its whole `idna` + `icu_*` + `zerovec`/`yoke`
-subtree) is pulled by both `igd-next` and `axum`'s `matchit`/query path. So none of the three shows
-that machinery as "exclusive," and dropping any one alone frees far less than expected. Dropping all
-three together collapses it in one move:
+Two of the eight, `gen_shimmer.py` and `gen_travel_shop.py`, initially failed byte-identical for a
+reason unrelated to the port: past hand-edits (`78d07de`, `65f4be3`) had updated `shimmer.rs`'s
+decraft doc paragraph and added `travel_shop.rs`'s BlackCounterweight/YellowCounterweight source
+comment and regression test straight to the committed tables, without updating either generator's
+`emit()` to match, in violation of "generated tables are never hand-edited". Reconciled by teaching
+both generators to emit exactly what is committed rather than touching either table.
 
-- drop `igd-next`: 171 -> 140
-- drop `igd-next` + `rust-embed`: 171 -> 132
-- drop `igd-next` + `rust-embed` + `axum`: 171 -> **96** (a 44% cut)
-- also hand-roll `toml` + `tracing-subscriber`: -> 86
+### Cross-cutting through Phase 1
 
-The 75 crates that leave at the `igd-next` + `rust-embed` + `axum` step include the entire `hyper`
-stack (`hyper`, `hyper-util`, `h2`, `http-body`, `http-body-util`, `want`, `try-lock`,
-`atomic-waker`), the entire `futures` stack (`futures`, `futures-channel`, `futures-executor`,
-`futures-io`, `futures-macro`, `futures-task`, `futures-util`), the entire `url`/IDNA/ICU stack
-(`url`, `idna`, `idna_adapter`, `icu_normalizer`, `icu_properties`, `icu_collections`,
-`icu_provider`, `icu_locale_core`, `zerovec`, `zerovec-derive`, `zerotrie`, `yoke`, `yoke-derive`,
-`zerofrom`, `zerofrom-derive`, `tinystr`, `litemap`, `potential_utf`, `writeable`, `utf8_iter`,
-`stable_deref_trait`, `synstructure`, `displaydoc`), `tungstenite`/`tokio-tungstenite`, `tower`,
-`matchit`, `indexmap`/`hashbrown`/`equivalent`, `serde_urlencoded`/`form_urlencoded`, `sha1`/`sha2`,
-`mime`/`mime_guess`, `walkdir`/`same-file`, `attohttpc`, `xml-rs`/`xmltree`, and more.
+- **Dense-file splits**, paired with panic-clearing and idiomatic cleanup in the same visit:
+  `world/wiring.rs` (2,575), `panel/mod.rs` (1,746), `world/world.rs` (1,636), `world/wld.rs`
+  (1,511), `game/spawn.rs` (1,432), `world/worldgen/traps.rs` (1,404), `game/ai/mod.rs` (1,365),
+  `world/worldgen/mod.rs` (1,281), `world/wld_save.rs` (1,233), `world/worldgen/structures.rs`
+  (1,197), `game/npc.rs` (1,179), `game/npc_ai.rs` (1,164), `term.rs` (1,154), `game/ai/town.rs`
+  (1,150), `game/buffs.rs` (1,136), `game/ai/critter.rs` (1,123), `game/army.rs` (1,088). The
+  generated proto tables are excluded: codegen output, never hand-edited, size is fine.
+- **The one dependency cut**: hand-roll UPnP to drop `igd-next` (see the dependency section below).
+  Scheduled in-campaign but not a release gate; its worst failure is a boot convenience that
+  already falls back to a logged manual-port-forward message.
+- **Performance discipline**: maintain the benchmarks, measure meaningful changes, reject confirmed
+  regressions on CPU, memory, latency, startup, saves and joins, and keep the instrumentation. The
+  deep optimisation campaign comes after the feature waves, not now.
+- **Docs**: de-slop `AUDIT.md` and `docs/*.md` (em dashes and the usual tells); this file replaces
+  `plan.md` and `GAPS.md`.
 
-**On merging duplicate versions.** The tree carries duplicate majors (`base64` x2, `getrandom` x3,
-`rustix` x2, `syn` x2, `winnow` x2, `rand_core` x2). These are upstream version pins, not something
-this workspace can unify by hand. They collapse as a side effect of the removals above: dropping
-`igd-next` removes the second `rand`/`rand_core`/`getrandom` and the `url` `base64`; dropping `toml`
-removes both `winnow`s; dropping `axum` + `igd-next` removes the shared `futures`/`hyper` duplicates.
-"Merging" here is realized by removing, not by editing versions.
+## Phase 2: release qualification
 
-### Hand-roll: UPnP (replaces `igd-next`, -31)
+Per release candidate: the manual differential against a real `TerrariaServer` (`probe`/`verify`;
+hosted CI can never hold the game); `just check-data` against the decompiled tree; and the
+255-player qualification run, separate from per-commit CI, with an objective bar: 255 real headless
+clients join a full-size world and hold 30 minutes, zero server panics, no disconnect storm, p99
+tick under the 16.67 ms budget, stable memory, and a clean world save under load. One extended
+multi-hour soak with a boss event under load runs before the first release only. The human
+fresh-world Moon Lord playthrough is strongly expected, waivable only if the automated and
+differential evidence is otherwise complete; anything found becomes a test. Final verification:
+`just check` green across the six targets, fuzz and soak green, zero production panics on
+hostile or environmental paths, zero unknown protocol IDs, the admin overhaul verified against a
+real client and Playwright, no confirmed performance regressions. Then tag v0.0.1.
 
-The only two `igd-next` operations used are `search_gateway` (SSDP discovery + fetch the device
-description) and `gateway.add_port` (one `AddPortMapping` SOAP call); no external-IP query, no
-unmapping. UPnP-IGD control traffic is plain HTTP/1.1 over the LAN with no TLS, and the "URLs"
-involved are always raw `IP:port` literals, so none of `url`/`idna`/ICU is needed to parse them, and
-only two fields (`serviceType`, `controlURL`) are needed out of the description XML. Hand-rolling it
-adds **zero** new dependencies: `tokio` (already present) for the UDP M-SEARCH and the TCP HTTP
-exchanges, plus a small pure module of:
+## Phase 3: after v0.0.1, in order
 
-- `build_msearch` (the SSDP `M-SEARCH` datagram to `239.255.255.250:1900`),
-- `parse_location` (pull `LOCATION:` out of the SSDP response, case-insensitive),
-- a tolerant tag scanner (`tag_inner`) that ignores namespace prefixes and attributes, used to find
-  the `WANIPConnection`/`WANPPPConnection` service block and its `controlURL`, plus the SOAP fault
-  `errorCode`/`errorDescription` on failure,
-- URL splitting (`http://host:port/path`, relative vs absolute `controlURL` resolution),
-- `build_soap_add_port` (the `AddPortMapping` envelope) and a minimal HTTP/1.1 GET/POST that sends
-  `Connection: close` and reads to EOF.
+1. **v0.0.2, the worldgen release**: the seven remaining secret seeds' generation content (Not the
+   Bees, Drunk World, Remix, Celebrationmk10, "get fixed boi", Don't Starve, Skyblock; Don't
+   Starve alone touches 53+ scattered branch points across nearly the whole of `WorldGen.cs`, and
+   the others are comparable or larger) and the 7 of 15 remaining micro-biomes (each needs a
+   genuinely separate subsystem: a trappable-chest mechanism, a second tree-growth engine, a
+   wandering-tunnel shape, and so on). The six deferred drop-table gaps ride along: five need
+   Remix's own generation content, the sixth is the documented npc-44 nested-fallback shape.
+2. **Regions and spawn protection**: the first built-in addition.
+3. **The plugin API**: Rust first (permissions land in v0.0.1, so the model exists; regions and the
+   admin interfaces settle into real use cases first), then C# once the host API has proven
+   itself. Event hooks, commands, permissions (reusing E1's registration path), opaque handles,
+   validated operations, lifecycle, storage, unload/reload semantics; never expose
+   `&mut GameServer`; the ordinary server stays self-contained with no .NET runtime.
+4. **The optimisation campaign**, after the feature waves: eliminate unnecessary work, then
+   algorithms and data structures, then memory/allocation/layout (the ~10 MB idle figure is an
+   aspirational research target tracked per component, not a promise), then CPU hotspots, then
+   safe parallelism, then explicit SIMD (AVX2/AVX-512, NEON, RVV, runtime dispatch, scalar
+   fallback everywhere), then generated-assembly inspection, then hand-written assembly where it
+   measurably wins. Profile first; every accelerated path proven bit-identical against the
+   reference with fuzzing, Miri and sanitisers where applicable.
+5. **Server-side characters**: much later; its own properly designed storage and auth system.
 
-Public API stays exactly `pub async fn attempt(listen: SocketAddr)`, so `main.rs`'s spawn site and
-the lease-renewal loop are untouched. Effort: moderate. Risk: low to keep the capability, but the
-live path cannot be tested without a real router, so all the parsing/formatting goes in pure,
-unit-tested functions and the socket I/O stays a thin shell. The old module comment argued against
-hand-rolling because router firmware varies; the variance is in namespaces, whitespace, and
-relative-vs-absolute URLs, which the tolerant scanner and URL resolution handle directly.
+**Deferred with reasons written down** (carried from the audit trail and the tick-rate research):
+- **Higher tick rates (120/240/480)**: demoted to an off-by-default experimental research note.
+  Unmodified clients are hard-pinned to 60 Hz (fixed-timestep accumulator), run their own NPC AI
+  prediction and advance world time themselves, so a faster server mostly manufactures desync; the
+  mechanical "configurable multiple" alone is a large scattered-literal sweep where every miss is a
+  silent pacing bug. Picked up only when a concrete need appears.
+- **One-time join credentials**: a short-lived single-use token issued through the panel and typed
+  into Terraria's normal password prompt, so a reusable password never crosses the plaintext
+  protocol. Does not encrypt the connection and does not stop an active MITM; it makes an observed
+  credential worthless.
+- **TShock-style built-ins** (warps, restrictions, richer moderation) so normal administration
+  never requires plugins.
+- **Seed-identical world generation**: 219-372 engineer-days by the standing estimate; the oracle
+  is built and green (`docs/worldgen-parity.md`). Generation is complete and playable; it is not
+  Terraria's world for a given seed, and closing that is its own campaign.
+- **Steam P2P (friend invites)**: needs the Steamworks SDK under AppID 105600 and a licence
+  decision against the AGPL. Protocol-level Steam support is already complete; a Steam-launched
+  client connecting by IP is byte-identical to any other.
+- **Operational polish**: config reload without a restart; a general log-file sink with rotation
+  (the moderation audit log in Lane E is separate and is in v0.0.1).
 
-### Deferred: asset embedding (`rust-embed`, -8) — kept
+## TUI and hosting polish (opportunistic, never derails release work)
 
-Kept for now with the rest; a working, mechanical serving path is not worth disturbing this pass.
-The plan, if it is ever revisited: `rust-embed` only provides `#[derive(RustEmbed)]` over
-`web-panel/dist/`; it drags in `sha2`,
-`digest`, `block-buffer`, `crypto-common`, `mime_guess`, `unicase`, `walkdir`, and `same-file`. The
-panel already has its own `content_type_for` match and its own `build.rs`. Replace the derive with a
-`build.rs` that walks `dist/`, writes a generated `assets.rs` of `(&str path, &[u8] via include_bytes!)`
-entries, and have `load_static_asset` look up that slice. MIME already comes from the local match.
-The `embed-web` on/off feature and its disk-serving dev path stay as they are. No ETag/hash is
-needed for a loopback admin panel; drop the `sha2` hash rust-embed computed. Effort: low. Risk: low,
-since the assets are ours and the serving path is unchanged.
+- **Smooth-gradient boot logo via a terminal image protocol.** The 5-row block-glyph banner cannot
+  match `docs/assets/banner.svg`'s gradient as text. Plan: bake `docs/assets/boot-logo.svg` (the
+  text-free transparent source) to a 2x transparent PNG offline via `rsvg-convert` and
+  `include_bytes!` it; hand-roll the iTerm2 OSC 1337 and kitty graphics emitters (skip sixel);
+  detect via the `supports-terminal-graphics` env heuristics gated behind `Palette::is_enabled()`,
+  treating `TMUX` as unsupported; fall back image -> 256-colour `banner()` -> plain. No new
+  dependencies: a ~15-line base64 encoder plus two emitters; explicitly not `viuer`. Gotcha:
+  cursor advance after the image differs between iTerm2 and kitty.
+- **Hanging indent for wrapped log lines** (manual wrapping at the terminal width).
+- **Narrow-terminal awareness** for the boot block layout.
 
-### Deferred: panel HTTP + WebSocket server (`axum` + `tungstenite`, -23 alone, -75 combined) — kept
+## Dependency pruning (decided; the record stays visible)
 
-The single biggest lever, and the one explicitly declined for stability: the panel is Playwright-
-verified and a transport rewrite resets that verification to zero. Recorded here in full in case it
-is ever revisited. The panel binds loopback only and needs
-HTTP/1.1 (http2 is already disabled) plus a WebSocket. Scope observed in `panel/mod.rs`:
+The default server build resolves **171 external crates**. **Decision (2026-08-29): stability over
+crate count.** The only cut being made is hand-rolling UPnP away from `igd-next` (-31 crates, no
+new dependencies). Everything else that could be cut is a working, in several cases
+already-verified subsystem and is deliberately kept: a mature dependency is worth more than the
+crates it costs, and rewriting one resets verification that has been earned.
 
-- ~30 `/api/*` routes (GET and POST) plus a static/SPA fallback. Extractors in use: JSON request
-  body, query string (only `?session=` on the two WS routes), the `Authorization` bearer header, and
-  the request path. No multipart. `serde`/`serde_json` stay (they are core, not part of `axum`), so
-  request/response bodies are still `serde_json::from_slice`/`to_vec`.
-- Two WebSocket routes, both server-to-client only: `stream_status` only ever sends `Text(json)` and
-  never reads a client frame. So the RFC 6455 work is the `Sec-WebSocket-Accept` handshake
-  (SHA-1 of key + magic GUID, then base64), a text-frame writer (server frames unmasked), and a
-  minimal read side for `ping` -> `pong` and `close`. Dead-client detection already rides on
-  send-failure every 2s.
+Measured with `cargo tree -e no-dev --workspace --no-dedupe` (plain `cargo metadata` returns a
+feature-unified maximal graph and undercounted `igd-next` by 20 crates; do not trust it for
+feature-gated ownership). Exclusive ownership: `igd-next` 31 (hand-roll, decided), `ureq` 13 plus
+`tempfile` 2 (keep: rustls/ring is the irreducible core of a secure `terrustia update`),
+`rust-embed` 8 (keep), `crossterm` 7 (keep: Windows console path), `toml` 6 (keep, deferred),
+`tracing-subscriber` 4 (keep, deferred), `argon2` 4 (keep: the one KDF this workspace does not
+hand-roll), `axum` 23 with `rust-embed` (keep: the panel is Playwright-verified and a transport
+rewrite resets that to zero). The combined `igd-next` + `rust-embed` + `axum` lever (171 -> 96) is
+recorded in git history with the full crate list; it was weighed and declined.
 
-To avoid re-adding `sha1`/`base64` for the handshake, hand-roll SHA-1 (a fixed, ~70-line algorithm
-used here as a non-cryptographic handshake token, exactly as RFC 6455 specifies) and a ~15-line
-base64 encoder. The server is a `tokio` accept loop; per connection: parse request line + headers +
-Content-Length body, dispatch on `(method, path)`, write `(status, headers, body)`; on
-`Upgrade: websocket` do the handshake and run the existing stream loop over the hand-rolled frame
-codec. Open sub-decisions: connection model (keep-alive vs one-request-per-connection
-`Connection: close`) and how much of the WS read side to implement. Effort: high. Risk: medium; the
-panel is already browser-verified (Playwright), so this needs the same verification re-run after the
-rewrite, plus unit tests over request parsing, the handshake accept value, and frame encode/decode.
-
-### Keep (deliberate)
-
-- `ureq` self-update (13 + `tempfile` 2). Hand-rolling a TLS 1.3 client is off the table; `ring`/
-  `rustls` is the irreducible core of a secure `terrustia update`. Kept in the default build by
-  decision.
-- `argon2` (4). The one KDF this workspace intentionally does not hand-roll; a password hash is not
-  the place to roll our own.
-- `crossterm` (7). Cross-platform raw mode and key decoding including the Windows console path; a
-  Unix-only `libc` termios hand-roll would regress Windows, which is on the roadmap.
-- `tokio`, `serde`/`serde_json`, `flate2` (zlib-rs), `bytes`, `rand`, `libc`, `thiserror`,
-  `tokio-util`. Core, tiny, or foundational; near-zero exclusive weight.
-
-### Deferred (measured, kept for stability)
-
-Both weighed and kept; the cut is not worth disturbing a working path for.
-
-- `toml` -> hand-rolled config reader/writer (-6, also removes both `winnow` versions). Risk is
-  faithfully round-tripping user-edited config (comments, quoting, arrays, tables), which is why the
-  crate was chosen originally.
-- `tracing-subscriber` -> a custom `tracing::Subscriber` (-4: `sharded-slab`, `thread_local`,
-  `lazy_static`). We already own the `fmt`-style layer; this means implementing span registry
-  storage ourselves for a modest cut.
+**The UPnP hand-roll**: only `search_gateway` and `add_port` are used; UPnP-IGD control traffic is
+plain HTTP/1.1 over the LAN with raw `IP:port` literals, so none of `url`/`idna`/ICU is needed.
+A small pure module (SSDP M-SEARCH datagram, LOCATION parse, a tolerant tag scanner for
+`serviceType`/`controlURL` and SOAP faults, URL splitting, the `AddPortMapping` envelope, a minimal
+HTTP/1.1 exchange) with the socket I/O as a thin shell; the public API stays exactly
+`pub async fn attempt(listen: SocketAddr)`. All parsing pure and unit-tested, since the live path
+needs a real router.
 
 ## Release
 
-- **Tag v0.0.1.** The last step, once the above is in a state worth cutting a first release for.
-  Deliberately `0.0.1`, since worldgen is visibly unfinished.
+Tag v0.0.1 when the Phase 1 gates are met and Phase 2 passes. Do not hold the release for
+post-release nice-to-haves.

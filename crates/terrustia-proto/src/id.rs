@@ -44,6 +44,10 @@ pub const AREA_TILE_CHANGE: u8 = 20;
 pub const SYNC_ITEM: u8 = 21;
 pub const ITEM_OWNER: u8 = 22;
 pub const SYNC_N_P_C: u8 = 23;
+/// Dead. `NetMessage.SendData` case 24 still serialises a `(short, byte)` payload, but nothing in
+/// the shipped game ever calls `SendData(24, ...)`, and `MessageBuffer.GetData`'s case 24 is
+/// `Invariant.Assert(condition: false, "UnusedMeleeStrike")`: reaching it is treated as a bug, not
+/// a real message. See `docs/packet-coverage.md`.
 pub const UNUSED_MELEE_STRIKE: u8 = 24;
 /// Deprecated in 1.4.5; the client no longer needs it.
 pub const UNUSED25: u8 = 25;
@@ -94,7 +98,16 @@ pub const SYNC_DODGE: u8 = 62;
 pub const SYNC_TILE_PAINT_OR_COATING: u8 = 63;
 pub const SYNC_WALL_PAINT_OR_COATING: u8 = 64;
 pub const TELEPORT_ENTITY: u8 = 65;
+/// Not dead, unlike its neighbours either side. `Projectile.cs`'s `aiStyle == 52` (a heal-on-touch
+/// projectile) calls `NetMessage.SendData(66, -1, -1, null, target, healAmount)`, and
+/// `MessageBuffer.GetData`'s case 66 applies the heal to `player.statLife` and, when
+/// `Main.netMode == 2`, relays it on to other clients. Unimplemented here: no dispatch arm and no
+/// encoder, so a real client using that projectile heals silently as far as this server is
+/// concerned. See `docs/packet-coverage.md`.
 pub const UNKNOWN66: u8 = 66;
+/// Dead. `NetMessage.SendData` has no `case 67:` at all, and `MessageBuffer.GetData` groups it
+/// with the officially-deprecated ids 15/25/26/44/83/93 under a bare `break;` with no field reads.
+/// See `docs/packet-coverage.md`.
 pub const UNKNOWN67: u8 = 67;
 pub const UNKNOWN68: u8 = 68;
 pub const CHEST_NAME: u8 = 69;
