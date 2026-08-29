@@ -3014,6 +3014,7 @@ impl GameServer {
             let world = &mut self.world;
             self.liquids.tick(world)
         };
+        self.kill_drowned_furniture(&settled.drowned);
         let mut touched: Vec<(i32, i32)> = settled.changed;
         touched.extend(settled.reacted.iter().map(|(x, y, _)| (*x, *y)));
         if touched.is_empty() {
@@ -3043,6 +3044,65 @@ impl GameServer {
         // large enough disturbance has to go out as several frames or the tail is simply lost.
         for batch in changes.chunks(net_module::MAX_LIQUID_CHANGES) {
             if let Ok(frame) = net_module::liquid_changes(batch) {
+                self.broadcast(frame, None);
+            }
+        }
+    }
+
+    /// Kill whatever furniture a liquid just reached, the tiles [`crate::world::liquid::Settled::drowned`]
+    /// reports.
+    ///
+    /// `Liquid.AddWater`'s own inline check (`Liquid.cs:1196-1215`): a lava or water tile
+    /// (honey included — the real check is `if (tile.lava()) CheckLavaDeath else
+    /// CheckWaterDeath`, with no separate branch for honey or shimmer) spreading onto an active
+    /// tile kills it outright when the generated `tile_death::LAVA_DEATH`/`WATER_DEATH` table says
+    /// so, via a bare `WorldGen.KillTile(x, y)` — items still drop (`noItem` defaults `false`),
+    /// and the kill is told to every client the same way a player's own break is
+    /// (`NetMessage.SendData(17, -1, -1, null, 0, x, y)`, packet 17 with no exclusion).
+    fn kill_drowned_furniture(&mut self, drowned: &[(i32, i32)]) {
+        for &(x, y) in drowned {
+            let tile = self.world.tile(x, y);
+            if !tile.is_active() {
+                continue;
+            }
+            let table = if tile.liquid_kind == terrustia_proto::tile::Liquid::Lava {
+                &terrustia_proto::tile_death::LAVA_DEATH
+            } else {
+                &terrustia_proto::tile_death::WATER_DEATH
+            };
+            if !table.get(tile.block as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let (block, frame_x, frame_y) = (tile.block, tile.frame_x, tile.frame_y);
+            let mut cleared = tile;
+            cleared.flags.set(TileFlags::ACTIVE, false);
+            cleared.block = 0;
+            cleared.frame_x = -1;
+            cleared.frame_y = -1;
+            cleared.slope = 0;
+            cleared.flags.set(TileFlags::HALF_BRICK, false);
+            self.world.set_tile(x, y, cleared);
+            self.spawn_tile_drop(block, frame_x, frame_y, x, y);
+            // Plantera's bulb has no crafted summon: breaking it, by whatever means, is the
+            // summon (`wake_from_tile`'s own doc comment) — the one tile in either table this
+            // project's own machinery gates on a boss, so it is the one special case carried over
+            // from the player-edit path's own `broke` handling (`on_tile_manipulation`).
+            // `BULB` (238) is `LAVA_DEATH`-true and `WATER_DEATH`-false, verified against the
+            // generated table directly, so this is only ever reached on the lava branch above.
+            if block == crate::world::bulbs::BULB {
+                self.wake_from_tile(x, y, PLANTERA);
+                if !self.world.progress.downed_plantera {
+                    self.grow_plantera_bulb();
+                }
+            }
+            let edit = TileManipulation {
+                action: 0,
+                x: x as i16,
+                y: y as i16,
+                arg: 0,
+                style: 0,
+            };
+            if let Ok(frame) = edit.encode() {
                 self.broadcast(frame, None);
             }
         }
@@ -7656,5 +7716,84 @@ mod wood_from_trees {
             (70..130).contains(&bonus),
             "bonus wood landed {bonus}/{TRIALS} — real item-independent rate is 1-in-3 (~100)"
         );
+    }
+}
+
+/// L2, the liquid-destroys-furniture consumer: `tick_liquids` now resolves
+/// `crate::world::liquid::Settled::drowned` against the generated `tile_death` table and
+/// actually kills what needs killing — `Liquid.AddWater`'s own inline
+/// `CheckLavaDeath`/`CheckWaterDeath` check (`Liquid.cs:1196-1215`), which the table alone,
+/// landed separately, was deliberately left unwired until this item.
+#[cfg(test)]
+mod liquid_furniture_death {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::tile::{Liquid, Tile};
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(50, 50, "liquid death probe")
+    }
+
+    // `WATER_DEATH[4] == true`, `LAVA_DEATH[4] == false` — a torch goes out in a flood but does
+    // not burn any further in a fire it is already part of.
+    const TORCH: u16 = 4;
+
+    fn full_of(kind: Liquid) -> Tile {
+        let mut t = Tile::AIR;
+        t.liquid = 255;
+        t.liquid_kind = kind;
+        t
+    }
+
+    /// A torch sitting under a full column of water is killed the moment the water reaches it:
+    /// the tile is cleared and every client hears about it as packet 17, the same shape
+    /// `on_tile_manipulation`'s own player-break path already uses.
+    #[test]
+    fn water_reaching_a_torch_kills_it_and_tells_every_client() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (x, y) = (10, 10);
+        server.world.set_tile(x, y, Tile::framed(TORCH, 0, 0));
+        server.world.set_tile(x, y - 1, full_of(Liquid::Water));
+
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+
+        server.liquids.wake(x, y - 1);
+        for _ in 0..5 {
+            server.tick_liquids();
+        }
+
+        let tile = server.world.tile(x, y);
+        assert!(!tile.is_active(), "the torch should have been killed");
+        assert_eq!(tile.block, 0, "and the tile cleared, not merely flagged");
+
+        let told_every_client = std::iter::from_fn(|| out_rx.try_recv().ok())
+            .any(|frame| frame.len() > 2 && frame[2] == terrustia_proto::id::TILE_MANIPULATION);
+        assert!(
+            told_every_client,
+            "packet 17 should have gone out, matching NetMessage.SendData(17, -1, -1, ...)"
+        );
+    }
+
+    /// The control case: the same torch under lava (`LAVA_DEATH[4] == false`) survives — proving
+    /// the fix reads the right table for the liquid that actually arrived, not merely "any liquid
+    /// kills anything".
+    #[test]
+    fn lava_reaching_a_torch_leaves_it_alone() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (x, y) = (10, 10);
+        server.world.set_tile(x, y, Tile::framed(TORCH, 0, 0));
+        server.world.set_tile(x, y - 1, full_of(Liquid::Lava));
+
+        server.liquids.wake(x, y - 1);
+        for _ in 0..40 {
+            server.tick_liquids();
+        }
+
+        let tile = server.world.tile(x, y);
+        assert!(tile.is_active(), "a torch should survive a lava flow");
+        assert_eq!(tile.block, TORCH);
     }
 }
