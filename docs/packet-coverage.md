@@ -79,8 +79,9 @@ Roughly by how much of the game each unblocked:
    operations that genuinely has to be the server's.
 9. **World-specific cavern monsters** (136) — each world draws six of the thirteen from its own
    id, which is why two worlds feel different underground.
-10. **Shimmer** (146) — the 1.4.4 transmutation pool, which did not exist here at all. See
-    [shimmer.md](shimmer.md); decrafting is still missing and is recorded there.
+10. **Shimmer** (146) — the 1.4.4 transmutation pool, including ordinary transforms, creature
+    transforms, coin luck and recipe decrafting with whole-batch remainders, world-evil recipe
+    variants, per-unit alchemy loss and max-stack splitting. See [shimmer.md](shimmer.md).
 11. **The Travelling Merchant** (72) — who did not exist here either. He arrives at random during
     the morning once the town has two other residents, carries four to six things chosen by the
     game's own chain of rolls, and leaves at dusk.
