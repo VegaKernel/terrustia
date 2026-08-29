@@ -17,6 +17,7 @@ pub mod player;
 pub mod projectile;
 pub mod rescues;
 pub mod server;
+pub mod shimmer;
 pub mod slime_rain;
 pub mod spawn;
 pub mod teleport;
