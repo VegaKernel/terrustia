@@ -4,6 +4,80 @@ Contributions are welcome: bug reports, fixes, worldgen and AI parity work, docs
 Open an issue if you want to discuss something first, or send a pull request directly for a
 self-contained change.
 
+## Working in the codebase
+
+### Prerequisites
+
+A recent stable Rust toolchain is all you need to build and test the server. The workspace is on the
+2024 edition with a minimum of Rust 1.97 (`rust-version` in `Cargo.toml`). [`just`](https://github.com/casey/just)
+runs the project's recipes, but every recipe is a thin wrapper over `cargo`, so plain `cargo` works
+just as well. You only need [`bun`](https://bun.sh) if you are touching the web panel's frontend.
+
+### Layout
+
+Three crates, described in the README's [Layout](README.md#layout) section: `terrustia-proto` (the
+wire format, no I/O), `terrustia-client` (a headless client that speaks the real protocol), and
+`terrustia` (the async server). A fourth, `terrustia-codegen`, is a hand-run developer tool that
+regenerates the data tables and is excluded from the default build.
+
+### Everyday commands
+
+Each recipe and the raw `cargo` it wraps:
+
+| Recipe | Runs | For |
+|---|---|---|
+| `just run -- --world W.wld` | `cargo run --release -p terrustia -- ...` | Run the server |
+| `just build` | build the web panel, then `cargo build --release` | A release binary with the panel embedded |
+| `just check` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets`, the web checks | What CI runs |
+| `just test` | `cargo test --workspace` | The whole test suite |
+| `just test-filter NAME` | `cargo test --workspace NAME` | One test or module |
+| `just fmt` | `cargo fmt --all` | Format everything |
+
+Clippy is denied workspace-wide, so a warning fails the build. Run `just check` before opening a
+pull request and it will catch what CI would.
+
+### The web panel
+
+The admin panel is a Svelte and Vite frontend, built with `bun` (`just web-build`) and embedded into
+the binary behind the `embed-web` cargo feature. Its build output (`dist/`) is gitignored, so rebuild
+it before an embedded or release build. `just dev` builds the panel and runs a debug server with it
+embedded.
+
+### Data tables
+
+`terrustia-proto` ships tables extracted from the game (which tiles hurt, what each NPC drops, and so
+on). They are generated from a local decompiled tree that never ships, by `terrustia-codegen`
+(`just regen`). The tree is `ilspycmd` output of `TerrariaServer.exe`; see `docs/generated-tables.md`.
+The Python `check_*` scripts (`just check-drops`, `just check-recipes`) validate the tables in CI and
+are the one place Python remains.
+
+### Checking against the real game
+
+Because this is a reimplementation, the strongest checks compare it to the real game rather than to
+itself. The `terrustia-client` examples do that: `probe` dumps and compares the packet sequence,
+`verify` joins and confirms things move, shoot, hurt and drop loot, `stress` and `soak` hold the
+world full under load, `bot` walks a client east to compare against vanilla, and `fuzz` throws
+malformed packets at a running server. `just conform` and `just roundtrip` check a save against a
+real `TerrariaServer`. For a protocol or gameplay change, run the relevant one against real Terraria.
+
+### Conventions
+
+- Transcribe vanilla where you transcribe vanilla, and cite the decompiled source in a comment
+  (`Wiring.cs:2042`, and so on) so the next reader can check it.
+- Add a test that fails on the unfixed code and passes on the fix, wherever a test can express it.
+- Keep clippy silent. Warnings are denied, so there is no such thing as a warning that is fine to
+  leave.
+- Disclose partial work: say what an implementation does not do, in the code and in the README row,
+  rather than implying completeness.
+- Never commit decompiled game source, game assets, game text, or `.wld` save files.
+- Plain prose in docs. No em-dashes.
+
+### Where to look
+
+`docs/` holds the protocol notes and subsystem write-ups. `plan.md` is the live, evidenced tracker of
+what is done. `AUDIT.md` records what the audits found and fixed. `TODO.md` is the backlog of known,
+deferred work.
+
 ## The bar for a change
 
 Every change is held to the same standard the rest of the project follows:

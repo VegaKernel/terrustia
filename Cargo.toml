@@ -124,7 +124,15 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
 
+# Release builds are tuned for the fastest, smallest binary rather than for build speed. `lto = "fat"`
+# runs whole-program link-time optimization and `codegen-units = 1` gives the optimizer the whole
+# crate at once; together they make a release build noticeably slower to produce, which is the
+# deliberate cost. `panic` is left at the default `unwind` on purpose: the server catches panics on
+# the packet path (`std::panic::catch_unwind` in `net/listener.rs` and `game/server.rs`) to save the
+# world and exit non-zero, and `panic = "abort"` would disable unwinding and break that. `target-cpu`
+# is deliberately not pinned here so the distributed binaries stay portable across machines.
 [profile.release]
+opt-level = 3
 codegen-units = 1
-lto = "thin"
+lto = "fat"
 strip = "symbols"

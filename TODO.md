@@ -29,6 +29,10 @@ The wire, door, meteor and slime items already landed. These remain:
   rather than reading past them. Needs a corrupt-`.wld` fixture to test against.
 - **BI8: slime facing.** A slime should re-target only during an active (flag3) hop, not on every
   hop. Small follow-on to the BI4 hop-rate fix.
+- **B13: Empress of Light damage.** The Empress's damage values still need a full re-derivation from
+  vanilla's seven `case` blocks. The boss-AI pass left them alone rather than doing the column swap
+  the other bosses took, since a wrong swap here is worse than the current placeholder. A boss-parity
+  gap, not a wire-up.
 
 ## Codegen (finish moving the data generators off Python)
 
@@ -64,6 +68,14 @@ The wrap-corruption bug, Ctrl-D, the flat boot, the status footer, the worlds/ d
 - **Narrow-terminal awareness.** Nothing consults the terminal width when laying out the boot block,
   so in a terminal narrower than the content the info lines wrap mid-value. Low priority now that the
   boxes are gone, but a documented minimum width or a narrower fallback layout would be tidy.
+
+## Docs
+
+- **De-slop the remaining docs.** The em-dash and AI-slop cleanup so far covered `README.md` only.
+  `AUDIT.md`, `docs/*.md` and `plan.md` still carry em-dashes and the same tells (aphoristic reveals,
+  rule-of-three lists, "not X, it's Y"). The house style is now plain prose everywhere, so the rest
+  of the docs should get the same pass. De-em-dashing code comments across the whole codebase is a
+  much larger, lower-priority sweep, optional rather than committed to here.
 
 ## Release
 
