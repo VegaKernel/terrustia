@@ -54,14 +54,13 @@ pub fn eligible(
         }
         // Webbed Stylist: unsafe Spider Wall in Cavern.
         354 => depth == Depth::Cavern && world.tile(x, y).wall == SPIDER_UNSAFE_WALL,
-        // Sleeping Angler's dry-land path: sand near a true world edge, above the surface line.
-        // Vanilla also has a water-surface route; the server's generic spawn-room test rejects deep
-        // water today, so that remains a disclosed generic spawn-physics gap rather than being
-        // faked here.
+        // Sleeping Angler's extra dry-land path: effective spawn-source sand near a true world
+        // edge, above the surface line. The ordinary Ocean-water route is handled in water_spawn.
         376 => {
+            let source = crate::game::spawn_source::block(world, x, y + 1);
             depth == Depth::Surface
                 && (x < ANGLER_SAND_REACH || x > world.width() - ANGLER_SAND_REACH)
-                && matches!(world.tile(x, y + 1).block, 53 | 112 | 116 | 234)
+                && matches!(source, 53 | 112 | 116 | 234)
         }
         // Unconscious Man / Tavernkeep: after either evil boss, with no special depth requirement.
         579 => world.progress.downed_boss2,
@@ -239,6 +238,22 @@ mod tests {
             100,
             250,
             Depth::Underground,
+            Biome::Ocean
+        ));
+    }
+
+    #[test]
+    fn angler_dry_spawn_looks_through_a_platform_to_sand() {
+        let mut world = world();
+        let (x, y) = (100, 100);
+        assert!(world.set_tile(x, y + 1, Tile::block(19)));
+        assert!(world.set_tile(x, y + 5, Tile::block(53)));
+        assert!(eligible(
+            &world,
+            376,
+            x,
+            y,
+            Depth::Surface,
             Biome::Ocean
         ));
     }
