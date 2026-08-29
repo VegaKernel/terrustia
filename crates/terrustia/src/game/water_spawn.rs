@@ -29,8 +29,45 @@ const BLUE_JELLY: &[u16] = &[63];
 // Green Jellyfish replaces Blue Jellyfish two thirds of the time in Hardmode.
 const HARDMODE_JELLY: &[u16] = &[63, 103, 103];
 
+/// Width of vanilla's inner Ocean-spawn band from either true world border.
+pub const OCEAN_INNER_BAND: i32 = 250;
+/// Width of the secondary regular-Sand-only Ocean-spawn band.
+pub const OCEAN_OUTER_BAND: i32 = 380;
+/// The outer-band ceiling is this many tiles above the vertical midpoint of the Underground layer.
+pub const OCEAN_OUTER_CEILING_OFFSET: i32 = 40;
+
 fn sand(block: u16) -> bool {
     matches!(block, 53 | 112 | 116 | 234)
+}
+
+/// Whether a resolved Sand source is in one of vanilla's two ordinary Ocean NPC spawn regions.
+///
+/// The current official spawning rules describe two independent routes:
+/// - any Sand variant in the inner 250-tile band, above the Cavern layer;
+/// - regular Sand only in the outer 380-tile band, above a ceiling 40 tiles above the midpoint of
+///   the Underground layer.
+///
+/// The edge comparison follows Terraria's long-standing world-border checks (`x < band` or
+/// `x > maxTilesX - band`): a source exactly at 250/380 is outside that band. This helper is kept
+/// separate from [`pool`] until the remaining source-Y/fallback pipeline is carried through
+/// `try_spawn`, so the documented geometry can be reviewed without silently changing selection.
+pub fn ocean_source_eligible(
+    world_width: i32,
+    x: i32,
+    source_y: i32,
+    surface: i32,
+    rock_layer: i32,
+    source_block: u16,
+) -> bool {
+    let inner = x < OCEAN_INNER_BAND || x > world_width - OCEAN_INNER_BAND;
+    if inner && sand(source_block) && source_y < rock_layer {
+        return true;
+    }
+
+    let outer = x < OCEAN_OUTER_BAND || x > world_width - OCEAN_OUTER_BAND;
+    let underground_midpoint = (surface + rock_layer) / 2;
+    let outer_ceiling = underground_midpoint - OCEAN_OUTER_CEILING_OFFSET;
+    outer && source_block == 53 && source_y < outer_ceiling
 }
 
 /// The water-specific pool for one solid spawning tile.
@@ -76,6 +113,45 @@ pub fn pool(depth: Depth, biome: Biome, hard_mode: bool, spawning_block: u16) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_ocean_band_accepts_every_sand_variant_above_caverns() {
+        for x in [0, 249, 1751, 1999] {
+            for block in [53, 112, 116, 234] {
+                assert!(ocean_source_eligible(2000, x, 299, 200, 300, block));
+            }
+        }
+        assert!(!ocean_source_eligible(2000, 250, 299, 200, 300, 112));
+        assert!(!ocean_source_eligible(2000, 1750, 299, 200, 300, 112));
+        assert!(!ocean_source_eligible(2000, 249, 300, 200, 300, 53));
+    }
+
+    #[test]
+    fn outer_ocean_band_is_regular_sand_only_and_has_its_own_ceiling() {
+        // Underground midpoint is 250; the outer-band ceiling is therefore y=210.
+        for x in [250, 379, 1621, 1750] {
+            assert!(ocean_source_eligible(2000, x, 209, 200, 300, 53));
+            assert!(!ocean_source_eligible(2000, x, 210, 200, 300, 53));
+            for variant in [112, 116, 234] {
+                assert!(!ocean_source_eligible(2000, x, 209, 200, 300, variant));
+            }
+        }
+    }
+
+    #[test]
+    fn exact_outer_band_edges_are_outside() {
+        assert!(!ocean_source_eligible(2000, 380, 100, 200, 300, 53));
+        assert!(!ocean_source_eligible(2000, 1620, 100, 200, 300, 53));
+        assert!(ocean_source_eligible(2000, 379, 100, 200, 300, 53));
+        assert!(ocean_source_eligible(2000, 1621, 100, 200, 300, 53));
+    }
+
+    #[test]
+    fn non_sand_never_qualifies_as_an_ocean_source() {
+        for block in [0, 1, 60, 147, 161] {
+            assert!(!ocean_source_eligible(2000, 1, 100, 200, 300, block));
+        }
+    }
 
     #[test]
     fn ocean_water_has_existing_aquatic_enemies_and_never_the_crab() {
