@@ -53,6 +53,7 @@ pub mod tile_solid;
 pub mod touch_debuffs;
 pub mod town_names;
 pub mod travel_shop;
+pub mod wall_house;
 pub mod writer;
 
 pub use error::{ProtoError, Result};
