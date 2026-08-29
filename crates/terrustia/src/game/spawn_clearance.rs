@@ -1,21 +1,24 @@
-//! Clearance around a vanilla NPC spawning tile.
+//! Clearance around a vanilla NPC spawn candidate.
 //!
-//! The spawning tile is the solid tile chosen by the ground scan. Vanilla then validates a 2x3
-//! rectangle immediately above it: the spawning column and the column immediately to its left,
-//! three tiles high. A solid tile or lava anywhere in those six cells rejects the candidate.
+//! Natural spawning starts from a randomly chosen air tile. Ground resolution is a later stage:
+//! the game first validates a 2x3 rectangle at the chosen point, then uses the solid spawning tile
+//! found below to decide the source/biome details. Keeping those coordinates separate matters when
+//! the chosen point is several tiles above the ground.
 
 use terrustia_proto::{Liquid, tile_solid::solid};
 
 use crate::world::World;
 
-/// Whether an NPC spawn has the vanilla-shaped 2x3 open rectangle above its solid floor tile.
+/// Whether the vanilla-shaped 2x3 rectangle at a chosen spawn point is unobstructed.
 ///
-/// `x, y` are the prospective NPC top-left tile coordinates used by `spawn::try_spawn`, so the
-/// solid spawning tile itself is `(x, y + 1)`.
-pub fn has_room(world: &World, x: i32, y: i32) -> bool {
+/// `x, chosen_y` identify the random candidate tile before the downward ground scan. The rectangle
+/// covers that column and the immediately-left column, three tiles high. Solid tiles and lava
+/// reject the candidate; water is allowed because liquid source selection happens after ground is
+/// resolved.
+pub fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
     for dx in -1..=0 {
         for dy in 0..3 {
-            let tile = world.tile(x + dx, y - dy);
+            let tile = world.tile(x + dx, chosen_y - dy);
             if tile.is_active() && solid(tile.block) {
                 return false;
             }
@@ -24,9 +27,7 @@ pub fn has_room(world: &World, x: i32, y: i32) -> bool {
             }
         }
     }
-
-    let floor = world.tile(x, y + 1);
-    floor.is_active() && solid(floor.block)
+    true
 }
 
 #[cfg(test)]
@@ -35,21 +36,26 @@ mod tests {
     use terrustia_proto::Tile;
 
     fn candidate() -> World {
-        let mut world = World::empty(100, 100, "spawn clearance");
-        assert!(world.set_tile(50, 50, Tile::block(1)));
-        world
+        World::empty(100, 100, "spawn clearance")
     }
 
     #[test]
-    fn clear_two_by_three_space_is_accepted() {
-        assert!(has_room(&candidate(), 50, 49));
+    fn clear_two_by_three_space_is_accepted_without_requiring_ground() {
+        assert!(chosen_point_is_clear(&candidate(), 50, 40));
+    }
+
+    #[test]
+    fn solid_chosen_tile_rejects_the_candidate() {
+        let mut world = candidate();
+        assert!(world.set_tile(50, 40, Tile::block(1)));
+        assert!(!chosen_point_is_clear(&world, 50, 40));
     }
 
     #[test]
     fn solid_in_the_left_column_rejects_the_candidate() {
         let mut world = candidate();
-        assert!(world.set_tile(49, 48, Tile::block(1)));
-        assert!(!has_room(&world, 50, 49));
+        assert!(world.set_tile(49, 39, Tile::block(1)));
+        assert!(!chosen_point_is_clear(&world, 50, 40));
     }
 
     #[test]
@@ -57,10 +63,10 @@ mod tests {
         let mut world = candidate();
         assert!(world.set_tile(
             49,
-            48,
+            39,
             Tile::AIR.with_liquid(Liquid::Lava, 1)
         ));
-        assert!(!has_room(&world, 50, 49));
+        assert!(!chosen_point_is_clear(&world, 50, 40));
     }
 
     #[test]
@@ -68,16 +74,16 @@ mod tests {
         let mut world = candidate();
         assert!(world.set_tile(
             49,
-            48,
+            39,
             Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
         ));
-        assert!(has_room(&world, 50, 49));
+        assert!(chosen_point_is_clear(&world, 50, 40));
     }
 
     #[test]
-    fn the_chosen_spawning_tile_must_still_be_solid() {
+    fn ground_below_the_chosen_point_does_not_change_clearance() {
         let mut world = candidate();
-        assert!(world.set_tile(50, 50, Tile::AIR));
-        assert!(!has_room(&world, 50, 49));
+        assert!(world.set_tile(50, 50, Tile::block(1)));
+        assert!(chosen_point_is_clear(&world, 50, 40));
     }
 }
