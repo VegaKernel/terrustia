@@ -36,6 +36,7 @@ pub mod sgr {
     pub const BRIGHT_YELLOW: &str = "\x1b[93m";
     pub const BRIGHT_BLUE: &str = "\x1b[94m";
     pub const BRIGHT_CYAN: &str = "\x1b[96m";
+    pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
 }
 
 /// Whether this process should emit colour, decided once at startup.
@@ -101,7 +102,7 @@ fn level_style(level: Level) -> (&'static str, &'static str) {
         Level::WARN => ("WARN ", sgr::BRIGHT_YELLOW),
         Level::INFO => ("INFO ", sgr::BRIGHT_GREEN),
         Level::DEBUG => ("DEBUG", sgr::BRIGHT_BLUE),
-        Level::TRACE => ("TRACE", sgr::MAGENTA),
+        Level::TRACE => ("TRACE", sgr::BRIGHT_MAGENTA),
     }
 }
 
@@ -714,80 +715,27 @@ pub fn ready_line(palette: Palette, elapsed: Duration) -> String {
     )
 }
 
-/// The width `panel` would draw these rows at on their own, before alignment with a sibling
-/// panel. A caller with two panels to print side by side in spirit (if not in fact, since they
-/// print one above the other) computes this for both and passes the larger back in as `panel`'s
-/// `min_inner`, so neither panel decides its width without knowing about the other.
-pub fn panel_width(title: &str, rows: &[(&str, String)]) -> usize {
-    let widest_label = rows
-        .iter()
-        .map(|(l, _)| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    let widest_value = rows
-        .iter()
-        .map(|(_, v)| v.chars().count())
-        .max()
-        .unwrap_or(0);
-    // Two spaces of padding either side, plus the gap between the columns.
-    (widest_label + widest_value + 3).max(title.chars().count() + 2)
-}
-
-/// A titled box of `label: value` rows, used for the summaries a server prints once.
-///
-/// `min_inner` widens the panel beyond what its own rows need, so a caller can line up two panels
-/// to the same width — pass `0` for a panel with no sibling to match.
-pub fn panel(palette: Palette, title: &str, rows: &[(&str, String)], min_inner: usize) -> String {
+/// An aligned block of `key   value` lines for the summary a server prints once at boot: a dim key
+/// padded to a shared width, then the value. One left margin, no boxes, so the block sits in the
+/// same rhythm as the ✓ stage lines above it rather than each row hugging its own width the way the
+/// old two boxes did.
+pub fn info_block(palette: Palette, rows: &[(&str, String)]) -> String {
     let p = palette;
-    let widest_label = rows
+    let key_width = rows
         .iter()
-        .map(|(l, _)| l.chars().count())
+        .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0);
-    let widest_value = rows
-        .iter()
-        .map(|(_, v)| v.chars().count())
-        .max()
-        .unwrap_or(0);
-    let natural = panel_width(title, rows);
-    let inner = natural.max(min_inner);
-    // Any width forced on top of what the rows need goes entirely to the value column, so a
-    // panel widened to match a sibling stays rectangular instead of opening a gap before its
-    // right border.
-    let value_width = widest_value + (inner - natural);
-
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "{}╭─ {}{title}{}{} {}╮{}",
-        p.on(sgr::DIM),
-        p.off(),
-        p.on(sgr::DIM),
-        p.on(sgr::BOLD),
-        "─".repeat(inner.saturating_sub(title.chars().count() + 2)),
-        p.off()
-    );
-    for (label, value) in rows {
+    for (key, value) in rows {
         let _ = writeln!(
             out,
-            "{}│{} {}{label:<widest_label$}{}  {}{value:<value_width$}{} {}│{}",
+            "    {}{key:<key_width$}{}   {}",
             p.on(sgr::DIM),
             p.off(),
-            p.on(sgr::DIM),
-            p.off(),
-            p.on(sgr::BRIGHT_CYAN),
-            p.off(),
-            p.on(sgr::DIM),
-            p.off(),
+            value
         );
     }
-    let _ = writeln!(
-        out,
-        "{}╰{}╯{}",
-        p.on(sgr::DIM),
-        "─".repeat(inner + 1),
-        p.off()
-    );
     out
 }
 
@@ -865,48 +813,24 @@ mod tests {
         assert_eq!(unquote(r#"say "hi""#), r#"say "hi""#);
     }
 
+    /// The boot summary block pads its keys to a shared width, so every value starts in the same
+    /// column and the block reads as one aligned unit rather than ragged rows.
     #[test]
-    fn a_panel_is_rectangular() {
-        let text = panel(
+    fn an_info_block_aligns_every_value_to_the_same_column() {
+        let text = info_block(
             Palette::PLAIN,
-            "world",
-            &[("name", "Test".into()), ("size", "4200 x 1200".into())],
-            0,
+            &[("world", "Alpha".into()), ("saves to", "Beta".into())],
         );
-        let widths: Vec<usize> = text.lines().map(|l| l.chars().count()).collect();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
         assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "ragged panel: {widths:?}\n{text}"
-        );
-    }
-
-    /// The mechanism `main.rs` relies on to make the world and server panels the same width: ask
-    /// each its natural width, pass the larger to both as `min_inner`, and the narrower one still
-    /// comes out rectangular — not just as wide, but without a ragged gap before its border.
-    #[test]
-    fn a_panel_widened_to_match_a_sibling_stays_rectangular() {
-        let narrow_rows = [("name", "Test".into())];
-        let wide_rows = [
-            ("listening", "0.0.0.0:7777".into()),
-            (
-                "save destination",
-                "/home/brooklyn/.local/share/terrustia/worlds/my great big world name.wld".into(),
-            ),
-        ];
-        let width = panel_width("world", &narrow_rows).max(panel_width("server", &wide_rows));
-
-        let narrow = panel(Palette::PLAIN, "world", &narrow_rows, width);
-        let wide = panel(Palette::PLAIN, "server", &wide_rows, width);
-
-        let narrow_widths: Vec<usize> = narrow.lines().map(|l| l.chars().count()).collect();
-        assert!(
-            narrow_widths.windows(2).all(|w| w[0] == w[1]),
-            "ragged narrow panel: {narrow_widths:?}\n{narrow}"
+            lines.iter().all(|l| l.starts_with("    ")),
+            "every row shares the four-space margin: {text}"
         );
         assert_eq!(
-            narrow_widths[0],
-            wide.lines().next().unwrap().chars().count(),
-            "panels do not match: {narrow_widths:?} vs {wide}"
+            lines[0].find("Alpha"),
+            lines[1].find("Beta"),
+            "values must start at the same column:\n{text}"
         );
     }
 

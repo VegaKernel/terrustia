@@ -3470,14 +3470,29 @@ impl GameServer {
                     _ => info!(target: CONSOLE_REPLY, "usage: claim <name> <password>"),
                 }
             }
-            "help" => info!(
-                target: CONSOLE_REPLY,
-                "console: say <text> | players | save | backups | rollback <n> | \
-                 whitelist add|remove|list [name] | \
-                 claim <name> <password> | kick <name> [reason] | \
-                 ban <name|ip|uuid> <value> [reason] | unban <value> | group <account> <group> | \
-                 world undo <player> <duration> | panel | stop"
-            ),
+            "help" => {
+                // One command per line, aligned, rather than a single run-on that wraps hard in any
+                // ordinary terminal. This is often the first thing an operator ever types.
+                for line in [
+                    "commands:",
+                    "  say <text>                          broadcast a message",
+                    "  players                             who is connected",
+                    "  save                                write the world now",
+                    "  backups                             list the rotating backups",
+                    "  rollback <n>                        restore backup n",
+                    "  whitelist add|remove|list [name]    manage the whitelist",
+                    "  claim <name> <password>             claim an unclaimed server",
+                    "  kick <name> [reason]                disconnect a player",
+                    "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
+                    "  unban <value>                       lift a ban",
+                    "  group <account> <group>             set an account's group",
+                    "  world undo <player> <duration>      revert a player's recent tile edits",
+                    "  panel                               toggle the web panel",
+                    "  stop                                save and shut down",
+                ] {
+                    info!(target: CONSOLE_REPLY, "{line}");
+                }
+            }
             // Toggles the web panel: starts it if it is not running, stops it if it is.
             // `panel_toggle`'s other end (`crate::panel::supervise`) owns the actual bind/abort and
             // decides which of those this pulse means — this arm only ever sends one and reports

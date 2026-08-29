@@ -198,64 +198,65 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         world.width(),
         world.height()
     ));
-    let mut world_rows = vec![
-        ("name", world.name.clone()),
-        ("size", format!("{} x {}", world.width(), world.height())),
-        ("spawn", format!("{}, {}", world.spawn_x, world.spawn_y)),
-        (
-            "evil",
-            if world.crimson {
-                "crimson"
-            } else {
-                "corruption"
-            }
-            .to_string(),
-        ),
-        ("chests", world.chests.len().to_string()),
-        ("loaded in", format!("{} ms", started.elapsed().as_millis())),
-    ];
-    // Only shown when one was actually detected — an ordinary world (numeric seed or otherwise)
-    // gets no row at all rather than a "none" filler on the common case.
-    if world.secret_seeds.any() {
-        let names = world.secret_seeds.active_names().join(", ");
-        world_rows.push(("secret seed", names));
+    // Logged before the summary block, not spliced into the middle of it as it once was.
+    if let Some(path) = &loaded_from {
+        info!(path = %path.display(), "loading world file");
     }
 
     // Bind before starting the game task so a port clash fails fast.
     let bind_stage = term::Stage::begin(palette, &format!("binding {}", config.listen));
     let listener = TcpListener::bind(config.listen).await?;
     bind_stage.finish("");
-    let save_destination = config.save_target().map_or_else(
-        || "none — this world will not be saved".to_string(),
-        |p| p.display().to_string(),
-    );
-    let autosave_interval = if config.save_target().is_none() {
-        "disabled (no save destination)".to_string()
-    } else if config.autosave_secs == 0 {
-        "disabled".to_string()
-    } else {
-        format!("every {}s", config.autosave_secs)
-    };
-    let server_rows = [
-        ("listening", config.listen.to_string()),
-        ("players", format!("up to {}", config.max_players)),
-        (
-            "log filter",
-            std::env::var("TERRUSTIA_LOG").unwrap_or_else(|_| "info".into()),
-        ),
-        ("save destination", save_destination),
-        ("autosave interval", autosave_interval),
-    ];
 
-    // Both panels are sized off the wider of the two, so they line up to the same gutter the log
-    // lines below them use rather than each hugging its own content.
-    let width =
-        term::panel_width("world", &world_rows).max(term::panel_width("server", &server_rows));
-    print!("{}", term::panel(palette, "world", &world_rows, width));
-    if let Some(path) = &loaded_from {
-        info!(path = %path.display(), "loading world file");
+    // The settled facts, as one aligned key/value block on a single left margin rather than two
+    // boxes each hugging their own width.
+    let evil = if world.crimson {
+        "crimson"
+    } else {
+        "corruption"
+    };
+    let mut world_line = format!(
+        "{} · {} × {} · {}",
+        world.name,
+        world.width(),
+        world.height(),
+        evil
+    );
+    if world.secret_seeds.any() {
+        world_line = format!(
+            "{world_line} · seed {}",
+            world.secret_seeds.active_names().join(", ")
+        );
     }
-    print!("{}", term::panel(palette, "server", &server_rows, width));
+    let saves_to = match config.save_target() {
+        None => "nowhere, this world will not be saved".to_string(),
+        Some(path) => {
+            let autosave = if config.autosave_secs == 0 {
+                "autosave off".to_string()
+            } else {
+                format!("autosave {}s", config.autosave_secs)
+            };
+            format!("{} · {autosave}", path.display())
+        }
+    };
+    let info = [
+        ("world", world_line),
+        (
+            "spawn",
+            format!(
+                "{}, {} · {} chests",
+                world.spawn_x,
+                world.spawn_y,
+                world.chests.len()
+            ),
+        ),
+        (
+            "listening",
+            format!("{} · up to {} players", config.listen, config.max_players),
+        ),
+        ("saves to", saves_to),
+    ];
+    print!("{}", term::info_block(palette, &info));
     println!();
 
     let recorder = match &args.record {
