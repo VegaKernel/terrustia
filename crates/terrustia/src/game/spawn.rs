@@ -867,6 +867,14 @@ pub fn try_spawn(
             if crate::game::spawn_ranges::in_safe_rectangle(x - px, ground - py) {
                 continue;
             }
+
+            // This is a post-selection failure, not another reason to search for a different point:
+            // once the chosen tile survives the retryable location checks, non-water liquid in
+            // either of the two tiles directly above it aborts this player's spawn attempt.
+            if !crate::game::spawn_postcheck::direct_above_liquid_is_water(world, x, chosen_y) {
+                break;
+            }
+
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
                 continue;
             };
@@ -1092,8 +1100,8 @@ mod tests {
         let late = blood_moon_pool(Depth::Surface, true);
         assert!(!early.is_empty());
         assert!(late.len() > early.len(), "hardmode adds the Clown");
-        assert!(late.contains(&109), "the Clown");
         assert!(!early.contains(&109), "but not before hardmode");
+        assert!(late.contains(&109), "the Clown");
         for npc_type in late {
             assert!(npc_stats(*npc_type).is_some(), "{npc_type} is not a type");
         }
@@ -1482,8 +1490,16 @@ mod tests {
         let mut boosted_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            boosted_seen +=
-                try_spawn(&world, &npcs, &players, &quiet(), &boosted, &mut rng, 0).len();
+            boosted_seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &boosted,
+                &mut rng,
+                0,
+            )
+            .len();
         }
         assert!(
             boosted_seen > ordinary_seen * 5,
