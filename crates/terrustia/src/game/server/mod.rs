@@ -22,6 +22,7 @@ use terrustia_proto::{
     npc::{DamageNpc, SyncNpc, damage_ack, damage_taken},
     objects::{
         self, DoorToggle, RequestChestOpen, RequestSign, SignText, SyncChestItem, SyncPlayerChest,
+        SyncPlayerChestIndex,
     },
     packets::{
         self, Hello, PlayerControls, PlayerHealth, PlayerMana, PlayerSpawn, SpawnTileData,

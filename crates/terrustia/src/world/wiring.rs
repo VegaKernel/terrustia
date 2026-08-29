@@ -114,6 +114,7 @@ pub fn is_trigger(block: u16) -> bool {
             | FAKE_CONTAINER2
             | LAND_MINE
             | GEYSER
+            | RIGGED_CHEST
     )
 }
 
@@ -131,6 +132,14 @@ const FAKE_CONTAINER2: u16 = 468;
 /// `TileID.LandMine` — explodes the instant it is hit, whether by a click or by a circuit reaching
 /// it; it is never itself a thing wired to something else the way a switch is.
 const LAND_MINE: u16 = 210;
+/// `TileID.Containers2` — an ordinary late-game chest tile (Golden Lock Box, Frozen Chest, and the
+/// rest), *unless* it is standing at frame style 4, which is a genuinely different object: a chest
+/// deliberately wired to fire something the moment it is opened rather than clicked directly
+/// (`WorldGen.IsChestRigged`, `WorldGen.cs:36135-36142`; `Wiring.HitSwitch`'s own `else if (type
+/// == 467)` case, `Wiring.cs:326-341`, which does nothing at all for any other style). Unlike
+/// [`FAKE_CONTAINER`]/[`FAKE_CONTAINER2`] this is not its own tile type — the style check lives in
+/// [`hit_switch`]'s own case for it, not in [`is_trigger`], which only sees the type.
+const RIGGED_CHEST: u16 = 467;
 
 /// Whether hitting this trigger flips a remembered state rather than only firing.
 fn flips(block: u16) -> bool {
@@ -330,6 +339,19 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
     if matches!(tile.block, FAKE_CONTAINER | FAKE_CONTAINER2) {
         let (ax, ay, _) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
         run_from(world, ax, ay, 2, 2, &mut out);
+        return out;
+    }
+
+    // A rigged chest (see `RIGGED_CHEST`'s own doc) is found the same way — `switch_anchor`'s
+    // formula recovers the real anchor regardless of which style multiple of 36 its `frame_x`
+    // carries, since the `% 4` step only ever sees the two-column offset within it. Any other
+    // style of the same tile type is not a trigger at all, matching `Wiring.cs:326-341`'s own
+    // `if (frameX / 36 == 4)` with no `else` — it does nothing, not even flood from its own tile.
+    if tile.block == RIGGED_CHEST {
+        if tile.frame_x / 36 == 4 {
+            let (ax, ay, _) = switch_anchor(tile.frame_x, tile.frame_y, x, y);
+            run_from(world, ax, ay, 2, 2, &mut out);
+        }
         return out;
     }
 

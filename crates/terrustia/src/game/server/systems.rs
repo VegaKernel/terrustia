@@ -141,15 +141,20 @@ impl GameServer {
     ///
     /// Not optional decoration: a client computes its own armour penetration from the buff list
     /// it believes the target has, so an enemy covered in ichor that nobody was told about takes
-    /// fifteen points less from every hit than it should.
+    /// fifteen points less from every hit than it should. A real, unconditional broadcast, not
+    /// [`Self::broadcast_near`]'s distance-gated one: every real send site (`NPC.cs:81959`,
+    /// `91090`, `91130`, `93029`) is `NetMessage.SendData(54, -1, -1, ...)` — `remoteClient` and
+    /// `ignoreClient` both `-1`, vanilla's own shape for "everyone, no exceptions" — with no
+    /// proximity check anywhere in source. A distant player still needs the right armour
+    /// penetration the moment they come back into range, which withholding this exactly like an
+    /// ordinary position sync would risk losing to the same skip budget.
     pub(super) fn broadcast_npc_buffs(&mut self, index: u8) {
         let Some(npc) = self.npcs.get(index) else {
             return;
         };
         let slots: Vec<(u16, i32)> = npc.buffs.active().map(|s| (s.kind, s.time)).collect();
-        let at = npc.position;
         if let Ok(frame) = packets::npc_buffs(index, slots) {
-            self.broadcast_near(frame, at, index);
+            self.broadcast(frame, None);
         }
     }
 
@@ -6182,6 +6187,54 @@ mod meteor_entity_safety {
             !boxes_overlap(strike(tx + 200, ty), npc_box),
             "a strike far from the slime is allowed"
         );
+    }
+}
+
+/// Server MINOR (C1-b item 5): `broadcast_npc_buffs` used to go through `broadcast_near`, the
+/// same distance-gated path an ordinary position sync takes, and could withhold the buff list
+/// from a distant player for several ticks running (`MAX_NPC_SYNC_SKIPS`). Every real send site
+/// for this packet (`NPC.cs:81959`, `91090`, `91130`, `93029`) is `SendData(54, -1, -1, ...)` —
+/// no proximity check anywhere in source — so this is a real, unconditional broadcast now.
+#[cfg(test)]
+mod npc_buff_broadcast_scope {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(4000, 1200, "npc buff broadcast probe")
+    }
+
+    #[test]
+    fn a_far_away_player_still_hears_an_npcs_buff_change_immediately() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        const ZOMBIE: u16 = 3;
+        let index = server
+            .npcs
+            .spawn(ZOMBIE, (0.0, 0.0))
+            .expect("a slot for a zombie");
+
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        // Comfortably outside `SECTION_REACH`'s one-section radius of the NPC at the origin.
+        player.position = (3000.0 * 16.0, 0.0);
+        server.players[0] = Some(player);
+
+        let npc = server.npcs.get_mut(index).expect("just spawned");
+        assert!(
+            npc.buffs.add(ZOMBIE, 20, 600),
+            "adding Poisoned should succeed"
+        );
+
+        server.broadcast_npc_buffs(index);
+
+        let frame = out_rx.try_recv();
+        assert!(
+            frame.is_ok(),
+            "a distant player should still hear about the buff on the very first call, \
+             not have it withheld the way an ordinary position sync would be"
+        );
+        assert_eq!(frame.unwrap()[2], terrustia_proto::id::N_P_C_BUFFS);
     }
 }
 

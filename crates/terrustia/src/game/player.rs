@@ -139,6 +139,14 @@ pub struct Player {
     /// the first line; reset on reconnect like every other per-connection field, deliberately: a
     /// cooldown is about this session's own pace, not a persistent record of the account.
     pub last_chat: Option<std::time::Instant>,
+    /// How many server-issued teleports this client has not yet acknowledged
+    /// (`Player.unacknowledgedTeleports`). Bumped whenever the server relocates this player
+    /// without their own client having already moved itself locally first (a Teleportation
+    /// Potion, a pylon), and dropped back down on packet 65's own ack sub-message (`what == 3`).
+    /// While it is above zero, `on_player_controls` distrusts the position and velocity this
+    /// client reports — they may still describe where it was *before* a teleport it has not
+    /// caught up with yet (`MessageBuffer.cs:998-1002`).
+    pub unacknowledged_teleports: u32,
 }
 
 impl Player {
@@ -189,6 +197,7 @@ impl Player {
             sent_sections: HashSet::new(),
             pending_sections: VecDeque::new(),
             last_chat: None,
+            unacknowledged_teleports: 0,
         }
     }
 
