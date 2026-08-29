@@ -134,6 +134,16 @@ pub struct Player {
     /// `SpawnTileData` packet handler — a first join can want up to ~39 of them, and sending them
     /// all in one call used to block every other player's tick for the whole burst.
     pub pending_sections: VecDeque<(i32, i32)>,
+    /// When the game task first saw this connection, for the handshake reaper.
+    ///
+    /// The connection task has a handshake deadline of its own (`net::connection::read_loop`), but
+    /// it stops applying once a connection has sent more than `HANDSHAKE_FRAMES` (64) frames - past
+    /// that it is treated as an established session on the ordinary idle timeout. A client that
+    /// sends sixty-five frames of anything and then never finishes joining therefore escapes that
+    /// deadline entirely and holds a player slot for as long as it keeps the socket warm. Slots are
+    /// the scarce resource (`max_players`, at most 255), so the game task needs its own clock on
+    /// them, and this is it: set once when the slot is handed out and never touched again.
+    pub connected_at: std::time::Instant,
     /// When this connection's last *accepted* chat line went out, for `config.chat_cooldown_ms` —
     /// a config-enabled mechanism, off by default (see `dispatch.rs`'s chat handling). `None` until
     /// the first line; reset on reconnect like every other per-connection field, deliberately: a
@@ -188,6 +198,7 @@ impl Player {
             open_chest: -1,
             sent_sections: HashSet::new(),
             pending_sections: VecDeque::new(),
+            connected_at: std::time::Instant::now(),
             last_chat: None,
         }
     }

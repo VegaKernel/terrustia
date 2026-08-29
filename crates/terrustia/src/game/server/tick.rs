@@ -26,6 +26,13 @@ const STATUS_EVERY: u64 = 60;
 /// How often the worst tick in the window is reported, when it is worth reporting.
 const TICK_REPORT_EVERY: u64 = 600;
 
+/// How often the tick looks for connections that took a slot and never finished joining.
+///
+/// Once a second. The sweep is a walk over the slot table - at most 255 entries, most of them
+/// `None` on any real server - against a deadline measured in tens of seconds, so doing it sixty
+/// times as often would be sixty times the work for no extra precision anybody could observe.
+const REAP_EVERY: u64 = 60;
+
 /// The parts of a tick, in the order they run.
 ///
 /// What used to be one `World` phase was thirteen separate systems sharing a lap, so a warning
@@ -286,6 +293,50 @@ impl GameServer {
         }
     }
 
+    /// Take back any slot whose connection never finished joining.
+    ///
+    /// The connection task already has a handshake deadline, and it is not enough on its own. It
+    /// stops applying once a connection has sent more than `net::connection::HANDSHAKE_FRAMES` (64)
+    /// frames, because past that point the connection is treated as an established session under
+    /// the ordinary idle timeout. So a client that sends sixty-five frames of *anything* - any
+    /// packet at all, repeated, none of it advancing the handshake - is no longer on a deadline,
+    /// and holds its player slot for as long as it keeps sending a byte inside the idle window.
+    ///
+    /// Sockets are separately capped (`max_connections`, `max_connections_per_address`), so that
+    /// half is bounded. Player slots were not: `max_players` is at most 255 and a slot is handed
+    /// out at `Join`, long before anybody has said who they are. Enough of these and the server is
+    /// full of connections that will never play, and real players are told it is full.
+    ///
+    /// So the game task keeps its own clock. Anything that is not yet `Playing` and has been
+    /// connected longer than the configured handshake timeout is kicked and its slot freed. The
+    /// timeout is the same one the connection uses, and the game-side clock starts *later* (at
+    /// `Join`, not at `accept`), so an ordinary slow join is always caught by the connection's own
+    /// deadline first and never gets here. `handshake_timeout_secs = 0` turns this off, matching
+    /// what a zero means elsewhere in [`crate::config::Config`] (`autosave_secs`).
+    fn reap_stalled_handshakes(&mut self) {
+        let deadline = Duration::from_secs(self.config.handshake_timeout_secs);
+        if deadline.is_zero() {
+            return;
+        }
+        // Collected first: kicking removes a player, which would invalidate an in-flight iterator.
+        let stalled: Vec<(u8, std::net::SocketAddr)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|player| !player.is_playing() && player.connected_at.elapsed() > deadline)
+            .map(|player| (player.slot, player.addr))
+            .collect();
+        for (slot, addr) in stalled {
+            warn!(
+                slot,
+                %addr,
+                after_secs = deadline.as_secs(),
+                "a connection took a slot and never finished joining; taking the slot back"
+            );
+            self.kick(slot, "took too long to finish joining");
+        }
+    }
+
     pub(super) fn tick(&mut self) -> TickCost {
         let mut cost = TickCost::default();
         let began = Instant::now();
@@ -344,6 +395,9 @@ impl GameServer {
         self.note_finished_save();
         self.note_finished_auth();
         self.reclaim_snapshot_buffer();
+        if self.ticks.is_multiple_of(REAP_EVERY) {
+            self.reap_stalled_handshakes();
+        }
         self.tick_tile_spam();
         // What the world is worth fighting at, refreshed before anything can spawn. Cheap, and
         // keeping it here means no spawn site has to remember to scale.
@@ -586,6 +640,195 @@ mod tick_accounting {
         assert!(
             clock.lap() > Duration::ZERO,
             "four million multiplies cost nothing?"
+        );
+    }
+}
+
+/// A connection that takes a slot and never finishes joining must not keep it (P2c).
+///
+/// The escape route the reaper closes: `net::connection::read_loop` only holds a connection to the
+/// handshake deadline while it has sent at most `HANDSHAKE_FRAMES` (64) frames. The sixty-fifth
+/// frame - of anything at all - promotes it to "established session" and puts it on the idle
+/// timeout instead, which resets on every byte. Its player slot was then held for as long as it
+/// cared to trickle.
+#[cfg(test)]
+mod handshake_reaper {
+    use super::*;
+    use crate::config::Config;
+    use crate::game::player::ConnState;
+    use bytes::Bytes;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "reaper probe")
+    }
+
+    /// A server whose handshake deadline is one second, so a test never has to wait one.
+    fn server_with_a_short_deadline() -> GameServer {
+        GameServer::new(
+            Config {
+                handshake_timeout_secs: 1,
+                ..Config::default()
+            },
+            tiny_world(),
+        )
+    }
+
+    /// Take a slot the way `ServerEvent::Join` does, and leave the connection in `state`.
+    ///
+    /// The receiver is handed back and must be kept alive: dropping it closes the outbound queue,
+    /// and the server treats a closed queue as a connection that has already gone - which would
+    /// remove the player for a reason that has nothing to do with the reaper.
+    fn join(server: &mut GameServer, state: ConnState) -> (u8, mpsc::Receiver<Bytes>) {
+        let (tx, rx) = mpsc::channel(16);
+        let slot = server
+            .allocate_slot("127.0.0.1:5000".parse().expect("a literal"), tx)
+            .expect("a free slot");
+        server.player_mut(slot).expect("the slot just taken").state = state;
+        (slot, rx)
+    }
+
+    /// Backdate a connection so it is already past the deadline.
+    fn make_it_old(server: &mut GameServer, slot: u8) {
+        let player = server.player_mut(slot).expect("the slot under test");
+        player.connected_at = Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .expect("a monotonic clock at least thirty seconds old");
+    }
+
+    #[test]
+    fn a_slot_held_before_playing_past_the_deadline_is_reclaimed() {
+        let mut server = server_with_a_short_deadline();
+        // `Identified` is past the point a slot is assigned and short of `Playing`: the client has
+        // sent a name and then stopped, which is exactly the shape that used to hold a slot for
+        // ever once it had sent enough frames to escape the connection-level deadline.
+        let (slot, _held) = join(&mut server, ConnState::Identified);
+        make_it_old(&mut server, slot);
+
+        server.reap_stalled_handshakes();
+
+        assert!(
+            server.players[slot as usize].is_none(),
+            "a connection that never finished joining must not keep its slot"
+        );
+    }
+
+    #[test]
+    fn every_pre_playing_state_is_reclaimed_not_just_one() {
+        for state in [
+            ConnState::Greeting,
+            ConnState::SlotAssigned,
+            ConnState::Identified,
+            ConnState::WorldSent,
+            ConnState::TilesSent,
+        ] {
+            let mut server = server_with_a_short_deadline();
+            let (slot, _held) = join(&mut server, state);
+            make_it_old(&mut server, slot);
+            server.reap_stalled_handshakes();
+            assert!(
+                server.players[slot as usize].is_none(),
+                "a connection stuck at {state:?} must be reclaimed too"
+            );
+        }
+    }
+
+    #[test]
+    fn a_playing_player_is_never_reaped_however_long_they_have_been_here() {
+        let mut server = server_with_a_short_deadline();
+        let (slot, _held) = join(&mut server, ConnState::Playing);
+        make_it_old(&mut server, slot);
+
+        server.reap_stalled_handshakes();
+
+        assert!(
+            server.players[slot as usize].is_some(),
+            "somebody who is actually playing has finished the handshake; a long session is not a \
+             stalled one"
+        );
+    }
+
+    #[test]
+    fn a_join_still_inside_the_deadline_is_left_alone() {
+        let mut server = server_with_a_short_deadline();
+        let (slot, _held) = join(&mut server, ConnState::Identified);
+        // Not backdated: an ordinary join in progress.
+
+        server.reap_stalled_handshakes();
+
+        assert!(
+            server.players[slot as usize].is_some(),
+            "a join that is merely in progress must be given its full deadline"
+        );
+    }
+
+    /// Zero means off, the same as it does for `autosave_secs`.
+    #[test]
+    fn a_zero_timeout_turns_the_reaper_off_rather_than_kicking_everyone_instantly() {
+        let mut server = GameServer::new(
+            Config {
+                handshake_timeout_secs: 0,
+                ..Config::default()
+            },
+            tiny_world(),
+        );
+        let (slot, _held) = join(&mut server, ConnState::Identified);
+        make_it_old(&mut server, slot);
+
+        server.reap_stalled_handshakes();
+
+        assert!(server.players[slot as usize].is_some());
+    }
+
+    /// And it is actually wired into the tick, rather than only being callable.
+    ///
+    /// Sixty ticks, because the sweep runs once a second rather than every frame. Deleting the
+    /// `reap_stalled_handshakes` call from `tick` fails this one and leaves the rest passing, which
+    /// is the point of having it.
+    #[test]
+    fn the_tick_runs_the_reaper_on_its_own() {
+        let mut server = server_with_a_short_deadline();
+        let (slot, _held) = join(&mut server, ConnState::Identified);
+        make_it_old(&mut server, slot);
+
+        for _ in 0..REAP_EVERY {
+            server.tick();
+        }
+
+        assert!(
+            server.players[slot as usize].is_none(),
+            "the tick must reclaim a stalled slot without anybody asking it to"
+        );
+    }
+
+    /// The freed slot is genuinely available again, which is the whole point of freeing it.
+    #[test]
+    fn the_reclaimed_slot_can_be_handed_to_somebody_else() {
+        let mut server = GameServer::new(
+            Config {
+                handshake_timeout_secs: 1,
+                max_players: 1,
+                ..Config::default()
+            },
+            tiny_world(),
+        );
+        let (slot, _held) = join(&mut server, ConnState::Identified);
+        let (tx, _rx) = mpsc::channel(16);
+        assert!(
+            server
+                .allocate_slot("127.0.0.1:5001".parse().expect("a literal"), tx)
+                .is_none(),
+            "the one-slot server should be full while the stalled connection holds it"
+        );
+
+        make_it_old(&mut server, slot);
+        server.reap_stalled_handshakes();
+
+        let (tx, _rx) = mpsc::channel(16);
+        assert!(
+            server
+                .allocate_slot("127.0.0.1:5001".parse().expect("a literal"), tx)
+                .is_some(),
+            "a real player must be able to have the slot back"
         );
     }
 }
