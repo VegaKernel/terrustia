@@ -206,7 +206,12 @@ fn write_config(path: &Path, config: &Config) -> Result<(), WizardError> {
     ));
     out.push_str(&format!("max_players = {}\n", config.max_players));
     out.push_str(&format!("panel_enabled = {}\n", config.panel_enabled));
-    std::fs::write(path, out)?;
+    // Through the same temp-file-and-rename every other writer here uses. The wizard writes into a
+    // directory it has just checked is empty, so there is rarely a previous file to protect - but
+    // `--setup` re-run against an existing install is a supported thing to do, and a half-written
+    // `terrustia.toml` is a server that will not start at all. The failure is explained for the
+    // same reason: this is the one moment the operator is definitely sitting at the terminal.
+    crate::safe_write::write_atomic("writing the config file", path, out.as_bytes())?;
     Ok(())
 }
 
@@ -343,5 +348,68 @@ mod tests {
         assert_eq!(loaded.autosave_secs, Config::default().autosave_secs);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A config the wizard cannot write must be refused out loud, with the previous one intact.
+    ///
+    /// `--setup` re-run against an existing install is a supported thing to do, and half a
+    /// `terrustia.toml` is a server that will not start at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_that_cannot_be_written_leaves_the_previous_one_byte_identical() {
+        let dir = crate::safe_write::tests::temp_dir("setup-readonly");
+        let config_path = dir.join("terrustia.toml");
+        let config = Config {
+            world_name: "The Good One".to_string(),
+            max_players: 8,
+            ..Config::default()
+        };
+        write_config(&config_path, &config).expect("the first, good write");
+        let before = std::fs::read(&config_path).expect("reading it back");
+
+        let Some(_guard) = crate::safe_write::tests::ReadOnlyDir::new(&dir) else {
+            eprintln!("skipping: this environment cannot make a directory read-only");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let replacement = Config {
+            world_name: "The Doomed One".to_string(),
+            ..config
+        };
+        let e = write_config(&config_path, &replacement)
+            .expect_err("a read-only directory must refuse the write");
+        let message = e.to_string();
+        drop(_guard);
+
+        assert!(
+            message.contains("config file") && message.contains("writable by the account"),
+            "the failure must name what it was doing and what to check, got: {message}"
+        );
+        assert_eq!(
+            std::fs::read(&config_path).expect("reading it back"),
+            before,
+            "a failed write must leave the previous config byte-identical"
+        );
+        assert!(
+            !crate::safe_write::temp_path(&config_path).exists(),
+            "a failed write must clean up its own scratch file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The wizard's own directory disappearing between the prompts and the write is reported.
+    #[test]
+    fn a_vanished_directory_is_reported_rather_than_fatal() {
+        let dir = crate::safe_write::tests::temp_dir("setup-vanished");
+        let config_path = dir.join("terrustia.toml");
+        std::fs::remove_dir_all(&dir).expect("removing the directory out from under it");
+
+        let e = write_config(&config_path, &Config::default())
+            .expect_err("a missing directory must refuse the write");
+        assert!(
+            e.to_string().contains("directory no longer exists"),
+            "got: {e}"
+        );
     }
 }

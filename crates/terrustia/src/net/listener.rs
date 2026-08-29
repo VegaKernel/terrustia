@@ -120,6 +120,72 @@ fn claim(
     })
 }
 
+/// How long to wait after the *second* consecutive `accept()` failure, doubling from there.
+const ACCEPT_BACKOFF_START_MS: u64 = 5;
+/// The ceiling on that wait. Half a second is long enough that a sticky failure costs the machine
+/// two syscalls a second instead of as many as a core can issue, and short enough that the listener
+/// is back in service within one wait of the condition clearing.
+const ACCEPT_BACKOFF_MAX_MS: u64 = 500;
+
+/// How long to pause before retrying `accept()` after `consecutive_failures` failures in a row.
+///
+/// `None` for the first one, deliberately. The ordinary failure is a single transient refusal - a
+/// client that vanished between the SYN and the accept, a momentary descriptor shortage - and it is
+/// gone by the next call. Sleeping for it would add latency to the case that fixes itself, which is
+/// the case that happens.
+///
+/// The second failure in a row is different: it says the condition is not transient. Descriptor
+/// exhaustion (`EMFILE`/`ENFILE`) is the one that matters, because the loop's own response to it
+/// used to be to try again immediately, and `accept()` on an exhausted process returns immediately
+/// too. That is a hot loop: one core pinned, a log line per iteration, and the machine given no
+/// slack to close whatever would free a descriptor. A short doubling wait turns it into a quiet
+/// retry that gets out of the way of its own recovery.
+///
+/// A pure function of the count so the schedule can be pinned by a test without a socket: the loop
+/// below only has to reset the count on success, which is the one thing the shape of it makes hard
+/// to get wrong.
+fn accept_backoff(consecutive_failures: u32) -> Option<Duration> {
+    // 0 and 1 wait not at all; 2 is the first that waits, and waits the starting amount.
+    let doublings = consecutive_failures.checked_sub(2)?;
+    let mut millis = ACCEPT_BACKOFF_START_MS;
+    // Capped at each step rather than shifted and clamped, so there is no width to overflow. 16 is
+    // far past the point the cap is reached; the `min` only exists to bound the loop.
+    for _ in 0..doublings.min(16) {
+        millis = (millis * 2).min(ACCEPT_BACKOFF_MAX_MS);
+    }
+    Some(Duration::from_millis(millis))
+}
+
+/// What a repeating `accept()` failure usually means, said once rather than never.
+///
+/// The per-failure line is the raw error, which for the common case (`EMFILE`, "too many open
+/// files") names a limit without saying whose or what to do about it. This is the same courtesy
+/// [`explain_bind_failure`] extends to a refused bind.
+fn explain_sticky_accept(e: &std::io::Error) -> &'static str {
+    match e.raw_os_error() {
+        // EMFILE (24) is this process's own descriptor limit; ENFILE (23) is the machine's.
+        Some(24) => {
+            "this process has no file descriptors left. Raise its limit (`ulimit -n`, or \
+             LimitNOFILE= in a systemd unit), or lower max_connections so the server refuses \
+             sockets before the kernel does."
+        }
+        Some(23) => {
+            "the machine has no file descriptors left, across every process. Something else on \
+             this host is probably leaking them."
+        }
+        // ENOBUFS (macOS 55 / Linux 105) and ENOMEM (12) both mean the kernel could not find room
+        // for the new socket.
+        Some(12) | Some(55) | Some(105) => {
+            "the kernel has no memory or buffer space left for another socket. The machine is \
+             under real pressure; lowering max_connections will reduce this server's share of it."
+        }
+        _ => {
+            "the listening socket keeps refusing connections. Until it stops, this server is \
+             retrying on a backoff rather than spinning."
+        }
+    }
+}
+
 /// Accept connections until the listener fails or the game task goes away.
 pub async fn run(
     listener: TcpListener,
@@ -138,9 +204,14 @@ pub async fn run(
         Err(e) => debug!(error = %e, "listener has no local address"),
     }
 
+    // Reset on every accepted connection, so a one-off failure between two healthy ones never
+    // builds towards a wait.
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                consecutive_failures = 0;
                 let slot = match claim(
                     &open,
                     addr.ip(),
@@ -174,6 +245,18 @@ pub async fn run(
                 if events.is_closed() {
                     return;
                 }
+                // Only a *repeating* failure is worth waiting for, and only the first repeat is
+                // worth a second line: past that the wait itself is what keeps the log quiet.
+                if let Some(delay) = accept_backoff(consecutive_failures.saturating_add(1)) {
+                    if consecutive_failures == 1 {
+                        warn!(
+                            advice = explain_sticky_accept(&e),
+                            "accept has failed twice in a row; backing off between retries"
+                        );
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
             }
         }
     }
@@ -262,5 +345,75 @@ mod tests {
 
         let other = explain_bind_failure(a, Error::from(ErrorKind::ConnectionReset));
         assert!(other.to_string().contains("could not bind"));
+    }
+
+    /// The backoff schedule, pinned as a pure function.
+    ///
+    /// The bug it exists for: `run`'s error arm used to `continue` with no delay at all, so a
+    /// *sticky* `accept()` failure - descriptor exhaustion, which returns immediately every time -
+    /// became a hot loop that pinned a core and wrote a log line per iteration, while giving the
+    /// machine no slack to close whatever would free a descriptor. Deleting the `sleep` in `run`
+    /// does not fail any test on its own, because a real fd exhaustion is not something a unit test
+    /// can arrange; what is testable, and what actually decides the behaviour, is the schedule.
+    #[test]
+    fn the_accept_backoff_spares_the_one_off_failure_and_caps_the_sticky_one() {
+        assert_eq!(
+            accept_backoff(0),
+            None,
+            "no failures, no wait - this is the ordinary path"
+        );
+        assert_eq!(
+            accept_backoff(1),
+            None,
+            "a single failure is transient and must cost no latency at all"
+        );
+
+        // From the second failure on: doubling, from the starting wait.
+        let schedule: Vec<u64> = (2..=12)
+            .map(|n| {
+                accept_backoff(n)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            schedule,
+            vec![5, 10, 20, 40, 80, 160, 320, 500, 500, 500, 500],
+            "the schedule should double from {ACCEPT_BACKOFF_START_MS}ms and stop at \
+             {ACCEPT_BACKOFF_MAX_MS}ms"
+        );
+
+        // Monotonic, and never past the cap, however long the condition lasts. `u32::MAX` is the
+        // saturating counter's own ceiling, so it is a value `run` really can reach.
+        let mut previous = Duration::ZERO;
+        for n in 2..=64 {
+            let delay = accept_backoff(n).expect("a repeat failure always waits");
+            assert!(delay >= previous, "the wait must never shrink");
+            assert!(
+                delay <= Duration::from_millis(ACCEPT_BACKOFF_MAX_MS),
+                "the wait must never exceed the cap"
+            );
+            previous = delay;
+        }
+        assert_eq!(
+            accept_backoff(u32::MAX),
+            Some(Duration::from_millis(ACCEPT_BACKOFF_MAX_MS)),
+            "a failure count that has saturated must still be the cap, not an overflow"
+        );
+    }
+
+    /// A repeating accept failure names the limit that is actually exhausted.
+    #[test]
+    fn a_sticky_accept_failure_says_which_limit_ran_out() {
+        use std::io::Error;
+        assert!(explain_sticky_accept(&Error::from_raw_os_error(24)).contains("ulimit -n"));
+        assert!(
+            explain_sticky_accept(&Error::from_raw_os_error(23)).contains("across every process")
+        );
+        assert!(explain_sticky_accept(&Error::from_raw_os_error(12)).contains("buffer space"));
+        assert!(
+            explain_sticky_accept(&Error::from(std::io::ErrorKind::ConnectionAborted))
+                .contains("backoff")
+        );
     }
 }

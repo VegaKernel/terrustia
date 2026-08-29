@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -94,7 +94,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen: "0.0.0.0:7777".parse().expect("valid default address"),
+            // Built rather than parsed. `"0.0.0.0:7777".parse().expect(..)` was correct and could
+            // never have fired, but "could never have fired" is a claim about a string literal that
+            // has to be re-checked every time somebody edits it, and it cost a line of the panic
+            // budget to hold. `Ipv4Addr::UNSPECIFIED` is 0.0.0.0 and this is a `const fn` chain, so
+            // there is no parse to fail.
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7777),
             max_players: 8,
             world_name: "Terrustia".into(),
             world_file: None,
@@ -113,7 +118,9 @@ impl Default for Config {
             max_connections_per_address: 8,
             handshake_timeout_secs: 30,
             panel_enabled: false,
-            panel_listen: "127.0.0.1:7778".parse().expect("valid default address"),
+            // Same reasoning as `listen` above; `Ipv4Addr::LOCALHOST` is 127.0.0.1, which
+            // `validate` then insists on staying loopback.
+            panel_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7778),
             update_check_enabled: true,
             upnp_enabled: true,
             audit_log_max_bytes: crate::admin::audit::DEFAULT_MAX_BYTES,

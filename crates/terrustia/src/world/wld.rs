@@ -54,6 +54,20 @@ pub enum WldError {
         source: std::io::Error,
     },
 
+    /// A write that failed, already explained.
+    ///
+    /// Separate from [`WldError::Io`] because that one says "reading", and a save failure reported
+    /// as a read is an operator sent looking in the wrong direction. `source` has been through
+    /// [`crate::safe_write::explain`], so it already carries the path, what was being attempted and
+    /// what to do about it; this variant deliberately adds nothing on top rather than printing a
+    /// second copy of the path in front of it.
+    #[error("{source}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("not a Terraria world file (magic was {found:?})")]
     BadMagic { found: Vec<u8> },
 

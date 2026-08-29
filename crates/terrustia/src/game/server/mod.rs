@@ -75,6 +75,16 @@ pub use panel::{
 /// Signs hold a page of text at most; anything longer is a client that is not playing fair.
 const MAX_SIGN_TEXT: usize = 1000;
 
+/// How many world saves must fail in a row before the players are told, and not only the log.
+///
+/// Three. One failure is a blip - a backup tool holding the file open for a moment, a network mount
+/// hiccuping - and interrupting everybody's game for it would teach them to ignore the message. At
+/// the default five-minute autosave, three is fifteen minutes of play at risk: long enough that
+/// telling people is warranted, short enough that they can still do something about it (log out and
+/// let the operator sort it out, rather than build for another hour first). The console log warns
+/// on the *first* failure regardless; this constant only governs the in-game broadcast.
+pub const SAVE_FAILURES_BEFORE_ALARM: u32 = 3;
+
 /// How far a player can be from an item and still have it reserved for them, in pixels.
 ///
 /// Generous on purpose: the reservation only grants the right to pick the item up, and a client
@@ -897,6 +907,14 @@ pub struct GameServer {
     /// A channel rather than the join handle because the tick is not async and polling a handle
     /// for its value needs an executor; a try-receive needs nothing.
     save_results: (SaveReport, SaveReports),
+    /// How many world saves have failed in a row. `0` means saving is healthy.
+    ///
+    /// This is the whole of the saves-failing state: the panel reads it (as
+    /// [`PanelStatus::save_failures`]), the in-game escalation is keyed off it crossing
+    /// [`SAVE_FAILURES_BEFORE_ALARM`], and a single success clears it. Not persisted, deliberately:
+    /// a restart is a fresh attempt, and a counter carried across one would keep alarming about a
+    /// disk that has since been fixed.
+    save_failures: u32,
     /// Password hashing that finished on a worker thread, waiting to be applied.
     ///
     /// Argon2 costs tens of milliseconds by design, against a tick budget of 16.67. Running it
@@ -1094,6 +1112,7 @@ impl GameServer {
             saving: None,
             save_reason: "",
             save_results: std::sync::mpsc::channel(),
+            save_failures: 0,
             auth_results: std::sync::mpsc::channel(),
             auth_in_flight: std::collections::HashSet::new(),
             claim_token: None,
@@ -1296,7 +1315,7 @@ impl GameServer {
     ///
     /// Only for shutdown, where there is no next tick to protect and the process must not exit
     /// before the bytes are on disk. Everything else wants [`Self::save_world_in_background`].
-    fn save_world(&mut self, reason: &str) {
+    fn save_world(&mut self, reason: &'static str) {
         let Some(path) = self.save_path.clone() else {
             return;
         };
@@ -1306,12 +1325,68 @@ impl GameServer {
             Ok(()) => {
                 let ms = started.elapsed().as_millis();
                 info!(path = %path.display(), reason, elapsed_ms = ms as u64, "world saved");
+                self.note_save_succeeded(reason);
                 self.announce(&format!("World saved ({ms} ms)."));
             }
             Err(e) => {
                 error!(path = %path.display(), error = %e, "world save failed");
-                self.announce("World save FAILED; see the server log.");
+                self.note_save_failed(reason);
             }
+        }
+    }
+
+    /// A save landed. Clear the failure state, and say so if anyone was told about it.
+    ///
+    /// The all-clear is owed to exactly the people who heard the alarm: if the count never reached
+    /// [`SAVE_FAILURES_BEFORE_ALARM`] then nobody in the game was told anything, and announcing
+    /// that saving is working again would be the first they had heard of it going wrong. The log
+    /// line is unconditional, because an operator reading it back wants both edges.
+    fn note_save_succeeded(&mut self, reason: &str) {
+        let failures = std::mem::take(&mut self.save_failures);
+        if failures == 0 {
+            return;
+        }
+        info!(
+            reason,
+            after_failures = failures,
+            "world saves are working again"
+        );
+        if failures >= SAVE_FAILURES_BEFORE_ALARM {
+            self.announce(
+                "Saving is working again. Everything since the last warning has now been kept.",
+            );
+        }
+    }
+
+    /// A save failed. Warn, count it, and escalate once it stops being a blip.
+    ///
+    /// What this deliberately does *not* do is stop the server. A disk that is full or briefly
+    /// unwritable is a condition to survive, not to die of: the world in memory is still the good
+    /// one, the previous save on disk is still intact (see [`crate::safe_write`]), and the next
+    /// autosave is one cadence away. Exiting here would throw away the very state the operator is
+    /// trying to keep.
+    ///
+    /// The escalation is repeated on every failure past the threshold rather than only on the
+    /// crossing. Somebody who joined since the first warning has no way of knowing the server is in
+    /// this state, and at the default five-minute cadence that is one line every five minutes,
+    /// which is the right price for "your progress is not being kept".
+    fn note_save_failed(&mut self, reason: &str) {
+        self.save_failures = self.save_failures.saturating_add(1);
+        let failures = self.save_failures;
+        warn!(
+            reason,
+            failures,
+            "a world save failed; the previous save is intact and the next autosave will retry"
+        );
+        // Whoever asked for this particular save is answered whatever the count says.
+        if reason == "command" {
+            self.announce("World save FAILED; see the server log.");
+        }
+        if failures >= SAVE_FAILURES_BEFORE_ALARM {
+            self.announce(&format!(
+                "Warning: the world has failed to save {failures} times in a row. Progress since \
+                 the last good save is at risk - please tell whoever runs this server."
+            ));
         }
     }
 
@@ -1526,7 +1601,12 @@ impl GameServer {
                 "could not move the current world aside; refusing to roll back: {e}"
             ));
         }
-        if let Err(e) = std::fs::copy(&bak, &path) {
+        // Through a temporary file, not a plain `std::fs::copy`: that truncates the destination
+        // before it fills it, so a disk that ran out (or a process killed) halfway would leave the
+        // world path holding a fragment of a world. The `aside` rename below undoes it for the
+        // error we can see, but not for the process dying mid-copy, and a rollback is exactly the
+        // moment somebody cannot afford a second accident.
+        if let Err(e) = crate::safe_write::copy_atomic("restoring a world backup", &bak, &path) {
             let _ = std::fs::rename(&aside, &path);
             return Err(format!("could not restore the backup: {e}"));
         }
@@ -1707,12 +1787,15 @@ impl GameServer {
         let Ok(result) = self.save_results.1.try_recv() else {
             return;
         };
+        let reason = self.save_reason;
         match result {
-            Ok(ms) if self.save_reason == "command" => {
-                self.announce(&format!("World saved ({ms} ms)."));
+            Ok(ms) => {
+                self.note_save_succeeded(reason);
+                if reason == "command" {
+                    self.announce(&format!("World saved ({ms} ms)."));
+                }
             }
-            Err(()) => self.announce("World save FAILED; see the server log."),
-            Ok(_) => {}
+            Err(()) => self.note_save_failed(reason),
         }
     }
 
@@ -1784,6 +1867,7 @@ impl GameServer {
                     max_players: self.config.max_players,
                     world_name: self.world.name.clone(),
                     world_file: self.current_world_file_stem(),
+                    save_failures: self.save_failures,
                 });
             }
             ServerEvent::PanelPlayers { reply } => {
@@ -2026,6 +2110,31 @@ impl GameServer {
         self.players.get_mut(slot as usize)?.as_mut()
     }
 
+    /// Take a player out of their slot.
+    ///
+    /// **Known gap, deliberately recorded here rather than left to be rediscovered.** Removing a
+    /// player does not end their connection's read task. Dropping the [`Player`] drops the last
+    /// sender for its outbound queue, which ends `write_loop` and shuts down the *write* half of
+    /// the socket - but `read_loop` keeps going until the client closes or `idle_timeout_secs`
+    /// expires, and keeps forwarding `ServerEvent::Packet { slot }` and, finally,
+    /// `ServerEvent::Leave { slot }` for a slot the game no longer associates with it.
+    ///
+    /// While the slot stays empty that is harmless: every handler goes through
+    /// [`Self::player_mut`], which returns `None`. The gap is that [`Self::allocate_slot`] hands
+    /// out the first free slot, so a newcomer arriving inside that window inherits the number - and
+    /// then the ghost connection's packets are attributed to them, and its eventual `Leave` removes
+    /// them.
+    ///
+    /// This is not new and is not specific to any one caller. Three paths reach here without the
+    /// connection having ended: `/kick`, [`crate::game::server::GameServer::reap_stalled_handshakes`],
+    /// and - reachable by any client with no privilege at all - [`Self::send_bytes`] dropping a
+    /// player whose outbound queue filled up.
+    ///
+    /// The fix is a per-connection epoch: `allocate_slot` hands back `(slot, epoch)`, the
+    /// connection stamps both onto every `Packet` and its `Leave`, and `handle_event` ignores any
+    /// that do not match the epoch currently in the slot. It is contained - the only three places
+    /// that build these events are in `net/connection.rs` - but it changes the shape of
+    /// [`ServerEvent`], so it is called out rather than smuggled in beside an unrelated change.
     fn remove_player(&mut self, slot: u8) {
         // Before the early return, not after it. A client that disconnects mid-check would
         // otherwise hold one of the server's few hashing slots until its worker happened to

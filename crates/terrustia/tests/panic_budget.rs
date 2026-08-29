@@ -29,7 +29,18 @@ use std::path::{Path, PathBuf};
 /// traps rewrite one (`kind_type` is rolled from a fixed range, the invariant is in the message),
 /// while the same wave's cleanups removed two older sites. This surfaced only now because the
 /// audit-wave branch's CI never ran as a whole before it merged to main.
-const ALLOWED: usize = 14;
+///
+/// 12, down from 14 (Lane B, error handling and data safety): `config.rs`'s two
+/// `"0.0.0.0:7777".parse().expect("valid default address")` calls are gone, replaced by
+/// `SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7777)` and its loopback twin. Neither could
+/// ever have fired - but "could never have fired" is a claim about a string literal that has to be
+/// re-checked every time somebody edits it, and building the address instead removes the claim
+/// rather than restating it. Nothing else in that lane's scope had a site to remove; `record.rs`'s
+/// two and `reader.rs`'s one are in files it did not own.
+///
+/// Lower this whenever a site genuinely goes away, in the same commit. Never raise it without a
+/// comment at the new site saying which invariant makes it safe.
+const ALLOWED: usize = 12;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
