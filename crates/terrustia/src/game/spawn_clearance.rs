@@ -57,6 +57,19 @@ mod tests {
     }
 
     #[test]
+    fn platform_like_chosen_tiles_are_solid_for_candidate_validation() {
+        for block in [19, 239, 380] {
+            let mut world = candidate();
+            assert!(world.set_tile(50, 40, Tile::block(block)));
+            assert!(solid(block), "tile {block} must be in Main.tileSolid");
+            assert!(
+                !chosen_point_is_clear(&world, 50, 40),
+                "platform-like tile {block} must reject a chosen point"
+            );
+        }
+    }
+
+    #[test]
     fn solid_in_the_left_column_rejects_the_candidate() {
         let mut world = candidate();
         assert!(world.set_tile(49, 39, Tile::block(1)));
