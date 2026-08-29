@@ -46,12 +46,12 @@ world, saves it into a `worlds/` directory in the folder you ran it from, and se
 Minecraft server lays out its own files wherever it is started. Measured against the official server
 on the same 4200×1200 world with nobody connected:
 
-| | vanilla 1.4.5.8 | terrustia |
-|---|:---:|:---:|
-| Startup | 2.26 s | **0.41 s** |
-| CPU, idle | 104% of a core | **0.7%** |
-| RAM, idle | 641.8 MB | **45.4 MB** |
-| Bandwidth over 5 minutes | 148,874 B | **133,400 B** |
+| | vanilla 1.4.5.8 | terrustia | |
+|---|:---:|:---:|:---:|
+| Startup | 2.26 s | **0.06 s** | 37× faster |
+| CPU, idle | 104% of a core | **0.7%** | ~150× less |
+| RAM, idle | 641.8 MB | **45.4 MB** | 14× less |
+| Bandwidth over 5 minutes | 148,874 B | **133,400 B** | 10% less |
 
 Saves are verified before they replace anything, then fsynced, and three backups are kept in
 rotation. A crash partway through a write cannot destroy the previous save. The file header is
