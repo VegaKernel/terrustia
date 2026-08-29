@@ -32,7 +32,10 @@ pub fn choose_offset(rng: &mut SmallRng) -> (i32, i32) {
     )
 }
 
-/// Whether a resolved spawn position lies in the early player-safe rectangle.
+/// Whether the resolved solid floor lies in the early player-safe rectangle.
+///
+/// Both offsets are relative to the tile containing the top-left corner of the player's hitbox.
+/// The caller must pass the solid floor row, not the NPC's stand/top-left row one tile above it.
 pub fn in_safe_rectangle(dx: i32, dy: i32) -> bool {
     (-SAFE_WEST..=SAFE_EAST).contains(&dx) && (-SAFE_UP..=SAFE_DOWN).contains(&dy)
 }
@@ -56,7 +59,10 @@ mod tests {
             (0, -SAFE_UP),
             (0, SAFE_DOWN),
         ] {
-            assert!(in_safe_rectangle(dx, dy), "edge ({dx}, {dy}) should be safe");
+            assert!(
+                in_safe_rectangle(dx, dy),
+                "edge ({dx}, {dy}) should be safe"
+            );
         }
         for (dx, dy) in [
             (-SAFE_WEST - 1, 0),
