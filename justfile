@@ -156,6 +156,7 @@ regen:
     cargo run -q -p terrustia-codegen -- hurt_tiles {{DECOMPILED}} crates/terrustia-proto/src/hurt_tiles.rs
     cargo run -q -p terrustia-codegen -- town_names {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
     cargo run -q -p terrustia-codegen -- travel_shop {{DECOMPILED}} crates/terrustia-proto/src/travel_shop.rs
+    cargo run -q -p terrustia-codegen -- tile_death  {{DECOMPILED}} crates/terrustia-proto/src/tile_death.rs
     cargo fmt --all
     @echo "Regenerated the data tables. Review the diff before committing."
 

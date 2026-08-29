@@ -56,10 +56,15 @@ pub fn update(npc: &mut Npc, target: Option<Target>, on_ground: bool, active: bo
         return;
     }
 
-    if let Some(t) = target {
+    // Vanilla only re-targets here (`TargetClosest()`, which is also what turns the slime to face
+    // whatever it picks) while active (`flag3`), gated further by its own `ai[2] == 1f`: a roughly
+    // two-hundred-tick cooldown after it last turned round off a wall, which this port does not
+    // model (`ai[2]` is otherwise unused here). NPC.cs:62245-62248. A passive slime hopping in
+    // daylight keeps whatever direction it already had instead of re-facing on every hop.
+    if active && let Some(t) = target {
         npc.direction = if t.center.0 > npc.center().0 { 1 } else { -1 };
+        npc.sprite_direction = npc.direction;
     }
-    npc.sprite_direction = npc.direction;
 
     if kind == 3 {
         npc.velocity.1 = BIG_HOP_Y;
@@ -117,6 +122,32 @@ mod tests {
         assert_eq!(s.velocity.1, HOP_Y, "should hop");
         assert!(s.velocity.0 > 0.0, "and lean toward the player");
         assert_eq!(s.direction, 1);
+    }
+
+    /// `TargetClosest()` (which is what turns a slime to face what it targets) only runs while the
+    /// slime is active (`flag3`), not on every hop. `NPC.cs:62245-62248`.
+    #[test]
+    fn a_passive_slime_does_not_reface_on_every_hop() {
+        let mut s = slime(1);
+        s.ai[0] = -1.0; // one tick from the first window
+        s.direction = 1; // already facing right
+        // The player is to the left, but the slime is not active (day, full health, above the
+        // surface, no slime rain), so it should keep its existing facing rather than turn to it.
+        update(&mut s, Some(player(-5000.0)), true, false);
+        assert_eq!(s.direction, 1, "a passive slime should not reface mid-hop");
+    }
+
+    /// The same hop, but active: now it does turn to face the player.
+    #[test]
+    fn an_active_slime_does_reface_on_a_hop() {
+        let mut s = slime(1);
+        s.ai[0] = -1.0;
+        s.direction = 1;
+        update(&mut s, Some(player(-5000.0)), true, true);
+        assert_eq!(
+            s.direction, -1,
+            "an active slime should turn to face the player"
+        );
     }
 
     #[test]

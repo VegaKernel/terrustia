@@ -98,6 +98,17 @@ pub enum WldError {
         len: usize,
     },
 
+    #[error(
+        "section pointer {index} is {pointer}, before section {prev_index}'s pointer {previous}; \
+         section pointers must not go backwards, so the file's structure cannot be trusted"
+    )]
+    SectionPointersOutOfOrder {
+        index: usize,
+        pointer: i64,
+        prev_index: usize,
+        previous: i64,
+    },
+
     #[error("tile data ended early: {decoded} of {expected} tiles")]
     TruncatedTiles { decoded: usize, expected: usize },
 
@@ -173,18 +184,16 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
     if file.sections.len() > 4 {
         for (nth, &start) in file.sections[4..].iter().enumerate() {
             // Each section runs to the start of the next; the last runs to the end of the file,
-            // taking the footer with it.
+            // taking the footer with it. `read_file_header` already refused a file whose pointers
+            // go backwards, so `end >= start` here is an established invariant, not merely hoped
+            // for: `.get` stays only as a check on a fact that should already be true rather than
+            // as the thing that makes a corrupt file read as an empty section.
             let end = file
                 .sections
                 .get(5 + nth)
                 .map_or(bytes.len(), |&next| next as usize);
             let (start, end) = (start as usize, end.min(bytes.len()));
-            trailing_sections.push(
-                bytes
-                    .get(start..end.max(start))
-                    .unwrap_or_default()
-                    .to_vec(),
-            );
+            trailing_sections.push(bytes.get(start..end).unwrap_or_default().to_vec());
         }
     }
 
@@ -334,6 +343,22 @@ fn read_file_header(r: &mut PacketReader<'_>, len: usize) -> Result<FileHeader> 
                 index,
                 pointer: i64::from(pointer),
                 len,
+            });
+        }
+        // Every section runs from its own pointer to the next one's (or, for the last section, to
+        // the end of the file); the trailing-section loop in `parse` relies on that ordering to
+        // slice each one out. A pointer that goes backwards is not a smaller section, it is a file
+        // whose structure cannot be trusted, and reading it anyway used to clamp the resulting
+        // negative-length slice to empty rather than refuse: a corrupt file loaded as one with a
+        // silently empty townsfolk or tile-entity section instead of being rejected outright.
+        if let Some(&previous) = sections.last()
+            && pointer < previous
+        {
+            return Err(WldError::SectionPointersOutOfOrder {
+                index,
+                pointer: i64::from(pointer),
+                prev_index: index - 1,
+                previous: i64::from(previous),
             });
         }
         sections.push(pointer);
@@ -1232,6 +1257,48 @@ mod tests {
         bytes[0..4].copy_from_slice(&326i32.to_le_bytes());
         let loaded = parse(&bytes).expect("a 1.4.5.8 (v326) world must load");
         assert_eq!(loaded.width(), 400);
+    }
+
+    /// The byte offset the section-pointer table starts at: version (4) + magic (7) + file type
+    /// (1) + revision (4) + favorite (8) + section count (2). Each pointer is a little-endian i32
+    /// from there on, one per section.
+    const POINTER_TABLE: usize = 4 + 7 + 1 + 4 + 8 + 2;
+
+    fn section_pointer(bytes: &[u8], index: usize) -> i32 {
+        let at = POINTER_TABLE + index * 4;
+        i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn set_section_pointer(bytes: &mut [u8], index: usize, value: i32) {
+        let at = POINTER_TABLE + index * 4;
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// P1d: a file whose trailing-section pointers go backwards is refused with a real error.
+    ///
+    /// Before this check, the trailing-section loop in `parse` sliced each section out with
+    /// `bytes.get(start..end.max(start))`, which silently clamped a backwards pointer to an empty
+    /// range: a corrupt world loaded successfully with its townsfolk (or whichever section came
+    /// after the swap) reading back as though nobody lived there, rather than being refused.
+    #[test]
+    fn a_file_with_out_of_order_trailing_section_pointers_is_refused() {
+        let world = crate::world::worldgen::generate(400, 300, "corrupt", 1);
+        let mut bytes = crate::world::wld_save::serialize(&world).expect("serialize");
+
+        // Sections 4 and 5 are both trailing (townsfolk, then tile entities): swap their pointers
+        // so section 5's now lands before section 4's.
+        let (p4, p5) = (section_pointer(&bytes, 4), section_pointer(&bytes, 5));
+        assert!(p5 > p4, "the fixture should not already be corrupt");
+        set_section_pointer(&mut bytes, 4, p5);
+        set_section_pointer(&mut bytes, 5, p4);
+
+        match parse(&bytes) {
+            Ok(_) => panic!("an out-of-order section pointer must be refused, not loaded"),
+            Err(err) => assert!(
+                matches!(err, WldError::SectionPointersOutOfOrder { index: 5, .. }),
+                "expected SectionPointersOutOfOrder at index 5, got {err:?}"
+            ),
+        }
     }
 
     /// The whole late header, as a world of `version` writes it.
