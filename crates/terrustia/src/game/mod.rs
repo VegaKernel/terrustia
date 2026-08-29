@@ -21,6 +21,7 @@ pub mod server;
 pub mod slime_rain;
 pub mod spawn;
 pub mod spawn_clearance;
+pub mod spawn_location;
 pub mod spawn_medium;
 pub mod spawn_postcheck;
 pub mod spawn_ranges;
