@@ -12343,6 +12343,8 @@ impl GameServer {
         let events = spawn::EventSpawns {
             moon: self.moon.moon.map(|m| (m, self.moon.wave)),
             eclipse: self.world.eclipse,
+            slime_rain: self.slime_rain.is_active(),
+            invasion: self.invasion.is_some(),
             downed_plantera: progress.downed_plantera,
             hard_mode: progress.hard_mode,
             downed_mech_any: progress.downed_mech_any,
