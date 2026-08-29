@@ -22,9 +22,9 @@ fn conveyor(block: u16) -> bool {
 /// Resolve the tile type Terraria uses as the ground/source for NPC selection.
 ///
 /// `floor_y` is the physical solid tile found by the spawn-location search. An ordinary solid is
-/// its own source. A Conveyor Belt uses exactly the tile immediately below it. A solid-top tile
-/// searches downward through as many as 29 tiles for the first ordinary solid; if that ordinary
-/// solid is itself a Conveyor Belt, the Conveyor rule is applied there as well.
+/// its own source. A Conveyor Belt used as the physical floor takes its source from exactly the tile
+/// immediately underneath it. A solid-top floor instead searches downward through as many as 29
+/// tiles and stops at the first solid block that is not itself solid-top.
 ///
 /// If a floating solid-top tile has no qualifying block below it, retaining its own type is safer
 /// than inventing a Dirt source from an inactive tile's zero-valued block field.
@@ -41,9 +41,6 @@ pub fn block(world: &World, x: i32, floor_y: i32) -> u16 {
         let tile = world.tile(x, floor_y + dy);
         if !tile.is_active() || !solid(tile.block) || solid_top(tile.block) {
             continue;
-        }
-        if conveyor(tile.block) {
-            return world.tile(x, floor_y + dy + 1).block;
         }
         return tile.block;
     }
@@ -97,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn conveyor_uses_exactly_the_tile_directly_below() {
+    fn conveyor_floor_uses_exactly_the_tile_directly_below() {
         for belt in [CONVEYOR_LEFT, CONVEYOR_RIGHT] {
             let mut world = world();
             assert!(world.set_tile(50, 40, Tile::block(belt)));
@@ -108,13 +105,12 @@ mod tests {
     }
 
     #[test]
-    fn platform_scan_honours_a_conveyor_it_reaches() {
+    fn platform_scan_stops_on_a_conveyor_without_reapplying_the_conveyor_rule() {
         let mut world = world();
         assert!(world.set_tile(50, 40, Tile::block(19)));
         assert!(world.set_tile(50, 45, Tile::block(CONVEYOR_LEFT)));
         assert!(world.set_tile(50, 46, Tile::block(53)));
-        assert!(world.set_tile(50, 48, Tile::block(1)));
-        assert_eq!(block(&world, 50, 40), 53);
+        assert_eq!(block(&world, 50, 40), CONVEYOR_LEFT);
     }
 
     #[test]
