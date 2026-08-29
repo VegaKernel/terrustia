@@ -143,6 +143,31 @@ pub const TELEPORT_PLAYER_THROUGH_PORTAL: u8 = 96;
 pub const ACHIEVEMENT_MESSAGE_N_P_C_KILLED: u8 = 97;
 pub const ACHIEVEMENT_MESSAGE_EVENT_HAPPENED: u8 = 98;
 pub const MINION_REST_TARGET_UPDATE: u8 = 99;
+/// Server-sent, live, and genuinely unimplemented — not for lack of a dispatch arm, but because
+/// the thing it reports has no server-side model to report at all.
+///
+/// `PortalHelper.TryGoingThroughPortals` (`Terraria.GameContent/PortalHelper.cs:105-214`) runs
+/// every tick for every player and NPC: when one crosses a placed Portal Gun portal's own
+/// collision line, it is moved to the paired portal's outing point and this fires
+/// (`NetMessage.SendData(100, -1, -1, null, npc.whoAmI, outX, outY, colourIndex)`,
+/// `PortalHelper.cs:202`) — but only from the *server* (`if (Main.netMode == 2)`), since NPCs are
+/// server-authoritative; the player half of the same function sends packet 96
+/// (`TELEPORT_PLAYER_THROUGH_PORTAL`) from the *client* instead, which this project already
+/// relays (`on_portal_teleport`, client-trusted, exactly as vanilla is for a player's own
+/// movement).
+///
+/// Reaching packet 100 for real needs the part of `PortalHelper` this project has never ported:
+/// pairing two placed portal projectiles into a linked gate (`FoundPortals`, keyed by colour
+/// parity — the same `ai[1]` "which" value `on_close_portal` already reads, but never paired up),
+/// deriving each portal's own collision line from its position and `ai[0]` angle
+/// (`GetPortalEdges`), checking every live NPC's hitbox against that line once a tick, computing
+/// the paired portal's outing point and redirected velocity, and a per-portal-per-NPC cooldown so
+/// a slow-moving NPC does not round-trip every tick. `game/projectile.rs` tracks a placed portal
+/// as an ordinary projectile (enough for `on_close_portal`'s own removal case) and nothing more;
+/// no per-tick NPC-vs-portal collision pass exists anywhere in this codebase to hang a `send` off
+/// of. A dispatch arm with no real trigger behind it would be exactly the "fake handler" this
+/// lane's own instructions rule out, so this is left honestly unimplemented rather than stubbed —
+/// see `docs/packet-ids.tsv`'s own row for the same account in the audited table.
 pub const TELEPORT_N_P_C_THROUGH_PORTAL: u8 = 100;
 pub const UPDATE_TOWER_SHIELD_STRENGTHS: u8 = 101;
 pub const NEBULA_LEVELUP_REQUEST: u8 = 102;
