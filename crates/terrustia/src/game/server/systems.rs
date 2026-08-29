@@ -6022,6 +6022,591 @@ impl GameServer {
             }
         }
     }
+
+    /// Advance the world census by one column, and publish it when a sweep completes.
+    pub(super) fn tick_census(&mut self) {
+        self.census.tick(&self.world);
+
+        if self.census.just_finished
+            && let Ok(frame) = packets::world_evil_tally(
+                self.census.percent_hallow,
+                self.census.percent_corrupt,
+                self.census.percent_crimson,
+            )
+        {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Write the world to disk, announcing the outcome in chat.
+    ///
+    /// Serialisation runs on the game task because it needs exclusive access to the world; it takes
+    /// a fraction of a second even for a full-size world, which is why it is not worth the cost of
+    /// snapshotting eighty megabytes of tiles to move it off-thread.
+    /// Age items, settle falling ones, and hand nearby ones to a player who can pick them up.
+    pub(super) fn tick_items(&mut self) {
+        for index in self.items.tick() {
+            if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+                self.broadcast(frame, None);
+            }
+        }
+
+        // Falling items need their landing broadcast, but nothing in between: a client draws the
+        // arc itself once it knows where the item started.
+        let mut landed = Vec::new();
+        let world = &self.world;
+        for (index, item) in self
+            .items
+            .iter()
+            .filter(|(_, i)| !i.resting)
+            .map(|(i, item)| (i, *item))
+            .collect::<Vec<_>>()
+        {
+            let mut item = item;
+            items::fall(&mut item, |x, y| world.tile(x, y).is_active());
+            let settled = item.resting;
+            if let Some(slot) = self.items.get_mut(index) {
+                *slot = item;
+            }
+            if settled {
+                landed.push(index);
+            }
+        }
+        for index in landed {
+            self.broadcast_item(index);
+        }
+        self.tick_shimmer();
+        self.tick_wall_of_flesh_trigger();
+        self.correct_item_drift();
+
+        // Offer unreserved items to the nearest player in range. Range is per-player, not one
+        // shared constant: Journey mode's `FarPlacementRange` (a misleading name inherited from
+        // source — both of its two real vanilla uses, `Player.cs:35212`/`35440`, are about item
+        // *pickup* range, not tile placement at all) adds a flat 240 pixels for whichever players
+        // have it on, but — matching source's own `difficulty == 3` guard on both sites — only in
+        // a Journey-mode world; the power has no effect at all in an ordinary one, even for a
+        // player who somehow has it enabled.
+        let journey_world = self.world.game_mode == 3;
+        let positions: Vec<(u8, (f32, f32), f32)> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| {
+                let range = if journey_world && self.journey.has_far_placement_range(p.slot) {
+                    ITEM_GRAB_RANGE + 240.0
+                } else {
+                    ITEM_GRAB_RANGE
+                };
+                (p.slot, p.position, range)
+            })
+            .collect();
+        if positions.is_empty() {
+            return;
+        }
+
+        let offers: Vec<(i16, u8, (f32, f32))> = self
+            .items
+            .iter()
+            .filter(|(_, item)| !item.is_reserved())
+            .filter_map(|(index, item)| {
+                positions
+                    .iter()
+                    .map(|(slot, pos, range)| {
+                        let (dx, dy) = (pos.0 - item.position.0, pos.1 - item.position.1);
+                        (*slot, dx * dx + dy * dy, range * range)
+                    })
+                    .filter(|(_, d2, range2)| *d2 <= *range2)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(slot, ..)| (index, slot, item.position))
+            })
+            .collect();
+
+        for (index, owner, position) in offers {
+            if let Some(item) = self.items.get_mut(index) {
+                item.owner = owner;
+                item.reservation = items::RESERVATION_TICKS;
+            }
+            if let Ok(frame) = ItemOwner::reserve(index, owner, position).encode() {
+                self.broadcast(frame, None);
+            }
+        }
+    }
+
+    /// Tell everyone the current state of one item.
+    pub(super) fn broadcast_item(&mut self, index: i16) {
+        let Some(item) = self.items.get(index).copied() else {
+            return;
+        };
+        let mut sync = SyncItem::dropped(index, item.position, item.item);
+        sync.velocity = item.velocity;
+        if let Ok(frame) = sync.encode() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Drop whatever a broken tile yields, if it is a block with a simple drop.
+    pub(super) fn spawn_tile_drop(
+        &mut self,
+        tile: u16,
+        frame_x: i16,
+        frame_y: i16,
+        x: i32,
+        y: i32,
+    ) {
+        if is_tree_tile(tile) {
+            self.spawn_tree_drop(frame_x, frame_y, x, y);
+            return;
+        }
+        let Some(item_id) = drop_of(tile, frame_x, frame_y) else {
+            debug!(tile, "nothing known to drop for this tile type");
+            return;
+        };
+        let position = (x as f32 * 16.0, y as f32 * 16.0);
+        let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), position) else {
+            debug!("item slots are full; the drop was discarded");
+            return;
+        };
+        self.broadcast_item(index);
+    }
+
+    /// A tree tile's own drop: kept apart from [`drop_of`]'s static table because vanilla's real
+    /// mechanism (`WorldGen.KillTile_GetTreeDrops`) needs live world state a per-tile lookup
+    /// cannot see — which biome the tree is rooted in, found by walking down to the ground.
+    ///
+    /// Faithful to source with one disclosed simplification: vanilla's own "bonus wood" roll also
+    /// scales with the chopping player's currently-equipped axe's power (`genRand.Next(35) <=
+    /// axe`), which needs per-slot inventory-content tracking this project does not have yet (the
+    /// same missing prerequisite `plan.md`'s `RedHatSkeletron` gap already found and disclosed).
+    /// Only the roll's own item-independent term (`Main.rand.Next(3) == 0`, real vanilla data, not
+    /// invented) is transcribed here; the axe-scaling half is a real, narrower, disclosed gap.
+    fn spawn_tree_drop(&mut self, frame_x: i16, frame_y: i16, x: i32, y: i32) {
+        let species = self.tree_species_at(x, y);
+        // `WorldGen.cs`'s own literal condition, transcribed as-is rather than redesigned: it is
+        // the frame range vanilla actually uses to decide "is this the leafy top", quirks and all.
+        let is_top = frame_x >= 22 && frame_y >= 198;
+
+        let mut secondary = None;
+        if is_top && rand::Rng::random_range(&mut self.rng, 0..2) == 0 && tree_drops_acorns(species)
+        {
+            secondary = Some(ACORN);
+        }
+
+        let primary = match species {
+            TreeSpecies::Corrupt => Some(EBONWOOD),
+            TreeSpecies::Crimson => Some(SHADEWOOD),
+            TreeSpecies::Jungle => Some(RICH_MAHOGANY),
+            TreeSpecies::Hallowed => Some(PEARLWOOD),
+            TreeSpecies::Snow => Some(BOREAL_WOOD),
+            TreeSpecies::Mushroom => {
+                (rand::Rng::random_range(&mut self.rng, 0..2) == 0).then_some(GLOWING_MUSHROOM)
+            }
+            TreeSpecies::Forest | TreeSpecies::None => Some(WOOD),
+        };
+
+        let position = (x as f32 * 16.0, y as f32 * 16.0);
+        if let Some(item_id) = primary {
+            let mut stack: i16 = 1;
+            if rand::Rng::random_range(&mut self.rng, 0..3) == 0 {
+                stack += 1;
+            }
+            if let Some(index) = self
+                .items
+                .spawn(ItemStack::new(item_id, stack, 0), position)
+            {
+                self.broadcast_item(index);
+            }
+        }
+        if let Some(secondary_id) = secondary
+            && let Some(index) = self
+                .items
+                .spawn(ItemStack::new(secondary_id, 1, 0), position)
+        {
+            self.broadcast_item(index);
+        }
+    }
+
+    /// Which vanilla species a tree tile belongs to, found by walking down to the ground it is
+    /// rooted in — `WorldGen.GetTreeBottom` + `GetTreeType`. The broken tile itself is already
+    /// cleared by the time this runs, exactly as in source (`KillTile` clears the tile before
+    /// computing its drop): the walk tolerates that by treating "not active" the same as "still a
+    /// tree tile, keep walking", the same forgiving condition vanilla's own loop uses.
+    ///
+    /// Only the ground types this generator's own `trees::fit_for_tree` can actually grow a tree
+    /// on ever occur here — vanilla's desert-palm and underworld-ash branches are omitted as
+    /// genuinely unreachable rather than transcribed dead, since nothing in this project plants a
+    /// tree on sand or ash today.
+    fn tree_species_at(&self, x: i32, y: i32) -> TreeSpecies {
+        let mut y = y;
+        loop {
+            let here = self.world.tile(x, y);
+            if here.is_active() && !is_tree_tile(here.block) {
+                break;
+            }
+            if !self.world.in_bounds(x, y + 1) {
+                break;
+            }
+            y += 1;
+        }
+        let ground = self.world.tile(x, y);
+        if !ground.is_active() {
+            return TreeSpecies::None;
+        }
+        match ground.block {
+            2 => TreeSpecies::Forest,
+            23 => TreeSpecies::Corrupt,
+            60 => TreeSpecies::Jungle,
+            70 => TreeSpecies::Mushroom,
+            109 => TreeSpecies::Hallowed,
+            147 => TreeSpecies::Snow,
+            199 => TreeSpecies::Crimson,
+            _ => TreeSpecies::None,
+        }
+    }
+
+    /// The Travelling Merchant: whether he turns up today, and whether he has gone.
+    ///
+    /// He is not a resident — he has no house and no permanent slot. He arrives at random during
+    /// the first half of a day, provided the town already has two other townsfolk, and he leaves
+    /// at dusk whether or not anybody bought anything.
+    ///
+    /// `Main.UpdateTime`'s own arrangement: the odds are one in `27000 / dayRate * 4` per tick,
+    /// which over a morning works out at rather better than it sounds.
+    pub(super) fn tick_travelling_merchant(&mut self) {
+        let here = self
+            .npcs
+            .iter()
+            .find(|(_, n)| n.npc_type == TRAVELLING_MERCHANT)
+            .map(|(index, _)| index);
+
+        // Dusk, or past the hour he leaves at, and he packs up.
+        let leaving = !self.world.day_time || self.world.time > MERCHANT_LEAVES_AT;
+        if let Some(index) = here {
+            if leaving {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+                self.announce("The Traveling Merchant has departed!");
+                info!("the travelling merchant left");
+            }
+            return;
+        }
+        if leaving || self.world.time >= MERCHANT_ARRIVES_BEFORE {
+            return;
+        }
+        // Two other townsfolk, not counting the Old Man or the Skeleton Merchant, who are not
+        // residents either.
+        let townsfolk = self
+            .npcs
+            .iter()
+            .filter(|(_, n)| {
+                n.stats.town_npc && n.npc_type != OLD_MAN && n.npc_type != SKELETON_MERCHANT
+            })
+            .count();
+        if townsfolk < 2 {
+            return;
+        }
+        if rand::Rng::random_range(&mut self.rng, 0..MERCHANT_ODDS) != 0 {
+            return;
+        }
+
+        // He arrives at the world's spawn, since he has no home to arrive at.
+        let at = (
+            f32::from(self.world.spawn_x) * TILE_SIZE,
+            f32::from(self.world.spawn_y) * TILE_SIZE - 48.0,
+        );
+        let Some(index) = self.npcs.spawn(TRAVELLING_MERCHANT, at) else {
+            return;
+        };
+        self.roll_travel_shop();
+        self.broadcast_npc(index);
+        self.broadcast_travel_shop();
+        self.announce("The Traveling Merchant has arrived!");
+        info!("the travelling merchant arrived");
+    }
+
+    /// Pick what he is carrying today. `Chest.SetupTravelShop`.
+    ///
+    /// The stock is a chain of rolls rather than a list: each candidate that comes up overwrites
+    /// the last, so the final match wins and rarer things are rarer because their odds are
+    /// longer, not because they are drawn from a smaller pool.
+    fn roll_travel_shop(&mut self) {
+        use terrustia_proto::travel_shop::{Needs, OFFERS, TIER_ODDS};
+        let p = &self.world.progress;
+        let mut world = 0u16;
+        for (yes, flag) in [
+            (p.hard_mode, Needs::HARDMODE),
+            (p.downed_mech_any, Needs::ANY_MECH),
+            (p.downed_mech1, Needs::DESTROYER),
+            (p.downed_mech2, Needs::TWINS),
+            (p.downed_mech3, Needs::PRIME),
+            (p.downed_boss1, Needs::EYE),
+            (p.downed_boss3, Needs::SKELETRON),
+            (p.shadow_orb_smashed, Needs::ORB_SMASHED),
+        ] {
+            if yes {
+                world |= flag;
+            }
+        }
+        let world = Needs(world);
+
+        // Four to six things, as the game rolls it.
+        let wanted = rand::Rng::random_range(&mut self.rng, 4..7);
+        self.travel_shop.clear();
+        // Fifty passes over the chain is plenty to fill six slots and bounded whatever the odds
+        // do; the game's own loop is capped at five thousand for the same reason.
+        for _ in 0..MERCHANT_ROLLS {
+            if self.travel_shop.len() >= wanted {
+                break;
+            }
+            let mut chosen = None;
+            for offer in OFFERS {
+                if !offer.needs.met_by(world) {
+                    continue;
+                }
+                let odds = TIER_ODDS
+                    .get(offer.tier as usize)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                if rand::Rng::random_range(&mut self.rng, 0..odds) == 0 {
+                    // Later entries overwrite earlier ones, which is what makes the chain work.
+                    chosen = Some(offer.item);
+                }
+            }
+            if let Some(item) = chosen
+                && !self.travel_shop.contains(&item)
+            {
+                self.travel_shop.push(item);
+            }
+        }
+        debug!(
+            stock = self.travel_shop.len(),
+            "travelling merchant's stock"
+        );
+    }
+
+    /// Tell everyone what he is carrying.
+    ///
+    /// Forty slots on the wire whatever he actually has, zero-filled — the client reads a fixed
+    /// count, so a short packet desynchronises everything after it.
+    fn broadcast_travel_shop(&mut self) {
+        let mut w = terrustia_proto::PacketWriter::new(id::TRAVEL_MERCHANT_ITEMS);
+        for slot in 0..TRAVEL_SHOP_SLOTS {
+            w.i16(self.travel_shop.get(slot).copied().unwrap_or(0) as i16);
+        }
+        if let Ok(frame) = w.finish() {
+            self.broadcast(frame, None);
+        }
+    }
+
+    /// Tell clients where resting items actually are.
+    ///
+    /// A client simulates a dropped item's fall itself from the moment it is told the item
+    /// exists, so the two can end up a few pixels apart — over a slope, in water, or after a
+    /// tile is broken out from under it. The gap is invisible until somebody tries to walk over
+    /// an item that is not where they see it.
+    ///
+    /// This is packet 160, which carries a position and nothing else. Sent for a handful of items
+    /// per second rather than all of them: the drift is slow, and a full sweep every tick would
+    /// cost more than the problem.
+    fn correct_item_drift(&mut self) {
+        if !self.ticks.is_multiple_of(ITEM_DRIFT_INTERVAL) || self.items.is_empty() {
+            return;
+        }
+        let resting: Vec<(i16, (f32, f32))> = self
+            .items
+            .iter()
+            .filter(|(_, item)| item.resting)
+            .map(|(index, item)| (index, item.position))
+            .take(ITEMS_PER_SWEEP)
+            .collect();
+        for (index, at) in resting {
+            let mut w = terrustia_proto::PacketWriter::new(id::ITEM_POSITION);
+            w.i16(index).f32(at.0).f32(at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast_to_nearby(frame, at);
+            }
+        }
+    }
+
+    /// Sink whatever is lying in shimmer, and transmute what has gone far enough in.
+    ///
+    /// Shimmer is the 1.4.4 transmutation pool: an item dropped into it becomes another item,
+    /// a creature, or — for coins — luck. It does not happen on contact. An item sinks over about
+    /// a second and a half and changes at nine tenths, which is what makes the mechanic feel
+    /// deliberate rather than punishing: you can pull something back out.
+    ///
+    /// One branch of the game's shimmer is missing and is a gap rather than a decision: an item
+    /// with no transform and no creature falls back to being **decrafted** into its recipe's
+    /// ingredients, which needs the whole recipe database. Such an item simply sits in the
+    /// shimmer here. See `docs/shimmer.md`.
+    fn tick_shimmer(&mut self) {
+        use crate::world::items::{Shimmering, shimmer};
+        // Almost always nothing is in shimmer, and finding that out should cost one scan of the
+        // item table rather than a tile lookup per item.
+        if self.items.is_empty() {
+            return;
+        }
+
+        let mut transmuted: Vec<(i16, ItemStack, (f32, f32))> = Vec::new();
+        let mut luck: Vec<((f32, f32), i32)> = Vec::new();
+        let mut decrafted: Vec<Decraft> = Vec::new();
+        let crimson = self.world.crimson;
+        {
+            let world = &self.world;
+            for (index, item) in self.items.iter_mut() {
+                // The game's own test: the tile *above* the item, since it is sinking through a
+                // surface rather than standing in a pool.
+                let x = (item.position.0 + crate::world::items::ITEM_SIZE / 2.0) / TILE_SIZE;
+                let y = item.position.1 / TILE_SIZE - 1.0;
+                let tile = world.tile(x as i32, y as i32);
+                let in_shimmer =
+                    tile.liquid > 0 && tile.liquid_kind == terrustia_proto::Liquid::Shimmer;
+
+                if shimmer(item, in_shimmer) != Shimmering::Transmute {
+                    continue;
+                }
+                let held = item.item;
+                let at = item.position;
+                let kind = u16::try_from(held.id).unwrap_or(0);
+
+                if terrustia_proto::shimmer::is_coin(kind) {
+                    // Coins are not transmuted but spent: they become luck, and are gone.
+                    luck.push((
+                        at,
+                        terrustia_proto::shimmer::coin_luck(kind, i32::from(held.stack)),
+                    ));
+                    transmuted.push((index, ItemStack::EMPTY, at));
+                } else if let Some(into) = terrustia_proto::shimmer::transforms_into(kind) {
+                    item.shimmered = true;
+                    item.item = ItemStack {
+                        id: i32::from(into),
+                        stack: held.stack,
+                        prefix: 0,
+                    };
+                    transmuted.push((index, item.item, at));
+                } else if let Some(recipe) = terrustia_proto::recipes::decraft_recipe(kind, crimson)
+                    && i32::from(held.stack) >= i32::from(recipe.makes)
+                {
+                    // No transform of its own, so it comes apart into what it was made of. A
+                    // stack only decrafts in whole batches: three torches give back one gel, and
+                    // the two left over stay torches.
+                    let batches = i32::from(held.stack) / i32::from(recipe.makes);
+                    let kept = held.stack - (batches * i32::from(recipe.makes)) as i16;
+                    item.shimmered = true;
+                    item.item.stack = kept;
+                    decrafted.push(Decraft {
+                        index,
+                        at,
+                        recipe,
+                        batches,
+                        kept,
+                    });
+                } else {
+                    // Nothing to become and nothing to come apart into. Mark it done so it stops
+                    // asking the same question every tick.
+                    item.shimmered = true;
+                }
+            }
+        }
+
+        for (index, now, at) in transmuted {
+            if now.is_empty() {
+                self.items.remove(index);
+                if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+                    self.broadcast(frame, None);
+                }
+            } else {
+                self.broadcast_item(index);
+            }
+            // The sparkle, which every client draws for itself once it is told where.
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_EFFECT).f32(at.0).f32(at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+        }
+        for (at, amount) in luck {
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_COIN_LUCK).f32(at.0).f32(at.1).i32(amount);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+            debug!(amount, "coins turned into luck");
+        }
+
+        for job in decrafted {
+            // Whatever did not make a whole batch stays where it was; the rest comes apart.
+            if job.kept > 0 {
+                self.broadcast_item(job.index);
+            } else {
+                self.items.remove(job.index);
+                if let Ok(frame) = terrustia_proto::items::item_despawn(job.index) {
+                    self.broadcast(frame, None);
+                }
+            }
+            for &(ingredient, per_batch) in job.recipe.ingredients() {
+                let mut count = job.batches.saturating_mul(i32::from(per_batch));
+                // Alchemy gives back less: each unit has a one-in-three chance of being lost.
+                // Without it, potions would be a free material duplicator.
+                if job.recipe.alchemy {
+                    let mut kept_units = 0;
+                    for _ in 0..count {
+                        if rand::Rng::random_range(&mut self.rng, 0..3) != 0 {
+                            kept_units += 1;
+                        }
+                    }
+                    count = kept_units;
+                }
+                // Spread across stacks rather than one impossible pile.
+                while count > 0 {
+                    let stack = count.min(i32::from(MAX_ITEM_STACK));
+                    count -= stack;
+                    self.spawn_item(
+                        ItemStack {
+                            id: i32::from(ingredient),
+                            stack: stack as i16,
+                            prefix: 0,
+                        },
+                        job.at,
+                    );
+                }
+            }
+            let mut w = terrustia_proto::PacketWriter::new(id::SHIMMER_ACTIONS);
+            w.u8(SHIMMER_EFFECT).f32(job.at.0).f32(job.at.1);
+            if let Ok(frame) = w.finish() {
+                self.broadcast(frame, None);
+            }
+            debug!(
+                result = job.recipe.result,
+                batches = job.batches,
+                "decrafted an item in shimmer"
+            );
+        }
+    }
+
+    /// Put an item into the world at a place, as a thing that can be picked up.
+    /// Drop into the world every pickup a mass-wire run reported — one wire or actuator at each
+    /// tile a cut cleared, at that tile's own pixel centre. Vanilla's `KillWire`/`KillActuator`
+    /// spawn these the instant they clear a flag; this is the same, batched by the caller. Without
+    /// it a mistake with the Grand Design simply destroyed the wire the player paid for.
+    pub(super) fn spawn_wire_drops(&mut self, drops: &[(i32, i32, u16)]) {
+        for &(x, y, item_id) in drops {
+            let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+            self.spawn_item(ItemStack::new(i32::from(item_id), 1, 0), position);
+        }
+    }
+
+    pub(super) fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) {
+        if item.is_empty() {
+            return;
+        }
+        let Some(index) = self.items.spawn(item, position) else {
+            debug!("item slots are full; the drop was discarded");
+            return;
+        };
+        self.broadcast_item(index);
+    }
 }
 
 #[cfg(test)]
@@ -7705,6 +8290,297 @@ mod conditional_numerator_fixes {
         assert!(
             expert_hits > 230,
             "expert landed {expert_hits}/{TRIALS} — real expert rate is 9-in-10 (~270), not the classic 1-in-2 (~150)"
+        );
+    }
+}
+
+/// Journey mode's `FarPlacementRange` — a misleading name inherited from source; both of its two
+/// real vanilla uses (`Player.cs:35212`/`35440`) are about item *pickup* range, not tile placement
+/// at all (see `tick_items`'s own comment) — extends how far an item can be reserved for a player,
+/// by exactly 240 pixels, and only in a world whose own difficulty is literally Journey
+/// (`world.game_mode == 3`), matching source's own `difficulty == 3` guard on both sites.
+#[cfg(test)]
+mod far_placement_range {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::ItemStack;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "far placement probe")
+    }
+
+    /// Same shape as `godmode`'s own `with_one_player` — the receiver has to outlive the tick
+    /// call, for the same reason (`broadcast` removes a player whose send fails).
+    fn with_one_player_at(
+        mut server: GameServer,
+        position: (f32, f32),
+    ) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        player.position = position;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    fn a_coin() -> ItemStack {
+        ItemStack {
+            id: 71, // Copper Coin
+            prefix: 0,
+            stack: 1,
+        }
+    }
+
+    #[test]
+    fn extends_pickup_range_by_exactly_two_hundred_forty_pixels_in_a_journey_world() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3; // Journey
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        // Within the boosted range (400 + 240 = 640) but outside the ordinary one — the only
+        // distance this test is actually about.
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            server.items.get(index).unwrap().is_reserved(),
+            "should have been reserved for the player once the range was extended"
+        );
+    }
+
+    #[test]
+    fn does_not_extend_range_without_the_power_enabled() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3;
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        // far_placement_range left off — the control case, so the test above is proving
+        // something rather than passing regardless of whether the extension exists at all.
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            !server.items.get(index).unwrap().is_reserved(),
+            "at ordinary range this item should never have been reserved at all"
+        );
+    }
+
+    /// The power has no effect at all outside a Journey world — `Player.cs`'s own two real uses
+    /// both gate on `difficulty == 3` before ever reading it, so an implementation that skipped
+    /// that gate would extend pickup range on every world, not just Journey ones.
+    #[test]
+    fn has_no_effect_outside_a_journey_world() {
+        let server = GameServer::new(Config::default(), tiny_world()); // game_mode 0: ordinary
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+
+        server.tick_items();
+
+        assert!(
+            !server.items.get(index).unwrap().is_reserved(),
+            "an ordinary-difficulty world should use the plain range regardless of the power"
+        );
+    }
+
+    #[test]
+    fn an_item_beyond_even_the_extended_range_is_still_out_of_reach() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 3;
+        let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
+        server.journey.set_far_placement_range(0, true);
+        let index = server.items.spawn(a_coin(), (700.0, 0.0)).unwrap(); // past 400 + 240
+
+        server.tick_items();
+
+        assert!(!server.items.get(index).unwrap().is_reserved());
+    }
+}
+
+/// Wood, closed as a real gap this session: a freshly generated world had trees but no drop
+/// mapping for tile 5 at all — chopping one gave nothing, silently, the first material every
+/// crafting recipe in the game starts from. `moonlord.rs`'s own doc comment first found and
+/// disclosed this live. Fixed by [`GameServer::spawn_tree_drop`], transcribed from
+/// `WorldGen.KillTile_GetTreeDrops`.
+#[cfg(test)]
+mod wood_from_trees {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::items::ItemStore;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "tree drop probe")
+    }
+
+    /// Plants a one-tile trunk on top of `ground_block` at `(10, 100)` and returns a server ready
+    /// to break it — the trunk's own position, `(10, 99)`, is what `spawn_tile_drop` is called
+    /// with in each test below.
+    fn planted(ground_block: u16) -> GameServer {
+        let mut world = tiny_world();
+        world.set_tile(10, 100, Tile::block(ground_block));
+        world.set_tile(10, 99, Tile::framed(5, 0, 0));
+        GameServer::new(Config::default(), world)
+    }
+
+    fn broken_ids(server: &mut GameServer, frame_x: i16, frame_y: i16) -> Vec<i32> {
+        server.items = ItemStore::new();
+        server.spawn_tile_drop(5, frame_x, frame_y, 10, 99);
+        let mut items: Vec<(i16, i32)> = server
+            .items
+            .iter()
+            .map(|(index, it)| (index, it.item.id))
+            .collect();
+        items.sort_unstable_by_key(|(index, _)| *index);
+        items.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Ordinary forest grass (block 2, `GetTreeType`'s default) gives plain Wood (item 9), not
+    /// nothing — the exact gap this test closes.
+    #[test]
+    fn a_tree_rooted_in_forest_grass_drops_wood() {
+        let mut server = planted(2);
+        let dropped = broken_ids(&mut server, 0, 0);
+        assert!(
+            dropped.contains(&9),
+            "expected Wood (9) from a plain trunk segment, got {dropped:?}"
+        );
+    }
+
+    /// The five other real biome ground types each give their own named wood
+    /// (`WorldGen.GetTreeType`'s switch), not the plain forest item.
+    #[test]
+    fn each_biomes_ground_gives_that_biomes_own_wood() {
+        for (ground, expected, name) in [
+            (23u16, 619i32, "Ebonwood from Corruption grass"),
+            (199, 911, "Shadewood from Crimson grass"),
+            (60, 620, "Rich Mahogany from Jungle grass"),
+            (109, 621, "Pearlwood from Hallowed grass"),
+            (147, 2503, "Boreal Wood from Snow"),
+        ] {
+            let mut server = planted(ground);
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                dropped.contains(&expected),
+                "{name}: expected item {expected}, got {dropped:?}"
+            );
+        }
+    }
+
+    /// A tree with no resolvable ground under it (nothing planted below the trunk at all) still
+    /// gives plain Wood — vanilla's own fallback (`GetTreeType`'s `default: return TreeTypes.None`
+    /// still reaches `KillTile_GetTreeDrops`'s unconditional `dropItem = 9` before the species
+    /// switch), not a silently discarded drop.
+    #[test]
+    fn a_tree_with_unresolvable_ground_still_drops_plain_wood() {
+        let mut world = tiny_world();
+        // No ground tile placed at all under the trunk.
+        world.set_tile(10, 99, Tile::framed(5, 0, 0));
+        let mut server = GameServer::new(Config::default(), world);
+        let dropped = broken_ids(&mut server, 0, 0);
+        assert!(
+            dropped.contains(&9),
+            "expected the plain-Wood fallback, got {dropped:?}"
+        );
+    }
+
+    /// A Mushroom-grass-rooted tree gives a Glowing Mushroom about half the time and nothing the
+    /// other half, never wood (`KillTile_GetTreeDrops`'s `TreeTypes.Mushroom` arm: `dropItem =
+    /// (genRand.Next(2)==0) ? 183 : 0`). 300 trials, mean 150 (sd ~8.7) if the roll is real.
+    #[test]
+    fn a_tree_rooted_in_mushroom_grass_sometimes_gives_a_glowing_mushroom_never_wood() {
+        const TRIALS: usize = 300;
+        let mut server = planted(70);
+        let mut hits = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                !dropped.contains(&9),
+                "a Mushroom-biome tree should never give plain Wood, got {dropped:?}"
+            );
+            hits += dropped.iter().filter(|&&id| id == 183).count();
+        }
+        assert!(
+            (100..200).contains(&hits),
+            "glowing mushroom landed {hits}/{TRIALS} — real rate is 1-in-2 (~150)"
+        );
+    }
+
+    /// Breaking the canopy-top frame (`frameX >= 22 && frameY >= 198`, vanilla's own literal
+    /// condition) on acorn-capable ground gives an Acorn about half the time, alongside the wood —
+    /// not instead of it. 300 trials, mean 150 (sd ~8.7).
+    #[test]
+    fn the_canopy_top_sometimes_also_drops_an_acorn() {
+        const TRIALS: usize = 300;
+        let mut server = planted(2);
+        let mut acorns = 0usize;
+        for _ in 0..TRIALS {
+            let dropped = broken_ids(&mut server, 22, 198);
+            assert!(
+                dropped.contains(&9),
+                "the canopy should still give Wood alongside any acorn, got {dropped:?}"
+            );
+            acorns += dropped.iter().filter(|&&id| id == 27).count();
+        }
+        assert!(
+            (100..200).contains(&acorns),
+            "acorn landed {acorns}/{TRIALS} — real rate off the canopy top is 1-in-2 (~150)"
+        );
+    }
+
+    /// Jungle trees never give an acorn even off the canopy top — `TreeTypeDropsAcorns` excludes
+    /// Jungle by name, since Rich Mahogany propagates by a sapling players plant, not a bonus item.
+    #[test]
+    fn jungle_trees_never_drop_an_acorn_even_off_the_canopy() {
+        let mut server = planted(60);
+        for _ in 0..40 {
+            let dropped = broken_ids(&mut server, 22, 198);
+            assert!(
+                !dropped.contains(&27),
+                "a Jungle tree's canopy should never give an acorn, got {dropped:?}"
+            );
+        }
+    }
+
+    /// A non-canopy frame never gives an acorn, on any ground — only the leafy top can.
+    #[test]
+    fn a_trunk_segment_never_drops_an_acorn() {
+        let mut server = planted(2);
+        for _ in 0..40 {
+            let dropped = broken_ids(&mut server, 0, 0);
+            assert!(
+                !dropped.contains(&27),
+                "a plain trunk segment should never give an acorn, got {dropped:?}"
+            );
+        }
+    }
+
+    /// "Bonus wood" (a second Wood in the same stack) lands about a third of the time — the one
+    /// real, item-independent term in vanilla's own roll (`Main.rand.Next(3) == 0`) this fix
+    /// transcribes; the axe-power-scaled term is a disclosed, separate gap (see
+    /// `spawn_tree_drop`'s own doc comment). 300 trials, mean 100 (sd ~8.2).
+    #[test]
+    fn bonus_wood_lands_about_a_third_of_the_time() {
+        const TRIALS: usize = 300;
+        let mut server = planted(2);
+        let mut bonus = 0usize;
+        for _ in 0..TRIALS {
+            server.items = ItemStore::new();
+            server.spawn_tile_drop(5, 0, 0, 10, 99);
+            let wood_stack: i16 = server
+                .items
+                .iter()
+                .filter(|(_, it)| it.item.id == 9)
+                .map(|(_, it)| it.item.stack)
+                .sum();
+            assert!(wood_stack == 1 || wood_stack == 2, "got stack {wood_stack}");
+            if wood_stack == 2 {
+                bonus += 1;
+            }
+        }
+        assert!(
+            (70..130).contains(&bonus),
+            "bonus wood landed {bonus}/{TRIALS} — real item-independent rate is 1-in-3 (~100)"
         );
     }
 }
