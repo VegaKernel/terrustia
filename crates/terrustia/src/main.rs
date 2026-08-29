@@ -167,11 +167,17 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Create the directory a world will save into before the first save reaches for it, so worlds/
     // exists the moment it is needed rather than failing the first autosave.
-    if let Some(parent) = config.save_target().and_then(|t| t.parent().map(|p| p.to_path_buf()))
+    if let Some(parent) = config
+        .save_target()
+        .and_then(|t| t.parent().map(|p| p.to_path_buf()))
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(&parent)
-            .map_err(|e| format!("cannot create the world directory {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(&parent).map_err(|e| {
+            format!(
+                "cannot create the world directory {}: {e}",
+                parent.display()
+            )
+        })?;
     }
 
     let started = Instant::now();

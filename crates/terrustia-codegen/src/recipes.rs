@@ -221,7 +221,10 @@ fn ingredients_of(text: &str) -> Vec<(u32, u32)> {
 
     // Style two: SetIngredients(item, count, item, count, …) — the game's own convention is that
     // the call always alternates item, count; a trailing lone item defaults to a count of one.
-    if let Some(m) = Regex::new(r"SetIngredients\(([^)]*)\)").unwrap().captures(text) {
+    if let Some(m) = Regex::new(r"SetIngredients\(([^)]*)\)")
+        .unwrap()
+        .captures(text)
+    {
         let nums: Vec<i64> = Regex::new(r"-?\d+")
             .unwrap()
             .find_iter(&m[1])
@@ -273,9 +276,7 @@ pub fn generate(root: &Path) -> String {
     for cap in chunk_re.captures_iter(body) {
         let result: u32 = cap[1].parse().unwrap();
         let text = &cap[2];
-        let stack = stack_re
-            .captures(text)
-            .map_or(1, |m| m[1].parse().unwrap());
+        let stack = stack_re.captures(text).map_or(1, |m| m[1].parse().unwrap());
         recipes.push(RecipeData {
             result,
             stack,
@@ -322,8 +323,11 @@ pub fn generate(root: &Path) -> String {
         .collect();
     used.sort_unstable();
     used.dedup();
-    let renumber: BTreeMap<usize, usize> =
-        used.iter().enumerate().map(|(new, &old)| (old, new)).collect();
+    let renumber: BTreeMap<usize, usize> = used
+        .iter()
+        .enumerate()
+        .map(|(new, &old)| (old, new))
+        .collect();
 
     // Pack ingredients end to end and lay out the recipes in kept order.
     let mut flat: Vec<(u32, u32)> = Vec::new();
@@ -341,8 +345,7 @@ pub fn generate(root: &Path) -> String {
         ));
     }
 
-    let ingredients_rows: Vec<String> =
-        flat.iter().map(|&(i, s)| format!("({i},{s}),")).collect();
+    let ingredients_rows: Vec<String> = flat.iter().map(|&(i, s)| format!("({i},{s}),")).collect();
     let ingredients_block = format!(
         "/// Every decraftable recipe's ingredients, packed end to end.\n\
          ///\n\

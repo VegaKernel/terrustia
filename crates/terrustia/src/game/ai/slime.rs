@@ -172,7 +172,10 @@ mod tests {
         active.ai[0] = -5000.0;
         update(&mut passive, None, true, false);
         update(&mut active, None, true, true);
-        assert_eq!(passive.ai[0], -4999.0, "a passive slime ticks its clock once");
+        assert_eq!(
+            passive.ai[0], -4999.0,
+            "a passive slime ticks its clock once"
+        );
         assert_eq!(
             active.ai[0], -4998.0,
             "an active slime ticks it twice, so it reaches its next hop in half the frames"

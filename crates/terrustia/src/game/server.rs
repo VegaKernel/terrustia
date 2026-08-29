@@ -10482,9 +10482,9 @@ impl GameServer {
     /// from the tile centre, exactly as `Projectile.NewProjectile(..., i*16+8, j*16+8, 0, 0, ...)`.
     fn throw_mine_blast(&mut self, x: i32, y: i32, projectile_type: u16, damage: i32) {
         let position = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
-        if let Some(index) = self
-            .projectiles
-            .launch(projectile_type, position, (0.0, 0.0), damage, 0)
+        if let Some(index) =
+            self.projectiles
+                .launch(projectile_type, position, (0.0, 0.0), damage, 0)
         {
             self.broadcast_projectile(index);
         }
@@ -13402,7 +13402,10 @@ mod meteor_entity_safety {
     /// The open-interval overlap: a shared edge is not an overlap.
     #[test]
     fn touching_boxes_do_not_count_as_overlap() {
-        assert!(boxes_overlap((0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 15.0, 15.0)));
+        assert!(boxes_overlap(
+            (0.0, 0.0, 10.0, 10.0),
+            (5.0, 5.0, 15.0, 15.0)
+        ));
         assert!(!boxes_overlap(
             (0.0, 0.0, 10.0, 10.0),
             (10.0, 0.0, 20.0, 10.0)

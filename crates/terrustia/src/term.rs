@@ -858,7 +858,11 @@ mod tests {
             cursor_back: 0,
             drawn_rows: 0,
         };
-        assert_eq!(footer_rows(&f, 40), 4, "status wraps to 3 rows, prompt fits on 1");
+        assert_eq!(
+            footer_rows(&f, 40),
+            4,
+            "status wraps to 3 rows, prompt fits on 1"
+        );
     }
 
     /// The erase clears exactly as many rows as were drawn, by moving to the top of the footer and
@@ -913,7 +917,10 @@ mod tests {
         };
         let line = layer.render_chat(&parts, Duration::from_millis(65_432));
         assert!(line.contains("CHAT"), "missing the chat tag: {line:?}");
-        assert!(line.contains("<bri> hello everyone"), "lost the message: {line:?}");
+        assert!(
+            line.contains("<bri> hello everyone"),
+            "lost the message: {line:?}"
+        );
         assert!(
             !line.contains("INFO"),
             "chat must not look like an INFO log: {line:?}"

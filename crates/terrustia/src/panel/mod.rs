@@ -1676,7 +1676,10 @@ async fn new_world(
     {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cannot create the world directory {}: {e}", parent.display()),
+            format!(
+                "cannot create the world directory {}: {e}",
+                parent.display()
+            ),
         );
     }
 

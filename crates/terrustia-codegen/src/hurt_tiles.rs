@@ -83,7 +83,13 @@ mod tests {
 /// `cargo fmt` reflows the row afterward, so this just emits the values in order.
 fn bool_table(name: &str, members: &BTreeSet<u32>, count: usize, doc: &str) -> String {
     let vals: Vec<&str> = (0..count as u32)
-        .map(|i| if members.contains(&i) { "true," } else { "false," })
+        .map(|i| {
+            if members.contains(&i) {
+                "true,"
+            } else {
+                "false,"
+            }
+        })
         .collect();
     format!(
         "{doc}\npub const {name}: [bool; {count}] = [\n    {}\n];",

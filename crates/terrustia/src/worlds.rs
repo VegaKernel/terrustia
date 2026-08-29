@@ -86,9 +86,13 @@ fn find_by_name(dir: &Path, given: &str) -> Option<PathBuf> {
     }
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
-        let matches = path.file_stem().and_then(|s| s.to_str()).is_some_and(|stem| {
-            stem.eq_ignore_ascii_case(given) || stem.replace('_', " ").eq_ignore_ascii_case(given)
-        });
+        let matches = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|stem| {
+                stem.eq_ignore_ascii_case(given)
+                    || stem.replace('_', " ").eq_ignore_ascii_case(given)
+            });
         if matches {
             return Some(path);
         }

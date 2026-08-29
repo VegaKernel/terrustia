@@ -43,11 +43,7 @@ fn main() {
         eprintln!("usage: codegen <table|all> <decompiled-root> [out.rs]");
         eprintln!(
             "tables: {}",
-            TABLES
-                .iter()
-                .map(|t| t.name)
-                .collect::<Vec<_>>()
-                .join(", ")
+            TABLES.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
         );
         std::process::exit(2);
     }
@@ -68,7 +64,9 @@ fn main() {
             run(table, Path::new(table.out));
         }
     } else if let Some(table) = TABLES.iter().find(|t| t.name == *which) {
-        let out = args.get(3).map_or_else(|| PathBuf::from(table.out), PathBuf::from);
+        let out = args
+            .get(3)
+            .map_or_else(|| PathBuf::from(table.out), PathBuf::from);
         run(table, &out);
     } else {
         eprintln!("unknown table {which:?}");
