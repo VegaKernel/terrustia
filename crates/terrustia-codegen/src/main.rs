@@ -10,6 +10,7 @@
 //! decompiled` the old scripts took). An explicit `out.rs` overrides the default path for a single
 //! table. Run `just regen` to do them all and `cargo fmt` afterward, exactly as before.
 
+mod angler;
 mod banners;
 mod buffs;
 mod csharp;
@@ -58,6 +59,11 @@ const TABLES: &[Table] = &[
         name: "buffs",
         out: "crates/terrustia-proto/src/buffs.rs",
         generate: buffs::generate,
+    },
+    Table {
+        name: "angler",
+        out: "crates/terrustia-proto/src/angler.rs",
+        generate: angler::generate,
     },
 ];
 

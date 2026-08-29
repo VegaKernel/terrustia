@@ -146,7 +146,7 @@ regen:
     cargo run -q -p terrustia-codegen -- projectiles {{DECOMPILED}} crates/terrustia-proto/src/projectile_data.rs
     cargo run -q -p terrustia-codegen -- banners     {{DECOMPILED}} crates/terrustia-proto/src/banners.rs
     cargo run -q -p terrustia-codegen -- buffs       {{DECOMPILED}} crates/terrustia-proto/src/buffs.rs
-    python3 tools/gen_angler.py      {{DECOMPILED}} crates/terrustia-proto/src/angler.rs
+    cargo run -q -p terrustia-codegen -- angler      {{DECOMPILED}} crates/terrustia-proto/src/angler.rs
     python3 tools/gen_shimmer.py     {{DECOMPILED}} crates/terrustia-proto/src/shimmer.rs
     cargo run -q -p terrustia-codegen -- hurt_tiles {{DECOMPILED}} crates/terrustia-proto/src/hurt_tiles.rs
     python3 tools/gen_town_names.py  {{DECOMPILED}} crates/terrustia-proto/src/town_names.rs
