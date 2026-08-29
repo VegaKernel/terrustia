@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn platform_looks_through_to_the_solid_below_and_keeps_both_rows() {
         let mut world = world();
-        assert!(world.set_tile(50, 40, Tile::block(19)));
+        assert!(world.set_tile(50, 40, Tile::framed(19, 0, 0)));
         assert!(world.set_tile(50, 47, Tile::block(53)));
         assert_eq!(resolve(&world, 50, 40), SpawnSource::new(53, 40, 47));
         assert_eq!(block(&world, 50, 40), 53);
@@ -123,7 +123,7 @@ mod tests {
         for floor in [239, 380] {
             let mut world = world();
             assert!(solid_top(floor), "{floor} must be solid-top in this build");
-            assert!(world.set_tile(50, 40, Tile::block(floor)));
+            assert!(world.set_tile(50, 40, Tile::framed(floor, 0, 0)));
             assert!(world.set_tile(50, 45, Tile::block(60)));
             assert_eq!(resolve(&world, 50, 40), SpawnSource::new(60, 40, 45));
             assert_eq!(block(&world, 50, 40), 60);
@@ -133,9 +133,9 @@ mod tests {
     #[test]
     fn stacked_solid_top_tiles_are_skipped() {
         let mut world = world();
-        assert!(world.set_tile(50, 40, Tile::block(19)));
-        assert!(world.set_tile(50, 44, Tile::block(380)));
-        assert!(world.set_tile(50, 46, Tile::block(239)));
+        assert!(world.set_tile(50, 40, Tile::framed(19, 0, 0)));
+        assert!(world.set_tile(50, 44, Tile::framed(380, 0, 0)));
+        assert!(world.set_tile(50, 46, Tile::framed(239, 0, 0)));
         assert!(world.set_tile(50, 49, Tile::block(1)));
         assert_eq!(resolve(&world, 50, 40), SpawnSource::new(1, 40, 49));
         assert_eq!(block(&world, 50, 40), 1);
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn platform_scan_stops_on_a_conveyor_without_reapplying_the_conveyor_rule() {
         let mut world = world();
-        assert!(world.set_tile(50, 40, Tile::block(19)));
+        assert!(world.set_tile(50, 40, Tile::framed(19, 0, 0)));
         assert!(world.set_tile(50, 45, Tile::block(CONVEYOR_LEFT)));
         assert!(world.set_tile(50, 46, Tile::block(53)));
         assert_eq!(
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn platform_scan_falls_back_to_the_physical_floor() {
         let mut world = world();
-        assert!(world.set_tile(50, 40, Tile::block(19)));
+        assert!(world.set_tile(50, 40, Tile::framed(19, 0, 0)));
 
         assert_eq!(
             resolve(&world, 50, 40),
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn platform_scan_is_bounded_to_twenty_nine_tiles() {
         let mut world = world();
-        assert!(world.set_tile(50, 40, Tile::block(19)));
+        assert!(world.set_tile(50, 40, Tile::framed(19, 0, 0)));
         assert!(world.set_tile(50, 69, Tile::block(53)));
         assert_eq!(resolve(&world, 50, 40), SpawnSource::new(53, 40, 69));
 

@@ -65,7 +65,10 @@ mod tests {
     fn normal_floor_search_uses_the_spawn_area_bottom_not_a_fixed_depth() {
         let player_y = 100;
         assert_eq!(normal_spawn_bottom_exclusive(player_y), 146);
-        assert_eq!(normal_spawn_bottom_exclusive(player_y) - 1, player_y + SPAWN_DOWN);
+        assert_eq!(
+            normal_spawn_bottom_exclusive(player_y) - 1,
+            player_y + SPAWN_DOWN
+        );
 
         // A candidate at the top of the range can therefore search much farther than 30 rows.
         let top_candidate = player_y - SPAWN_UP;

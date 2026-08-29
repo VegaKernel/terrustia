@@ -240,9 +240,7 @@ pub const MAX_SPAWNS: f32 = 5.0;
 
 /// Vanilla's screen-relative spawn/safe half-ranges. The actual integer rectangles are asymmetric;
 /// `spawn_ranges` owns their west/east/up/down edges and the sampling/checking helpers.
-pub use crate::game::spawn_ranges::{
-    SAFE_RANGE_X, SAFE_RANGE_Y, SPAWN_RANGE_X, SPAWN_RANGE_Y,
-};
+pub use crate::game::spawn_ranges::{SAFE_RANGE_X, SAFE_RANGE_Y, SPAWN_RANGE_X, SPAWN_RANGE_Y};
 
 /// How deep below the world's bottom the underworld begins.
 pub const UNDERWORLD_DEPTH: i32 = 200;
@@ -744,9 +742,9 @@ fn pick_bound(
 
 fn sleeping_angler_available(world: &World, npcs: &NpcStore) -> bool {
     crate::game::rescues::still_bound(&world.progress, 376)
-        && !npcs.iter().any(|(_, npc)| {
-            npc.is_alive() && matches!(npc.npc_type, 369 | 376)
-        })
+        && !npcs
+            .iter()
+            .any(|(_, npc)| npc.is_alive() && matches!(npc.npc_type, 369 | 376))
 }
 
 pub fn try_spawn(
@@ -846,10 +844,7 @@ pub fn try_spawn(
             let (dx, dy) = crate::game::spawn_ranges::choose_offset(rng);
             let x = px + dx;
             let chosen_y = py + dy;
-            if x < 10
-                || chosen_y < 10
-                || x >= world.width() - 10
-                || chosen_y >= world.height() - 40
+            if x < 10 || chosen_y < 10 || x >= world.width() - 10 || chosen_y >= world.height() - 40
             {
                 continue;
             }
@@ -1482,16 +1477,8 @@ mod tests {
         let mut boosted_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            boosted_seen += try_spawn(
-                &world,
-                &npcs,
-                &players,
-                &quiet(),
-                &boosted,
-                &mut rng,
-                0,
-            )
-            .len();
+            boosted_seen +=
+                try_spawn(&world, &npcs, &players, &quiet(), &boosted, &mut rng, 0).len();
         }
         assert!(
             boosted_seen > ordinary_seen * 5,

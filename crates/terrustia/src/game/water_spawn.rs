@@ -90,11 +90,7 @@ fn fallback_water_pool(depth: Depth, hard_mode: bool, spawning_block: u16) -> &'
     // Jungle water is keyed by the spawning tile, or by being in Cavern and below. The current
     // biome classifier is player-area based and cannot replace the tile condition here.
     if spawning_block == 60 || matches!(depth, Depth::Cavern | Depth::Underworld) {
-        return if hard_mode {
-            HARDMODE_PIRANHA
-        } else {
-            PIRANHA
-        };
+        return if hard_mode { HARDMODE_PIRANHA } else { PIRANHA };
     }
 
     if depth != Depth::Surface {
@@ -304,7 +300,10 @@ mod tests {
         for npc in [64, 65, 220, 221] {
             assert!(pool.contains(&npc), "missing ocean-water npc {npc}");
         }
-        assert!(!pool.contains(&67), "Crab is a ground spawn, not a water spawn");
+        assert!(
+            !pool.contains(&67),
+            "Crab is a ground spawn, not a water spawn"
+        );
     }
 
     #[test]
@@ -326,10 +325,7 @@ mod tests {
 
     #[test]
     fn hardmode_crimson_water_preempts_the_generic_water_pool() {
-        assert_eq!(
-            pool(Depth::Cavern, Biome::Crimson, true, 1),
-            BLOOD_WATER
-        );
+        assert_eq!(pool(Depth::Cavern, Biome::Crimson, true, 1), BLOOD_WATER);
     }
 
     #[test]
@@ -360,10 +356,7 @@ mod tests {
             pool(Depth::Underground, Biome::Forest, true, 1),
             HARDMODE_JELLY
         );
-        assert_eq!(
-            HARDMODE_JELLY.iter().filter(|&&npc| npc == 103).count(),
-            2
-        );
+        assert_eq!(HARDMODE_JELLY.iter().filter(|&&npc| npc == 103).count(), 2);
     }
 
     #[test]

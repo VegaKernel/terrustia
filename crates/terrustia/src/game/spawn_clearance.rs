@@ -99,7 +99,7 @@ mod tests {
     fn platform_like_random_tiles_are_solid_for_candidate_validation() {
         for block in [19, 239, 380] {
             let mut world = candidate();
-            assert!(world.set_tile(50, 30, Tile::block(block)));
+            assert!(world.set_tile(50, 30, Tile::framed(block, 0, 0)));
             assert!(solid(block), "tile {block} must be in Main.tileSolid");
             assert!(
                 solid_top(block),
@@ -137,22 +137,14 @@ mod tests {
     #[test]
     fn lava_in_left_column_above_floor_rejects_clearance() {
         let mut world = candidate();
-        assert!(world.set_tile(
-            49,
-            39,
-            Tile::AIR.with_liquid(Liquid::Lava, 1)
-        ));
+        assert!(world.set_tile(49, 39, Tile::AIR.with_liquid(Liquid::Lava, 1)));
         assert!(!floor_space_is_clear(&world, 50, 40));
     }
 
     #[test]
     fn water_above_floor_is_not_an_early_obstruction() {
         let mut world = candidate();
-        assert!(world.set_tile(
-            49,
-            39,
-            Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-        ));
+        assert!(world.set_tile(49, 39, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         assert!(floor_space_is_clear(&world, 50, 40));
     }
 

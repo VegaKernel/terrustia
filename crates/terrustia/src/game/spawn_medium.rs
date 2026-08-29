@@ -74,11 +74,7 @@ mod tests {
     #[test]
     fn one_liquid_tile_is_still_the_shallow_path() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            49,
-            Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-        ));
+        assert!(world.set_tile(50, 49, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         assert_eq!(classify(&world, 50, 50), Some(SpawnMedium::Dry));
     }
 
@@ -86,11 +82,7 @@ mod tests {
     fn two_water_tiles_select_the_water_path() {
         let mut world = world();
         for y in [48, 49] {
-            assert!(world.set_tile(
-                50,
-                y,
-                Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-            ));
+            assert!(world.set_tile(50, y, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         }
         assert_eq!(classify(&world, 50, 50), Some(SpawnMedium::Water));
     }
@@ -99,11 +91,7 @@ mod tests {
     fn water_surface_walks_to_the_top_of_the_same_column() {
         let mut world = world();
         for y in 43..=49 {
-            assert!(world.set_tile(
-                50,
-                y,
-                Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-            ));
+            assert!(world.set_tile(50, y, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
         }
         assert_eq!(water_surface_y(&world, 50, 50), 43);
     }
@@ -113,11 +101,7 @@ mod tests {
         for kind in [Liquid::Lava, Liquid::Honey, Liquid::Shimmer] {
             let mut world = world();
             for y in [48, 49] {
-                assert!(world.set_tile(
-                    50,
-                    y,
-                    Tile::AIR.with_liquid(kind, u8::MAX)
-                ));
+                assert!(world.set_tile(50, y, Tile::AIR.with_liquid(kind, u8::MAX)));
             }
             assert_eq!(classify(&world, 50, 50), None, "{kind:?}");
         }
@@ -126,16 +110,8 @@ mod tests {
     #[test]
     fn mixed_deep_liquids_are_not_water() {
         let mut world = world();
-        assert!(world.set_tile(
-            50,
-            49,
-            Tile::AIR.with_liquid(Liquid::Water, u8::MAX)
-        ));
-        assert!(world.set_tile(
-            50,
-            48,
-            Tile::AIR.with_liquid(Liquid::Honey, u8::MAX)
-        ));
+        assert!(world.set_tile(50, 49, Tile::AIR.with_liquid(Liquid::Water, u8::MAX)));
+        assert!(world.set_tile(50, 48, Tile::AIR.with_liquid(Liquid::Honey, u8::MAX)));
         assert_eq!(classify(&world, 50, 50), None);
     }
 }
