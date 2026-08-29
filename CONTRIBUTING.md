@@ -1,63 +1,62 @@
 # Contributing
 
-## Getting set up
+Contributions are welcome: bug reports, fixes, worldgen and AI parity work, docs, packaging, tests.
+Open an issue if you want to discuss something first, or send a pull request directly for a
+self-contained change.
 
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets
-cargo fmt --all --check
-```
+## The bar for a change
 
-The toolchain is pinned in `rust-toolchain.toml`, so `rustup` will fetch the right one. There is no
-C compiler in the dependency graph and no build script anywhere, which is why cross-compiling to
-musl needs nothing but `rustup target add`.
+Every change is held to the same standard the rest of the project follows:
 
-Some of the interesting tooling lives in `crates/*/examples/` and is run by hand rather than by
-`cargo test` — `soak`, `conform`, `provoke`, `playthrough`, `fuzz`. `tools/soak_ci.sh` is the one
-CI runs.
+1. It matches vanilla where it transcribes vanilla. This is a reimplementation of the 1.4.5.8
+   dedicated server, so behaviour is checked against the decompiled game, not against a guess.
+2. It has a test that fails on the unfixed code and passes on the fixed code, where a test can
+   express it.
+3. It builds clean: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` with no
+   warnings, and `cargo test --workspace` green.
+4. It is honest about its own limits. A partial implementation says what it does not do, in the code
+   and in the README row, rather than implying completeness.
 
-## The two things this project has learned the hard way
+`docs/` and `plan.md` describe how the project is put together and how it verifies itself against
+the real game. Reading the relevant part before a large change saves a round trip.
 
-**A green test suite is not evidence.** `terrustia-client` depends on `terrustia-proto`, so a test
-where our client talks to our server shares one encoder and one decoder — a misreading of the
-protocol passes both sides happily. Ten audits found seventeen real disagreements with the actual
-`TerrariaServer` sitting behind a fully green suite, including a boss that dropped no progression
-item at all and a server sending 18,165 door packets in five minutes.
+## AI-assisted contributions
 
-So: for anything protocol- or gameplay-shaped, check it against something that is not us. The real
-server via `examples/conform` and `examples/provoke`, a real world file, or a real client.
+AI-assisted contributions are welcome. Much of this project was written that way. The condition is
+that a human is accountable for every line:
 
-**A test that passes on the unfixed code proves nothing.** Before you rely on a regression test,
-break the fix and watch it fail. This is not a formality — it has caught vacuous tests here
-repeatedly, including one written *in this session* that asserted an invariant which held equally
-well with the bug present.
+- You have read and understood the change you are submitting. You can explain why it is correct and
+  answer questions about it in review.
+- It meets the bar above, including a real test and a clean build. AI output that was not run,
+  tested, or checked against the decompiled source is not acceptable, whether a person or a model
+  produced it.
+- You do not paste decompiled game source, game assets, or game text into the repository. The data
+  tables are generated from a local decompiled tree that never ships; see `docs/generated-tables.md`.
 
-## What earns a merge
+A change that clears the bar is judged on the change, not on how it was written. A change that does
+not clear it is declined, for the same reason.
 
-- **A test that fails without your change.** Verified, not assumed.
-- **`cargo fmt --check` and `clippy` clean.** Warnings are denied workspace-wide.
-- **A measurement, if it is a performance change.** A before number and an after number from the
-  same world under the same load. Not "should be faster".
-- **A `README.md` "What works" row moved,** if you changed what works. Landing a feature and not
-  moving its row counts as not having landed it.
+## Contributor license terms
 
-## Comments
+By submitting a contribution (a pull request, a patch, or any other work) to this project, you agree
+to the following. Read them, because they are broader than an ordinary inbound license.
 
-Say *why*, not *what*. The code already says what it does. Comments here are for the reasoning
-that is not recoverable from reading it — why a constant is that number, what the alternative was,
-what broke last time. Where something is transcribed from the decompiled game, say so and name the
-file and line, because the next person will need to check it against the same source.
+1. **You have the right to submit it.** The contribution is your own work, or you have the right to
+   submit it under these terms, and submitting it does not knowingly violate anyone else's rights.
 
-## Where the game data comes from
+2. **You keep your copyright.** You are not assigning ownership of your contribution to anyone.
 
-The big tables in `terrustia-proto` are generated by the scripts in `tools/`, each of which takes a
-decompiled Terraria tree as an argument. That tree is not in this repository and must not be added
-to it — `.gitignore` has a guard, but the real rule is that no decompiled source, game asset or
-game text belongs here. Regenerate rather than hand-editing a generated table; they are marked
-`linguist-generated` in `.gitattributes`.
+3. **You grant a broad, relicensable license.** You grant the project maintainer (the owner of the
+   `github.com/bybrooklyn/terrustia` repository) a perpetual, irrevocable, worldwide, royalty-free,
+   sublicensable, and transferable license to use, reproduce, modify, prepare derivative works of,
+   publicly display, distribute, and **relicense** your contribution, in whole or in part, under any
+   license terms, including licenses different from the project's current one and including
+   proprietary terms.
 
-## Licence
+This grant is what lets the project change its license later (for example, to dual-license or to
+move to a different open-source license) without tracking down every past contributor. Your
+contribution stays available to everyone under the project's public license at the time it was
+made; the grant is in addition to that, not instead of it.
 
-The server and client are AGPL-3.0-or-later. `terrustia-proto` is MIT so that anyone writing a
-Terraria tool in Rust can use the wire format without taking on the server's licence. By
-contributing you agree your work is licensed the same way as the crate it lands in.
+If you cannot agree to these terms for a particular contribution, say so in the pull request rather
+than submitting it, and we can work out another way to get the change in.
