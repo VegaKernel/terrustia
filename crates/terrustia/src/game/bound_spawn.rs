@@ -264,8 +264,20 @@ mod tests {
         world.progress.downed_boss3 = true;
         let mut npcs = NpcStore::new();
 
-        let available = || {
-            candidates(
+        let initial = candidates(
+            &world,
+            &npcs,
+            500,
+            400,
+            Depth::Cavern,
+            Biome::Dungeon,
+        );
+        assert!(initial.contains(&123), "the Mechanic should initially be findable");
+
+        npcs.spawn(124, (0.0, 0.0))
+            .expect("the freed Mechanic should have a slot");
+        assert!(
+            !candidates(
                 &world,
                 &npcs,
                 500,
@@ -273,17 +285,13 @@ mod tests {
                 Depth::Cavern,
                 Biome::Dungeon,
             )
-        };
-        assert!(available().contains(&123), "the Mechanic should initially be findable");
-
-        npcs.spawn(124, (0.0, 0.0));
-        assert!(
-            !available().contains(&123),
+            .contains(&123),
             "a live freed Mechanic must suppress another bound Mechanic"
         );
 
         let mut npcs = NpcStore::new();
-        npcs.spawn(123, (0.0, 0.0));
+        npcs.spawn(123, (0.0, 0.0))
+            .expect("the bound Mechanic should have a slot");
         assert!(
             !candidates(
                 &world,
