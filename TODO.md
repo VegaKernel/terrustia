@@ -12,26 +12,31 @@ Last reconciled against `master`: 2026-08-29.
 
 ## In flight
 
-### 1. Water-spawn path, including Sleeping Angler
+### 1. Finish spawn-candidate geometry and aquatic composition
 
-The generic bound-town-NPC lottery has been replaced with named vanilla-like eligibility rules on
-`master` (`b4caf607`): progression, location, saved-rescue state and both bound/freed duplicate
-forms are now checked independently for all six rescuable residents.
+Deep water is now a real spawn medium on `master` (`987c005f`), not something rejected by the room
+check before selection. Existing aquatic coverage is routed through water-specific sources instead
+of dry pools, Crab remains a ground spawn, and Sleeping Angler has both his dry Sand route and an
+Ocean water-surface route.
 
-One deliberately disclosed remainder is still real: Sleeping Angler's extra dry-land Sand route is
-implemented, but his normal water-surface route is not. `game/spawn.rs::has_room` currently rejects
-deep liquid and requires a solid floor, so the ordinary spawn search cannot produce a true aquatic
-candidate at all.
+The remaining work is narrower and should stay explicit:
 
-Do not fix this with an Angler-only exception. The same limitation affects the water half of the
-ordinary spawn pools too: Ocean/Jungle/Underground water enemies need a candidate path that can
-classify and validate water separately from a walking ground spawn. Split candidate medium from NPC
-selection, then pin at least:
+- vanilla validates a **2x3** clearance rectangle above the spawning tile; `spawn.rs::has_room`
+  still checks only one vertical column, so a solid/lava tile immediately to the left can be missed;
+- the generic Surface-water critter source is not implemented. Goldfish (55) was removed from the
+  dry Ocean pool rather than left spawning on land, so it needs its real water/critter route;
+- Sea Snail and other aquatic NPCs that were never in Terrustia's old spawn roster still need a
+  composition pass rather than being smuggled into the medium fix;
+- Ocean spawning still uses the project's coarse `Biome::Ocean` classification. Vanilla also has a
+  secondary regular-Sand band out to 380 tiles from a true world edge plus vertical restrictions;
+- a single `Biome` enum cannot express overlaps such as a Crimson/Jungle Ocean, so water-source
+  priority in hybrid areas is not yet a complete SceneMetrics replacement;
+- the exact Blood Feeder/Blood Jelly relative probability was not independently recovered from a
+  1.4.5.8 oracle. The water fix preserves Terrustia's previous 1:1 relative weighting rather than
+  pretending that weighting has now been certified.
 
-- Sleeping Angler in valid Ocean water after confirming neither form already exists;
-- Shark/Jellyfish/Squid in water rather than on a dry floor;
-- Crab remaining a ground spawn;
-- deep water not becoming a legal spawn point for an arbitrary walking enemy.
+Close the 2x3 clearance rule first because it is local, deterministic and affects every spawn
+source. Keep the broader composition audit separate.
 
 ### 2. Real Terraria client against Terrustia
 
@@ -86,8 +91,8 @@ not just per-style unit coverage.
 
 Spawn rates and caps are modelled and measured. The exact *composition* of what appears under each
 combination of biome, depth, time, progression, medium and event is not comprehensively diffed
-against vanilla. The now-fixed bound-NPC lottery and the remaining water-candidate gap are examples
-of why that distinction matters.
+against vanilla. The now-fixed bound-NPC lottery and water-medium bug are examples of why that
+distinction matters.
 
 ### 7. Drop probabilities and ordering
 
@@ -127,11 +132,13 @@ SDK in this AGPL project.
 
 The following items used to be TODOs and are already implemented on `master`:
 
-- **Bound-town-NPC eligibility**: `game/bound_spawn.rs` now owns the per-rescue progression and
-  location rules, saved-rescue state, duplicate suppression for both bound and freed forms, and
-  surface-event suppression; `spawn.rs` consumes those rules. Merged as `b4caf607`. The only
-  remaining Angler limitation is the generic water-candidate path tracked above, not the old
-  six-NPC cavern lottery.
+- **Deep-water spawn routing / Sleeping Angler water route**: `spawn_medium.rs` separates dry from
+  deep-water candidates, `water_spawn.rs` owns the current aquatic source priority, aquatic IDs no
+  longer live in dry pools, and Sleeping Angler can appear at the top of an Ocean water column.
+  Merged as `987c005f`. The composition/geometry remainder is tracked above rather than hidden.
+- **Bound-town-NPC eligibility**: `game/bound_spawn.rs` owns the per-rescue progression and location
+  rules, saved-rescue state, duplicate suppression for both bound and freed forms, and surface-event
+  suppression; `spawn.rs` consumes those rules. Merged as `b4caf607`.
 - **Delayed distant-NPC regression guard**: the GAPS §30 retry contract is pinned by
   `crates/terrustia/tests/npc_sync.rs`, using two real TCP clients and an inert Bound Goblin so no
   unrelated movement can accidentally rescue a lost one-off health update. Merged as `6c53fd25`.
@@ -152,7 +159,7 @@ The following items used to be TODOs and are already implemented on `master`:
 - **The claim that no inert NPC exists**: `game/ai/inert.rs` supplies the deterministic case used by
   the distant-NPC regression guard.
 
-Likewise, do not quote the old "2.9× vanilla bandwidth" headline as current: the same historical
+Likewise, do not quote the old "2.9x vanilla bandwidth" headline as current: the same historical
 TODO later contains a newer five-minute table where Terrustia sends 133,400 bytes against
 vanilla's 148,874. Any new bandwidth claim needs a fresh paired capture with the commit hashes and
 world recorded beside it.
