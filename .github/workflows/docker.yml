@@ -14,18 +14,26 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  image:
-    name: Build and push
+  build:
+    name: ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, arch: amd64 }
+          - { target: aarch64-unknown-linux-musl, arch: arm64 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: container-${{ matrix.target }}
 
       # A shipped image with an empty embedded panel is a broken deliverable someone might
-      # actually enable and find nothing — build the real frontend before either target compiles.
+      # actually enable and find nothing: build the real frontend before the target compiles.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -35,18 +43,41 @@ jobs:
           bun install --frozen-lockfile
           bun run build
 
-      # Both architectures built natively on the x86 runner, because nothing in the dependency
-      # graph needs a C compiler. Compiling aarch64 inside a QEMU-emulated container instead would
-      # turn a few minutes into most of an hour, for the same bytes.
-      - name: Build both binaries
+      # `ring` (pulled in transitively through `rustls`, via `ureq`'s HTTPS client for the update
+      # checker) runs real C compiler-family detection in its build script, so a linker alone is
+      # not enough for the musl targets. This is the same step ci.yml and release.yml already use.
+      # An earlier revision of this file built both targets with only rust-lld and claimed nothing
+      # in the dependency graph needs a C compiler; that stopped being true when the update
+      # checker's TLS stack arrived, and this job was red on every push until it caught up.
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p terrustia --target ${{ matrix.target }}
+
+      # The Dockerfile copies dist/terrustia-linux-${TARGETARCH}, so stage exactly that name.
+      - name: Stage the binary
         run: |
           mkdir -p dist
-          for pair in "x86_64-unknown-linux-musl amd64" "aarch64-unknown-linux-musl arm64"; do
-            set -- $pair
-            export "CARGO_TARGET_$(echo "$1" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"
-            cargo build --release --locked -p terrustia --target "$1"
-            cp "target/$1/release/terrustia" "dist/terrustia-linux-$2"
-          done
+          cp "target/${{ matrix.target }}/release/terrustia" "dist/terrustia-linux-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: dist/terrustia-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  image:
+    name: Assemble, push and prove the image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
