@@ -14,7 +14,7 @@ use crate::world::World;
 /// `x, chosen_y` identify the random candidate tile before the downward floor scan. The chosen tile
 /// itself must be non-solid. The clearance rectangle starts one row above it, covers that column
 /// and the immediately-left column, and is three tiles high. Solid tiles or lava inside the
-/// rectangle reject the candidate; water is allowed because liquid-source selection happens later.
+/// rectangle reject the candidate. Other liquid kinds are handled by the later liquid-source check.
 pub fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
     let chosen = world.tile(x, chosen_y);
     if chosen.is_active() && solid(chosen.block) {
