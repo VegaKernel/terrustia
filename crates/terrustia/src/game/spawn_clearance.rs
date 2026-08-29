@@ -5,19 +5,23 @@
 //! tile and a 2x3 rectangle immediately above it, then it resolves the solid floor below. Keeping
 //! those coordinates separate matters when the chosen point is several tiles above the floor.
 
-use terrustia_proto::{Liquid, tile_solid::solid};
+use terrustia_proto::{Liquid, tile_solid::solid, wall_house};
 
 use crate::world::World;
 
 /// Whether a chosen spawn point and the vanilla-shaped 2x3 rectangle above it are unobstructed.
 ///
 /// `x, chosen_y` identify the random candidate tile before the downward floor scan. The chosen tile
-/// itself must be non-solid. The clearance rectangle starts one row above it, covers that column
-/// and the immediately-left column, and is three tiles high. Solid tiles or lava inside the
-/// rectangle reject the candidate. Other liquid kinds are handled by the later liquid-source check.
+/// itself must be non-solid and cannot have a player-safe (`Main.wallHouse`) background wall. The
+/// clearance rectangle starts one row above it, covers that column and the immediately-left column,
+/// and is three tiles high. Solid tiles or lava inside the rectangle reject the candidate. Other
+/// liquid kinds are handled by the later liquid-source check.
 pub fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
     let chosen = world.tile(x, chosen_y);
     if chosen.is_active() && solid(chosen.block) {
+        return false;
+    }
+    if wall_house::safe(chosen.wall) {
         return false;
     }
 
@@ -54,6 +58,24 @@ mod tests {
         let mut world = candidate();
         assert!(world.set_tile(50, 40, Tile::block(1)));
         assert!(!chosen_point_is_clear(&world, 50, 40));
+    }
+
+    #[test]
+    fn safe_wall_at_the_chosen_tile_rejects_the_candidate() {
+        let mut world = candidate();
+        let mut tile = Tile::AIR;
+        tile.wall = 1; // Stone Wall: Main.wallHouse = true.
+        assert!(world.set_tile(50, 40, tile));
+        assert!(!chosen_point_is_clear(&world, 50, 40));
+    }
+
+    #[test]
+    fn natural_unsafe_wall_does_not_reject_the_candidate() {
+        let mut world = candidate();
+        let mut tile = Tile::AIR;
+        tile.wall = 62; // SpiderUnsafe: a natural wall, not a player-safe Spider Nest Wall.
+        assert!(world.set_tile(50, 40, tile));
+        assert!(chosen_point_is_clear(&world, 50, 40));
     }
 
     #[test]
