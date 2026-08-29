@@ -12,31 +12,26 @@ Last reconciled against `master`: 2026-08-29.
 
 ## In flight
 
-### 1. Bound-town-NPC spawn parity is wrong
+### 1. Water-spawn path, including Sleeping Angler
 
-The rescue **interaction** is implemented correctly in `game/rescues.rs`, but the way bound NPCs
-enter the live world is not vanilla-like.
+The generic bound-town-NPC lottery has been replaced with named vanilla-like eligibility rules on
+`master` (`b4caf607`): progression, location, saved-rescue state and both bound/freed duplicate
+forms are now checked independently for all six rescuable residents.
 
-`game/spawn.rs::pick_bound` currently throws all six rescue candidates into one lottery and may
-spawn any of them whenever an ordinary spawn candidate lands Underground or in the Cavern layer.
-The only filters are "not already rescued" and "not already alive".
+One deliberately disclosed remainder is still real: Sleeping Angler's extra dry-land Sand route is
+implemented, but his normal water-surface route is not. `game/spawn.rs::has_room` currently rejects
+deep liquid and requires a solid floor, so the ordinary spawn search cannot produce a true aquatic
+candidate at all.
 
-That is materially wrong. The six have different progression and place requirements:
+Do not fix this with an Angler-only exception. The same limitation affects the water half of the
+ordinary spawn pools too: Ocean/Jungle/Underground water enemies need a candidate path that can
+classify and validate water separately from a walking ground spawn. Split candidate medium from NPC
+selection, then pin at least:
 
-- **Bound Goblin (105)**: after the Goblin Army has been defeated, in the Cavern layer and above
-  the bottom rescue margin.
-- **Bound Wizard (106)**: Hardmode, in the same Cavern band.
-- **Bound Mechanic (123)**: after Skeletron, in the Cavern-layer Dungeon.
-- **Webbed Stylist (354)**: in the Cavern layer on unsafe Spider Wall.
-- **Sleeping Angler (376)**: at the true world edge, on sand or the water surface above ground.
-- **Unconscious Man / Tavernkeep (579)**: only after the Eater of Worlds or Brain of Cthulhu has
-  been defeated, without the generic cavern-only restriction.
-
-The rules are now isolated and unit-tested on `chatgpt/bound-npc-spawn-parity` in
-`game/bound_spawn.rs`. The remaining step is deliberately small but production-facing: route
-`spawn.rs::pick_bound` through that eligibility function, stop suppressing surface-legal rescues,
-and treat either the bound form or its freed resident already being alive as a duplicate. Do not
-merge the rule module alone; the task is finished only when the live spawn path consumes it.
+- Sleeping Angler in valid Ocean water after confirming neither form already exists;
+- Shark/Jellyfish/Squid in water rather than on a dry floor;
+- Crab remaining a ground spawn;
+- deep water not becoming a legal spawn point for an arbitrary walking enemy.
 
 ### 2. Real Terraria client against Terrustia
 
@@ -90,8 +85,9 @@ not just per-style unit coverage.
 ### 6. NPC spawn-pool composition
 
 Spawn rates and caps are modelled and measured. The exact *composition* of what appears under each
-combination of biome, depth, time, progression and event is not comprehensively diffed against
-vanilla. The bound-NPC defect above is already one example of why that distinction matters.
+combination of biome, depth, time, progression, medium and event is not comprehensively diffed
+against vanilla. The now-fixed bound-NPC lottery and the remaining water-candidate gap are examples
+of why that distinction matters.
 
 ### 7. Drop probabilities and ordering
 
@@ -131,6 +127,11 @@ SDK in this AGPL project.
 
 The following items used to be TODOs and are already implemented on `master`:
 
+- **Bound-town-NPC eligibility**: `game/bound_spawn.rs` now owns the per-rescue progression and
+  location rules, saved-rescue state, duplicate suppression for both bound and freed forms, and
+  surface-event suppression; `spawn.rs` consumes those rules. Merged as `b4caf607`. The only
+  remaining Angler limitation is the generic water-candidate path tracked above, not the old
+  six-NPC cavern lottery.
 - **Delayed distant-NPC regression guard**: the GAPS §30 retry contract is pinned by
   `crates/terrustia/tests/npc_sync.rs`, using two real TCP clients and an inert Bound Goblin so no
   unrelated movement can accidentally rescue a lost one-off health update. Merged as `6c53fd25`.
