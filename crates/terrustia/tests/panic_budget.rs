@@ -21,7 +21,15 @@ use std::path::{Path, PathBuf};
 /// threads its own column-band parallelization spawns — see that call site's own comment for the
 /// invariant (`gravitating_sand_column_range` only reads `World::tile`, which never panics, and
 /// pushes to a `Vec`, so the joined thread cannot actually have panicked).
-const ALLOWED: usize = 11;
+///
+/// 14, net up from 11 (2026-08-29): the audit wave's liquid L1 merge-semantics rewrite added
+/// four sites in `liquid.rs` (three `unreachable!` match arms, each guarded by an explicit
+/// `this_kind != X` check two lines above, and one `max()/min().unwrap()` over a slice whose
+/// length starts at 1 and only grows; each carries its invariant at the site) and the worldgen
+/// traps rewrite one (`kind_type` is rolled from a fixed range, the invariant is in the message),
+/// while the same wave's cleanups removed two older sites. This surfaced only now because the
+/// audit-wave branch's CI never ran as a whole before it merged to main.
+const ALLOWED: usize = 14;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

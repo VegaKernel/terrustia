@@ -272,7 +272,8 @@ impl Liquids {
 
         // Already level to within a drop: leave it alone. Without this the spare unit that
         // levelling cannot divide evenly gets handed back and forth between neighbours forever,
-        // and a still pool costs as much as a flooding one.
+        // and a still pool costs as much as a flooding one. The unwraps cannot fire: `n` starts
+        // at 1 (positions[0] is always x) and only grows, so `levels[..n]` is never empty.
         let flat = *levels.iter().max().unwrap() - *levels.iter().min().unwrap() <= 1;
         if flat && here.liquid >= 3 {
             return;
@@ -469,7 +470,7 @@ fn merge_result(
             Liquid::Lava => reaction::OBSIDIAN,
             Liquid::Honey => reaction::HONEY_BLOCK,
             Liquid::Shimmer => reaction::AETHERIUM,
-            Liquid::Water => unreachable!(),
+            Liquid::Water => unreachable!("guarded by this_kind != Water just above"),
         };
         kind = Liquid::Water;
     }
@@ -478,7 +479,7 @@ fn merge_result(
             Liquid::Water => reaction::OBSIDIAN,
             Liquid::Honey => reaction::CRISPY_HONEY,
             Liquid::Shimmer => reaction::AETHERIUM,
-            Liquid::Lava => unreachable!(),
+            Liquid::Lava => unreachable!("guarded by this_kind != Lava just above"),
         };
         kind = Liquid::Lava;
     }
@@ -487,7 +488,7 @@ fn merge_result(
             Liquid::Water => reaction::HONEY_BLOCK,
             Liquid::Lava => reaction::CRISPY_HONEY,
             Liquid::Shimmer => reaction::AETHERIUM,
-            Liquid::Honey => unreachable!(),
+            Liquid::Honey => unreachable!("guarded by this_kind != Honey just above"),
         };
         kind = Liquid::Honey;
     }
