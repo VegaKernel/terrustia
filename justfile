@@ -141,7 +141,7 @@ check-recipes:
 
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:
-    python3 tools/gen_recipes.py     {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
+    cargo run -q -p terrustia-codegen -- recipes {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
     python3 tools/gen_drops.py       {{DECOMPILED}} crates/terrustia-proto/src/npc_drops.rs
     python3 tools/gen_projectiles.py {{DECOMPILED}} crates/terrustia-proto/src/projectile_data.rs
     python3 tools/gen_banners.py     {{DECOMPILED}} crates/terrustia-proto/src/banners.rs

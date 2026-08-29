@@ -12,6 +12,7 @@
 
 mod csharp;
 mod hurt_tiles;
+mod recipes;
 
 use std::path::{Path, PathBuf};
 
@@ -23,11 +24,18 @@ struct Table {
     generate: fn(&Path) -> String,
 }
 
-const TABLES: &[Table] = &[Table {
-    name: "hurt_tiles",
-    out: "crates/terrustia-proto/src/hurt_tiles.rs",
-    generate: hurt_tiles::generate,
-}];
+const TABLES: &[Table] = &[
+    Table {
+        name: "hurt_tiles",
+        out: "crates/terrustia-proto/src/hurt_tiles.rs",
+        generate: hurt_tiles::generate,
+    },
+    Table {
+        name: "recipes",
+        out: "crates/terrustia-proto/src/recipes.rs",
+        generate: recipes::generate,
+    },
+];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
