@@ -42,6 +42,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = net_module::decode_pylon_message(data);
     let _ = net_module::decode_liquid_changes(data);
     let _ = net_module::IncomingChat::decode(data);
+    // The NetModules (82) creative-powers sub-decoder also parses raw client bytes via the
+    // dispatch, and was the one hand-parsed sub-decoder the sweep above still missed (audit
+    // item P5f/M3).
+    let _ = net_module::decode_creative_power(data);
     let _ = packets::Hello::decode(data);
     let _ = packets::SpawnTileData::decode(data);
     let _ = packets::PlayerSpawn::decode(data);
