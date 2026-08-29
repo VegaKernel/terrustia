@@ -656,6 +656,7 @@ pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
 }
 
 /// Whether the vanilla-shaped 2x3 rectangle at the random chosen point is clear.
+#[cfg(test)]
 fn chosen_point_is_clear(world: &World, x: i32, chosen_y: i32) -> bool {
     crate::game::spawn_clearance::chosen_point_is_clear(world, x, chosen_y)
 }
@@ -765,6 +766,7 @@ pub fn try_spawn(
     if active.is_empty() {
         return Vec::new();
     }
+    let active_positions: Vec<_> = active.iter().map(|player| player.position).collect();
 
     // The cap grows with the number of players, as it does in the game, and with wherever the
     // deepest of them is standing: a cavern holds far more at once than a forest.
@@ -852,41 +854,18 @@ pub fn try_spawn(
                 continue;
             }
 
-            // The random chosen point is validated before it is resolved to a ground tile. Keeping
-            // these coordinates distinct matters when the point is several tiles above the floor.
-            if !chosen_point_is_clear(world, x, chosen_y) {
-                continue;
-            }
-
-            let Some(ground) = find_ground(world, x, chosen_y) else {
-                continue;
+            let ground = match crate::game::spawn_location::evaluate_normal_candidate(
+                world,
+                (px, py),
+                &active_positions,
+                x,
+                chosen_y,
+            ) {
+                crate::game::spawn_location::NormalCandidate::Retry => continue,
+                crate::game::spawn_location::NormalCandidate::Abort => break,
+                crate::game::spawn_location::NormalCandidate::Accept { floor_y } => floor_y,
             };
             let y = ground - 1;
-
-            // Vanilla tests the resolved solid floor against the early safe rectangle.
-            if crate::game::spawn_ranges::in_safe_rectangle(x - px, ground - py) {
-                continue;
-            }
-
-            // After a candidate survives the retryable search, its 16x16 chosen-tile space must be
-            // completely outside the 2088x1172 post-selection rectangle of every active player.
-            // Failure here aborts the current spawn attempt rather than searching another point.
-            if active.iter().any(|other| {
-                !crate::game::spawn_postcheck::chosen_tile_outside_player_rectangle(
-                    x,
-                    chosen_y,
-                    other.position,
-                )
-            }) {
-                break;
-            }
-
-            // This is a post-selection failure, not another reason to search for a different point:
-            // once the chosen tile survives the retryable location checks, non-water liquid in
-            // either of the two tiles directly above it aborts this player's spawn attempt.
-            if !crate::game::spawn_postcheck::direct_above_liquid_is_water(world, x, chosen_y) {
-                break;
-            }
 
             let Some(medium) = crate::game::spawn_medium::classify(world, x, ground) else {
                 continue;
