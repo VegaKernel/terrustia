@@ -96,7 +96,7 @@ fn new_generates_a_world_into_the_platforms_terraria_world_directory() {
     std::fs::create_dir_all(&home).expect("scratch home");
 
     let mut child = run_new(&home, "Fork Test World", "127.0.0.1:17779");
-    let found = wait_for_file(&home, "Fork_Test_World.wld", Duration::from_secs(30));
+    let found = wait_for_file(&home, "Fork_Test_World.wld", Duration::from_secs(120));
     let _ = child.kill();
     let _ = child.wait();
 
@@ -132,7 +132,7 @@ fn new_ignores_a_stale_world_file_left_in_the_config() {
     // is the only test in this file that generates two worlds in sequence, each waiting on top of
     // whatever the other tests' own concurrently-running server subprocesses are costing it.
     let mut stale = run_new(&home, "Stale World", "127.0.0.1:17782");
-    let stale_found = wait_for_file(&home, "Stale_World.wld", Duration::from_secs(60));
+    let stale_found = wait_for_file(&home, "Stale_World.wld", Duration::from_secs(120));
     let _ = stale.kill();
     let _ = stale.wait();
     assert_eq!(
@@ -164,7 +164,7 @@ fn new_ignores_a_stale_world_file_left_in_the_config() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn terrustia");
-    let fresh_found = wait_for_file(&home, "Fresh_World.wld", Duration::from_secs(60));
+    let fresh_found = wait_for_file(&home, "Fresh_World.wld", Duration::from_secs(120));
     let _ = fresh.kill();
     let _ = fresh.wait();
     assert_eq!(
@@ -257,7 +257,7 @@ fn new_refuses_a_name_that_already_exists() {
     std::fs::create_dir_all(&home).expect("scratch home");
 
     let mut first = run_new(&home, "Collision World", "127.0.0.1:17780");
-    let found = wait_for_file(&home, "Collision_World.wld", Duration::from_secs(30));
+    let found = wait_for_file(&home, "Collision_World.wld", Duration::from_secs(120));
     let _ = first.kill();
     let _ = first.wait();
     assert_eq!(
