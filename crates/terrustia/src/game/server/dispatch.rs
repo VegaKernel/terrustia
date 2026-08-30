@@ -3175,12 +3175,15 @@ impl GameServer {
 
     /// A client asking to be taken to a pylon.
     ///
-    /// The game's rules, in the order it checks them: you have to be standing near a pylon, and the
-    /// one you are going to needs two townsfolk living within its scan box — except the Victory
-    /// pylon, which needs none. The biome requirement is *not* enforced here, because deciding
-    /// whether a stretch of ground counts as a jungle needs `SceneMetrics`, which this server does
-    /// not have; the effect is that a pylon planted in the wrong biome still works. That is a
-    /// permissive difference rather than a broken one, and it is written down rather than hidden.
+    /// The game runs five checks in order before it will carry anyone
+    /// (`TeleportPylonsSystem.HandleTeleportRequest`, TeleportPylonsSystem.cs:100-207): you are
+    /// standing near a pylon (`IsPlayerNearAPylon`, :107); the one you are going to has the two
+    /// townsfolk it needs, all but the Victory pylon (`HowManyNPCsDoesPylonNeed`, :314); the
+    /// Lihzahrd temple is not being reached before Plantera (:124); the destination pylon still
+    /// sits in its own biome (`DoesPylonAcceptTeleportation`, :139); and at least one pylon you are
+    /// near is itself working, with its own townsfolk and its own biome, not merely present (the
+    /// source loop, :145-188). This handler used to run only the first two, because the three that
+    /// were missing all lean on a biome scan the server did not have until L2-11 landed one.
     fn on_pylon_teleport(
         &mut self,
         slot: u8,
@@ -3199,20 +3202,67 @@ impl GameServer {
             return Ok(());
         };
         let at = (player.position.0 / 16.0, player.position.1 / 16.0);
-        if !known.iter().any(|p| {
-            (f32::from(p.x) - at.0).abs() <= PYLON_REACH
-                && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
-        }) {
+
+        // (1) You are standing near a pylon at all (`IsPlayerNearAPylon`, TeleportPylonsSystem.cs:107).
+        // The pylons within reach are kept, because check (5) has to know which of them are working.
+        let near: Vec<net_module::Pylon> = known
+            .iter()
+            .copied()
+            .filter(|p| {
+                (f32::from(p.x) - at.0).abs() <= PYLON_REACH
+                    && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
+            })
+            .collect();
+        if near.is_empty() {
             self.tell(slot, "You need to be near a pylon to travel.");
             return Ok(());
         }
 
+        // (2) The destination has the two townsfolk living near it that it needs; the Victory pylon
+        //     needs none (`DoesPylonHaveEnoughNPCsAroundIt`/`HowManyNPCsDoesPylonNeed`,
+        //     TeleportPylonsSystem.cs:116/314).
         if destination.kind != net_module::Pylon::VICTORY
             && self.town_npcs_near(destination.x, destination.y) < PYLON_RESIDENTS_NEEDED
         {
             self.tell(
                 slot,
                 "That pylon needs two townsfolk living near it before it will work.",
+            );
+            return Ok(());
+        }
+
+        // (3) The Lihzahrd temple stays sealed to its pylon until Plantera falls
+        //     (TeleportPylonsSystem.cs:124).
+        if self.temple_pylon_sealed(&destination) {
+            self.tell(
+                slot,
+                "The temple's pylon will not answer until Plantera is defeated.",
+            );
+            return Ok(());
+        }
+
+        // (4) The destination pylon still sits in the biome its network belongs to
+        //     (`DoesPylonAcceptTeleportation`, TeleportPylonsSystem.cs:139/254).
+        if !self.pylon_accepts(&destination) {
+            self.tell(
+                slot,
+                "That pylon is no longer in the right biome to travel to.",
+            );
+            return Ok(());
+        }
+
+        // (5) At least one of the pylons you are near is itself a working source: it has its own
+        //     townsfolk and matches its own biome (the source loop, TeleportPylonsSystem.cs:145-188).
+        //     Being near a broken pylon is not enough to leave from.
+        let source_ready = near.iter().any(|p| {
+            (p.kind == net_module::Pylon::VICTORY
+                || self.town_npcs_near(p.x, p.y) >= PYLON_RESIDENTS_NEEDED)
+                && self.pylon_accepts(p)
+        });
+        if !source_ready {
+            self.tell(
+                slot,
+                "The pylon you are standing at is not working: it needs its townsfolk and its own biome.",
             );
             return Ok(());
         }

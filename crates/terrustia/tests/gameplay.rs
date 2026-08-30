@@ -5789,6 +5789,54 @@ fn plant_pylon(world: &mut World, x: i16, y: i16, kind: u8) {
         .push(TileEntity::new(id, EntityKind::TeleportationPylon, x, y));
 }
 
+/// Overwrite a rectangle of tiles (tile coords, inclusive) with one block.
+fn fill_block(world: &mut World, x0: i32, y0: i32, x1: i32, y1: i32, block: u16) {
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            world.set_tile(x, y, Tile::block(block));
+        }
+    }
+}
+
+/// Lay enough jungle grass over a pylon's whole biome-scan box that `spawn::biome_at` reads jungle
+/// and nothing else. The scan box is 169 by 124 tiles, so a patch a little larger than that,
+/// centred on the pylon, leaves no generated tile of a competing biome inside it. This is what a
+/// jungle-network pylon needs to still count as a valid source or destination (L2-21 check 4).
+fn lay_jungle_around(world: &mut World, cx: i32, cy: i32) {
+    const JUNGLE_GRASS: u16 = 60; // JungleTileCount member (`SceneMetrics.cs:613`)
+    fill_block(world, cx - 88, cy - 66, cx + 88, cy + 66, JUNGLE_GRASS);
+}
+
+/// House two townsfolk on a pylon's own tile, the pair a working (non-Victory) pylon needs within
+/// its scan box (L2-21 checks 2 and 3).
+fn house_two_townsfolk(world: &mut World, x: i16, y: i16) {
+    const GUIDE: i32 = 22;
+    const MERCHANT: i32 = 17;
+    for (net_id, dx) in [(GUIDE, 0i32), (MERCHANT, 6)] {
+        world.town_npcs.push(terrustia::world::objects::TownNpc {
+            net_id,
+            name: String::from("Somebody"),
+            position: ((i32::from(x) + dx) as f32 * 16.0, f32::from(y) * 16.0),
+            homeless: false,
+            home: (i32::from(x) + dx, i32::from(y)),
+            variation: 0,
+            homeless_despawn: false,
+        });
+    }
+}
+
+/// The module-8 "take me to this pylon" request the client sends when a player picks a destination
+/// off the travel map.
+fn pylon_travel_request(x: i16, y: i16, kind: u8) -> Vec<u8> {
+    let mut request = Vec::new();
+    request.extend_from_slice(&terrustia_proto::net_module::MODULE_PYLON.to_le_bytes());
+    request.push(2); // PlayerRequestsTeleport
+    request.extend_from_slice(&x.to_le_bytes());
+    request.extend_from_slice(&y.to_le_bytes());
+    request.push(kind);
+    request
+}
+
 /// A joining client is told about every pylon in the world.
 ///
 /// The client keeps its own travel list and draws the pylon map from it; nothing else on the wire
@@ -5905,30 +5953,25 @@ async fn a_lonely_pylon_will_not_carry_anybody() {
 
 /// A pylon with a town around it carries a player standing at another one.
 ///
-/// The gate is only half the feature; this is the half a player notices. Two housed residents by
-/// the destination, the traveller within reach of a pylon of their own, and the server moves them
-/// and tells everybody.
+/// The gate is only half the feature; this is the half a player notices. All five of the game's
+/// checks pass here (L2-21): both pylons sit in real jungle, both have their two housed residents,
+/// neither is a temple pylon, so the traveller within reach of their own working pylon is moved and
+/// everybody is told. This is the scenario the earlier attempt under-built (the source pylon had no
+/// townsfolk and neither pylon was in its biome), which is why it regressed.
 #[tokio::test]
 async fn a_pylon_with_a_town_around_it_carries_a_player() {
     const JUNGLE: u8 = 1;
-    const GUIDE: i32 = 22;
-    const MERCHANT: i32 = 17;
     let addr = start_with(Config::default(), |world| {
-        // Where the traveller starts, near spawn, and where they are going.
-        plant_pylon(world, 400, 320, JUNGLE);
+        // Both pylons need to be in real jungle, and both need their townsfolk: the destination so
+        // it accepts arrivals, the source so it works as a place to leave from. Lay the jungle
+        // first, then plant the pylons on top, so a pylon's own tiles are not overwritten (a pylon
+        // whose tile is no longer a pylon is dropped from the travel network).
+        lay_jungle_around(world, 300, 300);
+        lay_jungle_around(world, 400, 320);
         plant_pylon(world, 300, 300, JUNGLE);
-        // Two residents living beside the destination pylon.
-        for (net_id, dx) in [(GUIDE, 0), (MERCHANT, 6)] {
-            world.town_npcs.push(terrustia::world::objects::TownNpc {
-                net_id,
-                name: String::from("Somebody"),
-                position: ((300 + dx) as f32 * 16.0, 300.0 * 16.0),
-                homeless: false,
-                home: (300 + dx, 300),
-                variation: 0,
-                homeless_despawn: false,
-            });
-        }
+        plant_pylon(world, 400, 320, JUNGLE);
+        house_two_townsfolk(world, 300, 300);
+        house_two_townsfolk(world, 400, 320);
     })
     .await;
 
@@ -5937,14 +5980,11 @@ async fn a_pylon_with_a_town_around_it_carries_a_player() {
     // matter, but being in the world's other half would.
     client.walk_to_tile(400, 316).await.unwrap();
 
-    let mut request = Vec::new();
-    request.extend_from_slice(&terrustia_proto::net_module::MODULE_PYLON.to_le_bytes());
-    request.push(2);
-    request.extend_from_slice(&300i16.to_le_bytes());
-    request.extend_from_slice(&300i16.to_le_bytes());
-    request.push(JUNGLE);
     client
-        .send(&frame(id::NET_MODULES, &request))
+        .send(&frame(
+            id::NET_MODULES,
+            &pylon_travel_request(300, 300, JUNGLE),
+        ))
         .await
         .unwrap();
 
@@ -5975,6 +6015,101 @@ async fn a_pylon_with_a_town_around_it_carries_a_player() {
         i32::from(JUNGLE),
         "the client colours the effect by network"
     );
+}
+
+/// A pylon whose ground is no longer its biome will not carry anyone to it (L2-21 check 4,
+/// `DoesPylonAcceptTeleportation`). This is one of the three checks the old handler skipped: before
+/// it, a jungle pylon standing in plain forest carried players just the same. Everything else here
+/// is valid (both pylons have their townsfolk, the source is real jungle), so the refusal can only
+/// be the destination's biome.
+#[tokio::test]
+async fn a_pylon_out_of_its_biome_does_not_carry() {
+    const JUNGLE: u8 = 1;
+    const STONE: u16 = 1; // in no biome tile list, so the destination reads as plain forest
+    let addr = start_with(Config::default(), |world| {
+        // The destination: a jungle pylon whose scan box is plain stone, not jungle. The source: a
+        // fully working jungle pylon, far enough right that its jungle cannot reach the
+        // destination's scan box (169 tiles wide), so only the destination fails the biome gate.
+        // Lay the ground first and plant each pylon on top, so their own tiles are not overwritten
+        // (a pylon whose tile is no longer a pylon is dropped from the travel network).
+        fill_block(world, 300 - 88, 300 - 66, 300 + 88, 300 + 66, STONE);
+        lay_jungle_around(world, 520, 320);
+        plant_pylon(world, 300, 300, JUNGLE);
+        plant_pylon(world, 520, 320, JUNGLE);
+        house_two_townsfolk(world, 300, 300);
+        house_two_townsfolk(world, 520, 320);
+    })
+    .await;
+
+    let mut client = join(addr, "traveller").await;
+    client.walk_to_tile(520, 316).await.unwrap();
+    let start = client.position();
+
+    client
+        .send(&frame(
+            id::NET_MODULES,
+            &pylon_travel_request(300, 300, JUNGLE),
+        ))
+        .await
+        .unwrap();
+
+    let moved = client
+        .try_wait_for(
+            "a teleport",
+            |event| matches!(event, terrustia_client::Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(
+        moved.is_none(),
+        "a pylon out of its biome carried a player anyway"
+    );
+    assert_eq!(client.position(), start);
+}
+
+/// A pylon you are standing at that has lost its own townsfolk cannot be used to leave, even when
+/// the destination is perfectly valid (L2-21 check 5, the source loop). Before the fix the source
+/// only had to exist, not to work: being near any pylon was enough. Here the destination has both
+/// its townsfolk and its jungle, so the only thing wrong is the source's empty houses.
+#[tokio::test]
+async fn a_source_pylon_without_townsfolk_does_not_carry() {
+    const JUNGLE: u8 = 1;
+    let addr = start_with(Config::default(), |world| {
+        // Both pylons stand in real jungle, but only the destination has residents. The source, the
+        // one the traveller is stood at, has none. Lay the jungle first and plant the pylons on top,
+        // so their own tiles are not overwritten (a pylon whose tile is gone is dropped).
+        lay_jungle_around(world, 300, 300);
+        lay_jungle_around(world, 400, 320);
+        plant_pylon(world, 300, 300, JUNGLE);
+        plant_pylon(world, 400, 320, JUNGLE);
+        house_two_townsfolk(world, 300, 300);
+    })
+    .await;
+
+    let mut client = join(addr, "traveller").await;
+    client.walk_to_tile(400, 316).await.unwrap();
+    let start = client.position();
+
+    client
+        .send(&frame(
+            id::NET_MODULES,
+            &pylon_travel_request(300, 300, JUNGLE),
+        ))
+        .await
+        .unwrap();
+
+    let moved = client
+        .try_wait_for(
+            "a teleport",
+            |event| matches!(event, terrustia_client::Event::Other(f) if f.id == id::TELEPORT_ENTITY),
+            Duration::from_millis(800),
+        )
+        .await;
+    assert!(
+        moved.is_none(),
+        "a pylon with no townsfolk of its own carried a player away anyway"
+    );
+    assert_eq!(client.position(), start);
 }
 
 /// A pylon placed on this server has to still be there after a save, or a restart wipes the
