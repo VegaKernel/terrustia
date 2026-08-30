@@ -134,6 +134,11 @@ def parse_dispatch_set():
 _ENCODER_PAT = re.compile(r"PacketWriter::new\(\s*(?:crate::)?id::([A-Z_0-9]+)\s*\)")
 _EMPTY_PAT = re.compile(r"(?:packets::)?empty\(\s*id::([A-Z_0-9]+)\s*\)")
 _RELAY_PAT = re.compile(r"(?:rewrite_owner|verbatim)\(\s*(?:id::)?(?:crate::)?id::([A-Z_0-9]+)")
+# A handful of packets share one payload between two message ids (SyncItem/SpawnInstancedItem is
+# the example in items.rs): the shared body lives in a private `encode_as(message_id: u8)` helper
+# that itself calls `PacketWriter::new(message_id)` with a variable, so `_ENCODER_PAT` above cannot
+# see the id there. The call site handing that helper its literal `id::XXX` is the real evidence.
+_ENCODE_AS_PAT = re.compile(r"\bencode_as\(\s*id::([A-Z_0-9]+)\s*\)")
 
 
 def parse_encoder_names():
@@ -141,6 +146,7 @@ def parse_encoder_names():
     for f in list(PROTO_DIR.glob("*.rs")) + sorted(SERVER_DIR.glob("*.rs")):
         text = f.read_text()
         names |= set(_ENCODER_PAT.findall(text))
+        names |= set(_ENCODE_AS_PAT.findall(text))
         for line in text.splitlines():
             if "fn empty(" in line:
                 continue
