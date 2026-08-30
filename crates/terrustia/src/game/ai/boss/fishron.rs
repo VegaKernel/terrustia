@@ -187,6 +187,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                     ),
                     velocity: (0.0, 0.0),
                     parent: None,
+                    ai: [None; 4],
                 });
             }
             npc.ai[2] += 1.0;
@@ -227,6 +228,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                         perp.1 * FISHRON_BURST_LATER_SPRAY_SPEED,
                     ),
                     parent: None,
+                    ai: [None; 4],
                 });
             }
 

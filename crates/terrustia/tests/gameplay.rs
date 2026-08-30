@@ -1523,8 +1523,16 @@ async fn a_dead_npc_drops_its_coin_value() {
         .await
         .expect("no coins dropped");
     if let Event::ItemSynced(item) = event {
-        assert_eq!(item.item.id, 71, "60 copper should drop copper coins");
-        assert_eq!(item.item.stack, 60);
+        // The drop is varied now (`NPC.NPCLoot_DropMoney`: a -20%..+75% base plus jackpots), so a
+        // zombie's 60 copper comes out as some copper, or a little silver plus copper once the roll
+        // carries it past a hundred, rather than exactly sixty copper. It stays coins, and a small
+        // one: never gold or platinum off sixty base.
+        assert!(
+            (71..=72).contains(&item.item.id),
+            "a zombie's coins are copper or, after a high roll, silver: got item {}",
+            item.item.id
+        );
+        assert!(item.item.stack >= 1, "a coin stack is never empty");
     }
 }
 

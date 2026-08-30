@@ -88,10 +88,14 @@ pub mod perm {
     pub const PANEL_CONSOLE: Permission = Permission("panel.console");
 
     // admin.* — changing who is allowed to do what.
-    /// Edit a group's own permission set, and move an account between groups. Deliberately powerful
-    /// and deliberately not handed to `admin` by default — see [`super::defaults`].
+    /// Edit a group's own permission set: add or remove a permission string from it. Deliberately
+    /// powerful and deliberately not handed to `admin` by default (see [`super::defaults`]). Does
+    /// *not* gate moving an account between groups; that is [`Self::ADMIN_ACCOUNTS`] (`console.rs`'s
+    /// `"group"` arm and the panel's `set_account_group` route both check that one instead).
     pub const ADMIN_GROUPS: Permission = Permission("admin.groups");
-    /// Create, delete and list accounts, without touching what any group may do.
+    /// Create, delete and list accounts, and move an account between groups (`/group`, the panel's
+    /// `set_account_group`/`delete_account` routes), all without touching what any group itself may
+    /// do, which stays gated behind [`Self::ADMIN_GROUPS`].
     pub const ADMIN_ACCOUNTS: Permission = Permission("admin.accounts");
     /// Read the audit log.
     pub const ADMIN_AUDIT: Permission = Permission("admin.audit");

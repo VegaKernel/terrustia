@@ -189,6 +189,27 @@ pub struct World {
     /// house is still there — with the same name — after a restart.
     pub town_npcs: Vec<super::objects::TownNpc>,
     pub shimmered_town_npcs: Vec<i32>,
+    /// The Lunar Pillars, as the file's own second `SaveNPCs` list remembers them: type and
+    /// position only, no name or home. Rebuilt from the live roster before every save
+    /// (`record_lunar_pillars`) and put back as live NPCs at startup (`restore_lunar_pillars`),
+    /// the same round trip `town_npcs` gets — without it a save mid-Lunar-Apocalypse drops the
+    /// pillars outright, and the next load's first tick reads their absence as every standing
+    /// tower having just been beaten.
+    pub saved_npcs: Vec<super::objects::SavedNpc>,
+    /// The Journey (creative) mode powers real vanilla persists per world -
+    /// `CreativePowerManager.SaveToWorld`'s six `IPersistentPerWorldContent` powers out of its
+    /// fifteen (`CreativePowerManager.cs:90-104` for the registration order each id comes from).
+    /// Mirrored from `self.journey` before every save and back again at startup, the same way
+    /// `town_npcs` mirrors the live roster; see `game/journey.rs`'s own module doc for why the
+    /// other nine powers have nothing to hold here.
+    pub journey_freeze_time: bool,
+    pub journey_freeze_rain: bool,
+    pub journey_freeze_wind: bool,
+    pub journey_stop_biome_spread: bool,
+    /// `ModifyTimeRate`'s raw 0.0-1.0 slider position, not the derived rate.
+    pub journey_time_rate_slider: f32,
+    /// `DifficultySliderPower`'s raw 0.0-1.0 slider position, not the derived multiplier.
+    pub journey_difficulty_slider: f32,
     /// How many of each banner's enemy have been killed, by banner index.
     ///
     /// On the world rather than the server because the save carries it: a hundred zombies killed
@@ -287,6 +308,13 @@ impl World {
             signs: Vec::new(),
             town_npcs: Vec::new(),
             shimmered_town_npcs: Vec::new(),
+            saved_npcs: Vec::new(),
+            journey_freeze_time: false,
+            journey_freeze_rain: false,
+            journey_freeze_wind: false,
+            journey_stop_biome_spread: false,
+            journey_time_rate_slider: 0.0,
+            journey_difficulty_slider: 0.0,
             banner_kills: std::collections::HashMap::new(),
             tile_entities: Vec::new(),
             next_tile_entity: 0,
@@ -503,6 +531,7 @@ impl World {
         self.town_npcs.clone_from(&source.town_npcs);
         self.shimmered_town_npcs
             .clone_from(&source.shimmered_town_npcs);
+        self.saved_npcs.clone_from(&source.saved_npcs);
         self.banner_kills.clone_from(&source.banner_kills);
         self.tile_entities.clone_from(&source.tile_entities);
         self.preserved.clone_from(&source.preserved);
@@ -553,6 +582,12 @@ impl World {
         self.tree_tops = source.tree_tops;
         self.num_clouds = source.num_clouds;
         self.next_tile_entity = source.next_tile_entity;
+        self.journey_freeze_time = source.journey_freeze_time;
+        self.journey_freeze_rain = source.journey_freeze_rain;
+        self.journey_freeze_wind = source.journey_freeze_wind;
+        self.journey_stop_biome_spread = source.journey_stop_biome_spread;
+        self.journey_time_rate_slider = source.journey_time_rate_slider;
+        self.journey_difficulty_slider = source.journey_difficulty_slider;
 
         // A copy is never served to anybody, so section caching is dead weight on it.
         self.dirty_sections.clear();
@@ -890,6 +925,13 @@ mod persistence {
             signs,
             town_npcs,
             shimmered_town_npcs,
+            saved_npcs,
+            journey_freeze_time,
+            journey_freeze_rain,
+            journey_freeze_wind,
+            journey_stop_biome_spread,
+            journey_time_rate_slider,
+            journey_difficulty_slider,
             banner_kills,
             tile_entities,
             next_tile_entity,
@@ -925,6 +967,25 @@ mod persistence {
             ("signs", Fate::Section, signs),
             ("town_npcs", Fate::Section, town_npcs),
             ("shimmered_town_npcs", Fate::Section, shimmered_town_npcs),
+            ("saved_npcs", Fate::Section, saved_npcs),
+            ("journey_freeze_time", Fate::Section, journey_freeze_time),
+            ("journey_freeze_rain", Fate::Section, journey_freeze_rain),
+            ("journey_freeze_wind", Fate::Section, journey_freeze_wind),
+            (
+                "journey_stop_biome_spread",
+                Fate::Section,
+                journey_stop_biome_spread,
+            ),
+            (
+                "journey_time_rate_slider",
+                Fate::Section,
+                journey_time_rate_slider,
+            ),
+            (
+                "journey_difficulty_slider",
+                Fate::Section,
+                journey_difficulty_slider,
+            ),
             ("tile_entities", Fate::Section, tile_entities),
             // --- carried in the header, but never changed while the server runs ---------------
             //

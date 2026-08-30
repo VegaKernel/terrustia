@@ -892,6 +892,7 @@ impl GameServer {
             let Some(npc) = self.npcs.get_mut(hit.target) else {
                 continue;
             };
+            // A townsperson's blow never crits (the melee-hit path skips the crit roll on purpose).
             let killed = npc.take_damage(hit.damage, hit.knockback, hit.direction);
             let (npc_type, center) = (npc.npc_type, npc.center());
             let value = if npc.from_statue {
@@ -914,12 +915,23 @@ impl GameServer {
             if let Some(index) = self.npcs.spawn(summon.npc_type, summon.position) {
                 if let Some(npc) = self.npcs.get_mut(index) {
                     npc.velocity = summon.velocity;
-                    // A boss part is raised with its side in the velocity's sign, and needs to
-                    // know which boss it belongs to.
+                    // A boss part is raised bound to the boss that asked for it and does not move
+                    // on its own; unless the caller pinned ai[0] outright, its side rides in the
+                    // velocity's sign, as Skeletron's hands are.
                     if let Some(owner) = summon.parent {
                         npc.follows_boss = Some(owner);
-                        npc.ai[0] = summon.velocity.0.signum();
                         npc.velocity = (0.0, 0.0);
+                        if summon.ai[0].is_none() {
+                            npc.ai[0] = summon.velocity.0.signum();
+                        }
+                    }
+                    // Whatever ai identity the caller pinned: a Wall Hungry's band in ai[0], a
+                    // saucer part's side in ai[1], a Moon Lord hand's in ai[2], a Pumpking blade's
+                    // phase in ai[3]. Seeded here before the part's own style ever runs.
+                    for (slot, value) in summon.ai.iter().enumerate() {
+                        if let Some(v) = value {
+                            npc.ai[slot] = *v;
+                        }
                     }
                 }
                 self.broadcast_npc(index);
@@ -1242,7 +1254,8 @@ impl GameServer {
     /// The invulnerability window is what makes this survivable: without it a player inside a
     /// zombie would take sixty hits a second rather than one every half second.
     pub(super) fn tick_contact_damage(&mut self) {
-        const IMMUNE_TICKS: i32 = 30;
+        // The difficulty the hostile-projectile curve is sampled at, read once for the whole tick.
+        let difficulty = self.effective_difficulty();
 
         for slot in 0..self.players.len() {
             let Some(player) = self.players[slot].as_ref() else {
@@ -1262,6 +1275,12 @@ impl GameServer {
                 crate::game::ai::PLAYER_WIDTH as f32,
                 crate::game::ai::PLAYER_HEIGHT as f32,
             );
+            // The push always points away from the attacker, measured off the player's centre, not
+            // its left edge. `Update_NPCCollision` (`Player.cs:31618`) and `Projectile.Damage`
+            // (`Projectile.cs:14894`): hitDirection is +1 when the attacker's centre is left of the
+            // player's centre, -1 when it is right. The old code inverted both and compared against
+            // the player's left edge, so contact knockback shoved the player the wrong way.
+            let player_centre = box_at.0 + box_size.0 / 2.0;
 
             // An enemy you are standing in.
             let hit = self.npcs.iter().find(|(_, npc)| {
@@ -1274,30 +1293,50 @@ impl GameServer {
                     && npc.position.1 + npc.height() > box_at.1
             });
             if let Some((index, npc)) = hit {
+                // Contact damage is the NPC's own `damage`, which `ScaleStats` has already scaled by
+                // difficulty at spawn, so no further multiplier here (`Player.cs:31623`, which reads
+                // `Main.npc[i].damage` straight, times a GetMeleeCollisionData multiplier we leave
+                // at one and a DamageVar the owning client rolls for itself).
                 let damage = npc.stats.damage;
-                let direction = if npc.center().0 < box_at.0 { -1 } else { 1 };
+                let direction = if npc.center().0 < player_centre {
+                    1
+                } else {
+                    -1
+                };
                 let npc_type = npc.npc_type;
-                self.hurt_player(
+                let hurt = self.hurt_player(
                     slot,
                     damage,
                     direction,
                     terrustia_proto::hurt::DeathReason::from_npc(i16::from(index)),
-                    IMMUNE_TICKS,
                 );
                 // Over half the roster leaves something behind as well as the damage, and for
-                // several of them that is the actual difficulty of the biome they live in.
-                self.apply_touch_debuffs(slot as u8, npc_type);
+                // several of them that is the actual difficulty of the biome they live in. The game
+                // only lands these when the hit itself lands (`Player.cs:31659-31661`, `StatusFromNPC`
+                // gated on `Hurt(...) > 0`), so a godmoded or already-immune player is spared them.
+                if hurt {
+                    self.apply_touch_debuffs(slot as u8, npc_type, difficulty);
+                }
                 continue;
             }
 
-            // Or something one of them threw.
+            // Or something one of them threw. Only hostile shots hurt a player: a friendly town-NPC
+            // musket ball that happens to overlap one does not (`Projectile.Damage`'s own
+            // `if (!hostile) return` at the top).
             let struck = self
                 .projectiles
                 .iter()
-                .find(|(_, p)| p.damage > 0 && p.overlaps(box_at, box_size))
+                .find(|(_, p)| p.stats.hostile && p.damage > 0 && p.overlaps(box_at, box_size))
                 .map(|(index, p)| (index, p.damage, p.center().0, p.projectile_type));
-            if let Some((index, damage, from_x, projectile_type)) = struck {
-                let direction = if from_x < box_at.0 { -1 } else { 1 };
+            if let Some((index, base_damage, from_x, projectile_type)) = struck {
+                // A hostile shot delivers `base * hostileDamageScaling(difficulty) * 2`, and the game
+                // applies both on the client at impact (`Projectile.cs:14916-14919`), not baked into
+                // the projectile. The wire carries the base (see `broadcast_projectile`), so a real
+                // client scales it once itself rather than twice.
+                let damage = (base_damage as f32
+                    * terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty)
+                    * 2.0) as i32;
+                let direction = if from_x < player_centre { 1 } else { -1 };
                 self.hurt_player(
                     slot,
                     damage,
@@ -1306,7 +1345,6 @@ impl GameServer {
                         index as i16,
                         projectile_type as i16,
                     ),
-                    IMMUNE_TICKS,
                 );
                 // A projectile with a hit budget spends one, and dies when it runs out.
                 let spent = self.projectiles.get_mut(index).is_some_and(|p| {
@@ -1377,7 +1415,15 @@ impl GameServer {
                 continue;
             };
             let taken = damage_taken(damage, resident.defense, false);
-            let direction = if from_x < at.0 { -1 } else { 1 };
+            // hitDirection points away from the attacker, off the resident's centre, as everywhere
+            // else (`Player.cs:31618`): the old form inverted it and measured off the left edge. It
+            // is inert while the knockback is zero, but correct for when it is not. The knockback
+            // itself, and the global 30-tick immune clock this loop runs on, stay deliberate
+            // simplifications of the town-casualty path: the game strikes a townsperson through the
+            // attacking enemy's own AI, which carries a per-enemy contact knockback this server does
+            // not model.
+            let resident_centre = at.0 + resident.width() / 2.0;
+            let direction = if from_x < resident_centre { 1 } else { -1 };
             let (killed, name) = (
                 resident.take_damage(taken, 0.0, direction),
                 resident.stats.name,
@@ -1422,28 +1468,35 @@ impl GameServer {
     }
 
     /// Take health off a player, tell everyone, and announce a death if it was fatal.
+    ///
+    /// Returns whether the hit actually landed, so the caller knows whether to follow it with a
+    /// touch debuff (the game only applies those when `Hurt` returned damage).
     fn hurt_player(
         &mut self,
         slot: usize,
         damage: i32,
         direction: i8,
         reason: terrustia_proto::hurt::DeathReason,
-        immune_ticks: i32,
-    ) {
+    ) -> bool {
         // Journey mode's `Godmode`. Real vanilla's own `creativeGodMode` gates apply client-side
         // (`Player.cs:31557`/`38486`/`39107`), since most damage in that game is client-decided —
         // this is the one place *this* server decides damage on a player's behalf at all (NPC
         // contact and NPC-thrown projectiles, this function's only two call sites), so it is the
         // one place this server needs its own gate to match.
         if self.journey.is_godmode(slot as u8) {
-            return;
+            return false;
         }
         let Some(player) = self.players[slot].as_mut() else {
-            return;
+            return false;
         };
         let taken = damage.max(1) as i16;
         player.life -= taken;
-        player.immune_ticks = immune_ticks;
+        // The invulnerability window, from `Hurt` (`Player.cs:38672`): a real hit gives forty ticks,
+        // a bare one-damage hit only twenty. `longInvince` (a Cross-Necklace-class accessory) would
+        // double both to eighty and forty, but the server does not track player accessories, so that
+        // doubling is a documented gap rather than modelled. This was a flat thirty before, so every
+        // enemy hit a player slightly too often and a chip-damage hit far too often.
+        player.immune_ticks = if taken == 1 { 20 } else { 40 };
         let died = player.life <= 0;
         if died {
             player.life = 0;
@@ -1475,6 +1528,7 @@ impl GameServer {
         {
             self.broadcast(frame, None);
         }
+        true
     }
 
     /// Tell everyone a projectile is gone, and free its slot.
@@ -1873,8 +1927,21 @@ impl GameServer {
         let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
+        // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
+        let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
         self.broadcast_npc_death(index);
-        self.drop_coins(value, center);
+        // An expert boss's coins ride inside its treasure bag, so the bag's own drop zeroes the
+        // NPC's money (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0` sets `npc.value = 0f`,
+        // `CommonCode.cs:31`). Without this an expert boss paid out both the loose coins and the
+        // bag that already holds them.
+        let value = if self.is_expert()
+            && terrustia_proto::conditional_drops::treasure_bag(npc_type).is_some()
+        {
+            0.0
+        } else {
+            value
+        };
+        self.drop_coins(value, center, midas);
         self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
@@ -2030,6 +2097,7 @@ impl GameServer {
             // than re-checked only from `one_from`'s own loop.
             self.drop_bundled_companion(pick, center);
         }
+        let treasure_bag = terrustia_proto::conditional_drops::treasure_bag(npc_type);
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
             // rules (`CommonDrop`/`ByCondition`'s own `chanceNumerator`) roll `M`-in-`N` instead —
@@ -2038,6 +2106,13 @@ impl GameServer {
             if rule.one_in > 1
                 && !rand::Rng::random_ratio(&mut self.rng, rule.numerator, rule.one_in)
             {
+                continue;
+            }
+            // The expert treasure bag is instanced, not shared: one for each interacting player,
+            // sent only to them (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`). The rest are
+            // ordinary world drops everybody can see and race for.
+            if Some(rule.item) == treasure_bag {
+                self.drop_instanced_bag(i32::from(rule.item), center);
                 continue;
             }
             let stack = if rule.max > rule.min {
@@ -2128,27 +2203,76 @@ impl GameServer {
 
     /// Scatter an NPC's coin value as item entities.
     ///
-    /// This is only the coin half of a death: it is universal and comes straight from the NPC's
-    /// `value`. What the thing was actually carrying is [`Self::drop_loot`].
-    fn drop_coins(&mut self, value: f32, center: (f32, f32)) {
-        let mut copper = value as i64;
-        if copper <= 0 {
+    /// Ported from `NPC.NPCLoot_DropMoney` (`NPC.cs:80436-80567`). The value is never paid at face:
+    /// it is varied (a base -20%..+75% roll plus a cascade of rarer jackpot bonuses), doubled up to
+    /// on a blood moon and raised by Midas, then peeled off largest-denomination-first into several
+    /// scattered stacks rather than one. The old code paid the raw value as one tidy pile of coins.
+    ///
+    /// Two disclosed narrowings. The luck double-roll (`num2 = 2` when a `luck` check passes, keep
+    /// the better or, for bad luck, worse of two rolls) is left out: the server does not track a
+    /// player's luck, so luck reads as zero and the roll happens once, which is the exact `luck ==
+    /// 0` behaviour. And the divide-into-more-stacks step is guarded to leave at least one coin of a
+    /// denomination it has entered, where source lets platinum/gold/silver divide to zero: that is a
+    /// latent spin loop and empty-item drop in source (only its copper branch guards it), unwanted
+    /// on this server's packet path.
+    fn drop_coins(&mut self, value: f32, center: (f32, f32), midas: bool) {
+        if value <= 0.0 {
             return;
         }
-        // Split into platinum, gold, silver and copper, largest denomination first.
-        for (tier, item) in COIN_ITEMS.iter().enumerate().rev() {
-            let unit = 100i64.pow(tier as u32);
-            let count = copper / unit;
-            if count == 0 {
-                continue;
+        let mut num = value;
+        if midas {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 30..=50) as f32 * 0.01;
+        }
+        num *= 1.0 + rand::Rng::random_range(&mut self.rng, -20..=75) as f32 * 0.01;
+        // The jackpot cascade: each rarer than the last, and each worth a little more.
+        for (one_in, lo, hi) in [
+            (2u32, 5i32, 10i32),
+            (4, 10, 20),
+            (8, 15, 30),
+            (16, 20, 40),
+            (32, 25, 50),
+            (64, 50, 100),
+        ] {
+            if rand::Rng::random_ratio(&mut self.rng, 1, one_in) {
+                num *= 1.0 + rand::Rng::random_range(&mut self.rng, lo..=hi) as f32 * 0.01;
             }
-            copper -= count * unit;
-            let stack = count.min(i64::from(i16::MAX)) as i16;
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(*item, stack, 0), (center.0, center.1))
-            {
-                self.broadcast_item(index);
+        }
+        if self.world.blood_moon {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 0..=100) as f32 * 0.01;
+        }
+
+        // Peel denominations off the top, scattering each into its own stack, high to low: copper
+        // 71, silver 72, gold 73, platinum 74.
+        while num as i64 > 0 {
+            let (unit, item, second_div_max): (f32, i32, i32) = if num > 1_000_000.0 {
+                (1_000_000.0, 74, 3)
+            } else if num > 10_000.0 {
+                (10_000.0, 73, 3)
+            } else if num > 100.0 {
+                (100.0, 72, 3)
+            } else {
+                (1.0, 71, 4)
+            };
+            let mut count = (num / unit) as i64;
+            if count > 50 && rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=3));
+            }
+            if rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=second_div_max));
+            }
+            // Source only floors the copper branch at one; flooring every branch is what keeps the
+            // loop from stalling when a divide zeroes a higher denomination it has already entered.
+            let count = count.max(1);
+            num -= unit * count as f32;
+            // Platinum caps a stack at 999 in source; the others never approach the i16 limit but
+            // are clamped for safety all the same.
+            let mut left = count;
+            while left > 0 {
+                let stack = left.min(999).min(i64::from(i16::MAX)) as i16;
+                left -= i64::from(stack);
+                if let Some(index) = self.items.spawn(ItemStack::new(item, stack, 0), center) {
+                    self.broadcast_item(index);
+                }
             }
         }
     }
@@ -2260,11 +2384,19 @@ impl GameServer {
     /// The world file's NPC section used to be carried through untouched, which meant every
     /// resident was a session-long guest: their name was regenerated on the next start and their
     /// house forgotten.
+    ///
+    /// The Travelling Merchant is deliberately excluded: `WorldFile.SaveNPCs`'s own resident loop
+    /// skips him by type (`nPC.type != 368`, `WorldFile.cs:1724`), because he is not a resident at
+    /// all — he arrives and leaves on his own schedule, and saving him into section 4 would have
+    /// him greet a reloaded world already standing in someone's yard rather than arriving properly
+    /// the next time he is due.
     pub(super) fn record_town_npcs(&mut self) {
         let residents: Vec<crate::world::objects::TownNpc> = self
             .npcs
             .iter()
-            .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+            .filter(|(_, npc)| {
+                npc.stats.town_npc && npc.is_alive() && npc.npc_type != TRAVELLING_MERCHANT
+            })
             .map(|(_, npc)| {
                 let home = npc.home.unwrap_or((0, 0));
                 crate::world::objects::TownNpc {
@@ -2274,7 +2406,11 @@ impl GameServer {
                     homeless: npc.home.is_none(),
                     home,
                     variation: npc.town_variation,
-                    homeless_despawn: false,
+                    // Carried from the live NPC rather than hardcoded: this server has no
+                    // despawn-timer routine that ever sets it, but a value a load decoded (a real
+                    // vanilla world saved mid-eviction) must still round-trip rather than being
+                    // silently reset to "not leaving" on this session's first save.
+                    homeless_despawn: npc.homeless_despawn,
                 }
             })
             .collect();
@@ -2299,6 +2435,7 @@ impl GameServer {
                 live.given_name = npc.name.clone();
                 live.town_variation = npc.variation;
                 live.home = (!npc.homeless).then_some(npc.home);
+                live.homeless_despawn = npc.homeless_despawn;
                 live.dirty = true;
             }
             restored += 1;
@@ -2307,6 +2444,129 @@ impl GameServer {
         if restored > 0 {
             info!(residents = restored, "the town's residents are back");
         }
+    }
+
+    /// Copy the live Lunar Pillars into the world, matching `WorldFile.SaveNPCs`'s second loop
+    /// (`WorldFile.cs:1745-1755`, gated on `NPCID.Sets.SavesAndLoads` - `NPCID.cs:4807`, which in
+    /// this build's target version names only the four pillars).
+    ///
+    /// Without this, whatever a save carries in the second list is whatever was in the file when
+    /// it was opened - typically nothing, since a freshly generated world has no pillars at all -
+    /// and the next load's first `tick_lunar` reads "no pillar standing" against a `tower_active_*`
+    /// flag that still says one is, and marks it defeated (`L3-02`). Called alongside
+    /// [`Self::record_town_npcs`], right before every save.
+    pub(super) fn record_lunar_pillars(&mut self) {
+        self.world.saved_npcs = self
+            .npcs
+            .iter()
+            .filter(|(_, npc)| {
+                crate::game::lunar::PILLARS.contains(&npc.npc_type) && npc.is_alive()
+            })
+            .map(|(_, npc)| crate::world::objects::SavedNpc {
+                net_id: i32::from(npc.npc_type),
+                position: npc.position,
+            })
+            .collect();
+    }
+
+    /// Put a loaded world's standing Lunar Pillars back as live NPCs.
+    ///
+    /// Called once at startup, alongside [`Self::restore_town_npcs`] and before the first tick
+    /// (`GameServer::run`) - the whole point is to have them standing before `tick_lunar` ever
+    /// runs, or its own "a pillar that was active and is not standing has fallen" diff reads an
+    /// empty roster as every tower having just been beaten.
+    ///
+    /// Vanilla's own second `SaveNPCs` loop carries no shield/AI state (only
+    /// active/netID/position, `WorldFile.cs:1745-1755`), and this server's own event tracker
+    /// (`self.lunar`, distinct from the world's `lunar_apocalypse_up`/`tower_active_*` flags)
+    /// starts every session at `LunarState::default()`. Left there, the very first `tick_lunar`
+    /// would see `self.lunar.up == false` while the pillars are about to come back standing,
+    /// which both loses the sky's own memory of the fight being on, and, worse, means the branch
+    /// that starts the Moon Lord's countdown once the last pillar falls never fires, because it
+    /// is gated on `self.lunar.up`. So a restored pillar comes back at full shield strength (half
+    /// once the Moon Lord has already been beaten once), exactly as
+    /// [`Self::trigger_lunar_apocalypse`] would set it fresh.
+    pub(super) fn restore_lunar_pillars(&mut self) {
+        let saved = std::mem::take(&mut self.world.saved_npcs);
+        if saved.is_empty() {
+            self.world.saved_npcs = saved;
+            return;
+        }
+
+        self.lunar.up = true;
+        self.lunar.countdown = 0;
+        let strength = if self.world.progress.downed_moon_lord {
+            crate::game::lunar::SHIELD_STRENGTH / 2
+        } else {
+            crate::game::lunar::SHIELD_STRENGTH
+        };
+        self.lunar.shields = [strength; 4];
+
+        let mut restored = 0usize;
+        for npc in &saved {
+            let Ok(npc_type) = u16::try_from(npc.net_id.max(0)) else {
+                continue;
+            };
+            if !crate::game::lunar::PILLARS.contains(&npc_type) {
+                // Not a type this build's `read_town_npcs` should ever have put here - the second
+                // list is gated on `NPCID.Sets.SavesAndLoads`, which names only the four pillars -
+                // but a hand-edited or future-version file is not this reader's to trust blindly.
+                continue;
+            }
+            let Some(index) = self.npcs.spawn(npc_type, npc.position) else {
+                break; // out of slots
+            };
+            if let Some(live) = self.npcs.get_mut(index) {
+                live.shield = strength;
+                live.dirty = true;
+            }
+            restored += 1;
+        }
+        self.world.saved_npcs = saved;
+        if restored > 0 {
+            info!(
+                pillars = restored,
+                "the lunar apocalypse's pillars are back"
+            );
+        } else {
+            // Nothing usable came back. Do not leave the event flagged "up" with no pillars to
+            // show for it, or the very first tick starts the Moon Lord countdown out of nowhere.
+            self.lunar.up = false;
+            self.lunar.shields = [0; 4];
+        }
+    }
+
+    /// Copy the live Journey powers into the world, so a save records what a Journey world's
+    /// players actually set (`L3-23`).
+    ///
+    /// Mirrors `self.journey`'s six `IPersistentPerWorldContent` fields onto `world.journey_*`
+    /// (`wld_save::write_journey_powers` reads only the world's own fields, the same separation
+    /// `record_town_npcs`/`world.town_npcs` uses), right before every save.
+    pub(super) fn record_journey_powers(&mut self) {
+        let j = &self.journey;
+        let w = &mut self.world;
+        w.journey_freeze_time = j.freeze_time;
+        w.journey_freeze_rain = j.freeze_rain;
+        w.journey_freeze_wind = j.freeze_wind;
+        w.journey_stop_biome_spread = j.stop_biome_spread;
+        w.journey_time_rate_slider = j.time_rate_slider;
+        w.journey_difficulty_slider = j.difficulty_slider;
+    }
+
+    /// Put a loaded world's Journey powers back into `self.journey`.
+    ///
+    /// Called once at startup, alongside `restore_town_npcs`/`restore_lunar_pillars`. Without
+    /// this the toggles and sliders `wld::read_journey_powers` decoded off the file never reach
+    /// anywhere a routine (`tick_spread`'s own Stop Biome Spread gate, the weather tick's
+    /// freeze checks, `GameServer::tick`'s time-rate multiplier) actually reads.
+    pub(super) fn restore_journey_powers(&mut self) {
+        let w = &self.world;
+        self.journey.freeze_time = w.journey_freeze_time;
+        self.journey.freeze_rain = w.journey_freeze_rain;
+        self.journey.freeze_wind = w.journey_freeze_wind;
+        self.journey.stop_biome_spread = w.journey_stop_biome_spread;
+        self.journey.time_rate_slider = w.journey_time_rate_slider;
+        self.journey.difficulty_slider = w.journey_difficulty_slider;
     }
 
     /// Who is waiting to move in, given what the world has been through and what people carry.
@@ -3824,8 +4084,23 @@ impl GameServer {
     }
 
     /// Land whatever an enemy leaves behind on the player it just touched.
-    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16) {
-        let expert = self.is_expert();
+    ///
+    /// The game applies a touch debuff with a local `AddBuff` (`Player.cs:5259`, `StatusFromNPC`),
+    /// which runs it through `AddBuff_DetermineBuffTimeToAdd`: in expert mode and up, a debuff in
+    /// `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` is stretched by the `DebuffTimeMultiplier`
+    /// (`Player.cs:5426-5429`). A server that hands the client a raw packet-55 duration skips that
+    /// stretch (the client trusts a networked duration as-is), so an expert-world On Fire! or Poison
+    /// off a touch lasted half as long as the game intends and a master-world one two fifths. Pre-
+    /// multiply here so the wire duration already carries it.
+    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16, difficulty: f32) {
+        // `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` (`BuffID.cs:28`): the debuffs whose
+        // duration the harder modes stretch. The rest (a cosmetic or a non-scaling status) are sent
+        // at their rolled length whatever the difficulty.
+        const DIFFICULTY_EXTENDED: &[u16] = &[
+            20, 22, 23, 24, 30, 31, 32, 33, 35, 36, 39, 44, 46, 47, 69, 70, 80, 323, 324,
+        ];
+        let expert = difficulty >= 2.0;
+        let stretch = terrustia_proto::difficulty::debuff_time_multiplier(difficulty);
         for rule in terrustia_proto::touch_debuffs::on_touch(npc_type) {
             if rule.expert_only && !expert {
                 continue;
@@ -3833,11 +4108,14 @@ impl GameServer {
             if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
                 continue;
             }
-            let ticks = if rule.ticks.1 > rule.ticks.0 {
+            let mut ticks = if rule.ticks.1 > rule.ticks.0 {
                 rand::Rng::random_range(&mut self.rng, rule.ticks.0..=rule.ticks.1)
             } else {
                 rule.ticks.0
             };
+            if expert && DIFFICULTY_EXTENDED.contains(&rule.buff) {
+                ticks = (stretch * ticks as f32) as i32;
+            }
             if let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, rule.buff, ticks) {
                 self.broadcast(frame, None);
             }
@@ -4096,7 +4374,15 @@ impl GameServer {
     /// where somebody is standing and sits still where nobody is.
     pub(super) fn tick_spread(&mut self) {
         use crate::world::hardmode;
-        if !self.world.progress.hard_mode || !self.ticks.is_multiple_of(SPREAD_EVERY) {
+        // FIX-2 note (persistence lane, L3-15): the Journey "Stop Biome Spread" power
+        // (`AllowedToSpreadInfections = !power.Enabled`, `WorldGen.cs:72047-72052`, checked at
+        // every spread site including `WorldGen.cs:70240-70243`) now round-trips through the
+        // world file (`wld_save::write_journey_powers`), so it needs an effect to persist. This
+        // is the one-line gate; the rest of this function's spread mechanics are FIX-1's.
+        if !self.world.progress.hard_mode
+            || self.journey.stop_biome_spread
+            || !self.ticks.is_multiple_of(SPREAD_EVERY)
+        {
             return;
         }
         let here: Vec<(i32, i32)> = self
@@ -5179,6 +5465,44 @@ impl GameServer {
         }
     }
 
+    /// Drop an expert treasure bag: one per interacting player, sent only to them (packet 90).
+    ///
+    /// The game gives every player who fought the boss their own bag that nobody else sees or can
+    /// take (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`, `WorldItem.MakeInstanced`). This
+    /// server does not track which players interacted with a given boss, so it treats every playing
+    /// player as an interactor: a documented, strictly-more-generous narrowing. Each bag is a real
+    /// item slot at the boss's own position, but announced with `SpawnInstancedItem` to its one
+    /// owner rather than broadcast, so the others neither see it nor can race it. With nobody
+    /// present it falls back to an ordinary shared drop rather than being silently lost.
+    fn drop_instanced_bag(&mut self, item_id: i32, center: (f32, f32)) {
+        let owners: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| p.slot)
+            .collect();
+        if owners.is_empty() {
+            if let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) {
+                self.broadcast_item(index);
+            }
+            return;
+        }
+        for slot in owners {
+            let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) else {
+                debug!("item slots are full; a treasure bag was discarded");
+                break;
+            };
+            let Some(item) = self.items.get(index).copied() else {
+                continue;
+            };
+            let sync = SyncItem::dropped(index, item.position, item.item);
+            if let Ok(frame) = sync.encode_instanced() {
+                self.send(slot, frame);
+            }
+        }
+    }
+
     /// Drop whatever a broken tile yields, if it is a block with a simple drop.
     pub(super) fn spawn_tile_drop(
         &mut self,
@@ -5640,6 +5964,300 @@ impl GameServer {
             return;
         };
         self.broadcast_item(index);
+    }
+}
+
+#[cfg(test)]
+mod lunar_pillar_persistence {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(400, 300, "lunar pillar persistence probe")
+    }
+
+    /// L3-02's headline fixture: a save taken mid-Lunar-Apocalypse round-trips the four standing
+    /// pillars, and the event still resolves correctly afterwards — the last pillar falling still
+    /// starts the Moon Lord's countdown, rather than every tower reading as defeated the moment
+    /// the reloaded world's first tick runs.
+    ///
+    /// Fails against the bug this exists to catch: reverting `read_town_npcs`/`write_town_npcs`
+    /// to drop the second `SaveNPCs` list (so `record_lunar_pillars` has nothing to write and
+    /// `restore_lunar_pillars` has nothing to restore) turns this red at the first `tick_lunar`
+    /// assertion below — with no pillars restored, `towers.0..3` all read `false` against a
+    /// `tower_active_*` of `true`, and every tower is marked downed on the very first tick after
+    /// the reload.
+    #[test]
+    fn a_mid_apocalypse_save_round_trips_the_four_pillars_and_the_event_survives_a_reload() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.trigger_lunar_apocalypse();
+        assert_eq!(
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            4,
+            "the trigger itself must raise all four"
+        );
+        // `trigger_lunar_apocalypse` only spawns the NPCs; `tower_active_*` is set from the live
+        // roster by `tick_lunar` itself, exactly as an ordinary tick during the fight would.
+        server.tick_lunar();
+        assert!(server.world.progress.tower_active_solar);
+        assert!(server.world.progress.tower_active_vortex);
+        assert!(server.world.progress.tower_active_nebula);
+        assert!(server.world.progress.tower_active_stardust);
+        assert!(server.world.progress.lunar_apocalypse_up);
+
+        // What a real save does, in order (`save_world`/`save_world_in_background`).
+        server.record_town_npcs();
+        server.record_lunar_pillars();
+        assert_eq!(
+            server.world.saved_npcs.len(),
+            4,
+            "the live pillars must be captured onto the world before it is serialised"
+        );
+
+        let bytes = crate::world::wld_save::serialize(&server.world).expect("serialize");
+        let loaded = crate::world::wld::parse(&bytes).expect("parse");
+
+        let mut reloaded = GameServer::new(Config::default(), loaded);
+        // What `GameServer::run` does at startup, in order: residents, then the pillars, before
+        // the first tick can run `tick_lunar` and misread an empty roster as a defeat.
+        reloaded.restore_town_npcs();
+        reloaded.restore_lunar_pillars();
+        assert_eq!(
+            reloaded
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            4,
+            "all four pillars must come back as live NPCs"
+        );
+        assert!(
+            reloaded.lunar.up,
+            "the runtime event tracker must know the fight is still on, or the Moon Lord's \
+             countdown branch below never fires"
+        );
+
+        reloaded.tick_lunar();
+        let p = &reloaded.world.progress;
+        assert!(
+            !p.downed_tower_solar,
+            "a standing tower must not be marked downed by the first tick after a reload"
+        );
+        assert!(!p.downed_tower_vortex);
+        assert!(!p.downed_tower_nebula);
+        assert!(!p.downed_tower_stardust);
+        assert!(
+            p.tower_active_solar
+                && p.tower_active_vortex
+                && p.tower_active_nebula
+                && p.tower_active_stardust,
+            "and all four must still read as standing"
+        );
+        assert!(p.lunar_apocalypse_up, "the apocalypse is still up");
+
+        // The event still functions after the reload: killing the last standing pillar starts
+        // the Moon Lord's countdown, which is only possible because `self.lunar.up` came back
+        // `true` above rather than staying at `LunarState::default()`'s `false`.
+        let indices: Vec<u8> = reloaded
+            .npcs
+            .iter()
+            .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+            .map(|(i, _)| i)
+            .collect();
+        for index in indices {
+            reloaded.npcs.remove(index);
+        }
+        reloaded.tick_lunar();
+        assert!(!reloaded.lunar.up, "the last pillar has fallen");
+        assert!(
+            reloaded.lunar.countdown > 0,
+            "the Moon Lord's countdown must have started"
+        );
+    }
+
+    /// A world with no apocalypse in progress restores nothing and leaves the event tracker
+    /// alone — restoring pillars must not be a side effect on every ordinary world.
+    #[test]
+    fn a_world_with_no_pillars_restores_nothing() {
+        let world = tiny_world();
+        let mut server = GameServer::new(Config::default(), world);
+        server.restore_lunar_pillars();
+
+        assert!(!server.lunar.up);
+        assert_eq!(
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod town_npc_persistence {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(400, 300, "town npc persistence probe")
+    }
+
+    /// L3-29: the Travelling Merchant is a real, `town_npc: true` NPC type
+    /// (`terrustia-proto/src/npc_data.rs`), so without the exclusion he would pass
+    /// `record_town_npcs`'s own filter alongside any real resident. Vanilla's own `SaveNPCs`
+    /// explicitly skips him (`nPC.type != 368`, `WorldFile.cs:1724`) because he is not a
+    /// resident: he arrives and leaves on his own schedule.
+    #[test]
+    fn the_travelling_merchant_is_not_recorded_as_a_resident() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let guide = server.npcs.spawn(GUIDE, (100.0, 100.0)).expect("a slot");
+        let merchant = server
+            .npcs
+            .spawn(TRAVELLING_MERCHANT, (200.0, 200.0))
+            .expect("a slot");
+        assert!(server.npcs.get(merchant).unwrap().stats.town_npc);
+
+        server.record_town_npcs();
+
+        let types: Vec<i32> = server.world.town_npcs.iter().map(|n| n.net_id).collect();
+        assert_eq!(
+            types,
+            vec![i32::from(GUIDE)],
+            "only the real resident, never the Travelling Merchant"
+        );
+        let _ = guide;
+    }
+
+    /// L3-29's other half: a `homeless_despawn` flag a load decoded must survive
+    /// `record_town_npcs`, not be clobbered to `false` on the session's first save.
+    #[test]
+    fn a_loaded_homeless_despawn_flag_survives_a_re_record() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server.npcs.spawn(GUIDE, (50.0, 50.0)).expect("a slot");
+        // What `restore_town_npcs` would have set, from a file that decoded `homelessDespawn`.
+        server.npcs.get_mut(index).unwrap().homeless_despawn = true;
+
+        server.record_town_npcs();
+
+        assert!(
+            server.world.town_npcs[0].homeless_despawn,
+            "a despawn timer a load decoded must round-trip, not reset to false"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stop_biome_spread_gate {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::Tile;
+
+    /// Corrupt grass (`hardmode::spreads`) and ordinary grass (`hardmode::takeable`), the pair
+    /// `hardmode::spread` needs to actually convert something.
+    const CORRUPT: u16 = 23;
+    const GRASS: u16 = 2;
+
+    /// A checkerboard of corrupt and ordinary grass around the player, large enough to cover
+    /// every tile `tick_spread`'s own random pick (`SPREAD_RANGE`) could land on, so that with
+    /// the gate off a change is overwhelmingly likely within a handful of ticks and with it on
+    /// none can happen at all — the gate is what this test is about, not `hardmode::spread`'s own
+    /// odds, which its own module already covers.
+    fn world_with_hardmode_and_a_player() -> (crate::world::World, (f32, f32)) {
+        let mut world = crate::world::World::empty(600, 600, "stop biome spread probe");
+        world.progress.hard_mode = true;
+        let (px, py): (i32, i32) = (300, 300);
+        for x in (px - 130)..=(px + 130) {
+            for y in (py - 130)..=(py + 130) {
+                let block = if (x + y).rem_euclid(2) == 0 {
+                    CORRUPT
+                } else {
+                    GRASS
+                };
+                world.set_tile(x, y, Tile::block(block));
+            }
+        }
+        (
+            world,
+            (
+                px as f32 * crate::game::npc::TILE,
+                py as f32 * crate::game::npc::TILE,
+            ),
+        )
+    }
+
+    fn with_a_player_at(mut server: GameServer, position: (f32, f32)) -> GameServer {
+        let (tx, _rx) = mpsc::channel(64);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        player.state = ConnState::Playing;
+        player.position = position;
+        server.players[0] = Some(player);
+        server
+    }
+
+    /// Counts how many tiles in the checkerboard no longer match the pattern it was built with -
+    /// the observable evidence that `hardmode::spread` actually ran and converted something.
+    fn drift_from_checkerboard(world: &crate::world::World) -> usize {
+        let (px, py): (i32, i32) = (300, 300);
+        let mut drifted = 0;
+        for x in (px - 130)..=(px + 130) {
+            for y in (py - 130)..=(py + 130) {
+                let want = if (x + y).rem_euclid(2) == 0 {
+                    CORRUPT
+                } else {
+                    GRASS
+                };
+                if world.tile(x, y).block != want {
+                    drifted += 1;
+                }
+            }
+        }
+        drifted
+    }
+
+    /// L3-15: with the power off, a hardmode world with a player standing in an infected area
+    /// spreads — the positive control proving the fixture itself is capable of a change, so the
+    /// negative test below is not merely "nothing happens here regardless."
+    #[test]
+    fn with_the_power_off_the_infection_spreads() {
+        let (world, position) = world_with_hardmode_and_a_player();
+        let mut server = with_a_player_at(GameServer::new(Config::default(), world), position);
+        assert!(!server.journey.stop_biome_spread, "off by default");
+
+        for _ in 0..50 {
+            server.tick_spread();
+        }
+
+        assert!(
+            drift_from_checkerboard(&server.world) > 0,
+            "a hardmode world saturated with corruption, with a player standing in it, must show \
+             some spread within fifty ticks"
+        );
+    }
+
+    /// The fix itself: with `journey.stop_biome_spread` on, the exact same fixture that spreads
+    /// above must not change a single tile, matching `AllowedToSpreadInfections = !power.Enabled`
+    /// (`WorldGen.cs:72047-72052`).
+    #[test]
+    fn with_the_power_on_nothing_spreads() {
+        let (world, position) = world_with_hardmode_and_a_player();
+        let mut server = with_a_player_at(GameServer::new(Config::default(), world), position);
+        server.journey.stop_biome_spread = true;
+
+        for _ in 0..50 {
+            server.tick_spread();
+        }
+
+        assert_eq!(
+            drift_from_checkerboard(&server.world),
+            0,
+            "Stop Biome Spread must hold the infection completely still"
+        );
     }
 }
 
@@ -6272,13 +6890,7 @@ mod godmode {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
 
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[0].as_ref().unwrap().life,
@@ -6293,7 +6905,7 @@ mod godmode {
         // godmode left off — the control case, so the test above is proving something rather
         // than passing regardless of whether the gate exists at all.
 
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
@@ -6302,17 +6914,11 @@ mod godmode {
     fn turning_godmode_off_again_lets_damage_through() {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 100, "still on");
 
         server.journey.set_godmode(0, false);
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
 
@@ -6327,13 +6933,150 @@ mod godmode {
         server.players[1] = Some(other);
 
         server.journey.set_godmode(0, true);
-        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[1].as_ref().unwrap().life,
             70,
             "slot 1 was never given godmode"
         );
+    }
+
+    /// A hostile shot lands `base * hostileDamageScaling(difficulty) * 2` where the game lands it,
+    /// at impact (`Projectile.cs:14916-14919`), and opens the full forty-tick window. The old path
+    /// pre-scaled the projectile at launch and omitted the flat doubling, so a base-one classic shot
+    /// delivered one where the game delivers two, and the immune window was a flat thirty.
+    #[test]
+    fn a_hostile_shot_does_double_damage_and_opens_the_full_window() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let pos = (1000.0, 1000.0);
+        {
+            let p = server.players[0].as_mut().unwrap();
+            p.position = pos;
+            p.immune_ticks = 0;
+            p.life = 200;
+            p.life_max = 200;
+        }
+        // A hostile Harpy Feather carrying one base damage, centred on the player.
+        let centre = (
+            pos.0 + crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            pos.1 + crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        server.projectiles.launch(38, centre, (0.0, 0.0), 1, 0);
+        server.tick_contact_damage();
+        let p = server.players[0].as_ref().unwrap();
+        assert_eq!(p.life, 198, "classic: base 1 * difficulty 1 * flat 2 = 2");
+        assert_eq!(p.immune_ticks, 40, "a real hit opens the full forty ticks");
+    }
+
+    /// The immune window follows the damage: a bare one-damage hit only opens twenty ticks, and a
+    /// godmoded hit reports no strike at all so no touch debuff can follow it (`Player.cs:38672`,
+    /// and the `StatusFromNPC` gate at `Player.cs:31659-31661`).
+    #[test]
+    fn the_immune_window_and_the_strike_report_follow_the_damage() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let chip = server.hurt_player(0, 1, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(chip, "the chip hit still landed");
+        assert_eq!(server.players[0].as_ref().unwrap().immune_ticks, 20);
+
+        server.journey.set_godmode(0, true);
+        let blocked = server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(
+            !blocked,
+            "a godmoded hit reports no strike, so no debuff follows"
+        );
+    }
+
+    /// An expert boss hands every player its own bag over packet 90 and drops no loose coins (they
+    /// ride inside the bag). The old path broadcast one shared bag as an ordinary item and paid the
+    /// coins on top, so on a two-player server one player got the bag and the boss double-paid.
+    #[test]
+    fn an_expert_boss_instances_a_bag_per_player_and_drops_no_loose_coins() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        let mut rxs = Vec::new();
+        for slot in 0u8..2 {
+            let (tx, rx) = mpsc::channel(64);
+            let mut p = Player::new(slot, format!("127.0.0.1:{}", slot + 1).parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[slot as usize] = Some(p);
+            rxs.push(rx);
+        }
+        // Eye of Cthulhu (type 4, bag 3319), killed while carrying a fat coin value.
+        let index = server
+            .npcs
+            .spawn(4, (1000.0, 1000.0))
+            .expect("the eye spawns");
+        server.npc_died(index, 4, (1000.0, 1000.0), 10_000.0);
+
+        for (slot, rx) in rxs.iter_mut().enumerate() {
+            let mut bag = false;
+            let mut coin = false;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() < 3 {
+                    continue;
+                }
+                let item_id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                if frame[2] == terrustia_proto::id::SPAWN_INSTANCED_ITEM && item_id == 3319 {
+                    bag = true;
+                }
+                if frame[2] == terrustia_proto::id::SYNC_ITEM && (71..=74).contains(&item_id) {
+                    coin = true;
+                }
+            }
+            assert!(
+                bag,
+                "player {slot} should be sent its own instanced treasure bag"
+            );
+            assert!(!coin, "an expert boss with a bag drops no loose coins");
+        }
+    }
+
+    /// Coins are varied per roll, not paid at face (`NPC.NPCLoot_DropMoney`, `NPC.cs:80436`). The
+    /// old path paid the exact value as one pile every time; the game rolls a -20%..+75% base plus
+    /// jackpots, so different rolls of the same value pay different amounts.
+    #[test]
+    fn coin_drops_are_varied_not_paid_at_face() {
+        use rand::SeedableRng;
+        const FACE: f32 = 1000.0;
+        let total_for = |seed: u64| -> i64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            let (tx, mut rx) = mpsc::channel(256);
+            let mut p = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[0] = Some(p);
+            server.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            server.drop_coins(FACE, (1000.0, 1000.0), false);
+            let mut total = 0i64;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() >= 23 && frame[2] == terrustia_proto::id::SYNC_ITEM {
+                    let id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                    let stack = i64::from(i16::from_le_bytes([frame[21], frame[22]]));
+                    let unit = match id {
+                        71 => 1,
+                        72 => 100,
+                        73 => 10_000,
+                        74 => 1_000_000,
+                        _ => 0,
+                    };
+                    total += stack * unit;
+                }
+            }
+            total
+        };
+        let (a, b, c) = (total_for(1), total_for(2), total_for(3));
+        assert!(a > 0 && b > 0 && c > 0, "coins should drop");
+        assert!(
+            a != b || b != c,
+            "the value is varied per roll, not paid at face"
+        );
+        for t in [a, b, c] {
+            let t = t as f32;
+            assert!(
+                (FACE * 0.5..=FACE * 5.0).contains(&t),
+                "within a sane band: {t}"
+            );
+        }
     }
 }
 
@@ -6614,18 +7357,60 @@ mod difficulty_slider {
         const QUEEN_BEE: u16 = 222;
 
         let (mut gentle, mut gentle_rx) = with_one_player(journey_at(0.0));
-        gentle.apply_touch_debuffs(0, QUEEN_BEE);
+        let gentle_difficulty = gentle.effective_difficulty();
+        gentle.apply_touch_debuffs(0, QUEEN_BEE, gentle_difficulty);
         assert!(
             gentle_rx.try_recv().is_err(),
             "a fresh Journey world is not expert, so no buff should be sent"
         );
 
         let (mut fierce, mut fierce_rx) = with_one_player(journey_at(1.0));
-        fierce.apply_touch_debuffs(0, QUEEN_BEE);
+        let fierce_difficulty = fierce.effective_difficulty();
+        fierce.apply_touch_debuffs(0, QUEEN_BEE, fierce_difficulty);
         assert!(
             fierce_rx.try_recv().is_ok(),
             "the slider at its top is expert, so the buff should be sent"
         );
+    }
+
+    /// A touch debuff in `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` lasts longer in expert.
+    /// NPC 141 lands a fixed six-hundred-tick Poisoned (buff 20, in that set) one touch in two, and
+    /// `DebuffTimeMultiplier` stretches it x2 in expert. The server sends packet 55 with a raw
+    /// duration the client trusts as-is, so it must pre-multiply: the same base roll must go out at
+    /// six hundred in classic and twelve hundred in expert. Before this the wire duration was raw,
+    /// so an expert-world poison off a touch ran half as long as the game intends.
+    #[test]
+    fn a_difficulty_extended_touch_debuff_is_stretched_on_the_wire_in_expert() {
+        use rand::SeedableRng;
+        const POISONER: u16 = 141;
+        let ticks = |f: &[u8]| i32::from_le_bytes([f[6], f[7], f[8], f[9]]);
+        for seed in 0..64u64 {
+            let (mut classic, mut classic_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            classic.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            classic.apply_touch_debuffs(0, POISONER, 1.0);
+
+            let (mut expert, mut expert_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            expert.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            expert.apply_touch_debuffs(0, POISONER, 2.0);
+
+            // The one-in-two roll consumes the rng identically under the same seed, so either both
+            // land the debuff or neither does.
+            if let Ok(classic_frame) = classic_rx.try_recv() {
+                let expert_frame = expert_rx
+                    .try_recv()
+                    .expect("the same seed lands the same one-in-two roll");
+                assert_eq!(
+                    ticks(&classic_frame),
+                    600,
+                    "classic keeps the base duration"
+                );
+                assert_eq!(ticks(&expert_frame), 1200, "expert doubles a Poisoned");
+                return;
+            }
+        }
+        panic!("no seed in the range landed the one-in-two poison");
     }
 
     /// `note_army_kill`'s own `expert` local — a plain Old One's Army goblin (any id in

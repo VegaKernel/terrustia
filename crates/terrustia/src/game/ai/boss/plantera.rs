@@ -72,6 +72,7 @@ pub fn plantera(
                 position: at,
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
     }
@@ -257,6 +258,7 @@ pub fn plantera(
                 position: at,
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
     }
@@ -283,6 +285,7 @@ pub fn plantera(
             position: (cx, cy),
             velocity: unit((dx, dy), PLANTERA_SPORE_SPEED),
             parent: None,
+            ai: [None; 4],
         });
     }
     out

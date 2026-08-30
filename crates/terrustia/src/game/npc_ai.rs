@@ -26,6 +26,18 @@ pub struct Spawn {
     /// A routine cannot know its own slot, so it sets [`Spawn::OWN_PARENT`] and the caller — which
     /// does know — fills the real one in.
     pub parent: Option<u8>,
+    /// Initial `ai[0..4]` slots to stamp onto the new NPC, the way vanilla's `NewNPC` seeds a
+    /// part's identity before its style ever runs. Each `Some(v)` pins that slot; each `None`
+    /// leaves it at the spawn default of zero.
+    ///
+    /// The one exception is `ai[0]` on a parented spawn: left `None`, it still falls back to the
+    /// side carried in the velocity's sign (`velocity.0.signum()`), which is how a boss part with
+    /// no richer identity than "left or right" is raised. A part that needs more names the slot
+    /// outright here rather than smuggling one number through the velocity: a Moon Lord hand's side
+    /// in `ai[2]` (`NPC.cs:41648`), a saucer part's in `ai[1]` (`NPC.cs:36433`), a Wall Hungry's
+    /// fractional band in `ai[0]` (`NPC.cs:26197`), a Pumpking blade's phase in `ai[3]`
+    /// (`NPC.cs:33383`).
+    pub ai: [Option<f32>; 4],
 }
 
 /// Everything about the world a tick of AI reads that is not the NPC or the tiles.
@@ -880,6 +892,7 @@ fn brain_of_cthulhu(npc: &mut Npc, target: Option<Target>, rng: &mut SmallRng, o
                     position: npc.center(),
                     velocity: (0.0, 0.0),
                     parent: None,
+                    ai: [None; 4],
                 });
             }
         }

@@ -87,6 +87,10 @@ pub fn core(
                     ),
                     velocity: (0.0, 0.0),
                     parent: Some(Spawn::OWN_PARENT),
+                    // Which hand this is, seated left (0) or right (1) by ai[2] (`NPC.cs:41649`,
+                    // `Main.npc[num2].ai[2] = i`). Left unset it would default to 0 for both and
+                    // seat both hands on the same side.
+                    ai: [None, None, Some(side as f32), None],
                 });
             }
             out.spawn.push(Spawn {
@@ -94,6 +98,7 @@ pub fn core(
                 position: (cx, cy - MOON_LORD_HEAD_UP),
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
         return out;
@@ -235,6 +240,7 @@ pub fn eye_socket(
                     position: npc.center(),
                     velocity: (0.0, 0.0),
                     parent: Some(Spawn::OWN_PARENT),
+                    ai: [None; 4],
                 });
             }
         }
@@ -421,6 +427,44 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// ML-7: the two hands are seated by `ai[2]` (0, then 1), the index vanilla hands each one
+    /// (`NPC.cs:41649`, `Main.npc[num2].ai[2] = i`). The hand routine reads that as its side; left
+    /// unset both would read 0 and station on top of each other.
+    #[test]
+    fn its_two_hands_seat_on_opposite_sides() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+
+        let mut spawned = Vec::new();
+        for _ in 0..(MOON_LORD_OPENING as i32 + 2) {
+            spawned.extend(core(&mut c, &w, 0, 0).spawn);
+        }
+        let sides: Vec<f32> = spawned
+            .iter()
+            .filter(|s| s.npc_type == MOON_LORD_HAND)
+            .map(|s| s.ai[2].expect("a hand's side is pinned in ai[2], not left to signum"))
+            .collect();
+        assert_eq!(sides, vec![0.0, 1.0], "one hand each side, not both at 0");
+
+        // And the hand routine really stations them apart off that ai[2]: seat two broken hands,
+        // one per side, and watch them pull toward opposite ends of the core.
+        let core_part = core_at((0.0, 0.0), state::WAITING);
+        let pull = |side: f32| {
+            let mut hand = piece(MOON_LORD_HAND);
+            hand.ai[0] = state::BROKEN;
+            hand.ai[2] = side;
+            eye_socket(
+                &mut hand,
+                &w,
+                Some(core_part),
+                &mut SmallRng::seed_from_u64(0),
+            );
+            hand.velocity.0
+        };
+        assert!(pull(0.0) < pull(1.0), "ai[2]=0 seats left of ai[2]=1");
     }
 
     /// The core cannot be hurt until every eye is broken. That is the whole structure of the fight.

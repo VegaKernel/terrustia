@@ -52,6 +52,7 @@ pub fn tablet(npc: &mut Npc, world: &World<'_, impl TileView>, attendants: usize
                 position: (cx + across, cy - 48.0),
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
         return out;

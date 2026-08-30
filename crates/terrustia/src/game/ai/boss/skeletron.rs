@@ -121,6 +121,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
                     ),
                     velocity: (side, 0.0),
                     parent: Some(Spawn::OWN_PARENT),
+                    ai: [None; 4],
                 });
             }
         }

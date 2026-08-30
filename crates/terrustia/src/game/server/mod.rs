@@ -711,11 +711,16 @@ pub enum ServerEvent {
     PanelWhitelist {
         reply: oneshot::Sender<PanelWhitelist>,
     },
+    /// `actor` is the signed-in account making the request, recorded against
+    /// [`crate::admin::AuditAction::Whitelist`] on a change, matching every other moderation route.
     PanelWhitelistAdd {
+        actor: String,
         name: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Same reasoning as [`Self::PanelWhitelistAdd`].
     PanelWhitelistRemove {
+        actor: String,
         name: String,
         reply: oneshot::Sender<bool>,
     },
@@ -794,9 +799,14 @@ pub enum ServerEvent {
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
-    /// that can still edit permissions cannot be removed.
+    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is, on both counts:
+    /// the last account that can still administer the server cannot be removed, and `actor` must
+    /// already reach everything the target account's own group holds (see
+    /// [`crate::admin::store::Admin::group_within_reach`]) or the deletion is refused. Without that
+    /// second guard an `admin.accounts` holder could delete an `owner` account outright, which is a
+    /// strictly bigger escalation than anything `PanelSetAccountGroup`'s reach check stops.
     PanelDeleteAccount {
+        actor: String,
         name: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -1353,6 +1363,8 @@ impl GameServer {
             return;
         };
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
         let started = Instant::now();
         match wld_save::save(&self.world, &path) {
             Ok(()) => {
@@ -1450,8 +1462,11 @@ impl GameServer {
         }
 
         // The roster has to reach the world before the snapshot is taken, or the copy that goes to
-        // disk holds whoever lived here when it was loaded rather than who lives here now.
+        // disk holds whoever lived here when it was loaded rather than who lives here now - and
+        // the same goes for the Lunar Pillars, or a save mid-Lunar-Apocalypse drops them outright.
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
 
         // Copy into a buffer we already own where we have one. A fresh `snapshot()` asks the
         // allocator for a new forty-megabyte mapping and then faults in every page of it as it
@@ -2092,17 +2107,25 @@ impl GameServer {
                     names: self.admin.whitelist.clone(),
                 });
             }
-            ServerEvent::PanelWhitelistAdd { name, reply } => {
+            ServerEvent::PanelWhitelistAdd { actor, name, reply } => {
                 let added = self.admin.add_to_whitelist(&name);
                 if added {
                     let _ = self.admin.save();
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Whitelist, &name, "added");
                 }
                 let _ = reply.send(added);
             }
-            ServerEvent::PanelWhitelistRemove { name, reply } => {
+            ServerEvent::PanelWhitelistRemove { actor, name, reply } => {
                 let removed = self.admin.remove_from_whitelist(&name);
                 if removed {
                     let _ = self.admin.save();
+                    self.audit.record(
+                        &actor,
+                        crate::admin::AuditAction::Whitelist,
+                        &name,
+                        "removed",
+                    );
                     // Take effect now rather than at their next join — mirrors the console's own
                     // `whitelist remove` arm.
                     if let Some(slot) = self.slot_named(&name) {
@@ -2188,8 +2211,8 @@ impl GameServer {
             } => {
                 let _ = reply.send(self.panel_create_account(&actor, account));
             }
-            ServerEvent::PanelDeleteAccount { name, reply } => {
-                let _ = reply.send(self.panel_delete_account(&name));
+            ServerEvent::PanelDeleteAccount { actor, name, reply } => {
+                let _ = reply.send(self.panel_delete_account(&actor, &name));
             }
             ServerEvent::PanelAuditTail { n, reply } => {
                 let _ = reply.send(self.audit.tail(n));
@@ -2520,9 +2543,6 @@ const BUFF_SLOW: u16 = 32;
 const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE;
 const RAISE_CHECK_RANGE: f32 = terrustia_proto::npc_params::RAISE_CHECK_RANGE;
 const RAISE_MINIMUM: usize = terrustia_proto::npc_params::RAISE_MINIMUM;
-
-/// Coin item ids, smallest first.
-const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
 
 /// Does a panic on the untrusted-packet path actually get caught, and does the world still reach
 /// disk on the way out?

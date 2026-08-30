@@ -3514,7 +3514,8 @@ impl GameServer {
         };
         // Live armour, not the type's: a rolling tortoise really is twice as hard to hurt.
         let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
-        let mut killed = npc.take_damage(amount, hit.knockback, hit.direction);
+        // A crit shoves 1.4x harder (`NPC.cs:82251-82254`), so the knockback needs to know.
+        let mut killed = npc.strike(amount, hit.knockback, hit.direction, hit.crit);
         // A statue's monster is worth nothing: the game zeroes its value on the way out of the
         // statue, which is what stops a wired statue being a coin printer.
         let value = if npc.from_statue {

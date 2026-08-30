@@ -215,6 +215,13 @@ pub struct Npc {
     /// The Dryad, the Truffle, the Princess and the Guide each have an alternate; the game keeps
     /// the choice as a number rather than a flag because it is sent alongside the name.
     pub town_variation: i32,
+    /// Whether a homeless townsperson is on the way out because their house was destroyed.
+    ///
+    /// This server has no despawn-timer routine that acts on it yet — it is carried purely so a
+    /// world's own `homelessDespawn` flag round-trips rather than being clobbered to `false` on
+    /// every save (`WorldFile.cs`'s own field, from file version 315). Set only by
+    /// `restore_town_npcs` from what a load decoded; nothing here ever sets it `true`.
+    pub homeless_despawn: bool,
 }
 
 impl Npc {
@@ -266,6 +273,7 @@ impl Npc {
             given_name: String::new(),
             extra_value: 0,
             town_variation: 0,
+            homeless_despawn: false,
         })
     }
 
@@ -346,6 +354,14 @@ impl Npc {
         self.stats.damage = (self.stats.damage as f32 * damage) as i32;
         self.stats.value *= money;
 
+        // `NPC.ScaleStats_ByDifficulty` (`NPC.cs:18211`) scales knockback resistance too, so a
+        // harder world's enemies stagger less: classic leaves it, expert x0.9, master x0.8. It runs
+        // on the raw table value the same as damage, and re-runs on transform, so it stays
+        // idempotent. The per-player Brain-of-Cthulhu and Creeper overrides (`NPC.cs:29457-29461`)
+        // are set inside that fight's own AI and belong with the boss lane, not here.
+        self.stats.knockback_resist *=
+            difficulty::knockback_to_enemies_multiplier(scaling.difficulty);
+
         // Bosses, and only bosses, also scale with how many people are fighting them. The game
         // lists them out rather than deriving it from a `boss` flag, because several boss *parts*
         // scale and a few flagged types do not.
@@ -366,27 +382,113 @@ impl Npc {
         self.life > 0
     }
 
-    /// Apply a hit, returning true if it killed the NPC.
+    /// Apply a non-critical hit, returning true if it killed the NPC.
+    ///
+    /// Most hits are not crits (a town blow, a contact tick, an invulnerability probe), so this is
+    /// the ordinary door in. [`Self::strike`] is the same thing with the crit flag exposed.
     pub fn take_damage(&mut self, amount: i32, knockback: f32, direction: i8) -> bool {
+        self.strike(amount, knockback, direction, false)
+    }
+
+    /// Apply a hit, returning true if it killed the NPC.
+    ///
+    /// The knockback is ported whole from `NPC.StrikeNPC_Inner` (`NPC.cs:82216-82311`). The old
+    /// code applied resist once, had no diminishing curve, cap or crit, and *added* to velocity
+    /// with no bound, so a rapid weapon accelerated an enemy without limit rather than shoving it a
+    /// fixed distance.
+    pub fn strike(&mut self, amount: i32, knockback: f32, direction: i8, crit: bool) -> bool {
         // `dont_take_damage` is the type saying it can never be hurt; `invulnerable` is a routine
         // saying not right now. Either one turns a hit into nothing.
         if self.stats.dont_take_damage || self.invulnerable {
             return false;
         }
-        self.life -= amount.max(0);
+        let num = amount.max(0);
+        self.life -= num;
         self.was_hurt = true;
         self.dirty = true;
 
         // knockback_resist is a multiplier: 0 means immovable, 1 fully affected. A routine can
-        // override it outright while it is committed to a move.
+        // override it outright while it is committed to a move. The game applies it twice: once
+        // building the raw push, once again when it assigns the push to velocity.
         let resist = if self.knockback_immune {
             0.0
         } else {
             self.stats.knockback_resist
         };
-        if resist > 0.0 && knockback > 0.0 {
-            self.velocity.0 += f32::from(direction) * knockback * resist;
-            self.velocity.1 -= knockback * resist * 0.5;
+        if knockback > 0.0 && resist > 0.0 {
+            let mut num3 = knockback * resist;
+            // The "On Fire!" 3.0 debuff makes a hit stagger a little harder.
+            if self.buffs.flags.on_fire2 {
+                num3 *= 1.1;
+            }
+            // The diminishing ladder (`NPC.cs:82223-82250`): every band past a threshold counts for
+            // progressively less, and the whole thing is capped at sixteen.
+            if num3 > 8.0 {
+                num3 = 8.0 + (num3 - 8.0) * 0.9;
+            }
+            if num3 > 10.0 {
+                num3 = 10.0 + (num3 - 10.0) * 0.8;
+            }
+            if num3 > 12.0 {
+                num3 = 12.0 + (num3 - 12.0) * 0.7;
+            }
+            if num3 > 14.0 {
+                num3 = 14.0 + (num3 - 14.0) * 0.6;
+            }
+            if num3 > 16.0 {
+                num3 = 16.0;
+            }
+            if crit {
+                num3 *= 1.4;
+            }
+
+            // A hit worth more than a tenth of max life (a fifteenth in expert and up) shoves hard,
+            // but *additively* and clamped so a run of big hits builds towards the push without ever
+            // overshooting it. Any smaller hit assigns the push outright.
+            let expert = self.scaling.difficulty >= 2.0;
+            let big_hit = if expert { num * 15 } else { num * 10 } > self.life_max;
+            let dir = f32::from(direction);
+            if big_hit {
+                if direction < 0 && self.velocity.0 > -num3 {
+                    if self.velocity.0 > 0.0 {
+                        self.velocity.0 -= num3;
+                    }
+                    self.velocity.0 -= num3;
+                    if self.velocity.0 < -num3 {
+                        self.velocity.0 = -num3;
+                    }
+                } else if direction > 0 && self.velocity.0 < num3 {
+                    if self.velocity.0 < 0.0 {
+                        self.velocity.0 += num3;
+                    }
+                    self.velocity.0 += num3;
+                    if self.velocity.0 > num3 {
+                        self.velocity.0 = num3;
+                    }
+                }
+                // The game's own special case for type 185 (`NPC.cs:82286`).
+                if self.npc_type == 185 {
+                    num3 *= 1.5;
+                }
+                num3 = if self.no_gravity {
+                    num3 * -0.5
+                } else {
+                    num3 * -0.75
+                };
+                if self.velocity.1 > num3 {
+                    self.velocity.1 += num3;
+                    if self.velocity.1 < num3 {
+                        self.velocity.1 = num3;
+                    }
+                }
+            } else {
+                self.velocity.1 = if self.no_gravity {
+                    -num3 * 0.5 * resist
+                } else {
+                    -num3 * 0.75 * resist
+                };
+                self.velocity.0 = num3 * dir * resist;
+            }
         }
         self.life <= 0
     }
@@ -1208,6 +1310,49 @@ mod tests {
         assert_eq!(boss.stats.knockback_resist, 0.0);
         boss.take_damage(5, 4.0, 1);
         assert_eq!(boss.velocity.0, 0.0);
+    }
+
+    /// The push is bounded, not accumulating. `NPC.StrikeNPC_Inner` (`NPC.cs:82216-82311`) runs a
+    /// diminishing ladder capped at sixteen and *assigns* the small-hit push rather than adding it,
+    /// so hammering a small enemy cannot fling it off at ever-growing speed the way the old
+    /// unbounded `velocity += knockback` did.
+    #[test]
+    fn knockback_is_capped_and_assigned_not_accumulated() {
+        // A small hit against a resilient, high-life enemy takes the assign branch. A blue slime is
+        // low-life, so give it a wall of health to keep num*10 below lifeMax.
+        let mut slime = Npc::new(1, (0.0, 0.0), 1).unwrap();
+        slime.life_max = 100_000;
+        slime.life = 100_000;
+        // A colossal raw knockback still lands capped at sixteen, once, in the hit direction.
+        slime.take_damage(1, 1000.0, 1);
+        assert!(
+            (slime.velocity.0 - 16.0).abs() < 1e-3,
+            "the push is capped at sixteen, got {}",
+            slime.velocity.0
+        );
+        // A second identical hit does not stack past the cap: it is assigned, not added.
+        slime.take_damage(1, 1000.0, 1);
+        assert!(
+            (slime.velocity.0 - 16.0).abs() < 1e-3,
+            "a second hit must not accumulate past the cap, got {}",
+            slime.velocity.0
+        );
+
+        // A crit shoves 1.4x harder before the cap is reached.
+        let mut a = Npc::new(1, (0.0, 0.0), 1).unwrap();
+        a.life_max = 100_000;
+        a.life = 100_000;
+        a.strike(1, 5.0, 1, false);
+        let mut b = Npc::new(1, (0.0, 0.0), 1).unwrap();
+        b.life_max = 100_000;
+        b.life = 100_000;
+        b.strike(1, 5.0, 1, true);
+        assert!(
+            (b.velocity.0 - a.velocity.0 * 1.4).abs() < 1e-3,
+            "a crit should push 1.4x: {} vs {}",
+            b.velocity.0,
+            a.velocity.0
+        );
     }
 
     #[test]
