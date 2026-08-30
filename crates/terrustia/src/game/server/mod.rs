@@ -711,11 +711,16 @@ pub enum ServerEvent {
     PanelWhitelist {
         reply: oneshot::Sender<PanelWhitelist>,
     },
+    /// `actor` is the signed-in account making the request, recorded against
+    /// [`crate::admin::AuditAction::Whitelist`] on a change, matching every other moderation route.
     PanelWhitelistAdd {
+        actor: String,
         name: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Same reasoning as [`Self::PanelWhitelistAdd`].
     PanelWhitelistRemove {
+        actor: String,
         name: String,
         reply: oneshot::Sender<bool>,
     },
@@ -2097,17 +2102,25 @@ impl GameServer {
                     names: self.admin.whitelist.clone(),
                 });
             }
-            ServerEvent::PanelWhitelistAdd { name, reply } => {
+            ServerEvent::PanelWhitelistAdd { actor, name, reply } => {
                 let added = self.admin.add_to_whitelist(&name);
                 if added {
                     let _ = self.admin.save();
+                    self.audit
+                        .record(&actor, crate::admin::AuditAction::Whitelist, &name, "added");
                 }
                 let _ = reply.send(added);
             }
-            ServerEvent::PanelWhitelistRemove { name, reply } => {
+            ServerEvent::PanelWhitelistRemove { actor, name, reply } => {
                 let removed = self.admin.remove_from_whitelist(&name);
                 if removed {
                     let _ = self.admin.save();
+                    self.audit.record(
+                        &actor,
+                        crate::admin::AuditAction::Whitelist,
+                        &name,
+                        "removed",
+                    );
                     // Take effect now rather than at their next join — mirrors the console's own
                     // `whitelist remove` arm.
                     if let Some(slot) = self.slot_named(&name) {

@@ -75,6 +75,9 @@ pub enum AuditAction {
     GroupChange,
     PermissionChange,
     Claim,
+    /// A whitelist (guest-list) entry added or removed, from either the console or the web panel.
+    /// `target` is the affected name; `detail` says `"added"` or `"removed"`.
+    Whitelist,
     /// A login-style attempt refused by `admin::throttle` while a per-IP or per-account backoff
     /// window was open. One line per summarised window, not one per refusal: see
     /// `throttle::Verdict::Refused`'s own doc comment. `issuer` is always `"system"` (nobody
@@ -96,6 +99,7 @@ impl AuditAction {
             Self::GroupChange => "group-change",
             Self::PermissionChange => "permission-change",
             Self::Claim => "claim",
+            Self::Whitelist => "whitelist",
             Self::Throttled => "throttled",
         }
     }

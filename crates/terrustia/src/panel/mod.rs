@@ -1136,10 +1136,12 @@ async fn whitelist_add(
     headers: axum::http::HeaderMap,
     Json(req): Json<NameRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::SERVER_WHITELIST).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::SERVER_WHITELIST).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelWhitelistAdd {
+        actor,
         name: req.name,
         reply,
     })
@@ -1155,10 +1157,12 @@ async fn whitelist_remove(
     headers: axum::http::HeaderMap,
     Json(req): Json<NameRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::SERVER_WHITELIST).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::SERVER_WHITELIST).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelWhitelistRemove {
+        actor,
         name: req.name,
         reply,
     })

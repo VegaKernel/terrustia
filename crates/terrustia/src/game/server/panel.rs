@@ -773,6 +773,7 @@ mod panel_admin_events {
 
         let (add_reply, mut add_rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelWhitelistAdd {
+            actor: "owner".into(),
             name: "Brooklyn".into(),
             reply: add_reply,
         });
@@ -786,6 +787,7 @@ mod panel_admin_events {
 
         let (remove_reply, mut remove_rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelWhitelistRemove {
+            actor: "owner".into(),
             name: "brooklyn".into(), // case-insensitive, matching the console command
             reply: remove_reply,
         });
@@ -913,6 +915,44 @@ mod panel_admin_events {
         assert_eq!(tail[0].issuer, "boss");
         assert_eq!(tail[0].target, "shady");
         assert_eq!(tail[0].action, crate::admin::AuditAction::DeleteAccount);
+    }
+
+    /// L6-05: whitelist changes made from the panel used to leave no trace in the audit log at all,
+    /// unlike every other moderation action (kick, ban, mute, group change all record one). Fail-
+    /// then-pass: before `PanelWhitelistAdd`/`PanelWhitelistRemove` threaded `actor` through to
+    /// `self.audit.record`, `server.audit.tail(10)` after this sequence was empty.
+    #[test]
+    fn whitelist_changes_from_the_panel_are_audited() {
+        let mut server = server_with_real_admin_files("panel-whitelist-audit");
+
+        let (add_reply, mut add_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistAdd {
+            actor: "boss".into(),
+            name: "Brooklyn".into(),
+            reply: add_reply,
+        });
+        assert!(add_rx.try_recv().unwrap());
+
+        let (remove_reply, mut remove_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistRemove {
+            actor: "boss".into(),
+            name: "Brooklyn".into(),
+            reply: remove_reply,
+        });
+        assert!(remove_rx.try_recv().unwrap());
+
+        let tail = server.audit.tail(10);
+        assert_eq!(
+            tail.len(),
+            2,
+            "both the add and the remove must be audited: {tail:?}"
+        );
+        assert_eq!(tail[0].issuer, "boss");
+        assert_eq!(tail[0].target, "Brooklyn");
+        assert_eq!(tail[0].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[0].detail, "added");
+        assert_eq!(tail[1].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[1].detail, "removed");
     }
 
     #[test]
