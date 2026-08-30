@@ -28,7 +28,7 @@ use terrustia_proto::npc_params::{
     GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP, GOLEM_LASER,
     GOLEM_LASER_DAMAGE, GOLEM_LASER_INTERVAL, GOLEM_LASER_NO_LOS_BONUS, GOLEM_LASER_SPEED,
     GOLEM_LASER_SPEED_OFFSIDE, GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT,
-    GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF, GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_SPEED, GOLEM_PUNCH_TICKS,
+    GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF, GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_REACH, GOLEM_PUNCH_SPEED,
     GOLEM_SLAM,
 };
 
@@ -413,6 +413,10 @@ pub fn fist(
             npc.velocity = (0.0, 0.0);
             if npc.ai[1] >= GOLEM_FIST_WINDUP {
                 npc.no_tile_collide = true;
+                // Clear any stale collision flags so the punch cannot retract on its very first tick
+                // (`NPC.cs:19451-19453`, `collideX = false; collideY = false;` at launch).
+                npc.collide_x = false;
+                npc.collide_y = false;
                 npc.ai[0] = 2.0;
                 npc.ai[1] = 0.0;
                 let mut speed = GOLEM_PUNCH_SPEED;
@@ -438,10 +442,28 @@ pub fn fist(
         }
 
         _ => {
-            // Punching. It travels the line it committed to and then goes home.
-            npc.no_tile_collide = true;
+            // GOL-1: punching. It travels the line it committed to. It phases through terrain on the
+            // way out, but turns solid the moment it is past the player, so a wall behind them stops
+            // it (`NPC.cs:19461-19482`). And it goes home by distance, not a fixed timer: once the
+            // fist is more than its reach from the station, or it has struck a wall
+            // (`NPC.cs:19483-19487`, `num2 > 700f || collideX || collideY`). The old code phased
+            // through everything and always returned after a flat sixty ticks.
             npc.ai[1] += 1.0;
-            if npc.ai[1] >= GOLEM_PUNCH_TICKS {
+            if let Some(target) = world.target {
+                if npc.velocity.0.abs() > npc.velocity.1.abs() {
+                    if (npc.velocity.0 > 0.0 && cx > target.center.0)
+                        || (npc.velocity.0 < 0.0 && cx < target.center.0)
+                    {
+                        npc.no_tile_collide = false;
+                    }
+                } else if (npc.velocity.1 > 0.0 && cy > target.center.1)
+                    || (npc.velocity.1 < 0.0 && cy < target.center.1)
+                {
+                    npc.no_tile_collide = false;
+                }
+            }
+            if gap > GOLEM_PUNCH_REACH || npc.collide_x || npc.collide_y {
+                npc.no_tile_collide = true;
                 npc.ai[0] = 0.0;
                 npc.ai[1] = 0.0;
             }
@@ -852,6 +874,68 @@ mod tests {
         // The left fist sits to the left of the body; a player further left is on its side.
         assert!(punched(-2000.0), "it should punch to its own side");
         assert!(!punched(6000.0), "and not across the body");
+    }
+
+    /// GOL-1: a punch ends by distance or by hitting a wall, not on a fixed timer. The old code
+    /// always returned after sixty ticks. Here a fist still within reach, with no wall struck, keeps
+    /// punching however long it has been out; and it retracts once it is past its reach or collides.
+    #[test]
+    fn a_fist_punch_ends_by_distance_or_wall_not_a_timer() {
+        let tiles = floor(30);
+        let parent = body_at((1000.0, 400.0));
+        // The player far to the left, so a left fist never counts as having passed it here.
+        let w = world(&tiles, Some((-3000.0, 400.0)));
+
+        // Close to the station, no wall struck: it keeps punching long past the old sixty-tick timer.
+        let mut f = piece(GOLEM_FIST_LEFT, 0, 0);
+        f.position = (900.0, 400.0);
+        f.ai[0] = 2.0;
+        f.ai[1] = 1000.0; // far past the old GOLEM_PUNCH_TICKS of sixty
+        f.velocity = (-12.0, 0.0);
+        f.no_tile_collide = true;
+        fist(&mut f, &w, Some(parent), whole());
+        assert_eq!(
+            f.ai[0], 2.0,
+            "a fist within reach keeps punching, not on a timer"
+        );
+
+        // Beyond its reach (well over 700 from the station near x=966): home it goes.
+        let mut far = piece(GOLEM_FIST_LEFT, 0, 0);
+        far.position = (-2000.0, 400.0);
+        far.ai[0] = 2.0;
+        far.ai[1] = 5.0;
+        far.velocity = (-12.0, 0.0);
+        fist(&mut far, &w, Some(parent), whole());
+        assert_eq!(far.ai[0], 0.0, "past its reach it returns");
+
+        // A wall struck (the engine's collision flag) sends it home too, even close in.
+        let mut hit = piece(GOLEM_FIST_LEFT, 0, 0);
+        hit.position = (900.0, 400.0);
+        hit.ai[0] = 2.0;
+        hit.ai[1] = 5.0;
+        hit.velocity = (-12.0, 0.0);
+        hit.collide_x = true;
+        fist(&mut hit, &w, Some(parent), whole());
+        assert_eq!(hit.ai[0], 0.0, "a wall stops the punch short");
+        assert!(hit.no_tile_collide, "and it phases home");
+    }
+
+    /// GOL-1: the fist phases through terrain on the way out but turns solid once it is past the
+    /// player, so a wall behind them can stop it. The old code left it phasing the whole punch.
+    #[test]
+    fn a_fist_turns_solid_once_it_passes_the_player() {
+        let tiles = floor(30);
+        let parent = body_at((1000.0, 400.0));
+        let w = world(&tiles, Some((800.0, 400.0)));
+        let mut f = piece(GOLEM_FIST_LEFT, 0, 0);
+        // Left of the player and moving further left: it has passed them.
+        f.position = (700.0, 400.0);
+        f.ai[0] = 2.0;
+        f.ai[1] = 5.0;
+        f.velocity = (-12.0, 0.0);
+        f.no_tile_collide = true;
+        fist(&mut f, &w, Some(parent), whole());
+        assert!(!f.no_tile_collide, "past the player it becomes solid");
     }
 
     /// The free head hovers above you rather than resting on the ground.

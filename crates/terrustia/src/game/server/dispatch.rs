@@ -1766,7 +1766,7 @@ impl GameServer {
         // gap — it is the whole fight missing, since both bosses' own real damage/behaviour depend
         // on having a body at all. `/spawn`'s own admin command already knew to do this for the
         // four ordinary worm monsters; this was the one real path that never did.
-        let spawned = match terrustia_proto::npc_params::worm_body(npc_type) {
+        let spawned = match self.worm_parts(npc_type) {
             Some((body, tail, segments)) => {
                 self.npcs.spawn_worm(npc_type, body, tail, segments, at)
             }

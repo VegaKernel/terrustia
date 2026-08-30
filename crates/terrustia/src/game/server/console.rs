@@ -727,7 +727,7 @@ impl GameServer {
                 // Drop it a little to the side so it does not appear inside the player.
                 let at = (position.0 + 64.0, position.1 - 32.0);
                 // Worm heads come with a body: spawning a bare head would be a floating face.
-                let spawned = match terrustia_proto::npc_params::worm_body(npc_type) {
+                let spawned = match self.worm_parts(npc_type) {
                     Some((body, tail, segments)) => {
                         self.npcs.spawn_worm(npc_type, body, tail, segments, at)
                     }

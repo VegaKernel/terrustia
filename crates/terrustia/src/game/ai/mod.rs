@@ -95,6 +95,10 @@ pub struct Conditions {
     pub expert: bool,
     /// Whether hardmode has begun. Some routines behave differently before the wall falls.
     pub hardmode: bool,
+    /// Whether this is a get-fixed-boi / For-the-Worthy world (`Main.getGoodWorld`). A handful of
+    /// routines are harder there in ways that are not merely stat scaling: the Wall of Flesh walks
+    /// faster and the Destroyer grows a longer body.
+    pub get_good_world: bool,
     /// The world's size in tiles, for the handful of routines that steer away from its edges.
     pub world_size: (i32, i32),
 }
@@ -123,6 +127,7 @@ impl Default for Conditions {
             surface_y: 0.0,
             expert: false,
             hardmode: false,
+            get_good_world: false,
             world_size: (4200, 1200),
         }
     }
@@ -835,6 +840,19 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         97 => {
             let out = hardmode::teleporter::nebula_brain(npc, world, rng);
             effects.shots.extend(out.base.shots);
+            // C7-01 SEAM: `out.hurried_floaters` is produced on the teleport tick but not consumed
+            // here, and this is deliberate, not an oversight. Vanilla hurries the brain's live
+            // floaters by subtracting from their charge timer (`NPC.cs:39982-40002`, proj 574's
+            // `ai[0] -= hurry` for every floater whose `ai[1] == whoAmI`, only while none has
+            // launched). Our NEBULA_FLOATER (`ai_style 102`) has no charge-up AI: it is spawned with
+            // a launch velocity and flies straight, so there is no `ai[0]` timer to hurry, and
+            // `projectile::step` is not passed the player target a charge-then-home floater needs.
+            // Honouring the hurry therefore depends on the floater charge-up (projectile-lane L2-14,
+            // not landed) plus owner tracking and a server-side pass over the projectile store. Left
+            // as a documented seam rather than faked: a hold-then-release floater would not be the
+            // homing attack the hurry exists to bring forward. The `hurried_floaters` flag is kept so
+            // the consumer is a one-line addition once the charge-up lands.
+            let _ = out.hurried_floaters;
         }
         85 => {
             // Another of its kind already on the player's head is what stops this one trying.
@@ -1072,7 +1090,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.died = out.spent;
         }
         78 | 79 => {
-            let out = boss::moon_lord::eye_socket(npc, world, world.parent, rng);
+            let out = boss::moon_lord::eye_socket(npc, world, world.parent);
             effects.shots.extend(out.shots);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;

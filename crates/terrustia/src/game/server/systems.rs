@@ -4745,8 +4745,28 @@ impl GameServer {
             // Journey world's `DifficultySlider` reaches AI branches that ask this too.
             expert: self.is_expert(),
             hardmode: self.world.progress.hard_mode,
+            // `Main.getGoodWorld`, the For-the-Worthy secret seed, persisted on the world from
+            // worldgen. A handful of routines are genuinely harder here, not merely stat-scaled.
+            get_good_world: self.world.secret_seeds.get_good,
             world_size: (self.world.width(), self.world.height()),
         }
+    }
+
+    /// The body/tail types and trailing-part count for a worm head, applying the For-the-Worthy
+    /// Destroyer variant. WOF-3: `GetDestroyerSegmentsCount` grows the Destroyer from 80 body
+    /// segments to 100 in a get-good world (`NPC.cs:51488-51495`), so it runs 101 parts rather than
+    /// 81. Every spawn-time path that builds a worm goes through this so the seed is honoured
+    /// uniformly.
+    pub(super) fn worm_parts(&self, npc_type: u16) -> Option<(u16, u16, usize)> {
+        let (body, tail, segments) = terrustia_proto::npc_params::worm_body(npc_type)?;
+        let segments = if npc_type == terrustia_proto::npc_params::DESTROYER_HEAD
+            && self.world.secret_seeds.get_good
+        {
+            terrustia_proto::npc_params::DESTROYER_SEGMENTS_GOOD
+        } else {
+            segments
+        };
+        Some((body, tail, segments))
     }
 
     /// Put one Plantera's bulb somewhere in the underground jungle, and tell everyone.
@@ -7359,6 +7379,41 @@ mod difficulty_slider {
         player.state = ConnState::Playing;
         server.players[0] = Some(player);
         (server, out_rx)
+    }
+
+    /// WOF-3: a For-the-Worthy world grows the Destroyer's body. Its head is built with 101 trailing
+    /// parts (100 body + tail) in a get-good world against 81 (80 + tail) otherwise
+    /// (`GetDestroyerSegmentsCount`, `NPC.cs:51488-51495`). Only the get-good flag changes it, and
+    /// only for the Destroyer. Before the fix `worm_body` gave 81 whatever the seed.
+    #[test]
+    fn a_for_the_worthy_destroyer_grows_a_longer_body() {
+        use terrustia_proto::npc_params::{
+            DESTROYER_HEAD, DESTROYER_SEGMENTS, DESTROYER_SEGMENTS_GOOD,
+        };
+        let mut server = GameServer::new(Config::default(), tiny_world());
+
+        let (_, _, ordinary) = server
+            .worm_parts(DESTROYER_HEAD)
+            .expect("the Destroyer is a worm");
+        assert_eq!(
+            ordinary, DESTROYER_SEGMENTS,
+            "an ordinary world keeps 81 parts"
+        );
+
+        server.world.secret_seeds.get_good = true;
+        let (_, _, good) = server.worm_parts(DESTROYER_HEAD).expect("still a worm");
+        assert_eq!(
+            good, DESTROYER_SEGMENTS_GOOD,
+            "a For-the-Worthy world grows it to 101"
+        );
+        assert!(good > ordinary, "the seed makes it longer, not shorter");
+
+        // The seed lengthens only the Destroyer: the Eater of Worlds keeps its count either way.
+        let (_, _, eater) = server.worm_parts(13).expect("the Eater is a worm");
+        assert_eq!(
+            eater, 20,
+            "an Eater of Worlds is the same in a get-good world"
+        );
     }
 
     #[test]

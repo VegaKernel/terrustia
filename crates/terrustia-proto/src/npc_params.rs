@@ -1915,6 +1915,15 @@ pub const DEER_SHADOW_HAND: u16 = 965;
 pub const DEER_SPIKE_DAMAGE: i32 = 13;
 pub const DEER_RUBBLE_DAMAGE: i32 = 18;
 pub const DEER_SHADOW_DAMAGE: i32 = 15;
+/// DEER-1: Expert Mode's passive shadow hands hit softer than the dedicated attack's do
+/// (`SpawnPassiveShadowHands`'s `shadowHandDamage = 10`, `NPC.cs:44490`).
+pub const DEER_SHADOW_DAMAGE_PASSIVE: i32 = 10;
+/// DEER-1: how often the passive hands come, in ticks, at full health and at none. Vanilla
+/// `Utils.Remap(lifePercent, 1, 0, 80, 40)` (`NPC.cs:44892`), i.e. `40 + 40 * lifePercent`, so
+/// they quicken from every 80 ticks to every 40 as it is worn down; three waves, then a pause.
+pub const DEER_PASSIVE_SHADOW_SLOW: f32 = 80.0;
+pub const DEER_PASSIVE_SHADOW_FAST: f32 = 40.0;
+pub const DEER_PASSIVE_SHADOW_WAVES: f32 = 3.0;
 
 /// Deerclops' states, as `ai[0]` records them.
 pub const DEER_STALKING: f32 = 0.0;
@@ -2005,9 +2014,9 @@ pub const WALL_EXPERT_SPEED_SCALE: f32 = 1.35;
 pub const WALL_EXPERT_SPEED_BONUS: f32 = 0.35;
 /// The flat multiplier and bonus get-fixed-boi (`Main.getGoodWorld`) applies on top of that.
 ///
-/// Applied unconditionally here rather than gated on the secret seed: nothing in gameplay tracks
-/// `getGoodWorld` yet (`secret_seed.rs` only reaches worldgen), so there is no flag to read. Left
-/// exactly as it already behaved rather than silently dropped while adding Expert Mode above it.
+/// WOF-3: applied only in a For-the-Worthy world now, gated on `Conditions::get_good_world`
+/// (`secret_seeds.get_good`), matching vanilla's `Main.getGoodWorld` guard. It used to be
+/// unconditional because no gameplay flag tracked the secret seed; the world now carries one.
 pub const WALL_SPEED_SCALE: f32 = 1.1;
 pub const WALL_SPEED_BONUS: f32 = 0.2;
 /// How tall the wall is kept, at least.
@@ -3261,6 +3270,11 @@ pub const DESTROYER_TAIL: u16 = 136;
 /// j++)` (`NPC.cs:50358-50365`), inclusive, so it runs 81 times, not 80 — corrected here from an
 /// earlier, unused, off-by-one guess this constant held before anything actually consumed it.
 pub const DESTROYER_SEGMENTS: usize = 81;
+/// WOF-3: a For-the-Worthy world lengthens it. `GetDestroyerSegmentsCount()` returns 100 rather
+/// than 80 when `Main.getGoodWorld` (`NPC.cs:51488-51495`), so the same inclusive loop runs 101
+/// times: 100 body segments and the tail. The spawn path picks this over [`DESTROYER_SEGMENTS`]
+/// when the world carries the secret seed.
+pub const DESTROYER_SEGMENTS_GOOD: usize = 101;
 
 /// It burrows faster than anything else in the game, and turns no more sharply for it.
 pub const DESTROYER_SPEED: f32 = 16.0;
@@ -3510,7 +3524,10 @@ pub const GOLEM_PUNCH_HALF: f32 = 4.0;
 pub const GOLEM_PUNCH_QUARTER: f32 = 4.0;
 pub const GOLEM_PUNCH_BODY_HURT: f32 = 10.0;
 pub const GOLEM_PUNCH_CAP: f32 = 48.0;
-pub const GOLEM_PUNCH_TICKS: f32 = 60.0;
+/// GOL-1: a punch retracts by distance, not a timer. It goes home once the fist is more than this
+/// far from its station or has struck terrain (`NPC.cs:19483`, `num2 > 700f || collideX ||
+/// collideY`). `num2` is the fist's distance from its home station, so this is its reach.
+pub const GOLEM_PUNCH_REACH: f32 = 700.0;
 
 /// The free head, once the body is dead: it hovers three hundred pixels above you.
 pub const GOLEM_FREE_ABOVE: f32 = 300.0;
@@ -3773,6 +3790,14 @@ pub struct TreeAttack {
     pub spread_scale: f32,
     /// Whether it starts partway through, as the two lobbing attacks do.
     pub warmup: f32,
+    /// How far the aim is jittered on each axis, in pixels: the Everscream's ornaments are thrown
+    /// off by up to this either way in both x and y (`NPC.cs:33088-33089`, `rand(-50, 51)`). Zero
+    /// for the attacks that do not scatter their aim point.
+    pub scatter: i32,
+    /// The most the aim is lofted upward, as a per-shot random percentage of the horizontal gap
+    /// (`NPC.cs:33090`, `-= abs(dx) * rand(0, 21) * 0.01`). Zero for the attacks with no loft. This
+    /// is distinct from `arc`, which is a fixed lob for the heavy attacks.
+    pub loft: i32,
 }
 
 const NO_SPREAD: TreeAttack = TreeAttack {
@@ -3789,6 +3814,8 @@ const NO_SPREAD: TreeAttack = TreeAttack {
     spread: 20,
     spread_scale: 0.01,
     warmup: 0.0,
+    scatter: 0,
+    loft: 0,
 };
 
 /// Mourning Wood's flaming spears, straight at you.
@@ -3837,7 +3864,9 @@ pub const WOOD_DESPERATE_SPHERES: TreeAttack = TreeAttack {
     spread_scale: 0.005,
     ..NO_SPREAD
 };
-/// The Everscream's ornaments, thrown fast and wide.
+/// The Everscream's ornaments, thrown fast and wide: aimed at you, then jittered up to fifty pixels
+/// either way on both axes and lofted upward by up to a fifth of the horizontal gap
+/// (`NPC.cs:33087-33093`), so a volley arrives spread out rather than flat and stacked.
 pub const SCREAM_ORNAMENTS: TreeAttack = TreeAttack {
     projectile: 345,
     damage: 43,
@@ -3846,6 +3875,8 @@ pub const SCREAM_ORNAMENTS: TreeAttack = TreeAttack {
     speed: 12.5,
     spread: 20,
     spread_scale: 0.02,
+    scatter: 50,
+    loft: 20,
     ..NO_SPREAD
 };
 /// ...and its pine needles, lobbed slowly.
@@ -4114,8 +4145,11 @@ pub const MOON_LORD_LEECH: u16 = 401;
 /// three eyes are always doing different things at once, and the fight has a shape rather than a
 /// rhythm.
 ///
-/// Attack 0 is "wait", 1 is the bolts, 2 is the heavy attack — a deathray from the head, a
-/// phantasmal sphere from a hand — and 3 is the spread of spheres.
+/// Attack 0 is "wait". Attack 1 is a hand's rapid eye-stream, or, for the head, the charged
+/// deathray (a hundred and eighty ticks of wind-up, then the beam). Attack 2 is a hand's six-sphere
+/// barrage, or, for the head, the leech attack. Attack 3 is the spread of bolts, the same for both.
+/// The row a part runs is not random: a hand takes the row for its side (left row 0, right row 1),
+/// the head takes row 2 (`NPC.cs:42032` `num6 = (ai[2]==0)?0:1`, `NPC.cs:42530` `num5 = 2`).
 pub const MOON_LORD_SCRIPTS: [[(u8, i32); 5]; 3] = [
     [(0, 50), (1, 70), (2, 330), (0, 60), (3, 90)],
     [(1, 70), (0, 50), (3, 90), (0, 60), (2, 330)],
@@ -4138,15 +4172,19 @@ pub const MOON_LORD_DEATH_TICKS: f32 = 600.0;
 /// Past this it leaves.
 pub const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
 
-/// What its parts throw.
-pub const PHANTASMAL_BOLT: u16 = 452;
-pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
-pub const PHANTASMAL_EYE: u16 = 454;
-pub const PHANTASMAL_EYE_DAMAGE: i32 = 40;
+/// What its parts throw. Ids are vanilla `ProjectileID` values and the damage each `NewProjectile`
+/// call passes in `AI_078`/`AI_079`: the eye stream (452, 30, `NPC.cs:42155`), the sphere barrage
+/// (454, 40, `NPC.cs:42199`), the head's deathray (455, 75, `NPC.cs:42667`) and the bolt spread
+/// (462, 30, `NPC.cs:42502`). The names match `ProjectileID.cs`: 452 is the eye, 454 the sphere,
+/// 462 the bolt.
+pub const PHANTASMAL_EYE: u16 = 452;
+pub const PHANTASMAL_EYE_DAMAGE: i32 = 30;
+pub const PHANTASMAL_SPHERE: u16 = 454;
+pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 40;
 pub const PHANTASMAL_DEATHRAY: u16 = 455;
 pub const PHANTASMAL_DEATHRAY_DAMAGE: i32 = 75;
-pub const PHANTASMAL_SPHERE: u16 = 462;
-pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 30;
+pub const PHANTASMAL_BOLT: u16 = 462;
+pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
 /// The bolts come in threes, a fifth of a second apart.
 pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
 pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;
