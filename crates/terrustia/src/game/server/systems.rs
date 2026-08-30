@@ -1544,6 +1544,12 @@ impl GameServer {
         {
             self.broadcast(frame, None);
         }
+        // The server ends a projectile here; a client reporting its own kill ends it in
+        // `on_client_projectile_kill`. Both have to drop the skip runs, because a projectile
+        // identity carries a generation that keeps climbing and so is never reused. Forgetting on
+        // only the client path would leak one entry per distant player for every projectile the
+        // server expired on its own, which is most of them.
+        self.forget_skips(Withheld::Projectile(projectile.key.pack()));
     }
 
     /// Tell everyone where a projectile is.
