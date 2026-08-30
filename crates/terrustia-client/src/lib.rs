@@ -706,7 +706,14 @@ impl Client {
                 })
             }
             id::AREA_TILE_CHANGE => {
-                let square = terrustia_proto::square::TileSquare::decode(&frame.payload)?;
+                // Merged onto this client's own record of the tile, the same as a real client
+                // merges onto `Main.tile` (`MessageBuffer.cs:1358-1437`) — see `TileSquare::decode`'s
+                // own doc. Matters here because this crate exists to compare against a real
+                // server's wire behaviour; decoding into a fresh tile every time would silently
+                // diverge from what a real client ends up holding whenever a square omits a field.
+                let square = terrustia_proto::square::TileSquare::decode(&frame.payload, |x, y| {
+                    self.world.tile(x, y).unwrap_or(terrustia_proto::Tile::AIR)
+                })?;
                 for dx in 0..usize::from(square.width) {
                     for dy in 0..usize::from(square.height) {
                         if let Some(tile) = square.tile(dx, dy) {

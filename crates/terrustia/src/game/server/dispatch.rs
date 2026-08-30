@@ -2092,7 +2092,11 @@ impl GameServer {
             return Ok(());
         }
 
-        let square = TileSquare::decode(payload)?;
+        // Merged onto the tile already on the ground at each position, not decoded into a fresh
+        // one — `world.tile` is bounds-checked and returns air outside the world, which is fine
+        // here: an out-of-bounds square is discarded whole by the bounds check just below,
+        // whatever this merged against.
+        let square = TileSquare::decode(payload, |x, y| self.world.tile(x, y))?;
         let (x0, y0) = (i32::from(square.x), i32::from(square.y));
 
         // A square is at most 255 on a side, so a hostile one cannot cost much; still refuse any
