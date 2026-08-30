@@ -892,6 +892,7 @@ impl GameServer {
             let Some(npc) = self.npcs.get_mut(hit.target) else {
                 continue;
             };
+            // A townsperson's blow never crits (the melee-hit path skips the crit roll on purpose).
             let killed = npc.take_damage(hit.damage, hit.knockback, hit.direction);
             let (npc_type, center) = (npc.npc_type, npc.center());
             let value = if npc.from_statue {
@@ -1253,7 +1254,8 @@ impl GameServer {
     /// The invulnerability window is what makes this survivable: without it a player inside a
     /// zombie would take sixty hits a second rather than one every half second.
     pub(super) fn tick_contact_damage(&mut self) {
-        const IMMUNE_TICKS: i32 = 30;
+        // The difficulty the hostile-projectile curve is sampled at, read once for the whole tick.
+        let difficulty = self.effective_difficulty();
 
         for slot in 0..self.players.len() {
             let Some(player) = self.players[slot].as_ref() else {
@@ -1273,6 +1275,12 @@ impl GameServer {
                 crate::game::ai::PLAYER_WIDTH as f32,
                 crate::game::ai::PLAYER_HEIGHT as f32,
             );
+            // The push always points away from the attacker, measured off the player's centre, not
+            // its left edge. `Update_NPCCollision` (`Player.cs:31618`) and `Projectile.Damage`
+            // (`Projectile.cs:14894`): hitDirection is +1 when the attacker's centre is left of the
+            // player's centre, -1 when it is right. The old code inverted both and compared against
+            // the player's left edge, so contact knockback shoved the player the wrong way.
+            let player_centre = box_at.0 + box_size.0 / 2.0;
 
             // An enemy you are standing in.
             let hit = self.npcs.iter().find(|(_, npc)| {
@@ -1285,30 +1293,50 @@ impl GameServer {
                     && npc.position.1 + npc.height() > box_at.1
             });
             if let Some((index, npc)) = hit {
+                // Contact damage is the NPC's own `damage`, which `ScaleStats` has already scaled by
+                // difficulty at spawn, so no further multiplier here (`Player.cs:31623`, which reads
+                // `Main.npc[i].damage` straight, times a GetMeleeCollisionData multiplier we leave
+                // at one and a DamageVar the owning client rolls for itself).
                 let damage = npc.stats.damage;
-                let direction = if npc.center().0 < box_at.0 { -1 } else { 1 };
+                let direction = if npc.center().0 < player_centre {
+                    1
+                } else {
+                    -1
+                };
                 let npc_type = npc.npc_type;
-                self.hurt_player(
+                let hurt = self.hurt_player(
                     slot,
                     damage,
                     direction,
                     terrustia_proto::hurt::DeathReason::from_npc(i16::from(index)),
-                    IMMUNE_TICKS,
                 );
                 // Over half the roster leaves something behind as well as the damage, and for
-                // several of them that is the actual difficulty of the biome they live in.
-                self.apply_touch_debuffs(slot as u8, npc_type);
+                // several of them that is the actual difficulty of the biome they live in. The game
+                // only lands these when the hit itself lands (`Player.cs:31659-31661`, `StatusFromNPC`
+                // gated on `Hurt(...) > 0`), so a godmoded or already-immune player is spared them.
+                if hurt {
+                    self.apply_touch_debuffs(slot as u8, npc_type, difficulty);
+                }
                 continue;
             }
 
-            // Or something one of them threw.
+            // Or something one of them threw. Only hostile shots hurt a player: a friendly town-NPC
+            // musket ball that happens to overlap one does not (`Projectile.Damage`'s own
+            // `if (!hostile) return` at the top).
             let struck = self
                 .projectiles
                 .iter()
-                .find(|(_, p)| p.damage > 0 && p.overlaps(box_at, box_size))
+                .find(|(_, p)| p.stats.hostile && p.damage > 0 && p.overlaps(box_at, box_size))
                 .map(|(index, p)| (index, p.damage, p.center().0, p.projectile_type));
-            if let Some((index, damage, from_x, projectile_type)) = struck {
-                let direction = if from_x < box_at.0 { -1 } else { 1 };
+            if let Some((index, base_damage, from_x, projectile_type)) = struck {
+                // A hostile shot delivers `base * hostileDamageScaling(difficulty) * 2`, and the game
+                // applies both on the client at impact (`Projectile.cs:14916-14919`), not baked into
+                // the projectile. The wire carries the base (see `broadcast_projectile`), so a real
+                // client scales it once itself rather than twice.
+                let damage = (base_damage as f32
+                    * terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty)
+                    * 2.0) as i32;
+                let direction = if from_x < player_centre { 1 } else { -1 };
                 self.hurt_player(
                     slot,
                     damage,
@@ -1317,7 +1345,6 @@ impl GameServer {
                         index as i16,
                         projectile_type as i16,
                     ),
-                    IMMUNE_TICKS,
                 );
                 // A projectile with a hit budget spends one, and dies when it runs out.
                 let spent = self.projectiles.get_mut(index).is_some_and(|p| {
@@ -1388,7 +1415,15 @@ impl GameServer {
                 continue;
             };
             let taken = damage_taken(damage, resident.defense, false);
-            let direction = if from_x < at.0 { -1 } else { 1 };
+            // hitDirection points away from the attacker, off the resident's centre, as everywhere
+            // else (`Player.cs:31618`): the old form inverted it and measured off the left edge. It
+            // is inert while the knockback is zero, but correct for when it is not. The knockback
+            // itself, and the global 30-tick immune clock this loop runs on, stay deliberate
+            // simplifications of the town-casualty path: the game strikes a townsperson through the
+            // attacking enemy's own AI, which carries a per-enemy contact knockback this server does
+            // not model.
+            let resident_centre = at.0 + resident.width() / 2.0;
+            let direction = if from_x < resident_centre { 1 } else { -1 };
             let (killed, name) = (
                 resident.take_damage(taken, 0.0, direction),
                 resident.stats.name,
@@ -1433,28 +1468,35 @@ impl GameServer {
     }
 
     /// Take health off a player, tell everyone, and announce a death if it was fatal.
+    ///
+    /// Returns whether the hit actually landed, so the caller knows whether to follow it with a
+    /// touch debuff (the game only applies those when `Hurt` returned damage).
     fn hurt_player(
         &mut self,
         slot: usize,
         damage: i32,
         direction: i8,
         reason: terrustia_proto::hurt::DeathReason,
-        immune_ticks: i32,
-    ) {
+    ) -> bool {
         // Journey mode's `Godmode`. Real vanilla's own `creativeGodMode` gates apply client-side
         // (`Player.cs:31557`/`38486`/`39107`), since most damage in that game is client-decided —
         // this is the one place *this* server decides damage on a player's behalf at all (NPC
         // contact and NPC-thrown projectiles, this function's only two call sites), so it is the
         // one place this server needs its own gate to match.
         if self.journey.is_godmode(slot as u8) {
-            return;
+            return false;
         }
         let Some(player) = self.players[slot].as_mut() else {
-            return;
+            return false;
         };
         let taken = damage.max(1) as i16;
         player.life -= taken;
-        player.immune_ticks = immune_ticks;
+        // The invulnerability window, from `Hurt` (`Player.cs:38672`): a real hit gives forty ticks,
+        // a bare one-damage hit only twenty. `longInvince` (a Cross-Necklace-class accessory) would
+        // double both to eighty and forty, but the server does not track player accessories, so that
+        // doubling is a documented gap rather than modelled. This was a flat thirty before, so every
+        // enemy hit a player slightly too often and a chip-damage hit far too often.
+        player.immune_ticks = if taken == 1 { 20 } else { 40 };
         let died = player.life <= 0;
         if died {
             player.life = 0;
@@ -1486,6 +1528,7 @@ impl GameServer {
         {
             self.broadcast(frame, None);
         }
+        true
     }
 
     /// Tell everyone a projectile is gone, and free its slot.
@@ -1884,8 +1927,21 @@ impl GameServer {
         let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
+        // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
+        let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
         self.broadcast_npc_death(index);
-        self.drop_coins(value, center);
+        // An expert boss's coins ride inside its treasure bag, so the bag's own drop zeroes the
+        // NPC's money (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0` sets `npc.value = 0f`,
+        // `CommonCode.cs:31`). Without this an expert boss paid out both the loose coins and the
+        // bag that already holds them.
+        let value = if self.is_expert()
+            && terrustia_proto::conditional_drops::treasure_bag(npc_type).is_some()
+        {
+            0.0
+        } else {
+            value
+        };
+        self.drop_coins(value, center, midas);
         self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
@@ -2041,6 +2097,7 @@ impl GameServer {
             // than re-checked only from `one_from`'s own loop.
             self.drop_bundled_companion(pick, center);
         }
+        let treasure_bag = terrustia_proto::conditional_drops::treasure_bag(npc_type);
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
             // rules (`CommonDrop`/`ByCondition`'s own `chanceNumerator`) roll `M`-in-`N` instead —
@@ -2049,6 +2106,13 @@ impl GameServer {
             if rule.one_in > 1
                 && !rand::Rng::random_ratio(&mut self.rng, rule.numerator, rule.one_in)
             {
+                continue;
+            }
+            // The expert treasure bag is instanced, not shared: one for each interacting player,
+            // sent only to them (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`). The rest are
+            // ordinary world drops everybody can see and race for.
+            if Some(rule.item) == treasure_bag {
+                self.drop_instanced_bag(i32::from(rule.item), center);
                 continue;
             }
             let stack = if rule.max > rule.min {
@@ -2139,27 +2203,76 @@ impl GameServer {
 
     /// Scatter an NPC's coin value as item entities.
     ///
-    /// This is only the coin half of a death: it is universal and comes straight from the NPC's
-    /// `value`. What the thing was actually carrying is [`Self::drop_loot`].
-    fn drop_coins(&mut self, value: f32, center: (f32, f32)) {
-        let mut copper = value as i64;
-        if copper <= 0 {
+    /// Ported from `NPC.NPCLoot_DropMoney` (`NPC.cs:80436-80567`). The value is never paid at face:
+    /// it is varied (a base -20%..+75% roll plus a cascade of rarer jackpot bonuses), doubled up to
+    /// on a blood moon and raised by Midas, then peeled off largest-denomination-first into several
+    /// scattered stacks rather than one. The old code paid the raw value as one tidy pile of coins.
+    ///
+    /// Two disclosed narrowings. The luck double-roll (`num2 = 2` when a `luck` check passes, keep
+    /// the better or, for bad luck, worse of two rolls) is left out: the server does not track a
+    /// player's luck, so luck reads as zero and the roll happens once, which is the exact `luck ==
+    /// 0` behaviour. And the divide-into-more-stacks step is guarded to leave at least one coin of a
+    /// denomination it has entered, where source lets platinum/gold/silver divide to zero: that is a
+    /// latent spin loop and empty-item drop in source (only its copper branch guards it), unwanted
+    /// on this server's packet path.
+    fn drop_coins(&mut self, value: f32, center: (f32, f32), midas: bool) {
+        if value <= 0.0 {
             return;
         }
-        // Split into platinum, gold, silver and copper, largest denomination first.
-        for (tier, item) in COIN_ITEMS.iter().enumerate().rev() {
-            let unit = 100i64.pow(tier as u32);
-            let count = copper / unit;
-            if count == 0 {
-                continue;
+        let mut num = value;
+        if midas {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 30..=50) as f32 * 0.01;
+        }
+        num *= 1.0 + rand::Rng::random_range(&mut self.rng, -20..=75) as f32 * 0.01;
+        // The jackpot cascade: each rarer than the last, and each worth a little more.
+        for (one_in, lo, hi) in [
+            (2u32, 5i32, 10i32),
+            (4, 10, 20),
+            (8, 15, 30),
+            (16, 20, 40),
+            (32, 25, 50),
+            (64, 50, 100),
+        ] {
+            if rand::Rng::random_ratio(&mut self.rng, 1, one_in) {
+                num *= 1.0 + rand::Rng::random_range(&mut self.rng, lo..=hi) as f32 * 0.01;
             }
-            copper -= count * unit;
-            let stack = count.min(i64::from(i16::MAX)) as i16;
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(*item, stack, 0), (center.0, center.1))
-            {
-                self.broadcast_item(index);
+        }
+        if self.world.blood_moon {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 0..=100) as f32 * 0.01;
+        }
+
+        // Peel denominations off the top, scattering each into its own stack, high to low: copper
+        // 71, silver 72, gold 73, platinum 74.
+        while num as i64 > 0 {
+            let (unit, item, second_div_max): (f32, i32, i32) = if num > 1_000_000.0 {
+                (1_000_000.0, 74, 3)
+            } else if num > 10_000.0 {
+                (10_000.0, 73, 3)
+            } else if num > 100.0 {
+                (100.0, 72, 3)
+            } else {
+                (1.0, 71, 4)
+            };
+            let mut count = (num / unit) as i64;
+            if count > 50 && rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=3));
+            }
+            if rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=second_div_max));
+            }
+            // Source only floors the copper branch at one; flooring every branch is what keeps the
+            // loop from stalling when a divide zeroes a higher denomination it has already entered.
+            let count = count.max(1);
+            num -= unit * count as f32;
+            // Platinum caps a stack at 999 in source; the others never approach the i16 limit but
+            // are clamped for safety all the same.
+            let mut left = count;
+            while left > 0 {
+                let stack = left.min(999).min(i64::from(i16::MAX)) as i16;
+                left -= i64::from(stack);
+                if let Some(index) = self.items.spawn(ItemStack::new(item, stack, 0), center) {
+                    self.broadcast_item(index);
+                }
             }
         }
     }
@@ -3971,8 +4084,23 @@ impl GameServer {
     }
 
     /// Land whatever an enemy leaves behind on the player it just touched.
-    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16) {
-        let expert = self.is_expert();
+    ///
+    /// The game applies a touch debuff with a local `AddBuff` (`Player.cs:5259`, `StatusFromNPC`),
+    /// which runs it through `AddBuff_DetermineBuffTimeToAdd`: in expert mode and up, a debuff in
+    /// `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` is stretched by the `DebuffTimeMultiplier`
+    /// (`Player.cs:5426-5429`). A server that hands the client a raw packet-55 duration skips that
+    /// stretch (the client trusts a networked duration as-is), so an expert-world On Fire! or Poison
+    /// off a touch lasted half as long as the game intends and a master-world one two fifths. Pre-
+    /// multiply here so the wire duration already carries it.
+    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16, difficulty: f32) {
+        // `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` (`BuffID.cs:28`): the debuffs whose
+        // duration the harder modes stretch. The rest (a cosmetic or a non-scaling status) are sent
+        // at their rolled length whatever the difficulty.
+        const DIFFICULTY_EXTENDED: &[u16] = &[
+            20, 22, 23, 24, 30, 31, 32, 33, 35, 36, 39, 44, 46, 47, 69, 70, 80, 323, 324,
+        ];
+        let expert = difficulty >= 2.0;
+        let stretch = terrustia_proto::difficulty::debuff_time_multiplier(difficulty);
         for rule in terrustia_proto::touch_debuffs::on_touch(npc_type) {
             if rule.expert_only && !expert {
                 continue;
@@ -3980,11 +4108,14 @@ impl GameServer {
             if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
                 continue;
             }
-            let ticks = if rule.ticks.1 > rule.ticks.0 {
+            let mut ticks = if rule.ticks.1 > rule.ticks.0 {
                 rand::Rng::random_range(&mut self.rng, rule.ticks.0..=rule.ticks.1)
             } else {
                 rule.ticks.0
             };
+            if expert && DIFFICULTY_EXTENDED.contains(&rule.buff) {
+                ticks = (stretch * ticks as f32) as i32;
+            }
             if let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, rule.buff, ticks) {
                 self.broadcast(frame, None);
             }
@@ -5331,6 +5462,44 @@ impl GameServer {
         sync.velocity = item.velocity;
         if let Ok(frame) = sync.encode() {
             self.broadcast(frame, None);
+        }
+    }
+
+    /// Drop an expert treasure bag: one per interacting player, sent only to them (packet 90).
+    ///
+    /// The game gives every player who fought the boss their own bag that nobody else sees or can
+    /// take (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`, `WorldItem.MakeInstanced`). This
+    /// server does not track which players interacted with a given boss, so it treats every playing
+    /// player as an interactor: a documented, strictly-more-generous narrowing. Each bag is a real
+    /// item slot at the boss's own position, but announced with `SpawnInstancedItem` to its one
+    /// owner rather than broadcast, so the others neither see it nor can race it. With nobody
+    /// present it falls back to an ordinary shared drop rather than being silently lost.
+    fn drop_instanced_bag(&mut self, item_id: i32, center: (f32, f32)) {
+        let owners: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| p.slot)
+            .collect();
+        if owners.is_empty() {
+            if let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) {
+                self.broadcast_item(index);
+            }
+            return;
+        }
+        for slot in owners {
+            let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) else {
+                debug!("item slots are full; a treasure bag was discarded");
+                break;
+            };
+            let Some(item) = self.items.get(index).copied() else {
+                continue;
+            };
+            let sync = SyncItem::dropped(index, item.position, item.item);
+            if let Ok(frame) = sync.encode_instanced() {
+                self.send(slot, frame);
+            }
         }
     }
 
@@ -6721,13 +6890,7 @@ mod godmode {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
 
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[0].as_ref().unwrap().life,
@@ -6742,7 +6905,7 @@ mod godmode {
         // godmode left off — the control case, so the test above is proving something rather
         // than passing regardless of whether the gate exists at all.
 
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
@@ -6751,17 +6914,11 @@ mod godmode {
     fn turning_godmode_off_again_lets_damage_through() {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 100, "still on");
 
         server.journey.set_godmode(0, false);
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
 
@@ -6776,13 +6933,150 @@ mod godmode {
         server.players[1] = Some(other);
 
         server.journey.set_godmode(0, true);
-        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[1].as_ref().unwrap().life,
             70,
             "slot 1 was never given godmode"
         );
+    }
+
+    /// A hostile shot lands `base * hostileDamageScaling(difficulty) * 2` where the game lands it,
+    /// at impact (`Projectile.cs:14916-14919`), and opens the full forty-tick window. The old path
+    /// pre-scaled the projectile at launch and omitted the flat doubling, so a base-one classic shot
+    /// delivered one where the game delivers two, and the immune window was a flat thirty.
+    #[test]
+    fn a_hostile_shot_does_double_damage_and_opens_the_full_window() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let pos = (1000.0, 1000.0);
+        {
+            let p = server.players[0].as_mut().unwrap();
+            p.position = pos;
+            p.immune_ticks = 0;
+            p.life = 200;
+            p.life_max = 200;
+        }
+        // A hostile Harpy Feather carrying one base damage, centred on the player.
+        let centre = (
+            pos.0 + crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            pos.1 + crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        server.projectiles.launch(38, centre, (0.0, 0.0), 1, 0);
+        server.tick_contact_damage();
+        let p = server.players[0].as_ref().unwrap();
+        assert_eq!(p.life, 198, "classic: base 1 * difficulty 1 * flat 2 = 2");
+        assert_eq!(p.immune_ticks, 40, "a real hit opens the full forty ticks");
+    }
+
+    /// The immune window follows the damage: a bare one-damage hit only opens twenty ticks, and a
+    /// godmoded hit reports no strike at all so no touch debuff can follow it (`Player.cs:38672`,
+    /// and the `StatusFromNPC` gate at `Player.cs:31659-31661`).
+    #[test]
+    fn the_immune_window_and_the_strike_report_follow_the_damage() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let chip = server.hurt_player(0, 1, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(chip, "the chip hit still landed");
+        assert_eq!(server.players[0].as_ref().unwrap().immune_ticks, 20);
+
+        server.journey.set_godmode(0, true);
+        let blocked = server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(
+            !blocked,
+            "a godmoded hit reports no strike, so no debuff follows"
+        );
+    }
+
+    /// An expert boss hands every player its own bag over packet 90 and drops no loose coins (they
+    /// ride inside the bag). The old path broadcast one shared bag as an ordinary item and paid the
+    /// coins on top, so on a two-player server one player got the bag and the boss double-paid.
+    #[test]
+    fn an_expert_boss_instances_a_bag_per_player_and_drops_no_loose_coins() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        let mut rxs = Vec::new();
+        for slot in 0u8..2 {
+            let (tx, rx) = mpsc::channel(64);
+            let mut p = Player::new(slot, format!("127.0.0.1:{}", slot + 1).parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[slot as usize] = Some(p);
+            rxs.push(rx);
+        }
+        // Eye of Cthulhu (type 4, bag 3319), killed while carrying a fat coin value.
+        let index = server
+            .npcs
+            .spawn(4, (1000.0, 1000.0))
+            .expect("the eye spawns");
+        server.npc_died(index, 4, (1000.0, 1000.0), 10_000.0);
+
+        for (slot, rx) in rxs.iter_mut().enumerate() {
+            let mut bag = false;
+            let mut coin = false;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() < 3 {
+                    continue;
+                }
+                let item_id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                if frame[2] == terrustia_proto::id::SPAWN_INSTANCED_ITEM && item_id == 3319 {
+                    bag = true;
+                }
+                if frame[2] == terrustia_proto::id::SYNC_ITEM && (71..=74).contains(&item_id) {
+                    coin = true;
+                }
+            }
+            assert!(
+                bag,
+                "player {slot} should be sent its own instanced treasure bag"
+            );
+            assert!(!coin, "an expert boss with a bag drops no loose coins");
+        }
+    }
+
+    /// Coins are varied per roll, not paid at face (`NPC.NPCLoot_DropMoney`, `NPC.cs:80436`). The
+    /// old path paid the exact value as one pile every time; the game rolls a -20%..+75% base plus
+    /// jackpots, so different rolls of the same value pay different amounts.
+    #[test]
+    fn coin_drops_are_varied_not_paid_at_face() {
+        use rand::SeedableRng;
+        const FACE: f32 = 1000.0;
+        let total_for = |seed: u64| -> i64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            let (tx, mut rx) = mpsc::channel(256);
+            let mut p = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[0] = Some(p);
+            server.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            server.drop_coins(FACE, (1000.0, 1000.0), false);
+            let mut total = 0i64;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() >= 23 && frame[2] == terrustia_proto::id::SYNC_ITEM {
+                    let id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                    let stack = i64::from(i16::from_le_bytes([frame[21], frame[22]]));
+                    let unit = match id {
+                        71 => 1,
+                        72 => 100,
+                        73 => 10_000,
+                        74 => 1_000_000,
+                        _ => 0,
+                    };
+                    total += stack * unit;
+                }
+            }
+            total
+        };
+        let (a, b, c) = (total_for(1), total_for(2), total_for(3));
+        assert!(a > 0 && b > 0 && c > 0, "coins should drop");
+        assert!(
+            a != b || b != c,
+            "the value is varied per roll, not paid at face"
+        );
+        for t in [a, b, c] {
+            let t = t as f32;
+            assert!(
+                (FACE * 0.5..=FACE * 5.0).contains(&t),
+                "within a sane band: {t}"
+            );
+        }
     }
 }
 
@@ -7063,18 +7357,60 @@ mod difficulty_slider {
         const QUEEN_BEE: u16 = 222;
 
         let (mut gentle, mut gentle_rx) = with_one_player(journey_at(0.0));
-        gentle.apply_touch_debuffs(0, QUEEN_BEE);
+        let gentle_difficulty = gentle.effective_difficulty();
+        gentle.apply_touch_debuffs(0, QUEEN_BEE, gentle_difficulty);
         assert!(
             gentle_rx.try_recv().is_err(),
             "a fresh Journey world is not expert, so no buff should be sent"
         );
 
         let (mut fierce, mut fierce_rx) = with_one_player(journey_at(1.0));
-        fierce.apply_touch_debuffs(0, QUEEN_BEE);
+        let fierce_difficulty = fierce.effective_difficulty();
+        fierce.apply_touch_debuffs(0, QUEEN_BEE, fierce_difficulty);
         assert!(
             fierce_rx.try_recv().is_ok(),
             "the slider at its top is expert, so the buff should be sent"
         );
+    }
+
+    /// A touch debuff in `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` lasts longer in expert.
+    /// NPC 141 lands a fixed six-hundred-tick Poisoned (buff 20, in that set) one touch in two, and
+    /// `DebuffTimeMultiplier` stretches it x2 in expert. The server sends packet 55 with a raw
+    /// duration the client trusts as-is, so it must pre-multiply: the same base roll must go out at
+    /// six hundred in classic and twelve hundred in expert. Before this the wire duration was raw,
+    /// so an expert-world poison off a touch ran half as long as the game intends.
+    #[test]
+    fn a_difficulty_extended_touch_debuff_is_stretched_on_the_wire_in_expert() {
+        use rand::SeedableRng;
+        const POISONER: u16 = 141;
+        let ticks = |f: &[u8]| i32::from_le_bytes([f[6], f[7], f[8], f[9]]);
+        for seed in 0..64u64 {
+            let (mut classic, mut classic_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            classic.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            classic.apply_touch_debuffs(0, POISONER, 1.0);
+
+            let (mut expert, mut expert_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            expert.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            expert.apply_touch_debuffs(0, POISONER, 2.0);
+
+            // The one-in-two roll consumes the rng identically under the same seed, so either both
+            // land the debuff or neither does.
+            if let Ok(classic_frame) = classic_rx.try_recv() {
+                let expert_frame = expert_rx
+                    .try_recv()
+                    .expect("the same seed lands the same one-in-two roll");
+                assert_eq!(
+                    ticks(&classic_frame),
+                    600,
+                    "classic keeps the base duration"
+                );
+                assert_eq!(ticks(&expert_frame), 1200, "expert doubles a Poisoned");
+                return;
+            }
+        }
+        panic!("no seed in the range landed the one-in-two poison");
     }
 
     /// `note_army_kill`'s own `expert` local — a plain Old One's Army goblin (any id in

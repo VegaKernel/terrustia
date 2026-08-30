@@ -131,24 +131,52 @@ const FLAME: u16 = 188;
 /// How much of its speed a rolling ball keeps when it bounces.
 const BOUNCE: f32 = -0.9;
 
+/// Walk a box from `from` towards `to` in sub-tile increments, stopping at the first solid tile.
+///
+/// Returns the furthest position reached and whether terrain was struck. This is the swept form of
+/// the game's `Collision.TileCollision`: a projectile crosses at most half a tile between checks,
+/// so nothing tunnels however fast it flies, while still advancing the *full* velocity vanilla
+/// gives it in a single pass. The old code confused the two, dividing velocity by the pass count,
+/// which is what flew the fast types at a fraction of their speed.
+fn advance(
+    from: (f32, f32),
+    to: (f32, f32),
+    size: (f32, f32),
+    tiles: &impl TileView,
+) -> ((f32, f32), bool) {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let distance = (dx * dx + dy * dy).sqrt();
+    let steps = (distance / (TILE * 0.5)).ceil().max(1.0) as i32;
+    let mut last = from;
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let probe = (from.0 + dx * t, from.1 + dy * t);
+        if hits_terrain(tiles, probe, size) {
+            return (last, true);
+        }
+        last = probe;
+    }
+    (to, false)
+}
+
 /// Drive one projectile for a tick.
 ///
 /// Anything it decides to put in the air is pushed onto `emits` rather than spawned, because a
 /// projectile cannot reach into the store that owns it.
+///
+/// The game runs the *entire* update body once per `extraUpdates + 1`: the AI, the movement and the
+/// `timeLeft` decrement all repeat, at full velocity each pass. `Projectile.Update`
+/// (`Projectile.cs:16781`) wraps `numUpdates = extraUpdates; while (numUpdates >= 0)` around the
+/// whole thing, with `AI()` at 16881 and `timeLeft--` at 17308 inside the loop. Sub-stepping
+/// velocity by the pass count and decrementing `timeLeft` once per frame flew the 33 hostile types
+/// that carry extra updates at 1/(N+1) speed and kept them alive (N+1) times too long.
 pub fn step(
     projectile: &mut Projectile,
     tiles: &impl TileView,
     emits: &mut Vec<Emission>,
 ) -> Outcome {
-    projectile.time_left -= 1;
-    if projectile.time_left <= 0 {
-        return Outcome::Spent;
-    }
-
-    // Fast projectiles move in several smaller steps, which is what keeps them from tunnelling
-    // through a one-tile wall.
-    let steps = projectile.stats.extra_updates + 1;
-    for _ in 0..steps {
+    let passes = projectile.stats.extra_updates + 1;
+    for _ in 0..passes {
         match projectile.stats.ai_style {
             1 => {
                 projectile.ai[0] += 1.0;
@@ -238,40 +266,60 @@ pub fn step(
             }
         }
 
+        // Movement at full velocity, one pass at a time.
         let size = (projectile.width(), projectile.height());
         let next = (
-            projectile.position.0 + projectile.velocity.0 / steps as f32,
-            projectile.position.1 + projectile.velocity.1 / steps as f32,
+            projectile.position.0 + projectile.velocity.0,
+            projectile.position.1 + projectile.velocity.1,
         );
-        if projectile.stats.tile_collide && hits_terrain(tiles, next, size) {
-            // A rolling ball bounces off what it hits instead of dying on it, and each axis is
-            // settled on its own: a ball that lands on a floor keeps travelling along it, which
-            // is why a spiky ball trap fills a corridor rather than a doorway.
-            if projectile.stats.ai_style != 14 {
-                return Outcome::Spent;
+        if projectile.stats.tile_collide {
+            if projectile.stats.ai_style == 14 {
+                // A rolling ball bounces off what it hits instead of dying on it, and each axis is
+                // settled on its own: a ball that lands on a floor keeps travelling along it, which
+                // is why a spiky ball trap fills a corridor rather than a doorway. Rolling balls
+                // carry no extra updates and move well under a tile a step, so a plain destination
+                // check settles them without any sweep.
+                if hits_terrain(tiles, next, size) {
+                    let sideways = (next.0, projectile.position.1);
+                    let downward = (projectile.position.0, next.1);
+                    let across = !hits_terrain(tiles, sideways, size);
+                    let down = !hits_terrain(tiles, downward, size);
+                    let (moved, bounce_x, bounce_y) = match (across, down) {
+                        (true, false) => (sideways, false, true),
+                        (false, true) => (downward, true, false),
+                        // Neither axis is free, or both are free alone but not together, a corner.
+                        // It comes off both and stays where it is for this step.
+                        _ => (projectile.position, true, true),
+                    };
+                    projectile.position = moved;
+                    if bounce_x {
+                        projectile.velocity.0 *= BOUNCE;
+                    }
+                    if bounce_y {
+                        projectile.velocity.1 *= BOUNCE;
+                    }
+                } else {
+                    projectile.position = next;
+                }
+            } else {
+                // Everything else dies on what it hits. Swept so a fast pass cannot skip a wall.
+                let (moved, hit) = advance(projectile.position, next, size, tiles);
+                projectile.position = moved;
+                if hit {
+                    return Outcome::Spent;
+                }
             }
-            let sideways = (next.0, projectile.position.1);
-            let downward = (projectile.position.0, next.1);
-            let across = !hits_terrain(tiles, sideways, size);
-            let down = !hits_terrain(tiles, downward, size);
-            let (moved, bounce_x, bounce_y) = match (across, down) {
-                (true, false) => (sideways, false, true),
-                (false, true) => (downward, true, false),
-                // Neither axis is free, or both are free alone but not together — a corner. It
-                // comes off both and stays where it is for this step.
-                _ => (projectile.position, true, true),
-            };
-            projectile.position = moved;
-            if bounce_x {
-                projectile.velocity.0 *= BOUNCE;
-            }
-            if bounce_y {
-                projectile.velocity.1 *= BOUNCE;
-            }
-            projectile.dirty = true;
-            continue;
+        } else {
+            projectile.position = next;
         }
-        projectile.position = next;
+
+        // The time budget is spent once per pass, exactly where the game spends it
+        // (`Projectile.cs:17308`), so a projectile with extra updates lives the right length of
+        // time rather than (N+1) times too long.
+        projectile.time_left -= 1;
+        if projectile.time_left <= 0 {
+            return Outcome::Spent;
+        }
     }
 
     projectile.dirty = true;
@@ -330,12 +378,6 @@ pub struct ProjectileStore {
     /// No guard against zero here, unlike the NPC store: the game does not have one either, and
     /// nothing asserts on a projectile generation of nought.
     slot_generations: Vec<u16>,
-    /// What the world's difficulty multiplies a hostile shot's damage by.
-    ///
-    /// Held here for the same reason the NPC store holds its scaling: one choke point that no
-    /// call site can forget. The game keeps it on the projectile itself, set from
-    /// `HostileProjectileDamageMultiplier` when it is created.
-    hostile_damage_scale: f32,
 }
 
 impl Default for ProjectileStore {
@@ -349,13 +391,7 @@ impl ProjectileStore {
         Self {
             slots: (0..MAX_PROJECTILES).map(|_| None).collect(),
             slot_generations: vec![0; MAX_PROJECTILES],
-            hostile_damage_scale: 1.0,
         }
-    }
-
-    /// Tell the store how hard the world hits. Applied to everything launched afterwards.
-    pub fn set_hostile_damage_scale(&mut self, scale: f32) {
-        self.hostile_damage_scale = scale;
     }
 
     /// Launch one, returning its slot.
@@ -400,13 +436,13 @@ impl ProjectileStore {
                 position.1 - stats.height as f32 / 2.0,
             ),
             velocity,
-            // Only what hurts players scales; a trap's harmless flame head and anything friendly
-            // keep the number they were given.
-            damage: if stats.hostile {
-                (damage as f32 * self.hostile_damage_scale) as i32
-            } else {
-                damage
-            },
+            // The base damage, unscaled. The game keeps a hostile shot's wire damage at its base
+            // and applies `hostileDamageScaling(difficulty) * 2` on the client at the moment it hits
+            // a player (`Projectile.cs:14916-14919`), so the server must not bake the difficulty
+            // multiplier in here: a client that received a pre-scaled number would scale it a second
+            // time. The server applies the same scaling itself when it originates the hit (see
+            // `tick_contact_damage`).
+            damage,
             knockback: stats.knockback,
             ai: [0.0; 3],
             local_ai: [0.0; 2],
@@ -645,6 +681,30 @@ mod tests {
         assert_eq!(step(&mut p, &tiles, &mut Vec::new()), Outcome::Flying);
         assert_eq!(step(&mut p, &tiles, &mut Vec::new()), Outcome::Flying);
         assert_eq!(step(&mut p, &tiles, &mut Vec::new()), Outcome::Spent);
+    }
+
+    /// Extra updates run the whole body again, at full velocity, so a fast type covers (N+1) times
+    /// its per-pass velocity a tick and its life ticks down (N+1) times. The old code moved
+    /// velocity/N and spent one tick of life a frame, so these types crawled and overstayed.
+    #[test]
+    fn extra_updates_move_full_velocity_and_spend_life_each_pass() {
+        let tiles = Air::default();
+        // The eye laser carries two extra updates: three passes a tick.
+        let mut laser = launched(83, (0.0, -3.0));
+        assert_eq!(laser.stats.extra_updates, 2);
+        let start_y = laser.position.1;
+        let start_life = laser.time_left;
+        step(&mut laser, &tiles, &mut Vec::new());
+        assert!(
+            (laser.position.1 - (start_y - 9.0)).abs() < 0.001,
+            "three passes of -3 should move -9, not {}",
+            laser.position.1 - start_y
+        );
+        assert_eq!(
+            laser.time_left,
+            start_life - 3,
+            "three passes should each spend a tick of life"
+        );
     }
 
     /// Fast projectiles move in substeps, which is what stops them tunnelling.

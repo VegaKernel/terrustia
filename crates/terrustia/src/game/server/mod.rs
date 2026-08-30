@@ -2526,9 +2526,6 @@ const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE
 const RAISE_CHECK_RANGE: f32 = terrustia_proto::npc_params::RAISE_CHECK_RANGE;
 const RAISE_MINIMUM: usize = terrustia_proto::npc_params::RAISE_MINIMUM;
 
-/// Coin item ids, smallest first.
-const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
-
 /// Does a panic on the untrusted-packet path actually get caught, and does the world still reach
 /// disk on the way out?
 ///

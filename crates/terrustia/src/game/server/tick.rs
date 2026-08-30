@@ -417,9 +417,9 @@ impl GameServer {
                 .filter(|p| p.is_playing())
                 .count() as u32,
         });
-        self.projectiles.set_hostile_damage_scale(
-            terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty),
-        );
+        // Hostile-shot damage is no longer pre-scaled at launch: the wire carries the base and the
+        // difficulty multiplier (and the flat x2) is applied where the game applies it, at the
+        // moment the shot hits a player (`tick_contact_damage`), so a real client scales it once.
 
         self.tick_liquids();
         lap(&mut cost, Phase::Liquids);
