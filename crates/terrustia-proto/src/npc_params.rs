@@ -4114,8 +4114,11 @@ pub const MOON_LORD_LEECH: u16 = 401;
 /// three eyes are always doing different things at once, and the fight has a shape rather than a
 /// rhythm.
 ///
-/// Attack 0 is "wait", 1 is the bolts, 2 is the heavy attack — a deathray from the head, a
-/// phantasmal sphere from a hand — and 3 is the spread of spheres.
+/// Attack 0 is "wait". Attack 1 is a hand's rapid eye-stream, or, for the head, the charged
+/// deathray (a hundred and eighty ticks of wind-up, then the beam). Attack 2 is a hand's six-sphere
+/// barrage, or, for the head, the leech attack. Attack 3 is the spread of bolts, the same for both.
+/// The row a part runs is not random: a hand takes the row for its side (left row 0, right row 1),
+/// the head takes row 2 (`NPC.cs:42032` `num6 = (ai[2]==0)?0:1`, `NPC.cs:42530` `num5 = 2`).
 pub const MOON_LORD_SCRIPTS: [[(u8, i32); 5]; 3] = [
     [(0, 50), (1, 70), (2, 330), (0, 60), (3, 90)],
     [(1, 70), (0, 50), (3, 90), (0, 60), (2, 330)],
@@ -4138,15 +4141,19 @@ pub const MOON_LORD_DEATH_TICKS: f32 = 600.0;
 /// Past this it leaves.
 pub const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
 
-/// What its parts throw.
-pub const PHANTASMAL_BOLT: u16 = 452;
-pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
-pub const PHANTASMAL_EYE: u16 = 454;
-pub const PHANTASMAL_EYE_DAMAGE: i32 = 40;
+/// What its parts throw. Ids are vanilla `ProjectileID` values and the damage each `NewProjectile`
+/// call passes in `AI_078`/`AI_079`: the eye stream (452, 30, `NPC.cs:42155`), the sphere barrage
+/// (454, 40, `NPC.cs:42199`), the head's deathray (455, 75, `NPC.cs:42667`) and the bolt spread
+/// (462, 30, `NPC.cs:42502`). The names match `ProjectileID.cs`: 452 is the eye, 454 the sphere,
+/// 462 the bolt.
+pub const PHANTASMAL_EYE: u16 = 452;
+pub const PHANTASMAL_EYE_DAMAGE: i32 = 30;
+pub const PHANTASMAL_SPHERE: u16 = 454;
+pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 40;
 pub const PHANTASMAL_DEATHRAY: u16 = 455;
 pub const PHANTASMAL_DEATHRAY_DAMAGE: i32 = 75;
-pub const PHANTASMAL_SPHERE: u16 = 462;
-pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 30;
+pub const PHANTASMAL_BOLT: u16 = 462;
+pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
 /// The bolts come in threes, a fifth of a second apart.
 pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
 pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;

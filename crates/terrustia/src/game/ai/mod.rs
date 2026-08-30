@@ -1072,7 +1072,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.died = out.spent;
         }
         78 | 79 => {
-            let out = boss::moon_lord::eye_socket(npc, world, world.parent, rng);
+            let out = boss::moon_lord::eye_socket(npc, world, world.parent);
             effects.shots.extend(out.shots);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
