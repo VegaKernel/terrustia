@@ -1629,10 +1629,10 @@ impl GameServer {
             return false;
         };
         let at = sync.position;
-        self.broadcast_near(frame, at, index)
+        self.broadcast_near(frame, at, Withheld::Npc(index), MAX_NPC_SYNC_SKIPS, None)
     }
 
-    /// Send an NPC's state only to the players whose part of the world it is in.
+    /// Send an update only to the players whose part of the world it happened in.
     ///
     /// A broadcast to everybody is what a server can least afford: with two hundred NPCs awake and
     /// a sync every six ticks, sending each to every player is thousands of frames a second per
@@ -1640,8 +1640,21 @@ impl GameServer {
     /// rule is to skip an NPC for a client whose loaded sections do not cover it — but never more
     /// than four times in a row, so something far away still gets an occasional update rather than
     /// freezing where it was last seen.
+    ///
+    /// `what` identifies the thing being withheld so each has its own run of skips against each
+    /// player, and `budget` is how many may go by before one is sent anyway. NPCs use the game's
+    /// own four ([`MAX_NPC_SYNC_SKIPS`]); things that arrive every tick rather than every sixth
+    /// need a larger one to actually shed the fan-out ([`MAX_PLAYER_SYNC_SKIPS`]).
+    ///
     /// Returns whether anybody was skipped, which is the caller's cue to try again next interval.
-    fn broadcast_near(&mut self, frame: Vec<u8>, at: (f32, f32), index: u8) -> bool {
+    pub(super) fn broadcast_near(
+        &mut self,
+        frame: Vec<u8>,
+        at: (f32, f32),
+        what: Withheld,
+        budget: u8,
+        except: Option<u8>,
+    ) -> bool {
         let bytes = Bytes::from(frame);
         let mut withheld = false;
         let section = section_of(at);
@@ -1649,22 +1662,32 @@ impl GameServer {
             .players
             .iter()
             .flatten()
-            .filter(|p| p.is_playing())
+            .filter(|p| p.is_playing() && Some(p.slot) != except)
             .map(|p| (p.slot, near_section(p.position, section)))
             .collect();
         for (slot, near) in targets {
             if !near {
-                let skipped = self.npc_skips.entry((index, slot)).or_insert(0);
-                if *skipped < MAX_NPC_SYNC_SKIPS {
+                let skipped = self.skips.entry((what, slot)).or_insert(0);
+                if *skipped < budget {
                     *skipped += 1;
                     withheld = true;
                     continue;
                 }
             }
-            self.npc_skips.remove(&(index, slot));
+            self.skips.remove(&(what, slot));
             self.send_bytes(slot, bytes.clone());
         }
         withheld
+    }
+
+    /// Drop every player's skip run for something that no longer exists.
+    ///
+    /// NPC indices and player slots are both small fixed ranges, so their entries are naturally
+    /// bounded and get reused. A projectile identity is not: it carries a generation that keeps
+    /// climbing, so without this a long-running server would hold one entry per player for every
+    /// projectile ever fired.
+    pub(super) fn forget_skips(&mut self, what: Withheld) {
+        self.skips.retain(|&(which, _), _| which != what);
     }
 
     /// Carry out what a fighter decided to do to a door.
@@ -7098,6 +7121,217 @@ mod npc_buff_broadcast_scope {
              not have it withheld the way an ordinary position sync would be"
         );
         assert_eq!(frame.unwrap()[2], terrustia_proto::id::N_P_C_BUFFS);
+    }
+}
+
+/// The area-of-interest cull, on the two things that arrive every tick rather than every sixth.
+///
+/// Vanilla relays a player's movement to every other player and a client's projectile syncs the
+/// same way, which is `max_players - 1` sends per source per tick: the quadratic fan-out that fills
+/// outbound queues and gets slow clients dropped. Culling by loaded section is a deliberate
+/// departure, bounded by a skip budget so nothing distant freezes outright.
+#[cfg(test)]
+mod area_of_interest_cull {
+    use super::*;
+    use crate::config::Config;
+
+    fn world() -> crate::world::World {
+        crate::world::World::empty(4000, 1200, "area of interest probe")
+    }
+
+    /// Seat a playing player and hand back the channel its frames land in. The receiver must be
+    /// kept alive by the caller: a dropped one closes the channel, and `send_bytes` removes a
+    /// player whose channel has closed.
+    fn seat(server: &mut GameServer, slot: u8, position: (f32, f32)) -> mpsc::Receiver<Bytes> {
+        let (out_tx, out_rx) = mpsc::channel(256);
+        let addr = format!("127.0.0.1:{}", u16::from(slot) + 1);
+        let mut player = Player::new(
+            slot,
+            addr.parse().expect("a valid loopback address"),
+            out_tx,
+        );
+        player.state = ConnState::Playing;
+        player.position = position;
+        server.players[slot as usize] = Some(player);
+        out_rx
+    }
+
+    /// One section is 200 by 150 tiles and `SECTION_REACH` is one, so this is comfortably outside.
+    const FAR: (f32, f32) = (3000.0 * 16.0, 0.0);
+    const ORIGIN: (f32, f32) = (0.0, 0.0);
+
+    #[test]
+    fn a_player_in_the_same_part_of_the_world_gets_every_movement_update() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _mover = seat(&mut server, 0, ORIGIN);
+        let mut near = seat(&mut server, 1, ORIGIN);
+
+        for _ in 0..10 {
+            server.broadcast_near(
+                vec![0, 0, terrustia_proto::id::PLAYER_CONTROLS],
+                ORIGIN,
+                Withheld::Player(0),
+                MAX_PLAYER_SYNC_SKIPS,
+                Some(0),
+            );
+        }
+
+        let mut got = 0;
+        while near.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(
+            got, 10,
+            "somebody standing next to the mover is never culled"
+        );
+    }
+
+    #[test]
+    fn a_distant_player_is_not_sent_every_movement_update() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _mover = seat(&mut server, 0, ORIGIN);
+        let mut far = seat(&mut server, 1, FAR);
+
+        // One full budget's worth. Every one of these is withheld.
+        for _ in 0..MAX_PLAYER_SYNC_SKIPS {
+            assert!(
+                server.broadcast_near(
+                    vec![0, 0, terrustia_proto::id::PLAYER_CONTROLS],
+                    ORIGIN,
+                    Withheld::Player(0),
+                    MAX_PLAYER_SYNC_SKIPS,
+                    Some(0),
+                ),
+                "a player nowhere near the mover is skipped, and the caller is told so"
+            );
+        }
+        assert!(
+            far.try_recv().is_err(),
+            "nothing should have reached a player {} sections away yet",
+            (FAR.0 / 16.0) as i32 / terrustia_proto::section::SECTION_WIDTH
+        );
+    }
+
+    #[test]
+    fn a_distant_player_is_not_left_frozen() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _mover = seat(&mut server, 0, ORIGIN);
+        let mut far = seat(&mut server, 1, FAR);
+
+        for _ in 0..MAX_PLAYER_SYNC_SKIPS {
+            server.broadcast_near(
+                vec![0, 0, terrustia_proto::id::PLAYER_CONTROLS],
+                ORIGIN,
+                Withheld::Player(0),
+                MAX_PLAYER_SYNC_SKIPS,
+                Some(0),
+            );
+        }
+        // The budget is spent, so this one goes out: the marker on a distant player's map keeps
+        // moving, it just moves in steps.
+        server.broadcast_near(
+            vec![0, 0, terrustia_proto::id::PLAYER_CONTROLS],
+            ORIGIN,
+            Withheld::Player(0),
+            MAX_PLAYER_SYNC_SKIPS,
+            Some(0),
+        );
+        let frame = far.try_recv();
+        assert!(
+            frame.is_ok(),
+            "after {MAX_PLAYER_SYNC_SKIPS} withheld updates the next one is sent anyway"
+        );
+        assert_eq!(frame.unwrap()[2], terrustia_proto::id::PLAYER_CONTROLS);
+    }
+
+    #[test]
+    fn a_projectile_is_culled_on_the_npc_budget_not_the_player_one() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _owner = seat(&mut server, 0, ORIGIN);
+        let mut far = seat(&mut server, 1, FAR);
+
+        let key = terrustia_proto::projectile::ProjectileKey {
+            owner: 0,
+            index: 7,
+            generation: 1,
+        };
+        for _ in 0..MAX_NPC_SYNC_SKIPS {
+            server.broadcast_near(
+                vec![0, 0, terrustia_proto::id::SYNC_PROJECTILE],
+                ORIGIN,
+                Withheld::Projectile(key.pack()),
+                MAX_NPC_SYNC_SKIPS,
+                Some(0),
+            );
+        }
+        assert!(far.try_recv().is_err(), "the budget is not spent yet");
+
+        server.broadcast_near(
+            vec![0, 0, terrustia_proto::id::SYNC_PROJECTILE],
+            ORIGIN,
+            Withheld::Projectile(key.pack()),
+            MAX_NPC_SYNC_SKIPS,
+            Some(0),
+        );
+        assert!(
+            far.try_recv().is_ok(),
+            "a projectile uses the game's own four-skip rule, not the movement budget"
+        );
+    }
+
+    #[test]
+    fn a_dead_projectiles_skip_runs_are_not_kept_for_ever() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _owner = seat(&mut server, 0, ORIGIN);
+        let _far = seat(&mut server, 1, FAR);
+
+        let key = terrustia_proto::projectile::ProjectileKey {
+            owner: 0,
+            index: 7,
+            generation: 1,
+        };
+        let what = Withheld::Projectile(key.pack());
+        server.broadcast_near(
+            vec![0, 0, terrustia_proto::id::SYNC_PROJECTILE],
+            ORIGIN,
+            what,
+            MAX_NPC_SYNC_SKIPS,
+            Some(0),
+        );
+        assert!(
+            !server.skips.is_empty(),
+            "the distant player's skip run was recorded"
+        );
+
+        server.forget_skips(what);
+        assert!(
+            server.skips.is_empty(),
+            "a projectile's identity carries a climbing generation, so its entries have to go \
+             when it dies or the ledger grows for the life of the server"
+        );
+    }
+
+    #[test]
+    fn a_departing_player_leaves_no_skip_run_behind_for_the_next_occupant() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _mover = seat(&mut server, 0, ORIGIN);
+        let far = seat(&mut server, 1, FAR);
+
+        server.broadcast_near(
+            vec![0, 0, terrustia_proto::id::PLAYER_CONTROLS],
+            ORIGIN,
+            Withheld::Player(0),
+            MAX_PLAYER_SYNC_SKIPS,
+            Some(0),
+        );
+        assert!(!server.skips.is_empty(), "slot 1 has a run against it");
+
+        drop(far);
+        server.remove_player(1);
+        assert!(
+            server.skips.is_empty(),
+            "slots are reused, so whoever joins as slot 1 next must not inherit a spent budget"
+        );
     }
 }
 
