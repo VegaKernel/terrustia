@@ -1920,6 +1920,17 @@ impl GameServer {
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
         self.broadcast_npc_death(index);
+        // An expert boss's coins ride inside its treasure bag, so the bag's own drop zeroes the
+        // NPC's money (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0` sets `npc.value = 0f`,
+        // `CommonCode.cs:31`). Without this an expert boss paid out both the loose coins and the
+        // bag that already holds them.
+        let value = if self.is_expert()
+            && terrustia_proto::conditional_drops::treasure_bag(npc_type).is_some()
+        {
+            0.0
+        } else {
+            value
+        };
         self.drop_coins(value, center);
         self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
@@ -2076,6 +2087,7 @@ impl GameServer {
             // than re-checked only from `one_from`'s own loop.
             self.drop_bundled_companion(pick, center);
         }
+        let treasure_bag = terrustia_proto::conditional_drops::treasure_bag(npc_type);
         for rule in terrustia_proto::conditional_drops::conditional(npc_type, at) {
             // Almost every rule here is a plain 1-in-`one_in` roll, but a handful of real vanilla
             // rules (`CommonDrop`/`ByCondition`'s own `chanceNumerator`) roll `M`-in-`N` instead —
@@ -2084,6 +2096,13 @@ impl GameServer {
             if rule.one_in > 1
                 && !rand::Rng::random_ratio(&mut self.rng, rule.numerator, rule.one_in)
             {
+                continue;
+            }
+            // The expert treasure bag is instanced, not shared: one for each interacting player,
+            // sent only to them (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`). The rest are
+            // ordinary world drops everybody can see and race for.
+            if Some(rule.item) == treasure_bag {
+                self.drop_instanced_bag(i32::from(rule.item), center);
                 continue;
             }
             let stack = if rule.max > rule.min {
@@ -5243,6 +5262,44 @@ impl GameServer {
         }
     }
 
+    /// Drop an expert treasure bag: one per interacting player, sent only to them (packet 90).
+    ///
+    /// The game gives every player who fought the boss their own bag that nobody else sees or can
+    /// take (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`, `WorldItem.MakeInstanced`). This
+    /// server does not track which players interacted with a given boss, so it treats every playing
+    /// player as an interactor: a documented, strictly-more-generous narrowing. Each bag is a real
+    /// item slot at the boss's own position, but announced with `SpawnInstancedItem` to its one
+    /// owner rather than broadcast, so the others neither see it nor can race it. With nobody
+    /// present it falls back to an ordinary shared drop rather than being silently lost.
+    fn drop_instanced_bag(&mut self, item_id: i32, center: (f32, f32)) {
+        let owners: Vec<u8> = self
+            .players
+            .iter()
+            .flatten()
+            .filter(|p| p.is_playing())
+            .map(|p| p.slot)
+            .collect();
+        if owners.is_empty() {
+            if let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) {
+                self.broadcast_item(index);
+            }
+            return;
+        }
+        for slot in owners {
+            let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) else {
+                debug!("item slots are full; a treasure bag was discarded");
+                break;
+            };
+            let Some(item) = self.items.get(index).copied() else {
+                continue;
+            };
+            let sync = SyncItem::dropped(index, item.position, item.item);
+            if let Ok(frame) = sync.encode_instanced() {
+                self.send(slot, frame);
+            }
+        }
+    }
+
     /// Drop whatever a broken tile yields, if it is a block with a simple drop.
     pub(super) fn spawn_tile_drop(
         &mut self,
@@ -6431,6 +6488,51 @@ mod godmode {
             !blocked,
             "a godmoded hit reports no strike, so no debuff follows"
         );
+    }
+
+    /// An expert boss hands every player its own bag over packet 90 and drops no loose coins (they
+    /// ride inside the bag). The old path broadcast one shared bag as an ordinary item and paid the
+    /// coins on top, so on a two-player server one player got the bag and the boss double-paid.
+    #[test]
+    fn an_expert_boss_instances_a_bag_per_player_and_drops_no_loose_coins() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        let mut rxs = Vec::new();
+        for slot in 0u8..2 {
+            let (tx, rx) = mpsc::channel(64);
+            let mut p = Player::new(slot, format!("127.0.0.1:{}", slot + 1).parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[slot as usize] = Some(p);
+            rxs.push(rx);
+        }
+        // Eye of Cthulhu (type 4, bag 3319), killed while carrying a fat coin value.
+        let index = server
+            .npcs
+            .spawn(4, (1000.0, 1000.0))
+            .expect("the eye spawns");
+        server.npc_died(index, 4, (1000.0, 1000.0), 10_000.0);
+
+        for (slot, rx) in rxs.iter_mut().enumerate() {
+            let mut bag = false;
+            let mut coin = false;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() < 3 {
+                    continue;
+                }
+                let item_id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                if frame[2] == terrustia_proto::id::SPAWN_INSTANCED_ITEM && item_id == 3319 {
+                    bag = true;
+                }
+                if frame[2] == terrustia_proto::id::SYNC_ITEM && (71..=74).contains(&item_id) {
+                    coin = true;
+                }
+            }
+            assert!(
+                bag,
+                "player {slot} should be sent its own instanced treasure bag"
+            );
+            assert!(!coin, "an expert boss with a bag drops no loose coins");
+        }
     }
 }
 

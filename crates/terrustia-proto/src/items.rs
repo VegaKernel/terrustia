@@ -91,6 +91,20 @@ impl SyncItem {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_as(id::SYNC_ITEM)
+    }
+
+    /// The same item, sent as packet `90` (`SpawnInstancedItem`).
+    ///
+    /// The payload is identical to packet `21`; only the message id differs. The game sends this
+    /// instead of the ordinary item sync for a drop that is instanced per client (an expert
+    /// treasure bag, dropped by `CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0`), so that only
+    /// the player it is sent to sees or can take it.
+    pub fn encode_instanced(&self) -> Result<Vec<u8>> {
+        self.encode_as(id::SPAWN_INSTANCED_ITEM)
+    }
+
+    fn encode_as(&self, message_id: u8) -> Result<Vec<u8>> {
         let mut flags = self.flags & 0x03;
         if self.shimmered || self.shimmer_time > 0.0 {
             flags |= Self::HAS_SHIMMER;
@@ -99,7 +113,7 @@ impl SyncItem {
             flags |= Self::HAS_GRAB_DELAY;
         }
 
-        let mut w = PacketWriter::new(id::SYNC_ITEM);
+        let mut w = PacketWriter::new(message_id);
         w.i16(self.index)
             .vec2(self.position.0, self.position.1)
             .vec2(self.velocity.0, self.velocity.1)
@@ -194,6 +208,18 @@ mod tests {
         // 2 + 8 + 8 + 2 + 1 + 1 + 2, and nothing more.
         assert_eq!(payload(&frame).len(), 24);
         assert_eq!(SyncItem::decode(payload(&frame)).unwrap(), item);
+    }
+
+    #[test]
+    fn the_instanced_encoding_is_the_same_payload_under_packet_90() {
+        let item = SyncItem::dropped(7, (1600.0, 320.0), ItemStack::new(3319, 1, 0));
+        let shared = item.encode().unwrap();
+        let instanced = item.encode_instanced().unwrap();
+        assert_eq!(shared[2], id::SYNC_ITEM);
+        assert_eq!(instanced[2], id::SPAWN_INSTANCED_ITEM);
+        // Only the message id differs; the bytes a client reads are identical.
+        assert_eq!(payload(&shared), payload(&instanced));
+        assert_eq!(SyncItem::decode(payload(&instanced)).unwrap(), item);
     }
 
     #[test]
