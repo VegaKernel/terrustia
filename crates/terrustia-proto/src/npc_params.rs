@@ -1667,6 +1667,9 @@ pub const KING_SLIME_FADE_OUT: f32 = 60.0;
 pub const KING_SLIME_FADE_IN: f32 = 30.0;
 /// How long it will tolerate being unreachable before it stops being fussy about where it lands.
 pub const KING_SLIME_ANTI_CHEESE: f32 = 360.0;
+/// Or, however visible you are, this far away (`vector.Length() > 2000f`, `NPC.cs:43643`): held at
+/// arm's length it lands on top of you outright rather than hunting for a floor near you.
+pub const KING_SLIME_ANTI_CHEESE_RANGE: f32 = 2000.0;
 /// Vertical slack within which it counts as being on your level.
 pub const KING_SLIME_LEVEL: f32 = 160.0;
 /// Beyond this it gives up entirely.

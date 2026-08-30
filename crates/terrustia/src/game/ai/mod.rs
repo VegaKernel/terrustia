@@ -724,13 +724,13 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         15 => {
             let court = boss::king_slime::update(npc, world, rng);
-            for (npc_type, position, velocity) in court.shed {
+            for (npc_type, position, velocity, ai) in court.shed {
                 effects.spawn.push(crate::game::npc_ai::Spawn {
                     npc_type,
                     position,
                     velocity,
                     parent: None,
-                    ai: [None; 4],
+                    ai,
                 });
             }
         }
