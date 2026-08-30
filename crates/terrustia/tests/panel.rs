@@ -156,6 +156,102 @@ async fn static_assets_and_the_unclaimed_flow_work_over_a_real_socket() {
     assert_eq!(status, 200, "the real password should sign in: {body}");
 }
 
+/// Fail-then-pass for the panel's own `/api/login` throttle (Lane F). `admin::throttle`'s own
+/// unit tests prove the schedule, the jitter and reset-on-success deterministically with an
+/// injected clock; this only has to prove the real HTTP handler is actually wired to it: enough
+/// wrong passwords against one account open a window, and the next attempt is refused with `429`
+/// and the shared `admin::REFUSAL_MESSAGE`, not the ordinary `401` "wrong name or password",
+/// even when it offers the real one, proving the throttle is checked before the credential is.
+#[tokio::test]
+async fn repeated_wrong_passwords_back_off_api_login() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        ..Config::default()
+    };
+
+    let world = worldgen::generate(
+        config.world_width,
+        config.world_height,
+        config.world_name.clone(),
+        7,
+    );
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone())
+        .await
+        .expect("panel should bind its configured loopback address");
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "claiming the server: {body}");
+    let owner_session = extract_session(&body);
+
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/accounts/create"),
+            r#"{"name":"victim","password":"victims-real-password","group":"moderator"}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    for attempt in 0..=terrustia::admin::throttle::FREE_ATTEMPTS {
+        let (status, body) = client
+            .post_json(
+                &format!("{base}/api/login"),
+                r#"{"name":"victim","password":"the-wrong-password"}"#,
+            )
+            .await;
+        assert_eq!(
+            status, 401,
+            "attempt {attempt}: an ordinary wrong password, not yet throttled: {body}"
+        );
+    }
+
+    // Inside the window now: even the real password is refused, and refused differently. The
+    // whole point being that this is decided before the password is ever compared at all.
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            r#"{"name":"victim","password":"victims-real-password"}"#,
+        )
+        .await;
+    assert_eq!(
+        status, 429,
+        "the window should still be open, refusing even the real password: {body}"
+    );
+    assert!(
+        body.contains(terrustia::admin::REFUSAL_MESSAGE),
+        "a throttled refusal should carry the shared generic message, not a fresh one: {body}"
+    );
+}
+
 /// The console's `panel` command, driven exactly as `main` wires it: `GameServer` holds one end
 /// of an unbounded channel, `panel::supervise` owns the other and the actual bind/abort. Starts
 /// with the panel off (`panel_enabled: false`, no `initial` handle) — the ordinary case, since the
