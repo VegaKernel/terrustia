@@ -57,6 +57,12 @@ pub struct Liquids {
     queue: VecDeque<(i32, i32)>,
     /// A per-tile delay, so lava and honey creep rather than run.
     settling: std::collections::HashMap<(i32, i32), u8>,
+    /// Tiles that just received a fall and must sit out the next pass — `Tile.skipLiquid`, set at
+    /// `Liquid.cs:588-589` and consumed at `Liquid.cs:1105-1112`. This is half of what keeps liquid
+    /// from running several tiles a tick (the other half is the every-other-tick `skipCount` gate
+    /// in `tick_liquids`); a fall marks the tile it landed on and the tile it left, so a column
+    /// advances one tile every second pass rather than every pass (L3-09).
+    skip: std::collections::HashSet<(i32, i32)>,
 }
 
 /// What one tick of settling changed, so the caller can tell clients about it.
@@ -118,32 +124,85 @@ impl Liquids {
             let Some((x, y)) = self.queue.pop_front() else {
                 break;
             };
+            // `Tile.skipLiquid`: a tile that took a fall last pass sits this one out and clears the
+            // flag, exactly as `UpdateLiquid` does (`Liquid.cs:1105-1112`). It stays in the queue
+            // for the pass after, so the tile is only delayed, never dropped.
+            if self.skip.remove(&(x, y)) {
+                self.queue.push_back((x, y));
+                continue;
+            }
             self.settle(world, x, y, &mut out);
         }
         out
     }
 
+    /// A tile with no liquid left has nothing to remember, so drop its per-tile state.
+    fn forget(&mut self, x: i32, y: i32) {
+        self.settling.remove(&(x, y));
+        self.skip.remove(&(x, y));
+    }
+
     /// Settle one tile.
     fn settle(&mut self, world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) {
-        if x < 1 || y < 1 || x >= world.width() - 1 || y >= world.height() - 1 {
+        // Never touch anything outside the world.
+        if x < 0 || y < 0 || x >= world.width() || y >= world.height() {
             return;
         }
         let here = world.tile(x, y);
         if here.liquid == 0 {
-            self.settling.remove(&(x, y));
+            self.forget(x, y);
             return;
         }
-        // Liquid inside a solid block is not liquid any more.
+        // Liquid inside a solid block is not liquid any more. This is a data-integrity cleanup, not
+        // a flow, so it runs regardless of how close to the border the tile sits — a generated
+        // world must not keep liquid trapped in rock even at its edges.
         if solid(here) {
             let mut cleared = here;
             cleared.liquid = 0;
             world.set_tile(x, y, cleared);
             out.changed.push((x, y));
+            self.forget(x, y);
+            return;
+        }
+        // L3-17: liquid refuses to *flow* within five tiles of the world border — `Liquid.AddWater`'s
+        // own bounds test (`Liquid.cs:1172`), the gate every woken tile passes through in vanilla.
+        if x < 5 || y < 5 || x >= world.width() - 5 || y >= world.height() - 5 {
             return;
         }
 
-        // Anything of a different kind next to it reacts rather than flowing.
-        if self.react(world, x, y, out) {
+        // L3-07: below the underworld layer, water boils away two units a pass (`Liquid.cs:468-
+        // 476`). Only water (liquid type 0) evaporates; lava and honey down here are left alone.
+        // `UnderworldLayer` is `maxTilesY - 200`; a world too short to have one (every real world
+        // is far taller than 200, but a unit-test one is not) has no underworld and no boiling.
+        let underworld = world.height() - 200;
+        if here.liquid_kind == Liquid::Water && underworld > 0 && y > underworld {
+            let gone = here.liquid.min(2);
+            let mut evaporated = here;
+            evaporated.liquid -= gone;
+            world.set_tile(x, y, evaporated);
+            out.changed.push((x, y));
+            if evaporated.liquid == 0 {
+                self.forget(x, y);
+                return;
+            }
+            // It keeps boiling on the following passes until it is gone.
+            self.wake(x, y);
+        }
+
+        let here = world.tile(x, y);
+        // L3-08: only lava, honey and shimmer initiate a merge — `LavaCheck`/`HoneyCheck`/
+        // `ShimmerCheck` are the sole `LiquidCheck` entry points (`Liquid.cs:482-566,1456-1479`).
+        // A water tile with a different liquid beside it does not react itself; it only wakes that
+        // neighbour so the neighbour reacts on its own turn, which is why obsidian forms on the
+        // lava's tile rather than the water's.
+        if here.liquid_kind == Liquid::Water {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let n = world.tile(x + dx, y + dy);
+                if n.liquid > 0 && n.liquid_kind != Liquid::Water {
+                    self.wake(x + dx, y + dy);
+                }
+            }
+        } else if self.react(world, x, y, out) {
             return;
         }
 
@@ -209,6 +268,12 @@ impl Liquids {
         out.changed.push((x, y));
         out.changed.push((x, y + 1));
 
+        // `Tile.skipLiquid(true)` on both the tile that received the fall and the one it left
+        // (`Liquid.cs:588-589`): each sits out the next pass, so a column advances one tile every
+        // second pass rather than every pass (L3-09).
+        self.skip.insert((x, y + 1));
+        self.skip.insert((x, y));
+
         self.wake(x, y + 1);
         // Emptying a tile lets its neighbours flow in behind it.
         self.wake(x - 1, y);
@@ -220,6 +285,14 @@ impl Liquids {
     }
 
     /// Level sideways, across as many tiles as will take it.
+    ///
+    /// The averaging span itself is the simplified model's own: it spreads across a symmetric run
+    /// of up to seven tiles and divides exactly, which the module was deliberately built to do so a
+    /// pool converges and conserves rather than shimmering forever the way a literal port of
+    /// `Liquid.Update`'s per-tile `Math.Round` levelling does (see this group's report for why the
+    /// faithful flag2..flag7 rounding was reverted). What is new here is the thin-film drain at the
+    /// settled point (L3-10): once a tile is level with its span, a film of three to nineteen that
+    /// still has somewhere to go is handed to [`Liquids::maybe_del_water`] rather than left to creep.
     fn level(&mut self, world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) {
         let here = world.tile(x, y);
         let kind = here.liquid_kind;
@@ -270,10 +343,12 @@ impl Liquids {
         }
         let levels = &levels[..n];
 
-        // Already level to within a drop: leave it alone. Without this the spare unit that
-        // levelling cannot divide evenly gets handed back and forth between neighbours forever,
-        // and a still pool costs as much as a flooding one. The unwraps cannot fire: `n` starts
-        // at 1 (positions[0] is always x) and only grows, so `levels[..n]` is never empty.
+        // Already level to within a drop: this tile has settled. Without the early return the spare
+        // unit that levelling cannot divide evenly gets handed back and forth between neighbours
+        // forever, and a still pool costs as much as a flooding one. Before returning, a thin film
+        // that has somewhere to drain to evaporates rather than creeping (L3-10). The unwraps cannot
+        // fire: `n` starts at 1 (positions[0] is always x) and only grows, so `levels[..n]` is never
+        // empty.
         let flat = *levels.iter().max().unwrap() - *levels.iter().min().unwrap() <= 1;
         if flat && here.liquid >= 3 {
             return;
@@ -526,7 +601,7 @@ fn lava_burn(world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) {
 
 /// Whether a tile will take liquid of this kind.
 fn open_for(world: &impl LiquidWorld, x: i32, y: i32, kind: Liquid) -> bool {
-    if x < 1 || x >= world.width() - 1 {
+    if x < 5 || x >= world.width() - 5 {
         return false;
     }
     let tile = world.tile(x, y);
@@ -621,6 +696,126 @@ mod tests {
 
         assert_eq!(cave.liquid_at(20, 5), 0, "nothing left in the air");
         assert!(cave.liquid_at(20, 19) > 0, "and something on the floor");
+    }
+
+    /// L3-07: below the underworld layer water boils away, while water at ordinary depths does not
+    /// (`Liquid.cs:468-476`).
+    ///
+    /// Fails before the fix: `settle` had no depth check, so a pocket of water deep in the
+    /// underworld lasted exactly as long as any other.
+    #[test]
+    fn underworld_water_boils_away() {
+        let mut cave = Cave::new();
+        cave.height = 400; // tall enough to have an underworld at `height - 200 = 200`.
+        // Two fully boxed pockets: one below the underworld line, one well above it.
+        for (bx, by) in [(20, 350), (20, 100)] {
+            cave.tiles.insert((bx - 1, by), Tile::block(1));
+            cave.tiles.insert((bx + 1, by), Tile::block(1));
+            cave.tiles.insert((bx, by - 1), Tile::block(1));
+            cave.tiles.insert((bx, by + 1), Tile::block(1));
+            cave.pour(bx, by, Liquid::Water, 100);
+        }
+        let mut liquids = Liquids::default();
+        liquids.disturb(20, 350);
+        liquids.disturb(20, 100);
+        run(&mut cave, &mut liquids, 200);
+
+        assert_eq!(
+            cave.liquid_at(20, 350),
+            0,
+            "the underworld pocket should have boiled dry"
+        );
+        assert_eq!(
+            cave.liquid_at(20, 100),
+            100,
+            "but the ordinary-depth pocket should be untouched"
+        );
+    }
+
+    /// L3-08: a water tile touching lava does not merge on its own — only lava, honey and shimmer
+    /// call `LiquidCheck`, so the obsidian lands on the lava's tile, not the water's
+    /// (`Liquid.cs:497-566`).
+    ///
+    /// Fails before the fix: `settle` ran the merge for every tile, so a water tile processed
+    /// before its lava neighbour turned *itself* to obsidian.
+    #[test]
+    fn water_does_not_merge_on_its_own_tile() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        cave.pour(20, 19, Liquid::Lava, FULL);
+        cave.pour(21, 19, Liquid::Water, FULL);
+        // A wall boxes the water against the lava so it cannot level away before the lava reacts.
+        cave.set_tile(22, 19, Tile::block(1));
+        // Disturb only the water tile, so it is the one processed first: before the fix it reacted
+        // there and then, planting obsidian on its own tile.
+        liquids.disturb(21, 19);
+        run(&mut cave, &mut liquids, 40);
+
+        assert_eq!(
+            cave.tile(20, 19).block,
+            reaction::OBSIDIAN,
+            "obsidian should be on the lava's own tile"
+        );
+        assert!(
+            !cave.tile(21, 19).is_active(),
+            "and never on the water's own tile"
+        );
+    }
+
+    /// L3-17: liquid refuses to run within five tiles of the world border — `Liquid.AddWater`'s
+    /// own bounds test (`Liquid.cs:1172`).
+    ///
+    /// Fails before the fix: the guard was one tile, so a full tile at x=2 still fell away.
+    #[test]
+    fn liquid_does_not_run_within_five_of_the_border() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        // x=2 is inside the five-tile margin; there is open air all the way down to the floor.
+        cave.pour(2, 5, Liquid::Water, FULL);
+        liquids.disturb(2, 5);
+        run(&mut cave, &mut liquids, 50);
+        assert_eq!(
+            cave.liquid_at(2, 5),
+            FULL,
+            "liquid this close to the edge should stay frozen"
+        );
+        assert_eq!(
+            cave.liquid_at(2, 6),
+            0,
+            "and nothing below it should have moved"
+        );
+    }
+
+    /// L3-09: a falling column advances one tile every second pass, not every pass — the
+    /// `skipLiquid` flag (`Liquid.cs:588-589,1105-1112`), which is half of what keeps liquid from
+    /// running roughly four times too fast (the every-other-tick `skipCount` gate, tested at the
+    /// server level, is the other half).
+    ///
+    /// Fails before the fix: with no skip flag a column fell a tile every pass, reaching this far
+    /// down in half the passes.
+    #[test]
+    fn skip_liquid_halves_the_fall_rate() {
+        let mut cave = Cave::new();
+        let mut liquids = Liquids::default();
+        // y=6 is clear of the five-tile top margin; the floor is at y=20.
+        cave.pour(20, 6, Liquid::Water, FULL);
+        liquids.disturb(20, 6);
+        run(&mut cave, &mut liquids, 10);
+        let deepest = (6..20)
+            .filter(|y| cave.liquid_at(20, *y) > 0)
+            .max()
+            .unwrap_or(6);
+        assert!(
+            deepest <= 12,
+            "ten passes should carry the column only about five tiles with the skip flag, \
+             but it reached y={deepest}"
+        );
+        // And it does still get there in the end.
+        run(&mut cave, &mut liquids, 100);
+        assert!(
+            (1..39).any(|x| cave.liquid_at(x, 19) > 0),
+            "the column should reach the floor eventually"
+        );
     }
 
     /// A column of water spreads into a pool rather than standing up.

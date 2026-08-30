@@ -3368,6 +3368,16 @@ impl GameServer {
     /// nothing here. What moves is sent as tile squares, batched by row, because a flowing pool
     /// changes a run of neighbours at once and one packet each would be a flood of its own.
     pub(super) fn tick_liquids(&mut self) {
+        // `Liquid.skipCount` (`WorldGen.cs:72072-72079`): the liquid sim runs only every second
+        // tick. `skipCount` counts up and the sim runs (and the count resets) when it passes one,
+        // so a settle takes twice as many real ticks — half of the L3-09 slowdown, the per-tile
+        // `skipLiquid` flag inside the sim being the other half.
+        self.liquid_skip_count += 1;
+        if self.liquid_skip_count <= 1 {
+            return;
+        }
+        self.liquid_skip_count = 0;
+
         if self.liquids.pending() == 0 {
             return;
         }
@@ -8885,6 +8895,33 @@ mod liquid_furniture_death {
         assert!(
             told_every_client,
             "packet 17 should have gone out, matching NetMessage.SendData(17, -1, -1, ...)"
+        );
+    }
+
+    /// L3-09: the liquid simulation runs only every second `tick_liquids` call — the
+    /// `Liquid.skipCount` gate (`WorldGen.cs:72072-72079`), half of what keeps liquid from running
+    /// roughly four times too fast.
+    ///
+    /// Fails before the fix: `tick_liquids` ran the sim every tick, so a single call already
+    /// carried the water down a tile.
+    #[test]
+    fn liquid_runs_only_every_second_tick() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        // A single tile of water above open air, so one settle pass visibly drops it a tile.
+        server.world.set_tile(10, 8, full_of(Liquid::Water));
+        server.liquids.wake(10, 8);
+
+        server.tick_liquids();
+        assert_eq!(
+            server.world.tile(10, 8).liquid,
+            255,
+            "the first call is skipped, so nothing has moved yet"
+        );
+
+        server.tick_liquids();
+        assert!(
+            server.world.tile(10, 9).liquid > 0,
+            "the second call runs the sim and the water falls a tile"
         );
     }
 
