@@ -892,6 +892,7 @@ impl GameServer {
             let Some(npc) = self.npcs.get_mut(hit.target) else {
                 continue;
             };
+            // A townsperson's blow never crits (the melee-hit path skips the crit roll on purpose).
             let killed = npc.take_damage(hit.damage, hit.knockback, hit.direction);
             let (npc_type, center) = (npc.npc_type, npc.center());
             let value = if npc.from_statue {
