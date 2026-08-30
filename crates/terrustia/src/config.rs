@@ -273,6 +273,76 @@ impl Config {
                 self.panel_listen.ip()
             )));
         }
+        // These four all gate `net::listener::claim`/`connection::serve` directly, and each has a
+        // zero value that is not merely useless but refuses every connection outright (verified by
+        // reading the code that consumes them, not assumed): `claim` refuses once
+        // `guard.total >= max_total` (true immediately when `max_total` is 0) and once
+        // `*count >= max_per_address` (same, for 0), and `connection::serve` wraps every read in
+        // `timeout(idle_timeout.min(..), ..)`, so an `idle`/`handshake` duration of zero elapses
+        // before a real client can send a single byte. A config that passed this unbounded used to
+        // start a server that would never admit a single player, silently. The upper bounds are a
+        // typo guard rather than a technical ceiling (there is no protocol reason a bigger number
+        // could not work), generous enough that no real deployment should ever reach them.
+        // These four all gate `net::listener::claim`/`connection::serve` directly, and each has a
+        // zero value that is not merely useless but refuses every connection outright (verified by
+        // reading the code that consumes them, not assumed): `claim` refuses once
+        // `guard.total >= max_total` (true immediately when `max_total` is 0) and once
+        // `*count >= max_per_address` (same, for 0), and `connection::serve` wraps every read in
+        // `timeout(idle_timeout.min(..), ..)`, so an `idle`/`handshake` duration of zero elapses
+        // before a real client can send a single byte. A config that passed this unbounded used to
+        // start a server that would never admit a single player, silently. The upper bounds are a
+        // typo guard rather than a technical ceiling (there is no protocol reason a bigger number
+        // could not work), generous enough that no real deployment should ever reach them.
+        if self.max_connections == 0 || self.max_connections > 65_536 {
+            return Err(ConfigError::Invalid(format!(
+                "max_connections must be between 1 and 65536, got {}",
+                self.max_connections
+            )));
+        }
+        if self.max_connections_per_address == 0
+            || self.max_connections_per_address > self.max_connections
+        {
+            return Err(ConfigError::Invalid(format!(
+                "max_connections_per_address must be between 1 and max_connections ({}), got {}",
+                self.max_connections, self.max_connections_per_address
+            )));
+        }
+        if self.handshake_timeout_secs == 0 || self.handshake_timeout_secs > 3600 {
+            return Err(ConfigError::Invalid(format!(
+                "handshake_timeout_secs must be between 1 and 3600, got {}",
+                self.handshake_timeout_secs
+            )));
+        }
+        if self.idle_timeout_secs == 0 || self.idle_timeout_secs > 86_400 {
+            return Err(ConfigError::Invalid(format!(
+                "idle_timeout_secs must be between 1 and 86400, got {}",
+                self.idle_timeout_secs
+            )));
+        }
+        // `net_module::validate_chat` already refuses an empty line; a `max_chat_len` of 0 makes
+        // that refusal unconditional and silently disables chat instead of reporting a bad config.
+        // The upper bound is a real one, not a guess: `MAX_FRAME_LEN` is the `u16` length prefix
+        // every frame carries (`net/codec.rs`), so a chat line longer than that could never fit in
+        // one frame regardless of what this field says.
+        if self.max_chat_len == 0 || self.max_chat_len > terrustia_proto::MAX_FRAME_LEN {
+            return Err(ConfigError::Invalid(format!(
+                "max_chat_len must be between 1 and {}, got {}",
+                terrustia_proto::MAX_FRAME_LEN,
+                self.max_chat_len
+            )));
+        }
+        // `AuditLog::rotate_if_needed` treats 0 as "never rotate" (`admin/audit.rs`), not "rotate
+        // every write": past `audit_log_max_bytes`, the live file is left exactly where it is and
+        // keeps growing forever instead of rolling to `.1`. Unbounded disk growth from a config
+        // value that looked like "keep nothing" is exactly the silent-self-DoS shape this function
+        // exists to catch.
+        if self.audit_log_keep_segments == 0 {
+            return Err(ConfigError::Invalid(
+                "audit_log_keep_segments must be at least 1, or the live audit log never rotates \
+                 and grows without bound"
+                    .into(),
+            ));
+        }
         // A loaded world brings its own dimensions, so the size limits below do not apply to it.
         if self.world_file.is_some() {
             if self.max_players == 0 || self.max_players > MAX_PLAYERS {
@@ -372,10 +442,58 @@ mod tests {
             "world_width = 100",
             "world_height = 100",
             "world_width = 40000",
+            "max_connections = 0",
+            "max_connections = 65537",
+            "max_connections_per_address = 0",
+            "max_connections_per_address = 9999",
+            "handshake_timeout_secs = 0",
+            "handshake_timeout_secs = 3601",
+            "idle_timeout_secs = 0",
+            "idle_timeout_secs = 86401",
+            "max_chat_len = 0",
+            "max_chat_len = 65536",
+            "audit_log_keep_segments = 0",
         ] {
             let config: Config = toml::from_str(text).unwrap();
             assert!(config.validate().is_err(), "{text} should be rejected");
         }
+    }
+
+    /// L6-04, fail-then-pass: `max_connections = 0` used to pass `validate` outright and only bite
+    /// at runtime, where `net::listener::claim` refuses `guard.total >= max_total` and 0 makes that
+    /// true for the very first connection, forever. A server started with this config would run,
+    /// bind its port, and never let a single player (or admin) in: a self-DoS indistinguishable from
+    /// a healthy idle server until someone tried to join.
+    #[test]
+    fn max_connections_zero_is_refused_as_a_self_dos() {
+        let config: Config = toml::from_str("max_connections = 0").unwrap();
+        let err = config
+            .validate()
+            .expect_err("0 must be refused, not silently accepted");
+        assert!(
+            err.to_string().contains("max_connections"),
+            "the error should name the offending field: {err}"
+        );
+    }
+
+    /// The same shape of bug, for the handshake side: `handshake_timeout_secs = 0` used to pass
+    /// `validate`, then made `connection::serve`'s handshake deadline `now + 0`, so every new
+    /// connection timed out before it could finish handshaking.
+    #[test]
+    fn handshake_timeout_zero_is_refused_as_a_self_dos() {
+        let config: Config = toml::from_str("handshake_timeout_secs = 0").unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    /// `audit_log_keep_segments = 0` used to pass `validate`, then made
+    /// `AuditLog::rotate_if_needed` skip rotation forever (`self.keep_segments == 0` short-circuits
+    /// before the size check even runs): the live audit file would grow without bound instead of
+    /// rolling over, an unbounded-disk-growth self-DoS with the same "passes validate, bites later"
+    /// shape as the connection-limit cases above.
+    #[test]
+    fn audit_log_keep_segments_zero_is_refused() {
+        let config: Config = toml::from_str("audit_log_keep_segments = 0").unwrap();
+        assert!(config.validate().is_err());
     }
 
     #[test]
