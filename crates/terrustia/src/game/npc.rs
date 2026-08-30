@@ -222,6 +222,14 @@ pub struct Npc {
     /// every save (`WorldFile.cs`'s own field, from file version 315). Set only by
     /// `restore_town_npcs` from what a load decoded; nothing here ever sets it `true`.
     pub homeless_despawn: bool,
+    /// A friendly NPC's slow health recovery accumulator (`NPC.friendlyRegen`, `NPC.cs:6578`).
+    ///
+    /// Climbs by one a tick (more for a few named residents) and heals a single point each time it
+    /// passes 180, so a hurt townsperson mends over a couple of minutes rather than staying at a
+    /// sliver of health forever. Vanilla ticks it for every friendly NPC; this server only drives it
+    /// for town NPCs (see `tick_town_regen`), which are the residents that realistically take a
+    /// beating and persist, so nothing else ever touches this counter here.
+    pub friendly_regen: i32,
 }
 
 impl Npc {
@@ -274,6 +282,7 @@ impl Npc {
             extra_value: 0,
             town_variation: 0,
             homeless_despawn: false,
+            friendly_regen: 0,
         })
     }
 
