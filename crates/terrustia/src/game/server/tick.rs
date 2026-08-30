@@ -401,6 +401,20 @@ impl GameServer {
         }
         self.tick_party();
 
+        // Everything above this point is the world clock and whatever turning day or night sets
+        // off: the dawn and dusk rolls, the slime rain, the party, stopping the moon, and two
+        // `broadcast_world_data` calls. That is `World`'s own description ("the clock, tile
+        // entities, wiring timers, lunar events and the biome census"), and it was being charged
+        // to `Snapshot` instead, because this was the tick's *first* lap and a lap bills
+        // everything since the previous one.
+        //
+        // That made the phase say the opposite of what it was added to say. `Snapshot` was split
+        // out so an expensive save could not hide inside a bucket of systems; instead the bucket
+        // moved inside `Snapshot`, which then read as the most expensive phase in the tick on
+        // ticks where no save ran at all. A 255-player run reporting `phase=snapshot
+        // phase_us=23377` had taken a snapshot costing a fraction of that.
+        lap(&mut cost, Phase::World);
+
         if let Some(every) = self.autosave_ticks
             && self.ticks.is_multiple_of(every)
         {

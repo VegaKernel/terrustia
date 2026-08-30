@@ -47,7 +47,10 @@ echo "=== server: max_players=$PLAYERS, world 4200x1200, port $PORT ==="
 # The tick module goes to debug so its per-window `tick window` line is emitted; that line is the
 # only source of the server's own processor cost per tick, and the release bar is stated in terms of
 # it. Everything else stays at info, so this does not turn the run into a wall of logging.
-TERRUSTIA_LOG=info,terrustia::game::server::tick=debug \
+# Overridable so a diagnostic run can widen it (for example
+# TERRUSTIA_LOG=info,terrustia::game::server=debug to see what each save actually copied)
+# without editing this script.
+TERRUSTIA_LOG="${TERRUSTIA_LOG:-info,terrustia::game::server::tick=debug}" \
   TERRUSTIA_MAX_PLAYERS="$PLAYERS" \
   TERRUSTIA_MAX_CONNECTIONS="$((PLAYERS + 16))" \
   TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS="$PLAYERS" \
