@@ -3402,8 +3402,11 @@ async fn poured_water_falls() {
     pour.push(0); // water
     bob.send(&frame(id::LIQUID_UPDATE, &pour)).await.unwrap();
 
-    // Give the simulation a moment.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Give the simulation a moment. Liquid now settles at vanilla's pace rather than four times
+    // too fast (L3-09: the every-other-tick skipCount gate plus the per-tile skipLiquid flag), so a
+    // full bucket takes noticeably longer to fall the eight tiles to the basin floor than it did
+    // before the pacing was corrected.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
 
     let fresh = join(addr, "fresh").await;
     let up_top = fresh.world().tile(405, 331).map(|t| t.liquid).unwrap_or(0);
