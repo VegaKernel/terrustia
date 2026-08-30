@@ -38,7 +38,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = objects::RequestSign::decode(data);
     let _ = objects::SignText::decode(data);
     let _ = objects::DoorToggle::decode(data);
-    let _ = square::TileSquare::decode(data);
+    // `TileSquare::decode` now merges onto whatever tile is already on the ground, so it needs a
+    // caller-supplied lookup; a fuzz target has no real world state, so every position decodes
+    // over bare air, same as `square.rs`'s own isolated round-trip tests.
+    let _ = square::TileSquare::decode(data, |_, _| terrustia_proto::Tile::AIR);
     let _ = net_module::decode_pylon_message(data);
     let _ = net_module::decode_liquid_changes(data);
     let _ = net_module::IncomingChat::decode(data);
