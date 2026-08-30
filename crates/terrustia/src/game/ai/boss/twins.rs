@@ -526,6 +526,25 @@ mod tests {
         }
     }
 
+    /// MECH-1: the flee has to reach the server as a despawn. The dispatch routes `fleeing` to
+    /// `expired`, which zeroes `time_left` (a boss never counts down through `tick_life`). On the
+    /// pre-fix code the flag was dropped in the dispatch and both eyes hung in the sky for ever.
+    #[test]
+    fn daybreak_actually_despawns_them_through_the_dispatch() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(30);
+        for ty in [RETINAZER, SPAZMATISM] {
+            let mut e = eye(ty, 0.0, 0.0);
+            let mut w = night(&tiles, Some((300.0, 300.0)));
+            w.conditions.day = true;
+            let effects = crate::game::ai::run(&mut e, &w, &mut rng);
+            assert!(
+                effects.expired,
+                "daybreak must reach the server as a despawn"
+            );
+        }
+    }
+
     /// Retinazer holds above you; Spazmatism holds level. That difference is the whole matchup.
     #[test]
     fn the_two_eyes_want_different_places() {

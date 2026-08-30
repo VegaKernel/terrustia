@@ -207,15 +207,17 @@ pub fn eye<T: TileView>(
     let super::skeletron::Parent {
         position: wall_position,
         size: wall_size,
+        direction: wall_direction,
         ..
     } = wall_at?;
-    // It rides the Wall's column, at the top or bottom of the band depending on its side.
+    // It rides the Wall's column and faces the way the Wall faces (`NPC.cs:26215-26217`:
+    // `position.X = wall.position.X; direction = wall.direction; spriteDirection = direction`).
+    // WOF-2: the old code compared the eye's x against the Wall's *after* snapping them equal, so
+    // the test was always false and the eye kept its spawn-time direction of +1. On a Wall walking
+    // left that left the eye facing away from the player for the whole fight, and the firing gate
+    // below (`looking`) never opened, so half of all fights got no eye lasers at all.
     npc.position.0 = wall_position.0;
-    npc.direction = if wall_position.0 < npc.position.0 {
-        -1
-    } else {
-        npc.direction
-    };
+    npc.direction = wall_direction;
     npc.sprite_direction = npc.direction;
 
     let middle = wall_position.1 + wall_size.1 / 2.0;
@@ -749,6 +751,32 @@ mod tests {
         assert!(!fired.is_empty(), "it should have fired");
         assert_eq!(fired[0].projectile, WALL_LASER);
         assert!(fired[0].velocity.0 > 0.0, "and toward the player");
+    }
+
+    /// WOF-2: an eye faces the way the Wall faces (`NPC.cs:26216`), so a Wall walking left fires
+    /// from its eyes at a player on its left. The old code kept the eye's spawn direction of +1
+    /// (its direction test was a no-op) and its firing gate never opened leftward: on the unfixed
+    /// code this fires nothing.
+    #[test]
+    fn an_eye_on_a_leftward_wall_fires_at_a_player_on_its_left() {
+        let tiles = Hell;
+        let mut left_wall = wall_at((10_000.0, 20_000.0), (16.0, 200.0));
+        left_wall.direction = -1;
+        let at = Some(left_wall);
+        let mut e = an_eye(1.0);
+        e.direction = 1; // as spawned, still facing right
+        let t = Some(player_at(9_000.0, 20_000.0)); // and the player off to the left
+        let mut fired = 0;
+        for _ in 0..3000 {
+            if eye(&mut e, &hell(&tiles, t), at, 1.0).is_some() {
+                fired += 1;
+            }
+        }
+        assert_eq!(e.direction, -1, "the eye takes the Wall's leftward heading");
+        assert!(
+            fired > 0,
+            "a left-walking Wall's eye must fire at a player on its left, got {fired}"
+        );
     }
 
     #[test]

@@ -3532,6 +3532,12 @@ impl GameServer {
             npc.life = npc.life_max;
             npc.dirty = true;
         }
+        // ML-1/ML-2: nor do the Moon Lord's parts (`NPC.cs:78864-78883`, `checkDead`). A struck
+        // hand or head becomes a broken, empty socket that frees its True Eye; the exposed core,
+        // struck down, begins its death drama. None of the three is reaped by this hit.
+        if killed && crate::game::ai::boss::moon_lord::checkdead(npc) {
+            killed = false;
+        }
 
         self.broadcast(hit.encode()?, Some(slot));
 

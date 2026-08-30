@@ -17,11 +17,12 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     FREE_EYE_ACCEL, FREE_EYE_SPEED, LEECH_HEAL, LEECH_TICKS, MOON_LORD_ACCEL, MOON_LORD_BELOW,
-    MOON_LORD_BOLT_EVERY, MOON_LORD_BOLT_SPEED, MOON_LORD_DEATH_TICKS, MOON_LORD_FIGHTING_DISTANCE,
-    MOON_LORD_HAND, MOON_LORD_HAND_OUT, MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP,
-    MOON_LORD_LEECH, MOON_LORD_OPENING, MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED,
-    PHANTASMAL_BOLT, PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE,
-    PHANTASMAL_EYE, PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE,
+    MOON_LORD_BOLT_EVERY, MOON_LORD_BOLT_SPEED, MOON_LORD_CORE, MOON_LORD_DEATH_TICKS,
+    MOON_LORD_FIGHTING_DISTANCE, MOON_LORD_FREE_EYE, MOON_LORD_HAND, MOON_LORD_HAND_OUT,
+    MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP, MOON_LORD_LEECH, MOON_LORD_OPENING,
+    MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED, PHANTASMAL_BOLT,
+    PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE, PHANTASMAL_EYE,
+    PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE,
 };
 
 use super::skeletron::Parent;
@@ -43,6 +44,33 @@ mod state {
     pub const DYING: f32 = 2.0;
 }
 
+/// Vanilla `checkDead` (`NPC.cs:78864-78883`): the Moon Lord's parts do not die when their life
+/// runs out. A hand or head becomes a broken, empty socket (`ai[0] = -2`) and is refilled so it
+/// hangs on as a shell (its True Eye is then freed by [`eye_socket`] on the socket's next tick,
+/// where the spawn plumbing lives); the core enters its ten-second death drama (`ai[0] = 2`), and
+/// only the end of that drama is the actual kill. Returns true when the lethal blow was
+/// intercepted, in which case the caller must not reap the NPC.
+pub fn checkdead(npc: &mut Npc) -> bool {
+    match npc.npc_type {
+        // `PrepareForDeathAnimation` (`NPC.cs:78836-78842`): full life again, no longer takeable.
+        MOON_LORD_HAND | MOON_LORD_HEAD if npc.ai[0] != state::BROKEN => {
+            npc.ai[0] = state::BROKEN;
+            npc.ai[1] = 0.0;
+            npc.life = npc.life_max;
+            npc.dirty = true;
+            true
+        }
+        MOON_LORD_CORE if npc.ai[0] != state::DYING => {
+            npc.ai[0] = state::DYING;
+            npc.ai[1] = 0.0;
+            npc.life = npc.life_max;
+            npc.dirty = true;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// What a piece of it did this tick.
 #[derive(Debug, Default)]
 pub struct MoonLordOutcome {
@@ -55,13 +83,9 @@ pub struct MoonLordOutcome {
 
 /// Style 77: the core.
 ///
-/// `parts_open` is how many of its three eyes have been broken.
-pub fn core(
-    npc: &mut Npc,
-    world: &World<'_, impl TileView>,
-    parts: usize,
-    parts_open: usize,
-) -> MoonLordOutcome {
+/// `parts_open` is how many of its three eyes have been broken (counting both a socket that has
+/// left the table and one still hanging on as a broken shell), worked out by the caller.
+pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) -> MoonLordOutcome {
     let mut out = MoonLordOutcome::default();
     npc.dirty = true;
 
@@ -116,12 +140,13 @@ pub fn core(
         return out;
     }
 
-    // Its parts are gone entirely: nothing is holding it together.
-    if parts == 0 {
-        out.spent = true;
-        return out;
-    }
-
+    // ML-1: the core is never removed just because its limbs are gone. In vanilla the sockets
+    // stay on the field as broken shells (they never go inactive, so the core's own "a limb
+    // vanished" guard at `NPC.cs:41697-41702` does not fire in an ordinary fight), and the only
+    // way the core leaves is through its death drama (`ai[0] == 2`), reached from `checkDead` once
+    // every socket is open and the exposed core has been struck down. Counting the last limb's
+    // fall as a death (the old `parts == 0 -> spent`) killed the boss the instant it fell and left
+    // the exposed-core finale and the death sequence as dead code.
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
@@ -186,6 +211,20 @@ pub fn eye_socket(
     // Broken: the socket is empty and it does nothing but hang there.
     if npc.ai[0] == state::BROKEN {
         npc.invulnerable = true;
+        // ML-2: on the tick it breaks, its eye comes out and hunts as a free True Eye of Cthulhu
+        // (`NPC.cs:78873`, `MoonLord_SpawnTrueEyeOfCthulhu`). Vanilla spawns it from `checkDead`;
+        // we free it here on the socket's next tick, where the spawn plumbing lives, latched by
+        // `local_ai[1]` so exactly one is freed per socket.
+        if npc.local_ai[1] == 0.0 {
+            npc.local_ai[1] = 1.0;
+            out.spawn.push(Spawn {
+                npc_type: MOON_LORD_FREE_EYE,
+                position: npc.center(),
+                velocity: (0.0, 0.0),
+                parent: None,
+                ai: [None; 4],
+            });
+        }
         if core.state == state::DYING {
             out.spent = true;
         }
@@ -359,7 +398,6 @@ mod tests {
     use crate::game::npc_ai::Target;
     use rand::SeedableRng;
     use std::collections::HashMap;
-    use terrustia_proto::npc_params::{MOON_LORD_CORE, MOON_LORD_FREE_EYE};
     use terrustia_proto::tile::Tile;
 
     struct Sky(HashMap<(i32, i32), Tile>);
@@ -410,7 +448,7 @@ mod tests {
 
         let mut spawned = Vec::new();
         for _ in 0..(MOON_LORD_OPENING as i32 + 2) {
-            spawned.extend(core(&mut c, &w, 0, 0).spawn);
+            spawned.extend(core(&mut c, &w, 0).spawn);
         }
         assert_eq!(spawned.len(), 3, "two hands and a head");
         assert_eq!(
@@ -440,7 +478,7 @@ mod tests {
 
         let mut spawned = Vec::new();
         for _ in 0..(MOON_LORD_OPENING as i32 + 2) {
-            spawned.extend(core(&mut c, &w, 0, 0).spawn);
+            spawned.extend(core(&mut c, &w, 0).spawn);
         }
         let sides: Vec<f32> = spawned
             .iter()
@@ -477,12 +515,69 @@ mod tests {
         c.ai[0] = state::WAITING;
 
         for open in 0..3 {
-            core(&mut c, &w, 3, open);
+            core(&mut c, &w, open);
             assert!(c.invulnerable, "{open} eyes broken is not enough");
             assert!(!c.take_damage(9999, 0.0, 1));
         }
-        core(&mut c, &w, 3, 3);
+        core(&mut c, &w, 3);
         assert!(!c.invulnerable, "all three: now it is open");
+    }
+
+    /// ML-1: the core is not removed the instant its last limb falls. In vanilla the sockets stay
+    /// as broken shells and the core leaves only through its death drama (`NPC.cs:41697-41722`);
+    /// the old `parts == 0 -> spent` killed the boss outright and left the finale as dead code.
+    #[test]
+    fn losing_every_limb_is_not_a_death() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+        c.local_ai[3] = 1.0;
+        c.ai[0] = state::WAITING;
+        // No hands or head on the field, but all three sockets accounted as open.
+        let out = core(&mut c, &w, 3);
+        assert!(!out.spent, "no limbs left is not, by itself, a death");
+        assert!(
+            !c.invulnerable,
+            "with every socket open the core is exposed, not gone"
+        );
+    }
+
+    /// ML-1: struck down, the exposed core does not die on the hit. `checkdead` sends it into its
+    /// ten-second drama (`NPC.cs:78878-78883`), and only the end of that drama is the kill
+    /// (`NPC.cs:41869-41875`). Reverting `checkdead` to `false` fails the first assert; leaving the
+    /// old `parts == 0` death or a zero `MOON_LORD_DEATH_TICKS` fails the drama.
+    #[test]
+    fn the_exposed_core_dies_only_after_its_death_drama() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+        c.local_ai[3] = 1.0;
+        c.ai[0] = state::FIGHTING;
+        c.life = 1;
+
+        assert!(
+            checkdead(&mut c),
+            "a lethal blow on the exposed core is intercepted"
+        );
+        assert_eq!(
+            c.ai[0],
+            state::DYING,
+            "it enters the death drama, not the grave"
+        );
+        assert_eq!(c.life, c.life_max, "and is not left lingering at zero life");
+
+        let mut spent_after = None;
+        for tick in 1..=(MOON_LORD_DEATH_TICKS as i32 + 2) {
+            if core(&mut c, &w, 3).spent {
+                spent_after = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(
+            spent_after,
+            Some(MOON_LORD_DEATH_TICKS as i32),
+            "the drama runs its full ten seconds, then the kill"
+        );
     }
 
     /// Each eye is given one of three scripts, and they are not all the same.
@@ -574,6 +669,42 @@ mod tests {
             &mut rng,
         );
         assert!(broken.invulnerable, "an empty socket takes nothing");
+    }
+
+    /// ML-2: breaking a socket does not kill the part. A struck hand or head becomes a broken,
+    /// refilled shell (`checkdead`, `NPC.cs:78864-78876`) and, on its next tick, frees exactly one
+    /// True Eye of Cthulhu (`MoonLord_SpawnTrueEyeOfCthulhu`, `NPC.cs:78873`). Reverting `checkdead`
+    /// to `false` fails the interception asserts; dropping the `eye_socket` spawn frees no eye.
+    #[test]
+    fn breaking_a_socket_opens_it_and_frees_an_eye() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(7);
+        let w = world(&tiles, Some((0.0, 600.0)));
+
+        let mut h = piece(MOON_LORD_HAND);
+        h.local_ai[3] = 1.0;
+        h.ai[0] = state::WAITING;
+        h.life = 1;
+        assert!(
+            checkdead(&mut h),
+            "a lethal blow on a socket is intercepted"
+        );
+        assert_eq!(h.ai[0], state::BROKEN, "it opens rather than dies");
+        assert_eq!(
+            h.life, h.life_max,
+            "and refills, an empty shell that hangs on"
+        );
+
+        let core_part = core_at((0.0, 0.0), state::WAITING);
+        let mut freed = 0;
+        for _ in 0..10 {
+            freed += eye_socket(&mut h, &w, Some(core_part), &mut rng)
+                .spawn
+                .iter()
+                .filter(|s| s.npc_type == MOON_LORD_FREE_EYE)
+                .count();
+        }
+        assert_eq!(freed, 1, "one True Eye of Cthulhu, freed exactly once");
     }
 
     /// A free eye hunts on its own.
