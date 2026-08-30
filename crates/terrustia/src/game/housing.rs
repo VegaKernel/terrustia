@@ -66,7 +66,19 @@ impl Room {
 /// Whether a tile blocks the flood fill.
 fn blocks(world: &World, x: i32, y: i32) -> bool {
     let tile = world.tile(x, y);
-    tile.is_active() && solid(tile.block) && !terrustia_proto::tile_solid::solid_top(tile.block)
+    if !tile.is_active() {
+        return false;
+    }
+    // A solid block stops the flood, except a solid-top platform you can walk up onto.
+    if solid(tile.block) && !terrustia_proto::tile_solid::solid_top(tile.block) {
+        return true;
+    }
+    // An OPEN door, trapdoor or tall gate is a barrier the room check does not pass through, even
+    // though it is not a solid tile: `WorldGen.CheckRoom` returns `BlockingOpenGate` for tile types
+    // 11, 386 and 389 (`WorldGen.cs:6113-6127`) - the same set as `housing_wall_tile`. Without this
+    // the flood walked straight through an open doorway into the outside or a neighbouring room, so
+    // the far side failed the enclosure check and a perfectly good house was reported homeless.
+    housing_wall_tile(tile.block)
 }
 
 /// Whether a tile seals a room, either by being solid or by being a wall-like object.
@@ -282,6 +294,43 @@ mod tests {
             }
         }
         assert_eq!(check_room(&world, x, y), Err(RoomError::NotEnclosed));
+    }
+
+    /// An open door in an outside wall does not open the house to the world: the flood must not
+    /// walk through it (`WorldGen.CheckRoom` BlockingOpenGate, `WorldGen.cs:6113-6127`). Fails
+    /// before the fix, when `blocks` only stopped on solid tiles, so the flood escaped through the
+    /// open doorway and the far side failed the enclosure check - the house was reported homeless.
+    #[test]
+    fn an_open_door_in_an_outside_wall_is_not_a_way_out() {
+        let (mut world, x, y) = house(12, 9, true);
+        assert!(
+            check_room(&world, x, y).is_ok(),
+            "the sealed house is valid to begin with"
+        );
+
+        // Replace a tile of the left wall (x0 = 50) with an OPEN door (type 11). Beyond it, at
+        // x = 49, is open sky with no house wall behind it.
+        world.set_tile(50, 55, Tile::framed(11, 0, 0));
+        assert!(
+            check_room(&world, x, y).is_ok(),
+            "an open door is a wall to the room check, not a hole to walk out of",
+        );
+
+        // Sanity: a genuine hole (plain air, no door) in the same spot with the far side open does
+        // let the flood escape, so the room is not enclosed - the fix is specific to the door.
+        let mut air = Tile::AIR;
+        air.wall = 0;
+        world.set_tile(50, 55, air);
+        for dy in 53..58 {
+            let mut outside = Tile::AIR;
+            outside.wall = 0;
+            world.set_tile(49, dy, outside);
+        }
+        assert_eq!(
+            check_room(&world, x, y),
+            Err(RoomError::NotEnclosed),
+            "a real hole, unlike an open door, does leave the room unsealed",
+        );
     }
 
     #[test]
