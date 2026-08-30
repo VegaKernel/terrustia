@@ -680,7 +680,7 @@ mod handshake_reaper {
     /// remove the player for a reason that has nothing to do with the reaper.
     fn join(server: &mut GameServer, state: ConnState) -> (u8, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(16);
-        let slot = server
+        let (slot, _epoch) = server
             .allocate_slot("127.0.0.1:5000".parse().expect("a literal"), tx)
             .expect("a free slot");
         server.player_mut(slot).expect("the slot just taken").state = state;

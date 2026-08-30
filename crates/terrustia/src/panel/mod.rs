@@ -722,6 +722,10 @@ struct StatusResponse {
     /// which tabs and buttons to show; every route still re-checks its own permission server-side
     /// regardless of what this says. See [`PanelAuthLookup::permissions`].
     permissions: Vec<String>,
+    /// How many world saves have failed in a row. `0` is healthy; see
+    /// [`PanelStatus::save_failures`]'s own doc comment for what this means and where it comes
+    /// from — this is a straight passthrough, not a second copy of the logic.
+    save_failures: u32,
 }
 
 /// `account` is the signed-in account making the request — its own permissions are what the
@@ -740,6 +744,7 @@ async fn build_status(state: &PanelState, account: &str) -> Result<StatusRespons
         version: env!("CARGO_PKG_VERSION"),
         unclaimed: lookup.unclaimed,
         permissions: lookup.permissions,
+        save_failures: live.save_failures,
     })
 }
 

@@ -134,8 +134,12 @@ pub async fn serve(
 
     let (mut read_half, mut write_half) = stream.into_split();
 
-    let slot = match slot_rx.await {
-        Ok(Some(slot)) => slot,
+    // `epoch` is this connection's generation counter for `slot` (see
+    // `game::server::GameServer::remove_player`'s doc comment): stamped onto every `Packet` below
+    // and onto this connection's own eventual `Leave`, so the game task can tell this connection's
+    // events apart from a ghost's once the slot has been recycled.
+    let (slot, epoch) = match slot_rx.await {
+        Ok(Some(assigned)) => assigned,
         _ => {
             // Full, or the game task dropped the request. Say so rather than closing silently:
             // a bare disconnect shows up in the client as an unexplained failure.
@@ -151,16 +155,17 @@ pub async fn serve(
     let reason = read_loop(
         &mut read_half,
         slot,
+        epoch,
         &events,
         idle_timeout,
         handshake_deadline,
         recorder.as_ref(),
     )
     .await;
-    debug!(%addr, slot, %reason, "connection closed");
+    debug!(%addr, slot, epoch, %reason, "connection closed");
 
     // Dropping the player closes the outbound channel, which ends the write task.
-    let _ = events.send(ServerEvent::Leave { slot }).await;
+    let _ = events.send(ServerEvent::Leave { slot, epoch }).await;
     writer.abort();
 }
 
@@ -210,6 +215,7 @@ async fn write_loop(
 async fn read_loop(
     read: &mut tokio::net::tcp::OwnedReadHalf,
     slot: u8,
+    epoch: u32,
     events: &mpsc::Sender<ServerEvent>,
     idle_timeout: Duration,
     handshake_deadline: std::time::Instant,
@@ -235,7 +241,7 @@ async fn read_loop(
                         still_handshaking = false;
                     }
                     if events
-                        .send(ServerEvent::Packet { slot, frame })
+                        .send(ServerEvent::Packet { slot, epoch, frame })
                         .await
                         .is_err()
                     {

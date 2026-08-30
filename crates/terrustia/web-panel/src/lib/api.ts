@@ -110,6 +110,9 @@ export interface StatusResponse {
    *  buttons to show; every route still re-checks its own permission on the backend regardless of
    *  what this says, so getting this wrong client-side is a display bug, never a security one. */
   permissions: string[];
+  /** How many world saves have failed in a row. `0` is healthy and should show nothing; anything
+   *  else means the world on disk is older than the world being played. */
+  save_failures: number;
 }
 
 export async function fetchStatus(session: string): Promise<StatusResponse> {

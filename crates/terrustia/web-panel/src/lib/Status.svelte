@@ -104,6 +104,11 @@
   <span class="dot" class:live></span>
   <strong>terrustia</strong>
   {#if status}<span class="dim">v{status.version}</span>{/if}
+  {#if status && status.save_failures > 0}
+    <span class="save-warn" title="the world on disk is behind the world being played">
+      saves failing ({status.save_failures})
+    </span>
+  {/if}
   <nav>
     {#each TABS as t (t.id)}
       <button class="tab" class:active={tab === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
@@ -129,6 +134,14 @@
           <span class="label">uptime</span>
           <span class="value">{uptime(status.uptime_secs)}</span>
         </div>
+        {#if status.save_failures > 0}
+          <div class="card warn">
+            <span class="label">saves</span>
+            <span class="value warn">
+              {status.save_failures} failed in a row
+            </span>
+          </div>
+        {/if}
       </div>
     {:else}
       <p class="dim">waiting for the server…</p>
@@ -177,6 +190,14 @@
 
   .dot.live {
     background: var(--accent);
+  }
+
+  .save-warn {
+    color: var(--danger);
+    font-size: 0.8rem;
+    border: 1px solid var(--danger);
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
   }
 
   nav {
@@ -237,6 +258,10 @@
     gap: 0.3rem;
   }
 
+  .card.warn {
+    border-color: var(--danger);
+  }
+
   .label {
     font-size: 0.72rem;
     text-transform: uppercase;
@@ -247,5 +272,9 @@
   .value {
     font-size: 1.1rem;
     color: var(--accent);
+  }
+
+  .value.warn {
+    color: var(--danger);
   }
 </style>
