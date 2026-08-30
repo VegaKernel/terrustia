@@ -1305,6 +1305,75 @@ impl GameServer {
             .count()
     }
 
+    /// Whether a pylon's surroundings still match its network, the game's biome gate on travelling
+    /// to it (`TeleportPylonsSystem.DoesPylonAcceptTeleportation`, TeleportPylonsSystem.cs:254-312).
+    ///
+    /// The scan the game runs there is the same one the spawner uses (`spawn::biome_at`), so the
+    /// biome networks read straight across. The pylon kinds are the game's `TeleportPylonType`
+    /// values (TeleportPylonType.cs): 0 surface purity, 1 jungle, 2 hallow, 3 underground, 4 beach,
+    /// 5 desert, 6 snow, 7 glowing mushroom, 8 victory, 9 underworld, 10 shimmer.
+    ///
+    /// Two disclosed narrowings from the game's own code. The game reads each biome's tile count
+    /// independently (`_sceneMetrics.EnoughTilesForJungle` and its siblings), so a spot can be over
+    /// several thresholds at once; `biome_at` returns the single first biome to cross, which is why
+    /// the surface-purity clause tests one biome rather than a set. And glowing mushroom (7) and
+    /// shimmer (10) are biomes this server does not model, so their pylons are accepted rather than
+    /// falsely refused, the same permissive stance the default arm of the game's switch would land
+    /// on for a type with no biome to check.
+    fn pylon_accepts(&self, pylon: &net_module::Pylon) -> bool {
+        use crate::game::spawn::{Biome, Depth, biome_at, depth_at};
+        let (x, y) = (i32::from(pylon.x), i32::from(pylon.y));
+        let depth = depth_at(&self.world, y);
+        let biome = biome_at(&self.world, x, y);
+        // The game's edge band (TeleportPylonsSystem.cs:265, :285): within 380 tiles of either side.
+        let near_edge = x <= 380 || x >= self.world.width() - 380;
+        match pylon.kind {
+            // Jungle, Hallow, Desert, Snow simply demand their biome (TeleportPylonsSystem.cs:276,
+            // :299, :280, :278).
+            1 => biome == Biome::Jungle,
+            2 => biome == Biome::Hallow,
+            5 => biome == Biome::Desert,
+            6 => biome == Biome::Snow,
+            // SurfacePurity: the plain surface, clear of the edge bands and of every special biome
+            // (TeleportPylonsSystem.cs:258-274).
+            0 => {
+                depth == Depth::Surface
+                    && !near_edge
+                    && !matches!(
+                        biome,
+                        Biome::Jungle
+                            | Biome::Snow
+                            | Biome::Desert
+                            | Biome::Hallow
+                            | Biome::Corruption
+                            | Biome::Crimson
+                    )
+            }
+            // Beach: the surface band by an ocean edge (TeleportPylonsSystem.cs:282-292).
+            4 => depth == Depth::Surface && near_edge,
+            // Underground: anywhere at or below the surface line (TeleportPylonsSystem.cs:301-302).
+            3 => depth != Depth::Surface,
+            // Underworld: the underworld layer (TeleportPylonsSystem.cs:305-306).
+            9 => depth == Depth::Underworld,
+            // Victory (8, TeleportPylonsSystem.cs:303-304) travels from anywhere; glowing mushroom
+            // (7) and shimmer (10) are the unmodelled biomes noted in the doc comment.
+            _ => true,
+        }
+    }
+
+    /// Whether a pylon is a Lihzahrd temple pylon sealed until Plantera falls, the game's early
+    /// access gate (`TeleportPylonsSystem.HandleTeleportRequest`, TeleportPylonsSystem.cs:124).
+    ///
+    /// The game refuses a destination that is below the surface, standing on the temple's own wall
+    /// (`WallID.LihzahrdBrickUnsafe`, WallID.cs:243, value 87), while Plantera is still alive, so
+    /// the temple's network cannot be reached before the temple is meant to open.
+    fn temple_pylon_sealed(&self, pylon: &net_module::Pylon) -> bool {
+        const LIHZAHRD_BRICK_WALL: u16 = 87;
+        !self.world.progress.downed_plantera
+            && i32::from(pylon.y) > i32::from(self.world.surface)
+            && self.world.tile(i32::from(pylon.x), i32::from(pylon.y)).wall == LIHZAHRD_BRICK_WALL
+    }
+
     /// The whole banner kill table, as module 11 message 0.
     fn banner_state_frame(&self) -> terrustia_proto::Result<Vec<u8>> {
         let mut kills = [0u32; net_module::BANNER_SLOTS];
@@ -3052,5 +3121,167 @@ mod announcements {
         assert_eq!(line.substitutions.len(), 1);
         assert_eq!(line.substitutions[0].mode, TextMode::LocalizationKey);
         assert_eq!(line.substitutions[0].text, "NPCName.MoonLord");
+    }
+}
+
+/// The two pylon-travel gates that a biome scan made possible (L2-21): the destination must still
+/// sit in its network's biome (`DoesPylonAcceptTeleportation`) and a temple pylon stays sealed
+/// until Plantera falls (the `wall == 87` clause of `HandleTeleportRequest`).
+#[cfg(test)]
+mod pylon_gates {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::tile::Tile;
+
+    fn server() -> GameServer {
+        let mut world = World::empty(1200, 400, "pylon gate probe");
+        world.surface = 100;
+        world.rock_layer = 200;
+        GameServer::new(Config::default(), world)
+    }
+
+    fn pylon(kind: u8, x: i16, y: i16) -> net_module::Pylon {
+        net_module::Pylon { x, y, kind }
+    }
+
+    /// Paint a `side*2`-square patch of one block type centred on a point, enough to carry a biome.
+    fn paint(server: &mut GameServer, x: i16, y: i16, block: u16, side: i32) {
+        for dy in -side..side {
+            for dx in -side..side {
+                server
+                    .world
+                    .set_tile(i32::from(x) + dx, i32::from(y) + dy, Tile::block(block));
+            }
+        }
+    }
+
+    /// L2-21 check (4): a pylon is a valid destination only while it still sits in its own biome
+    /// (`TeleportPylonsSystem.DoesPylonAcceptTeleportation`, TeleportPylonsSystem.cs:254-312).
+    /// Before the fix there was no biome gate at all, so a pylon planted in the wrong biome still
+    /// carried players; every `!...accepts` line below passed unconditionally then.
+    #[test]
+    fn a_pylon_must_match_its_network_biome() {
+        const JUNGLE_GRASS: u16 = 60; // JungleTileCount member (`SceneMetrics.cs:613`)
+        const PEARLSTONE: u16 = 109; // HolyTileCount member (`SceneMetrics.cs:603`)
+
+        // Jungle (kind 1): a jungle-network pylon standing in a real jungle is accepted; in plain
+        // forest it is not.
+        let (jx, jy) = (600i16, 150i16);
+        let mut jungle = server();
+        paint(&mut jungle, jx, jy, JUNGLE_GRASS, 15); // 900 jungle tiles, over the 140 threshold
+        assert!(
+            jungle.pylon_accepts(&pylon(1, jx, jy)),
+            "a jungle pylon in the jungle should work",
+        );
+        assert!(
+            !server().pylon_accepts(&pylon(1, jx, jy)),
+            "a jungle pylon standing in plain forest should be refused",
+        );
+
+        // Hallow (kind 2): the cheap-to-declare holy biome, accepted once its tiles are down.
+        let mut hallow = server();
+        paint(&mut hallow, jx, jy, PEARLSTONE, 9); // 324 holy tiles, over the 125 threshold
+        assert!(
+            hallow.pylon_accepts(&pylon(2, jx, jy)),
+            "a hallow pylon in the hallow should work",
+        );
+        assert!(
+            !server().pylon_accepts(&pylon(2, jx, jy)),
+            "a hallow pylon in plain forest should be refused",
+        );
+
+        // SurfacePurity (kind 0): the plain surface, accepted when clear, refused once the same spot
+        // is jungle.
+        let (sx, sy) = (600i16, 40i16); // above surface(100), away from the edge bands
+        assert!(
+            server().pylon_accepts(&pylon(0, sx, sy)),
+            "a purity pylon on the plain surface should work",
+        );
+        let mut overgrown = server();
+        paint(&mut overgrown, sx, sy, JUNGLE_GRASS, 15);
+        assert!(
+            !overgrown.pylon_accepts(&pylon(0, sx, sy)),
+            "a purity pylon is refused once its ground is jungle",
+        );
+
+        // Beach (kind 4): the surface band by an edge. Accepted within 380 tiles of the side,
+        // refused in the middle of the world.
+        let s = server();
+        assert!(
+            s.pylon_accepts(&pylon(4, 200, 40)),
+            "a beach pylon near the edge should work",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(4, 600, 40)),
+            "a beach pylon in the middle of the map should be refused",
+        );
+
+        // The depth-keyed networks. Underground (kind 3) wants anywhere below the surface;
+        // Underworld (kind 9) wants the underworld layer.
+        assert!(
+            s.pylon_accepts(&pylon(3, 600, 150)),
+            "an underground pylon below the surface should work",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(3, 600, 40)),
+            "an underground pylon on the surface should be refused",
+        );
+        assert!(
+            s.pylon_accepts(&pylon(9, 600, 260)), // y past height - 200 => underworld
+            "an underworld pylon in the underworld should work",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(9, 600, 40)),
+            "an underworld pylon on the surface should be refused",
+        );
+
+        // Victory (kind 8) travels from anywhere, biome or no biome.
+        assert!(s.pylon_accepts(&pylon(net_module::Pylon::VICTORY, 600, 40)));
+    }
+
+    /// L2-21 check (5): a pylon standing on the Lihzahrd temple's own wall, below the surface, will
+    /// not carry anyone until Plantera is defeated (`HandleTeleportRequest`, TeleportPylonsSystem
+    /// .cs:124; wall 87 is `WallID.LihzahrdBrickUnsafe`, WallID.cs:243). Before the fix this gate
+    /// was absent, so `temple_pylon_sealed` would have been `false` in every case here.
+    #[test]
+    fn a_temple_pylon_stays_sealed_until_plantera() {
+        const LIHZAHRD_BRICK_WALL: u16 = 87;
+        let (tx, ty) = (600i16, 150i16); // below surface(100)
+
+        let mut s = server();
+        s.world.set_tile(
+            i32::from(tx),
+            i32::from(ty),
+            Tile::AIR.with_wall(LIHZAHRD_BRICK_WALL),
+        );
+        assert!(
+            s.temple_pylon_sealed(&pylon(1, tx, ty)),
+            "a temple pylon before Plantera should be sealed",
+        );
+
+        // Once Plantera falls the same pylon opens up.
+        s.world.progress.downed_plantera = true;
+        assert!(
+            !s.temple_pylon_sealed(&pylon(1, tx, ty)),
+            "the temple pylon should answer once Plantera is down",
+        );
+
+        // A pylon on the surface, or one not on temple brick, is never a temple pylon.
+        let mut surface = server();
+        surface
+            .world
+            .set_tile(600, 40, Tile::AIR.with_wall(LIHZAHRD_BRICK_WALL));
+        assert!(
+            !surface.temple_pylon_sealed(&pylon(1, 600, 40)),
+            "a pylon above the surface is not gated by the temple rule",
+        );
+        let mut plain = server();
+        plain
+            .world
+            .set_tile(i32::from(tx), i32::from(ty), Tile::AIR.with_wall(4));
+        assert!(
+            !plain.temple_pylon_sealed(&pylon(1, tx, ty)),
+            "a pylon that is not on temple brick is not a temple pylon",
+        );
     }
 }
