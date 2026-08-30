@@ -54,6 +54,17 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets
 
+      # `embed-web` is default-on (`crates/terrustia/Cargo.toml`), so the step above never compiles
+      # the panel's disk-serving static-asset branch: `panel/mod.rs::load_static_asset`'s
+      # `#[cfg(not(feature = "embed-web"))]` arm, the one with the `..` traversal guard against a
+      # request path escaping `web-panel/dist`. Unbuilt code is unchecked code, guard included; this
+      # step is what actually compiles and lints it. No frontend build needed first: unlike the
+      # `embed-web` arm, this one reads `web-panel/dist` from disk at runtime rather than embedding
+      # it via `rust_embed::RustEmbed` at compile time, so there is nothing here for a missing
+      # `dist/` to fail on the way the step above needs `bun run build` to have already run.
+      - name: Lints (embed-web off, exercises the disk-serving panel branch)
+        run: cargo clippy -p terrustia --all-targets --no-default-features
+
       - name: Tests
         run: cargo test --workspace
 
