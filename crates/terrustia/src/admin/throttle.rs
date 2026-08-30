@@ -10,13 +10,13 @@
 //! third party: the delay is capped ([`MAX_DELAY_SECS`]), so a real owner trying their own account
 //! mid-attack waits at most that long, the same as the attacker does, and a single correct
 //! credential clears the key's history immediately ([`Throttle::record_success`]). A process
-//! restart drops every window too, which is fine — see `TODO.md` again: "in-memory ... so a
+//! restart drops every window too, which is fine: see `TODO.md` again, "in-memory ... so a
 //! restart clears state harmlessly" is the point, not a gap. There is deliberately no notion of an
 //! account becoming inaccessible until an operator intervenes; that would let the very attack this
 //! guards against turn into a denial of service against the account's own owner.
 //!
-//! Two independent [`Throttle`]s are meant to be held side by side by a caller — one keyed by the
-//! caller's address, one by the account name they typed — and a login attempt is refused if
+//! Two independent [`Throttle`]s are meant to be held side by side by a caller (one keyed by the
+//! caller's address, one by the account name they typed), and a login attempt is refused if
 //! *either* key's window is open. [`Throttle`] itself does not know or care which dimension a
 //! given instance covers; it is the same map either way.
 //!
@@ -31,7 +31,7 @@
 //! would answer "does this account exist"), refuse with [`REFUSAL_MESSAGE`] if it says so, and
 //! otherwise check the credential and call [`Throttle::record_success`] or
 //! [`Throttle::record_failure`] with the outcome. [`Verdict::Refused`] carries `log_summary` for
-//! exactly the refusals that should produce one audit-log line — see its own doc comment.
+//! exactly the refusals that should produce one audit-log line: see its own doc comment.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -39,14 +39,15 @@ use std::time::{Duration, Instant};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 /// Attempts allowed before backoff engages at all. A slow typist or a fat-fingered password gets
-/// this many free retries with no extra delay — the point of throttling is brute force, not an
+/// this many free retries with no extra delay: the point of throttling is brute force, not an
 /// honest mistake.
 ///
-/// `pub` (unlike this module's other constants, which stay private) so a test elsewhere — in this
-/// crate or in `tests/panel.rs`, a separate binary that only ever sees this crate's public surface
-/// — can open a window in exactly as many real attempts as it takes, rather than duplicating the
-/// number and silently drifting from it if the schedule ever changes. Not a secret either way: see
-/// [`jittered`]'s own doc comment on why the schedule itself is not something worth hiding.
+/// `pub` (unlike this module's other constants, which stay private) so a test elsewhere (in this
+/// crate, or in `tests/panel.rs`, a separate binary that only ever sees this crate's public
+/// surface) can open a window in exactly as many real attempts as it takes, rather than
+/// duplicating the number and silently drifting from it if the schedule ever changes. Not a
+/// secret either way: see [`jittered`]'s own doc comment on why the schedule itself is not
+/// something worth hiding.
 pub const FREE_ATTEMPTS: u32 = 3;
 /// The delay before jitter after the first throttled failure (the `FREE_ATTEMPTS + 1`th).
 const INITIAL_DELAY_SECS: u64 = 1;
@@ -57,19 +58,19 @@ const MAX_DELAY_SECS: u64 = 300;
 /// How far the exponent is allowed to climb before `.min(MAX_DELAY_SECS)` would clamp it anyway.
 /// Bounded so the shift below never has to consider overflow.
 const EXPONENT_CAP: u32 = 20;
-/// How much of the base delay is randomised, each way. Not a secrecy measure — the schedule is
-/// public — just enough to stop an attacker timing their next attempt to land the instant a
+/// How much of the base delay is randomised, each way. Not a secrecy measure (the schedule is
+/// public), just enough to stop an attacker timing their next attempt to land the instant a
 /// window closes.
 const JITTER_FRACTION: f64 = 0.2;
 /// A key already inside a refused window earns at most one audit-log line per this interval, no
-/// matter how many refusals landed in it — seem this module's top doc and [`Verdict::Refused`].
+/// matter how many refusals landed in it: see this module's top doc and [`Verdict::Refused`].
 const LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// A key that has not been touched in this long is forgotten outright the next time the map is
 /// swept ([`Throttle::prune_stale`]), so a sustained flood of distinct keys (many IPs, many
 /// account names tried once and abandoned) cannot grow this map without bound. Well past
 /// `MAX_DELAY_SECS`, so pruning never interrupts an attack actually in progress.
 const IDLE_EXPIRY: Duration = Duration::from_secs(3600);
-/// The map is only swept once it holds more than this many keys — pruning is `O(n)`, so gating it
+/// The map is only swept once it holds more than this many keys: pruning is `O(n)`, so gating it
 /// on size keeps the ordinary case (a handful of keys, most servers) from paying for a sweep on
 /// every single failure.
 const PRUNE_THRESHOLD: usize = 4096;
@@ -77,11 +78,11 @@ const PRUNE_THRESHOLD: usize = 4096;
 /// The message every throttled refusal answers with, everywhere this module is used. One shared
 /// string rather than one per call site so the wording can never drift into accidentally
 /// distinguishing "this account does not exist" from "this account exists and is being tried too
-/// often" — the whole point of routing both through the same [`Verdict::Refused`] arm.
+/// often": the whole point of routing both through the same [`Verdict::Refused`] arm.
 pub const REFUSAL_MESSAGE: &str = "too many attempts; wait a moment and try again.";
 
 /// The base backoff for a key's `n`th consecutive failure (`n` counts every failure, including
-/// the free ones from the start), before jitter. Pure and deterministic — see this module's top
+/// the free ones from the start), before jitter. Pure and deterministic: see this module's top
 /// doc for why that matters for testing.
 pub fn base_delay(consecutive_failures: u32) -> Duration {
     if consecutive_failures <= FREE_ATTEMPTS {
@@ -93,7 +94,7 @@ pub fn base_delay(consecutive_failures: u32) -> Duration {
 }
 
 /// Spread `base` by up to [`JITTER_FRACTION`] in either direction. `unit` is the caller's own
-/// random draw in `[0, 1]` (a real one in production, a fixed value in a test) — kept as a plain
+/// random draw in `[0, 1]` (a real one in production, a fixed value in a test), kept as a plain
 /// parameter rather than an RNG so this function itself needs nothing injected but the number.
 /// A zero base (still inside the free attempts) is returned unchanged: there is no window to
 /// jitter yet.
@@ -132,7 +133,7 @@ pub enum Verdict {
     ///
     /// `log_summary` is `Some(n)` exactly on the one refusal in every [`LOG_INTERVAL`] window that
     /// should produce a single audit-log line covering the `n` refusals (this one included) since
-    /// the line before it — every other refusal in between carries `None` and should stay silent.
+    /// the line before it; every other refusal in between carries `None` and should stay silent.
     /// This is the "not one line per spam attempt; summarise" requirement: an attacker retrying
     /// every few milliseconds produces one log line a minute, not one a millisecond.
     Refused {
@@ -151,10 +152,10 @@ pub struct Throttle {
 impl Throttle {
     /// A fresh throttle with no history for any key.
     ///
-    /// Jitter is seeded from the OS's own CSPRNG — the same `argon2::password_hash::rand_core`
+    /// Jitter is seeded from the OS's own CSPRNG (the same `argon2::password_hash::rand_core`
     /// re-export of `rand_core::OsRng` this crate already pulls in for password salts and session
-    /// tokens (`admin::Account::new`, `panel::mod::issue_session`), so this adds no new
-    /// dependency — then advances deterministically from there with the same `SmallRng` the game
+    /// tokens: `admin::Account::new`, `panel::mod::issue_session`, so this adds no new
+    /// dependency), then advances deterministically from there with the same `SmallRng` the game
     /// task already uses for ordinary game randomness (`GameServer::rng`). Jitter only has to keep
     /// an attacker from timing a retry to the second; it is not a secret and does not need to
     /// resist prediction from a leaked seed, so a non-cryptographic generator is the right tool
@@ -168,8 +169,8 @@ impl Throttle {
 
     /// A throttle whose jitter is reproducible, for tests: real entropy would make a bounds
     /// assertion on `retry_after` correct but unrepeatable, and a fixed seed is not weaker for
-    /// this purpose than a random one — see [`Self::new`]'s own doc comment for why jitter is not
-    /// a secret in the first place.
+    /// this purpose than a random one (see [`Self::new`]'s own doc comment for why jitter is not
+    /// a secret in the first place).
     fn with_seed(seed: u64) -> Self {
         Self {
             entries: HashMap::new(),
@@ -178,7 +179,7 @@ impl Throttle {
     }
 
     /// Whether `key`'s window is currently open. Call this before touching the real credential at
-    /// all — see this module's top doc.
+    /// all: see this module's top doc.
     pub fn check(&mut self, key: &str, now: Instant) -> Verdict {
         let Some(entry) = self.entries.get_mut(key) else {
             return Verdict::Allowed;
@@ -210,7 +211,7 @@ impl Throttle {
     /// Record a failed credential check for `key`, extending (or opening) its window from `now`.
     ///
     /// Only ever call this after [`Self::check`] returned [`Verdict::Allowed`] and the real
-    /// credential then turned out to be wrong — a refusal from `check` itself must never also
+    /// credential then turned out to be wrong: a refusal from `check` itself must never also
     /// count as a failure, or a key already backed off would have its window pushed out further
     /// just by being hammered, punishing a confused legitimate user exactly as hard as an
     /// attacker.
@@ -404,7 +405,7 @@ mod tests {
         ));
     }
 
-    /// Distinct keys never affect each other — the whole reason a caller holds two `Throttle`s
+    /// Distinct keys never affect each other: the whole reason a caller holds two `Throttle`s
     /// (one per-IP, one per-account) rather than mixing every attempt into one bucket.
     #[test]
     fn different_keys_are_independent() {
@@ -428,7 +429,7 @@ mod tests {
     ///
     /// Enough failures to push the window's base delay all the way to `MAX_DELAY_SECS` (well past
     /// `LOG_INTERVAL` even after the worst-case `-JITTER_FRACTION` draw), so the window is still
-    /// open sixty seconds later — a handful of failures would open a window shorter than
+    /// open sixty seconds later: a handful of failures would open a window shorter than
     /// `LOG_INTERVAL` itself, closing before there was ever a second refusal to fold in.
     #[test]
     fn refusals_are_summarised_at_most_once_per_log_interval() {

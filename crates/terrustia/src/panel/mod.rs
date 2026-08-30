@@ -147,7 +147,7 @@ struct PanelState {
     /// channel round trip this handler has no other reason to pay. See `admin::throttle`'s top doc
     /// for the mechanism itself, which is identical either way.
     ip_throttle: Arc<Mutex<crate::admin::Throttle>>,
-    /// Per-account (lowercased, as typed) `/api/login` backoff — see [`Self::ip_throttle`]'s doc
+    /// Per-account (lowercased, as typed) `/api/login` backoff. See [`Self::ip_throttle`]'s doc
     /// comment for why this is panel-local, and `admin::throttle`'s top doc for why both exist.
     account_throttle: Arc<Mutex<crate::admin::Throttle>>,
 }
@@ -296,7 +296,7 @@ pub async fn run(
     info!(%addr, "web panel listening (loopback only)");
     let handle = tokio::spawn(async move {
         // `with_connect_info` so `login`'s `ConnectInfo<SocketAddr>` extractor can see the real
-        // caller address for its per-address throttle — every other handler ignores it.
+        // caller address for its per-address throttle. Every other handler ignores it.
         if let Err(e) = axum::serve(
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
@@ -506,7 +506,7 @@ async fn authorized_token(
 }
 
 // `password` and `claim_token` below are never logged, at any level, anywhere in `login` or the
-// functions it calls — see `admin::mod`'s own "never logged" convention. `#[derive(Deserialize)]`
+// functions it calls: see `admin::mod`'s own "never logged" convention. `#[derive(Deserialize)]`
 // gives this struct no `Debug`/`Display` on purpose: an errant `{req:?}` in a future edit would
 // fail to compile instead of quietly printing both.
 #[derive(Deserialize)]
@@ -535,7 +535,7 @@ async fn login(
     if lookup.unclaimed {
         // Not throttled: there is no existing password to check here at all (the claim path only
         // ever creates the very first account), the same reasoning that leaves `/register` on a
-        // claimed server unthrottled too — see `TODO.md`'s Lane F entry. The token itself is a
+        // claimed server unthrottled too: see `TODO.md`'s Lane F entry. The token itself is a
         // ~59-bit random secret (`GameServer::announce_claim_token`), not a guessable password;
         // brute-forcing it is already infeasible, and it is spent after one use regardless.
         //
@@ -592,14 +592,14 @@ async fn login(
 
     // Checked before the lookup result is even consulted: a throttled attempt must not learn
     // "no such account" vs. "wrong password" any faster or slower than usual, so both are refused
-    // the same way, this early, with the one shared `REFUSAL_MESSAGE` — see `admin::throttle`'s
+    // the same way, this early, with the one shared `REFUSAL_MESSAGE`. See `admin::throttle`'s
     // top doc and `login_throttled`'s doc comment on the game-task side for the same rule applied
     // to `/login`.
     let ip_key = addr.ip().to_string();
     let account_key = req.name.to_ascii_lowercase();
     let now = Instant::now();
-    // Each verdict is read out of its `MutexGuard` into a plain value *before* the `if let` below
-    // — a guard borrowed straight in an `if let`'s own condition stays locked for the rest of that
+    // Each verdict is read out of its `MutexGuard` into a plain value *before* the `if let` below:
+    // a guard borrowed straight in an `if let`'s own condition stays locked for the rest of that
     // block by Rust's temporary-lifetime rules, and `record_throttled`'s `.await` inside it would
     // then be holding a `std::sync::MutexGuard` (not `Send`) across a suspend point.
     let ip_verdict = state.ip_throttle().check(&ip_key, now);
@@ -650,11 +650,11 @@ async fn login(
     issue_session(&state, req.name)
 }
 
-/// Sends the game task one summarised audit-log line for a login-throttle refusal — see
+/// Sends the game task one summarised audit-log line for a login-throttle refusal. See
 /// `admin::throttle::Verdict::Refused`'s own doc comment for why this is called only once per
 /// summarised window rather than once per refusal. Fire-and-forget: `login` has already decided
 /// to refuse the request regardless of whether this record lands, matching `AuditLog::record`'s
-/// own "a write failure must never block the action it is recording" rule — if the game task is
+/// own "a write failure must never block the action it is recording" rule: if the game task is
 /// gone, there is nobody left to hold a session against anyway.
 async fn record_throttled(state: &PanelState, target: String, count: u32) {
     let _ = state
@@ -1744,7 +1744,7 @@ async fn set_account_group(
     }
 }
 
-// `password` is never logged below, at any level — see `admin::mod`'s own "never logged"
+// `password` is never logged below, at any level: see `admin::mod`'s own "never logged"
 // convention, and `LoginRequest`'s own doc comment for why this deliberately has no `Debug` either.
 #[derive(Deserialize)]
 struct CreateAccountRequest {

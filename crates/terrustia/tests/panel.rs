@@ -160,7 +160,7 @@ async fn static_assets_and_the_unclaimed_flow_work_over_a_real_socket() {
 /// unit tests prove the schedule, the jitter and reset-on-success deterministically with an
 /// injected clock; this only has to prove the real HTTP handler is actually wired to it: enough
 /// wrong passwords against one account open a window, and the next attempt is refused with `429`
-/// and the shared `admin::REFUSAL_MESSAGE` — not the ordinary `401` "wrong name or password" —
+/// and the shared `admin::REFUSAL_MESSAGE`, not the ordinary `401` "wrong name or password",
 /// even when it offers the real one, proving the throttle is checked before the credential is.
 #[tokio::test]
 async fn repeated_wrong_passwords_back_off_api_login() {
@@ -234,7 +234,7 @@ async fn repeated_wrong_passwords_back_off_api_login() {
         );
     }
 
-    // Inside the window now: even the real password is refused, and refused differently — the
+    // Inside the window now: even the real password is refused, and refused differently. The
     // whole point being that this is decided before the password is ever compared at all.
     let (status, body) = client
         .post_json(

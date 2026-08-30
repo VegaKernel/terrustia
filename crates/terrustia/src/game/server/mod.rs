@@ -648,7 +648,7 @@ pub enum ServerEvent {
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// The web panel's own `/api/login` throttle logging one summarised refusal — the panel keeps
+    /// The web panel's own `/api/login` throttle logging one summarised refusal. The panel keeps
     /// its own `admin::Throttle`s (see `panel::PanelState`'s doc comment for why), but the
     /// append-only audit log lives on the game task, so this is how a refusal reaches it. No
     /// reply: `login` has already decided to refuse the request either way.
@@ -940,11 +940,11 @@ pub struct GameServer {
     /// Slots with a hash already running. One at a time, so nobody can queue up work.
     auth_in_flight: std::collections::HashSet<u8>,
     /// Per-IP login backoff, shared by the join password (`dispatch::on_password`) and `/login`
-    /// (`console::run_admin_command`'s `"login"` arm) — both are "does this address keep failing a
+    /// (`console::run_admin_command`'s `"login"` arm): both are "does this address keep failing a
     /// password check" in the same sense. See `admin::throttle`'s own doc comment for the design.
     ip_throttle: crate::admin::Throttle,
     /// Per-account `/login` backoff, keyed by the (lowercased) account name typed rather than
-    /// whether it actually exists — see `login_throttled`'s own doc comment for why that matters.
+    /// whether it actually exists: see `login_throttled`'s own doc comment for why that matters.
     account_throttle: crate::admin::Throttle,
     /// A one-time secret for claiming an unclaimed server, printed to the console at startup.
     ///
@@ -1510,7 +1510,7 @@ impl GameServer {
     /// re-derived here, because the two callers disagree about what earns it: from chat it takes
     /// the console's claim token, and from the console it takes nothing at all.
     ///
-    /// `password` is never logged below, at any level — see `admin::mod`'s own "never logged"
+    /// `password` is never logged below, at any level: see `admin::mod`'s own "never logged"
     /// convention. It only ever travels into `Account::new`, which turns it into a PHC hash and
     /// nothing else.
     fn begin_registration(&mut self, slot: u8, account: &str, password: &str, owner: bool) {
@@ -1709,16 +1709,16 @@ impl GameServer {
 
     /// The gate `/login` checks before spending anything on the credential it was just handed:
     /// whether either the caller's own address or the account name they typed (case-folded, so a
-    /// throttled attacker cannot dodge it by changing case — matches `Admin::account_hash`'s own
+    /// throttled attacker cannot dodge it by changing case: matches `Admin::account_hash`'s own
     /// case-insensitive lookup) currently has a backoff window open. `account_key` is the name as
     /// typed, not whether it resolves to a real account, deliberately: keying only on real names
     /// would let an attacker distinguish "this account exists" from "it does not" by whether
-    /// their spam ever starts slowing down — see `admin::REFUSAL_MESSAGE`'s own doc comment.
+    /// their spam ever starts slowing down. See `admin::REFUSAL_MESSAGE`'s own doc comment.
     ///
     /// Tells `slot` the shared generic refusal and returns `true` if either window is open, in
     /// which case the caller must stop right there: no hash, no lookup, nothing that could itself
     /// leak anything a fast rejection would not. Any refusal worth a line in the audit log is
-    /// written here, already folded down to a summary by `Throttle::check` — see its own doc
+    /// written here, already folded down to a summary by `Throttle::check`. See its own doc
     /// comment for why this never becomes one log line per spam attempt.
     fn login_throttled(&mut self, slot: u8, ip_key: Option<&str>, account_key: &str) -> bool {
         let now = std::time::Instant::now();
@@ -1822,7 +1822,7 @@ impl GameServer {
                     let account_key = account.to_ascii_lowercase();
                     if correct {
                         // No lockout: a right password always clears both windows immediately,
-                        // whatever backoff either key had built up — see `admin::throttle`'s own
+                        // whatever backoff either key had built up. See `admin::throttle`'s own
                         // top doc.
                         self.account_throttle.record_success(&account_key);
                         if let Some(ip_key) = &ip_key {
@@ -2631,7 +2631,7 @@ mod claim_token_and_login_throttle {
     }
 
     /// `begin_registration`/`/login`'s hash always runs on a real worker thread and reports back
-    /// through `auth_results`, which `note_finished_auth` only ever drains on a tick — there is no
+    /// through `auth_results`, which `note_finished_auth` only ever drains on a tick: there is no
     /// synchronous point to await here, so this polls the way `tests/panel.rs`'s own `wait_until`
     /// does, on a deadline rather than a fixed sleep.
     async fn wait_until(
@@ -2653,7 +2653,7 @@ mod claim_token_and_login_throttle {
     }
 
     /// Fail-then-pass for the constant-time compare itself: a wrong token must never be able to
-    /// claim the server (and must not even start a hash — the whole point of checking the token
+    /// claim the server (and must not even start a hash: the whole point of checking the token
     /// first), and the real one must.
     #[tokio::test]
     async fn the_claim_token_compare_rejects_wrong_and_accepts_right() {
@@ -2691,7 +2691,7 @@ mod claim_token_and_login_throttle {
     /// Fail-then-pass for the throttle: `admin::throttle::FREE_ATTEMPTS + 1` wrong `/login`s in a
     /// row open a backoff window (proven deterministically, with an injected clock, in
     /// `admin::throttle`'s own tests), and this proves the wiring: a real `/login` landing inside
-    /// that window is refused before it even starts a hash — including one that would otherwise
+    /// that window is refused before it even starts a hash, including one that would otherwise
     /// have been the right password, which is the whole point of checking the window first rather
     /// than racing the credential check against it.
     ///

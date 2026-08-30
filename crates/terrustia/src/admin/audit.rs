@@ -72,7 +72,7 @@ pub enum AuditAction {
     PermissionChange,
     Claim,
     /// A login-style attempt refused by `admin::throttle` while a per-IP or per-account backoff
-    /// window was open. One line per summarised window, not one per refusal — see
+    /// window was open. One line per summarised window, not one per refusal: see
     /// `throttle::Verdict::Refused`'s own doc comment. `issuer` is always `"system"` (nobody
     /// signed in caused this; the server's own throttle did), `target` names which key tripped it
     /// (`ip:<address>` or `account:<name>`), and `detail` carries the refusal count and window.

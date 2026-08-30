@@ -26,7 +26,7 @@
 //!
 //! **Convention: a password or a claim token is never logged, at any level, in any field.** Every
 //! `tracing::` call and every [`audit::AuditLog::record`] on a login, register or claim path names
-//! only outcomes — an account name, a group, a slot, whether a credential was `correct` — never
+//! only outcomes (an account name, a group, a slot, whether a credential was `correct`), never
 //! the credential itself, not even at `trace` and not inside an error branch. `Account`'s own
 //! stored form is a PHC hash, checked here; the plain-text value never has a reason to reach a log
 //! line at all. The one-time claim token is likewise never printed anywhere but the console's own
@@ -110,8 +110,8 @@ impl Account {
 /// The one shared primitive behind every plain-secret compare in this crate: the server join
 /// password (`game::server::dispatch::on_password`) and the claim token, checked both from the
 /// console (`game::server::console::run_admin_command`'s `"register"` arm) and from the web panel
-/// (`panel::mod::login`). None of these is a high-value secret — the claim token in particular is
-/// spent once and lives for a single process — but a length-independent compare costs nothing and
+/// (`panel::mod::login`). None of these is a high-value secret (the claim token in particular is
+/// spent once and lives for a single process), but a length-independent compare costs nothing and
 /// avoids having to argue about it three separate times. (Argon2's own verifier already handles
 /// this for password hashes; this helper is only for the plain-string cases that never go through
 /// it.)
@@ -159,7 +159,7 @@ mod tests {
 
     /// The primitive every claim-token and join-password compare site now shares. Timing itself
     /// is not something a unit test can observe; what is checked here is the ordinary correctness
-    /// every one of those call sites depends on — right accepted, wrong (whether shorter, longer,
+    /// every one of those call sites depends on: right accepted, wrong (whether shorter, longer,
     /// or the same length) refused.
     #[test]
     fn constant_time_eq_accepts_the_right_value_and_refuses_every_wrong_one() {

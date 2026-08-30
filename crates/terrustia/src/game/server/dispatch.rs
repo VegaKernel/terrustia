@@ -239,7 +239,7 @@ impl GameServer {
             return Ok(());
         }
         // Per-IP backoff only: there is no account here, just the one shared server password, so
-        // there is nothing for a per-account window to key on — see `admin::throttle`'s top doc.
+        // there is nothing for a per-account window to key on. See `admin::throttle`'s top doc.
         // Refused with the exact same "Incorrect password." a genuinely wrong guess gets, so a
         // throttled attempt is not distinguishable from an ordinary wrong one by its wording.
         let ip_key = self.player(slot).map(|p| p.addr.ip().to_string());
@@ -259,7 +259,7 @@ impl GameServer {
             self.kick(slot, "Incorrect password.");
             return Ok(());
         }
-        // `offered` never appears in a log line below, or anywhere else — see `admin::mod`'s own
+        // `offered` never appears in a log line below, or anywhere else: see `admin::mod`'s own
         // "never logged" convention.
         let offered = PacketReader::new(payload).string()?;
         if crate::admin::constant_time_eq(offered.as_bytes(), self.config.password.as_bytes()) {
@@ -4402,8 +4402,8 @@ mod section_streaming {
 
 /// Lane F: the join password (`on_password`, above) is backed off per address by
 /// `admin::throttle`, and its compare goes through the shared `admin::constant_time_eq` rather
-/// than a plain `!=` (`constant_time_eq`'s own tests, in `admin::mod`, cover the primitive itself
-/// — timing is not something a unit test can observe, so what matters here is that this call site
+/// than a plain `!=` (`constant_time_eq`'s own tests, in `admin::mod`, cover the primitive itself:
+/// timing is not something a unit test can observe, so what matters here is that this call site
 /// actually uses it and that the throttle actually gates it).
 #[cfg(test)]
 mod join_password_throttle {
@@ -4421,14 +4421,14 @@ mod join_password_throttle {
         )
     }
 
-    /// A fresh connection at `slot`, past the version check and ready for a password — what a real
+    /// A fresh connection at `slot`, past the version check and ready for a password: what a real
     /// client's handshake reaches by the time it may send one (`on_hello`'s own `player.greeted =
     /// true` before it prompts for a password at all).
     ///
     /// Returns the outbound channel's receiver, which the caller must hold onto for as long as the
     /// connection is meant to look alive: `send_bytes` treats a closed channel exactly like a dead
-    /// connection and removes the player on the very next thing sent to it — accept's own
-    /// `player_info` frame included, not only a kick — so dropping the receiver immediately would
+    /// connection and removes the player on the very next thing sent to it (accept's own
+    /// `player_info` frame included, not only a kick), so dropping the receiver immediately would
     /// make every outcome below look identical.
     fn connect(server: &mut GameServer, slot: u8, addr: &str) -> mpsc::Receiver<Bytes> {
         let (out_tx, out_rx) = mpsc::channel(64);
@@ -4464,11 +4464,11 @@ mod join_password_throttle {
     /// address opens a window (proven deterministically, with an injected clock, in
     /// `admin::throttle`'s own tests) and the next connection from that address is refused before
     /// its password is even compared. Proven here by offering the *right* password on that next
-    /// connection and it still getting kicked — the only way that happens is the throttle refusing
+    /// connection and it still getting kicked: the only way that happens is the throttle refusing
     /// before `constant_time_eq` is ever reached.
     ///
     /// Each attempt is its own connection because a wrong join password kicks immediately
-    /// (`on_password`'s own `else` arm) — there was never a way to retry more than once on a
+    /// (`on_password`'s own `else` arm): there was never a way to retry more than once on a
     /// single socket, throttled or not, so this reconnects with a fresh `Player` each time exactly
     /// as a real client retrying from the same address would.
     #[test]
@@ -4493,7 +4493,7 @@ mod join_password_throttle {
         );
     }
 
-    /// A different address is never affected by another one's window — the reason a caller keys
+    /// A different address is never affected by another one's window: the reason a caller keys
     /// this per-IP at all rather than refusing every join once one address fails enough times.
     /// Same octets but for the port on purpose, matching this whole module's own point that the
     /// throttle keys on the address alone: two different *ports* at the same address (an ordinary

@@ -45,7 +45,7 @@ impl GameServer {
             // Claiming from the console needs no token: whoever can type here can already read
             // the world file, so there is nothing left to prove.
             //
-            // `password` is never logged below, at any level — not even inside an error branch —
+            // `password` is never logged below, at any level, not even inside an error branch:
             // matching `admin::mod`'s own "never logged" convention. That still holds even though
             // this line only ever reaches a trusted terminal: `info!` goes through the same
             // `tracing` pipeline as everything else, and this project does not assume every
@@ -208,7 +208,7 @@ impl GameServer {
     /// a lowercased password is a different password, and `run_command` lowercases everything for
     /// the benefit of NPC-name lookup.
     ///
-    /// `password` and `token` below are never logged, at any level — see `admin::mod`'s own
+    /// `password` and `token` below are never logged, at any level: see `admin::mod`'s own
     /// "never logged" convention. `argument` itself is not logged either, for the same reason: it
     /// is the raw `/login`, `/register` or `/group` (etc.) line, which is exactly where those
     /// values live before they are split apart.
@@ -228,7 +228,7 @@ impl GameServer {
             "register" if self.admin.unclaimed() => match words.as_slice() {
                 [account, password, token] => {
                     // Constant-time: a plain `!=` here would compare a real one-time secret byte
-                    // by byte, exiting the moment a mismatch is found — the classic timing side
+                    // by byte, exiting the moment a mismatch is found: the classic timing side
                     // channel. `self.claim_token` being `None` (nothing left to claim, or nothing
                     // generated yet) always refuses, same as before; the compare only runs at all
                     // once there is a real token to compare against.
@@ -259,8 +259,8 @@ impl GameServer {
             "login" => match words.as_slice() {
                 [account, password] => {
                     // Checked before anything else touches the account store or a worker thread:
-                    // a throttled attempt must cost exactly nothing, not even the lookup below —
-                    // see `login_throttled`'s own doc comment.
+                    // a throttled attempt must cost exactly nothing, not even the lookup below.
+                    // See `login_throttled`'s own doc comment.
                     let ip_key = self.player(slot).map(|p| p.addr.ip().to_string());
                     let account_key = account.to_ascii_lowercase();
                     if self.login_throttled(slot, ip_key.as_deref(), &account_key) {
