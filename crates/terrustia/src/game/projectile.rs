@@ -378,12 +378,6 @@ pub struct ProjectileStore {
     /// No guard against zero here, unlike the NPC store: the game does not have one either, and
     /// nothing asserts on a projectile generation of nought.
     slot_generations: Vec<u16>,
-    /// What the world's difficulty multiplies a hostile shot's damage by.
-    ///
-    /// Held here for the same reason the NPC store holds its scaling: one choke point that no
-    /// call site can forget. The game keeps it on the projectile itself, set from
-    /// `HostileProjectileDamageMultiplier` when it is created.
-    hostile_damage_scale: f32,
 }
 
 impl Default for ProjectileStore {
@@ -397,13 +391,7 @@ impl ProjectileStore {
         Self {
             slots: (0..MAX_PROJECTILES).map(|_| None).collect(),
             slot_generations: vec![0; MAX_PROJECTILES],
-            hostile_damage_scale: 1.0,
         }
-    }
-
-    /// Tell the store how hard the world hits. Applied to everything launched afterwards.
-    pub fn set_hostile_damage_scale(&mut self, scale: f32) {
-        self.hostile_damage_scale = scale;
     }
 
     /// Launch one, returning its slot.
@@ -448,13 +436,13 @@ impl ProjectileStore {
                 position.1 - stats.height as f32 / 2.0,
             ),
             velocity,
-            // Only what hurts players scales; a trap's harmless flame head and anything friendly
-            // keep the number they were given.
-            damage: if stats.hostile {
-                (damage as f32 * self.hostile_damage_scale) as i32
-            } else {
-                damage
-            },
+            // The base damage, unscaled. The game keeps a hostile shot's wire damage at its base
+            // and applies `hostileDamageScaling(difficulty) * 2` on the client at the moment it hits
+            // a player (`Projectile.cs:14916-14919`), so the server must not bake the difficulty
+            // multiplier in here: a client that received a pre-scaled number would scale it a second
+            // time. The server applies the same scaling itself when it originates the hit (see
+            // `tick_contact_damage`).
+            damage,
             knockback: stats.knockback,
             ai: [0.0; 3],
             local_ai: [0.0; 2],

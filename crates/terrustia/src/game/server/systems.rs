@@ -1254,7 +1254,8 @@ impl GameServer {
     /// The invulnerability window is what makes this survivable: without it a player inside a
     /// zombie would take sixty hits a second rather than one every half second.
     pub(super) fn tick_contact_damage(&mut self) {
-        const IMMUNE_TICKS: i32 = 30;
+        // The difficulty the hostile-projectile curve is sampled at, read once for the whole tick.
+        let difficulty = self.effective_difficulty();
 
         for slot in 0..self.players.len() {
             let Some(player) = self.players[slot].as_ref() else {
@@ -1274,6 +1275,12 @@ impl GameServer {
                 crate::game::ai::PLAYER_WIDTH as f32,
                 crate::game::ai::PLAYER_HEIGHT as f32,
             );
+            // The push always points away from the attacker, measured off the player's centre, not
+            // its left edge. `Update_NPCCollision` (`Player.cs:31618`) and `Projectile.Damage`
+            // (`Projectile.cs:14894`): hitDirection is +1 when the attacker's centre is left of the
+            // player's centre, -1 when it is right. The old code inverted both and compared against
+            // the player's left edge, so contact knockback shoved the player the wrong way.
+            let player_centre = box_at.0 + box_size.0 / 2.0;
 
             // An enemy you are standing in.
             let hit = self.npcs.iter().find(|(_, npc)| {
@@ -1286,30 +1293,50 @@ impl GameServer {
                     && npc.position.1 + npc.height() > box_at.1
             });
             if let Some((index, npc)) = hit {
+                // Contact damage is the NPC's own `damage`, which `ScaleStats` has already scaled by
+                // difficulty at spawn, so no further multiplier here (`Player.cs:31623`, which reads
+                // `Main.npc[i].damage` straight, times a GetMeleeCollisionData multiplier we leave
+                // at one and a DamageVar the owning client rolls for itself).
                 let damage = npc.stats.damage;
-                let direction = if npc.center().0 < box_at.0 { -1 } else { 1 };
+                let direction = if npc.center().0 < player_centre {
+                    1
+                } else {
+                    -1
+                };
                 let npc_type = npc.npc_type;
-                self.hurt_player(
+                let hurt = self.hurt_player(
                     slot,
                     damage,
                     direction,
                     terrustia_proto::hurt::DeathReason::from_npc(i16::from(index)),
-                    IMMUNE_TICKS,
                 );
                 // Over half the roster leaves something behind as well as the damage, and for
-                // several of them that is the actual difficulty of the biome they live in.
-                self.apply_touch_debuffs(slot as u8, npc_type);
+                // several of them that is the actual difficulty of the biome they live in. The game
+                // only lands these when the hit itself lands (`Player.cs:31659-31661`, `StatusFromNPC`
+                // gated on `Hurt(...) > 0`), so a godmoded or already-immune player is spared them.
+                if hurt {
+                    self.apply_touch_debuffs(slot as u8, npc_type, difficulty);
+                }
                 continue;
             }
 
-            // Or something one of them threw.
+            // Or something one of them threw. Only hostile shots hurt a player: a friendly town-NPC
+            // musket ball that happens to overlap one does not (`Projectile.Damage`'s own
+            // `if (!hostile) return` at the top).
             let struck = self
                 .projectiles
                 .iter()
-                .find(|(_, p)| p.damage > 0 && p.overlaps(box_at, box_size))
+                .find(|(_, p)| p.stats.hostile && p.damage > 0 && p.overlaps(box_at, box_size))
                 .map(|(index, p)| (index, p.damage, p.center().0, p.projectile_type));
-            if let Some((index, damage, from_x, projectile_type)) = struck {
-                let direction = if from_x < box_at.0 { -1 } else { 1 };
+            if let Some((index, base_damage, from_x, projectile_type)) = struck {
+                // A hostile shot delivers `base * hostileDamageScaling(difficulty) * 2`, and the game
+                // applies both on the client at impact (`Projectile.cs:14916-14919`), not baked into
+                // the projectile. The wire carries the base (see `broadcast_projectile`), so a real
+                // client scales it once itself rather than twice.
+                let damage = (base_damage as f32
+                    * terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty)
+                    * 2.0) as i32;
+                let direction = if from_x < player_centre { 1 } else { -1 };
                 self.hurt_player(
                     slot,
                     damage,
@@ -1318,7 +1345,6 @@ impl GameServer {
                         index as i16,
                         projectile_type as i16,
                     ),
-                    IMMUNE_TICKS,
                 );
                 // A projectile with a hit budget spends one, and dies when it runs out.
                 let spent = self.projectiles.get_mut(index).is_some_and(|p| {
@@ -1434,28 +1460,35 @@ impl GameServer {
     }
 
     /// Take health off a player, tell everyone, and announce a death if it was fatal.
+    ///
+    /// Returns whether the hit actually landed, so the caller knows whether to follow it with a
+    /// touch debuff (the game only applies those when `Hurt` returned damage).
     fn hurt_player(
         &mut self,
         slot: usize,
         damage: i32,
         direction: i8,
         reason: terrustia_proto::hurt::DeathReason,
-        immune_ticks: i32,
-    ) {
+    ) -> bool {
         // Journey mode's `Godmode`. Real vanilla's own `creativeGodMode` gates apply client-side
         // (`Player.cs:31557`/`38486`/`39107`), since most damage in that game is client-decided —
         // this is the one place *this* server decides damage on a player's behalf at all (NPC
         // contact and NPC-thrown projectiles, this function's only two call sites), so it is the
         // one place this server needs its own gate to match.
         if self.journey.is_godmode(slot as u8) {
-            return;
+            return false;
         }
         let Some(player) = self.players[slot].as_mut() else {
-            return;
+            return false;
         };
         let taken = damage.max(1) as i16;
         player.life -= taken;
-        player.immune_ticks = immune_ticks;
+        // The invulnerability window, from `Hurt` (`Player.cs:38672`): a real hit gives forty ticks,
+        // a bare one-damage hit only twenty. `longInvince` (a Cross-Necklace-class accessory) would
+        // double both to eighty and forty, but the server does not track player accessories, so that
+        // doubling is a documented gap rather than modelled. This was a flat thirty before, so every
+        // enemy hit a player slightly too often and a chip-damage hit far too often.
+        player.immune_ticks = if taken == 1 { 20 } else { 40 };
         let died = player.life <= 0;
         if died {
             player.life = 0;
@@ -1487,6 +1520,7 @@ impl GameServer {
         {
             self.broadcast(frame, None);
         }
+        true
     }
 
     /// Tell everyone a projectile is gone, and free its slot.
@@ -3836,8 +3870,23 @@ impl GameServer {
     }
 
     /// Land whatever an enemy leaves behind on the player it just touched.
-    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16) {
-        let expert = self.is_expert();
+    ///
+    /// The game applies a touch debuff with a local `AddBuff` (`Player.cs:5259`, `StatusFromNPC`),
+    /// which runs it through `AddBuff_DetermineBuffTimeToAdd`: in expert mode and up, a debuff in
+    /// `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` is stretched by the `DebuffTimeMultiplier`
+    /// (`Player.cs:5426-5429`). A server that hands the client a raw packet-55 duration skips that
+    /// stretch (the client trusts a networked duration as-is), so an expert-world On Fire! or Poison
+    /// off a touch lasted half as long as the game intends and a master-world one two fifths. Pre-
+    /// multiply here so the wire duration already carries it.
+    fn apply_touch_debuffs(&mut self, slot: u8, npc_type: u16, difficulty: f32) {
+        // `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` (`BuffID.cs:28`): the debuffs whose
+        // duration the harder modes stretch. The rest (a cosmetic or a non-scaling status) are sent
+        // at their rolled length whatever the difficulty.
+        const DIFFICULTY_EXTENDED: &[u16] = &[
+            20, 22, 23, 24, 30, 31, 32, 33, 35, 36, 39, 44, 46, 47, 69, 70, 80, 323, 324,
+        ];
+        let expert = difficulty >= 2.0;
+        let stretch = terrustia_proto::difficulty::debuff_time_multiplier(difficulty);
         for rule in terrustia_proto::touch_debuffs::on_touch(npc_type) {
             if rule.expert_only && !expert {
                 continue;
@@ -3845,11 +3894,14 @@ impl GameServer {
             if rule.one_in > 1 && !rand::Rng::random_ratio(&mut self.rng, 1, rule.one_in) {
                 continue;
             }
-            let ticks = if rule.ticks.1 > rule.ticks.0 {
+            let mut ticks = if rule.ticks.1 > rule.ticks.0 {
                 rand::Rng::random_range(&mut self.rng, rule.ticks.0..=rule.ticks.1)
             } else {
                 rule.ticks.0
             };
+            if expert && DIFFICULTY_EXTENDED.contains(&rule.buff) {
+                ticks = (stretch * ticks as f32) as i32;
+            }
             if let Ok(frame) = terrustia_proto::packets::add_player_buff(slot, rule.buff, ticks) {
                 self.broadcast(frame, None);
             }
@@ -6284,13 +6336,7 @@ mod godmode {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
 
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[0].as_ref().unwrap().life,
@@ -6305,7 +6351,7 @@ mod godmode {
         // godmode left off — the control case, so the test above is proving something rather
         // than passing regardless of whether the gate exists at all.
 
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
@@ -6314,17 +6360,11 @@ mod godmode {
     fn turning_godmode_off_again_lets_damage_through() {
         let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
         server.journey.set_godmode(0, true);
-        server.hurt_player(
-            0,
-            9999,
-            1,
-            terrustia_proto::hurt::DeathReason::from_npc(0),
-            0,
-        );
+        server.hurt_player(0, 9999, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 100, "still on");
 
         server.journey.set_godmode(0, false);
-        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
         assert_eq!(server.players[0].as_ref().unwrap().life, 70);
     }
 
@@ -6339,12 +6379,57 @@ mod godmode {
         server.players[1] = Some(other);
 
         server.journey.set_godmode(0, true);
-        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0), 0);
+        server.hurt_player(1, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
 
         assert_eq!(
             server.players[1].as_ref().unwrap().life,
             70,
             "slot 1 was never given godmode"
+        );
+    }
+
+    /// A hostile shot lands `base * hostileDamageScaling(difficulty) * 2` where the game lands it,
+    /// at impact (`Projectile.cs:14916-14919`), and opens the full forty-tick window. The old path
+    /// pre-scaled the projectile at launch and omitted the flat doubling, so a base-one classic shot
+    /// delivered one where the game delivers two, and the immune window was a flat thirty.
+    #[test]
+    fn a_hostile_shot_does_double_damage_and_opens_the_full_window() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let pos = (1000.0, 1000.0);
+        {
+            let p = server.players[0].as_mut().unwrap();
+            p.position = pos;
+            p.immune_ticks = 0;
+            p.life = 200;
+            p.life_max = 200;
+        }
+        // A hostile Harpy Feather carrying one base damage, centred on the player.
+        let centre = (
+            pos.0 + crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            pos.1 + crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        server.projectiles.launch(38, centre, (0.0, 0.0), 1, 0);
+        server.tick_contact_damage();
+        let p = server.players[0].as_ref().unwrap();
+        assert_eq!(p.life, 198, "classic: base 1 * difficulty 1 * flat 2 = 2");
+        assert_eq!(p.immune_ticks, 40, "a real hit opens the full forty ticks");
+    }
+
+    /// The immune window follows the damage: a bare one-damage hit only opens twenty ticks, and a
+    /// godmoded hit reports no strike at all so no touch debuff can follow it (`Player.cs:38672`,
+    /// and the `StatusFromNPC` gate at `Player.cs:31659-31661`).
+    #[test]
+    fn the_immune_window_and_the_strike_report_follow_the_damage() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let chip = server.hurt_player(0, 1, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(chip, "the chip hit still landed");
+        assert_eq!(server.players[0].as_ref().unwrap().immune_ticks, 20);
+
+        server.journey.set_godmode(0, true);
+        let blocked = server.hurt_player(0, 30, 1, terrustia_proto::hurt::DeathReason::from_npc(0));
+        assert!(
+            !blocked,
+            "a godmoded hit reports no strike, so no debuff follows"
         );
     }
 }
@@ -6626,18 +6711,60 @@ mod difficulty_slider {
         const QUEEN_BEE: u16 = 222;
 
         let (mut gentle, mut gentle_rx) = with_one_player(journey_at(0.0));
-        gentle.apply_touch_debuffs(0, QUEEN_BEE);
+        let gentle_difficulty = gentle.effective_difficulty();
+        gentle.apply_touch_debuffs(0, QUEEN_BEE, gentle_difficulty);
         assert!(
             gentle_rx.try_recv().is_err(),
             "a fresh Journey world is not expert, so no buff should be sent"
         );
 
         let (mut fierce, mut fierce_rx) = with_one_player(journey_at(1.0));
-        fierce.apply_touch_debuffs(0, QUEEN_BEE);
+        let fierce_difficulty = fierce.effective_difficulty();
+        fierce.apply_touch_debuffs(0, QUEEN_BEE, fierce_difficulty);
         assert!(
             fierce_rx.try_recv().is_ok(),
             "the slider at its top is expert, so the buff should be sent"
         );
+    }
+
+    /// A touch debuff in `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` lasts longer in expert.
+    /// NPC 141 lands a fixed six-hundred-tick Poisoned (buff 20, in that set) one touch in two, and
+    /// `DebuffTimeMultiplier` stretches it x2 in expert. The server sends packet 55 with a raw
+    /// duration the client trusts as-is, so it must pre-multiply: the same base roll must go out at
+    /// six hundred in classic and twelve hundred in expert. Before this the wire duration was raw,
+    /// so an expert-world poison off a touch ran half as long as the game intends.
+    #[test]
+    fn a_difficulty_extended_touch_debuff_is_stretched_on_the_wire_in_expert() {
+        use rand::SeedableRng;
+        const POISONER: u16 = 141;
+        let ticks = |f: &[u8]| i32::from_le_bytes([f[6], f[7], f[8], f[9]]);
+        for seed in 0..64u64 {
+            let (mut classic, mut classic_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            classic.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            classic.apply_touch_debuffs(0, POISONER, 1.0);
+
+            let (mut expert, mut expert_rx) =
+                with_one_player(GameServer::new(Config::default(), tiny_world()));
+            expert.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            expert.apply_touch_debuffs(0, POISONER, 2.0);
+
+            // The one-in-two roll consumes the rng identically under the same seed, so either both
+            // land the debuff or neither does.
+            if let Ok(classic_frame) = classic_rx.try_recv() {
+                let expert_frame = expert_rx
+                    .try_recv()
+                    .expect("the same seed lands the same one-in-two roll");
+                assert_eq!(
+                    ticks(&classic_frame),
+                    600,
+                    "classic keeps the base duration"
+                );
+                assert_eq!(ticks(&expert_frame), 1200, "expert doubles a Poisoned");
+                return;
+            }
+        }
+        panic!("no seed in the range landed the one-in-two poison");
     }
 
     /// `note_army_kill`'s own `expert` local — a plain Old One's Army goblin (any id in
