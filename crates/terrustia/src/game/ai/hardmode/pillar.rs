@@ -119,10 +119,15 @@ pub fn pillar(npc: &mut Npc, world: &World<'_, impl TileView>, shield: i32) -> O
             clamped.1 - npc.height() / 2.0,
         );
     }
-    // And it stays underground-side of the surface, so it never sits in open sky.
-    let ceiling = world.conditions.surface_y - npc.height() - 100.0;
-    if npc.position.1 + npc.height() > world.conditions.surface_y - 100.0 {
-        npc.position.1 = ceiling;
+    // And it holds above the surface line, its base 100px clear of it, so it never sinks into the
+    // ground. PIL-2: vanilla skips this clamp outright in a For-the-Worthy world (`!Main.getGoodWorld`,
+    // and `!Main.remixWorld`, which this server does not model, `NPC.cs:39574`), where the tower is
+    // let sit wherever it lands. Applying it everywhere pinned the get-good towers to the surface too.
+    if !world.conditions.get_good_world {
+        let ceiling = world.conditions.surface_y - npc.height() - 100.0;
+        if npc.position.1 + npc.height() > world.conditions.surface_y - 100.0 {
+            npc.position.1 = ceiling;
+        }
     }
 
     npc.ai[0] += 1.0;
@@ -294,6 +299,32 @@ mod tests {
         assert!(done, "it should finish collapsing");
         assert_eq!(ticks, TOWER_COLLAPSE_TICKS as i32);
         assert!(p.alpha > 0, "and it should have faded on the way out");
+    }
+
+    /// PIL-2: a For-the-Worthy tower is left where it lands, not lifted above the surface line
+    /// (`!Main.getGoodWorld`, `NPC.cs:39574`). A normal-world tower below the surface is pulled up to
+    /// hover 100px clear of it; a get-good one stays put below.
+    #[test]
+    fn a_for_the_worthy_tower_skips_the_surface_clamp() {
+        let tiles = Ground(HashMap::new()); // no ground under it, so only the surface rule can act
+        let settle = |get_good: bool| {
+            // Its base sits well below the surface line at y = 6000.
+            let mut p = tower(100, 400);
+            let mut w = world(&tiles, Some((1600.0, 6400.0)));
+            w.conditions.get_good_world = get_good;
+            pillar(&mut p, &w, 100);
+            p.position.1
+        };
+        let normal = settle(false);
+        let good = settle(true);
+        assert!(
+            normal < 6000.0,
+            "a normal-world tower is lifted above the surface, got {normal}"
+        );
+        assert!(
+            good > 6000.0,
+            "a get-good tower is left below the surface, got {good}"
+        );
     }
 
     /// It will not drift out of the world.

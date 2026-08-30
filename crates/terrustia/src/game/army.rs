@@ -278,6 +278,30 @@ impl ArmyState {
     pub fn won(&self) -> bool {
         self.tier.is_some_and(|tier| self.wave > tier.waves())
     }
+
+    /// How far through the current wave, as `(current, required)` for the progress readout.
+    ///
+    /// C7-09: tier three's final wave is not a kill count. Vanilla overwrites the current count with
+    /// Betsy's inverted health (`currentKillCount = 100 - (int)(life/lifeMax*100); return 100`,
+    /// `Difficulty_3_GetRequiredWaveKills`, `DD2Event.cs:1488-1495`), so the bar climbs smoothly to
+    /// 100 as she dies rather than sitting at zero until the instant she falls. Before Betsy is on
+    /// the field the requirement is a placeholder 1 and the count is left where it was.
+    /// `boss_health` is her current life fraction, which the caller reads off the NPC table.
+    ///
+    /// NARROWING: this server does not yet broadcast the Old One's Army progress readout to clients
+    /// (the event is not an `Invasion`, and its count is otherwise unsurfaced), so nothing consumes
+    /// this yet. It is the faithful computation, ready for that path; the wave itself already
+    /// completes on Betsy's death in [`Self::note_kill`].
+    pub fn progress(&self, boss_health: Option<f32>) -> Option<(i32, i32)> {
+        let tier = self.tier?;
+        if tier == Tier::Three && self.wave == tier.waves() {
+            return Some(match boss_health {
+                Some(h) => (100 - (h.clamp(0.0, 1.0) * 100.0) as i32, 100),
+                None => (self.kills, 1),
+            });
+        }
+        Some((self.kills, tier.required_kills(self.wave)))
+    }
 }
 
 /// What a gate should let out this time, given the census of what is already on the field.
@@ -795,6 +819,42 @@ mod tests {
         let finished = army.note_kill(ids::DD2_BETSY, false);
         assert_eq!(finished, Some(7), "Betsy's death completes wave 7");
         assert!(army.won(), "the Old One's Army is won when Betsy falls");
+    }
+
+    /// C7-09: the tier-3 finale's progress readout is Betsy's inverted health, not a kill count, so
+    /// the bar climbs to 100 as she dies (`DD2Event.cs:1488-1495`).
+    #[test]
+    fn the_tier_three_finale_reports_betsys_health_as_progress() {
+        let mut army = ArmyState::default();
+        army.start(Tier::Three, (0, 0));
+        army.wave = Tier::Three.waves(); // the Betsy wave
+
+        assert_eq!(
+            army.progress(Some(1.0)),
+            Some((0, 100)),
+            "full health, no progress"
+        );
+        assert_eq!(
+            army.progress(Some(0.5)),
+            Some((50, 100)),
+            "half health, halfway"
+        );
+        assert_eq!(
+            army.progress(Some(0.01)),
+            Some((99, 100)),
+            "nearly dead, nearly done"
+        );
+        // Before Betsy is on the field the requirement is the placeholder 1, not her health.
+        assert_eq!(army.progress(None), Some((0, 1)), "no Betsy yet");
+
+        // An ordinary wave is still a plain kill count out of its quota.
+        army.wave = 1;
+        army.kills = 20;
+        assert_eq!(
+            army.progress(Some(1.0)),
+            Some((20, Tier::Three.required_kills(1))),
+            "a normal wave ignores boss health"
+        );
     }
 
     fn empty(_: u16) -> usize {

@@ -1667,6 +1667,9 @@ pub const KING_SLIME_FADE_OUT: f32 = 60.0;
 pub const KING_SLIME_FADE_IN: f32 = 30.0;
 /// How long it will tolerate being unreachable before it stops being fussy about where it lands.
 pub const KING_SLIME_ANTI_CHEESE: f32 = 360.0;
+/// Or, however visible you are, this far away (`vector.Length() > 2000f`, `NPC.cs:43643`): held at
+/// arm's length it lands on top of you outright rather than hunting for a floor near you.
+pub const KING_SLIME_ANTI_CHEESE_RANGE: f32 = 2000.0;
 /// Vertical slack within which it counts as being on your level.
 pub const KING_SLIME_LEVEL: f32 = 160.0;
 /// Beyond this it gives up entirely.
@@ -1701,15 +1704,19 @@ pub const BRAIN_CHARGE_SMOOTH: f32 = 50.0;
 /// How long between teleports in each phase, as (base, extra).
 pub const BRAIN_BLINK_SHIELDED: (u32, u32) = (120, 300);
 pub const BRAIN_BLINK_EXPOSED: (u32, u32) = (60, 120);
+/// On a dedicated server (netMode != 0) the exposed blink wait gains a further 30-89 ticks
+/// (`num859 += Main.rand.Next(30, 90)`, `NPC.cs:32690-32693`); single-player omits it.
+pub const BRAIN_BLINK_EXPOSED_MP_EXTRA: (u32, u32) = (30, 90);
 /// How far from the target it appears, in tiles, in each phase.
 pub const BRAIN_RANGE_SHIELDED: (i32, i32) = (12, 40);
 pub const BRAIN_RANGE_EXPOSED: (i32, i32) = (10, 12);
 /// How much of the target's own speed is added to that offset, so it leads a running player.
 pub const BRAIN_LEAD: f32 = 16.0;
 
-/// Fade rate per tick while blinking, in each phase.
+/// Fade rate per tick while blinking, in each phase. The exposed rate is the dedicated-server
+/// (netMode != 0) value of 15 (`NPC.cs:32744`); single-player fades faster, at 25 (`NPC.cs:32748`).
 pub const BRAIN_FADE_SHIELDED: f32 = 5.0;
-pub const BRAIN_FADE_EXPOSED: f32 = 25.0;
+pub const BRAIN_FADE_EXPOSED: f32 = 15.0;
 
 /// Beyond this Manhattan distance the Brain simply leaves.
 pub const BRAIN_GIVE_UP: f32 = 6000.0;
@@ -1958,6 +1965,11 @@ pub const DEER_UNTIL_ROAR: f32 = 120.0;
 pub const DEER_SPIKE_RANGE: f32 = 120.0;
 /// How far it has to be for the roar.
 pub const DEER_ROAR_RANGE: f32 = 100.0;
+/// How long the roar's Slow lasts, and so how long it holds off the next roar. Vanilla gates the
+/// roar on the target not already carrying the Slow buff (`flag13`, `NPC.cs:44653-44654`); the
+/// server keeps no queryable player-buff state, so this reproduces that with a cooldown equal to the
+/// twelve-second Slow (`ROAR_SLOW_TICKS`) the roar itself applies.
+pub const DEER_ROAR_SLOW: f32 = 720.0;
 
 /// Walking speed at full health, and the extra it gains as it is worn down.
 pub const DEER_WALK: f32 = 3.5;

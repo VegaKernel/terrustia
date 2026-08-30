@@ -19,8 +19,8 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     DEER_DEN, DEER_GIVE_UP, DEER_GOING_HOME, DEER_LEAVING, DEER_PASSIVE_SHADOW_FAST,
     DEER_PASSIVE_SHADOW_SLOW, DEER_PASSIVE_SHADOW_WAVES, DEER_PATIENCE, DEER_PATIENCE_DEEP,
-    DEER_ROAR, DEER_ROAR_RANGE, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE, DEER_RUBBLE_SLAM,
-    DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE,
+    DEER_ROAR, DEER_ROAR_RANGE, DEER_ROAR_SLOW, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE,
+    DEER_RUBBLE_SLAM, DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE,
     DEER_SHADOW_DAMAGE_PASSIVE, DEER_SHADOW_HAND, DEER_SHADOW_HANDS, DEER_SHADOW_HANDS_COUNT,
     DEER_SHADOW_TICKS, DEER_SHIELD_AFTER, DEER_SHIELD_RANGE, DEER_SPIKE, DEER_SPIKE_COUNT,
     DEER_SPIKE_DAMAGE, DEER_SPIKE_RANGE, DEER_SPIKES_BOTH, DEER_SPIKES_BOTH_TICKS,
@@ -215,6 +215,13 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     let mut going_home = false;
     let state = npc.ai[0];
 
+    // DEER-3: the roar's Slow cooldown counts down every tick, whatever it is doing. It stands in
+    // for vanilla's `flag13` gate (the target must not already carry the Slow buff) since the server
+    // keeps no queryable player-buff state; see `DEER_ROAR_SLOW`.
+    if npc.local_ai[0] > 0.0 {
+        npc.local_ai[0] -= 1.0;
+    }
+
     if state == DEER_STALKING {
         if should_go_home(npc, world, true) {
             npc.ai[0] = DEER_GOING_HOME;
@@ -259,11 +266,14 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             } else if npc.ai[1] >= DEER_UNTIL_ROAR
                 && npc.velocity.1 == 0.0
                 && dx.abs() > DEER_ROAR_RANGE
+                && npc.local_ai[0] <= 0.0
             {
                 npc.velocity.0 = 0.0;
                 npc.ai[0] = DEER_ROAR;
                 npc.ai[1] = 0.0;
                 npc.local_ai[1] = 0.0;
+                // Hold off the next roar for the life of the Slow it applies (DEER-3).
+                npc.local_ai[0] = DEER_ROAR_SLOW;
             }
             if npc.ai[0] != DEER_STALKING {
                 npc.dirty = true;
@@ -633,6 +643,53 @@ mod tests {
             roared |= update(&mut d, &tundra(&tiles, t), &mut rng()).roared;
         }
         assert!(roared);
+    }
+
+    /// DEER-3: it will not pick the roar again while the Slow the last one applied is still up. This
+    /// stands in for vanilla's `flag13` gate (the target must not already carry the Slow buff,
+    /// `NPC.cs:44653-44654`), which the server cannot read directly. The old gate re-picked the roar
+    /// every roar-timer, keeping the player permanently Slowed.
+    #[test]
+    fn it_will_not_re_roar_while_its_slow_is_still_up() {
+        let tiles = snowfield();
+        let mut d = deerclops(200);
+        let (cx, _) = d.center();
+        let t = Some(player_at(cx + 400.0, 299.0 * TILE));
+
+        // Put it exactly at the roar-selection point: stalking, roar timer met but short of the
+        // rubble timer, moving (so the shadow attack is not the pick), grounded, well out of spike
+        // range.
+        let arm = |d: &mut Npc| {
+            d.ai[0] = DEER_STALKING;
+            d.ai[1] = DEER_UNTIL_ROAR + 5.0;
+            d.velocity = (2.0, 0.0);
+            d.local_ai[1] = 0.0;
+        };
+
+        arm(&mut d);
+        d.local_ai[0] = 0.0;
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        assert_eq!(
+            d.ai[0], DEER_ROAR,
+            "it roars when the player is not yet Slowed"
+        );
+
+        // Re-armed while the cooldown from that roar is still up: it must pick something else.
+        arm(&mut d);
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        assert_ne!(
+            d.ai[0], DEER_ROAR,
+            "it will not re-roar while the Slow is still up"
+        );
+
+        // Once the cooldown has lapsed it can roar again.
+        d.local_ai[0] = 0.0;
+        arm(&mut d);
+        update(&mut d, &tundra(&tiles, t), &mut rng());
+        assert_eq!(
+            d.ai[0], DEER_ROAR,
+            "and roars again once the Slow has lapsed"
+        );
     }
 
     #[test]

@@ -25,9 +25,9 @@ use terrustia_proto::npc_params::{
     STINGER_DAMAGE, STINGER_SPEED,
 };
 
-use crate::game::ai::{Shot, World, can_see};
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, Shot, World, can_see, sight};
 use crate::game::npc::{Npc, TileView};
-use crate::game::npc_ai::Spawn;
+use crate::game::npc_ai::{Spawn, Target};
 
 /// What a tick of the fight produced.
 #[derive(Debug, Default)]
@@ -83,6 +83,41 @@ fn close_on(velocity: &mut f32, wanted: f32, accel: f32) {
             *velocity -= accel;
         }
     }
+}
+
+/// As [`close_on`], but the wrong-way correction is a *doubled* extra push (`num689 * 2f`) rather
+/// than a repeat of the base one. The stinging approach's clear-line branch uses this harder pull
+/// (`NPC.cs:31011-31042`).
+fn close_on_hard(velocity: &mut f32, wanted: f32, accel: f32) {
+    if *velocity < wanted {
+        *velocity += accel;
+        if *velocity < 0.0 && wanted > 0.0 {
+            *velocity += accel * 2.0;
+        }
+    } else if *velocity > wanted {
+        *velocity -= accel;
+        if *velocity > 0.0 && wanted < 0.0 {
+            *velocity -= accel * 2.0;
+        }
+    }
+}
+
+/// Whether a 1x1 muzzle point has a clear line to the player's box.
+///
+/// This is vanilla's `Collision.CanHit(muzzle, 1, 1, player.position, player.width, player.height)`,
+/// the gate the game puts in front of both the bee call and the stinger spit so she never fires
+/// blind through solid ground.
+fn muzzle_can_hit<T: TileView>(tiles: &T, muzzle: (f32, f32), target: Target) -> bool {
+    sight::can_hit(
+        tiles,
+        muzzle,
+        (1, 1),
+        (
+            target.center.0 - PLAYER_WIDTH as f32 / 2.0,
+            target.center.1 - PLAYER_HEIGHT as f32 / 2.0,
+        ),
+        (PLAYER_WIDTH, PLAYER_HEIGHT),
+    )
 }
 
 /// Drive the Queen Bee for a tick.
@@ -307,9 +342,12 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         } else {
             QUEEN_HOVER_ACCEL
         };
-        let k = QUEEN_HOVER / gap.max(0.01);
-        close_on(&mut npc.velocity.0, dx * k, hover_accel);
-        close_on(&mut npc.velocity.1, dy * k, hover_accel);
+        // QB-4: vanilla computes `num677 = num673 / num677` here (a normalised 12-hover speed) but
+        // never reads it again (`NPC.cs:30749`) - the accel below closes on the *raw* offset, so
+        // there is no 12-cap on her climb. The old code multiplied the target by that dead `k` and
+        // so plateaued her at 12.
+        close_on(&mut npc.velocity.0, dx, hover_accel);
+        close_on(&mut npc.velocity.1, dy, hover_accel);
         npc.sprite_direction = npc.direction;
         npc.dirty = true;
         return hive;
@@ -322,12 +360,26 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         } else {
             0.0
         };
+        // Her muzzle, jittered along her facing and rebuilt every tick as vanilla does (`vector77`,
+        // `NPC.cs:30787`).
+        let muzzle = (
+            cx + (rng.random_range(0..20) * i32::from(npc.direction)) as f32,
+            npc.position.1 + npc.height() * 0.8,
+        );
         npc.ai[1] += 1.0 + cadence_bonus;
         let every = QUEEN_SUMMON_EVERY - 18.0 * cross;
+        // The cadence timer counts and the tally climbs whether or not she has a clear line
+        // (`flag52`, `ai[2]++`, `NPC.cs:30821-30828`); only the bee itself is line-of-sight gated.
+        let mut called = false;
         if npc.ai[1] > every.max(1.0) {
             npc.ai[1] = 0.0;
             npc.ai[2] += 1.0;
-            let from = (cx, npc.position.1 + npc.height() * 0.8);
+            called = true;
+        }
+        // QB-5: the bee only appears when she can see the player from that muzzle
+        // (`Collision.CanHit(vector77, ...) && flag52`, `NPC.cs:30829`). The old code called bees
+        // blind through walls.
+        if called && muzzle_can_hit(world.tiles, muzzle, target) {
             let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
             let k = QUEEN_BEE_SPEED / (dx * dx + dy * dy).sqrt().max(0.01);
             hive.bees.push(Spawn {
@@ -336,7 +388,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                 } else {
                     BEE_STRONG
                 },
-                position: from,
+                position: muzzle,
                 velocity: (dx * k, dy * k),
                 parent: None,
                 ai: [None; 4],
@@ -367,20 +419,23 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         return hive;
     }
 
-    // Stinging: she hangs high and spits, and only downward. Her approach speed and acceleration
-    // toward that height are their own, higher, flat values in Expert Mode; the biome penalty
-    // adds to either, in any mode.
+    // Stinging: she hangs high and spits, and only downward.
+    //
+    // Her muzzle, jittered along her facing and rebuilt every tick (`vector79`, `NPC.cs:30910`).
+    let muzzle = (
+        cx + (rng.random_range(0..20) * i32::from(npc.direction)) as f32,
+        npc.position.1 + npc.height() * 0.8,
+    );
+    // Offsets from her centre: dx to the player, dy to her sting height (300 above them). Her
+    // approach acceleration toward that height is its own, higher, flat value in Expert Mode, plus
+    // the biome penalty in any mode. (Vanilla's paired `num688` approach *speed* is dead: it only
+    // ever feeds a normalise, `num692 = num688 / num692`, that is never read - which is QB-4.)
     let (dx, dy) = (
         target.center.0 - cx,
         target.center.1 - QUEEN_STING_ABOVE - cy,
     );
-    let gap = (dx * dx + dy * dy).sqrt().max(0.01);
-    let (speed_base, accel_base) = if expert { (6.0, 0.075) } else { (4.0, 0.05) };
-    let speed = speed_base + 6.0 * cross;
-    let accel = accel_base + 0.2 * cross;
-    let k = speed / gap;
-    close_on(&mut npc.velocity.0, dx * k, accel);
-    close_on(&mut npc.velocity.1, dy * k, accel);
+    let gap = (dx * dx + dy * dy).sqrt();
+    let accel = if expert { 0.075 } else { 0.05 } + 0.2 * cross;
 
     npc.ai[1] += 1.0;
     // Cadence: flat in Normal mode; a health-tiered ladder, faster throughout, in Expert.
@@ -396,8 +451,12 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     };
     every -= 5.0 * cross;
     let every = every.max(1.0);
-    if npc.ai[1] % every == every - 1.0 && npc.position.1 + npc.height() < target.center.1 {
-        let muzzle = (cx, npc.position.1 + npc.height() * 0.8);
+    // QB-5: she only spits when she has a clear line to the player from the muzzle
+    // (`Collision.CanHit(vector79, ...)`, `NPC.cs:30923`). The old code fired blind through walls.
+    if npc.ai[1] % every == every - 1.0
+        && npc.position.1 + npc.height() < target.center.1
+        && muzzle_can_hit(world.tiles, muzzle, target)
+    {
         // The horizontal and vertical scatter are not the same width in real vanilla.
         let scatter_x = (80.0 - 39.0 * cross).max(1.0) as i32;
         let scatter_y = (40.0 - 19.0 * cross).max(1.0) as i32;
@@ -427,6 +486,26 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         });
         npc.dirty = true;
     }
+
+    // Approach. QB-4: vanilla closes on the *raw* offset (its `num692 = num688 / num692` normalise
+    // at `NPC.cs:30972,31010` is computed and never read), so nothing caps her approach speed. The
+    // old code multiplied the target by that dead `k` and plateaued her at 4 (6 in Expert).
+    // QB-5: which offset she chases, and how hard, turns on her line to the player.
+    if !muzzle_can_hit(world.tiles, (muzzle.0, muzzle.1 - 30.0), target) {
+        // Line blocked: fly straight at the player from the muzzle, faster outside her jungle
+        // (`NPC.cs:30960-31005`, `num689 = 0.5f` when displeased else `0.1f`).
+        let hard_accel = if cross > 0.0 { 0.5 } else { 0.1 };
+        close_on(&mut npc.velocity.0, target.center.0 - muzzle.0, hard_accel);
+        close_on(&mut npc.velocity.1, target.center.1 - muzzle.1, hard_accel);
+    } else if gap > 100.0 {
+        // Clear line but still short of her sting height: close on it, pulling harder when she is
+        // going the wrong way (`NPC.cs:31006-31043`, `num689 * 2f`). A clear line within 100px and
+        // she simply coasts.
+        close_on_hard(&mut npc.velocity.0, dx, accel);
+        close_on_hard(&mut npc.velocity.1, dy, accel);
+        npc.sprite_direction = npc.direction;
+    }
+
     // QB-2: the sting phase runs for `cadence * (20 - 5*cross)` ticks (`NPC.cs:31044-31051`,
     // `ai[1] > num693 * num703`), so she fires roughly twenty stingers (fewer out of her jungle)
     // whatever the cadence. In Normal mode with no penalty that is 40 * 20 = 800 ticks, not the
@@ -458,6 +537,21 @@ mod tests {
         }
     }
 
+    /// A solid horizontal band of tiles spanning every column, so a line crossing it is broken.
+    struct Walled {
+        band: std::ops::Range<i32>,
+    }
+
+    impl TileView for Walled {
+        fn tile(&self, _x: i32, y: i32) -> Tile {
+            if self.band.contains(&y) {
+                Tile::block(1)
+            } else {
+                Tile::AIR
+            }
+        }
+    }
+
     fn rng() -> SmallRng {
         SmallRng::seed_from_u64(43)
     }
@@ -467,6 +561,17 @@ mod tests {
     }
 
     fn hive_world<'a>(tiles: &'a Hollow, target: Option<Target>) -> World<'a, Hollow> {
+        World {
+            conditions: Conditions {
+                jungle: true,
+                surface_y: 0.0,
+                ..Conditions::default()
+            },
+            ..crate::game::ai::calm(tiles, target)
+        }
+    }
+
+    fn walled_world<'a>(tiles: &'a Walled, target: Option<Target>) -> World<'a, Walled> {
         World {
             conditions: Conditions {
                 jungle: true,
@@ -975,5 +1080,108 @@ mod tests {
             "she flies toward the fleeing player, got {}",
             q.velocity.0
         );
+    }
+
+    /// QB-4: state 2's `num677 = num673 / num677` normalise (`NPC.cs:30749`) is dead, so her climb
+    /// closes on the raw offset and accelerates past the 12 the old capped code plateaued at. The
+    /// player is kept just inside her give-up radius so she stays in the climb.
+    #[test]
+    fn her_climb_has_no_hover_speed_cap() {
+        let tiles = Hollow;
+        let mut q = queen();
+        q.ai[0] = QUEEN_CLIMBING;
+        let (cx, cy) = q.center();
+        let t = Some(player_at(cx, cy + 2900.0));
+        let mut r = rng();
+        for _ in 0..250 {
+            update(&mut q, &hive_world(&tiles, t), &mut r);
+            assert_eq!(q.ai[0], QUEEN_CLIMBING, "she should still be climbing");
+        }
+        assert!(
+            q.velocity.1 > QUEEN_HOVER + 1.0,
+            "her climb should build past the old 12 cap, got {}",
+            q.velocity.1
+        );
+    }
+
+    /// QB-4: state 3's clear-line branch has the same dead normalise (`num692 = num688 / num692`,
+    /// `NPC.cs:31010`), so her sting approach closes on the raw offset and outruns the old 4 cap.
+    #[test]
+    fn her_sting_approach_has_no_speed_cap() {
+        let tiles = Hollow;
+        let mut q = queen();
+        q.ai[0] = QUEEN_STINGING;
+        let (cx, cy) = q.center();
+        // Far below, in clear air: the clear-line branch, well past its 100px coast window.
+        let t = Some(player_at(cx, cy + 2900.0));
+        let mut r = rng();
+        for _ in 0..150 {
+            update(&mut q, &hive_world(&tiles, t), &mut r);
+        }
+        assert!(
+            q.velocity.1 > 5.0,
+            "her sting approach should outrun the old ~4 cap, got {}",
+            q.velocity.1
+        );
+    }
+
+    /// QB-5: the bee is gated on `Collision.CanHit` from the muzzle (`NPC.cs:30829`). Behind a wall
+    /// she calls none, though the tally still climbs; in clear air she calls plenty.
+    #[test]
+    fn she_will_not_call_bees_through_a_wall() {
+        let summon = |walled: bool| {
+            let mut q = queen();
+            q.ai[0] = QUEEN_SUMMONING;
+            let (cx, cy) = q.center();
+            let t = Some(player_at(cx, cy + 300.0));
+            let mut r = rng();
+            let mut bees = Vec::new();
+            for _ in 0..200 {
+                if walled {
+                    let tiles = Walled { band: 634..637 };
+                    bees.extend(update(&mut q, &walled_world(&tiles, t), &mut r).bees);
+                } else {
+                    let tiles = Hollow;
+                    bees.extend(update(&mut q, &hive_world(&tiles, t), &mut r).bees);
+                }
+            }
+            bees.len()
+        };
+        assert_eq!(
+            summon(true),
+            0,
+            "no bee should reach the player through a wall"
+        );
+        assert!(summon(false) > 0, "in clear air she calls her bees");
+    }
+
+    /// QB-5: the stinger is gated on `Collision.CanHit` from the muzzle (`NPC.cs:30923`). Behind a
+    /// wall she spits nothing; in clear air she spits freely.
+    #[test]
+    fn she_will_not_spit_stingers_through_a_wall() {
+        let sting = |walled: bool| {
+            let mut q = queen();
+            q.ai[0] = QUEEN_STINGING;
+            let (cx, cy) = q.center();
+            let t = Some(player_at(cx, cy + 500.0));
+            let mut r = rng();
+            let mut spat = Vec::new();
+            for _ in 0..200 {
+                if walled {
+                    let tiles = Walled { band: 634..637 };
+                    spat.extend(update(&mut q, &walled_world(&tiles, t), &mut r).stingers);
+                } else {
+                    let tiles = Hollow;
+                    spat.extend(update(&mut q, &hive_world(&tiles, t), &mut r).stingers);
+                }
+            }
+            spat.len()
+        };
+        assert_eq!(
+            sting(true),
+            0,
+            "no stinger should reach the player through a wall"
+        );
+        assert!(sting(false) > 0, "in clear air she spits her stingers");
     }
 }

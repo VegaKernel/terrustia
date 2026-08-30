@@ -46,14 +46,19 @@ pub struct GolemState {
     /// Whether the player is in the temple or jungle, and underground. Outside it, everything the
     /// Golem does happens twice as fast.
     pub at_home: bool,
+    /// GOL-2: the game's own per-player balance factor (`GetMyBalance`, `NPC.cs:19547`), read off the
+    /// part that spawned it: one for a lone player, higher on a crowded server. The old code hardcoded
+    /// this to one, so a multiplayer Golem fought at single-player pace.
+    pub balance: f32,
 }
 
 impl GolemState {
     /// The multiplier every rate in the fight is scaled by.
     fn pace(&self) -> f32 {
-        // The game's own balance factor is one in single player; the part that matters here is
-        // whether the fight has been dragged out of the temple.
-        let base = 1.0;
+        // Its base pace is the game's per-player balance; dragged out of the temple, everything then
+        // runs at twice that (`num *= 2f`, `NPC.cs:19554`). (Vanilla's separate `+2` in a
+        // For-the-Worthy world is not modelled here.)
+        let base = self.balance;
         if self.at_home {
             base
         } else {
@@ -642,6 +647,7 @@ mod tests {
             left_fist: true,
             right_fist: true,
             at_home: true,
+            balance: 1.0,
         }
     }
 
@@ -725,10 +731,44 @@ mod tests {
             left_fist: false,
             right_fist: false,
             at_home: true,
+            balance: 1.0,
         });
         assert!(
             stripped > intact,
             "a stripped Golem should hop more: {stripped} vs {intact}"
+        );
+    }
+
+    /// GOL-2: on a crowded server the Golem fights faster, because its base pace is the per-player
+    /// balance (`GetMyBalance`, `NPC.cs:19547`) rather than a hardcoded one. The old code pinned the
+    /// factor to one, so a multiplayer Golem hopped at single-player pace.
+    #[test]
+    fn a_golem_scaled_for_a_crowd_hops_faster() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((200.0, 29.0 * TILE)));
+        let hops = |balance: f32| {
+            let mut g = piece(GOLEM_BODY, 0, 25);
+            g.local_ai[0] = 1.0;
+            g.ai[1] = 1.0;
+            let state = GolemState { balance, ..whole() };
+            let mut count = 0;
+            let mut grounded = true;
+            for _ in 0..3000 {
+                body(&mut g, &w, state);
+                if grounded && g.velocity.1 < 0.0 {
+                    count += 1;
+                }
+                grounded = g.velocity.1 == 0.0;
+                crate::game::npc::step_physics(&mut g, &tiles);
+            }
+            count
+        };
+        // One player is the vanilla flat 1.0; four players scale it up (GetStatScalingFactors).
+        let lone = hops(1.0);
+        let crowd = hops(terrustia_proto::difficulty::balance(4));
+        assert!(
+            crowd > lone,
+            "a Golem scaled for a crowd should hop more often: {crowd} vs {lone}"
         );
     }
 
