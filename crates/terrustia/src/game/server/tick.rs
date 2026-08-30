@@ -167,6 +167,12 @@ impl GameServer {
     pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) -> Stopped {
         // Whoever lived here when the world was last saved lives here again.
         self.restore_town_npcs();
+        // Before the first tick, or `tick_lunar`'s own "a pillar that was active and is not
+        // standing has fallen" diff reads an empty roster as every tower having just been beaten.
+        self.restore_lunar_pillars();
+        // Before the first tick, or a Journey world's toggles/sliders stay at their in-memory
+        // defaults until someone flips them again this session.
+        self.restore_journey_powers();
         self.announce_claim_token();
 
         let mut ticker = interval(TICK);

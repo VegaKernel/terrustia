@@ -229,6 +229,11 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         }
         world.shimmered_town_npcs = read.shimmered;
         world.town_npcs = read.npcs;
+        // The Lunar Pillars, from the same section's second list. Restored to live NPCs at
+        // startup (`GameServer::restore_lunar_pillars`) rather than here — this module only reads
+        // the file into `World` fields, and a pillar has to come back as something `tick_lunar`
+        // can see standing, which needs the server's own NPC roster.
+        world.saved_npcs = read.saved_npcs;
     }
 
     // Section 5 is the tile entities: pylons, item frames, mannequins, logic sensors. Read rather
@@ -253,6 +258,17 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
             .map(|e| e.id + 1)
             .max()
             .unwrap_or(0);
+    }
+
+    // Section 9 (index 5 of the trailing run): the Journey powers this server keeps live on
+    // `GameServer::journey`, not on the world. Read here so a restart of a Journey world does not
+    // silently reset its shared toggles and sliders; always rewritten from live state on save
+    // (`wld_save::write_journey_powers`), the same as the townsfolk and pillars above, so nothing
+    // here needs an "understood" flag of its own — a section this build cannot fully decode just
+    // leaves whichever powers it did not reach at their defaults.
+    if let Some(section) = trailing_sections.get(5) {
+        let mut r = PacketReader::new(section);
+        read_journey_powers(&mut r, &mut world);
     }
 
     world.preserved = Some(PreservedWorld {
@@ -1112,23 +1128,33 @@ fn read_signs(r: &mut PacketReader<'_>) -> Result<Vec<Option<Sign>>> {
 /// A truncated or unrecognised section gives up rather than failing the whole load. It is the
 /// difference between "this world has an item frame this build does not know about" and "this
 /// world will not open", and the first is much the better answer.
-/// Read the townsfolk section: which types have been shimmered, then the residents themselves.
+/// Read the townsfolk section: which types have been shimmered, then the residents themselves,
+/// then the Lunar Pillars.
 ///
 /// The entry loop is led by its own boolean rather than counted — `SaveNPCs` writes `active` before
 /// each and a bare `false` to finish — which is why this cannot be seeked into.
 ///
-/// A second list follows, of the non-town NPCs the game persists. This server does not model those
-/// (they respawn), so it stops at the terminator and lets the rest go.
+/// A second list follows the town-list terminator, of the non-town NPCs the game persists
+/// (`WorldFile.cs:1745-1755`, gated on `NPCID.Sets.SavesAndLoads` — `NPCID.cs:4807`, which in this
+/// build's target version names only the four Lunar Pillars). Dropping this — reading only up to
+/// the town list's own terminator and stopping there — used to mean a save mid-Lunar-Apocalypse
+/// carried an *empty* second list forward, so the next load's `tick_lunar` found no pillar standing
+/// against a `tower_active_*` that still said one was, and marked every tower defeated on the very
+/// first tick: a free skip past the whole event.
 /// The townsfolk section, and whether all of it was understood.
 ///
 /// `complete` is the important field. This section is *rewritten* on save rather than carried
 /// through, so a parse that gave up halfway used to mean the save wrote back only the residents it
 /// managed to read — or, when the failure came before the commit, an **empty list**, permanently
 /// deleting every resident, their names and their houses. Keeping what decoded is only half the
-/// answer; the other half is refusing to rewrite a section we did not fully understand.
+/// answer; the other half is refusing to rewrite a section we did not fully understand. The same
+/// now goes for the second list: `complete` is only set once *both* terminators are read, so a
+/// section understood up to the residents but not past them is carried through whole rather than
+/// rewritten with the pillars silently dropped.
 pub(crate) struct TownNpcSection {
     pub shimmered: Vec<i32>,
     pub npcs: Vec<super::objects::TownNpc>,
+    pub saved_npcs: Vec<super::objects::SavedNpc>,
     pub complete: bool,
 }
 
@@ -1141,6 +1167,7 @@ fn read_town_npcs(r: &mut PacketReader<'_>, version: i32) -> TownNpcSection {
     let mut section = TownNpcSection {
         shimmered: Vec::new(),
         npcs: Vec::new(),
+        saved_npcs: Vec::new(),
         complete: false,
     };
 
@@ -1159,11 +1186,9 @@ fn read_town_npcs(r: &mut PacketReader<'_>, version: i32) -> TownNpcSection {
     loop {
         match r.bool() {
             Ok(true) => {}
-            // The terminator: everything was read.
-            Ok(false) => {
-                section.complete = true;
-                return section;
-            }
+            // The terminator: every resident was read. The second list, of the Lunar Pillars,
+            // follows immediately — fall through to it rather than returning here.
+            Ok(false) => break,
             Err(_) => return section,
         }
         let entry = (|| {
@@ -1202,6 +1227,38 @@ fn read_town_npcs(r: &mut PacketReader<'_>, version: i32) -> TownNpcSection {
             return section;
         }
     }
+
+    // The second list: `active` (a leading bool, doubling as this loop's own terminator),
+    // `netID`, then a `Vector2` position — nothing else, unlike a `TownNpc` above.
+    loop {
+        match r.bool() {
+            Ok(true) => {}
+            Ok(false) => {
+                section.complete = true;
+                return section;
+            }
+            Err(_) => return section,
+        }
+        let entry = (|| {
+            let net_id = r.i32().ok()?;
+            let x = r.f32().ok()?;
+            let y = r.f32().ok()?;
+            Some(super::objects::SavedNpc {
+                net_id,
+                position: (x, y),
+            })
+        })();
+        let Some(npc) = entry else {
+            return section;
+        };
+        section.saved_npcs.push(npc);
+        if section.saved_npcs.len() > 64 {
+            // Real vanilla writes at most four entries here (the pillars). More than a handful
+            // means this reader has drifted out of step with the format, not that the list is
+            // legitimately large.
+            return section;
+        }
+    }
 }
 
 /// Read the tile entities, reporting whether every one of them was understood.
@@ -1227,6 +1284,56 @@ fn read_tile_entities(
     }
     let complete = entities.len() == wanted;
     (entities, complete)
+}
+
+/// Ids `CreativePowerManager.Initialize` hands out, in its own fixed registration order
+/// (`CreativePowerManager.cs:90-104`) — the id is just the 0-based position a power is
+/// `Register`ed at, so it has to match that call sequence exactly. Only the six of the fifteen
+/// that are `IPersistentPerWorldContent` are ever written into a world file at all; the rest
+/// (one-shot day/noon/night/midnight buttons, the three per-player powers, and the two "modify"
+/// sliders vanilla itself does not persist either) never appear in section 9, so this reader and
+/// `wld_save::write_journey_powers` share these six and nothing else.
+pub(crate) const JOURNEY_FREEZE_TIME: u16 = 0;
+pub(crate) const JOURNEY_MODIFY_TIME_RATE: u16 = 8;
+pub(crate) const JOURNEY_FREEZE_RAIN: u16 = 9;
+pub(crate) const JOURNEY_FREEZE_WIND: u16 = 10;
+pub(crate) const JOURNEY_DIFFICULTY_SLIDER: u16 = 12;
+pub(crate) const JOURNEY_STOP_BIOME_SPREAD: u16 = 13;
+
+/// Read section 9: the Journey powers, matching `CreativePowerManager.LoadFromWorld`
+/// (`CreativePowerManager.cs:139-151`). A run of `(true, power id, power's own payload)` entries
+/// ended by a bare `false`; the four toggles write one `bool` each and the two sliders write one
+/// raw `f32` each (`ASharedTogglePower`/`ASharedSliderPower`'s own `Save` methods in
+/// `CreativePowers.cs`).
+///
+/// An id this build does not model the payload width of stops the read outright: nothing after it
+/// in the section can be trusted to be at the right offset, so whatever power was not reached
+/// simply keeps its default rather than risk misreading the rest as some other power's value.
+fn read_journey_powers(r: &mut PacketReader<'_>, world: &mut World) {
+    loop {
+        match r.bool() {
+            Ok(true) => {}
+            _ => return,
+        }
+        let Ok(id) = r.u16() else { return };
+        let ok = match id {
+            JOURNEY_FREEZE_TIME => r.bool().map(|v| world.journey_freeze_time = v).is_ok(),
+            JOURNEY_MODIFY_TIME_RATE => r.f32().map(|v| world.journey_time_rate_slider = v).is_ok(),
+            JOURNEY_FREEZE_RAIN => r.bool().map(|v| world.journey_freeze_rain = v).is_ok(),
+            JOURNEY_FREEZE_WIND => r.bool().map(|v| world.journey_freeze_wind = v).is_ok(),
+            JOURNEY_DIFFICULTY_SLIDER => {
+                r.f32().map(|v| world.journey_difficulty_slider = v).is_ok()
+            }
+            JOURNEY_STOP_BIOME_SPREAD => r
+                .bool()
+                .map(|v| world.journey_stop_biome_spread = v)
+                .is_ok(),
+            _ => false,
+        };
+        if !ok {
+            return;
+        }
+    }
 }
 
 /// Jump to a section pointer, checking it lies inside the file.
@@ -1480,6 +1587,9 @@ mod tests {
     }
 
     /// A whole, well-formed section reports itself complete, so it is still rewritten normally.
+    ///
+    /// Also covers the second list: one pillar after the town-list terminator, then that list's
+    /// own terminator, must both decode and still leave `complete` true.
     #[test]
     fn a_whole_townsfolk_section_is_complete() {
         use terrustia_proto::Writer;
@@ -1497,7 +1607,13 @@ mod tests {
             .i32(0)
             .u8(0)
             .bool(false);
-        w.bool(false); // the terminator
+        w.bool(false); // the town-list terminator
+        // The second list: one pillar, then its own terminator.
+        w.bool(true)
+            .i32(crate::game::lunar::VORTEX as i32)
+            .f32(300.0)
+            .f32(400.0);
+        w.bool(false);
         let bytes = w.into_bytes();
 
         let mut r = PacketReader::new(&bytes);
@@ -1505,13 +1621,84 @@ mod tests {
 
         assert_eq!(read.shimmered, vec![5]);
         assert_eq!(read.npcs.len(), 1);
-        assert!(read.complete, "a section ending in its terminator is whole");
+        assert_eq!(read.saved_npcs.len(), 1, "the pillar in the second list");
+        assert_eq!(read.saved_npcs[0].net_id, crate::game::lunar::VORTEX as i32);
+        assert_eq!(read.saved_npcs[0].position, (300.0, 400.0));
+        assert!(
+            read.complete,
+            "a section ending in both terminators is whole"
+        );
+    }
+
+    /// The L3-02 bug directly: a section whose town list decodes fully but whose second (pillar)
+    /// list is truncated must NOT be reported complete, or the save rewrites the section from a
+    /// partial read and silently drops whichever pillars it did not reach.
+    #[test]
+    fn a_townsfolk_section_truncated_in_the_second_list_is_not_complete() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(64);
+        w.i32(0); // no shimmered types
+        w.bool(false); // an empty, but well-formed, town list
+        // The second list starts, then runs out of bytes before the position.
+        w.bool(true).i32(crate::game::lunar::SOLAR as i32).f32(1.0);
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new(&bytes);
+        let read = read_town_npcs(&mut r, 326);
+
+        assert!(
+            !read.complete,
+            "a section that ran out of bytes in the pillar list must not be reported as \
+             understood, or the save writes back the pillars it did manage to read and \
+             silently drops the rest"
+        );
+    }
+
+    /// The plain reading of `WorldFile.SaveNPCs`'s second loop: `active`/`netID`/position, and
+    /// nothing else — unlike a `TownNpc`, no name, no home, no variation byte.
+    #[test]
+    fn the_second_list_decodes_type_and_position_only() {
+        use terrustia_proto::Writer;
+
+        let mut w = Writer::with_capacity(64);
+        w.i32(0); // no shimmered types
+        w.bool(false); // empty town list
+        for (ty, x, y) in [
+            (crate::game::lunar::SOLAR, 10.0f32, 20.0f32),
+            (crate::game::lunar::VORTEX, 30.0, 40.0),
+            (crate::game::lunar::NEBULA, 50.0, 60.0),
+            (crate::game::lunar::STARDUST, 70.0, 80.0),
+        ] {
+            w.bool(true).i32(ty as i32).f32(x).f32(y);
+        }
+        w.bool(false); // the second list's own terminator
+        let bytes = w.into_bytes();
+
+        let mut r = PacketReader::new(&bytes);
+        let read = read_town_npcs(&mut r, 326);
+
+        assert!(read.complete);
+        assert_eq!(read.saved_npcs.len(), 4, "all four pillars");
+        let types: Vec<i32> = read.saved_npcs.iter().map(|n| n.net_id).collect();
+        assert_eq!(
+            types,
+            vec![
+                crate::game::lunar::SOLAR as i32,
+                crate::game::lunar::VORTEX as i32,
+                crate::game::lunar::NEBULA as i32,
+                crate::game::lunar::STARDUST as i32,
+            ]
+        );
+        assert_eq!(read.saved_npcs[2].position, (50.0, 60.0));
     }
 
     /// A pre-315 world (e.g. 1.4.4.x, still within `MIN_VERSION`) wrote no `homelessDespawn` byte.
     /// Reading one there would eat the section terminator and desync everything after it — the exact
     /// corruption that made such a world fail to load in real Terraria after a round-trip. Two
-    /// residents with no despawn byte, ending in the terminator, must decode whole.
+    /// residents with no despawn byte, ending in the terminator, must decode whole - the second
+    /// list is unconditional on file version (`LoadNPCs` gates it on `>= 140`, well below this
+    /// reader's own `MIN_VERSION` floor of 279), so an empty one still needs its own terminator.
     #[test]
     fn a_pre_315_townsfolk_section_has_no_despawn_byte() {
         use terrustia_proto::Writer;
@@ -1530,7 +1717,8 @@ mod tests {
                 .u8(0);
             // deliberately NO homeless_despawn byte — this is a <315 world
         }
-        w.bool(false); // terminator
+        w.bool(false); // town-list terminator
+        w.bool(false); // second-list terminator (empty)
         let bytes = w.into_bytes();
 
         let mut r = PacketReader::new(&bytes);

@@ -2384,11 +2384,19 @@ impl GameServer {
     /// The world file's NPC section used to be carried through untouched, which meant every
     /// resident was a session-long guest: their name was regenerated on the next start and their
     /// house forgotten.
+    ///
+    /// The Travelling Merchant is deliberately excluded: `WorldFile.SaveNPCs`'s own resident loop
+    /// skips him by type (`nPC.type != 368`, `WorldFile.cs:1724`), because he is not a resident at
+    /// all — he arrives and leaves on his own schedule, and saving him into section 4 would have
+    /// him greet a reloaded world already standing in someone's yard rather than arriving properly
+    /// the next time he is due.
     pub(super) fn record_town_npcs(&mut self) {
         let residents: Vec<crate::world::objects::TownNpc> = self
             .npcs
             .iter()
-            .filter(|(_, npc)| npc.stats.town_npc && npc.is_alive())
+            .filter(|(_, npc)| {
+                npc.stats.town_npc && npc.is_alive() && npc.npc_type != TRAVELLING_MERCHANT
+            })
             .map(|(_, npc)| {
                 let home = npc.home.unwrap_or((0, 0));
                 crate::world::objects::TownNpc {
@@ -2398,7 +2406,11 @@ impl GameServer {
                     homeless: npc.home.is_none(),
                     home,
                     variation: npc.town_variation,
-                    homeless_despawn: false,
+                    // Carried from the live NPC rather than hardcoded: this server has no
+                    // despawn-timer routine that ever sets it, but a value a load decoded (a real
+                    // vanilla world saved mid-eviction) must still round-trip rather than being
+                    // silently reset to "not leaving" on this session's first save.
+                    homeless_despawn: npc.homeless_despawn,
                 }
             })
             .collect();
@@ -2423,6 +2435,7 @@ impl GameServer {
                 live.given_name = npc.name.clone();
                 live.town_variation = npc.variation;
                 live.home = (!npc.homeless).then_some(npc.home);
+                live.homeless_despawn = npc.homeless_despawn;
                 live.dirty = true;
             }
             restored += 1;
@@ -2431,6 +2444,129 @@ impl GameServer {
         if restored > 0 {
             info!(residents = restored, "the town's residents are back");
         }
+    }
+
+    /// Copy the live Lunar Pillars into the world, matching `WorldFile.SaveNPCs`'s second loop
+    /// (`WorldFile.cs:1745-1755`, gated on `NPCID.Sets.SavesAndLoads` - `NPCID.cs:4807`, which in
+    /// this build's target version names only the four pillars).
+    ///
+    /// Without this, whatever a save carries in the second list is whatever was in the file when
+    /// it was opened - typically nothing, since a freshly generated world has no pillars at all -
+    /// and the next load's first `tick_lunar` reads "no pillar standing" against a `tower_active_*`
+    /// flag that still says one is, and marks it defeated (`L3-02`). Called alongside
+    /// [`Self::record_town_npcs`], right before every save.
+    pub(super) fn record_lunar_pillars(&mut self) {
+        self.world.saved_npcs = self
+            .npcs
+            .iter()
+            .filter(|(_, npc)| {
+                crate::game::lunar::PILLARS.contains(&npc.npc_type) && npc.is_alive()
+            })
+            .map(|(_, npc)| crate::world::objects::SavedNpc {
+                net_id: i32::from(npc.npc_type),
+                position: npc.position,
+            })
+            .collect();
+    }
+
+    /// Put a loaded world's standing Lunar Pillars back as live NPCs.
+    ///
+    /// Called once at startup, alongside [`Self::restore_town_npcs`] and before the first tick
+    /// (`GameServer::run`) - the whole point is to have them standing before `tick_lunar` ever
+    /// runs, or its own "a pillar that was active and is not standing has fallen" diff reads an
+    /// empty roster as every tower having just been beaten.
+    ///
+    /// Vanilla's own second `SaveNPCs` loop carries no shield/AI state (only
+    /// active/netID/position, `WorldFile.cs:1745-1755`), and this server's own event tracker
+    /// (`self.lunar`, distinct from the world's `lunar_apocalypse_up`/`tower_active_*` flags)
+    /// starts every session at `LunarState::default()`. Left there, the very first `tick_lunar`
+    /// would see `self.lunar.up == false` while the pillars are about to come back standing,
+    /// which both loses the sky's own memory of the fight being on, and, worse, means the branch
+    /// that starts the Moon Lord's countdown once the last pillar falls never fires, because it
+    /// is gated on `self.lunar.up`. So a restored pillar comes back at full shield strength (half
+    /// once the Moon Lord has already been beaten once), exactly as
+    /// [`Self::trigger_lunar_apocalypse`] would set it fresh.
+    pub(super) fn restore_lunar_pillars(&mut self) {
+        let saved = std::mem::take(&mut self.world.saved_npcs);
+        if saved.is_empty() {
+            self.world.saved_npcs = saved;
+            return;
+        }
+
+        self.lunar.up = true;
+        self.lunar.countdown = 0;
+        let strength = if self.world.progress.downed_moon_lord {
+            crate::game::lunar::SHIELD_STRENGTH / 2
+        } else {
+            crate::game::lunar::SHIELD_STRENGTH
+        };
+        self.lunar.shields = [strength; 4];
+
+        let mut restored = 0usize;
+        for npc in &saved {
+            let Ok(npc_type) = u16::try_from(npc.net_id.max(0)) else {
+                continue;
+            };
+            if !crate::game::lunar::PILLARS.contains(&npc_type) {
+                // Not a type this build's `read_town_npcs` should ever have put here - the second
+                // list is gated on `NPCID.Sets.SavesAndLoads`, which names only the four pillars -
+                // but a hand-edited or future-version file is not this reader's to trust blindly.
+                continue;
+            }
+            let Some(index) = self.npcs.spawn(npc_type, npc.position) else {
+                break; // out of slots
+            };
+            if let Some(live) = self.npcs.get_mut(index) {
+                live.shield = strength;
+                live.dirty = true;
+            }
+            restored += 1;
+        }
+        self.world.saved_npcs = saved;
+        if restored > 0 {
+            info!(
+                pillars = restored,
+                "the lunar apocalypse's pillars are back"
+            );
+        } else {
+            // Nothing usable came back. Do not leave the event flagged "up" with no pillars to
+            // show for it, or the very first tick starts the Moon Lord countdown out of nowhere.
+            self.lunar.up = false;
+            self.lunar.shields = [0; 4];
+        }
+    }
+
+    /// Copy the live Journey powers into the world, so a save records what a Journey world's
+    /// players actually set (`L3-23`).
+    ///
+    /// Mirrors `self.journey`'s six `IPersistentPerWorldContent` fields onto `world.journey_*`
+    /// (`wld_save::write_journey_powers` reads only the world's own fields, the same separation
+    /// `record_town_npcs`/`world.town_npcs` uses), right before every save.
+    pub(super) fn record_journey_powers(&mut self) {
+        let j = &self.journey;
+        let w = &mut self.world;
+        w.journey_freeze_time = j.freeze_time;
+        w.journey_freeze_rain = j.freeze_rain;
+        w.journey_freeze_wind = j.freeze_wind;
+        w.journey_stop_biome_spread = j.stop_biome_spread;
+        w.journey_time_rate_slider = j.time_rate_slider;
+        w.journey_difficulty_slider = j.difficulty_slider;
+    }
+
+    /// Put a loaded world's Journey powers back into `self.journey`.
+    ///
+    /// Called once at startup, alongside `restore_town_npcs`/`restore_lunar_pillars`. Without
+    /// this the toggles and sliders `wld::read_journey_powers` decoded off the file never reach
+    /// anywhere a routine (`tick_spread`'s own Stop Biome Spread gate, the weather tick's
+    /// freeze checks, `GameServer::tick`'s time-rate multiplier) actually reads.
+    pub(super) fn restore_journey_powers(&mut self) {
+        let w = &self.world;
+        self.journey.freeze_time = w.journey_freeze_time;
+        self.journey.freeze_rain = w.journey_freeze_rain;
+        self.journey.freeze_wind = w.journey_freeze_wind;
+        self.journey.stop_biome_spread = w.journey_stop_biome_spread;
+        self.journey.time_rate_slider = w.journey_time_rate_slider;
+        self.journey.difficulty_slider = w.journey_difficulty_slider;
     }
 
     /// Who is waiting to move in, given what the world has been through and what people carry.
@@ -4238,7 +4374,15 @@ impl GameServer {
     /// where somebody is standing and sits still where nobody is.
     pub(super) fn tick_spread(&mut self) {
         use crate::world::hardmode;
-        if !self.world.progress.hard_mode || !self.ticks.is_multiple_of(SPREAD_EVERY) {
+        // FIX-2 note (persistence lane, L3-15): the Journey "Stop Biome Spread" power
+        // (`AllowedToSpreadInfections = !power.Enabled`, `WorldGen.cs:72047-72052`, checked at
+        // every spread site including `WorldGen.cs:70240-70243`) now round-trips through the
+        // world file (`wld_save::write_journey_powers`), so it needs an effect to persist. This
+        // is the one-line gate; the rest of this function's spread mechanics are FIX-1's.
+        if !self.world.progress.hard_mode
+            || self.journey.stop_biome_spread
+            || !self.ticks.is_multiple_of(SPREAD_EVERY)
+        {
             return;
         }
         let here: Vec<(i32, i32)> = self
@@ -5820,6 +5964,300 @@ impl GameServer {
             return;
         };
         self.broadcast_item(index);
+    }
+}
+
+#[cfg(test)]
+mod lunar_pillar_persistence {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(400, 300, "lunar pillar persistence probe")
+    }
+
+    /// L3-02's headline fixture: a save taken mid-Lunar-Apocalypse round-trips the four standing
+    /// pillars, and the event still resolves correctly afterwards — the last pillar falling still
+    /// starts the Moon Lord's countdown, rather than every tower reading as defeated the moment
+    /// the reloaded world's first tick runs.
+    ///
+    /// Fails against the bug this exists to catch: reverting `read_town_npcs`/`write_town_npcs`
+    /// to drop the second `SaveNPCs` list (so `record_lunar_pillars` has nothing to write and
+    /// `restore_lunar_pillars` has nothing to restore) turns this red at the first `tick_lunar`
+    /// assertion below — with no pillars restored, `towers.0..3` all read `false` against a
+    /// `tower_active_*` of `true`, and every tower is marked downed on the very first tick after
+    /// the reload.
+    #[test]
+    fn a_mid_apocalypse_save_round_trips_the_four_pillars_and_the_event_survives_a_reload() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.trigger_lunar_apocalypse();
+        assert_eq!(
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            4,
+            "the trigger itself must raise all four"
+        );
+        // `trigger_lunar_apocalypse` only spawns the NPCs; `tower_active_*` is set from the live
+        // roster by `tick_lunar` itself, exactly as an ordinary tick during the fight would.
+        server.tick_lunar();
+        assert!(server.world.progress.tower_active_solar);
+        assert!(server.world.progress.tower_active_vortex);
+        assert!(server.world.progress.tower_active_nebula);
+        assert!(server.world.progress.tower_active_stardust);
+        assert!(server.world.progress.lunar_apocalypse_up);
+
+        // What a real save does, in order (`save_world`/`save_world_in_background`).
+        server.record_town_npcs();
+        server.record_lunar_pillars();
+        assert_eq!(
+            server.world.saved_npcs.len(),
+            4,
+            "the live pillars must be captured onto the world before it is serialised"
+        );
+
+        let bytes = crate::world::wld_save::serialize(&server.world).expect("serialize");
+        let loaded = crate::world::wld::parse(&bytes).expect("parse");
+
+        let mut reloaded = GameServer::new(Config::default(), loaded);
+        // What `GameServer::run` does at startup, in order: residents, then the pillars, before
+        // the first tick can run `tick_lunar` and misread an empty roster as a defeat.
+        reloaded.restore_town_npcs();
+        reloaded.restore_lunar_pillars();
+        assert_eq!(
+            reloaded
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            4,
+            "all four pillars must come back as live NPCs"
+        );
+        assert!(
+            reloaded.lunar.up,
+            "the runtime event tracker must know the fight is still on, or the Moon Lord's \
+             countdown branch below never fires"
+        );
+
+        reloaded.tick_lunar();
+        let p = &reloaded.world.progress;
+        assert!(
+            !p.downed_tower_solar,
+            "a standing tower must not be marked downed by the first tick after a reload"
+        );
+        assert!(!p.downed_tower_vortex);
+        assert!(!p.downed_tower_nebula);
+        assert!(!p.downed_tower_stardust);
+        assert!(
+            p.tower_active_solar
+                && p.tower_active_vortex
+                && p.tower_active_nebula
+                && p.tower_active_stardust,
+            "and all four must still read as standing"
+        );
+        assert!(p.lunar_apocalypse_up, "the apocalypse is still up");
+
+        // The event still functions after the reload: killing the last standing pillar starts
+        // the Moon Lord's countdown, which is only possible because `self.lunar.up` came back
+        // `true` above rather than staying at `LunarState::default()`'s `false`.
+        let indices: Vec<u8> = reloaded
+            .npcs
+            .iter()
+            .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+            .map(|(i, _)| i)
+            .collect();
+        for index in indices {
+            reloaded.npcs.remove(index);
+        }
+        reloaded.tick_lunar();
+        assert!(!reloaded.lunar.up, "the last pillar has fallen");
+        assert!(
+            reloaded.lunar.countdown > 0,
+            "the Moon Lord's countdown must have started"
+        );
+    }
+
+    /// A world with no apocalypse in progress restores nothing and leaves the event tracker
+    /// alone — restoring pillars must not be a side effect on every ordinary world.
+    #[test]
+    fn a_world_with_no_pillars_restores_nothing() {
+        let world = tiny_world();
+        let mut server = GameServer::new(Config::default(), world);
+        server.restore_lunar_pillars();
+
+        assert!(!server.lunar.up);
+        assert_eq!(
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| crate::game::lunar::PILLARS.contains(&n.npc_type))
+                .count(),
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod town_npc_persistence {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(400, 300, "town npc persistence probe")
+    }
+
+    /// L3-29: the Travelling Merchant is a real, `town_npc: true` NPC type
+    /// (`terrustia-proto/src/npc_data.rs`), so without the exclusion he would pass
+    /// `record_town_npcs`'s own filter alongside any real resident. Vanilla's own `SaveNPCs`
+    /// explicitly skips him (`nPC.type != 368`, `WorldFile.cs:1724`) because he is not a
+    /// resident: he arrives and leaves on his own schedule.
+    #[test]
+    fn the_travelling_merchant_is_not_recorded_as_a_resident() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let guide = server.npcs.spawn(GUIDE, (100.0, 100.0)).expect("a slot");
+        let merchant = server
+            .npcs
+            .spawn(TRAVELLING_MERCHANT, (200.0, 200.0))
+            .expect("a slot");
+        assert!(server.npcs.get(merchant).unwrap().stats.town_npc);
+
+        server.record_town_npcs();
+
+        let types: Vec<i32> = server.world.town_npcs.iter().map(|n| n.net_id).collect();
+        assert_eq!(
+            types,
+            vec![i32::from(GUIDE)],
+            "only the real resident, never the Travelling Merchant"
+        );
+        let _ = guide;
+    }
+
+    /// L3-29's other half: a `homeless_despawn` flag a load decoded must survive
+    /// `record_town_npcs`, not be clobbered to `false` on the session's first save.
+    #[test]
+    fn a_loaded_homeless_despawn_flag_survives_a_re_record() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server.npcs.spawn(GUIDE, (50.0, 50.0)).expect("a slot");
+        // What `restore_town_npcs` would have set, from a file that decoded `homelessDespawn`.
+        server.npcs.get_mut(index).unwrap().homeless_despawn = true;
+
+        server.record_town_npcs();
+
+        assert!(
+            server.world.town_npcs[0].homeless_despawn,
+            "a despawn timer a load decoded must round-trip, not reset to false"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stop_biome_spread_gate {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::Tile;
+
+    /// Corrupt grass (`hardmode::spreads`) and ordinary grass (`hardmode::takeable`), the pair
+    /// `hardmode::spread` needs to actually convert something.
+    const CORRUPT: u16 = 23;
+    const GRASS: u16 = 2;
+
+    /// A checkerboard of corrupt and ordinary grass around the player, large enough to cover
+    /// every tile `tick_spread`'s own random pick (`SPREAD_RANGE`) could land on, so that with
+    /// the gate off a change is overwhelmingly likely within a handful of ticks and with it on
+    /// none can happen at all — the gate is what this test is about, not `hardmode::spread`'s own
+    /// odds, which its own module already covers.
+    fn world_with_hardmode_and_a_player() -> (crate::world::World, (f32, f32)) {
+        let mut world = crate::world::World::empty(600, 600, "stop biome spread probe");
+        world.progress.hard_mode = true;
+        let (px, py): (i32, i32) = (300, 300);
+        for x in (px - 130)..=(px + 130) {
+            for y in (py - 130)..=(py + 130) {
+                let block = if (x + y).rem_euclid(2) == 0 {
+                    CORRUPT
+                } else {
+                    GRASS
+                };
+                world.set_tile(x, y, Tile::block(block));
+            }
+        }
+        (
+            world,
+            (
+                px as f32 * crate::game::npc::TILE,
+                py as f32 * crate::game::npc::TILE,
+            ),
+        )
+    }
+
+    fn with_a_player_at(mut server: GameServer, position: (f32, f32)) -> GameServer {
+        let (tx, _rx) = mpsc::channel(64);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        player.state = ConnState::Playing;
+        player.position = position;
+        server.players[0] = Some(player);
+        server
+    }
+
+    /// Counts how many tiles in the checkerboard no longer match the pattern it was built with -
+    /// the observable evidence that `hardmode::spread` actually ran and converted something.
+    fn drift_from_checkerboard(world: &crate::world::World) -> usize {
+        let (px, py): (i32, i32) = (300, 300);
+        let mut drifted = 0;
+        for x in (px - 130)..=(px + 130) {
+            for y in (py - 130)..=(py + 130) {
+                let want = if (x + y).rem_euclid(2) == 0 {
+                    CORRUPT
+                } else {
+                    GRASS
+                };
+                if world.tile(x, y).block != want {
+                    drifted += 1;
+                }
+            }
+        }
+        drifted
+    }
+
+    /// L3-15: with the power off, a hardmode world with a player standing in an infected area
+    /// spreads — the positive control proving the fixture itself is capable of a change, so the
+    /// negative test below is not merely "nothing happens here regardless."
+    #[test]
+    fn with_the_power_off_the_infection_spreads() {
+        let (world, position) = world_with_hardmode_and_a_player();
+        let mut server = with_a_player_at(GameServer::new(Config::default(), world), position);
+        assert!(!server.journey.stop_biome_spread, "off by default");
+
+        for _ in 0..50 {
+            server.tick_spread();
+        }
+
+        assert!(
+            drift_from_checkerboard(&server.world) > 0,
+            "a hardmode world saturated with corruption, with a player standing in it, must show \
+             some spread within fifty ticks"
+        );
+    }
+
+    /// The fix itself: with `journey.stop_biome_spread` on, the exact same fixture that spreads
+    /// above must not change a single tile, matching `AllowedToSpreadInfections = !power.Enabled`
+    /// (`WorldGen.cs:72047-72052`).
+    #[test]
+    fn with_the_power_on_nothing_spreads() {
+        let (world, position) = world_with_hardmode_and_a_player();
+        let mut server = with_a_player_at(GameServer::new(Config::default(), world), position);
+        server.journey.stop_biome_spread = true;
+
+        for _ in 0..50 {
+            server.tick_spread();
+        }
+
+        assert_eq!(
+            drift_from_checkerboard(&server.world),
+            0,
+            "Stop Biome Spread must hold the infection completely still"
+        );
     }
 }
 
