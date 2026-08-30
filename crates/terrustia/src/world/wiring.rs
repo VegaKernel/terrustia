@@ -40,8 +40,10 @@
 //! reached and the caller does the work — [`trap_shot`] and [`check_logic_gate`] are the tables it
 //! calls.
 //!
-//! What is left after all of that really is cosmetic: candles, chandeliers and the like change a
-//! frame and nothing else, and a client does that for itself from the relayed hit.
+//! What is left looks cosmetic but is not the client's to decide: candles, chandeliers, torches and
+//! the other wired lights change only a frame, but on a dedicated server that frame is authoritative,
+//! so the flood toggles it here and broadcasts it rather than leaving a wired light dark for everyone
+//! but the player who tripped it (L3-24, [`toggle_light`]).
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
 //! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
@@ -750,6 +752,13 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         world.set_tile(x, y, toggled);
         out.changed.push((x, y));
     }
+    // A wired light or heat source toggles its whole footprint and marks it skipped for this colour,
+    // exactly as `HitWireSingle`'s own `Toggle*` cases do (`Wiring.cs:2813-3085`). Placed after the
+    // actuator, matching vanilla's `ActuateForced` then type switch, and terminal like every one of
+    // those cases (L3-24).
+    if tile.is_active() && toggle_light(world, x, y, tile, out) {
+        return;
+    }
     if tile.is_active() && matches!(tile.block, TRAPS | GEYSER) {
         out.traps.push((x, y));
     }
@@ -879,6 +888,233 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         if !out.statues.contains(&anchor) {
             out.statues.push(anchor);
         }
+    }
+}
+
+/// `TileID.Torches` (`TileID.Sets.Torches = { 4 }`) — the standard torch, one tile.
+const LIGHT_TORCH: u16 = 4;
+/// `TileID.HolidayLights` — one tile, the on-state at frame 54.
+const LIGHT_HOLIDAY: u16 = 149;
+/// `TileID.HangingLanterns` — one wide, two tall.
+const LIGHT_HANGING_LANTERN: u16 = 42;
+/// `TileID.Lamps` — one wide, three tall.
+const LIGHT_LAMP: u16 = 93;
+/// `TileID.Chandeliers` — three by three, its on-state folded into `frameX % 108`.
+const LIGHT_CHANDELIER: u16 = 34;
+/// `TileID.LampPosts` — one wide, six tall.
+const LIGHT_LAMP_POST: u16 = 92;
+/// `TileID.Fireplace` — three wide, two tall, on at `frameX >= 54`.
+const LIGHT_FIREPLACE: u16 = 405;
+/// `TileID.Campfire` (`TileID.Sets.Campfires = { 215 }`) — three by two, and the one fixture whose
+/// on-state lives in `frameY`, not `frameX`.
+const LIGHT_CAMPFIRE: u16 = 215;
+
+/// The candle-shaped one-tile lights that all toggle `frameX` by 18: `TileID.Candles`,
+/// `PlatinumCandle`, `WaterCandle`, `Candelabras`... (the exact set `HitWireSingle` sends to
+/// `ToggleCandle`, `Wiring.cs:1754-1759`).
+fn is_candle_light(block: u16) -> bool {
+    matches!(block, 33 | 49 | 174 | 372 | 646)
+}
+
+/// The two-by-two lights `HitWireSingle` sends to `Toggle2x2Light` (`Wiring.cs:1690-1696`):
+/// `Candelabras`, `ChineseLanterns`, `DiscoBall`, `BitraLamp`... — all toggling `frameX` by 36.
+fn is_2x2_light(block: u16) -> bool {
+    matches!(block, 95 | 100 | 126 | 173 | 564)
+}
+
+/// Toggle a wired light or heat source, returning whether the tile was one at all.
+///
+/// Transcribed from the `Toggle*` helpers in `Wiring.cs` (`2813-3085`), which `HitWireSingle` routes
+/// each fixture type to. The flood can reach any cell of a multi-tile fixture first, so each arm
+/// recovers the fixture's anchor from the reached cell's frame the way vanilla's own
+/// `for (num = frame / 18; num >= N; num -= N) {}` loops do, then flips the whole footprint together
+/// and marks every cell skipped for this colour (vanilla's `SkipWire` inside each helper). Because
+/// the footprint is skipped as a unit, a second cell the flood reaches is short-circuited by [`act`]'s
+/// own skip check, so the fixture toggles once per colour.
+///
+/// `forcedStateWhereTrueIsOn` is always null on the wire path (`HitWireSingle`'s own local,
+/// `Wiring.cs:999`), so every helper's guard collapses to an unconditional toggle here.
+///
+/// Narrowing disclosed: the one-tile torch, holiday light and candle have no `SkipWire` in vanilla
+/// (they are one tile, so nothing to guard); marking them skipped anyway is a harmless no-op, since a
+/// one-tile fixture is already reached only once per colour by the flood's own visited set.
+fn toggle_light(world: &mut impl WiredWorld, x: i32, y: i32, tile: Tile, out: &mut Fired) -> bool {
+    // `frame / 18`, then reduced back into `[0, n)` — a cell's own offset within its fixture.
+    fn within(frame: i16, n: i32) -> i32 {
+        let mut m = i32::from(frame) / 18;
+        while m >= n {
+            m -= n;
+        }
+        m
+    }
+    // Flip `frame_x` (or `frame_y`) by `delta` on every listed cell, skip it for this colour, and
+    // report it changed.
+    fn flip(
+        world: &mut impl WiredWorld,
+        cells: &[(i32, i32)],
+        axis_y: bool,
+        delta: i16,
+        out: &mut Fired,
+    ) {
+        for &(cx, cy) in cells {
+            out.skipped.insert((cx, cy));
+            let mut t = world.tile(cx, cy);
+            if axis_y {
+                t.frame_y += delta;
+            } else {
+                t.frame_x += delta;
+            }
+            world.set_tile(cx, cy, t);
+            out.changed.push((cx, cy));
+        }
+    }
+
+    let fx = tile.frame_x;
+    let fy = tile.frame_y;
+    match tile.block {
+        // One tile, larger offsets: the torch flips by 66 (on at 66), the holiday light by 54.
+        LIGHT_TORCH => {
+            flip(
+                world,
+                &[(x, y)],
+                false,
+                if fx >= 66 { -66 } else { 66 },
+                out,
+            );
+            true
+        }
+        LIGHT_HOLIDAY => {
+            flip(
+                world,
+                &[(x, y)],
+                false,
+                if fx >= 54 { -54 } else { 54 },
+                out,
+            );
+            true
+        }
+        b if is_candle_light(b) => {
+            flip(world, &[(x, y)], false, if fx > 0 { -18 } else { 18 }, out);
+            true
+        }
+        // One wide, N tall: the delta reads the reached cell's own `frameX`, which every cell of the
+        // column shares, so it is the same whichever one the flood arrived at.
+        LIGHT_HANGING_LANTERN => {
+            let ay = y - within(fy, 2);
+            let delta = if fx > 0 { -18 } else { 18 };
+            flip(world, &[(x, ay), (x, ay + 1)], false, delta, out);
+            true
+        }
+        LIGHT_LAMP => {
+            let ay = y - within(fy, 3);
+            let delta = if fx > 0 { -18 } else { 18 };
+            flip(
+                world,
+                &[(x, ay), (x, ay + 1), (x, ay + 2)],
+                false,
+                delta,
+                out,
+            );
+            true
+        }
+        LIGHT_LAMP_POST => {
+            let ay = y - i32::from(fy) / 18;
+            let delta = if fx > 0 { -18 } else { 18 };
+            let cells: Vec<(i32, i32)> = (ay..ay + 6).map(|cy| (x, cy)).collect();
+            flip(world, &cells, false, delta, out);
+            true
+        }
+        // Two by two: the delta reads the anchor (top-left) cell, which is why the anchor is recovered
+        // first (`Wiring.cs:2856-2890`).
+        b if is_2x2_light(b) => {
+            let ay = y - within(fy, 2);
+            let mut col = i32::from(fx) / 18;
+            if col > 1 {
+                col -= 2;
+            }
+            let ax = x - col;
+            let delta = if world.tile(ax, ay).frame_x > 0 {
+                -36
+            } else {
+                36
+            };
+            let cells = [(ax, ay), (ax + 1, ay), (ax, ay + 1), (ax + 1, ay + 1)];
+            flip(world, &cells, false, delta, out);
+            true
+        }
+        // Three by three, the on-state folded into `frameX % 108` (`Wiring.cs:2976-3011`).
+        LIGHT_CHANDELIER => {
+            let ay = y - within(fy, 3);
+            let mut col = (i32::from(fx) % 108) / 18;
+            if col > 2 {
+                col -= 3;
+            }
+            let ax = x - col;
+            let delta = if i32::from(world.tile(ax, ay).frame_x) % 108 > 0 {
+                -54
+            } else {
+                54
+            };
+            let mut cells = Vec::with_capacity(9);
+            for k in ax..ax + 3 {
+                for l in ay..ay + 3 {
+                    cells.push((k, l));
+                }
+            }
+            flip(world, &cells, false, delta, out);
+            true
+        }
+        // Three by two, on at `frameX >= 54` (`Wiring.cs:3057-3085`).
+        LIGHT_FIREPLACE => {
+            let ax = x - (i32::from(fx) % 54) / 18;
+            let ay = y - (i32::from(fy) % 36) / 18;
+            let delta = if world.tile(ax, ay).frame_x >= 54 {
+                -54
+            } else {
+                54
+            };
+            let mut cells = Vec::with_capacity(6);
+            for k in ax..ax + 3 {
+                for l in ay..ay + 2 {
+                    cells.push((k, l));
+                }
+            }
+            flip(world, &cells, false, delta, out);
+            true
+        }
+        // Three by two, and the one fixture toggled on `frameY` (`Wiring.cs:3013-3055`). Vanilla
+        // refuses the toggle unless every cell is an active campfire (`ValidateTileSquareIsActiveAnd
+        // OfType`), checked before any `SkipWire`, and then only flips cells that really are one.
+        LIGHT_CAMPFIRE => {
+            let ax = x - (i32::from(fx) % 54) / 18;
+            let ay = y - (i32::from(fy) % 36) / 18;
+            for k in ax..ax + 3 {
+                for l in ay..ay + 2 {
+                    let t = world.tile(k, l);
+                    if !t.is_active() || t.block != LIGHT_CAMPFIRE {
+                        return true;
+                    }
+                }
+            }
+            let delta = if world.tile(ax, ay).frame_y >= 36 {
+                -36
+            } else {
+                36
+            };
+            for k in ax..ax + 3 {
+                for l in ay..ay + 2 {
+                    out.skipped.insert((k, l));
+                    let mut t = world.tile(k, l);
+                    if t.is_active() && t.block == LIGHT_CAMPFIRE {
+                        t.frame_y += delta;
+                        world.set_tile(k, l, t);
+                        out.changed.push((k, l));
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -2439,6 +2675,65 @@ mod tests {
 
         hit_switch(&mut board, 100, 100);
         assert_eq!(board.tile(105, 100).block, ACTIVE_STONE, "and back again");
+    }
+
+    /// A wired torch lights and goes out server-side — `HitWireSingle`'s own `ToggleTorch`
+    /// (`Wiring.cs:2916-2931`), flipping `frameX` by 66.
+    ///
+    /// Fails before the fix: the module treated every light fixture as cosmetic and left it to the
+    /// client, so the server's own tile never changed and a late-joining client saw a torch that was
+    /// wired but permanently dark (L3-24).
+    #[test]
+    fn a_wired_torch_lights_and_goes_out() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(LIGHT_TORCH, Wire::Red));
+        assert_eq!(board.tile(105, 100).frame_x, 0, "starts dark");
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).frame_x, 66, "lit");
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).frame_x, 0, "and out again");
+    }
+
+    /// A multi-tile fixture toggles its whole footprint even when the flood reaches a cell that is not
+    /// its anchor: a two-by-two light wired only through its bottom-right cell still flips all four,
+    /// because `Toggle2x2Light` recovers the top-left anchor from whichever cell was reached
+    /// (`Wiring.cs:2856-2890`).
+    #[test]
+    fn a_wired_2x2_light_toggles_its_whole_footprint_from_any_cell() {
+        let mut board = Board(HashMap::new());
+        // A 2x2 light with anchor at (105,100): frameX encodes the column (0/18), frameY the row
+        // (0/18). Only the bottom-right cell (106,101) carries wire, and the switch feeds it from
+        // below so the flood arrives at that non-anchor cell first.
+        let anchor = (105, 100);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let mut cell = Tile::framed(95, (dx * 18) as i16, (dy * 18) as i16);
+            if dx == 1 && dy == 1 {
+                cell.flags.set(TileFlags::WIRE_RED, true);
+            }
+            board.set_tile(anchor.0 + dx, anchor.1 + dy, cell);
+        }
+        board.set_tile(106, 103, wired(136, Wire::Red)); // switch below the bottom-right cell
+        let mut lead = Tile::AIR;
+        lead.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(106, 102, lead); // (106,102) -> (106,101), the bottom-right cell
+
+        hit_switch(&mut board, 106, 103);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let cell = board.tile(anchor.0 + dx, anchor.1 + dy);
+            assert_eq!(
+                cell.frame_x,
+                (dx * 18) as i16 + 36,
+                "cell ({dx},{dy}) turned on"
+            );
+        }
     }
 
     /// Doors, trapdoors and tall gates are reported to the caller rather than resolved on the
