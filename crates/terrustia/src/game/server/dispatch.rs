@@ -1037,10 +1037,50 @@ impl GameServer {
         let mut r = PacketReader::new(payload);
         r.u8()?;
         let team = r.u8()?;
+        let old_team = self.player(slot).map_or(0, |p| p.team);
         if let Some(player) = self.player_mut(slot) {
             player.team = team;
         }
-        self.relay_player_packet(slot, id::TEAM_CHANGE, payload)
+        self.relay_player_packet(slot, id::TEAM_CHANGE, payload)?;
+
+        // Vanilla follows the state relay with a chat line — but only to the changer, whoever was
+        // on the old team, and whoever is now on the new one, never a full broadcast
+        // (`MessageBuffer.cs:2325-2364`). `Lang.mp[13 + team]` names it for teams 0-4; team 5
+        // (pink) is `Lang.mp[22]` specifically, not the `13 + team` formula's own `mp[18]` — a
+        // real quirk in vanilla's own switch, not a typo to "fix" here.
+        if let Some((name, playing)) = self
+            .player(slot)
+            .map(|p| (p.name.clone(), p.is_playing()))
+            && playing
+        {
+            let key = if team == 5 {
+                "LegacyMultiplayer.22".to_string()
+            } else {
+                format!("LegacyMultiplayer.{}", 13 + u16::from(team))
+            };
+            let who = NetworkText::literal(name);
+            if let Ok(frame) = net_module::chat_broadcast(
+                net_module::SERVER_AUTHOR,
+                &NetworkText::key(key, vec![who]),
+                team_colour(team),
+            ) {
+                let targets: Vec<u8> = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| {
+                        p.slot == slot
+                            || (old_team > 0 && p.team == old_team)
+                            || (team > 0 && p.team == team)
+                    })
+                    .map(|p| p.slot)
+                    .collect();
+                for target in targets {
+                    self.send(target, frame.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Packet 60 inbound: a player using the housing screen.
@@ -1120,7 +1160,31 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.pvp = hostile;
         }
-        self.relay_player_packet(slot, id::TOGGLE_P_V_P, payload)
+        self.relay_player_packet(slot, id::TOGGLE_P_V_P, payload)?;
+
+        // Vanilla always follows the state relay with a chat line to everyone, coloured to the
+        // toggling player's own team (`MessageBuffer.cs:1860-1864`): `Lang.mp[11]` for turning PvP
+        // on, `Lang.mp[12]` for turning it off.
+        if let Some((name, team, playing)) = self
+            .player(slot)
+            .map(|p| (p.name.clone(), p.team, p.is_playing()))
+            && playing
+        {
+            let key = if hostile {
+                "LegacyMultiplayer.11"
+            } else {
+                "LegacyMultiplayer.12"
+            };
+            let who = NetworkText::literal(name);
+            if let Ok(frame) = net_module::chat_broadcast(
+                net_module::SERVER_AUTHOR,
+                &NetworkText::key(key, vec![who]),
+                team_colour(team),
+            ) {
+                self.broadcast(frame, None);
+            }
+        }
+        Ok(())
     }
 
     fn on_buffs(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
@@ -4266,6 +4330,20 @@ fn other_slots(slots: &[u8]) -> Vec<u8> {
     slots.to_vec()
 }
 
+/// `Main.teamColor` (`Main.cs:6795-6800`): none/red/green/blue/yellow/pink, in that team-index
+/// order. Used to colour the PvP-toggle and team-change chat lines the same way vanilla's own
+/// dedicated server does (`MessageBuffer.cs:1863-1864`, `:2337`).
+fn team_colour(team: u8) -> [u8; 3] {
+    match team {
+        1 => [218, 59, 59],
+        2 => [59, 218, 85],
+        3 => [59, 149, 218],
+        4 => [242, 221, 100],
+        5 => [224, 100, 242],
+        _ => [255, 255, 255],
+    }
+}
+
 /// A join's own tile stream is spread across ticks (`drain_section_streams`) rather than sent in
 /// one synchronous loop inside `on_spawn_tile_data`'s own packet handler — see
 /// `SECTION_STREAM_BUDGET`'s own doc comment for the measured cost this bounds.
@@ -4515,6 +4593,141 @@ mod join_password_throttle {
             Some(ConnState::SlotAssigned),
             "a different address's own first attempt must not inherit someone else's backoff"
         );
+    }
+}
+
+/// FIX-6 [30]/[45,157]: `TogglePVP` and `TeamChange` relayed the state correctly but never sent
+/// the localized chat line vanilla always broadcasts alongside it (`MessageBuffer.cs:1851-1866`
+/// for PvP, `:2325-2364` for team).
+#[cfg(test)]
+mod pvp_and_team_chat_lines {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::net_text::TextMode;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "pvp/team chat line probe")
+    }
+
+    fn with_players(count: u8, mut server: GameServer) -> (GameServer, Vec<mpsc::Receiver<Bytes>>) {
+        let mut rxs = Vec::new();
+        for slot in 0..count {
+            let (tx, rx) = mpsc::channel(16);
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+            rxs.push(rx);
+        }
+        (server, rxs)
+    }
+
+    fn pvp_payload(hostile: bool) -> Vec<u8> {
+        vec![0, hostile as u8]
+    }
+
+    fn team_payload(team: u8) -> Vec<u8> {
+        vec![0, team]
+    }
+
+    /// Drain every module-1 (text) frame off a channel and decode it back to a `NetworkText`,
+    /// ignoring anything else (the ordinary packet-30/45 state relay lands on the same channel).
+    fn text_frames(rx: &mut mpsc::Receiver<Bytes>) -> Vec<NetworkText> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.get(2) != Some(&terrustia_proto::id::NET_MODULES) {
+                continue;
+            }
+            let mut r = PacketReader::new(&frame[3..]);
+            if r.u16() != Ok(net_module::MODULE_TEXT) {
+                continue;
+            }
+            r.u8().unwrap(); // author
+            out.push(NetworkText::read(&mut r).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn enabling_pvp_broadcasts_lang_mp_11_to_everyone_including_the_toggler() {
+        let (mut server, mut rxs) = with_players(2, GameServer::new(Config::default(), tiny_world()));
+        server.on_pvp(0, &pvp_payload(true)).unwrap();
+
+        for (slot, rx) in rxs.iter_mut().enumerate() {
+            let texts = text_frames(rx);
+            let line = texts
+                .iter()
+                .find(|t| t.mode == TextMode::LocalizationKey)
+                .unwrap_or_else(|| panic!("slot {slot} should hear the PvP-on announcement"));
+            assert_eq!(line.text, "LegacyMultiplayer.11");
+            assert_eq!(line.substitutions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn disabling_pvp_broadcasts_lang_mp_12() {
+        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_pvp(0, &pvp_payload(false)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .expect("the disabling line should still be sent");
+        assert_eq!(line.text, "LegacyMultiplayer.12");
+    }
+
+    /// `MessageBuffer.cs:2348-2354`: the team-change line goes only to the changer, whoever was on
+    /// the old team, and whoever is now on the new team — never a full broadcast. Slot 0 changes
+    /// from team 1 to team 2; slot 1 stays on team 1 (old team — should hear it); slot 2 is
+    /// already on team 2 (new team — should hear it); slot 3 is on team 3 (neither — must not).
+    #[test]
+    fn a_team_change_reaches_only_the_changer_and_old_and_new_teammates() {
+        let (mut server, mut rxs) = with_players(4, GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().team = 1;
+        server.player_mut(1).unwrap().team = 1;
+        server.player_mut(2).unwrap().team = 2;
+        server.player_mut(3).unwrap().team = 3;
+
+        server.on_team(0, &team_payload(2)).unwrap();
+
+        for slot in [0usize, 1, 2] {
+            assert!(
+                text_frames(&mut rxs[slot])
+                    .iter()
+                    .any(|t| t.mode == TextMode::LocalizationKey),
+                "slot {slot} should have heard the team-change line"
+            );
+        }
+        assert!(
+            text_frames(&mut rxs[3]).is_empty(),
+            "a bystander on an unrelated team must not hear it"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_team_uses_lang_mp_thirteen_plus_team() {
+        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_team(0, &team_payload(3)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .unwrap();
+        assert_eq!(line.text, "LegacyMultiplayer.16", "13 + team 3");
+    }
+
+    /// The one quirk worth pinning by itself: team 5 (pink) does not follow the `13 + team`
+    /// formula (which would be `mp[18]`) — vanilla special-cases it to `mp[22]`
+    /// (`MessageBuffer.cs:2344-2347`).
+    #[test]
+    fn team_five_uses_lang_mp_22_not_the_formula() {
+        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_team(0, &team_payload(5)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .unwrap();
+        assert_eq!(line.text, "LegacyMultiplayer.22");
     }
 }
 
