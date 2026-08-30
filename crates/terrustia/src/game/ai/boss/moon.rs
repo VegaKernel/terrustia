@@ -116,20 +116,35 @@ pub fn pumpking(
         });
     }
 
-    // Lost, or daylight: it sinks away.
-    let target = world.target.filter(|t| {
+    // Lost, or daylight: it sinks away, but the two leave differently.
+    let in_leash = world.target.filter(|t| {
         t.alive
             && (npc.position.0 - t.center.0).abs() <= PUMPKING_LEASH
             && (npc.position.1 - t.center.1).abs() <= PUMPKING_LEASH
     });
-    if target.is_none() || world.conditions.day {
+    // PUMP-2: daytime overrides everything with a hard sink and a horizontal brake
+    // (`velocity.Y += 0.3; velocity.X *= 0.9`, `NPC.cs:33403-33407`). Losing the player - dead, or
+    // more than the leash away - is instead the gentle "leaving" drift (`ai[1] = 2`):
+    // `velocity.Y += 0.1`, a further brake on any upward drift, and a shorter `EncourageDespawn(500)`
+    // grace. The old code lumped the leash exit into the daytime sink, so a leashed-out Pumpking
+    // dropped three times as fast and lingered a hundred ticks longer than vanilla.
+    if world.conditions.day {
         npc.velocity.1 += 0.3;
         npc.velocity.0 *= 0.9;
         npc.rotation = npc.velocity.0 * -0.02;
         npc.time_left = npc.time_left.min(600);
         return out;
     }
-    let target = target.expect("checked just above");
+    if in_leash.is_none() {
+        npc.velocity.1 += 0.1;
+        if npc.velocity.1 < 0.0 {
+            npc.velocity.1 *= 0.95;
+        }
+        npc.rotation = npc.velocity.0 * -0.02;
+        npc.time_left = npc.time_left.min(500);
+        return out;
+    }
+    let target = in_leash.expect("checked just above");
     let (cx, cy) = npc.center();
 
     if npc.ai[1] == 0.0 {
@@ -681,5 +696,29 @@ mod tests {
         let mut s = boss(terrustia_proto::npc_params::SANTA_NK1, 0.0, 0.0);
         let out = santa(&mut s, &w, &mut rng);
         assert!(out.shots.is_empty(), "Santa stops shooting");
+    }
+
+    /// PUMP-2: losing the player at night is the gentle leaving drift (`ai[1] = 2`):
+    /// `velocity.Y += 0.1` with a shorter `EncourageDespawn(500)` grace, not the hard daytime sink
+    /// (0.3 and a 600-tick grace) the old code reused for both.
+    #[test]
+    fn a_leashed_out_pumpking_leaves_gently() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(58);
+        let mut p = boss(PUMPKING, 0.0, 0.0);
+        p.velocity = (4.0, 0.0);
+        p.time_left = 10_000;
+        let w = night(&tiles, None); // night, but nobody to fight
+        pumpking(&mut p, &w, &mut rng);
+        assert!(
+            (p.velocity.1 - 0.1).abs() < 1e-4,
+            "the gentle 0.1 leaving drift, not the 0.3 daytime sink, got {}",
+            p.velocity.1
+        );
+        assert!(
+            p.time_left <= 500,
+            "the shorter EncourageDespawn(500) grace, got {}",
+            p.time_left
+        );
     }
 }
