@@ -29,8 +29,10 @@ use terrustia_proto::npc_params::{
     WALL_SPEED_SCALE,
 };
 
+use terrustia_proto::tile_solid::solid;
+
 use crate::game::ai::{Shot, World};
-use crate::game::npc::{Npc, TileView};
+use crate::game::npc::{Npc, TILE, TileView};
 use crate::game::npc_ai::Spawn;
 
 /// What a tick of the Wall produced.
@@ -62,6 +64,18 @@ fn rage(npc: &Npc, expert: bool) -> f32 {
     total
 }
 
+/// Ease one smoothed shaft edge a pixel a tick toward its freshly-scanned value, snapping straight
+/// to it from the game's -1 sentinel (`Main.wofDrawArea*` at `NPC.cs:25902-25976`).
+fn ease_toward(edge: &mut f32, target: f32) {
+    if *edge == -1.0 {
+        *edge = target;
+    } else if *edge > target {
+        *edge = (*edge - 1.0).max(target);
+    } else if *edge < target {
+        *edge = (*edge + 1.0).min(target);
+    }
+}
+
 /// Drive the Wall of Flesh for a tick.
 ///
 /// `leeches` is how many of its worms are still swimming, which the caller counts.
@@ -81,6 +95,11 @@ pub fn wall<T: TileView>(
     // First tick: two eyes and a row of Hungry come with it.
     if npc.local_ai[0] == 0.0 {
         npc.local_ai[0] = 1.0;
+        // WOF-5: the smoothed floor and ceiling of the shaft it walks (`Main.wofDrawAreaBottom` /
+        // `Top`), seeded to the game's -1 sentinel so the first scan snaps them to the real terrain
+        // (`NPC.cs:25789-25790`). Kept per-Wall in `local_ai[2]` (bottom) and `local_ai[3]` (top).
+        npc.local_ai[2] = -1.0;
+        npc.local_ai[3] = -1.0;
         for (side, at) in [
             (1.0, (npc.center().1 + top) / 2.0),
             (-1.0, (npc.center().1 + bottom) / 2.0),
@@ -151,6 +170,82 @@ pub fn wall<T: TileView>(
         }
         npc.dirty = true;
     }
+
+    // WOF-5: re-centre vertically in the open shaft it is walking, the way vanilla measures the
+    // terrain each tick rather than staying pinned to its spawn height. It scans the tile column the
+    // Wall spans for the floor below and the ceiling above (counting solid or liquid tiles), eases
+    // the found edges a pixel a tick, clamps them into the underworld and to a 160px minimum gap,
+    // and drops its own Y to the middle (`aiStyle==27`, `NPC.cs:25866-25997`). Skipping it left the
+    // Wall pinned wherever it spawned.
+    let max_y = world.conditions.world_size.1 - 10; // maxTilesY - 10
+    let underworld = world.conditions.world_size.1 - 200; // Main.UnderworldLayer
+    let limit_top = underworld + 10; // num372
+    let limit_bottom = limit_top + 70; // num373
+    let col_left = (npc.position.0 / TILE) as i32; // num374
+    let col_right = ((npc.position.0 + npc.width()) / TILE) as i32; // num375
+    let center_row = ((npc.position.1 + npc.height() / 2.0) / TILE) as i32; // num376
+    let blocking = |x: i32, y: i32| {
+        let tile = world.tiles.tile(x, y);
+        (tile.is_active() && solid(tile.block)) || tile.liquid > 0
+    };
+
+    // Floor: scan down from seven tiles below the centre until fifteen blocking tiles are seen.
+    let mut count = 0;
+    let mut floor_row = center_row + 7; // num378
+    while count < 15 && floor_row > underworld {
+        floor_row += 1;
+        if floor_row > max_y {
+            floor_row = max_y;
+            break;
+        }
+        if floor_row < limit_top {
+            continue;
+        }
+        for x in col_left..=col_right {
+            if blocking(x, floor_row) {
+                count += 1;
+            }
+        }
+    }
+    floor_row += 4;
+
+    // Ceiling: scan up from seven tiles above the centre.
+    count = 0;
+    let mut ceil_row = center_row - 7; // num378
+    while count < 15 && ceil_row < max_y {
+        ceil_row -= 1;
+        if ceil_row <= 10 {
+            ceil_row = 10;
+            break;
+        }
+        if ceil_row > limit_bottom {
+            continue;
+        }
+        if ceil_row < limit_top {
+            ceil_row = limit_top;
+            break;
+        }
+        for x in col_left..=col_right {
+            if blocking(x, ceil_row) {
+                count += 1;
+            }
+        }
+    }
+    ceil_row -= 4;
+
+    // Ease the smoothed edges toward the scan, clamp them into the underworld band, hold them at
+    // least 160px apart, and centre the Wall between them.
+    ease_toward(&mut npc.local_ai[2], (floor_row * 16) as f32);
+    ease_toward(&mut npc.local_ai[3], (ceil_row * 16) as f32);
+    let (lo, hi) = ((limit_top * 16) as f32, (limit_bottom * 16) as f32);
+    npc.local_ai[2] = npc.local_ai[2].clamp(lo, hi);
+    npc.local_ai[3] = npc.local_ai[3].clamp(lo, hi);
+    if npc.local_ai[3] > npc.local_ai[2] - 160.0 {
+        npc.local_ai[3] = npc.local_ai[2] - 160.0;
+    } else if npc.local_ai[2] < npc.local_ai[3] + 160.0 {
+        npc.local_ai[2] = npc.local_ai[3] + 160.0;
+    }
+    npc.position.1 = (npc.local_ai[2] + npc.local_ai[3]) / 2.0 - npc.height() / 2.0;
 
     // It walks, and only ever the way it is already going. Expert Mode applies its own multiplier
     // on top of every threshold crossed above (its own five, and Normal's four) — separate from,
@@ -498,6 +593,23 @@ mod tests {
         }
     }
 
+    /// Solid everywhere from a given tile row on down: a flat floor with open air above it.
+    struct Floored(i32);
+
+    impl TileView for Floored {
+        fn tile(&self, _x: i32, y: i32) -> Tile {
+            if y >= self.0 {
+                Tile::block(1)
+            } else {
+                Tile::AIR
+            }
+        }
+    }
+
+    fn floored_world<'a>(tiles: &'a Floored, target: Option<Target>) -> World<'a, Floored> {
+        crate::game::ai::calm(tiles, target)
+    }
+
     fn rng() -> SmallRng {
         SmallRng::seed_from_u64(27)
     }
@@ -571,6 +683,55 @@ mod tests {
                 .iter()
                 .all(|b| bands.iter().filter(|x| *x == b).count() == 1),
             "and every Hungry sits at its own height: {bands:?}"
+        );
+    }
+
+    /// WOF-5: the Wall measures the shaft each tick and drops to the middle of it, rather than
+    /// staying at its spawn height (`NPC.cs:25866-25997`). Spawned below the world, it is pulled up
+    /// into the underworld band; the old code left it wherever it was placed.
+    #[test]
+    fn it_recentres_into_the_underworld_shaft() {
+        let tiles = Hell;
+        let mut w = the_wall(); // spawns at y = 20_000, below a 1200-tile world
+        let start_y = w.position.1;
+        let t = Some(player_at(11_000.0, 20_000.0));
+        let mut r = rng();
+        for _ in 0..5 {
+            wall(&mut w, &hell(&tiles, t), 0, &mut r);
+        }
+        assert!(
+            w.position.1 < start_y - 1000.0,
+            "should have been pulled up into the underworld, from {start_y} to {}",
+            w.position.1
+        );
+        // The underworld band of a 1200-tile world is tiles 1010..1080 (px 16160..17280).
+        let centre = w.position.1 + w.height() / 2.0;
+        assert!(
+            (16160.0..=17280.0).contains(&centre),
+            "and its centre should sit in the underworld band, got {centre}"
+        );
+    }
+
+    /// WOF-5: the band edges are real terrain, not just the clamp. A solid floor higher in the shaft
+    /// leaves less open space below, so the Wall settles higher than it would over a deeper floor.
+    #[test]
+    fn a_higher_floor_settles_the_wall_higher() {
+        let settle = |floor_row: i32| {
+            let tiles = Floored(floor_row);
+            let mut w = the_wall();
+            w.position.1 = 1030.0 * TILE - w.height() / 2.0; // start inside the band
+            let t = Some(player_at(11_000.0, w.center().1));
+            let mut r = rng();
+            for _ in 0..3 {
+                wall(&mut w, &floored_world(&tiles, t), 0, &mut r);
+            }
+            w.position.1 + w.height() / 2.0
+        };
+        assert!(
+            settle(1040) < settle(1078) - 50.0,
+            "a floor at tile 1040 should settle the Wall higher than one at 1078: {} vs {}",
+            settle(1040),
+            settle(1078)
         );
     }
 
