@@ -117,11 +117,7 @@ impl Tier {
         // is handled by `held` above (matching vanilla's `currentKillCount` clamp back to 139,
         // `DD2Event.cs:994-996`).
         let finishes_final_wave = last && kills == self.required_kills(wave) - 2;
-        if !expert || finishes_final_wave {
-            1
-        } else {
-            2
-        }
+        if !expert || finishes_final_wave { 1 } else { 2 }
     }
 }
 

@@ -894,7 +894,10 @@ mod tests {
         f.velocity = (-12.0, 0.0);
         f.no_tile_collide = true;
         fist(&mut f, &w, Some(parent), whole());
-        assert_eq!(f.ai[0], 2.0, "a fist within reach keeps punching, not on a timer");
+        assert_eq!(
+            f.ai[0], 2.0,
+            "a fist within reach keeps punching, not on a timer"
+        );
 
         // Beyond its reach (well over 700 from the station near x=966): home it goes.
         let mut far = piece(GOLEM_FIST_LEFT, 0, 0);

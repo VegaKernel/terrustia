@@ -7331,7 +7331,10 @@ mod difficulty_slider {
         let (_, _, ordinary) = server
             .worm_parts(DESTROYER_HEAD)
             .expect("the Destroyer is a worm");
-        assert_eq!(ordinary, DESTROYER_SEGMENTS, "an ordinary world keeps 81 parts");
+        assert_eq!(
+            ordinary, DESTROYER_SEGMENTS,
+            "an ordinary world keeps 81 parts"
+        );
 
         server.world.secret_seeds.get_good = true;
         let (_, _, good) = server.worm_parts(DESTROYER_HEAD).expect("still a worm");
@@ -7343,7 +7346,10 @@ mod difficulty_slider {
 
         // The seed lengthens only the Destroyer: the Eater of Worlds keeps its count either way.
         let (_, _, eater) = server.worm_parts(13).expect("the Eater is a worm");
-        assert_eq!(eater, 20, "an Eater of Worlds is the same in a get-good world");
+        assert_eq!(
+            eater, 20,
+            "an Eater of Worlds is the same in a get-good world"
+        );
     }
 
     #[test]
