@@ -121,8 +121,12 @@ pub fn is_trigger(block: u16) -> bool {
 /// `TileID.Lever` — a switch two tiles wide, whose own frame remembers which way it is thrown
 /// rather than using `frameY` the way [`flips`]'s tiles do. See [`hit_switch`]'s own case for it.
 const LEVER: u16 = 132;
-/// `TileID.Detonator` — clicked exactly like a [`LEVER`]; the only difference vanilla makes is a
-/// cooldown record (`CheckMech`) this project has no use for, since nothing here reads it back.
+/// `TileID.Detonator` — clicked and flooded like a [`LEVER`] here. Vanilla additionally makes it
+/// momentary rather than a toggle: `CheckMech(x, y, 60)` records it (`Wiring.cs:362`) and
+/// `UpdateMech` shifts its `frameX` back after the cooldown (`Wiring.cs:219-244`), so it pops back
+/// up on its own instead of latching. Modelling it as a plain latching lever leaves it stuck
+/// pressed (L3-26); the fix rides on the `CheckMech`/`UpdateMech` table seam documented on
+/// [`Fired`]'s `skipped` field.
 const DETONATOR: u16 = 411;
 /// `TileID.FakeContainers` — a chest that is really a trap, styled to look ordinary. Clicking it
 /// finds its true footprint and floods from there; nothing about the chest itself changes.
@@ -272,11 +276,29 @@ pub struct Fired {
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
     pub truncated: bool,
-    /// Tiles already acted on in this run, which are not acted on again.
+    /// Tiles already acted on in this run, which are not acted on again — vanilla's `_wireSkip`,
+    /// added to by `SkipWire` (`Wiring.cs:117-122`).
     ///
-    /// The four colours run one after another over the same world, so without this a lamp with
-    /// two colours on it would toggle twice and end up where it started. The game keeps the same
-    /// list and calls adding to it `SkipWire`.
+    /// SEAM (L3-03/L3-26/L3-27/L3-30, the CheckMech group). Vanilla keeps *two* gates, and this
+    /// model has only this one. `_wireSkip` is cleared after **each** colour's `HitWire`
+    /// (`Wiring.cs:977`), so a device with two colours on it is acted on **once per colour** —
+    /// a double-wired lamp toggles twice (L3-03), ending where it started, which is intended.
+    /// This field is instead kept across all four colours, so such a device toggles only once.
+    ///
+    /// The reason clearing it per colour is not a one-line fix is the other gate, `CheckMech`
+    /// (`Wiring.cs:455-475`) plus its per-frame `UpdateMech` (`145-257`): a persistent, cross-frame
+    /// cooldown table keyed by tile. In vanilla the two gates are split by device, and this model
+    /// routes several `CheckMech` devices through `_wireSkip` instead — most visibly the track
+    /// switch (`case 314: if (CheckMech(i, j, 5))`, `Wiring.cs:1749`), which vanilla flips **once
+    /// per trip** regardless of colour count, but which per-colour clearing here would flip twice.
+    /// Doing L3-03 correctly therefore means porting the `CheckMech`/`UpdateMech` table as a unit:
+    /// track switch (314, time 5), traps (137, 90/200/300 by subtype), geyser (443, 900), statues
+    /// (105, 30), and the Detonator (411, 60) become `CheckMech`-gated (act once per trip, on a
+    /// cross-frame cooldown), while lamps and the rest stay `_wireSkip`-gated (per colour). That
+    /// same table then resets the Detonator after firing (`UpdateMech` type 411, L3-26), re-homes
+    /// the wired track switch onto the circuit pulse (L3-27), and carries the timer self-fire
+    /// (type 144) so timers are not re-registered from a load scan (L3-30). Deferred as a unit,
+    /// not landed piecemeal, since each half contradicts the other without the whole table.
     skipped: HashSet<(i32, i32)>,
     /// Which way each pixel box the flood crossed has been entered — bit `2` for a vertical
     /// crossing, bit `1` for a horizontal one. A box crossed both ways (`3`) flips its frame in
