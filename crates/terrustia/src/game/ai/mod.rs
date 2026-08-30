@@ -319,7 +319,7 @@ fn plantera_state<T: TileView>(world: &World<'_, T>) -> boss::plantera::Plantera
 /// Which of its parts are still standing changes how often the body hops, and where it is being
 /// fought changes every rate in the fight, so both are worked out from the census rather than
 /// guessed at.
-fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
+fn golem_state<T: TileView>(npc: &Npc, world: &World<'_, T>) -> boss::golem::GolemState {
     boss::golem::GolemState {
         head: world.count(terrustia_proto::npc_params::GOLEM_HEAD) > 0,
         left_fist: world.count(terrustia_proto::npc_params::GOLEM_FIST_LEFT) > 0,
@@ -329,6 +329,8 @@ fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
             && world
                 .target
                 .is_some_and(|t| t.center.1 > world.conditions.surface_y),
+        // GOL-2: the per-player balance this part was scaled for (its own `GetMyBalance`).
+        balance: npc.balance(),
     }
 }
 
@@ -763,17 +765,20 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         45 => {
-            let out = boss::golem::body(npc, world, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::body(npc, world, state);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
         }
         46 => {
-            let out = boss::golem::head(npc, world, world.parent, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::head(npc, world, world.parent, state);
             effects.shots.extend(out.shots);
             effects.expired = out.spent;
         }
         47 => {
-            let out = boss::golem::fist(npc, world, world.parent, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::fist(npc, world, world.parent, state);
             effects.expired = out.spent;
         }
         48 => effects
