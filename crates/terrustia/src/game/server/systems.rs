@@ -3495,6 +3495,7 @@ impl GameServer {
         let hard_mode = self.world.progress.hard_mode;
         let sky = crate::game::weather::Sky {
             lantern_night: self.lantern_night.is_up(),
+            next_night_is_lantern_night: self.lantern_night.next_night_guaranteed,
             slime_rain: self.slime_rain.is_active(),
             num_clouds: u16::from(self.world.num_clouds),
         };

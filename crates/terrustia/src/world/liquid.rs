@@ -287,12 +287,21 @@ impl Liquids {
     /// Level sideways, across as many tiles as will take it.
     ///
     /// The averaging span itself is the simplified model's own: it spreads across a symmetric run
-    /// of up to seven tiles and divides exactly, which the module was deliberately built to do so a
-    /// pool converges and conserves rather than shimmering forever the way a literal port of
-    /// `Liquid.Update`'s per-tile `Math.Round` levelling does (see this group's report for why the
-    /// faithful flag2..flag7 rounding was reverted). What is new here is the thin-film drain at the
-    /// settled point (L3-10): once a tile is level with its span, a film of three to nineteen that
-    /// still has somewhere to go is handed to [`Liquids::maybe_del_water`] rather than left to creep.
+    /// of up to seven tiles and divides exactly (the remainder handed out from the middle outward,
+    /// below), which the module was deliberately built to do so a pool converges and conserves
+    /// rather than the way a literal port of `Liquid.Update`'s per-tile `Math.Round` levelling
+    /// behaves. That faithful port was measured, as a whole unit with vanilla's `kill`/`DelWater`/
+    /// `stuckCount` machinery, in `world/liquid_faithful.rs`: it converges without draining or
+    /// thrashing, but it is not conservative — its `Math.Round` *creates* water (the L3-12
+    /// duplication), so it cannot meet the "no creation" criterion this model holds to. That
+    /// measured non-conservation is the documented seam for L3-11 (the asymmetric 4-tile case) and
+    /// L3-12 (the rounding); this model keeps exact division instead.
+    ///
+    /// The one thin-film behaviour this model does carry (L3-10, narrowed) is inlined just below as
+    /// the `here.liquid < 3` drain: a film of one or two units that is not already level with its
+    /// span loses its last unit rather than creeping across a cavern forever. Vanilla's fuller
+    /// `DelWater` drain of every 2..19 film with an outlet (`Liquid.cs:1510-1516`) is part of the
+    /// same faithful-vs-conserving seam above and is not reproduced here.
     fn level(&mut self, world: &mut impl LiquidWorld, x: i32, y: i32, out: &mut Settled) {
         let here = world.tile(x, y);
         let kind = here.liquid_kind;
