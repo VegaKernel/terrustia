@@ -1965,6 +1965,11 @@ pub const DEER_UNTIL_ROAR: f32 = 120.0;
 pub const DEER_SPIKE_RANGE: f32 = 120.0;
 /// How far it has to be for the roar.
 pub const DEER_ROAR_RANGE: f32 = 100.0;
+/// How long the roar's Slow lasts, and so how long it holds off the next roar. Vanilla gates the
+/// roar on the target not already carrying the Slow buff (`flag13`, `NPC.cs:44653-44654`); the
+/// server keeps no queryable player-buff state, so this reproduces that with a cooldown equal to the
+/// twelve-second Slow (`ROAR_SLOW_TICKS`) the roar itself applies.
+pub const DEER_ROAR_SLOW: f32 = 720.0;
 
 /// Walking speed at full health, and the extra it gains as it is worn down.
 pub const DEER_WALK: f32 = 3.5;
