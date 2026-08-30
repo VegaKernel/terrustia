@@ -2922,12 +2922,14 @@ impl GameServer {
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
-            if let [a, b] = fired.teleporters[..] {
+            // L3-05: each colour's teleporter pair is jumped separately, in the colour order the
+            // flood collected them.
+            for (a, b) in fired.teleport_pairs {
                 self.run_teleporters(a, b);
             }
-            if !fired.pump_in.is_empty() && !fired.pump_out.is_empty() {
-                self.run_pumps(&fired.pump_in, &fired.pump_out);
-            }
+            // Pumps already moved their water per colour inside the flood; all that is left is to
+            // re-settle and broadcast the cells that changed.
+            self.broadcast_pump_changes(&fired.pump_changed);
             for (tx, ty) in fired.timers_started {
                 self.running_timers.insert((tx, ty), TIMER_WINDOW);
             }
@@ -3305,13 +3307,11 @@ impl GameServer {
         }
     }
 
-    /// Move liquid from the inlet pumps a circuit reached to its outlets.
-    fn run_pumps(&mut self, inlets: &[(i32, i32)], outlets: &[(i32, i32)]) {
-        let changed = {
-            let world = &mut self.world;
-            crate::world::wiring::transfer_liquid(world, inlets, outlets)
-        };
-        for (x, y) in changed {
+    /// Re-settle and broadcast the cells a per-colour pump transfer moved liquid on. The transfer
+    /// itself already ran inside the flood (L3-05, `run_from`'s own [`transfer_liquid`] call), so
+    /// this only wakes the liquid sim and tells clients.
+    fn broadcast_pump_changes(&mut self, changed: &[(i32, i32)]) {
+        for &(x, y) in changed {
             // The moved liquid has to settle from where it landed, or it would sit in a column of
             // its own until something else disturbed it.
             self.liquids.disturb(x, y);
@@ -3368,6 +3368,16 @@ impl GameServer {
     /// nothing here. What moves is sent as tile squares, batched by row, because a flowing pool
     /// changes a run of neighbours at once and one packet each would be a flood of its own.
     pub(super) fn tick_liquids(&mut self) {
+        // `Liquid.skipCount` (`WorldGen.cs:72072-72079`): the liquid sim runs only every second
+        // tick. `skipCount` counts up and the sim runs (and the count resets) when it passes one,
+        // so a settle takes twice as many real ticks — half of the L3-09 slowdown, the per-tile
+        // `skipLiquid` flag inside the sim being the other half.
+        self.liquid_skip_count += 1;
+        if self.liquid_skip_count <= 1 {
+            return;
+        }
+        self.liquid_skip_count = 0;
+
         if self.liquids.pending() == 0 {
             return;
         }
@@ -3481,11 +3491,17 @@ impl GameServer {
             .any(|p| p.is_playing() && p.life_max >= 120);
         let was_raining = self.weather.raining;
         let hard_mode = self.world.progress.hard_mode;
+        let sky = crate::game::weather::Sky {
+            lantern_night: self.lantern_night.is_up(),
+            slime_rain: self.slime_rain.is_active(),
+            num_clouds: u16::from(self.world.num_clouds),
+        };
         self.weather.tick(
             strong_enough,
             hard_mode,
             self.journey.freeze_wind,
             self.journey.freeze_rain,
+            sky,
             &mut self.rng,
         );
         // The world carries the weather so it goes into the save with everything else.
@@ -4373,8 +4389,12 @@ impl GameServer {
 
         // The biomes only creep in hardmode, and Journey mode's "Stop Biome Spread" power freezes
         // them where they are (`AllowedToSpreadInfections`, `WorldGen.cs:72047-72052`; L3-15).
-        let spreading = self.world.progress.hard_mode && !self.journey.stop_biome_spread;
+        let hard_mode = self.world.progress.hard_mode;
+        let spreading = hard_mode && !self.journey.stop_biome_spread;
         let downed_plantera = self.world.progress.downed_plantera;
+        // Crystal shards and chlorophyte regrow in hardmode regardless of the Stop Biome Spread
+        // power, because vanilla's `hardUpdateWorld` does them before its own spread gate (L3-14).
+        let rock_layer = i32::from(self.world.rock_layer);
 
         let mut changed: Vec<(i32, i32)> = Vec::new();
 
@@ -4393,6 +4413,16 @@ impl GameServer {
                     &mut self.rng,
                     &mut changed,
                 );
+                if hard_mode {
+                    changed.extend(crate::world::hardmode::regrow(
+                        &mut self.world,
+                        x,
+                        y,
+                        surface,
+                        rock_layer,
+                        &mut self.rng,
+                    ));
+                }
                 if spreading {
                     changed.extend(crate::world::hardmode::spread(
                         &mut self.world,
@@ -4420,6 +4450,16 @@ impl GameServer {
                     &mut self.rng,
                     &mut changed,
                 );
+                if hard_mode {
+                    changed.extend(crate::world::hardmode::regrow(
+                        &mut self.world,
+                        x,
+                        y,
+                        surface,
+                        rock_layer,
+                        &mut self.rng,
+                    ));
+                }
                 if spreading {
                     changed.extend(crate::world::hardmode::spread(
                         &mut self.world,
@@ -8885,6 +8925,33 @@ mod liquid_furniture_death {
         assert!(
             told_every_client,
             "packet 17 should have gone out, matching NetMessage.SendData(17, -1, -1, ...)"
+        );
+    }
+
+    /// L3-09: the liquid simulation runs only every second `tick_liquids` call — the
+    /// `Liquid.skipCount` gate (`WorldGen.cs:72072-72079`), half of what keeps liquid from running
+    /// roughly four times too fast.
+    ///
+    /// Fails before the fix: `tick_liquids` ran the sim every tick, so a single call already
+    /// carried the water down a tile.
+    #[test]
+    fn liquid_runs_only_every_second_tick() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        // A single tile of water above open air, so one settle pass visibly drops it a tile.
+        server.world.set_tile(10, 8, full_of(Liquid::Water));
+        server.liquids.wake(10, 8);
+
+        server.tick_liquids();
+        assert_eq!(
+            server.world.tile(10, 8).liquid,
+            255,
+            "the first call is skipped, so nothing has moved yet"
+        );
+
+        server.tick_liquids();
+        assert!(
+            server.world.tile(10, 9).liquid > 0,
+            "the second call runs the sim and the water falls a tile"
         );
     }
 

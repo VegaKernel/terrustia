@@ -45,6 +45,11 @@ const NEUTRAL: [u16; 6] = [2, 477, 1, 60, 53, 161];
 /// game does with its `total*` and `total*2` pairs.
 #[derive(Debug, Clone)]
 pub struct Census {
+    /// Ticks waited since the last column was counted. Vanilla only advances the sweep one column
+    /// every thirty updates (`totalD`, `WorldGen.cs:72058-72070`), so a full sweep, and the
+    /// packet-57 rebroadcast that ends it, happen at a thirtieth the rate a column-per-tick would
+    /// (L3-16).
+    delay: i32,
     /// Which column the sweep is up to.
     column: i32,
     /// Weighted tile counts for the sweep under way, indexed by tile type.
@@ -65,6 +70,7 @@ pub struct Census {
 impl Census {
     pub fn new(tile_count: u16) -> Self {
         Self {
+            delay: 0,
             column: 0,
             running: vec![0; usize::from(tile_count)],
             hallow: 0,
@@ -78,12 +84,18 @@ impl Census {
         }
     }
 
-    /// Count one column, advancing the sweep. Call once per tick.
+    /// Advance the sweep. Call once per tick; a column is actually counted only every thirtieth
+    /// call (L3-16), which is the cadence the game keeps.
     pub fn tick(&mut self, world: &World) {
         self.just_finished = false;
         if world.width() <= 0 {
             return;
         }
+        self.delay += 1;
+        if self.delay < 30 {
+            return;
+        }
+        self.delay = 0;
         self.count_column(world, self.column);
         self.column += 1;
         if self.column >= world.width() {
@@ -355,13 +367,41 @@ mod tests {
         let mut all_at_once = Census::new(terrustia_proto::tile_sets::TILE_COUNT);
         all_at_once.sweep(&world);
 
+        // One column counted every thirty ticks (L3-16), so a full sweep of the world's width is
+        // thirty times the width in ticks.
         let mut by_tick = Census::new(terrustia_proto::tile_sets::TILE_COUNT);
-        for _ in 0..world.width() {
+        for _ in 0..(30 * world.width()) {
             by_tick.tick(&world);
         }
         assert!(by_tick.just_finished, "the sweep should have wrapped");
         assert_eq!(by_tick.percent_corrupt, all_at_once.percent_corrupt);
         assert_eq!(by_tick.percent_hallow, all_at_once.percent_hallow);
         assert_eq!(by_tick.percent_crimson, all_at_once.percent_crimson);
+    }
+
+    /// L3-16: the sweep advances one column every thirty ticks, not one per tick, so a whole width
+    /// of ticks is nowhere near a full sweep (`WorldGen.cs:72058-72070`).
+    ///
+    /// Fails before the fix: `tick` counted a column every call, so a full sweep took one width of
+    /// ticks and the packet-57 rebroadcast fired thirty times as often.
+    #[test]
+    fn the_census_counts_one_column_every_thirty_ticks() {
+        let world = world_of(25, 200); // wholly corrupt
+        let mut census = Census::new(terrustia_proto::tile_sets::TILE_COUNT);
+        for _ in 0..world.width() {
+            census.tick(&world);
+        }
+        assert_eq!(
+            census.percent_corrupt, 0,
+            "a single width of ticks is far too few to finish a sweep now"
+        );
+        // Thirty times as many does complete it.
+        for _ in 0..(29 * world.width()) {
+            census.tick(&world);
+        }
+        assert_eq!(
+            census.percent_corrupt, 100,
+            "thirty widths of ticks should have wrapped the sweep"
+        );
     }
 }

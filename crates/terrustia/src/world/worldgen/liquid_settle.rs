@@ -36,6 +36,11 @@ use crate::world::liquid::Liquids;
 /// plainly if it was ever actually needed.
 const MAX_ROUNDS: usize = 20_000;
 
+/// How many full wake-all sweeps to allow while ironing out the residual gradient a local pass can
+/// leave (see [`settle`]). A settled world needs one (which moves nothing and stops); an unsettled
+/// one converges in a handful, and the bound stops a pathological case looping.
+const MAX_SWEEPS: usize = 8;
+
 /// What settling did.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Report {
@@ -68,7 +73,6 @@ pub fn settle(world: &mut World) -> Report {
     for y in 0..height {
         for x in 0..width {
             if world.tile(x, y).liquid > 0 {
-                sim.wake(x, y);
                 queued += 1;
             }
         }
@@ -76,10 +80,33 @@ pub fn settle(world: &mut World) -> Report {
 
     let mut rounds = 0usize;
     let mut changes = 0usize;
-    while sim.pending() > 0 && rounds < MAX_ROUNDS {
-        let out = sim.tick(world);
-        changes += out.changed.len();
-        rounds += 1;
+    let mut sweeps = 0usize;
+    // The wake-queue relaxes each tile against its own short window and stops when nothing is
+    // waiting, which can leave a world level to within a unit but not exactly flat: a long even
+    // run whose spare units the local passes never carry all the way from one end to the other
+    // (a 205 here and a 203 there either side of a flat middle). That is fine for a live server,
+    // where liquid is never expected to be pixel-perfect, but a generated world is snapshotted and
+    // re-settled, and the two must match. So once the queue drains, wake every liquid tile afresh
+    // and drain again; a sweep that moves nothing is the true global rest state. It converges
+    // quickly (each sweep only irons the residual the last one left) and is bounded either way.
+    loop {
+        for y in 0..height {
+            for x in 0..width {
+                if world.tile(x, y).liquid > 0 {
+                    sim.wake(x, y);
+                }
+            }
+        }
+        let before_sweep = changes;
+        while sim.pending() > 0 && rounds < MAX_ROUNDS {
+            let out = sim.tick(world);
+            changes += out.changed.len();
+            rounds += 1;
+        }
+        sweeps += 1;
+        if changes == before_sweep || rounds >= MAX_ROUNDS || sweeps >= MAX_SWEEPS {
+            break;
+        }
     }
 
     Report {

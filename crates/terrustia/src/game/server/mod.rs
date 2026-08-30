@@ -1017,6 +1017,10 @@ pub struct GameServer {
     tile_entity_anchors: HashMap<u8, i32>,
     /// Liquid waiting to settle. Empty unless something has disturbed it.
     liquids: crate::world::liquid::Liquids,
+    /// `Liquid.skipCount`: the liquid simulation runs only every second tick, not every tick
+    /// (`WorldGen.cs:72072-72079`). This is half of what keeps liquid from running roughly four
+    /// times too fast (the per-tile `skipLiquid` flag inside the sim is the other half, L3-09).
+    liquid_skip_count: u8,
     /// Who may do what, and who is kept out. Read from disk beside the world.
     admin: crate::admin::Admin,
     /// The append-only record of every moderation and permission-affecting action. Beside the world
@@ -1170,6 +1174,7 @@ impl GameServer {
             angler_quest: 0,
             angler_finished_today: std::collections::HashSet::new(),
             liquids: crate::world::liquid::Liquids::default(),
+            liquid_skip_count: 0,
             // Beside the world it belongs to. A world with nowhere to save has nowhere to put
             // this either, and should not scatter one into whatever directory it was started in.
             admin: match &save_path {
