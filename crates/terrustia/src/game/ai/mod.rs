@@ -636,6 +636,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                     position,
                     velocity: (0.0, 0.0),
                     parent: None,
+                    ai: [None; 4],
                 });
             }
             if let Some(shot) = cast.shot {
@@ -708,6 +709,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                     position,
                     velocity,
                     parent: None,
+                    ai: [None; 4],
                 });
             }
             effects.expired = swarm.gone;
@@ -720,6 +722,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                     position,
                     velocity,
                     parent: None,
+                    ai: [None; 4],
                 });
             }
         }

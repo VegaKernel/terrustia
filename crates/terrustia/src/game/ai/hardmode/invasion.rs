@@ -159,6 +159,7 @@ pub fn dutchman(
                 position: at,
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
         return out;
@@ -181,6 +182,7 @@ pub fn dutchman(
                 DUTCHMAN_DROP_RISE + npc.velocity.1,
             ),
             parent: None,
+            ai: [None; 4],
         });
     }
 

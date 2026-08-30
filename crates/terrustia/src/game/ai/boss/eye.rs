@@ -206,6 +206,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
                         position: (centre.0 + throw.0 * 10.0, centre.1 + throw.1 * 10.0),
                         velocity: throw,
                         parent: None,
+                        ai: [None; 4],
                     });
                     npc.dirty = true;
                 }

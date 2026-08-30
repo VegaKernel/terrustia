@@ -277,6 +277,7 @@ pub fn cultist(
                             v.1 * CULTIST_SHADOWFLAME_SPEED,
                         ),
                         parent: None,
+                        ai: [None; 4],
                     });
                 }
             }
@@ -295,6 +296,7 @@ pub fn cultist(
                         position: npc.center(),
                         velocity: (0.0, 0.0),
                         parent: Some(Spawn::OWN_PARENT),
+                        ai: [None; 4],
                     });
                 }
             }

@@ -914,12 +914,23 @@ impl GameServer {
             if let Some(index) = self.npcs.spawn(summon.npc_type, summon.position) {
                 if let Some(npc) = self.npcs.get_mut(index) {
                     npc.velocity = summon.velocity;
-                    // A boss part is raised with its side in the velocity's sign, and needs to
-                    // know which boss it belongs to.
+                    // A boss part is raised bound to the boss that asked for it and does not move
+                    // on its own; unless the caller pinned ai[0] outright, its side rides in the
+                    // velocity's sign, as Skeletron's hands are.
                     if let Some(owner) = summon.parent {
                         npc.follows_boss = Some(owner);
-                        npc.ai[0] = summon.velocity.0.signum();
                         npc.velocity = (0.0, 0.0);
+                        if summon.ai[0].is_none() {
+                            npc.ai[0] = summon.velocity.0.signum();
+                        }
+                    }
+                    // Whatever ai identity the caller pinned: a Wall Hungry's band in ai[0], a
+                    // saucer part's side in ai[1], a Moon Lord hand's in ai[2], a Pumpking blade's
+                    // phase in ai[3]. Seeded here before the part's own style ever runs.
+                    for (slot, value) in summon.ai.iter().enumerate() {
+                        if let Some(v) = value {
+                            npc.ai[slot] = *v;
+                        }
                     }
                 }
                 self.broadcast_npc(index);

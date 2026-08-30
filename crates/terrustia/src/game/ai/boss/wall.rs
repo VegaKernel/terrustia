@@ -88,18 +88,24 @@ pub fn wall<T: TileView>(
             out.spawn.push(Spawn {
                 npc_type: WALL_EYE,
                 position: (npc.position.0, at),
-                // The side rides in the velocity, as it does for Skeletron's hands.
+                // The side rides in the velocity, as it does for Skeletron's hands: the eyes want
+                // only ai[0] = +/-1 (`NPC.cs:26192,26194`), which the sign of the velocity gives.
                 velocity: (side, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
         for n in 0..WALL_HUNGRY_COUNT {
             out.spawn.push(Spawn {
                 npc_type: WALL_HUNGRY,
                 position: (npc.position.0, (npc.center().1 + bottom) / 2.0),
-                // Its height along the wall, spread evenly.
-                velocity: (n as f32 * 0.1 - 0.05, 0.0),
+                velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                // Its fractional height along the wall, spread evenly and read straight back as
+                // ai[0] (`NPC.cs:26197`, `ai0 = num403 * 0.1 - 0.05`, so -0.05..0.85). This must be
+                // set outright: the signum path would flatten every band to +/-1 and stack all
+                // eleven Hungry at two heights instead of spreading them down the Wall.
+                ai: [Some(n as f32 * 0.1 - 0.05), None, None, None],
             });
         }
         npc.dirty = true;
@@ -140,6 +146,7 @@ pub fn wall<T: TileView>(
                 ),
                 velocity: (f32::from(npc.direction) * 8.0, 0.0),
                 parent: None,
+                ai: [None; 4],
             });
         }
         npc.dirty = true;
@@ -528,6 +535,35 @@ mod tests {
                 .iter()
                 .all(|s| s.parent == Some(Spawn::OWN_PARENT)),
             "and they all belong to it"
+        );
+    }
+
+    /// WOF-1: each Hungry is raised with its own fractional band in `ai[0]`, spread evenly from
+    /// -0.05 to 0.85, the way vanilla seeds them (`NPC.cs:26197`, `ai0 = num403 * 0.1 - 0.05`). The
+    /// Hungry reader multiplies this straight into its anchor height along the Wall, so the value
+    /// has to survive as-is. Packed through the velocity, as it used to be, the consumer's
+    /// `signum` would flatten all eleven to +/-1 and stack them at two heights.
+    #[test]
+    fn its_hungry_carry_their_band_in_ai0_not_a_flattened_sign() {
+        let tiles = Hell;
+        let mut w = the_wall();
+        let t = Some(player_at(11_000.0, 20_000.0));
+        let out = wall(&mut w, &hell(&tiles, t), 0, &mut rng());
+        let bands: Vec<f32> = out
+            .spawn
+            .iter()
+            .filter(|s| s.npc_type == WALL_HUNGRY)
+            .map(|s| s.ai[0].expect("a Hungry's band is pinned outright, not left to signum"))
+            .collect();
+        let expected: Vec<f32> = (0..WALL_HUNGRY_COUNT)
+            .map(|n| n as f32 * 0.1 - 0.05)
+            .collect();
+        assert_eq!(bands, expected, "eleven distinct bands, -0.05..0.85");
+        assert!(
+            bands
+                .iter()
+                .all(|b| bands.iter().filter(|x| *x == b).count() == 1),
+            "and every Hungry sits at its own height: {bands:?}"
         );
     }
 

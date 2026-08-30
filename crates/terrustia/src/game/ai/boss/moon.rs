@@ -62,17 +62,28 @@ pub fn pumpking(
     npc.no_gravity = true;
     npc.no_tile_collide = true;
 
-    // Its two blades go out on the first tick, one to each side.
+    // Its two blades go out on the first tick, on opposite sides and half a cycle out of phase so
+    // they scythe opposite arcs rather than sitting on top of one another (`NPC.cs:33377-33387`):
+    // the first is raised with ai[0] = -1, the second with ai[0] = 1 and its phase ai[3] started at
+    // 150 of the 300-tick sweep. Left unset both would read ai[0] = signum(0) = 1 and ai[3] = 0.
     if npc.ai[0] == 0.0 {
         npc.ai[0] = 1.0;
         for side in 0..PUMPKING_BLADES {
+            // The first goes left at phase 0, the second right and already 150 of its 300 ticks
+            // along, so the two are half a cycle apart. Vanilla leaves the first's ai[3] at its
+            // default and only sets the second's, which this mirrors.
+            let (arc, phase) = if side == 0 {
+                (-1.0, None)
+            } else {
+                (1.0, Some(150.0))
+            };
             out.spawn.push(Spawn {
                 npc_type: PUMPKING_BLADE,
                 position: npc.center(),
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [Some(arc), None, None, phase],
             });
-            let _ = side;
         }
     }
 
@@ -481,6 +492,29 @@ mod tests {
         assert_eq!(out.spawn.len(), PUMPKING_BLADES);
         assert!(out.spawn.iter().all(|s| s.npc_type == PUMPKING_BLADE));
         assert!(pumpking(&mut p, &w, &mut rng).spawn.is_empty(), "only once");
+    }
+
+    /// PUMP-1: the two blades are raised on opposite sides and half a cycle out of phase, so they
+    /// scythe opposite arcs rather than orbiting as one (`NPC.cs:33377-33387`): the first with
+    /// ai[0] = -1, the second ai[0] = 1 and its phase ai[3] = 150. Left to the consumer's signum
+    /// both would read ai[0] = signum(0) = 1 and ai[3] = 0, and the pair would overlap exactly.
+    #[test]
+    fn its_blades_seat_on_opposite_sides_out_of_phase() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(58);
+        let mut p = boss(PUMPKING, 0.0, 0.0);
+        let w = night(&tiles, Some((600.0, 400.0)));
+        let out = pumpking(&mut p, &w, &mut rng);
+        let blades: Vec<&Spawn> = out
+            .spawn
+            .iter()
+            .filter(|s| s.npc_type == PUMPKING_BLADE)
+            .collect();
+        assert_eq!(blades.len(), 2);
+        assert_eq!(blades[0].ai[0], Some(-1.0), "the first blade goes left");
+        assert_eq!(blades[0].ai[3], None, "and starts at phase 0 (its default)");
+        assert_eq!(blades[1].ai[0], Some(1.0), "the second goes right");
+        assert_eq!(blades[1].ai[3], Some(150.0), "half a 300-tick cycle ahead");
     }
 
     /// Its moods come round, and the throwing one actually throws.

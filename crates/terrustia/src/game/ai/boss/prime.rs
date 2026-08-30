@@ -89,6 +89,7 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
                 position: at,
                 velocity: (side, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
     }
