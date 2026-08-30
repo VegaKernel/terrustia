@@ -104,6 +104,31 @@ peak_slot=$(grep -oE 'slot=[0-9]+' "$WORK/server.log" | grep -oE '[0-9]+' | sort
 echo "peak slot the server assigned: ${peak_slot:-none}"
 echo "server RSS: start $((MEM_START/1024)) MiB -> end $(( ${MEM_END:-0}/1024 )) MiB"
 echo "--- RSS curve over the hold (plateau vs leak) ---"; cat "$WORK/mem.log" 2>/dev/null || echo "(no samples)"
+# "Stable memory" is one of the release bars, so judge it rather than printing a curve and hoping
+# somebody reads it. That is exactly how a run climbing 120 MiB to 689 MiB over thirty minutes was
+# recorded as a pass.
+#
+# The join burst is a real spike that then drains, so the first two samples are not part of the
+# question. What is left is compared third-to-third: a plateau or a recession keeps the ratio near
+# or below one, and only sustained growth pushes it up. The threshold is deliberately loose so this
+# fires on a leak and not on ordinary movement.
+mem_growth=""
+mem_verdict=""
+if [ -s "$WORK/mem.log" ]; then
+  read -r mem_verdict mem_growth < <(grep -oE 'RSS=[0-9]+' "$WORK/mem.log" | grep -oE '[0-9]+' | awk '
+    { v[NR] = $1 }
+    END {
+      # Drop the join burst, then split what remains into thirds.
+      first = 3
+      n = NR - first + 1
+      if (n < 6) { print "SKIP 0"; exit }          # too short to say anything honest
+      third = int(n / 3)
+      for (i = 0; i < third; i++) { early += v[first + i]; late += v[NR - i] }
+      early /= third; late /= third
+      ratio = (early > 0) ? late / early : 1
+      printf "%s %.2f\n", (ratio > 1.5 ? "GROWING" : "STABLE"), ratio
+    }')
+fi
 echo "--- server tick cost: its own cpu vs any external stall ---"
 # Every `cpu_us` the server logged, in order. Each sample is already the *worst* tick of a ten-second
 # window (the loop maxes into `worst_tick` and takes it), so a percentile here is a percentile of
@@ -160,5 +185,11 @@ if [ -n "$tick_p99" ]; then
 else
   echo "FAIL  no tick-cost samples; the p99-under-budget bar could not be judged"; fail=1
 fi
+case "$mem_verdict" in
+  STABLE)  echo "PASS  memory stable after the join burst (last third / first third = ${mem_growth}x)" ;;
+  GROWING) echo "FAIL  memory still climbing after the join burst (last third / first third = ${mem_growth}x)"; fail=1 ;;
+  SKIP)    echo "note  too few RSS samples to judge stability; hold for longer to test it" ;;
+  *)       echo "note  no RSS samples, memory stability not judged" ;;
+esac
 [ "$fail" -eq 0 ] && echo "=== soak PASSED ===" || echo "=== soak FAILED ==="
 exit "$fail"
