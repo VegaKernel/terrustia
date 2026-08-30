@@ -5,8 +5,10 @@
 //!
 //! * up close, a wall of **ice spikes** thrown forward — or, if it has already done that recently,
 //!   thrown out to *both* sides, which is the answer to standing behind it;
-//! * at four seconds, a **slam** that brings rubble down from above;
-//! * standing still for a second and a half, six **shadow hands**;
+//! * at four seconds, a **slam** that throws rubble up out of the ground in a fan, one chunk a tick,
+//!   each arcing back down onto you;
+//! * standing still for a second and a half, six **shadow hands** (and, in Expert, a passive rain of
+//!   them running the whole fight besides);
 //! * at a distance, a **roar** that leaves you Slowed for twelve seconds.
 //!
 //! It also has a den. Leave the snow, or get more than two and a half thousand pixels away, and it
@@ -16,8 +18,10 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     DEER_DEN, DEER_GIVE_UP, DEER_GOING_HOME, DEER_LEAVING, DEER_PATIENCE, DEER_PATIENCE_DEEP,
-    DEER_ROAR, DEER_ROAR_RANGE, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE, DEER_RUBBLE_SLAM,
-    DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE, DEER_SHADOW_HAND,
+    DEER_PASSIVE_SHADOW_FAST, DEER_PASSIVE_SHADOW_SLOW, DEER_PASSIVE_SHADOW_WAVES, DEER_ROAR,
+    DEER_ROAR_RANGE, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE, DEER_RUBBLE_SLAM,
+    DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE,
+    DEER_SHADOW_DAMAGE_PASSIVE, DEER_SHADOW_HAND,
     DEER_SHADOW_HANDS, DEER_SHADOW_HANDS_COUNT, DEER_SHADOW_TICKS, DEER_SHIELD_AFTER,
     DEER_SHIELD_RANGE, DEER_SPIKE, DEER_SPIKE_COUNT, DEER_SPIKE_DAMAGE, DEER_SPIKE_RANGE,
     DEER_SPIKES_BOTH, DEER_SPIKES_BOTH_TICKS, DEER_SPIKES_BOTH_WINDUP, DEER_SPIKES_FORWARD,
@@ -71,6 +75,40 @@ fn spikes<T: TileView>(npc: &Npc, world: &World<'_, T>, direction: i8, out: &mut
             time_left: 300,
         });
     }
+}
+
+/// DEER-2: throw one chunk of rubble up out of the ground, fanned by which one it is. Vanilla
+/// `AI_123_Deerclops_ShootRubbleUp` (`NPC.cs:44913-44932`): the source is a point ten tiles above
+/// Deerclops (and three ahead), scanned downward for the first solid ground; the chunk then launches
+/// upward from there (proj 962, an arc that flies flat and falls back), fanned by an angle
+/// proportional to `which`. This is the same ground-launched fan as the ice spikes, not the old
+/// diagonal line dropped from above.
+fn rubble_up<T: TileView>(
+    npc: &Npc,
+    world: &World<'_, T>,
+    which: i32,
+    rng: &mut SmallRng,
+    out: &mut Vec<Shot>,
+) {
+    let dir = i32::from(npc.direction);
+    let x = (npc.center().0 / TILE) as i32 + dir * 3 + which * dir;
+    let from = (npc.position.1 / TILE) as i32 - 10;
+    // The first solid tile below the source point, scanned over thirty-five tiles (`i in 0..35`).
+    let Some(y) = (from..from + 35).find(|&y| {
+        let t = world.tiles.tile(x, y);
+        t.is_active() && solid(t.block)
+    }) else {
+        return;
+    };
+    let lean = (which * dir) as f32 * 0.7 * (std::f32::consts::FRAC_PI_4 / DEER_SPIKE_COUNT as f32);
+    let speed = 8.0 + rng.random::<f32>() * 8.0;
+    out.push(Shot {
+        projectile: DEER_RUBBLE,
+        damage: DEER_RUBBLE_DAMAGE,
+        position: ((x * 16 + 8) as f32, (y * 16 - 8) as f32),
+        velocity: (lean.sin() * speed, -lean.cos() * speed),
+        time_left: 220,
+    });
 }
 
 /// Whether it should break off and go home.
@@ -139,6 +177,39 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     npc.local_ai[3] =
         (npc.local_ai[3] + if far { 1.0 } else { -1.0 }).clamp(0.0, DEER_SHIELD_AFTER);
     npc.stats.dont_take_damage = npc.local_ai[3] >= DEER_SHIELD_AFTER;
+
+    // DEER-1: in Expert Mode a passive rain of shadow hands runs throughout the fight, quite apart
+    // from the dedicated shadow-hands attack below (`SpawnPassiveShadowHands`,
+    // `NPC.cs:44522-44524,44890-44912`). They come faster as it is worn down: a hand every
+    // `40 + 40 * lifePercent` ticks, three waves and then a pause, keyed off `local_ai[2]`.
+    if world.conditions.expert
+        && let Some(target) = world.target
+    {
+        let life_percent = npc.life as f32 / npc.life_max.max(1) as f32;
+        let interval = (DEER_PASSIVE_SHADOW_FAST
+            + (DEER_PASSIVE_SHADOW_SLOW - DEER_PASSIVE_SHADOW_FAST) * life_percent.clamp(0.0, 1.0))
+        .round()
+        .max(1.0);
+        npc.local_ai[2] += 1.0;
+        if npc.local_ai[2] % interval == 0.0 {
+            // One hand out of the dark around the target, as the dedicated attack raises them.
+            let angle = rng.random::<f32>() * std::f32::consts::TAU;
+            let radius = 300.0 + rng.random::<f32>() * 200.0;
+            out.shots.push(Shot {
+                projectile: DEER_SHADOW_HAND,
+                damage: DEER_SHADOW_DAMAGE_PASSIVE,
+                position: (
+                    target.center.0 + angle.cos() * radius,
+                    target.center.1 + angle.sin() * radius,
+                ),
+                velocity: (-angle.cos() * 4.0, -angle.sin() * 4.0),
+                time_left: 300,
+            });
+            if npc.local_ai[2] / interval >= DEER_PASSIVE_SHADOW_WAVES {
+                npc.local_ai[2] = 0.0;
+            }
+        }
+    }
 
     let mut halt = false;
     let mut going_home = false;
@@ -225,21 +296,13 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     } else if state == DEER_RUBBLE_SLAM {
         npc.ai[1] += 1.0;
         halt = true;
-        if npc.ai[1] == DEER_RUBBLE_WINDUP {
-            let top = (
-                (npc.center().0 / TILE) as i32 + i32::from(npc.direction) * 3,
-                (npc.position.1 / TILE) as i32 - 10,
-            );
-            for step in 0..DEER_SPIKE_COUNT {
-                let x = top.0 + step * i32::from(npc.direction);
-                let speed = 8.0 + rng.random::<f32>() * 8.0;
-                out.shots.push(Shot {
-                    projectile: DEER_RUBBLE,
-                    damage: DEER_RUBBLE_DAMAGE,
-                    position: ((x * 16 + 8) as f32, ((top.1 + step) * 16 - 8) as f32),
-                    velocity: (0.0, speed),
-                    time_left: 300,
-                });
+        // DEER-2: after the wind-up, one chunk of rubble a tick is thrown up out of the ground in a
+        // fan, arcing back down (`NPC.cs:44718-44739`, one `ShootRubbleUp` per tick with `whichOne`
+        // counting up), rather than the old diagonal line dropped from above.
+        if npc.ai[1] >= DEER_RUBBLE_WINDUP {
+            let which = (npc.ai[1] - DEER_RUBBLE_WINDUP) as i32;
+            if which < DEER_SPIKE_COUNT {
+                rubble_up(npc, world, which, rng, &mut out.shots);
             }
         }
         if npc.ai[1] >= DEER_RUBBLE_TICKS {
@@ -477,19 +540,40 @@ mod tests {
         assert!(thrown.iter().any(|s| s.position.0 < here));
     }
 
+    /// DEER-2: the slam throws rubble UP out of the ground in a fan, one chunk a tick, and each
+    /// arcs back down (proj 962 is a fly-flat-then-fall arc). The old code dropped a diagonal line
+    /// of rubble downward from above; the `velocity.1 > 0` it asserted is exactly what this now
+    /// forbids.
     #[test]
-    fn the_slam_brings_rubble_down_from_above() {
+    fn the_slam_throws_rubble_up_out_of_the_ground() {
         let tiles = snowfield();
         let mut d = deerclops(200);
         d.ai[0] = DEER_RUBBLE_SLAM;
+        d.direction = 1;
         let t = Some(player_at(200.0 * TILE + 400.0, 299.0 * TILE));
         let mut thrown = Vec::new();
         for _ in 0..(DEER_RUBBLE_TICKS as i32) {
             thrown.extend(update(&mut d, &tundra(&tiles, t), &mut rng()).shots);
         }
-        assert!(!thrown.is_empty());
+        assert!(!thrown.is_empty(), "the slam should throw rubble");
         assert!(thrown.iter().all(|s| s.projectile == DEER_RUBBLE));
-        assert!(thrown.iter().all(|s| s.velocity.1 > 0.0), "and it falls");
+        // Every chunk launches upward, and out of the ground surface (tile y=300 here), not from
+        // ten tiles above Deerclops.
+        assert!(
+            thrown.iter().all(|s| s.velocity.1 < 0.0),
+            "it is thrown up, not dropped down"
+        );
+        assert!(
+            thrown.iter().all(|s| s.position.1 >= 299.0 * TILE),
+            "and out of the ground, not the air above"
+        );
+        // The fan spreads: not every chunk shares the leftmost launch angle.
+        let spread = thrown
+            .iter()
+            .map(|s| s.velocity.0)
+            .fold(f32::MIN, f32::max)
+            - thrown.iter().map(|s| s.velocity.0).fold(f32::MAX, f32::min);
+        assert!(spread > 0.5, "the chunks fan out, got spread {spread}");
     }
 
     #[test]
@@ -512,6 +596,33 @@ mod tests {
             }),
             "they should ring the player"
         );
+    }
+
+    /// DEER-1: in Expert Mode a passive rain of shadow hands runs throughout the fight, apart from
+    /// the dedicated shadow-hands attack. Counted by their softer damage so a dedicated volley
+    /// cannot be mistaken for them. A Classic world has none.
+    #[test]
+    fn expert_deerclops_rains_passive_shadow_hands() {
+        let tiles = snowfield();
+        let passive = |expert: bool| {
+            let mut d = deerclops(200);
+            let t = Some(player_at(200.0 * TILE + 400.0, 299.0 * TILE));
+            let mut world = tundra(&tiles, t);
+            world.conditions.expert = expert;
+            let mut count = 0;
+            for _ in 0..300 {
+                count += update(&mut d, &world, &mut rng())
+                    .shots
+                    .iter()
+                    .filter(|s| {
+                        s.projectile == DEER_SHADOW_HAND && s.damage == DEER_SHADOW_DAMAGE_PASSIVE
+                    })
+                    .count();
+            }
+            count
+        };
+        assert!(passive(true) > 0, "Expert rains passive shadow hands");
+        assert_eq!(passive(false), 0, "Classic does not");
     }
 
     #[test]

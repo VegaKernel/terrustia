@@ -1915,6 +1915,15 @@ pub const DEER_SHADOW_HAND: u16 = 965;
 pub const DEER_SPIKE_DAMAGE: i32 = 13;
 pub const DEER_RUBBLE_DAMAGE: i32 = 18;
 pub const DEER_SHADOW_DAMAGE: i32 = 15;
+/// DEER-1: Expert Mode's passive shadow hands hit softer than the dedicated attack's do
+/// (`SpawnPassiveShadowHands`'s `shadowHandDamage = 10`, `NPC.cs:44490`).
+pub const DEER_SHADOW_DAMAGE_PASSIVE: i32 = 10;
+/// DEER-1: how often the passive hands come, in ticks, at full health and at none. Vanilla
+/// `Utils.Remap(lifePercent, 1, 0, 80, 40)` (`NPC.cs:44892`), i.e. `40 + 40 * lifePercent`, so
+/// they quicken from every 80 ticks to every 40 as it is worn down; three waves, then a pause.
+pub const DEER_PASSIVE_SHADOW_SLOW: f32 = 80.0;
+pub const DEER_PASSIVE_SHADOW_FAST: f32 = 40.0;
+pub const DEER_PASSIVE_SHADOW_WAVES: f32 = 3.0;
 
 /// Deerclops' states, as `ai[0]` records them.
 pub const DEER_STALKING: f32 = 0.0;
