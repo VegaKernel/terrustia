@@ -16,7 +16,7 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     BEE, BEE_STRONG, QUEEN_BEE_SPEED, QUEEN_CHARGE, QUEEN_CHARGE_ALIGN, QUEEN_CHARGE_EXPERT,
     QUEEN_CHARGE_LIMIT, QUEEN_CHARGE_RAGE, QUEEN_CHARGE_SPEED_RAGE_EXPERT, QUEEN_CHARGES,
-    QUEEN_CHARGING, QUEEN_CHOOSING, QUEEN_CLIMB_ACCEL_RAGE_EXPERT, QUEEN_CLIMBING,
+    QUEEN_CHARGING, QUEEN_CHASING, QUEEN_CHOOSING, QUEEN_CLIMB_ACCEL_RAGE_EXPERT, QUEEN_CLIMBING,
     QUEEN_CLIMBING_HOVER_ACCEL_EXPERT, QUEEN_DEFENSE_RAMP, QUEEN_EXPERT_STEPS, QUEEN_GIVE_UP,
     QUEEN_HOVER, QUEEN_HOVER_ACCEL, QUEEN_LEAVING, QUEEN_STANDOFF, QUEEN_STING_ABOVE,
     QUEEN_STING_EVERY, QUEEN_STING_EVERY_ENRAGED, QUEEN_STING_EVERY_EXPERT,
@@ -25,7 +25,7 @@ use terrustia_proto::npc_params::{
     STINGER_DAMAGE, STINGER_SPEED,
 };
 
-use crate::game::ai::{Shot, World};
+use crate::game::ai::{Shot, World, can_see};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -111,7 +111,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     if npc.ai[0] != QUEEN_LEAVING {
         npc.time_left = npc.time_left.max(60);
         if reach > QUEEN_GIVE_UP {
-            npc.ai[0] = 4.0;
+            npc.ai[0] = QUEEN_CHASING;
             npc.dirty = true;
         }
     }
@@ -120,7 +120,28 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         npc.dirty = true;
     }
 
-    if npc.ai[0] == QUEEN_LEAVING || npc.ai[0] == 4.0 {
+    if npc.ai[0] == QUEEN_CHASING {
+        // QB-1: out-running her (past 3000) does not despawn her. She gives chase, flying toward
+        // the player at 14 with heavy smoothing, and drops back into the chooser the instant they
+        // are within 2000 again (`NPC.cs:31053-31076`). Only a dead player (`QUEEN_LEAVING`)
+        // actually ends the fight. The old code lumped this state in with leaving and capped
+        // time_left to 10, so a player who briefly outran her killed the fight outright.
+        let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
+        let len = (dx * dx + dy * dy).sqrt().max(f32::MIN_POSITIVE);
+        let toward = (dx / len * 14.0, dy / len * 14.0);
+        npc.velocity.0 = (npc.velocity.0 * 14.0 + toward.0) / 15.0;
+        npc.velocity.1 = (npc.velocity.1 * 14.0 + toward.1) / 15.0;
+        npc.direction = if npc.velocity.0 < 0.0 { -1 } else { 1 };
+        npc.sprite_direction = npc.direction;
+        if reach < 2000.0 {
+            npc.ai[0] = QUEEN_CHOOSING;
+        }
+        npc.dirty = true;
+        return hive;
+    }
+
+    if npc.ai[0] == QUEEN_LEAVING {
+        // Everyone is dead: she leaves the field for good (EncourageDespawn, `NPC.cs:30434-30471`).
         npc.velocity.1 *= 0.98;
         npc.direction = if npc.velocity.0 < 0.0 { -1 } else { 1 };
         npc.velocity.0 += 0.08 * f32::from(npc.direction);
@@ -322,8 +343,20 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             });
             npc.dirty = true;
         }
-        npc.velocity.0 *= 0.9;
-        npc.velocity.1 *= 0.9;
+        // QB-3: she keeps station on the player while calling her bees. Too far (over 400) or out
+        // of sight, she flies back toward them at 14 (`NPC.cs:30845-30890`); close and in view, she
+        // holds. The old code only ever held, so a player who walked off during the summon was
+        // never followed and the bees came out of empty air behind her.
+        let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
+        let reach_player = (dx * dx + dy * dy).sqrt();
+        if reach_player > 400.0 || !can_see(world.tiles, npc, target) {
+            let k = 14.0 / reach_player.max(0.01);
+            close_on(&mut npc.velocity.0, dx * k, 0.1);
+            close_on(&mut npc.velocity.1, dy * k, 0.1);
+        } else {
+            npc.velocity.0 *= 0.9;
+            npc.velocity.1 *= 0.9;
+        }
         if npc.ai[2] > QUEEN_SUMMONS {
             npc.ai[0] = QUEEN_CHOOSING;
             npc.ai[1] = QUEEN_SUMMONING;
@@ -394,7 +427,12 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         });
         npc.dirty = true;
     }
-    if npc.ai[1] > 300.0 {
+    // QB-2: the sting phase runs for `cadence * (20 - 5*cross)` ticks (`NPC.cs:31044-31051`,
+    // `ai[1] > num693 * num703`), so she fires roughly twenty stingers (fewer out of her jungle)
+    // whatever the cadence. In Normal mode with no penalty that is 40 * 20 = 800 ticks, not the
+    // flat 300 the old code used, which cut the volley to about a third of its length.
+    let phase_ticks = every * (20.0 - 5.0 * cross);
+    if npc.ai[1] > phase_ticks {
         npc.ai[0] = QUEEN_CHOOSING;
         npc.ai[1] = QUEEN_STINGING;
         npc.dirty = true;
@@ -844,13 +882,98 @@ mod tests {
         assert_eq!(q.defense, base, "Normal mode's defence should never move");
     }
 
+    /// QB-1: out-running her does not despawn her. Past 3000 she gives chase (state 4) rather than
+    /// leaving, flies toward the player and is not marked for despawn, and recovers to the chooser
+    /// the moment the player is back within 2000 (`NPC.cs:31053-31076`). Only a dead player ends it.
     #[test]
-    fn a_player_who_runs_far_enough_ends_it() {
+    fn out_running_her_makes_her_give_chase_not_despawn() {
         let tiles = Hollow;
         let mut q = queen();
-        let t = Some(player_at(10_000.0 + QUEEN_GIVE_UP + 100.0, 10_000.0));
-        update(&mut q, &hive_world(&tiles, t), &mut rng());
-        update(&mut q, &hive_world(&tiles, t), &mut rng());
-        assert!(q.time_left <= 10);
+        let far = Some(player_at(10_000.0 + QUEEN_GIVE_UP + 100.0, 10_000.0));
+        update(&mut q, &hive_world(&tiles, far), &mut rng());
+        assert_eq!(q.ai[0], QUEEN_CHASING, "she chases rather than leaving");
+        update(&mut q, &hive_world(&tiles, far), &mut rng());
+        assert!(q.time_left > 10, "and is not marked for despawn");
+        assert!(
+            q.velocity.0 > 0.0,
+            "she closes the distance, flying toward the player"
+        );
+
+        // Back within 2000: she resumes the fight rather than leaving.
+        let (cx, cy) = q.center();
+        let near = Some(player_at(cx + 1500.0, cy));
+        update(&mut q, &hive_world(&tiles, near), &mut rng());
+        assert_eq!(q.ai[0], QUEEN_CHOOSING, "recovered to the chooser");
+    }
+
+    /// A dead player, on the other hand, does end it: she leaves for good and is marked to despawn.
+    #[test]
+    fn a_dead_player_sends_her_home_for_good() {
+        let tiles = Hollow;
+        let mut q = queen();
+        let dead = Some(Target {
+            slot: 0,
+            center: (10_400.0, 10_000.0),
+            velocity: (0.0, 0.0),
+            alive: false,
+        });
+        update(&mut q, &hive_world(&tiles, dead), &mut rng());
+        assert_eq!(q.ai[0], QUEEN_LEAVING);
+        assert!(q.time_left <= 10, "and marked for despawn");
+    }
+
+    /// QB-2: the sting phase runs about 800 ticks in Normal mode, not the old flat 300, so she
+    /// fires roughly twenty stingers a volley (`NPC.cs:31044-31051`, `ai[1] > 40 * 20`).
+    #[test]
+    fn the_sting_phase_lasts_its_full_length() {
+        let tiles = Hollow;
+        let mut q = queen();
+        q.ai[0] = QUEEN_STINGING;
+        let (cx, cy) = q.center();
+        let below = Some(player_at(cx + 50.0, cy + 500.0));
+        let mut r = rng();
+        // At 300 ticks (the old cut-off) she is still stinging.
+        for _ in 0..300 {
+            update(&mut q, &hive_world(&tiles, below), &mut r);
+        }
+        assert_eq!(
+            q.ai[0], QUEEN_STINGING,
+            "still stinging past the old 300-tick cut-off"
+        );
+        // She keeps stinging until close to 800, then returns to the chooser.
+        let mut ended_at = None;
+        for tick in 300..900 {
+            update(&mut q, &hive_world(&tiles, below), &mut r);
+            if q.ai[0] == QUEEN_CHOOSING {
+                ended_at = Some(tick);
+                break;
+            }
+        }
+        let ended_at = ended_at.expect("the sting phase should end");
+        assert!(
+            (750..=800).contains(&ended_at),
+            "the phase should run its full ~800 ticks, ended at {ended_at}"
+        );
+    }
+
+    /// QB-3: she keeps station on the player while summoning. A player who walks off during the
+    /// call is chased at 14 toward them (`NPC.cs:30845-30890`), not left behind while she holds.
+    #[test]
+    fn she_repositions_toward_a_fleeing_player_during_the_summon() {
+        let tiles = Hollow;
+        let mut q = queen();
+        q.ai[0] = QUEEN_SUMMONING;
+        let (cx, cy) = q.center();
+        // Well beyond the 400px hold radius, off to the right.
+        let far = Some(player_at(cx + 1200.0, cy));
+        let mut r = rng();
+        for _ in 0..12 {
+            update(&mut q, &hive_world(&tiles, far), &mut r);
+        }
+        assert!(
+            q.velocity.0 > 0.5,
+            "she flies toward the fleeing player, got {}",
+            q.velocity.0
+        );
     }
 }

@@ -1850,6 +1850,9 @@ pub const QUEEN_CHARGING: f32 = 0.0;
 pub const QUEEN_SUMMONING: f32 = 1.0;
 pub const QUEEN_CLIMBING: f32 = 2.0;
 pub const QUEEN_STINGING: f32 = 3.0;
+/// The player has run past 3000: she gives chase rather than leaving, and drops back into the
+/// chooser once they are within 2000 again (`NPC.cs:31053-31076`). Not a despawn.
+pub const QUEEN_CHASING: f32 = 4.0;
 pub const QUEEN_LEAVING: f32 = 5.0;
 
 /// Charge speed at full health, and the extra it gains at each quarter lost — Expert Mode only;
