@@ -285,11 +285,11 @@ fn check(tallies: &mut BTreeMap<u8, Tally>, packet_id: u8, payload: &[u8]) {
         // merge onto here (this only inspects a captured byte stream), so every position decodes
         // over bare air, same as `square.rs`'s own isolated round-trip tests do; that has no
         // bearing on this check, which only confirms the packet decodes without erroring.
-        id::AREA_TILE_CHANGE => terrustia_proto::square::TileSquare::decode(payload, |_, _| {
-            terrustia_proto::Tile::AIR
-        })
-        .map(|_| Checked::DecodedOnly)
-        .map_err(|e| e.to_string()),
+        id::AREA_TILE_CHANGE => {
+            terrustia_proto::square::TileSquare::decode(payload, |_, _| terrustia_proto::Tile::AIR)
+                .map(|_| Checked::DecodedOnly)
+                .map_err(|e| e.to_string())
+        }
         // The richest check available. A section carries the tile bit-flags, the run-length
         // batching, the frame-importance table, and the chest, sign and tile-entity tails —
         // hundreds of decisions, every one of which has to match for the bytes to come back equal.
