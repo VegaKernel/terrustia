@@ -841,19 +841,67 @@ fn town_npcs_near(npcs: &NpcStore, at: (f32, f32)) -> u32 {
 
 /// One spawn attempt in this many considers a bound townsperson instead of an enemy.
 ///
-/// Deliberately steep. Six of them exist in a world's whole lifetime and each is a resident you
-/// cannot otherwise have, so they want to be a find rather than a fixture.
+/// Deliberately steep. A handful of them exist in a world's whole lifetime and each is a resident
+/// you cannot otherwise have, so they want to be a find rather than a fixture.
 const BOUND_RARITY: u32 = 120;
 
-/// Somebody still tied up somewhere in this world, if any are left to find.
+/// Whether a bound townsperson may be found at this depth, biome and spot.
 ///
-/// Refuses anyone already rescued *and* anyone already standing about waiting to be talked to, so
-/// a world cannot end up with two Mechanics or a corridor full of bound wizards.
-fn pick_bound(world: &World, npcs: &NpcStore, rng: &mut SmallRng) -> Option<u16> {
+/// Each gate is the real `NPC.Spawner.SpawnNPC` condition for that bound NPC rather than "anywhere
+/// underground": without them the Wizard, Mechanic and Goblin Tinkerer were all findable on day
+/// one, skipping the hardmode / Skeletron / goblin-army progression the game puts in front of
+/// them. The gates key on world progress the server already tracks, plus the depth and biome of
+/// the candidate spot. `spawn_y` is the tile row, used for the Mechanic's exact depth threshold.
+///
+/// Two deliberate narrowings, both because the server does not model the tile the real gate reads:
+/// the Stylist's real gate is a spider-nest wall (wall 62, `NPC.cs:1662-1671`), approximated here
+/// as "the caverns"; and the Angler's is the ocean surface/water (`NPC.cs:1778-1928`), so he is
+/// gated to the ocean biome and is therefore never *mis*-found in a cave, even though this
+/// underground-only bound path never reaches the ocean to place him (a disclosed gap, not a fake).
+pub fn bound_gate(bound: u16, world: &World, depth: Depth, biome: Biome, spawn_y: i32) -> bool {
+    let p = &world.progress;
+    match bound {
+        // Goblin Tinkerer: the goblin army beaten, deeper than the rock layer but above the
+        // underworld (`NPC.cs:2087`: downedGoblins && deeperThanRockLayer && spawnTileY < maxTilesY-210).
+        105 => p.downed_goblins && depth == Depth::Cavern,
+        // Wizard: hardmode, same caverns band (`NPC.cs:2091`).
+        106 => p.hard_mode && depth == Depth::Cavern,
+        // Mechanic: Skeletron beaten, below (worldSurface*4 + rockLayer)/5 (`NPC.cs:2656`).
+        123 => {
+            let threshold = (f64::from(world.surface) * 4.0 + f64::from(world.rock_layer)) / 5.0;
+            p.downed_boss3 && f64::from(spawn_y) > threshold
+        }
+        // Stylist: the spider nest, approximated as the caverns (`NPC.cs:1662-1671`; see above).
+        354 => depth == Depth::Cavern,
+        // Angler: the ocean (`NPC.cs:1778-1928`; see above).
+        376 => biome == Biome::Ocean,
+        // Bartender: the Old One's Army becomes available once the Eater of Worlds / Brain of
+        // Cthulhu is down (`NPC.cs:1658`, `DD2Event.ReadyToFindBartender => NPC.downedBoss2`).
+        579 => p.downed_boss2,
+        // Golfer: the underground desert (`NPC.cs:1682-1697`).
+        589 => biome == Biome::Desert && matches!(depth, Depth::Underground | Depth::Cavern),
+        _ => false,
+    }
+}
+
+/// Somebody still tied up somewhere in this world, if any are left to find here.
+///
+/// Refuses anyone already rescued, anyone already standing about waiting to be talked to (so a
+/// world cannot end up with two Mechanics or a corridor full of bound wizards), and anyone whose
+/// real progression / biome / depth gate this spot does not satisfy.
+fn pick_bound(
+    world: &World,
+    npcs: &NpcStore,
+    depth: Depth,
+    biome: Biome,
+    spawn_y: i32,
+    rng: &mut SmallRng,
+) -> Option<u16> {
     let waiting: Vec<u16> = crate::game::rescues::RESCUES
         .iter()
         .map(|r| r.bound)
         .filter(|bound| crate::game::rescues::still_bound(&world.progress, *bound))
+        .filter(|bound| bound_gate(*bound, world, depth, biome, spawn_y))
         .filter(|bound| {
             !npcs
                 .iter()
@@ -1018,12 +1066,14 @@ pub fn try_spawn(
             };
             // Somebody tied up, once in a long while, deep enough down to be worth finding.
             //
-            // Rare and unique on purpose: these six are the *only* way their residents ever
-            // arrive, so one of them failing to appear is a whole townsperson missing — the
-            // Mechanic, and with her every piece of wire in the game.
+            // Rare and unique on purpose: these are the *only* way their residents ever arrive, so
+            // one of them failing to appear is a whole townsperson missing — the Mechanic, and with
+            // her every piece of wire in the game. Each one is gated on its real vanilla condition
+            // (`bound_gate`), so the Wizard, Mechanic and Goblin Tinkerer are no longer findable
+            // day one and the Golfer wants the underground desert.
             if matches!(depth, Depth::Underground | Depth::Cavern)
                 && rng.random_range(0..BOUND_RARITY) == 0
-                && let Some(bound) = pick_bound(world, npcs, rng)
+                && let Some(bound) = pick_bound(world, npcs, depth, biome_at(world, x, y), y, rng)
             {
                 out.push((bound, (x as f32 * 16.0, y as f32 * 16.0)));
                 break;
@@ -1558,6 +1608,73 @@ mod tests {
             "10x should spawn noticeably more often than 1x over {TICKS} ticks: \
              {boosted_seen} boosted vs {ordinary_seen} ordinary"
         );
+    }
+
+    /// The bound townsfolk are gated on their real progression, biome and depth, so the Wizard,
+    /// Mechanic and Goblin Tinkerer are not findable on day one (`NPC.cs:2087-2091,2656`). Fails
+    /// before the fix, when every still-bound resident was offered the moment a player reached a
+    /// cavern, with no hardmode / Skeletron / goblin-army gate at all.
+    #[test]
+    fn bound_townsfolk_are_gated_on_real_progression() {
+        let mut world = test_world();
+        world.progress.hard_mode = false;
+        world.progress.downed_boss3 = false;
+        world.progress.downed_goblins = false;
+        let y = i32::from(world.rock_layer) + 5; // squarely in the caverns
+        assert_eq!(depth_at(&world, y), Depth::Cavern);
+
+        // Day one, deep in a plain cavern: none of the three progression-gated finds are eligible.
+        assert!(
+            !bound_gate(106, &world, Depth::Cavern, Biome::Forest, y),
+            "the Wizard needs hardmode"
+        );
+        assert!(
+            !bound_gate(123, &world, Depth::Cavern, Biome::Forest, y),
+            "the Mechanic needs Skeletron down"
+        );
+        assert!(
+            !bound_gate(105, &world, Depth::Cavern, Biome::Forest, y),
+            "the Goblin Tinkerer needs the army beaten"
+        );
+
+        // The Stylist has no progression gate (a spider nest is a day-one find), so she is eligible.
+        assert!(bound_gate(354, &world, Depth::Cavern, Biome::Forest, y));
+
+        // Hardmode opens the Wizard; Skeletron opens the Mechanic; the beaten army the Goblin.
+        world.progress.hard_mode = true;
+        world.progress.downed_boss3 = true;
+        world.progress.downed_goblins = true;
+        assert!(bound_gate(106, &world, Depth::Cavern, Biome::Forest, y));
+        assert!(bound_gate(123, &world, Depth::Cavern, Biome::Forest, y));
+        assert!(bound_gate(105, &world, Depth::Cavern, Biome::Forest, y));
+
+        // The Golfer wants the underground desert, not a forest cavern.
+        assert!(!bound_gate(589, &world, Depth::Cavern, Biome::Forest, y));
+        assert!(bound_gate(
+            589,
+            &world,
+            Depth::Underground,
+            Biome::Desert,
+            y
+        ));
+
+        // And a fresh cavern only ever offers the Stylist, never a progression-gated resident.
+        let mut rng = SmallRng::seed_from_u64(5);
+        world.progress.hard_mode = false;
+        world.progress.downed_boss3 = false;
+        world.progress.downed_goblins = false;
+        for _ in 0..500 {
+            if let Some(bound) = pick_bound(
+                &world,
+                &NpcStore::new(),
+                Depth::Cavern,
+                Biome::Forest,
+                y,
+                &mut rng,
+            ) {
+                assert_eq!(bound, 354, "only the Stylist is a day-one cavern find");
+            }
+        }
     }
 }
 

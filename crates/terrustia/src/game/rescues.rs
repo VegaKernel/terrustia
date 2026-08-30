@@ -57,6 +57,14 @@ pub const RESCUES: &[Rescue] = &[
         freed: 550,
         announcement: "The Tavernkeep is back on his feet!",
     },
+    // The bound Golfer (589) is found in the underground desert and becomes the Golfer (588) when
+    // freed (`NPC.cs:1693-1697` spawns 589; `NPC.cs:19883-19885` transforms 589 into 588). He was
+    // missing entirely, so a world generated here could never gain a Golfer.
+    Rescue {
+        bound: 589,
+        freed: 588,
+        announcement: "The Golfer is free!",
+    },
 ];
 
 /// Who this one becomes, if talking to them frees anybody.
@@ -88,6 +96,7 @@ pub fn still_bound(progress: &Progress, bound: u16) -> bool {
         354 => !progress.saved_stylist,
         376 => !progress.saved_angler,
         579 => !progress.saved_bartender,
+        589 => !progress.saved_golfer,
         _ => false,
     }
 }
@@ -128,5 +137,23 @@ mod tests {
     #[test]
     fn a_guide_frees_nobody() {
         assert!(rescue_for(22).is_none());
+    }
+
+    /// The bound Golfer (589) was missing entirely, so no world generated here could ever gain a
+    /// Golfer. He is found in the underground desert (`NPC.cs:1693-1697`) and becomes 588 when
+    /// freed (`NPC.cs:19883-19885`). Fails before the fix, when 589 was in no rescue table at all.
+    #[test]
+    fn the_golfer_can_be_freed() {
+        let rescue = rescue_for(589).expect("a bound golfer is somebody");
+        assert_eq!(rescue.freed, 588);
+
+        let mut progress = Progress::default();
+        assert!(
+            still_bound(&progress, 589),
+            "he starts out there to be found"
+        );
+        remember(&mut progress, rescue.freed);
+        assert!(progress.saved_golfer);
+        assert!(!still_bound(&progress, 589), "and is not found twice");
     }
 }
