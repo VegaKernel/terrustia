@@ -222,6 +222,17 @@ fn throw(npc: &Npc, player: (f32, f32), attack: &TreeAttack, rng: &mut SmallRng)
         across += rng.random_range(-50..=50) as f32;
         rise -= rng.random_range(50..201) as f32;
     }
+    // C7-06: the Everscream's ornaments jitter their aim point up to `scatter` pixels either way on
+    // both axes and take a small random upward loft (`NPC.cs:33088-33090`), so a volley lands spread
+    // out rather than flat and stacked on one line. The loft reads `across` after the scatter, the
+    // way vanilla does (it is a fraction of the already-jittered horizontal gap).
+    if attack.scatter > 0 {
+        across += rng.random_range(-attack.scatter..=attack.scatter) as f32;
+        rise += rng.random_range(-attack.scatter..=attack.scatter) as f32;
+    }
+    if attack.loft > 0 {
+        rise -= across.abs() * (rng.random_range(0..=attack.loft) as f32 * 0.01);
+    }
     let length = across.hypot(rise).max(f32::MIN_POSITIVE);
     let mut velocity = (across / length * speed, rise / length * speed);
     let jitter = |rng: &mut SmallRng| {
@@ -364,6 +375,39 @@ mod tests {
         assert!(
             wood.is_disjoint(&scream),
             "and never the same thing: {wood:?} vs {scream:?}"
+        );
+    }
+
+    /// C7-06: the Everscream's ornaments scatter and loft rather than flying flat. Thrown at a
+    /// player level with the throw point, the old flat volley sent every ornament dead horizontal
+    /// (`velocity.1 == 0`); the +/-50 scatter and 0-20% loft (`NPC.cs:33088-33090`) give each one
+    /// its own rise, so the volley fans out and, on average, arcs upward. Zeroing `scatter`/`loft`
+    /// collapses the fan and fails this.
+    #[test]
+    fn everscream_ornaments_scatter_and_loft() {
+        let npc = boss(EVERSCREAM, 0.0, 0.0);
+        let attack = SCREAM_ORNAMENTS;
+        // Level with the throw origin (`center.y + attack.from`) and well to the side, so a flat
+        // throw would carry no vertical velocity at all.
+        let player = (npc.center().0 + 500.0, npc.center().1 + attack.from);
+        let mut rng = SmallRng::seed_from_u64(11);
+        let rises: Vec<f32> = (0..300)
+            .map(|_| throw(&npc, player, &attack, &mut rng).velocity.1)
+            .collect();
+        let max = rises.iter().copied().fold(f32::MIN, f32::max);
+        let min = rises.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            max - min > 1.0,
+            "ornaments fan out vertically rather than flying flat: {min}..{max}"
+        );
+        assert!(
+            max > 0.0 && min < 0.0,
+            "the scatter throws some up and some down: {min}..{max}"
+        );
+        let mean = rises.iter().sum::<f32>() / rises.len() as f32;
+        assert!(
+            mean < 0.0,
+            "and the loft biases the volley upward on average: {mean}"
         );
     }
 

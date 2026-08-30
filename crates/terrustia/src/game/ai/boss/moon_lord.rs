@@ -4,25 +4,28 @@
 //! all, and waits — its two hands and its head are the fight, and only once all three are open does
 //! the core become something you can attack.
 //!
-//! Each eye runs one of three attack scripts, fixed when it opens: five entries of "do this for
-//! that long", so the three are always doing different things at once and the fight has a shape
-//! rather than a rhythm. Attack nought is a pause, one is a stream of bolts, two is the heavy
-//! attack — a sweeping deathray from the head, a phantasmal sphere from a hand — and three is a
-//! spread of spheres.
+//! Each part runs a fixed five-entry attack timeline, and which one is decided by which part it is,
+//! not by chance: the left hand runs row 0, the right hand row 1, and the head row 2 of
+//! `MoonLordAttacksArray` (`NPC.cs:42032`, `NPC.cs:42530`). Every tick a part steps its row by the
+//! cumulative timer in `ai[1]`, writes the current attack into `ai[0]` and runs it. The three are
+//! therefore always doing different things at once, and the fight has a shape rather than a rhythm.
+//!
+//! The same attack id means different things on a hand and on the head. Attack 0 is a pause for
+//! both. Attack 1 is a hand's rapid eye-stream, but the head's charged deathray: a hundred and
+//! eighty ticks of wind-up, then the beam. Attack 2 is a hand's six-sphere barrage, but the head's
+//! leech attack. Attack 3 is the spread of bolts, the same for both.
 //!
 //! Breaking a socket does not remove it from the fight: the eye comes out and hunts you as a free
 //! eye. And the head puts out leeches that carry life back to whichever part is most hurt, so
 //! ignoring them undoes work you have already done.
 
-use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     FREE_EYE_ACCEL, FREE_EYE_SPEED, LEECH_HEAL, LEECH_TICKS, MOON_LORD_ACCEL, MOON_LORD_BELOW,
-    MOON_LORD_BOLT_EVERY, MOON_LORD_BOLT_SPEED, MOON_LORD_CORE, MOON_LORD_DEATH_TICKS,
-    MOON_LORD_FIGHTING_DISTANCE, MOON_LORD_FREE_EYE, MOON_LORD_HAND, MOON_LORD_HAND_OUT,
-    MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP, MOON_LORD_LEECH, MOON_LORD_OPENING,
-    MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED, PHANTASMAL_BOLT,
-    PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE, PHANTASMAL_EYE,
-    PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE,
+    MOON_LORD_CORE, MOON_LORD_DEATH_TICKS, MOON_LORD_FIGHTING_DISTANCE, MOON_LORD_FREE_EYE,
+    MOON_LORD_HAND, MOON_LORD_HAND_OUT, MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP,
+    MOON_LORD_LEECH, MOON_LORD_OPENING, MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED,
+    PHANTASMAL_BOLT, PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE,
+    PHANTASMAL_EYE, PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE,
 };
 
 use super::skeletron::Parent;
@@ -179,14 +182,51 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) 
     out
 }
 
+/// Which of the three attack rows a part runs. It is fixed by which part it is, never random: a
+/// hand takes the row for its side (`ai[2]`: left is 0, right is 1), the head takes row 2. Vanilla
+/// `AI_078` picks `num6 = (ai[2]==0) ? 0 : 1` (`NPC.cs:42032`); `AI_079` fixes `num5 = 2`
+/// (`NPC.cs:42530`).
+fn attack_row(npc: &Npc, head: bool) -> usize {
+    if head {
+        2
+    } else if npc.ai[2] >= 1.0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Step the fixed timeline by the cumulative timer in `ai[1]`, returning the current attack, how
+/// long it has run (`num2`), and the current step's total length (`num3`). `ai[0]` is written with
+/// the current attack so the wire carries it and a client plays the right animation. Transcribes
+/// the walk in `AI_078` (`NPC.cs:42027-42055`) and `AI_079` (`NPC.cs:42541-42566`): find the step
+/// whose cumulative end is past `ai[1]`, and wrap `ai[1]` back to zero once the last one is behind.
+fn step_timeline(npc: &mut Npc, row: &[(u8, i32); 5]) -> (u8, f32, i32) {
+    npc.ai[1] += 1.0;
+    let mut acc = 0i32;
+    let mut idx = row.len();
+    for (i, &(_, dur)) in row.iter().enumerate() {
+        if (dur + acc) as f32 > npc.ai[1] {
+            idx = i;
+            break;
+        }
+        acc += dur;
+    }
+    if idx == row.len() {
+        idx = 0;
+        acc = 0;
+        npc.ai[1] = 0.0;
+    }
+    let (attack, dur) = row[idx];
+    npc.ai[0] = f32::from(attack);
+    (attack, npc.ai[1] - acc as f32, dur)
+}
+
 /// Styles 78 and 79: a hand or the head.
-///
-/// `script` is which of the three it was given when it opened.
 pub fn eye_socket(
     npc: &mut Npc,
     world: &World<'_, impl TileView>,
     core: Option<Parent>,
-    rng: &mut SmallRng,
 ) -> MoonLordOutcome {
     let mut out = MoonLordOutcome::default();
     npc.dirty = true;
@@ -196,6 +236,14 @@ pub fn eye_socket(
         out.spent = true;
         return out;
     };
+    // ML-6: the wire carries the core's slot in `ai[3]`, the way vanilla does
+    // (`NPC.cs:42010,42522`, `Main.npc[(int)ai[3]]`), so a client running the part's own AI finds
+    // the right parent. The engine tracks the link separately in `follows_boss`; this only mirrors
+    // that slot into the synced `ai` array.
+    if let Some(slot) = npc.follows_boss {
+        npc.ai[3] = f32::from(slot);
+    }
+
     // It rides its station on the core.
     let (bx, by) = core.center();
     let station = if head {
@@ -231,49 +279,106 @@ pub fn eye_socket(
         return out;
     }
 
-    // Its script is fixed when it opens.
-    if npc.local_ai[3] == 0.0 {
-        npc.local_ai[3] = 1.0;
-        npc.ai[3] = rng.random_range(0..MOON_LORD_SCRIPTS.len()) as f32;
-        npc.ai[0] = state::WAITING;
-    }
-
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
 
-    // `local_ai[0]` is how far through its script it is; `ai[1]` how long the current entry has run.
-    let script = MOON_LORD_SCRIPTS[(npc.ai[3] as usize).min(MOON_LORD_SCRIPTS.len() - 1)];
-    let step = (npc.local_ai[0] as usize) % script.len();
-    let (attack, ticks) = script[step];
+    // ML-3: the row is fixed by which part this is, and the timeline is stepped by `ai[1]`.
+    let row = &MOON_LORD_SCRIPTS[attack_row(npc, head)];
+    let (attack, within, dur) = step_timeline(npc, row);
 
-    npc.ai[1] += 1.0;
+    if head {
+        run_head_attack(npc, &mut out, target.center, attack, within, dur);
+    } else {
+        run_hand_attack(npc, &mut out, target.center, attack, within, dur);
+    }
+    out
+}
+
+/// A hand's attacks. Attack 1 is the eye stream, attack 2 the six-sphere barrage, attack 3 the
+/// bolt spread. It never runs the head's deathray or leech attack.
+fn run_hand_attack(
+    npc: &Npc,
+    out: &mut MoonLordOutcome,
+    target: (f32, f32),
+    attack: u8,
+    within: f32,
+    dur: i32,
+) {
     match attack {
         1 => {
-            // The bolts: a stream of them, aimed as they leave.
-            if npc.ai[1] % MOON_LORD_BOLT_EVERY == 0.0 {
+            // The eye stream: proj 452 fired every four ticks through the middle third of the
+            // window (`NPC.cs:42128-42159`, the `num2` in `[num8*num9, num8*num9*2)` band with
+            // `num8=7, num9=4`, one shot each `num9` ticks).
+            let band = 7.0 * 4.0;
+            if within >= band && within < band * 2.0 && (within - band) % 4.0 == 0.0 {
                 out.shots.push(aimed(
                     npc,
-                    target.center,
-                    PHANTASMAL_BOLT,
-                    PHANTASMAL_BOLT_DAMAGE,
-                    MOON_LORD_BOLT_SPEED,
+                    target,
+                    PHANTASMAL_EYE,
+                    PHANTASMAL_EYE_DAMAGE,
+                    8.0,
                 ));
             }
         }
-        2 if head => {
-            // The deathray, which sweeps rather than tracks: it is fired once and turns.
-            if npc.ai[1] as i32 == 1 {
+        2 => {
+            // ML-5: the heavy attack is SIX spheres, not one. Vanilla gathers six proj 454 over a
+            // hundred and eighty ticks (`num12 % 30 == 0`, six times) and launches them together
+            // toward the player at `num2 == 292` (`NPC.cs:42184-42260`). The projectile layer has no
+            // hover-then-relaunch AI (the same narrowing the deathray already carries), so the six
+            // are fired as one aimed fan at the launch tick rather than gathered first.
+            if within as i32 == 292 {
+                fire_fan(
+                    npc,
+                    out,
+                    target,
+                    6,
+                    PHANTASMAL_SPHERE,
+                    PHANTASMAL_SPHERE_DAMAGE,
+                    12.0,
+                );
+            }
+        }
+        3 => fire_spread(npc, out, target, within, dur),
+        // Nought is a pause.
+        _ => {}
+    }
+}
+
+/// The head's attacks. Attack 1 is the charged deathray, attack 2 the leech attack, attack 3 the
+/// bolt spread. ML-4: it charges and fires the deathray, and runs neither of the hands' attacks.
+fn run_head_attack(
+    npc: &Npc,
+    out: &mut MoonLordOutcome,
+    target: (f32, f32),
+    attack: u8,
+    within: f32,
+    dur: i32,
+) {
+    match attack {
+        1 => {
+            // ML-4: a hundred and eighty ticks of wind-up, then the beam (`NPC.cs:42606-42690`:
+            // dust while `num < 180`, proj 455 at `num == 180`). A hand's id-1 attack is the eye
+            // stream instead, so only the head ever fires the deathray. The projectile flies
+            // straight for its lifetime (the sweep is a projectile-lane concern, not modelled here).
+            if within as i32 == 180 {
+                let (cx, cy) = npc.center();
+                let aim = (target.0 - cx, target.1 - cy);
+                let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
                 out.shots.push(Shot {
                     projectile: PHANTASMAL_DEATHRAY,
                     damage: PHANTASMAL_DEATHRAY_DAMAGE,
                     position: npc.center(),
-                    velocity: (0.0, -1.0),
+                    velocity: (aim.0 / length, aim.1 / length),
                     time_left: MOON_LORD_RAY_SWEEP as u16,
                 });
             }
-            // ...and it puts out leeches while it fires.
-            if npc.ai[1] % 60.0 == 0.0 {
+        }
+        2 => {
+            // The leech attack: the head puts out leeches that carry life back to the most-hurt
+            // part (`NPC.cs:42691-42730`, proj 456 branding players and spawning NPC 401). Narrowed
+            // to one leech every sixty ticks; the brand-then-blob plumbing is not modelled.
+            if within % 60.0 == 0.0 {
                 out.spawn.push(Spawn {
                     npc_type: MOON_LORD_LEECH,
                     position: npc.center(),
@@ -283,49 +388,50 @@ pub fn eye_socket(
                 });
             }
         }
-        2 => {
-            // A hand's heavy attack is a single phantasmal eye, thrown once.
-            if npc.ai[1] as i32 == 1 {
-                out.shots.push(aimed(
-                    npc,
-                    target.center,
-                    PHANTASMAL_EYE,
-                    PHANTASMAL_EYE_DAMAGE,
-                    6.0,
-                ));
-            }
-        }
-        3 if npc.ai[1] as i32 == 1 => {
-            // The spread: spheres thrown outward on an even fan.
-            {
-                for i in 0..3 {
-                    let angle = (i as f32 - 1.0) * 0.4;
-                    let aim = (target.center.0 - cx, target.center.1 - cy);
-                    let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
-                    let (sin, cos) = angle.sin_cos();
-                    let unit = (aim.0 / length, aim.1 / length);
-                    out.shots.push(Shot {
-                        projectile: PHANTASMAL_SPHERE,
-                        damage: PHANTASMAL_SPHERE_DAMAGE,
-                        position: (cx, cy),
-                        velocity: (
-                            (unit.0 * cos - unit.1 * sin) * 5.0,
-                            (unit.0 * sin + unit.1 * cos) * 5.0,
-                        ),
-                        time_left: 900,
-                    });
-                }
-            }
-        }
-        // Nought is a pause.
+        3 => fire_spread(npc, out, target, within, dur),
         _ => {}
     }
+}
 
-    if npc.ai[1] >= ticks as f32 {
-        npc.ai[1] = 0.0;
-        npc.local_ai[0] += 1.0;
+/// The bolt spread (attack 3), the same for a hand and the head: a bolt at `num2 == num3-14`,
+/// `num3-7` and `num3` (`NPC.cs:42297-42302`, `NPC.cs:42760-42766`). `num2` only ever reaches
+/// `num3-1` within a step, so the third (`== num3`) never fires, exactly as in vanilla.
+fn fire_spread(npc: &Npc, out: &mut MoonLordOutcome, target: (f32, f32), within: f32, dur: i32) {
+    let n = within as i32;
+    if n == dur - 14 || n == dur - 7 || n == dur {
+        out.shots.push(aimed(
+            npc,
+            target,
+            PHANTASMAL_BOLT,
+            PHANTASMAL_BOLT_DAMAGE,
+            8.0,
+        ));
     }
-    out
+}
+
+/// Throw `count` shots at the player in an even fan, so a barrage reads as more than one shot.
+fn fire_fan(
+    npc: &Npc,
+    out: &mut MoonLordOutcome,
+    target: (f32, f32),
+    count: usize,
+    projectile: u16,
+    damage: i32,
+    speed: f32,
+) {
+    let (cx, cy) = npc.center();
+    let base = (target.1 - cy).atan2(target.0 - cx);
+    for i in 0..count {
+        let spread = (i as f32 - (count as f32 - 1.0) / 2.0) * 0.12;
+        let angle = base + spread;
+        out.shots.push(Shot {
+            projectile,
+            damage,
+            position: (cx, cy),
+            velocity: (angle.cos() * speed, angle.sin() * speed),
+            time_left: 600,
+        });
+    }
 }
 
 /// Style 81: an eye that has come out of its broken socket.
@@ -396,7 +502,6 @@ fn aimed(npc: &Npc, player: (f32, f32), projectile: u16, damage: i32, speed: f32
 mod tests {
     use super::*;
     use crate::game::npc_ai::Target;
-    use rand::SeedableRng;
     use std::collections::HashMap;
     use terrustia_proto::tile::Tile;
 
@@ -494,12 +599,7 @@ mod tests {
             let mut hand = piece(MOON_LORD_HAND);
             hand.ai[0] = state::BROKEN;
             hand.ai[2] = side;
-            eye_socket(
-                &mut hand,
-                &w,
-                Some(core_part),
-                &mut SmallRng::seed_from_u64(0),
-            );
+            eye_socket(&mut hand, &w, Some(core_part));
             hand.velocity.0
         };
         assert!(pull(0.0) < pull(1.0), "ai[2]=0 seats left of ai[2]=1");
@@ -580,50 +680,100 @@ mod tests {
         );
     }
 
-    /// Each eye is given one of three scripts, and they are not all the same.
+    /// Run a part through enough ticks to loop its row, and return the attack ids in the order they
+    /// first ran (consecutive repeats of the same attack collapsed).
+    fn attack_sequence(w: &World<'_, Sky>, npc_type: u16, side: f32) -> Vec<u8> {
+        let mut e = piece(npc_type);
+        e.ai[2] = side;
+        let mut seq: Vec<u8> = Vec::new();
+        for _ in 0..2400 {
+            eye_socket(&mut e, w, Some(core_at((0.0, 0.0), state::WAITING)));
+            let a = e.ai[0] as u8;
+            if seq.last() != Some(&a) {
+                seq.push(a);
+            }
+        }
+        seq
+    }
+
+    /// ML-3: the attack row is fixed by which part it is, never random. The left hand runs row 0,
+    /// the right hand row 1, the head row 2, and each steps that row in order. Restoring the random
+    /// `ai[3] = rng` script (or picking the row any other way) breaks this per-part sequence.
     #[test]
-    fn the_eyes_run_different_scripts() {
+    fn each_part_runs_its_own_fixed_row() {
         let tiles = Sky(HashMap::new());
         let w = world(&tiles, Some((0.0, 600.0)));
-        let mut scripts = std::collections::HashSet::new();
-        for seed in 0..40 {
-            let mut rng = SmallRng::seed_from_u64(seed);
-            let mut h = piece(MOON_LORD_HAND);
-            eye_socket(
-                &mut h,
-                &w,
-                Some(core_at((0.0, 0.0), state::WAITING)),
-                &mut rng,
-            );
-            scripts.insert(h.ai[3] as i32);
-        }
-        assert!(
-            scripts.len() > 1,
-            "they should not all get the same: {scripts:?}"
+        let expect =
+            |row: usize| -> Vec<u8> { MOON_LORD_SCRIPTS[row].iter().map(|s| s.0).collect() };
+        assert_eq!(
+            attack_sequence(&w, MOON_LORD_HAND, 0.0)[..5],
+            expect(0)[..],
+            "the left hand runs row 0"
         );
-        assert!(
-            scripts.iter().all(|s| (0..3).contains(s)),
-            "and all of them real: {scripts:?}"
+        assert_eq!(
+            attack_sequence(&w, MOON_LORD_HAND, 1.0)[..5],
+            expect(1)[..],
+            "the right hand runs row 1"
+        );
+        assert_eq!(
+            attack_sequence(&w, MOON_LORD_HEAD, 0.0)[..5],
+            expect(2)[..],
+            "the head runs row 2, whatever its ai[2]"
         );
     }
 
-    /// The head fires a deathray and puts out leeches; a hand does neither.
+    /// ML-6: a part carries its parent core's slot in `ai[3]` on the wire, so a client running the
+    /// part's own AI can find the core it hangs from. The old model overwrote `ai[3]` with a random
+    /// script index (0, 1 or 2), which a client would read as "my parent is NPC slot 0, 1 or 2".
     #[test]
-    fn only_the_head_fires_the_deathray() {
+    fn a_part_carries_its_parent_slot_on_the_wire() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut h = piece(MOON_LORD_HAND);
+        h.follows_boss = Some(37);
+        eye_socket(&mut h, &w, Some(core_at((0.0, 0.0), state::WAITING)));
+        assert_eq!(
+            h.ai[3], 37.0,
+            "ai[3] carries the core's slot, not a script index"
+        );
+    }
+
+    /// ML-5: a hand's heavy attack (id 2) throws six spheres, not one. The old model threw a single
+    /// phantasmal eye on the attack's first tick.
+    #[test]
+    fn a_hands_heavy_attack_throws_six_spheres() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        // The left hand (row 0) reaches attack 2 after its idle (50) and stream (70). One full loop
+        // (600 ticks) passes through the single launch.
+        let mut h = piece(MOON_LORD_HAND);
+        h.ai[2] = 0.0;
+        let mut spheres = 0;
+        for _ in 0..600 {
+            let out = eye_socket(&mut h, &w, Some(core_at((0.0, 0.0), state::WAITING)));
+            spheres += out
+                .shots
+                .iter()
+                .filter(|s| s.projectile == PHANTASMAL_SPHERE)
+                .count();
+        }
+        assert_eq!(spheres, 6, "six spheres launched together, not one");
+    }
+
+    /// ML-4: the head fires the deathray and puts out leeches, and runs neither of a hand's attacks;
+    /// a hand throws eyes and spheres and never the deathray. The same attack id means different
+    /// things on the two parts (id 1 is a hand's eye stream but the head's deathray; id 2 is a
+    /// hand's sphere barrage but the head's leech attack), which is why the sets do not overlap.
+    #[test]
+    fn the_head_and_hands_run_different_attacks() {
         let tiles = Sky(HashMap::new());
         let w = world(&tiles, Some((0.0, 600.0)));
         let fired = |npc_type: u16| {
-            let mut rng = SmallRng::seed_from_u64(3);
             let mut e = piece(npc_type);
             let mut projectiles = std::collections::HashSet::new();
             let mut leeches = 0;
             for _ in 0..4000 {
-                let out = eye_socket(
-                    &mut e,
-                    &w,
-                    Some(core_at((0.0, 0.0), state::WAITING)),
-                    &mut rng,
-                );
+                let out = eye_socket(&mut e, &w, Some(core_at((0.0, 0.0), state::WAITING)));
                 for shot in out.shots {
                     projectiles.insert(shot.projectile);
                 }
@@ -637,16 +787,51 @@ mod tests {
             "the head has the ray"
         );
         assert!(head_leeches > 0, "and puts out leeches");
+        assert!(
+            !head_shots.contains(&PHANTASMAL_SPHERE),
+            "the head does not run the hand's sphere barrage"
+        );
 
         let (hand_shots, hand_leeches) = fired(MOON_LORD_HAND);
         assert!(
             !hand_shots.contains(&PHANTASMAL_DEATHRAY),
-            "a hand does not"
+            "a hand never fires the deathray"
         );
         assert_eq!(hand_leeches, 0, "nor leeches");
         assert!(
-            hand_shots.contains(&PHANTASMAL_EYE),
-            "it throws eyes instead"
+            hand_shots.contains(&PHANTASMAL_EYE) && hand_shots.contains(&PHANTASMAL_SPHERE),
+            "it throws eyes and spheres instead"
+        );
+    }
+
+    /// ML-4: the head charges its deathray for a hundred and eighty ticks before it fires, rather
+    /// than loosing it the instant the attack begins. Seat the timeline at the start of row 2's
+    /// deathray step (cumulative start 180+30+435+180 = 825) and watch when the ray appears.
+    #[test]
+    fn the_head_charges_before_the_deathray_fires() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut head = piece(MOON_LORD_HEAD);
+        head.follows_boss = Some(5);
+        head.ai[1] = 825.0;
+        let mut ray_ticks = Vec::new();
+        for tick in 0..375 {
+            let out = eye_socket(&mut head, &w, Some(core_at((0.0, 0.0), state::WAITING)));
+            if head.ai[0] as u8 != 1 {
+                break; // left the deathray step
+            }
+            if out
+                .shots
+                .iter()
+                .any(|s| s.projectile == PHANTASMAL_DEATHRAY)
+            {
+                ray_ticks.push(tick);
+            }
+        }
+        assert_eq!(
+            ray_ticks,
+            vec![179],
+            "the ray fires once, on the hundred-and-eightieth tick of the charge"
         );
     }
 
@@ -654,20 +839,14 @@ mod tests {
     #[test]
     fn a_socket_without_a_core_is_gone() {
         let tiles = Sky(HashMap::new());
-        let mut rng = SmallRng::seed_from_u64(5);
         let w = world(&tiles, Some((0.0, 600.0)));
         let mut h = piece(MOON_LORD_HAND);
-        assert!(eye_socket(&mut h, &w, None, &mut rng).spent);
+        assert!(eye_socket(&mut h, &w, None).spent);
 
         let mut broken = piece(MOON_LORD_HAND);
         broken.local_ai[3] = 1.0;
         broken.ai[0] = state::BROKEN;
-        eye_socket(
-            &mut broken,
-            &w,
-            Some(core_at((0.0, 0.0), state::WAITING)),
-            &mut rng,
-        );
+        eye_socket(&mut broken, &w, Some(core_at((0.0, 0.0), state::WAITING)));
         assert!(broken.invulnerable, "an empty socket takes nothing");
     }
 
@@ -678,7 +857,6 @@ mod tests {
     #[test]
     fn breaking_a_socket_opens_it_and_frees_an_eye() {
         let tiles = Sky(HashMap::new());
-        let mut rng = SmallRng::seed_from_u64(7);
         let w = world(&tiles, Some((0.0, 600.0)));
 
         let mut h = piece(MOON_LORD_HAND);
@@ -698,7 +876,7 @@ mod tests {
         let core_part = core_at((0.0, 0.0), state::WAITING);
         let mut freed = 0;
         for _ in 0..10 {
-            freed += eye_socket(&mut h, &w, Some(core_part), &mut rng)
+            freed += eye_socket(&mut h, &w, Some(core_part))
                 .spawn
                 .iter()
                 .filter(|s| s.npc_type == MOON_LORD_FREE_EYE)
