@@ -436,6 +436,25 @@ impl GameServer {
     /// disclosed ordering bias, not a fairness guarantee, since the problem this fixes (one join
     /// stalling everyone already playing) does not depend on joiners being served evenly.
     pub(super) fn drain_section_streams(&mut self) {
+        self.drain_section_streams_bounded(None, SECTION_STREAM_BUDGET);
+    }
+
+    /// The shared drain itself, bounded by whichever limit trips first.
+    ///
+    /// `time_budget` is the wall-clock share of a tick a drain may spend (`SECTION_STREAM_BUDGET`
+    /// in production). `max_sections` is a hard cap on how many sections the whole call may send,
+    /// and is `None` in production, so a real drain is bounded only by the wall clock exactly as
+    /// before. The cap exists purely so a test can drive the drain over a fixed section count
+    /// rather than the wall clock: the number of sections that fit in four milliseconds swings with
+    /// CI scheduling, which is what let the shared-budget test flake, so `Some(n)` makes the shared
+    /// accounting deterministic without weakening what it proves. The counter is per call, spanning
+    /// every slot, so it stays a shared budget: were it reset per player, two joiners would drain
+    /// twice what one does, which is exactly the regression this whole mechanism guards against.
+    fn drain_section_streams_bounded(
+        &mut self,
+        max_sections: Option<usize>,
+        time_budget: Duration,
+    ) {
         let slots: Vec<u8> = self
             .players
             .iter()
@@ -444,12 +463,14 @@ impl GameServer {
             .map(|p| p.slot)
             .collect();
         let began = Instant::now();
+        let mut sent = 0usize;
         for slot in slots {
             while let Some((sx, sy)) = self
                 .player_mut(slot)
                 .and_then(|p| p.pending_sections.pop_front())
             {
                 let _ = self.send_section(slot, sx, sy);
+                sent += 1;
                 let drained = self
                     .player(slot)
                     .is_some_and(|p| p.pending_sections.is_empty());
@@ -457,7 +478,7 @@ impl GameServer {
                     self.finish_join_stream(slot);
                     break;
                 }
-                if began.elapsed() >= SECTION_STREAM_BUDGET {
+                if max_sections.is_some_and(|cap| sent >= cap) || began.elapsed() >= time_budget {
                     return;
                 }
             }
@@ -4627,18 +4648,38 @@ mod section_streaming {
     }
 
     /// The budget is shared across every player streaming at once, not given to each one
-    /// separately: two simultaneous joiners must not be able to drain roughly twice what one
-    /// alone would in the same call — that would let a burst of simultaneous joins reproduce the
-    /// exact stall this whole mechanism exists to prevent, just triggered by many joiners instead
-    /// of one, exactly the scaling bug an earlier draft of this fix actually had (a `began`
-    /// per player rather than per call).
+    /// separately: two simultaneous joiners must not be able to drain more than one alone would in
+    /// the same call — that would let a burst of simultaneous joins reproduce the exact stall this
+    /// whole mechanism exists to prevent, just triggered by many joiners instead of one, exactly
+    /// the scaling bug an earlier draft of this fix actually had (a `began` per player rather than
+    /// per call).
+    ///
+    /// Driven over a fixed section cap (`drain_section_streams_bounded(Some(cap), ..)`) rather than
+    /// the wall clock. The production drain stops on a four-millisecond budget, and how many
+    /// sections fit in four milliseconds swings with CI scheduling, so comparing a solo drain's
+    /// count against a paired drain's over the wall clock could flip either way under load even when
+    /// the budget was correctly shared. The section cap makes the shared accounting exact without
+    /// weakening the property: a shared budget drains exactly `cap` sections whether one player or
+    /// two are queued, while a per-player budget would drain `2 * cap` for two.
     #[test]
     fn the_drain_budget_is_shared_across_players_not_given_to_each_one() {
         let (mut solo, _rx) = with_one_player(GameServer::new(Config::default(), real_world()));
         let queued = all_sections(&solo).len();
+        // Half the world's sections: strictly fewer than one player has queued, so the drain always
+        // stops on the cap with sections still pending rather than emptying a queue early.
+        let cap = queued / 2;
+        assert!(
+            cap > 0,
+            "world too small to prove anything about a shared cap"
+        );
+
         solo.player_mut(0).unwrap().pending_sections = all_sections(&solo);
-        solo.drain_section_streams();
+        solo.drain_section_streams_bounded(Some(cap), Duration::MAX);
         let solo_sent = queued - solo.player(0).unwrap().pending_sections.len();
+        assert_eq!(
+            solo_sent, cap,
+            "one player alone should drain exactly the shared cap"
+        );
 
         let (mut paired, _rx_a) = with_one_player(GameServer::new(Config::default(), real_world()));
         let (out_tx_b, _rx_b) = mpsc::channel(100_000);
@@ -4648,12 +4689,12 @@ mod section_streaming {
         paired.player_mut(0).unwrap().pending_sections = all_sections(&paired);
         paired.player_mut(1).unwrap().pending_sections = all_sections(&paired);
 
-        paired.drain_section_streams();
+        paired.drain_section_streams_bounded(Some(cap), Duration::MAX);
 
         let paired_sent = (queued - paired.player(0).unwrap().pending_sections.len())
             + (queued - paired.player(1).unwrap().pending_sections.len());
-        assert!(
-            paired_sent <= solo_sent * 3 / 2,
+        assert_eq!(
+            paired_sent, solo_sent,
             "two simultaneous joiners together drained {paired_sent} sections in one call, \
              vs {solo_sent} for one alone — the budget is being given to each player \
              separately instead of shared across the whole call"
