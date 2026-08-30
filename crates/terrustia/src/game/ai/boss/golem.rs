@@ -93,6 +93,7 @@ pub fn body(npc: &mut Npc, world: &World<'_, impl TileView>, state: GolemState) 
                 position: (cx + offset.0, cy + offset.1),
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
     }

@@ -318,6 +318,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                 position: from,
                 velocity: (dx * k, dy * k),
                 parent: None,
+                ai: [None; 4],
             });
             npc.dirty = true;
         }

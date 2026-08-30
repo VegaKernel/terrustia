@@ -330,6 +330,7 @@ pub fn mothron(
                         position: (npc.ai[1], npc.ai[2]),
                         velocity: (0.0, 0.0),
                         parent: None,
+                        ai: [None; 4],
                     });
                 } else if npc.ai[3] >= wait * 2.0 {
                     let relay =
