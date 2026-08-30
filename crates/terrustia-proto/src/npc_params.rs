@@ -3515,7 +3515,10 @@ pub const GOLEM_PUNCH_HALF: f32 = 4.0;
 pub const GOLEM_PUNCH_QUARTER: f32 = 4.0;
 pub const GOLEM_PUNCH_BODY_HURT: f32 = 10.0;
 pub const GOLEM_PUNCH_CAP: f32 = 48.0;
-pub const GOLEM_PUNCH_TICKS: f32 = 60.0;
+/// GOL-1: a punch retracts by distance, not a timer. It goes home once the fist is more than this
+/// far from its station or has struck terrain (`NPC.cs:19483`, `num2 > 700f || collideX ||
+/// collideY`). `num2` is the fist's distance from its home station, so this is its reach.
+pub const GOLEM_PUNCH_REACH: f32 = 700.0;
 
 /// The free head, once the body is dead: it hovers three hundred pixels above you.
 pub const GOLEM_FREE_ABOVE: f32 = 300.0;
