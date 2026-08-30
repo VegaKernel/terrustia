@@ -251,6 +251,12 @@ impl GameServer {
     /// tick that took a long time without using the processor is the machine being busy elsewhere.
     /// The breakdown comes with the first one, because "a tick took 26 ms" is a mystery and "the
     /// spawn scan took 26 ms" is a bug report.
+    ///
+    /// The per-window `tick window` line is `debug`, so an ordinary server stays quiet; the release
+    /// qualification bar ("p99 tick under budget") needs it, so `tools/soak_scale.sh` turns it on
+    /// for this module alone with `TERRUSTIA_LOG=info,terrustia::game::server::tick=debug`. Every
+    /// line here names the worst tick's processor time `cpu_us`, so one field carries the
+    /// measurement whatever level it came out at.
     fn note_tick_cost(&mut self, cost: TickCost) {
         self.last_tick = cost;
         if self.ticks.is_multiple_of(STATUS_EVERY) {
@@ -278,7 +284,12 @@ impl GameServer {
         if worst.cpu * 2 > TICK {
             let (phase, phase_cost) = worst.worst_phase();
             warn!(
-                worst_us = worst.cpu.as_micros() as u64,
+                // The same quantity the `tick window` line above reports, and deliberately under
+                // the same field name. It was `worst_us` here and `cpu_us` there, which meant
+                // anything reading the log for tick cost (tools/soak_scale.sh) matched the quiet
+                // line and missed this one: the only line that fires when a tick is genuinely
+                // over budget. One name for one measurement.
+                cpu_us = worst.cpu.as_micros() as u64,
                 budget_us = TICK.as_micros() as u64,
                 phase,
                 phase_us = phase_cost.as_micros() as u64,

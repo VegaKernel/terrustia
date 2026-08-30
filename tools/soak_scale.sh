@@ -23,7 +23,19 @@ WORK="$(mktemp -d)"
 BIN="$ROOT/target/release/terrustia"
 SOAK="$ROOT/target/release/examples/soak"
 
-trap 'kill "${SRV:-}" "${SAMPLER:-}" 2>/dev/null; rm -rf "$WORK"' EXIT
+# Set SOAK_KEEP=1 to leave the run directory behind. A run that is never looked at again is a run
+# whose evidence is gone: the tick samples, the server log and the per-client logs all live in here,
+# and once the trap has fired there is no way back to them.
+KEEP="${SOAK_KEEP:-0}"
+cleanup() {
+  kill "${SRV:-}" "${SAMPLER:-}" 2>/dev/null
+  if [ "$KEEP" = 1 ]; then
+    echo "run directory kept: $WORK"
+  else
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT
 
 [ -x "$BIN" ]  || { echo "build first: cargo build --release -p terrustia --bin terrustia"; exit 1; }
 [ -x "$SOAK" ] || { echo "build first: cargo build --release -p terrustia-client --example soak"; exit 1; }
@@ -32,7 +44,10 @@ PORT=$((20000 + RANDOM % 20000))
 echo "=== server: max_players=$PLAYERS, world 4200x1200, port $PORT ==="
 # Lift the per-address cap (all clients share 127.0.0.1) and give max_connections a little headroom
 # over the player count. Every other limit is left at its default.
-TERRUSTIA_LOG=info \
+# The tick module goes to debug so its per-window `tick window` line is emitted; that line is the
+# only source of the server's own processor cost per tick, and the release bar is stated in terms of
+# it. Everything else stays at info, so this does not turn the run into a wall of logging.
+TERRUSTIA_LOG=info,terrustia::game::server::tick=debug \
   TERRUSTIA_MAX_PLAYERS="$PLAYERS" \
   TERRUSTIA_MAX_CONNECTIONS="$((PLAYERS + 16))" \
   TERRUSTIA_MAX_CONNECTIONS_PER_ADDRESS="$PLAYERS" \
@@ -87,8 +102,34 @@ echo "peak slot the server assigned: ${peak_slot:-none}"
 echo "server RSS: start $((MEM_START/1024)) MiB -> end $(( ${MEM_END:-0}/1024 )) MiB"
 echo "--- RSS curve over the hold (plateau vs leak) ---"; cat "$WORK/mem.log" 2>/dev/null || echo "(no samples)"
 echo "--- server tick cost: its own cpu vs any external stall ---"
-grep -oE 'cpu_us=[0-9]+' "$WORK/server.log" | grep -oE '[0-9]+' | sort -n | tail -1 \
-  | xargs -I{} echo "highest cpu_us sample: {} us (budget 16667 us/tick)"
+# Every `cpu_us` the server logged, in order. Each sample is already the *worst* tick of a ten-second
+# window (the loop maxes into `worst_tick` and takes it), so a percentile here is a percentile of
+# window maxima: a stricter reading than a true per-tick percentile, not a looser one. A 30-minute
+# hold yields about 180 samples.
+BUDGET_US=16667
+grep -oE 'cpu_us=[0-9]+' "$WORK/server.log" | grep -oE '[0-9]+' | sort -n > "$WORK/cpu_us.txt"
+tick_samples=$(wc -l < "$WORK/cpu_us.txt" | tr -d ' ')
+tick_p99=""
+if [ "${tick_samples:-0}" -gt 0 ]; then
+  read -r tick_p99 tick_line < <(awk -v budget="$BUDGET_US" '
+    { v[NR] = $1 }
+    END {
+      n = NR
+      # Nearest-rank on an already-sorted list; clamp so a short run cannot index past the end.
+      r50 = int((n + 1) / 2);        if (r50 < 1) r50 = 1; if (r50 > n) r50 = n
+      r95 = int(0.95 * n + 0.9999);  if (r95 < 1) r95 = 1; if (r95 > n) r95 = n
+      r99 = int(0.99 * n + 0.9999);  if (r99 < 1) r99 = 1; if (r99 > n) r99 = n
+      # The leading value is the p99 on its own, for the caller to read into a variable; the rest
+      # is the human line.
+      printf "%d over %d samples (worst tick per 10s window): median %d us | p95 %d us | p99 %d us | max %d us  (budget %d us/tick)\n", \
+        v[r99], n, v[r50], v[r95], v[r99], v[n], budget
+    }' "$WORK/cpu_us.txt")
+  echo "tick cost $tick_line"
+else
+  echo "NO tick-cost samples: the 'tick window' line is debug-level and did not reach the log."
+  echo "  Without it the release bar (p99 tick under budget) cannot be judged. Check that the"
+  echo "  server was started with terrustia::game::server::tick=debug in TERRUSTIA_LOG."
+fi
 grep -c "held off the processor" "$WORK/server.log" | xargs echo "external-stall warnings (test box, not the server):"
 
 # Shut the server down and confirm it writes a world on the way out.
@@ -103,5 +144,18 @@ panics=$(grep -icE "panic|thread .* panicked" "$WORK/server.log")
 [ "$panics" -eq 0 ] && echo "PASS  no panics" || { echo "FAIL  $panics panic line(s)"; fail=1; }
 if [ "$ok" -ge $(( PLAYERS * 9 / 10 )) ]; then echo "PASS  $ok/$PLAYERS clients connected and held"; else echo "FAIL  only $ok/$PLAYERS clients held"; fail=1; fi
 if [ "$saved_bytes" -gt 0 ]; then echo "PASS  world saved on shutdown ($saved_bytes bytes)"; else echo "FAIL  no world written on shutdown"; fail=1; fi
+# The release bar names p99 tick cost, so the run judges it rather than printing a number for a
+# person to eyeball. No samples is a failure and not a pass: an absent measurement used to be
+# indistinguishable from a good one, which is how "peak cpu_us 3889 us" came to be quoted as tick
+# cost when it was only ever the cost of whichever tick happened to coincide with a machine stall.
+if [ -n "$tick_p99" ]; then
+  if [ "$tick_p99" -le "$BUDGET_US" ]; then
+    echo "PASS  p99 tick ${tick_p99} us within the ${BUDGET_US} us budget"
+  else
+    echo "FAIL  p99 tick ${tick_p99} us over the ${BUDGET_US} us budget"; fail=1
+  fi
+else
+  echo "FAIL  no tick-cost samples; the p99-under-budget bar could not be judged"; fail=1
+fi
 [ "$fail" -eq 0 ] && echo "=== soak PASSED ===" || echo "=== soak FAILED ==="
 exit "$fail"
