@@ -1074,7 +1074,10 @@ mod chest_loot_tests {
         let mut rand = UnifiedRandom::new(1);
 
         let (loot, style) = dungeon_loot(&mut rand, &layout, just_deep, 0);
-        assert_eq!(loot[0].id, 155, "slot 0 (Muramasa), not overridden to a key");
+        assert_eq!(
+            loot[0].id, 155,
+            "slot 0 (Muramasa), not overridden to a key"
+        );
         assert_eq!(style, 2, "locked, not the near-surface unlocked override");
     }
 

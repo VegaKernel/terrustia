@@ -458,7 +458,10 @@ mod tests {
         let existing = Tile::block(2).with_wall(300);
         let decoded = round_trip_over(&square, |_, _| existing);
 
-        assert_eq!(decoded.tiles[0].wall, 0, "vanilla clears the wall rather than keeping it");
+        assert_eq!(
+            decoded.tiles[0].wall, 0,
+            "vanilla clears the wall rather than keeping it"
+        );
     }
 
     /// `block`/`frame_x`/`frame_y`/`slope` are all inside vanilla's own `if (tile4.active())`

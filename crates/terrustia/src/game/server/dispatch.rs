@@ -1048,9 +1048,7 @@ impl GameServer {
         // (`MessageBuffer.cs:2325-2364`). `Lang.mp[13 + team]` names it for teams 0-4; team 5
         // (pink) is `Lang.mp[22]` specifically, not the `13 + team` formula's own `mp[18]` — a
         // real quirk in vanilla's own switch, not a typo to "fix" here.
-        if let Some((name, playing)) = self
-            .player(slot)
-            .map(|p| (p.name.clone(), p.is_playing()))
+        if let Some((name, playing)) = self.player(slot).map(|p| (p.name.clone(), p.is_playing()))
             && playing
         {
             let key = if team == 5 {
@@ -4828,7 +4826,8 @@ mod pvp_and_team_chat_lines {
 
     #[test]
     fn enabling_pvp_broadcasts_lang_mp_11_to_everyone_including_the_toggler() {
-        let (mut server, mut rxs) = with_players(2, GameServer::new(Config::default(), tiny_world()));
+        let (mut server, mut rxs) =
+            with_players(2, GameServer::new(Config::default(), tiny_world()));
         server.on_pvp(0, &pvp_payload(true)).unwrap();
 
         for (slot, rx) in rxs.iter_mut().enumerate() {
@@ -4844,7 +4843,8 @@ mod pvp_and_team_chat_lines {
 
     #[test]
     fn disabling_pvp_broadcasts_lang_mp_12() {
-        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
         server.on_pvp(0, &pvp_payload(false)).unwrap();
 
         let line = text_frames(&mut rxs[0])
@@ -4860,7 +4860,8 @@ mod pvp_and_team_chat_lines {
     /// already on team 2 (new team — should hear it); slot 3 is on team 3 (neither — must not).
     #[test]
     fn a_team_change_reaches_only_the_changer_and_old_and_new_teammates() {
-        let (mut server, mut rxs) = with_players(4, GameServer::new(Config::default(), tiny_world()));
+        let (mut server, mut rxs) =
+            with_players(4, GameServer::new(Config::default(), tiny_world()));
         server.player_mut(0).unwrap().team = 1;
         server.player_mut(1).unwrap().team = 1;
         server.player_mut(2).unwrap().team = 2;
@@ -4884,7 +4885,8 @@ mod pvp_and_team_chat_lines {
 
     #[test]
     fn an_ordinary_team_uses_lang_mp_thirteen_plus_team() {
-        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
         server.on_team(0, &team_payload(3)).unwrap();
 
         let line = text_frames(&mut rxs[0])
@@ -4899,7 +4901,8 @@ mod pvp_and_team_chat_lines {
     /// (`MessageBuffer.cs:2344-2347`).
     #[test]
     fn team_five_uses_lang_mp_22_not_the_formula() {
-        let (mut server, mut rxs) = with_players(1, GameServer::new(Config::default(), tiny_world()));
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
         server.on_team(0, &team_payload(5)).unwrap();
 
         let line = text_frames(&mut rxs[0])
@@ -5275,9 +5278,15 @@ mod net_module_relays {
 
         server.on_net_module(0, w.as_slice()).unwrap();
 
-        let relayed = other_rx.try_recv().expect("the other client should hear it");
+        let relayed = other_rx
+            .try_recv()
+            .expect("the other client should hear it");
         assert_eq!(relayed[2], terrustia_proto::id::NET_MODULES);
-        assert_eq!(&relayed[3..], w.as_slice(), "relayed byte for byte, unchanged");
+        assert_eq!(
+            &relayed[3..],
+            w.as_slice(),
+            "relayed byte for byte, unchanged"
+        );
         assert!(
             sender_rx.try_recv().is_err(),
             "the sender should not hear its own particles back"
@@ -5293,7 +5302,9 @@ mod net_module_relays {
 
         server.on_net_module(0, w.as_slice()).unwrap();
 
-        let relayed = other_rx.try_recv().expect("the other client should hear it");
+        let relayed = other_rx
+            .try_recv()
+            .expect("the other client should hear it");
         assert_eq!(&relayed[3..], w.as_slice());
         assert!(sender_rx.try_recv().is_err());
     }
@@ -5439,9 +5450,7 @@ mod craft_requests {
             .unwrap();
         // `can_craft_from_chest` reads the tile at exactly `(chest.x, chest.y)` — `Chest::empty_at`
         // above recorded that as `(10, 10)`.
-        server
-            .world
-            .set_tile(10, 10, Tile::framed(21, 72, 0));
+        server.world.set_tile(10, 10, Tile::framed(21, 72, 0));
 
         server
             .on_craft_request(0, request(&[(WOOD, 6)], &[id]))

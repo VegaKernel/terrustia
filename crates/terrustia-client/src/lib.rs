@@ -711,9 +711,10 @@ impl Client {
                 // own doc. Matters here because this crate exists to compare against a real
                 // server's wire behaviour; decoding into a fresh tile every time would silently
                 // diverge from what a real client ends up holding whenever a square omits a field.
-                let square = terrustia_proto::square::TileSquare::decode(&frame.payload, |x, y| {
-                    self.world.tile(x, y).unwrap_or(terrustia_proto::Tile::AIR)
-                })?;
+                let square =
+                    terrustia_proto::square::TileSquare::decode(&frame.payload, |x, y| {
+                        self.world.tile(x, y).unwrap_or(terrustia_proto::Tile::AIR)
+                    })?;
                 for dx in 0..usize::from(square.width) {
                     for dy in 0..usize::from(square.height) {
                         if let Some(tile) = square.tile(dx, dy) {
