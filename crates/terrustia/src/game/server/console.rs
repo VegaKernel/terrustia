@@ -139,6 +139,12 @@ impl GameServer {
                     (Some("add"), Some(name)) => {
                         if self.admin.add_to_whitelist(name) {
                             let _ = self.admin.save();
+                            self.audit.record(
+                                "console",
+                                crate::admin::AuditAction::Whitelist,
+                                name,
+                                "added",
+                            );
                             info!(target: CONSOLE_REPLY, name, "added to the guest list");
                         } else {
                             info!(target: CONSOLE_REPLY, name, "already on the guest list");
@@ -147,6 +153,12 @@ impl GameServer {
                     (Some("remove"), Some(name)) => {
                         if self.admin.remove_from_whitelist(name) {
                             let _ = self.admin.save();
+                            self.audit.record(
+                                "console",
+                                crate::admin::AuditAction::Whitelist,
+                                name,
+                                "removed",
+                            );
                             info!(target: CONSOLE_REPLY, name, "removed from the guest list");
                             // Take effect now rather than at their next join.
                             if let Some(slot) = self.slot_named(name) {
@@ -891,5 +903,54 @@ mod panel_toggle_command {
         .unwrap();
         drop(tx);
         assert_eq!(handle.await.unwrap(), Stopped::Cleanly);
+    }
+}
+
+#[cfg(test)]
+mod console_whitelist_audit {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "console whitelist audit probe")
+    }
+
+    /// A `GameServer` with a real, file-backed audit log rather than the in-memory one
+    /// `Config::default()` gives: an in-memory `AuditLog` records nothing at all
+    /// (`AuditLog::in_memory`'s own doc comment), which would make "an audit line was written"
+    /// untestable rather than merely false.
+    fn server_with_real_admin_files(name: &str) -> GameServer {
+        let dir = crate::safe_write::tests::temp_dir(name);
+        let config = Config {
+            save_file: Some(dir.join("world.wld")),
+            ..Config::default()
+        };
+        GameServer::new(config, tiny_world())
+    }
+
+    /// L6-05: `whitelist add|remove` typed at the server's own console used to change the guest
+    /// list with no audit trail at all, unlike every other console moderation command (`kick`,
+    /// `ban`, `mute`, `group` all record one via `run_admin_command`). Fail-then-pass: before the
+    /// `whitelist` arm in `run_console` called `self.audit.record`, `server.audit.tail(10)` after
+    /// this sequence was empty.
+    #[test]
+    fn whitelist_add_and_remove_from_the_console_are_audited() {
+        let mut server = server_with_real_admin_files("console-whitelist-audit");
+
+        server.run_console("whitelist add Brooklyn");
+        server.run_console("whitelist remove Brooklyn");
+
+        let tail = server.audit.tail(10);
+        assert_eq!(
+            tail.len(),
+            2,
+            "both the add and the remove must be audited: {tail:?}"
+        );
+        assert_eq!(tail[0].issuer, "console");
+        assert_eq!(tail[0].target, "Brooklyn");
+        assert_eq!(tail[0].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[0].detail, "added");
+        assert_eq!(tail[1].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[1].detail, "removed");
     }
 }

@@ -493,8 +493,14 @@ impl GameServer {
         Ok(())
     }
 
-    /// Delete an account, guarded so the last admin-capable one cannot be removed.
-    pub(super) fn panel_delete_account(&mut self, name: &str) -> Result<(), String> {
+    /// Delete an account, guarded so the last admin-capable one cannot be removed, and by the same
+    /// anti-escalation rule [`Self::panel_set_account_group`] applies: `actor` must already reach
+    /// everything the target account's own group holds (see `Admin::group_within_reach`), or this
+    /// refuses. Without it, an `admin.accounts` holder (which does not itself hold `admin.groups`)
+    /// could delete an `owner` account outright: a strictly bigger escalation than anything the
+    /// group-change route's own reach check stops, and one this route used to allow entirely
+    /// unchecked.
+    pub(super) fn panel_delete_account(&mut self, actor: &str, name: &str) -> Result<(), String> {
         let Some(account) = self
             .admin
             .accounts
@@ -503,6 +509,14 @@ impl GameServer {
         else {
             return Err(format!("there is no account called {name}"));
         };
+        let Some(actor_group) = self.admin.account_group(actor) else {
+            return Err("your own account no longer exists".into());
+        };
+        if !self.admin.group_within_reach(actor_group, &account.group) {
+            return Err(format!(
+                "you cannot delete {name}: their group holds permissions you do not have yourself"
+            ));
+        }
         if self.account_can_admin(account) && self.admin_capable_accounts() <= 1 {
             return Err(
                 "that is the only account that can still administer the server; it cannot be \
@@ -514,7 +528,9 @@ impl GameServer {
             .accounts
             .retain(|a| !a.name.eq_ignore_ascii_case(name));
         let _ = self.admin.save();
-        info!(account = name, "account deleted from the web panel");
+        self.audit
+            .record(actor, crate::admin::AuditAction::DeleteAccount, name, "");
+        info!(account = name, actor, "account deleted from the web panel");
         Ok(())
     }
 
@@ -757,6 +773,7 @@ mod panel_admin_events {
 
         let (add_reply, mut add_rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelWhitelistAdd {
+            actor: "owner".into(),
             name: "Brooklyn".into(),
             reply: add_reply,
         });
@@ -770,6 +787,7 @@ mod panel_admin_events {
 
         let (remove_reply, mut remove_rx) = oneshot_reply();
         server.handle_event(ServerEvent::PanelWhitelistRemove {
+            actor: "owner".into(),
             name: "brooklyn".into(), // case-insensitive, matching the console command
             reply: remove_reply,
         });
@@ -778,6 +796,163 @@ mod panel_admin_events {
         let (list_reply2, mut list_rx2) = oneshot_reply();
         server.handle_event(ServerEvent::PanelWhitelist { reply: list_reply2 });
         assert!(!list_rx2.try_recv().unwrap().on, "an empty list is off");
+    }
+
+    /// Sanity check for the helper the account-deletion and whitelist audit tests below rely on: an
+    /// in-memory admin store (no `save_file`, what `Config::default()` gives every other test in
+    /// this module) also has an in-memory audit log, which records nothing at all and would make "no
+    /// audit line was written" trivially true for the wrong reason. Those tests need a file-backed
+    /// log instead, via `server_with_real_admin_files`, so a refusal that wrote nothing can be told
+    /// apart from a store that could never have written anything.
+    #[test]
+    fn an_in_memory_admin_store_has_an_in_memory_audit_log_too() {
+        let server = GameServer::new(Config::default(), tiny_world());
+        assert!(
+            server.audit.tail(10).is_empty(),
+            "an in-memory audit log is always empty, by construction"
+        );
+    }
+
+    /// A `GameServer` whose `admin`/`audit` are backed by real files in a fresh temp directory,
+    /// rather than the in-memory stores `Config::default()` gives every other test in this module
+    /// (see the sanity check just above): needed here because the account-deletion tests must be
+    /// able to tell "refused, and correctly wrote no audit line" apart from "using a store that
+    /// cannot write one regardless". The directory is not cleaned up; it is process- and
+    /// thread-unique (`safe_write::tests::temp_dir`) and cheap enough to leave for the OS.
+    fn server_with_real_admin_files(name: &str) -> GameServer {
+        let dir = crate::safe_write::tests::temp_dir(name);
+        let save_file = dir.join("world.wld");
+        let config = Config {
+            save_file: Some(save_file),
+            ..Config::default()
+        };
+        GameServer::new(config, tiny_world())
+    }
+
+    /// L6-01: deleting an account used to skip the reach check every sibling account/group route
+    /// enforces, so an `admin`-tier account (holds `admin.accounts` but not `admin.groups`) could
+    /// delete an `owner` outright: a bigger escalation than `group_within_reach` was ever meant to
+    /// let through by the group-change route. This is the fail-then-pass case: before
+    /// `panel_delete_account` grew its own `group_within_reach` check, this refusal did not happen
+    /// (the deletion went through) and no audit line existed to catch it either, since the whole
+    /// route wrote none at all.
+    ///
+    /// Two `owner` accounts, deliberately: with only one, the pre-existing "do not strip the last
+    /// admin-capable account" guard refuses the same deletion for an unrelated reason (verified by
+    /// disabling the reach check locally and re-running this test: with a single owner it still
+    /// passed, for the wrong reason, which is exactly the false confidence a real regression could
+    /// hide behind). A second owner keeps that guard from firing, so a failure here can only mean
+    /// the reach check itself stopped catching the escalation.
+    #[test]
+    fn deleting_an_owner_as_an_admin_tier_account_is_refused_and_unaudited() {
+        let mut server = server_with_real_admin_files("panel-delete-account-refused");
+        server
+            .admin
+            .insert_account(crate::admin::Account::new("boss", "hunter22", "owner").unwrap())
+            .unwrap();
+        server
+            .admin
+            .insert_account(crate::admin::Account::new("boss2", "hunter22", "owner").unwrap())
+            .unwrap();
+        server
+            .admin
+            .insert_account(crate::admin::Account::new("shady", "hunter22", "admin").unwrap())
+            .unwrap();
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelDeleteAccount {
+            actor: "shady".into(),
+            name: "boss".into(),
+            reply,
+        });
+        let outcome = rx.try_recv().expect("a reply was sent");
+        assert!(
+            outcome.is_err(),
+            "an admin-tier actor must not be able to delete an owner, even when a second owner \
+             means the last-admin-capable guard would not have caught it either"
+        );
+        assert!(
+            server.admin.accounts.iter().any(|a| a.name == "boss"),
+            "the refused deletion must not have touched the account"
+        );
+        assert!(
+            server.audit.tail(10).is_empty(),
+            "a refused deletion must not write an audit line either"
+        );
+    }
+
+    /// The mirror of the refusal above: an actor whose group already reaches the target's group
+    /// (here, the owner deleting a lesser account) succeeds, and is recorded in the audit log with
+    /// the real actor as issuer, exactly as `panel_set_account_group`/`panel_create_account` are.
+    #[test]
+    fn deleting_an_account_within_the_actors_reach_succeeds_and_is_audited() {
+        let mut server = server_with_real_admin_files("panel-delete-account-allowed");
+        server
+            .admin
+            .insert_account(crate::admin::Account::new("boss", "hunter22", "owner").unwrap())
+            .unwrap();
+        server
+            .admin
+            .insert_account(crate::admin::Account::new("shady", "hunter22", "admin").unwrap())
+            .unwrap();
+
+        let (reply, mut rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelDeleteAccount {
+            actor: "boss".into(),
+            name: "shady".into(),
+            reply,
+        });
+        assert!(
+            rx.try_recv().expect("a reply was sent").is_ok(),
+            "an owner may delete an account within their reach"
+        );
+        assert!(
+            !server.admin.accounts.iter().any(|a| a.name == "shady"),
+            "the account must actually be gone"
+        );
+        let tail = server.audit.tail(10);
+        assert_eq!(tail.len(), 1, "the deletion must be audited");
+        assert_eq!(tail[0].issuer, "boss");
+        assert_eq!(tail[0].target, "shady");
+        assert_eq!(tail[0].action, crate::admin::AuditAction::DeleteAccount);
+    }
+
+    /// L6-05: whitelist changes made from the panel used to leave no trace in the audit log at all,
+    /// unlike every other moderation action (kick, ban, mute, group change all record one). Fail-
+    /// then-pass: before `PanelWhitelistAdd`/`PanelWhitelistRemove` threaded `actor` through to
+    /// `self.audit.record`, `server.audit.tail(10)` after this sequence was empty.
+    #[test]
+    fn whitelist_changes_from_the_panel_are_audited() {
+        let mut server = server_with_real_admin_files("panel-whitelist-audit");
+
+        let (add_reply, mut add_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistAdd {
+            actor: "boss".into(),
+            name: "Brooklyn".into(),
+            reply: add_reply,
+        });
+        assert!(add_rx.try_recv().unwrap());
+
+        let (remove_reply, mut remove_rx) = oneshot_reply();
+        server.handle_event(ServerEvent::PanelWhitelistRemove {
+            actor: "boss".into(),
+            name: "Brooklyn".into(),
+            reply: remove_reply,
+        });
+        assert!(remove_rx.try_recv().unwrap());
+
+        let tail = server.audit.tail(10);
+        assert_eq!(
+            tail.len(),
+            2,
+            "both the add and the remove must be audited: {tail:?}"
+        );
+        assert_eq!(tail[0].issuer, "boss");
+        assert_eq!(tail[0].target, "Brooklyn");
+        assert_eq!(tail[0].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[0].detail, "added");
+        assert_eq!(tail[1].action, crate::admin::AuditAction::Whitelist);
+        assert_eq!(tail[1].detail, "removed");
     }
 
     #[test]

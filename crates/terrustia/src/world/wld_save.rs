@@ -3,11 +3,14 @@
 //! There are two paths, and which one runs depends on where the world came from.
 //!
 //! A world **loaded from a file** keeps its own header. Saving re-serialises the header verbatim
-//! with the mutable fields patched in place, then the tiles, chests and signs; every later
-//! section — NPCs, tile entities, pressure plates, the town manager, the bestiary, creative
-//! powers and the footer — is written back exactly as it was read. Nothing is re-derived, so
-//! nothing can drift: a world round-trips byte-identically apart from the revision counter, and
-//! the state this server does not model survives untouched.
+//! with the mutable fields patched in place, then the tiles, chests and signs. Every later
+//! section is rewritten from this server's own live state rather than carried through: the
+//! townsfolk (with the Lunar Pillars' own second list), the tile entities, the pressure-plate
+//! section, the town manager's room list, the bestiary and the Journey powers. Only a townsfolk or
+//! tile-entity section a load did not fully understand — where rewriting from a partial read would
+//! mean silently dropping whatever came after the part that failed — still passes through as the
+//! bytes it arrived as, and only the footer riding on the tail of the last section is ever copied
+//! verbatim on purpose.
 //!
 //! A **generated** world has no header to copy, so one is written from scratch at
 //! [`SAVE_VERSION`] — the whole of the game's own flag order, with the fields this server does
@@ -116,27 +119,37 @@ pub fn serialize(world: &World) -> Result<Vec<u8>> {
     pointers[3] = section_pointer(w.len())?;
     write_signs(&mut w, world);
 
-    // --- sections 4..: carried through, except the tile entities ---------------------------
+    // --- sections 4..: rewritten from live state, except a section a load did not fully -----
+    //     understand and the footer riding on the tail of the last one
     //
-    // Section 5 is written from the server's own state rather than copied. It has to be: a pylon
-    // placed while the server was running is not in the bytes that were loaded, and one that was
-    // mined still is. Copying it back would mean the world remembered the pylons it had when it
-    // was opened and nothing since.
+    // Sections 5 (tile entities), 6 (pressure plates), 7 (the town manager's room list), 8 (the
+    // bestiary) and 9 (Journey powers) are all written from the server's own state rather than
+    // copied. It has to be: a pylon placed while the server was running is not in the bytes that
+    // were loaded, and one that was mined still is. Copying any of them back would mean the world
+    // remembered whatever it had when it was opened and nothing since.
     //
-    // Because that section can change length, the pointers cannot be a single shift any more —
+    // Because these sections can change length, the pointers cannot be a single shift any more —
     // each is taken from where its section actually lands.
     for (index, section) in preserved.trailing_sections.iter().enumerate() {
         pointers[4 + index] = section_pointer(w.len())?;
         match index {
             // Rewritten only when the load understood the whole section. Rewriting one we read
             // partially would write back what we managed to decode and silently drop the rest —
-            // which for these two sections means a world's residents or its pylons.
+            // which for these two sections means a world's residents (and the pillars riding in
+            // the same section's second list) or its pylons.
             TOWN_NPC_SECTION if preserved.town_npcs_understood => {
                 write_town_npcs(&mut w, world, preserved.version)
             }
             TILE_ENTITY_SECTION if preserved.tile_entities_understood => {
                 write_tile_entities(&mut w, world, preserved.version)
             }
+            // These four need no "understood" gate: none of them is rewritten from what was
+            // *read*, only from live server state, so a section this build could not decode
+            // simply loses nothing it was ever going to carry forward anyway.
+            PRESSURE_PLATE_SECTION => write_pressure_plates(&mut w),
+            TOWN_MANAGER_SECTION => write_town_rooms(&mut w, world),
+            BESTIARY_SECTION => write_bestiary(&mut w),
+            JOURNEY_SECTION => write_journey_powers(&mut w, world),
             _ => {
                 w.bytes(section);
             }
@@ -419,22 +432,23 @@ fn serialize_fresh(world: &World) -> Vec<u8> {
     write_signs(&mut w, world);
 
     // Sections 5 to 11 hold state this server keeps in memory rather than on the world: the
-    // townsfolk who have moved in, the tile entities, the pressure plates that are held down, the
-    // rooms the town manager has assigned, the bestiary and the creative powers. A generated world
-    // that has just been made has none of them, and one this server has been running keeps them
-    // elsewhere, so each is written empty in the shape its loader expects.
+    // townsfolk who have moved in (with the Lunar Pillars riding the same section), the tile
+    // entities, the pressure plates that are held down, the rooms the town manager has assigned,
+    // the bestiary and the Journey powers. A generated world that has just been made has none of
+    // them (`world`'s own fields are all still at their fresh-world defaults), so these are the
+    // same writers the loaded-world path uses, just fed a `World` with nothing live in it yet.
     pointers[4] = w.len() as i32;
     write_town_npcs(&mut w, world, SAVE_VERSION);
     pointers[5] = w.len() as i32;
     write_tile_entities(&mut w, world, SAVE_VERSION);
     pointers[6] = w.len() as i32;
-    w.i32(0); // no pressure plates held down
+    write_pressure_plates(&mut w);
     pointers[7] = w.len() as i32;
-    w.i32(0); // no rooms assigned
+    write_town_rooms(&mut w, world);
     pointers[8] = w.len() as i32;
-    w.i32(0).i32(0).i32(0); // bestiary: kills, sightings, conversations
+    write_bestiary(&mut w);
     pointers[9] = w.len() as i32;
-    w.bool(false); // no creative powers
+    write_journey_powers(&mut w, world);
     pointers[10] = w.len() as i32;
     // The footer, which is what the game checks a save against before trusting it.
     w.bool(true).string(&world.name).i32(world.id);
@@ -455,11 +469,27 @@ const TILE_ENTITY_SECTION: usize = 1;
 /// Index of the townsfolk among the trailing sections. Section 4 of the file.
 const TOWN_NPC_SECTION: usize = 0;
 
-/// Write the townsfolk, matching `WorldFile.SaveNPCs`.
+/// Section 6: which weighted pressure plates are held down. Index 2 of the trailing run.
+const PRESSURE_PLATE_SECTION: usize = 2;
+
+/// Section 7: the town manager's room list. Index 3 of the trailing run.
+const TOWN_MANAGER_SECTION: usize = 3;
+
+/// Section 8: the bestiary. Index 4 of the trailing run.
+const BESTIARY_SECTION: usize = 4;
+
+/// Section 9: the Journey powers. Index 5 of the trailing run.
+const JOURNEY_SECTION: usize = 5;
+
+/// Write the townsfolk, matching `WorldFile.SaveNPCs` (`WorldFile.cs:1710-1757`).
 ///
 /// Two lists, each led by a boolean per entry and closed by a bare `false`. The second holds the
-/// non-town NPCs the game persists; this server does not model those, so it writes an empty list —
-/// which is valid, and means they respawn rather than being carried.
+/// non-town NPCs the game persists — in this build's target version, exactly the four Lunar
+/// Pillars (`NPCID.Sets.SavesAndLoads`, `NPCID.cs:4807`) — written from `world.saved_npcs`, which
+/// `GameServer::record_lunar_pillars` fills from the live roster before every save the same way
+/// `world.town_npcs` is filled from it. Dropping this list (writing only the terminator) is the
+/// L3-02 bug: the next load's first `tick_lunar` then sees no pillar standing against a
+/// `tower_active_*` that still says one is, and marks every tower defeated.
 fn write_town_npcs(w: &mut Writer, world: &World, version: i32) {
     w.i32(world.shimmered_town_npcs.len() as i32);
     for kind in &world.shimmered_town_npcs {
@@ -487,6 +517,107 @@ fn write_town_npcs(w: &mut Writer, world: &World, version: i32) {
         }
     }
     w.bool(false);
+
+    for npc in &world.saved_npcs {
+        w.bool(true)
+            .i32(npc.net_id)
+            .f32(npc.position.0)
+            .f32(npc.position.1);
+    }
+    w.bool(false);
+}
+
+/// Section 6: which weighted pressure plates (tile 428) are currently held down
+/// (`SaveWeightedPressurePlates`, `WorldFile.cs:3374-3398`).
+///
+/// Real vanilla's own set (`PressurePlateHelper.PressurePlatesPressed`) is momentary — a plate a
+/// player is standing on right now — and this server keeps no equivalent at all: `wiring.rs`
+/// recognises tile 428 as wire-triggering but tracks no per-tile pressed state (live press/release
+/// tracking is a follow-up). Writing the bytes this section arrived with would mean re-firing
+/// whatever a *previous* session's players happened to be standing on the moment it saved, on a
+/// world nobody has even joined yet — worse than writing nothing, since real vanilla's own loader
+/// throws the pressed state away on every load regardless (`LoadWeightedPressurePlates` recreates
+/// a fresh, all-unpressed `bool[255]` per key; only the coordinate itself survives a round-trip in
+/// real vanilla, never any actual press state). An empty set is therefore the correct minimum for
+/// a server-owned world, not merely the easiest one.
+fn write_pressure_plates(w: &mut Writer) {
+    w.i32(0);
+}
+
+/// Section 7: `TownRoomManager`'s cache of which tile each town-NPC *type* currently has a room
+/// at (`SaveTownManager`, `WorldFile.cs:3400-3404`; `TownRoomManager.Save`,
+/// `TownRoomManager.cs:94-106`) — keyed by type rather than by NPC instance, at most one entry per
+/// type, matching the game's own `_hasRoom[NPCID.Count]` array.
+///
+/// Written from the residents `write_town_npcs` is about to record in section 4 (`world.town_npcs`,
+/// which `GameServer::record_town_npcs` fills from the live roster immediately before a save)
+/// rather than from this section's own imported bytes, or a resident who moved in — or died —
+/// since the world was opened would disagree with what section 4 says about them.
+fn write_town_rooms(w: &mut Writer, world: &World) {
+    let housed: Vec<_> = world.town_npcs.iter().filter(|npc| !npc.homeless).collect();
+    w.i32(housed.len() as i32);
+    for npc in housed {
+        w.i32(npc.net_id).i32(npc.home.0).i32(npc.home.1);
+    }
+}
+
+/// Section 8: the bestiary's three trackers - kills, sightings, conversations
+/// (`SaveBestiary`, `WorldFile.cs:3411-3415`; `BestiaryUnlocksTracker.Save`,
+/// `BestiaryUnlocksTracker.cs:13-18`), each its own `count` then `count` persistent-id entries
+/// (`NPCKillsTracker.cs:60-71`, `NPCWasNearPlayerTracker.cs:65-75`, `NPCWasChatWithTracker.cs`).
+///
+/// This server keeps no live equivalent of any of the three yet: no per-NPC persistent-id table,
+/// and nothing wired to a kill or a sighting (the client's banner-kill counter this project does
+/// track, `note_banner_kill`, is a different, separate vanilla system - `NetBannersModule`, not
+/// `NetBestiaryModule` - and does not cover every NPC a banner does not exist for). Carrying the
+/// imported bytes forward would claim progress the running server has no memory of and cannot
+/// keep in step with what sections 4/5 say happened this session, so the genuinely empty shape -
+/// three zero counts, exactly what a fresh world's own tracker looks like - is written instead.
+/// Live kill/sighting/chat tracking is a follow-up.
+fn write_bestiary(w: &mut Writer) {
+    w.i32(0).i32(0).i32(0);
+}
+
+/// Section 9: the Journey (creative) mode powers real vanilla persists per world, matching
+/// `CreativePowerManager.SaveToWorld` (`CreativePowerManager.cs:125-137`).
+///
+/// Only the six of vanilla's fifteen powers that implement `IPersistentPerWorldContent` are ever
+/// written (`CreativePowers.cs`'s own `FreezeTime`, `ModifyTimeRate`, `FreezeRainPower`,
+/// `FreezeWindDirectionAndStrength`, `DifficultySliderPower`, `StopBiomeSpreadPower`); the rest
+/// are one-shot day/noon/night/midnight buttons, per-player powers saved into a `.plr` file this
+/// project does not own, or (`ModifyWindDirectionAndStrength`/`ModifyRainPower`) not persisted by
+/// vanilla itself either - see `game/journey.rs`'s own module doc. Written from `world.journey_*`,
+/// which mirrors `GameServer::journey` before every save the same way `world.town_npcs` mirrors
+/// the live roster.
+///
+/// The four toggles each write one `bool`; the two sliders each write their raw 0.0-1.0 value as
+/// one `f32`, not the derived rate/multiplier (`ASharedTogglePower`/`ASharedSliderPower`'s own
+/// `Save` methods). Ids are `CreativePowerManager.Initialize`'s own registration order
+/// (`CreativePowerManager.cs:90-104`), shared with `wld::read_journey_powers` as the
+/// `wld::JOURNEY_*` constants.
+fn write_journey_powers(w: &mut Writer, world: &World) {
+    use super::wld::{
+        JOURNEY_DIFFICULTY_SLIDER, JOURNEY_FREEZE_RAIN, JOURNEY_FREEZE_TIME, JOURNEY_FREEZE_WIND,
+        JOURNEY_MODIFY_TIME_RATE, JOURNEY_STOP_BIOME_SPREAD,
+    };
+    w.bool(true)
+        .u16(JOURNEY_FREEZE_TIME)
+        .bool(world.journey_freeze_time);
+    w.bool(true)
+        .u16(JOURNEY_MODIFY_TIME_RATE)
+        .f32(world.journey_time_rate_slider);
+    w.bool(true)
+        .u16(JOURNEY_FREEZE_RAIN)
+        .bool(world.journey_freeze_rain);
+    w.bool(true)
+        .u16(JOURNEY_FREEZE_WIND)
+        .bool(world.journey_freeze_wind);
+    w.bool(true)
+        .u16(JOURNEY_DIFFICULTY_SLIDER)
+        .f32(world.journey_difficulty_slider);
+    w.bool(true)
+        .u16(JOURNEY_STOP_BIOME_SPREAD)
+        .bool(world.journey_stop_biome_spread);
     w.bool(false);
 }
 
@@ -1454,5 +1585,234 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `World` whose `preserved` is populated the way a real load leaves it, so re-serialising
+    /// it exercises `serialize`'s "preserved" branch (the trailing-section match arms) rather than
+    /// `serialize_fresh`'s. Built by round-tripping a freshly generated world once, exactly the way
+    /// `roundtrip_wld` and every real server does on its very first save after opening a file.
+    fn preserved_world() -> super::super::World {
+        let world = crate::world::worldgen::generate(400, 300, "preserved-fixture", 1);
+        let bytes = serialize(&world).expect("a fresh world must serialise");
+        super::super::wld::parse(&bytes).expect("and the bytes it wrote must parse back")
+    }
+
+    /// L3-02's headline fixture, at the `wld`/`wld_save` layer (the `GameServer`-level fixture -
+    /// pillars actually standing, `tick_lunar` run before and after - lives in
+    /// `game/server/systems.rs`, where the live roster and `tick_lunar` both are).
+    ///
+    /// The pillars (`world.saved_npcs`) must round-trip through a *preserved* world's save, not
+    /// just a fresh one — a fresh world's second list is empty by construction, which proves
+    /// nothing about the bug this section exists to fix.
+    #[test]
+    fn the_lunar_pillars_round_trip_through_a_preserved_worlds_save() {
+        use crate::world::objects::SavedNpc;
+
+        let mut world = preserved_world();
+        world.saved_npcs = vec![
+            SavedNpc {
+                net_id: i32::from(crate::game::lunar::SOLAR),
+                position: (100.0, 200.0),
+            },
+            SavedNpc {
+                net_id: i32::from(crate::game::lunar::VORTEX),
+                position: (300.0, 400.0),
+            },
+            SavedNpc {
+                net_id: i32::from(crate::game::lunar::NEBULA),
+                position: (500.0, 600.0),
+            },
+            SavedNpc {
+                net_id: i32::from(crate::game::lunar::STARDUST),
+                position: (700.0, 800.0),
+            },
+        ];
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+
+        assert_eq!(
+            back.saved_npcs, world.saved_npcs,
+            "all four pillars, with their positions, must survive a save of a loaded world"
+        );
+    }
+
+    /// Reverting the fix (dropping the second list, as `write_town_npcs` used to) turns this red:
+    /// with no pillars written, `back.saved_npcs` comes back empty and the assertion above fails.
+    /// Pinned here as its own test so that failure mode is named rather than folded into the
+    /// round-trip test's own assertion message.
+    #[test]
+    fn an_empty_pillar_list_stays_empty_and_does_not_desync_the_section() {
+        let world = preserved_world();
+        assert!(world.saved_npcs.is_empty(), "the fixture itself has none");
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+
+        assert!(back.saved_npcs.is_empty());
+        // And nothing after the townsfolk section desynced: the tile entities (section 5, right
+        // after) must still be understood, which they would not be if the second list's own
+        // terminator were missing or misplaced.
+        assert!(
+            back.preserved
+                .as_ref()
+                .expect("a loaded world carries its preserved state")
+                .tile_entities_understood
+        );
+    }
+
+    /// L3-21: a pressure-plate section a load decoded as non-empty must still save as empty for a
+    /// server-owned world — the imported bytes are never carried forward, because this server
+    /// tracks no live press/release state to have written them from in the first place.
+    #[test]
+    fn pressure_plates_always_save_empty_even_when_the_loaded_section_held_something() {
+        let mut world = preserved_world();
+        let preserved = world.preserved.as_mut().expect("a loaded world");
+        assert_eq!(
+            preserved.trailing_sections[PRESSURE_PLATE_SECTION],
+            0i32.to_le_bytes(),
+            "the fixture's own section starts empty, same as any freshly generated world's"
+        );
+        // Stand in for a real vanilla file saved while a player was on a weighted plate: one
+        // pressed tile at (12, 34).
+        let mut held = Writer::new();
+        held.i32(1).i32(12).i32(34);
+        preserved.trailing_sections[PRESSURE_PLATE_SECTION] = held.into_bytes();
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+
+        assert_eq!(
+            back.preserved.expect("loaded").trailing_sections[PRESSURE_PLATE_SECTION],
+            0i32.to_le_bytes(),
+            "a server-owned world must never re-fire a plate nobody is standing on any more"
+        );
+    }
+
+    /// L3-20: the room list is derived from the live residents this save is about to write into
+    /// section 4, not from whatever the room section's own imported bytes said — a resident who
+    /// moved in, moved out or died since the world was opened must be reflected in both sections
+    /// alike.
+    #[test]
+    fn the_town_manager_room_list_is_derived_from_the_live_residents() {
+        use crate::world::objects::TownNpc;
+
+        let mut world = preserved_world();
+        // A stale room the imported bytes claimed, for someone who is no longer housed by the time
+        // this save runs — this must not survive into the rewritten section.
+        let mut stale = Writer::new();
+        stale.i32(1).i32(999).i32(11).i32(22);
+        world
+            .preserved
+            .as_mut()
+            .expect("a loaded world")
+            .trailing_sections[TOWN_MANAGER_SECTION] = stale.into_bytes();
+
+        world.town_npcs = vec![
+            TownNpc {
+                net_id: 22,
+                name: "Andrew".into(),
+                position: (1.0, 2.0),
+                homeless: false,
+                home: (77, 88),
+                variation: 0,
+                homeless_despawn: false,
+            },
+            TownNpc {
+                net_id: 17,
+                name: "Wilhelmina".into(),
+                position: (3.0, 4.0),
+                homeless: true,
+                home: (0, 0),
+                variation: 0,
+                homeless_despawn: false,
+            },
+        ];
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+        let section = &back.preserved.expect("loaded").trailing_sections[TOWN_MANAGER_SECTION];
+
+        // count(i32), then (type, x, y) triples: only Andrew, who has a room; Wilhelmina is
+        // homeless and the stale entry for type 999 must be gone.
+        assert_eq!(
+            &section[..4],
+            &1i32.to_le_bytes(),
+            "one room: the housed resident only"
+        );
+        assert_eq!(&section[4..8], &22i32.to_le_bytes(), "Andrew's type");
+        assert_eq!(&section[8..12], &77i32.to_le_bytes(), "his home x");
+        assert_eq!(&section[12..16], &88i32.to_le_bytes(), "his home y");
+        assert_eq!(section.len(), 16, "no trailing stale entry");
+    }
+
+    /// L3-22: the bestiary is always written as the genuinely empty shape (three zero counts),
+    /// never as whatever the loaded section's own bytes said, since this server keeps no live
+    /// kill/sighting/chat tracker to have derived a non-empty one from.
+    #[test]
+    fn the_bestiary_always_saves_empty_even_when_the_loaded_section_held_something() {
+        let mut world = preserved_world();
+        let mut claimed = Writer::new();
+        claimed.i32(1).string("Zombie").i32(42);
+        claimed.i32(0);
+        claimed.i32(0);
+        world
+            .preserved
+            .as_mut()
+            .expect("a loaded world")
+            .trailing_sections[BESTIARY_SECTION] = claimed.into_bytes();
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+
+        assert_eq!(
+            back.preserved.expect("loaded").trailing_sections[BESTIARY_SECTION],
+            [0i32.to_le_bytes(), 0i32.to_le_bytes(), 0i32.to_le_bytes()].concat(),
+            "three empty counts: kills, sightings, conversations"
+        );
+    }
+
+    /// L3-23: the Journey powers this server tracks live round-trip through a preserved world's
+    /// save — not just the four toggles, but the two sliders at a non-default value, so this is
+    /// not merely testing that "everything off" happens to look like the section's own empty
+    /// shape.
+    #[test]
+    fn journey_powers_round_trip_through_a_preserved_worlds_save() {
+        let mut world = preserved_world();
+        world.journey_freeze_time = true;
+        world.journey_freeze_rain = false;
+        world.journey_freeze_wind = true;
+        world.journey_stop_biome_spread = true;
+        world.journey_time_rate_slider = 0.75;
+        world.journey_difficulty_slider = 0.2;
+
+        let bytes = serialize(&world).expect("serialize");
+        let back = super::super::wld::parse(&bytes).expect("parse");
+
+        assert!(back.journey_freeze_time);
+        assert!(!back.journey_freeze_rain);
+        assert!(back.journey_freeze_wind);
+        assert!(back.journey_stop_biome_spread);
+        assert!((back.journey_time_rate_slider - 0.75).abs() < 1e-6);
+        assert!((back.journey_difficulty_slider - 0.2).abs() < 1e-6);
+    }
+
+    /// Reverting the fix (carrying the section's imported bytes forward, as it used to) turns this
+    /// red: a Journey world's toggles would come back at whatever a fresh world's empty section
+    /// decodes to (every power off, every slider at zero) regardless of what was set above.
+    #[test]
+    fn a_journey_world_with_everything_off_still_saves_the_six_modelled_entries() {
+        // Not a placeholder `bool(false)` for "no creative powers" any more: even an all-off
+        // Journey world writes all six entries, matching `CreativePowerManager.SaveToWorld`, which
+        // writes one for every `IPersistentPerWorldContent` power regardless of its value.
+        let world = preserved_world();
+        let section = &world.preserved.as_ref().expect("loaded").trailing_sections[JOURNEY_SECTION];
+        // Six `(true, u16, payload)` entries plus the terminator: (1 + 2 + 1) * 4 bools + (1 + 2 +
+        // 4) * 2 sliders + 1 terminator byte.
+        assert_eq!(
+            section.len(),
+            (1 + 2 + 1) * 4 + (1 + 2 + 4) * 2 + 1,
+            "all six entries, not a one-byte placeholder"
+        );
     }
 }
