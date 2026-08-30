@@ -37,9 +37,10 @@ use crate::world::World;
 use terrustia_proto::Tile;
 
 /// `ObsidianBrick`/`HellstoneBrick` (`TileID.cs`) and their matching `*Unsafe` walls
-/// (`WallID.cs`) — vanilla's own default pair (`tileType = 75`, `wallType = 14`) four times out of
-/// five, the other roll (`tileType = 76`, `wallType = 13`) approximated here as a flat 20% rather
-/// than the exact `Next(75, 77)`-then-`Next(5) > 0` double-roll vanilla uses to get there.
+/// (`WallID.cs`). [`material`] rolls the real compound odds rather than a flat split: a naive
+/// reading of the second roll alone ("one in five is Hellstone") gives 80/20, but the two rolls
+/// stack (`WorldGen.cs:32447-32456`) so the true split is 90% Obsidian, 10% Hellstone — see
+/// [`material`]'s own doc for the derivation.
 const OBSIDIAN_BRICK: u16 = 75;
 const OBSIDIAN_BRICK_WALL: u16 = 14;
 const HELLSTONE_BRICK: u16 = 76;
@@ -48,8 +49,23 @@ const HELLSTONE_BRICK_WALL: u16 = 13;
 /// A door style vanilla's own `HellFort` uses for every door it places (`doorStyle = 19`).
 const DOOR_STYLE: i32 = 19;
 
+/// `WorldGen.cs:32447-32456`, transcribed as the two separate rolls it actually is rather than
+/// one flat split:
+///
+/// ```csharp
+/// ushort num3 = (ushort)genRand.Next(75, 77); // 75 or 76, uniformly
+/// byte wallType = 13;
+/// if (genRand.Next(5) > 0) { num3 = 75; }     // forced to Obsidian four times out of five...
+/// if (num3 == 75) { wallType = 14; }          // ...REGARDLESS of what the first roll gave
+/// ```
+///
+/// Hellstone only survives the one-in-five branch where the second roll does *not* force
+/// Obsidian, and even then only if the first roll had already landed on Hellstone: `1/5 * 1/2 =
+/// 1/10` overall. A single `Next(5) == 0` check (one roll, one-in-five) gives 80/20; this is 90/10.
 fn material(rand: &mut UnifiedRandom) -> (u16, u16) {
-    if rand.next_max(5) == 0 {
+    let first_roll_hellstone = rand.next_range(75, 77) == i32::from(HELLSTONE_BRICK);
+    let forced_obsidian = rand.next_max(5) > 0;
+    if !forced_obsidian && first_roll_hellstone {
         (HELLSTONE_BRICK, HELLSTONE_BRICK_WALL)
     } else {
         (OBSIDIAN_BRICK, OBSIDIAN_BRICK_WALL)
@@ -190,6 +206,24 @@ mod tests {
         let mut layout = Layout::plan(width, height, &mut rand);
         layout.underworld = underworld;
         (world, layout)
+    }
+
+    /// `WorldGen.cs:32447-32456`'s compound roll gives 90% Obsidian / 10% Hellstone, not the
+    /// 80/20 a single `Next(5) == 0` check would produce — checked over enough draws that the two
+    /// are clearly distinguishable rather than merely "in the neighbourhood of 90".
+    #[test]
+    fn material_rolls_the_real_ninety_ten_split_not_a_flat_eighty_twenty() {
+        let mut rand = Rand::new(1);
+        let draws = 20_000;
+        let hellstone = (0..draws)
+            .filter(|_| material(&mut rand).0 == HELLSTONE_BRICK)
+            .count();
+        let rate = f64::from(hellstone as u32) / f64::from(draws);
+        assert!(
+            (0.08..0.12).contains(&rate),
+            "hellstone rate was {rate}, expected close to 0.10 (the old flat-split bug landed \
+             near 0.20)"
+        );
     }
 
     #[test]
