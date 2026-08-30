@@ -60,8 +60,26 @@ async fn main() -> ExitCode {
             break 'hold;
         }
         step += 1;
-        // Drain whatever arrived so the socket never backs up.
-        for _ in 0..64 {
+        // Drain what has arrived, bounded by time rather than by a count of events.
+        //
+        // Both bounds have been wrong in an instructive way. A fixed 64 events per 30 ms caps the
+        // client at about 2100 a second; a full server sends more than that to a player with
+        // company, so the shortfall accumulated in the receive buffer, TCP's window closed, and the
+        // kernel eventually gave up retransmitting and killed the connection. That reads as
+        // `socket read failed error=Operation timed out (os error 60)` on the server and a broken
+        // pipe here, and looks exactly like the server dropping clients under load when it is the
+        // test client failing to read.
+        //
+        // Raising the count instead (8192) broke it the other way. The server stops treating a
+        // connection as still handshaking only once it has *received* more than `HANDSHAKE_FRAMES`
+        // from it, and this loop sends one frame per pass, so a drain long enough to swallow the
+        // join burst starved the sends: all 255 clients were closed at the 30 s handshake deadline
+        // with "took too long to say who it was".
+        //
+        // A time budget satisfies both. The socket gets drained as fast as events can be parsed,
+        // and the client always gets back to sending promptly, whatever the server is sending it.
+        let drain_until = Instant::now() + Duration::from_millis(10);
+        loop {
             match client.next_event().await {
                 Ok(_) => {}
                 // The read timeout is deliberately short and this is a poll, so "nothing has
@@ -73,6 +91,9 @@ async fn main() -> ExitCode {
                     dropped = Some(e.to_string());
                     break 'hold;
                 }
+            }
+            if Instant::now() >= drain_until {
+                break;
             }
         }
         sleep(Duration::from_millis(30)).await;
