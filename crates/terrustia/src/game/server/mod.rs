@@ -578,6 +578,10 @@ mod nearest_visible_hostile_tests {
 /// the same kind firing on the same tick however long they have been running.
 const TIMER_WINDOW: i32 = 18_000;
 
+/// How long a pressed Detonator stays down before it pops back up, in ticks — vanilla's own
+/// `CheckMech(anchor, 60)` (`Wiring.cs:362`).
+const DETONATOR_WINDOW: i32 = 60;
+
 /// Every timer in the world that is switched on.
 ///
 /// Walked once, when the world is loaded. It is the whole world, but only once and only for the
@@ -929,6 +933,10 @@ pub struct GameServer {
     /// The game keeps the same list, capped at 999 entries; this one is a map because looking a
     /// tile up is what it is for.
     mech_cooldown: HashMap<(i32, i32), i32>,
+    /// Detonators pressed recently, by their top-left anchor, and how many ticks until each pops
+    /// back up. The `UpdateMech` reset that makes the button momentary (`Wiring.cs:219-244`), timed
+    /// here because it fires outside any circuit trip (L3-26).
+    detonator_resets: HashMap<(i32, i32), i32>,
     /// A save being written on another thread, if one is.
     ///
     /// Kept so that shutdown can wait for it and so that two never run at once.
@@ -1153,6 +1161,7 @@ impl GameServer {
             housing_turn: 0,
             running_timers,
             mech_cooldown: HashMap::new(),
+            detonator_resets: HashMap::new(),
             tile_entity_anchors: HashMap::new(),
             saving: None,
             save_reason: "",

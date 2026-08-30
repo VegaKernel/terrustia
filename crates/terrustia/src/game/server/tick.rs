@@ -436,6 +436,7 @@ impl GameServer {
         // become a wall of near-zero lines.
         self.tick_tile_entities();
         self.tick_mech_cooldowns();
+        self.tick_detonators();
         self.tick_timers();
         self.tick_lunar();
         self.tick_census();
