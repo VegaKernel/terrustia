@@ -558,7 +558,7 @@ pub fn depth_at(world: &World, y: i32) -> Depth {
 
 /// Half-extents of the biome scan box, in tiles.
 ///
-/// The game scans `SceneMetrics.ZoneScanSize` — a 169-by-124 tile box centred on the tile it is
+/// The game scans `SceneMetrics.ZoneScanSize`, a 169-by-124 tile box centred on the tile it is
 /// asked about (`SceneMetrics.cs:16`: `1920/16 + 25*2 - 1 = 169` across, `1200/16 + 25*2 - 1 = 124`
 /// down). This used a 41-by-41 box (radius 20), which is small enough to miss a biome the player is
 /// plainly standing in and large enough only to be fooled by a stray vein: both directions of
