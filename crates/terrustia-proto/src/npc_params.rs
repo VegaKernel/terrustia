@@ -3947,6 +3947,9 @@ pub const ICE_QUEEN_MODE1_AT: f32 = 600.0;
 /// Santa-NK1 walks and shoots, faster at every quarter of its health.
 pub const SANTA_WALK: [(f32, f32); 4] = [(1.0, 2.0), (0.75, 3.0), (0.5, 4.0), (0.25, 5.0)];
 pub const SANTA_WAIT: f32 = 300.0;
+/// How long a firing burst lasts before it plants and waits again (`NPC.cs:34067`, `ai[1] > 240`).
+/// Its own value, not `SANTA_WAIT`: the two are unrelated in vanilla and only looked alike here.
+pub const SANTA_FIRE_TICKS: f32 = 240.0;
 /// Its gun fires faster as it is worn down: every sixteen ticks down to every eight.
 pub const SANTA_FIRE_RATE: [(f32, f32); 4] = [(1.0, 16.0), (0.75, 14.0), (0.5, 11.0), (0.25, 8.0)];
 pub const SANTA_BULLET: u16 = 180;
