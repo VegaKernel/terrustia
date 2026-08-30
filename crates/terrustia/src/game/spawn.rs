@@ -1687,6 +1687,7 @@ mod tests {
     }
 
     /// Fill a `w`-by-`h` block of one tile type with its top-left `dx`,`dy` from a centre.
+    #[allow(clippy::too_many_arguments)]
     fn fill_block(
         world: &mut World,
         cx: i32,
