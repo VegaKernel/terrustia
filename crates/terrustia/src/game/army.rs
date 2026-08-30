@@ -108,9 +108,12 @@ impl Tier {
         if !belongs(npc_type) {
             return 0;
         }
-        // The kill that would finish the wave only ever counts as one, so the quota cannot be
-        // jumped straight past the champion.
-        if expert && kills + 2 <= self.required_kills(wave) {
+        // C7-08: the kill that would finish the wave only ever counts as one, so the quota cannot
+        // be jumped straight past the champion (`DD2Event.cs:994-998,1120-1186`). The guard is a
+        // strict `<`: at `required - 2` a double would land exactly on `required` and complete the
+        // wave without the champion, jumping the hold at `required - 1`. With `<` it counts one
+        // instead, so the count settles on the hold and only the champion finishes the wave.
+        if expert && kills + 2 < self.required_kills(wave) {
             2
         } else {
             1
@@ -937,18 +940,58 @@ mod tests {
         assert_eq!(army.wave, 1);
     }
 
-    /// Expert counts double, but never past the quota, so the champion cannot be skipped.
+    /// Expert counts double on an ordinary wave, and the kill that would finish it counts as one so
+    /// the count lands exactly on the quota rather than over it.
     #[test]
-    fn expert_counts_double_but_not_past_the_line() {
+    fn expert_counts_double_but_the_finishing_kill_counts_one() {
         let mut army = ArmyState::default();
         army.start(Tier::One, (0, 0));
+        // Wave one asks for sixty. Twenty-nine doubles reach fifty-eight.
         for _ in 0..29 {
             army.note_kill(ids::DD2_GOBLIN_T1, true);
         }
         assert_eq!(army.kills, 58, "twenty-nine kills at two apiece");
+        // The next double would land on sixty, so it counts as one and holds at fifty-nine.
+        army.note_kill(ids::DD2_GOBLIN_T1, true);
+        assert_eq!(army.kills, 59, "the kill that would finish counts as one");
+        // And the one after that finishes the wave, exactly on the line.
         army.note_kill(ids::DD2_GOBLIN_T1, true);
         assert_eq!(army.kills, 0, "the sixtieth finishes the wave");
         assert_eq!(army.wave, 2);
+    }
+
+    /// C7-08: on the final wave an Expert double must not land exactly on the quota and complete the
+    /// wave without the champion. The count holds one short, at the champion gate, and only the
+    /// champion's own death finishes it. On the pre-fix `<=` guard a regular kill from `required-2`
+    /// jumped straight to `required` and won the tier without ever killing the Dark Mage.
+    #[test]
+    fn an_expert_double_cannot_skip_the_final_wave_champion() {
+        let mut army = ArmyState::default();
+        army.start(Tier::One, (0, 0));
+        army.wave = Tier::One.waves(); // the final wave
+        let required = Tier::One.required_kills(army.wave);
+
+        let mut finished = None;
+        for _ in 0..(required * 2) {
+            if let Some(w) = army.note_kill(ids::DD2_GOBLIN_T1, true) {
+                finished = Some(w);
+                break;
+            }
+        }
+        assert!(
+            finished.is_none(),
+            "regular kills alone never finish the final wave, however they are counted"
+        );
+        assert_eq!(
+            army.kills,
+            required - 1,
+            "the count holds one short, waiting for the champion"
+        );
+        assert_eq!(
+            army.note_kill(ids::DD2_DARK_MAGE_T1, true),
+            Some(Tier::One.waves()),
+            "and only the Dark Mage's death completes it"
+        );
     }
 
     /// A flat floor with walls at both ends gives an arena those walls define.

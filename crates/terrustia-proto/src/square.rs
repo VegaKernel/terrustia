@@ -6,6 +6,10 @@
 //!
 //! The encoding is denser than a section's and completely different: three flag bytes per tile, no
 //! run-length, and tiles walked **column by column** within the rectangle.
+//!
+//! Applying a decoded square is a *merge* onto whatever tile is already there, not a fresh
+//! overwrite — see [`TileSquare::decode`]'s own doc for the field-by-field rules, transcribed
+//! from `MessageBuffer.cs:1358-1437`.
 
 use crate::{
     error::{ProtoError, Result},
@@ -44,7 +48,14 @@ impl TileSquare {
         self.tiles.get(dx * usize::from(self.height) + dy).copied()
     }
 
-    pub fn decode(payload: &[u8]) -> Result<Self> {
+    /// Decode a packet `20` payload against the tiles already on the ground.
+    ///
+    /// Vanilla's own receive handler (`MessageBuffer.cs:1358-1437`) never builds a tile from
+    /// scratch: `tile4 = Main.tile[x, y]` is the *existing* tile, and every field below mutates it
+    /// in place, some unconditionally, some only when the packet's bits say so. `existing_tile`
+    /// is how the caller supplies that starting point — the world position, not an index into
+    /// this square, since the packet is walked column by column starting at `(x, y)`.
+    pub fn decode(payload: &[u8], existing_tile: impl Fn(i32, i32) -> Tile) -> Result<Self> {
         let mut r = PacketReader::new(payload);
         let x = r.i16()?;
         let y = r.i16()?;
@@ -53,9 +64,14 @@ impl TileSquare {
         let change_type = r.u8()?;
 
         let count = usize::from(width) * usize::from(height);
-        let mut tiles = Vec::with_capacity(count);
-        for _ in 0..count {
-            tiles.push(read_tile(&mut r)?);
+        let mut tiles = vec![Tile::AIR; count];
+        // Column by column, outer x then inner y — `MessageBuffer.cs:1359-1361`'s own nested
+        // loop, which is also this file's own on-wire order (see `tile`'s doc above).
+        for dx in 0..usize::from(width) {
+            for dy in 0..usize::from(height) {
+                let existing = existing_tile(i32::from(x) + dx as i32, i32::from(y) + dy as i32);
+                tiles[dx * usize::from(height) + dy] = read_tile(&mut r, existing)?;
+            }
         }
 
         Ok(Self {
@@ -88,17 +104,34 @@ impl TileSquare {
     }
 }
 
-fn read_tile(r: &mut PacketReader<'_>) -> Result<Tile> {
+/// Apply one tile's worth of packet `20` onto the tile already there, field by field, exactly the
+/// way `MessageBuffer.cs:1358-1437` does it. This is a *merge*, not a fresh decode: colour, wall
+/// colour, and liquid are deliberately left untouched when their bit is absent (a real client
+/// never sets the liquid bit on send at all, `NetMessage.cs:593`, so a dedicated server never
+/// overwrites liquid from this packet in practice), `wall`'s absent bit means something
+/// different — "no wall here" — and is honoured by clearing it, and `block`/`frame_x`/`frame_y`/
+/// `slope` only change at all when the `active` bit that arrived is set.
+fn read_tile(r: &mut PacketReader<'_>, existing: Tile) -> Result<Tile> {
     let flags1 = r.u8()?;
     let flags2 = r.u8()?;
     let flags3 = r.u8()?;
 
-    let mut tile = Tile::AIR;
+    let mut tile = existing;
+
+    // Captured before `active` is overwritten below — vanilla's `flag8`, used later to decide
+    // whether a frame reset is owed (`MessageBuffer.cs:1368`).
+    let was_active = tile.is_active();
+
     let active = flags1 & 0x01 != 0;
     let has_wall = flags1 & 0x04 != 0;
     let has_liquid = flags1 & 0x08 != 0;
 
     tile.flags.set(TileFlags::ACTIVE, active);
+    // Wall presence is not "preserved when absent" the way liquid and paint are below: vanilla
+    // always resolves it this packet, clearing to no-wall when the bit is unset and reading the
+    // real id when it is set (`MessageBuffer.cs:1373`, `:1427-1430`).
+    tile.wall = 0;
+
     tile.flags.set(TileFlags::WIRE_RED, flags1 & 0x10 != 0);
     tile.flags.set(TileFlags::HALF_BRICK, flags1 & 0x20 != 0);
     tile.flags.set(TileFlags::ACTUATOR, flags1 & 0x40 != 0);
@@ -107,6 +140,8 @@ fn read_tile(r: &mut PacketReader<'_>) -> Result<Tile> {
     tile.flags.set(TileFlags::WIRE_GREEN, flags2 & 0x02 != 0);
     tile.flags.set(TileFlags::WIRE_YELLOW, flags2 & 0x80 != 0);
 
+    // Left alone — not zeroed — when the bit is absent: an existing colour survives a square that
+    // says nothing about colour (`MessageBuffer.cs:1385-1392`).
     if flags2 & 0x04 != 0 {
         tile.color = r.u8()?;
     }
@@ -115,11 +150,17 @@ fn read_tile(r: &mut PacketReader<'_>) -> Result<Tile> {
     }
 
     if active {
+        let old_block = tile.block;
         // Unlike a section, the type is always two bytes here.
         tile.block = r.u16()?;
         if frame_important(tile.block) {
             tile.frame_x = r.i16()?;
             tile.frame_y = r.i16()?;
+        } else if !was_active || tile.block != old_block {
+            // Turning active for the first time, or changing type without new frame data of its
+            // own: the old frame no longer describes anything real (`MessageBuffer.cs:1402-1406`).
+            tile.frame_x = -1;
+            tile.frame_y = -1;
         }
         // The slope is spread across three separate bits rather than a packed field.
         let mut slope = 0u8;
@@ -134,6 +175,8 @@ fn read_tile(r: &mut PacketReader<'_>) -> Result<Tile> {
         }
         tile.slope = slope;
     }
+    // When `active` is false, block/frame/slope are left exactly as the existing tile had them —
+    // vanilla's own `if (tile4.active())` guard around all four (`MessageBuffer.cs:1393-1421`).
 
     tile.flags
         .set(TileFlags::FULLBRIGHT_BLOCK, flags3 & 0x01 != 0);
@@ -147,6 +190,11 @@ fn read_tile(r: &mut PacketReader<'_>) -> Result<Tile> {
     if has_wall {
         tile.wall = r.u16()?;
     }
+    // Left alone when the bit is absent, same as colour above — and on a real dedicated server
+    // that bit is always absent (see the doc comment above). This is the fix for the
+    // liquid-erasing bug: the old code decoded straight into a fresh `Tile::AIR` and always
+    // overwrote `liquid` (leaving it `0` whenever this bit was unset), deleting any pre-existing
+    // liquid on every ordinary tile square a client ever sent.
     if has_liquid {
         tile.liquid = r.u8()?;
         tile.liquid_kind = match r.u8()? {
@@ -272,10 +320,18 @@ mod tests {
         }
     }
 
+    /// Decodes over bare air at every position, which is what makes these round-trip tests valid:
+    /// `encode` always carries every non-default field explicitly, so merging onto `Tile::AIR`
+    /// reconstructs the original tile exactly, the same as the old "decode into a fresh tile"
+    /// behaviour did.
     fn round_trip(square: &TileSquare) -> TileSquare {
+        round_trip_over(square, |_, _| Tile::AIR)
+    }
+
+    fn round_trip_over(square: &TileSquare, existing: impl Fn(i32, i32) -> Tile) -> TileSquare {
         let frame = square.encode().unwrap();
         assert_eq!(frame[2], id::AREA_TILE_CHANGE);
-        TileSquare::decode(&frame[3..]).unwrap()
+        TileSquare::decode(&frame[3..], existing).unwrap()
     }
 
     #[test]
@@ -354,7 +410,89 @@ mod tests {
     fn a_truncated_square_errors_rather_than_panicking() {
         let mut w = Writer::new();
         w.i16(0).i16(0).u8(4).u8(4).u8(0).u8(1); // claims 16 tiles, supplies a fragment
-        assert!(TileSquare::decode(w.as_slice()).is_err());
+        assert!(TileSquare::decode(w.as_slice(), |_, _| Tile::AIR).is_err());
+    }
+
+    // ---------------------------------------------------------------- the merge, not overwrite
+
+    /// The bug this file exists to fix: applying an ordinary tile square (furniture, a dug block,
+    /// anything that does not touch liquid at all) over ground that already holds water must
+    /// leave the water exactly as it was. A real client never sets the has-liquid bit on send
+    /// (`NetMessage.cs:593`), so this is every ordinary building action a player ever takes.
+    ///
+    /// Before the fix, `read_tile` decoded straight into a fresh `Tile::AIR` rather than merging
+    /// onto the tile already there, so this assertion failed: the water came back as `0`.
+    #[test]
+    fn a_square_with_no_liquid_bit_leaves_existing_liquid_intact() {
+        let square = square_of(vec![Tile::block(1)], 1, 1);
+        let existing = Tile::AIR.with_liquid(Liquid::Water, 200);
+        let decoded = round_trip_over(&square, |_, _| existing);
+
+        assert_eq!(decoded.tiles[0].liquid, 200, "the water must survive");
+        assert_eq!(decoded.tiles[0].liquid_kind, Liquid::Water);
+        assert_eq!(decoded.tiles[0].block, 1, "the block change still applies");
+    }
+
+    /// Same bug, the other resource it destroyed: paint. Colour and wall colour are only written
+    /// when their bit is set (`MessageBuffer.cs:1385-1392`) — an edit that says nothing about
+    /// colour must not zero it.
+    #[test]
+    fn a_square_with_no_colour_bits_leaves_existing_paint_intact() {
+        let square = square_of(vec![Tile::block(1)], 1, 1);
+        let mut existing = Tile::block(2);
+        existing.color = 12;
+        existing.wall_color = 9;
+        let decoded = round_trip_over(&square, |_, _| existing);
+
+        assert_eq!(decoded.tiles[0].color, 12, "block paint must survive");
+        assert_eq!(decoded.tiles[0].wall_color, 9, "wall paint must survive");
+    }
+
+    /// Wall presence is *not* preserved-when-absent the way liquid and paint are: vanilla always
+    /// resolves it, clearing an existing wall to none when the bit is unset
+    /// (`MessageBuffer.cs:1373`, `:1427-1430`). A square that says "no wall here" must actually
+    /// remove one.
+    #[test]
+    fn an_absent_wall_bit_clears_an_existing_wall() {
+        let square = square_of(vec![Tile::block(1)], 1, 1); // no `.with_wall(..)`, so no wall bit
+        let existing = Tile::block(2).with_wall(300);
+        let decoded = round_trip_over(&square, |_, _| existing);
+
+        assert_eq!(
+            decoded.tiles[0].wall, 0,
+            "vanilla clears the wall rather than keeping it"
+        );
+    }
+
+    /// `block`/`frame_x`/`frame_y`/`slope` are all inside vanilla's own `if (tile4.active())`
+    /// guard (`MessageBuffer.cs:1393-1421`): an inactive tile in the square leaves them exactly as
+    /// the existing tile had them.
+    #[test]
+    fn an_inactive_square_tile_leaves_the_existing_block_and_frame_untouched() {
+        let square = square_of(vec![Tile::AIR], 1, 1); // active bit unset
+        let existing = Tile::framed(21, 18, 0);
+        let decoded = round_trip_over(&square, |_, _| existing);
+
+        assert!(!decoded.tiles[0].is_active());
+        assert_eq!(decoded.tiles[0].block, existing.block);
+        assert_eq!(decoded.tiles[0].frame_x, existing.frame_x);
+        assert_eq!(decoded.tiles[0].frame_y, existing.frame_y);
+    }
+
+    /// Changing a non-frame-important type resets the frame to `-1, -1` rather than leaving the
+    /// old type's frame behind (`MessageBuffer.cs:1402-1406`) — the case this matters for is a
+    /// dug-out block replaced by a different plain one in the same edit.
+    #[test]
+    fn changing_a_non_frame_important_type_resets_the_frame() {
+        let square = square_of(vec![Tile::block(2)], 1, 1);
+        let mut existing = Tile::block(1);
+        existing.frame_x = 5;
+        existing.frame_y = 5;
+        let decoded = round_trip_over(&square, |_, _| existing);
+
+        assert_eq!(decoded.tiles[0].block, 2);
+        assert_eq!(decoded.tiles[0].frame_x, -1);
+        assert_eq!(decoded.tiles[0].frame_y, -1);
     }
 
     #[test]

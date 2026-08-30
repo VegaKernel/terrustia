@@ -23,8 +23,8 @@ use terrustia_proto::npc_params::{
     PUMPKING_MOOD_TICKS, PUMPKING_MOODS, PUMPKING_RUSH_STEPS, PUMPKING_SPHERE,
     PUMPKING_SPHERE_DAMAGE, PUMPKING_SPHERE_EVERY, PUMPKING_SPHERE_SPAN, PUMPKING_SPHERE_SPEED,
     QUEEN_ABOVE_MAX, QUEEN_ABOVE_MIN, QUEEN_CLIMB, QUEEN_CLIMB_CAP, QUEEN_PACE, QUEEN_SWEEP,
-    SANTA_BULLET, SANTA_BULLET_DAMAGE, SANTA_BULLET_SPEED, SANTA_FIRE_RATE, SANTA_LEASH,
-    SANTA_MUZZLE, SANTA_WAIT, SANTA_WALK,
+    SANTA_BULLET, SANTA_BULLET_DAMAGE, SANTA_BULLET_SPEED, SANTA_FIRE_RATE, SANTA_FIRE_TICKS,
+    SANTA_LEASH, SANTA_MUZZLE, SANTA_WAIT, SANTA_WALK,
 };
 
 use super::skeletron::Parent;
@@ -384,8 +384,12 @@ pub fn santa(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng
         .target
         .filter(|t| t.alive && (npc.position.0 - t.center.0).abs() <= SANTA_LEASH);
     if world.conditions.day {
+        // C7-05: vanilla forces the despawn at dawn (`NPC.cs:34011-34014`, `EncourageDespawn(10)`,
+        // walk 8), so Santa-NK1 is gone within ten ticks of leaving the area, not six hundred.
         walk = 8.0;
-        npc.time_left = npc.time_left.min(600);
+        npc.time_left = npc
+            .time_left
+            .min(terrustia_proto::npc_params::DESPAWN_ENCOURAGED_TICKS);
         if npc.velocity.0 == 0.0 {
             npc.velocity.0 = 0.1;
         }
@@ -422,7 +426,9 @@ pub fn santa(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng
                     time_left: 300,
                 });
             }
-            if npc.ai[1] >= 300.0 {
+            // C7-03: the burst runs 240 ticks, not 300 (`NPC.cs:34067`, `ai[1] > 240`). The old
+            // 300 was `SANTA_WAIT` reused; the two durations are unrelated in vanilla.
+            if npc.ai[1] > SANTA_FIRE_TICKS {
                 npc.ai[1] = 0.0;
                 npc.ai[0] = 0.0;
             }

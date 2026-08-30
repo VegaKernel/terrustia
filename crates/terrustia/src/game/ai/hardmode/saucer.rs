@@ -47,10 +47,16 @@ mod state {
 pub struct SaucerOutcome {
     pub spawn: Vec<Spawn>,
     pub shots: Vec<Shot>,
+    /// Set when it left the world quietly (flew off the top): a despawn, not a kill.
     pub spent: bool,
+    /// Set when it was finished for good: the Classic-mode death once its guns are gone, which
+    /// drops the loot and records the kill. A separate outcome from `spent`.
+    pub died: bool,
 }
 
-pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
+/// `guns_alive` is how many of its four turrets and cannons are still on the field, which the
+/// caller counts. It is the whole trigger for leaving the circuit: see the block below.
+pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, guns_alive: usize) -> SaucerOutcome {
     let mut out = SaucerOutcome::default();
     npc.dirty = true;
 
@@ -84,8 +90,30 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
         });
     }
 
+    // The guns are the whole fight. While any turret or cannon is alive the core just flies its
+    // circuit; the instant the last one is destroyed the body ends the machine (`NPC.cs:35933-35951`,
+    // the style-75 body's `flag82` block): in Classic it dies outright (`ai[0] = 3`, whose own AI
+    // strikes the core for 9999 and drops the loot, `NPC.cs:36457-36461`), in Expert it drops into
+    // the spin and then the last stand (`ai[0] = 1`). SAU-1: nothing counted the guns, so the
+    // saucer never left phase one and, in Classic, could never be finished at all. `local_ai[0]`
+    // latches that the guns were assembled, so a first tick before they exist is not read as loss.
+    if guns_alive > 0 {
+        npc.local_ai[0] = 1.0;
+    }
+    if npc.ai[0] == state::CIRCUIT && npc.local_ai[0] != 0.0 && guns_alive == 0 {
+        npc.ai[0] = if world.conditions.expert {
+            state::SPINNING
+        } else {
+            state::DONE
+        };
+        npc.ai[1] = 0.0;
+        npc.ai[2] = 0.0;
+        npc.ai[3] = 0.0;
+    }
+
     if npc.ai[0] == state::DONE {
-        out.spent = true;
+        // Not a quiet despawn: the Classic-mode death drops the Martian loot and records the kill.
+        out.died = true;
         return out;
     }
 
@@ -461,8 +489,19 @@ mod tests {
         Npc::new(MARTIAN_SAUCER_CORE, (2000.0, 3000.0), 1).expect("a saucer core")
     }
 
+    /// A tick with its guns still up (the ordinary state these tests exercise): four alive, so the
+    /// end-of-fight transition below never fires.
     fn tick(npc: &mut Npc, w: &World<'_, Sky>, tiles: &Sky) -> SaucerOutcome {
-        let out = core(npc, w);
+        tick_with_guns(npc, w, tiles, 4)
+    }
+
+    fn tick_with_guns(
+        npc: &mut Npc,
+        w: &World<'_, Sky>,
+        tiles: &Sky,
+        guns: usize,
+    ) -> SaucerOutcome {
+        let out = core(npc, w, guns);
         npc.no_gravity = true;
         npc.no_tile_collide = true;
         crate::game::npc::step_physics(npc, tiles);
@@ -526,6 +565,61 @@ mod tests {
             vec![0.0, 1.0],
             "and so do the two cannons"
         );
+    }
+
+    /// SAU-1: while its guns are up the saucer just flies its circuit and cannot be finished; the
+    /// moment the last one is destroyed, Classic ends the whole machine as a death (`ai[0] = 3`,
+    /// which drops the loot), not a silent despawn. On the pre-fix code nothing counted the guns,
+    /// so it never left the circuit and never died.
+    #[test]
+    fn losing_its_last_gun_finishes_it_in_classic() {
+        let tiles = ground();
+        let w = world(&tiles, Some((2000.0, 3100.0)));
+        let mut n = saucer();
+        // Guns up: it circuits and stays whole.
+        for _ in 0..8 {
+            let out = tick_with_guns(&mut n, &w, &tiles, 4);
+            assert!(!out.died, "whole, it cannot be finished");
+        }
+        assert_eq!(n.ai[0], state::CIRCUIT, "still flying its circuit");
+
+        // The last gun destroyed: the whole machine dies, with loot.
+        let out = tick_with_guns(&mut n, &w, &tiles, 0);
+        assert_eq!(n.ai[0], state::DONE);
+        assert!(out.died, "a kill, not a silent despawn");
+        assert!(!out.spent, "and not routed as a mere expiry");
+    }
+
+    /// SAU-1: in Expert the same loss drops it into the spin (and on into the last stand), not an
+    /// instant death - the core stays and has to be killed.
+    #[test]
+    fn losing_its_last_gun_drops_it_into_the_spin_in_expert() {
+        let tiles = ground();
+        let mut w = world(&tiles, Some((2000.0, 3100.0)));
+        w.conditions.expert = true;
+        let mut n = saucer();
+        for _ in 0..8 {
+            tick_with_guns(&mut n, &w, &tiles, 4);
+        }
+        let out = tick_with_guns(&mut n, &w, &tiles, 0);
+        assert_eq!(
+            n.ai[0],
+            state::SPINNING,
+            "expert spins, it does not die outright"
+        );
+        assert!(!out.died, "no Classic-mode instant death in Expert");
+    }
+
+    /// SAU-1: guns missing on the very first tick (before they have been assembled) is not a loss;
+    /// the `local_ai[0]` latch means only guns that were once present, then gone, end the fight.
+    #[test]
+    fn a_saucer_with_no_guns_yet_is_not_finished_on_its_first_tick() {
+        let tiles = ground();
+        let w = world(&tiles, Some((2000.0, 3100.0)));
+        let mut n = saucer();
+        let out = tick_with_guns(&mut n, &w, &tiles, 0);
+        assert!(!out.died, "its guns simply have not spawned yet");
+        assert_eq!(n.ai[0], state::CIRCUIT);
     }
 
     /// The circuit really is a circuit: it visits every phase and comes back round.

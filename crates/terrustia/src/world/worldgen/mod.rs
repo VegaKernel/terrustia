@@ -389,31 +389,34 @@ pub fn build_with_secret_seed(
         "liquid settling did not converge; a generated world would ship with moving water"
     );
 
-    // Desert oases, before anything below gets a chance to drop a decoration onto the desert
-    // surface. Its own siting check requires every active tile in a wide scan window to be plain
-    // sand, faithful to vanilla — where the same check works because vanilla's own `Oasis` pass
-    // (`WorldGen.cs:16339`) runs before essentially every decorative pass, including `Statues`
-    // (16962), `PotsGraveyardsAndBoulderPiles` (18123) and, notably, cacti themselves
-    // (`CactusPalmTreesAndCoral`, 21488 — the very end of vanilla's own pass list). This module
-    // first ran after `plant_undergrowth` (which plants cacti) and, later, after pots/statues too
-    // — both left desert columns carrying a decoration the scan window's "must be plain sand"
-    // check would fail on, and oases placed zero on every real world tried either way. Moving it
-    // here, before any of that runs, matches vanilla's own order and is the actual fix; nothing
-    // about `try_place` itself was wrong.
-    let oases = oasis::scatter(&mut world, &plan, &mut rand);
-
-    // Pyramids, for the same reason as oases just above: vanilla's own `Pyramids` pass
-    // (`WorldGen.cs:15438`) runs before essentially every decoration pass too — earlier than
-    // `Oasis` itself, in fact (15438 vs 16339), though the two rarely interact in practice, since
-    // a pyramid's own site check only ever looks at the one point it starts digging from, not a
-    // wide window the way oasis does.
+    // Pyramids, before essentially every decoration pass — vanilla's own `Pyramids` pass
+    // (`WorldGen.cs:15438`) is the earliest of this trio, ahead of `LivingTrees` (15562) and
+    // `Oasis` (16338) alike, though it rarely interacts with either in practice: a pyramid's own
+    // site check only ever looks at the one point it starts digging from, not a wide window the
+    // way oasis does.
     let pyramids = pyramids::scatter(&mut world, &plan, &mut rand, &mut forest_rng);
 
-    // Living trees, right after pyramids for the same reason — vanilla's own `LivingTrees` pass
-    // (`WorldGen.cs:15563`) runs between `Pyramids` (15438) and `Oasis` (16339), before anything
-    // below gets a chance to leave a tile in the 100-wide clear footprint a trunk needs.
+    // Living trees, right after pyramids — vanilla's own `LivingTrees` pass (`WorldGen.cs:15562`)
+    // runs between `Pyramids` (15438) and `Oasis` (16338), before anything below gets a chance to
+    // leave a tile in the 100-wide clear footprint a trunk needs.
     let living_trees = living_trees::scatter(&mut world, &plan, &mut rand);
     living_trees::scatter_walls(&mut world, &plan);
+
+    // Desert oases, last of this trio and still before anything further below gets a chance to
+    // drop a decoration onto the desert surface. Its own siting check requires every active tile
+    // in a wide scan window to be plain sand, faithful to vanilla — where the same check works
+    // because vanilla's own `Oasis` pass (`WorldGen.cs:16338`) runs before essentially every
+    // decorative pass, including `Statues` (16962), `PotsGraveyardsAndBoulderPiles` (18123) and,
+    // notably, cacti themselves (`CactusPalmTreesAndCoral`, 21488 — the very end of vanilla's own
+    // pass list). This module first ran after `plant_undergrowth` (which plants cacti) and,
+    // later, after pots/statues too — both left desert columns carrying a decoration the scan
+    // window's "must be plain sand" check would fail on, and oases placed zero on every real
+    // world tried either way. Moving it before any of that runs matches vanilla's own order and
+    // is the actual fix; nothing about `try_place` itself was wrong. It used to also run *before*
+    // `Pyramids`/`LivingTrees` above, contradicting both vanilla and this very comment block's own
+    // stated order (`WorldGen.cs:15438/15562/16338` puts Oasis strictly last of the three) — moved
+    // here to match.
+    let oases = oasis::scatter(&mut world, &plan, &mut rand);
 
     // Floating islands: entirely in the sky, well above `plan.surface`, so — unlike every other
     // Tier 2 pass above — its relative order against ground-level passes is genuinely inert rather
@@ -989,9 +992,30 @@ mod tests {
         );
         let differing = (0..world.width())
             .flat_map(|x| (0..world.height()).map(move |y| (x, y)))
-            .filter(|&(x, y)| world.tile(x, y) != back.tile(x, y))
+            .filter(|&(x, y)| !tiles_equal_for_save(world.tile(x, y), back.tile(x, y)))
             .count();
         assert_eq!(differing, 0, "{differing} tiles changed across a save");
+    }
+
+    /// Whether two tiles are the same for the purpose of "did the save lose anything real".
+    ///
+    /// `liquid_kind` on a dry tile (`liquid == 0`) does not survive a save: the wire and file
+    /// format both, deliberately, only encode `liquid_kind` when `liquid != 0`
+    /// (`terrustia-proto/src/section.rs`'s `write_tile_with`, guarded by `if tile.liquid != 0`,
+    /// and its matching reader), the same as real vanilla's own tile section, which never
+    /// transmits a liquid type for a tile that currently holds none. A generated world can still
+    /// carry a stale, pre-drain `liquid_kind` on a tile that no longer has any liquid (several
+    /// worldgen passes drain liquid without resetting the type byte, matching vanilla's own
+    /// `Tile.liquidType`, which is not reset on drain either); that byte alone differing, with
+    /// both sides genuinely dry, is not a real difference a save lost.
+    fn tiles_equal_for_save(before: Tile, after: Tile) -> bool {
+        before == after
+            || (before.liquid == 0
+                && after.liquid == 0
+                && Tile {
+                    liquid_kind: after.liquid_kind,
+                    ..before
+                } == after)
     }
 
     /// Every header field survives a save.

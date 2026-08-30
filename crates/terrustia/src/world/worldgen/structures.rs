@@ -417,7 +417,12 @@ pub fn dungeon(world: &mut World, layout: &Layout, heights: &[i32], rand: &mut U
     }
 
     // Rooms, spread either side of the shaft and down.
+    //
+    // `dungeon_loot_style` is vanilla's own `dungeonLootStyle`: one counter shared across every
+    // chest this whole dungeon places, advanced only when a chest is actually placed
+    // (`DungeonUtils.cs:379-383`), not reseeded per room.
     let rooms = 14 + rand.next_max(10);
+    let mut dungeon_loot_style: u8 = 0;
     for _ in 0..rooms {
         let rw = rand.next_range(14, 30);
         let rh = rand.next_range(9, 16);
@@ -453,7 +458,16 @@ pub fn dungeon(world: &mut World, layout: &Layout, heights: &[i32], rand: &mut U
         if rand.next_max(2) == 0 {
             let cx = rx + rand.next_range(-rw + 2, rw - 2);
             let cy = ry + rh - 1;
-            add_chest(world, cx, cy, dungeon_loot(rand), rand);
+            let (loot, style) = dungeon_loot(rand, layout, cy, dungeon_loot_style);
+            if add_chest_styled(world, cx, cy, loot, rand, style) {
+                // Only a chest that actually landed advances the round-robin — the same
+                // `if (num3 && styleData.Style == 0) dungeonLootStyle++;` gate vanilla's own
+                // caller applies (`DungeonUtils.cs:380-383`). `wrapping_add` rather than the
+                // explicit ">=8 reset" vanilla stores: both pick the same slot via `% 8`, and a
+                // dungeon never places enough chests to make the difference visible short of
+                // overflowing a `u8` entirely.
+                dungeon_loot_style = dungeon_loot_style.wrapping_add(1);
+            }
         }
     }
 }
@@ -613,7 +627,7 @@ pub fn chests(world: &mut World, layout: &Layout, rand: &mut UnifiedRandom) -> u
     placed
 }
 
-/// Put a chest down if there is room and a floor for it.
+/// Put a plain (style 0) chest down if there is room and a floor for it.
 ///
 /// `pub(crate)`: `jungle_shrines.rs` reuses this directly for the chest a shrine's own floor gap
 /// is built to hold, rather than re-deriving the same clearance/floor check a second time.
@@ -622,7 +636,27 @@ pub(crate) fn add_chest(
     x: i32,
     y: i32,
     items: Vec<terrustia_proto::ItemStack>,
+    rand: &mut UnifiedRandom,
+) -> bool {
+    add_chest_styled(world, x, y, items, rand, 0)
+}
+
+/// [`add_chest`], but able to frame the tile at a chosen chest *style* rather than always the
+/// plain one — needed for a dungeon chest, which vanilla places locked (style 2) far more often
+/// than not (see [`dungeon_loot`]'s own doc).
+///
+/// A chest tile's style lives entirely in its frame: each style is one 36-pixel-wide (two-tile)
+/// column of the sprite sheet, so `frame_x = style * 36 + local_dx * 18` — confirmed against
+/// `on_lock`'s own `frame_x / 36` read of an existing chest's style, and against
+/// `terrustia_proto::locks`' style numbers, where 2 is exactly the locked dungeon/gold chest
+/// `unlock_shift` already knows how to open with a key.
+pub(crate) fn add_chest_styled(
+    world: &mut World,
+    x: i32,
+    y: i32,
+    items: Vec<terrustia_proto::ItemStack>,
     _rand: &mut UnifiedRandom,
+    style: u16,
 ) -> bool {
     if !world.in_bounds(x, y) || !world.in_bounds(x + 1, y + 1) {
         return false;
@@ -637,10 +671,12 @@ pub(crate) fn add_chest(
         return false;
     }
 
+    let style_frame = style * 36;
     for dx in 0..2i32 {
         for dy in 0..2i32 {
             let wall = world.tile(x + dx, y - 1 + dy).wall;
-            let mut tile = Tile::framed(tiles::CHEST, (dx as i16) * 18, (dy as i16) * 18);
+            let frame_x = style_frame as i16 + (dx as i16) * 18;
+            let mut tile = Tile::framed(tiles::CHEST, frame_x, (dy as i16) * 18);
             tile.wall = wall;
             world.set_tile(x + dx, y - 1 + dy, tile);
         }
@@ -772,30 +808,68 @@ pub(crate) fn cavern_loot(
     items
 }
 
-/// ...and what a dungeon chest holds, which is a tier above.
+/// ...and what a dungeon chest holds, which is a tier above — and, unlike every other chest table
+/// in this file, not random at all.
 ///
-/// Every id below used to disagree with its own comment: 327 is Golden Key in `ItemID.cs`, not
-/// Muramasa; 328 is Shadow Chest, not Cobalt Shield; 329 is Shadow Key, not Aqua Scepter; 330 is
-/// Obsidian Brick Wall, not Blue Moon; 676 (Frostbrand) and 1266 (Magnet Sphere) are real items,
-/// but a hardmode reforge and a post-Plantera drop respectively — both too advanced for an
-/// always-pre-hardmode dungeon table. Replaced with the classic dungeon weapon family each
-/// original comment actually named, IDs verified against `ItemID.cs` directly: Muramasa(155),
-/// Cobalt Shield(156), Blade of Grass(190), Blue Moon(163), Handgun(164).
-fn dungeon_loot(rand: &mut UnifiedRandom) -> Vec<terrustia_proto::ItemStack> {
+/// A prior fix already replaced this table's original five mislabeled ids (327/328/329/330/676
+/// wrongly commented as Muramasa/Cobalt Shield/Aqua Scepter/Blue Moon/Magnet Sphere) with a
+/// classic weapon family, but the family itself was still fabricated: five items picked with
+/// `next_max`, when real vanilla's own table has **eight** items chosen by a **deterministic
+/// round-robin**, not a per-chest die roll — `WorldGen.GetDungeonLootAndChestStyle`
+/// (`WorldGen.cs:36189-36237`), wired to a "style-0" regular dungeon chest by
+/// `DungeonUtils.GenerateDungeonRegularChest` (`DungeonUtils.cs:334-385`).
+///
+/// `dungeonLootStyle` is a persistent counter, one shared value for the entire dungeon (not
+/// reseeded per chest), advanced by the caller once per chest *actually placed* and wrapped at 8
+/// (`DungeonUtils.cs:380-383`; the wrap in `GetDungeonLootAndChestStyle` itself resets the stored
+/// counter to 0 at >=8 rather than taking a modulus, but the two are the same sequence of chosen
+/// slots — `slot` here is the caller's counter already reduced mod 8). Slot 6 of the eight is
+/// always a Golden Key, framed at chest style 0 (an ordinary *unlocked* chest, so exploring the
+/// dungeon is never blocked on finding a key before finding the thing the key opens); every other
+/// slot is framed at chest style 2 (the locked dungeon/gold chest `terrustia_proto::locks`
+/// already knows how to open with one). Separately, **any** chest — whichever slot it landed on —
+/// sitting within 50 tiles of the world surface line is overridden outright to the same
+/// guaranteed unlocked Golden Key, so the entrance is never far from a way to open what is deeper
+/// in (`WorldGen.cs:36228-36232`).
+///
+/// Returns the loot and the chest style [`add_chest_styled`] should frame the tile with.
+fn dungeon_loot(
+    rand: &mut UnifiedRandom,
+    layout: &Layout,
+    y: i32,
+    slot: u8,
+) -> (Vec<terrustia_proto::ItemStack>, u16) {
     use terrustia_proto::ItemStack;
-    let signature = [
-        155, // Muramasa
-        156, // Cobalt Shield
-        190, // Blade of Grass
-        163, // Blue Moon
-        164, // Handgun
-    ];
-    let pick = signature[rand.next_max(signature.len() as i32) as usize];
-    vec![
-        ItemStack::new(pick, 1, 0),
+
+    /// The real eight, in `dungeonLootStyle`'s own order (`WorldGen.cs:36197-36228`): Muramasa,
+    /// Cobalt Shield, Aqua Scepter, Blue Moon, Magic Missile, Valor, Golden Key, Handgun.
+    const ROUND_ROBIN: [i32; 8] = [155, 156, 157, 163, 113, 3317, 327, 164];
+    /// The one slot that is a Golden Key rather than a weapon, and so the one slot framed
+    /// unlocked (style 0) rather than locked (style 2).
+    const GOLDEN_KEY_SLOT: usize = 6;
+    const LOCKED_STYLE: u16 = 2;
+    const UNLOCKED_STYLE: u16 = 0;
+
+    let i = usize::from(slot) % ROUND_ROBIN.len();
+    let (mut signature, mut style) = (
+        ROUND_ROBIN[i],
+        if i == GOLDEN_KEY_SLOT {
+            UNLOCKED_STYLE
+        } else {
+            LOCKED_STYLE
+        },
+    );
+    if y < layout.surface + 50 {
+        signature = ROUND_ROBIN[GOLDEN_KEY_SLOT];
+        style = UNLOCKED_STYLE;
+    }
+
+    let items = vec![
+        ItemStack::new(signature, 1, 0),
         ItemStack::new(8, rand.next_range(15, 40) as i16, 0),
         ItemStack::new(72, rand.next_range(5, 40) as i16, 0),
-    ]
+    ];
+    (items, style)
 }
 
 /// Grass, and the surface plants that grow on it.
@@ -943,30 +1017,68 @@ mod chest_loot_tests {
         assert!(biome_chest_loot(&layout, 250, 500, &mut rand).is_none());
     }
 
-    /// `dungeon_loot`'s old signature array (327/328/329/330/676/1266) disagreed with its own
-    /// comments: `ItemID.cs` says 327 is Golden Key (not Muramasa), 328 is Shadow Chest (not
-    /// Cobalt Shield), 329 is Shadow Key (not Aqua Scepter), 330 is Obsidian Brick Wall (not Blue
-    /// Moon) — and 676/1266 really are Frostbrand/Magnet Sphere, but a hardmode reforge and a
-    /// post-Plantera drop are both too advanced for an always-pre-hardmode dungeon chest. Pins
-    /// the real classic family (Muramasa/Cobalt Shield/Blade of Grass/Blue Moon/Handgun) instead.
+    /// `dungeon_loot`'s previous fix already replaced the original mislabeled ids
+    /// (327/328/329/330/676/1266, disagreeing with their own comments — `ItemID.cs` says 327 is
+    /// Golden Key, not Muramasa, and so on) with a five-item classic family, but that family was
+    /// itself fabricated: real vanilla's table (`WorldGen.cs:36189-36237`) is eight items chosen
+    /// by a **deterministic round-robin** over `dungeonLootStyle`, not a per-chest die roll, and
+    /// one of the eight (slot 6) is a Golden Key rather than a weapon. This pins the real eight,
+    /// in order, plus the chest style each slot frames — style 2 (locked) for the seven weapons,
+    /// style 0 (unlocked) for the key, so a dungeon is never sealed behind its own loot.
     #[test]
-    fn dungeon_chests_hold_the_real_classics_not_the_mislabeled_ids() {
-        let mut seen = std::collections::HashSet::new();
-        for seed in 0..300i32 {
-            let mut rand = UnifiedRandom::new(seed);
-            let signature = dungeon_loot(&mut rand)[0].id;
-            assert!(
-                [155, 156, 190, 163, 164].contains(&signature),
-                "unexpected dungeon chest item id {signature} — the old mislabeled set \
-                 (327/328/329/330/676/1266) must never appear"
-            );
-            seen.insert(signature);
+    fn dungeon_loot_cycles_through_the_real_eight_item_table_in_order() {
+        let layout = test_layout();
+        let deep_y = layout.surface + 500; // comfortably past the near-surface override below
+        let mut rand = UnifiedRandom::new(1);
+
+        let real_table = [155, 156, 157, 163, 113, 3317, 327, 164];
+        for (slot, &want_item) in real_table.iter().enumerate() {
+            let (loot, style) = dungeon_loot(&mut rand, &layout, deep_y, slot as u8);
+            assert_eq!(loot[0].id, want_item, "round-robin slot {slot}");
+            let want_style = if slot == 6 { 0 } else { 2 };
+            assert_eq!(style, want_style, "chest style for slot {slot}");
         }
+
+        // `dungeonLootStyle` wraps at 8 (`WorldGen.cs:36192-36196`), back to slot 0's Muramasa.
+        let (loot, style) = dungeon_loot(&mut rand, &layout, deep_y, 8);
+        assert_eq!(loot[0].id, 155, "slot 8 wraps to slot 0");
+        assert_eq!(style, 2);
+    }
+
+    /// Whichever slot the round-robin lands on, a chest within 50 tiles of the world surface line
+    /// is always overridden to a guaranteed, *unlocked* Golden Key (`WorldGen.cs:36228-36232`) —
+    /// so an explorer who has barely climbed down always finds a way to open the locked chests
+    /// deeper in, rather than needing to already have a key to find the first key.
+    #[test]
+    fn a_near_surface_chest_always_overrides_to_an_unlocked_golden_key() {
+        let layout = test_layout();
+        let near_y = layout.surface + 49; // just inside the 50-tile window
+        let mut rand = UnifiedRandom::new(1);
+
+        for slot in 0..8u8 {
+            let (loot, style) = dungeon_loot(&mut rand, &layout, near_y, slot);
+            assert_eq!(
+                loot[0].id, 327,
+                "slot {slot} should still be overridden to the Golden Key"
+            );
+            assert_eq!(style, 0, "slot {slot} should still be unlocked");
+        }
+    }
+
+    /// The boundary itself: `y < surface + 50` is false exactly at `surface + 50`, so the ordinary
+    /// round-robin applies from there down.
+    #[test]
+    fn just_outside_the_near_surface_window_the_round_robin_applies_normally() {
+        let layout = test_layout();
+        let just_deep = layout.surface + 50;
+        let mut rand = UnifiedRandom::new(1);
+
+        let (loot, style) = dungeon_loot(&mut rand, &layout, just_deep, 0);
         assert_eq!(
-            seen,
-            [155, 156, 190, 163, 164].into_iter().collect(),
-            "every real classic should show up over 300 draws"
+            loot[0].id, 155,
+            "slot 0 (Muramasa), not overridden to a key"
         );
+        assert_eq!(style, 2, "locked, not the near-surface unlocked override");
     }
 
     /// `cavern_loot`'s old shallow/deep arrays disagreed with their own comments the same way —
