@@ -13,12 +13,21 @@
 
 use rand::{Rng, rngs::SmallRng};
 
-/// The strongest wind the world will ever blow.
+/// The strongest wind the world will ever blow — the strongest it *targets*, before rain drives it
+/// harder still (see [`RAIN_WIND_BOOST`]).
 pub const WIND_LIMIT: f32 = 0.8;
 /// ...and the strongest it blows for a party who have never found a life crystal.
 pub const WIND_LIMIT_EARLY: f32 = 0.35;
-/// How fast the wind actually gets to where it is going.
-pub const WIND_DRIFT: f32 = 0.0025;
+/// The wind never quite stops closing on its target: this is the floor on how far it moves each
+/// tick (`Main.cs:59739`).
+pub const WIND_APPROACH_FLOOR: f32 = 0.0003;
+/// ...and on top of that floor it closes this fraction of the remaining distance every tick, so it
+/// approaches fast when far and eases in when near — an exponential creep, not a fixed drift
+/// (`Main.cs:59741`).
+pub const WIND_APPROACH_RATE: f32 = 0.0015;
+/// Rain drives the wind harder: the target it heads for is multiplied by `1 + this * maxRaining`
+/// (`Main.cs:59740`), so a downpour blows past the ordinary [`WIND_LIMIT`].
+pub const RAIN_WIND_BOOST: f32 = 5.0 / 9.0;
 /// A day counts as windy past this, which is what several routines are actually asking.
 pub const WINDY: f32 = 0.4;
 
@@ -71,6 +80,37 @@ impl Default for Weather {
 /// A day is 86,400 ticks by the game's own reckoning of weather timings.
 const DAY: i32 = 86_400;
 
+/// The rest of the sky state a weather tick reads, beside the wind and rain it keeps itself: two
+/// events that gate weather (L3-19) and the cloud count that sets a shower's strength (L3-18).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sky {
+    /// Whether a lantern night is up — it holds the wind's target and stops (or forestalls) rain.
+    pub lantern_night: bool,
+    /// Whether a slime rain is on — rain will not begin over one.
+    pub slime_rain: bool,
+    /// How many clouds the sky is holding, which decides how hard a shower comes down.
+    pub num_clouds: u16,
+}
+
+/// How hard a shower comes down, rolled from how cloudy the sky already is — `Main.ChangeRain`'s
+/// own three cloud-dependent branches (`Main.cs:65710`). The `cloudBGActive >= 1` half of vanilla's
+/// top branch is not modelled (this project does not track the visual cloud alpha), so only the
+/// `numClouds` thresholds select the branch; that is a narrowing, not a different formula.
+fn roll_rain_strength(num_clouds: u16, rng: &mut SmallRng) -> f32 {
+    // Two rolls in three take the common (narrower, stronger) range; the last takes the wider one.
+    let common = rng.random_range(0..3) != 0;
+    let range = if num_clouds > 150 {
+        if common { 40..=90 } else { 20..=90 }
+    } else if num_clouds > 100 {
+        if common { 20..=60 } else { 10..=70 }
+    } else if common {
+        5..=30
+    } else {
+        5..=40
+    };
+    rng.random_range(range) as f32 * 0.01
+}
+
 impl Weather {
     /// One tick. `strong_enough` is whether anyone in the world has found a life crystal, which
     /// is the gate on real weather happening at all.
@@ -80,24 +120,51 @@ impl Weather {
     /// separate update calls), which is why they are two parameters here rather than one shared
     /// pause: freezing a storm mid-downpour should not also freeze which way the wind is blowing.
     /// Sandstorms have no Journey power of their own and are never frozen by either flag.
+    ///
+    /// `sky` carries the rest of what vanilla's own weather reads: whether a lantern night is up
+    /// and whether a slime rain is on (both gate the wind and the rain, L3-19), and how many clouds
+    /// the sky is holding, which sets how hard a shower comes down (L3-18).
     pub fn tick(
         &mut self,
         strong_enough: bool,
         hard_mode: bool,
         freeze_wind: bool,
         freeze_rain: bool,
+        sky: Sky,
         rng: &mut SmallRng,
     ) {
         if !freeze_wind {
-            self.tick_wind(strong_enough, rng);
+            self.tick_wind(strong_enough, sky.lantern_night, rng);
         }
         if !freeze_rain {
-            self.tick_rain(strong_enough, rng);
+            self.tick_rain(strong_enough, sky, rng);
         }
         self.tick_sandstorm(hard_mode, rng);
     }
 
-    fn tick_wind(&mut self, strong_enough: bool, rng: &mut SmallRng) {
+    fn tick_wind(&mut self, strong_enough: bool, lantern_night: bool, rng: &mut SmallRng) {
+        // L3-19: a lantern night holds the wind's target where it is (`Main.cs:59764`). The wind
+        // still creeps toward that frozen target below; it only stops picking a *new* one.
+        if !lantern_night {
+            self.tick_wind_target(strong_enough, rng);
+        }
+        self.target = self.target.clamp(-WIND_LIMIT, WIND_LIMIT);
+
+        // L3-13: the wind closes on its target exponentially (fast when far, easing in when near,
+        // never quite still), toward a target rain drives harder — `Main.cs:59738-59756`, not the
+        // fixed drift this used, which approached several times too fast and ignored the rain.
+        let effective = self.target * (1.0 + RAIN_WIND_BOOST * self.max_rain);
+        let step = WIND_APPROACH_FLOOR + (effective - self.wind).abs() * WIND_APPROACH_RATE;
+        if self.wind < effective {
+            self.wind = (self.wind + step).min(effective);
+        } else if self.wind > effective {
+            self.wind = (self.wind - step).max(effective);
+        }
+    }
+
+    /// Roll a new wind target, once its counter has run out. Split from the approach so a lantern
+    /// night can freeze the one without freezing the other.
+    fn tick_wind_target(&mut self, strong_enough: bool, rng: &mut SmallRng) {
         self.counter -= 1;
         if self.counter <= 0 {
             let was = if self.target < 0.0 { -1.0 } else { 1.0 };
@@ -153,14 +220,6 @@ impl Weather {
                 self.target *= -1.0;
             }
         }
-        self.target = self.target.clamp(-WIND_LIMIT, WIND_LIMIT);
-
-        // The wind itself only ever creeps toward its target.
-        if self.wind < self.target {
-            self.wind = (self.wind + WIND_DRIFT).min(self.target);
-        } else if self.wind > self.target {
-            self.wind = (self.wind - WIND_DRIFT).max(self.target);
-        }
     }
 
     fn cap(&mut self, strong_enough: bool) {
@@ -176,25 +235,41 @@ impl Weather {
         }
     }
 
-    fn tick_rain(&mut self, strong_enough: bool, rng: &mut SmallRng) {
+    fn tick_rain(&mut self, strong_enough: bool, sky: Sky, rng: &mut SmallRng) {
         if self.raining {
+            // L3-19: a lantern night stops the rain outright (`Main.cs:65848-65851`).
+            if sky.lantern_night {
+                self.stop_rain();
+                return;
+            }
             self.rain_time -= 1;
             if self.rain_time <= 0 {
                 self.stop_rain();
+                return;
+            }
+            // L3-18: one tick in 7,200 the intensity is re-rolled mid-storm (`Main.cs:65862-65865`,
+            // `86400 / 24 * 2`), so a shower is not one flat strength start to finish.
+            if rng.random_range(0..7200) == 0 {
+                self.max_rain = roll_rain_strength(sky.num_clouds, rng);
             }
             return;
         }
         if !strong_enough {
             return;
         }
+        // L3-19: rain does not begin during a slime rain or a lantern night (`Main.cs:65870`).
+        if sky.slime_rain || sky.lantern_night {
+            return;
+        }
         // Roughly one shower every five and three-quarter days.
         if rng.random_range(0..(DAY as f32 * 5.75) as i32) == 0 {
-            self.start_rain(rng);
+            self.start_rain(sky.num_clouds, rng);
         }
     }
 
-    /// Begin a shower: somewhere from eight hours to a day of it, at a strength of its own.
-    pub fn start_rain(&mut self, rng: &mut SmallRng) {
+    /// Begin a shower: somewhere from eight hours to a day of it, at a strength set by how cloudy
+    /// the sky already is (L3-18).
+    pub fn start_rain(&mut self, num_clouds: u16, rng: &mut SmallRng) {
         let hour = DAY / 24;
         let mut length = rng.random_range(hour * 8..DAY);
         // Six independent rolls that each sometimes extend it, which is what makes a long
@@ -212,11 +287,7 @@ impl Weather {
         }
         self.rain_time = (length as f32 * stretch) as i32;
         self.raining = true;
-        self.max_rain = if rng.random_range(0..3) != 0 {
-            rng.random_range(5..=30) as f32 * 0.01
-        } else {
-            rng.random_range(5..=40) as f32 * 0.01
-        };
+        self.max_rain = roll_rain_strength(num_clouds, rng);
     }
 
     pub fn stop_rain(&mut self) {
@@ -298,36 +369,97 @@ mod tests {
         let mut weather = Weather::default();
         let mut trace = Vec::new();
         for _ in 0..ticks {
-            weather.tick(strong_enough, false, false, false, &mut rng);
+            weather.tick(strong_enough, false, false, false, Sky::default(), &mut rng);
             trace.push(weather.wind);
         }
         (weather, trace)
     }
 
-    /// The wind actually moves, and never past its limit.
+    /// The strongest the wind can ever reach: its ordinary limit, driven harder by the heaviest
+    /// rain (`max_rain` tops out at 0.40 in [`Weather::start_rain`]) — the rain-amplified target
+    /// from L3-13.
+    const AMPLIFIED_LIMIT: f32 = WIND_LIMIT * (1.0 + RAIN_WIND_BOOST * 0.40);
+
+    /// The wind actually moves, and never past its limit — the ordinary one in the dry, and the
+    /// rain-amplified one when it is pouring.
     #[test]
     fn the_wind_blows_and_stays_within_bounds() {
         let (_, trace) = run(true, 200_000, 1);
         let strongest = trace.iter().cloned().fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(strongest > 0.2, "it should blow at all: {strongest}");
         assert!(
-            trace.iter().all(|w| w.abs() <= WIND_LIMIT + 1e-6),
-            "past the limit: {strongest}"
+            trace.iter().all(|w| w.abs() <= AMPLIFIED_LIMIT + 1e-6),
+            "past the amplified limit: {strongest}"
         );
     }
 
-    /// It creeps rather than jumping: no single tick moves it more than its drift.
+    /// It creeps rather than jumping: no single tick moves it more than one exponential step, the
+    /// floor plus the rate times the farthest it could ever be from its target (L3-13). Vanilla's
+    /// approach is not the old fixed drift, so a step can be a little larger when far from target,
+    /// but it is still a creep, never a teleport.
     #[test]
     fn the_wind_never_jumps() {
+        let max_step = WIND_APPROACH_FLOOR + WIND_APPROACH_RATE * 2.0 * AMPLIFIED_LIMIT;
         let (_, trace) = run(true, 100_000, 2);
         for pair in trace.windows(2) {
             assert!(
-                (pair[1] - pair[0]).abs() <= WIND_DRIFT + 1e-6,
+                (pair[1] - pair[0]).abs() <= max_step + 1e-6,
                 "the wind jumped from {} to {}",
                 pair[0],
                 pair[1]
             );
         }
+    }
+
+    /// L3-13: the wind closes on its target by an exponential step (fast far, slow near) rather
+    /// than a fixed drift, and rain drives the target past the ordinary limit.
+    ///
+    /// Fails before the fix: the old approach moved a constant `0.0025` a tick, so the first step
+    /// would be far larger than the exponential floor-plus-fraction, the step would not shrink as
+    /// it closed in, and rain would never carry the wind past `WIND_LIMIT`.
+    #[test]
+    fn wind_approaches_exponentially_and_rain_drives_it_harder() {
+        let mut rng = SmallRng::seed_from_u64(0);
+        // A fixed target (a huge counter keeps the nudge logic from re-rolling it), no rain.
+        let mut w = Weather {
+            target: 0.35,
+            counter: 1_000_000,
+            ..Default::default()
+        };
+        let before = w.wind;
+        w.tick_wind(true, false, &mut rng);
+        let first_step = w.wind - before;
+        let expected = WIND_APPROACH_FLOOR + WIND_APPROACH_RATE * 0.35;
+        assert!(
+            (first_step - expected).abs() < 1e-6,
+            "first step {first_step} should be the exponential {expected}, not a fixed drift"
+        );
+        // Closing in, the step shrinks toward the floor — a fixed drift never would.
+        for _ in 0..2_000 {
+            w.tick_wind(true, false, &mut rng);
+        }
+        let near = w.wind;
+        w.tick_wind(true, false, &mut rng);
+        assert!(
+            w.wind - near < first_step,
+            "the step should shrink as the wind nears its target"
+        );
+
+        // Rain drives the target past the ordinary limit.
+        let mut w = Weather {
+            target: WIND_LIMIT,
+            counter: 1_000_000,
+            max_rain: 0.40,
+            ..Default::default()
+        };
+        for _ in 0..20_000 {
+            w.tick_wind(true, false, &mut rng);
+        }
+        assert!(
+            w.wind > WIND_LIMIT + 0.05,
+            "rain should push the wind well past {WIND_LIMIT}: {}",
+            w.wind
+        );
     }
 
     /// It blows both ways — over enough worlds, not necessarily within one.
@@ -480,7 +612,7 @@ mod tests {
     fn rain_starts_and_stops() {
         let mut rng = SmallRng::seed_from_u64(6);
         let mut weather = Weather::default();
-        weather.start_rain(&mut rng);
+        weather.start_rain(0, &mut rng);
         assert!(weather.raining);
         assert!(weather.max_rain > 0.0 && weather.max_rain <= 0.4);
         // Eight hours at the very least, by the game's own reckoning of a day.
@@ -493,7 +625,7 @@ mod tests {
         let started = weather.rain_time;
         let mut ticks = 0;
         while weather.raining && ticks < started + 10 {
-            weather.tick(true, false, false, false, &mut rng);
+            weather.tick(true, false, false, false, Sky::default(), &mut rng);
             ticks += 1;
         }
         assert!(!weather.raining, "and it should have stopped");
@@ -508,7 +640,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(seed);
             let mut weather = Weather::default();
             for _ in 0..2_000_000 {
-                weather.tick(true, false, false, false, &mut rng);
+                weather.tick(true, false, false, false, Sky::default(), &mut rng);
                 if weather.raining {
                     rained = true;
                     break;
@@ -519,5 +651,98 @@ mod tests {
             }
         }
         assert!(rained, "two million ticks and never a drop");
+    }
+
+    /// L3-18: a shower's intensity re-rolls mid-storm rather than holding one value throughout
+    /// (`Main.cs:65862-65865`).
+    ///
+    /// Fails before the fix: `max_rain` was set once in `start_rain` and never touched again, so a
+    /// storm came down at exactly one strength from beginning to end.
+    #[test]
+    fn rain_intensity_re_rolls_mid_storm() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut weather = Weather::default();
+        weather.start_rain(0, &mut rng);
+        let initial = weather.max_rain;
+        let sky = Sky::default();
+        let mut changed = false;
+        while weather.raining {
+            weather.tick_rain(true, sky, &mut rng);
+            if (weather.max_rain - initial).abs() > 1e-6 {
+                changed = true;
+                break;
+            }
+        }
+        assert!(
+            changed,
+            "the intensity should have re-rolled during the storm"
+        );
+    }
+
+    /// L3-19: a lantern night stops rain outright (`Main.cs:65848-65851`).
+    ///
+    /// Fails before the fix: `tick_rain` had no notion of a lantern night, so the rain ran on.
+    #[test]
+    fn a_lantern_night_stops_the_rain() {
+        let mut rng = SmallRng::seed_from_u64(4);
+        let mut weather = Weather::default();
+        weather.start_rain(0, &mut rng);
+        assert!(weather.raining);
+        let sky = Sky {
+            lantern_night: true,
+            ..Default::default()
+        };
+        weather.tick_rain(true, sky, &mut rng);
+        assert!(
+            !weather.raining,
+            "a lantern night should have stopped the rain"
+        );
+    }
+
+    /// L3-19: rain does not begin during a slime rain (`Main.cs:65870`).
+    ///
+    /// Fails before the fix: rain start was ungated, so a slime rain and an ordinary shower could
+    /// run at once.
+    #[test]
+    fn rain_does_not_start_during_a_slime_rain() {
+        let mut rng = SmallRng::seed_from_u64(5);
+        let mut weather = Weather::default();
+        let sky = Sky {
+            slime_rain: true,
+            ..Default::default()
+        };
+        for _ in 0..2_000_000 {
+            weather.tick_rain(true, sky, &mut rng);
+        }
+        assert!(
+            !weather.raining,
+            "rain should never begin during a slime rain"
+        );
+    }
+
+    /// L3-19: a lantern night holds the wind's target where it is (`Main.cs:59764`), though the
+    /// wind still creeps toward it.
+    ///
+    /// Fails before the fix: the wind picked a new target on its schedule regardless of the night.
+    #[test]
+    fn a_lantern_night_freezes_the_wind_target() {
+        let mut rng = SmallRng::seed_from_u64(6);
+        // A counter of zero would re-roll the target immediately on an ordinary night.
+        let mut weather = Weather {
+            target: 0.5,
+            counter: 0,
+            ..Default::default()
+        };
+        for _ in 0..100 {
+            weather.tick_wind(true, true, &mut rng);
+        }
+        assert_eq!(
+            weather.target, 0.5,
+            "the target should be held through a lantern night"
+        );
+        assert!(
+            weather.wind > 0.0,
+            "but the wind should still creep toward it"
+        );
     }
 }

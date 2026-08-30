@@ -3491,11 +3491,17 @@ impl GameServer {
             .any(|p| p.is_playing() && p.life_max >= 120);
         let was_raining = self.weather.raining;
         let hard_mode = self.world.progress.hard_mode;
+        let sky = crate::game::weather::Sky {
+            lantern_night: self.lantern_night.is_up(),
+            slime_rain: self.slime_rain.is_active(),
+            num_clouds: u16::from(self.world.num_clouds),
+        };
         self.weather.tick(
             strong_enough,
             hard_mode,
             self.journey.freeze_wind,
             self.journey.freeze_rain,
+            sky,
             &mut self.rng,
         );
         // The world carries the weather so it goes into the save with everything else.
