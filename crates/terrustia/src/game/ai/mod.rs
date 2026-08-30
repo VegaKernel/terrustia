@@ -99,6 +99,9 @@ pub struct Conditions {
     /// routines are harder there in ways that are not merely stat scaling: the Wall of Flesh walks
     /// faster and the Destroyer grows a longer body.
     pub get_good_world: bool,
+    /// Whether this is a 10th-anniversary (`celebrationmk10`) world (`Main.tenthAnniversaryWorld`).
+    /// One routine reads it: the Crimson big mimic gains a gag "stuff cannon" state there (C7-07).
+    pub tenth_anniversary: bool,
     /// The world's size in tiles, for the handful of routines that steer away from its edges.
     pub world_size: (i32, i32),
 }
@@ -128,6 +131,7 @@ impl Default for Conditions {
             expert: false,
             hardmode: false,
             get_good_world: false,
+            tenth_anniversary: false,
             world_size: (4200, 1200),
         }
     }
@@ -319,7 +323,7 @@ fn plantera_state<T: TileView>(world: &World<'_, T>) -> boss::plantera::Plantera
 /// Which of its parts are still standing changes how often the body hops, and where it is being
 /// fought changes every rate in the fight, so both are worked out from the census rather than
 /// guessed at.
-fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
+fn golem_state<T: TileView>(npc: &Npc, world: &World<'_, T>) -> boss::golem::GolemState {
     boss::golem::GolemState {
         head: world.count(terrustia_proto::npc_params::GOLEM_HEAD) > 0,
         left_fist: world.count(terrustia_proto::npc_params::GOLEM_FIST_LEFT) > 0,
@@ -329,6 +333,8 @@ fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
             && world
                 .target
                 .is_some_and(|t| t.center.1 > world.conditions.surface_y),
+        // GOL-2: the per-player balance this part was scaled for (its own `GetMyBalance`).
+        balance: npc.balance(),
     }
 }
 
@@ -724,13 +730,13 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         15 => {
             let court = boss::king_slime::update(npc, world, rng);
-            for (npc_type, position, velocity) in court.shed {
+            for (npc_type, position, velocity, ai) in court.shed {
                 effects.spawn.push(crate::game::npc_ai::Spawn {
                     npc_type,
                     position,
                     velocity,
                     parent: None,
-                    ai: [None; 4],
+                    ai,
                 });
             }
         }
@@ -763,17 +769,20 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         45 => {
-            let out = boss::golem::body(npc, world, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::body(npc, world, state);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
         }
         46 => {
-            let out = boss::golem::head(npc, world, world.parent, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::head(npc, world, world.parent, state);
             effects.shots.extend(out.shots);
             effects.expired = out.spent;
         }
         47 => {
-            let out = boss::golem::fist(npc, world, world.parent, golem_state(world));
+            let state = golem_state(npc, world);
+            let out = boss::golem::fist(npc, world, world.parent, state);
             effects.expired = out.spent;
         }
         48 => effects

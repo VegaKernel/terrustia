@@ -66,6 +66,7 @@ fn main() -> ExitCode {
         expert: world.game_mode >= 1,
         hardmode: world.progress.hard_mode,
         get_good_world: world.secret_seeds.get_good,
+        tenth_anniversary: world.secret_seeds.tenth_anniversary,
         world_size: (world.width(), world.height()),
     };
 

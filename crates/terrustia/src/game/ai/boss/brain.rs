@@ -16,9 +16,10 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    BRAIN_BLINK_EXPOSED, BRAIN_BLINK_SHIELDED, BRAIN_CHARGE, BRAIN_CHARGE_SMOOTH, BRAIN_CREEPERS,
-    BRAIN_DRIFT, BRAIN_FADE_EXPOSED, BRAIN_FADE_SHIELDED, BRAIN_GIVE_UP, BRAIN_HOMESICK,
-    BRAIN_LEAD, BRAIN_RANGE_EXPOSED, BRAIN_RANGE_SHIELDED, BRAIN_SINK_AFTER, BRAIN_SINK_RATE,
+    BRAIN_BLINK_EXPOSED, BRAIN_BLINK_EXPOSED_MP_EXTRA, BRAIN_BLINK_SHIELDED, BRAIN_CHARGE,
+    BRAIN_CHARGE_SMOOTH, BRAIN_CREEPERS, BRAIN_DRIFT, BRAIN_FADE_EXPOSED, BRAIN_FADE_SHIELDED,
+    BRAIN_GIVE_UP, BRAIN_HOMESICK, BRAIN_LEAD, BRAIN_RANGE_EXPOSED, BRAIN_RANGE_SHIELDED,
+    BRAIN_SINK_AFTER, BRAIN_SINK_RATE,
 };
 use terrustia_proto::tile_solid::solid;
 
@@ -168,8 +169,14 @@ pub fn update<T: TileView>(
                 if world.was_hurt {
                     npc.local_ai[1] -= rng.random_range(0..5) as f32;
                 }
-                let wait =
-                    (BRAIN_BLINK_EXPOSED.0 + rng.random_range(0..BRAIN_BLINK_EXPOSED.1)) as f32;
+                // BRN-1: a dedicated server is netMode 2, where the exposed blink wait gains a
+                // further 30-89 ticks (`num859 += Main.rand.Next(30, 90)`, `NPC.cs:32690-32693`).
+                // This ran the single-player formula, which omits it, so it blinked too eagerly.
+                let wait = (BRAIN_BLINK_EXPOSED.0
+                    + rng.random_range(0..BRAIN_BLINK_EXPOSED.1)
+                    + rng.random_range(
+                        BRAIN_BLINK_EXPOSED_MP_EXTRA.0..BRAIN_BLINK_EXPOSED_MP_EXTRA.1,
+                    )) as f32;
                 if npc.local_ai[1] >= wait
                     && let Some(spot) = blink_to(
                         world,
@@ -373,6 +380,9 @@ mod tests {
     #[test]
     fn it_drifts_while_shielded_and_charges_once_exposed() {
         let tiles = Crimson::default();
+        // Sample the peak speed over the run rather than the speed at one arbitrary tick: a blink
+        // damps the velocity mid-fade, so the instantaneous final speed depends on where the blink
+        // cadence happens to land, while the peak captures the charge itself.
         let speed_of = |exposed: bool| {
             let mut b = brain();
             b.local_ai[0] = 1.0;
@@ -381,6 +391,7 @@ mod tests {
             }
             let (cx, cy) = b.center();
             let t = Some(player_at(cx + 3000.0, cy));
+            let mut peak = 0.0_f32;
             for _ in 0..600 {
                 update(
                     &mut b,
@@ -390,8 +401,9 @@ mod tests {
                     (0.0, 0.0),
                     &mut rng(),
                 );
+                peak = peak.max((b.velocity.0.powi(2) + b.velocity.1.powi(2)).sqrt());
             }
-            (b.velocity.0.powi(2) + b.velocity.1.powi(2)).sqrt()
+            peak
         };
         let drift = speed_of(false);
         let charge = speed_of(true);
@@ -512,5 +524,65 @@ mod tests {
             &mut rng(),
         );
         assert!(swarm.gone);
+    }
+
+    /// BRN-1: a dedicated server is netMode 2, where the exposed teleport fades at 15 a tick, not
+    /// the single-player 25 (`NPC.cs:32744` against `32748`). `ai[3]` climbs 0 -> 255 through the
+    /// fade-out (`ai[0] == -2`), so the slower rate takes noticeably longer.
+    #[test]
+    fn its_exposed_fade_uses_the_slower_multiplayer_rate() {
+        let tiles = Crimson::default();
+        let mut b = brain();
+        b.local_ai[0] = 1.0;
+        b.ai[0] = -2.0; // fading out toward a chosen tile
+        b.ai[1] = 100.0;
+        b.ai[2] = 100.0;
+        b.ai[3] = 0.0;
+        let (cx, cy) = b.center();
+        let t = Some(player_at(cx + 300.0, cy));
+        let mut r = rng();
+        let mut ticks = 0;
+        for _ in 0..40 {
+            update(&mut b, &world(&tiles, t), 0, true, (0.0, 0.0), &mut r);
+            ticks += 1;
+            if b.ai[0] == -3.0 {
+                break;
+            }
+        }
+        // 255 / 15 = 17 ticks (dedicated server); 255 / 25 = 11 (single-player).
+        assert!(
+            ticks >= 15,
+            "the fade should take the slower multiplayer count, got {ticks}"
+        );
+    }
+
+    /// BRN-1: on a dedicated server the exposed blink wait gains another 30-89 ticks
+    /// (`num859 += Main.rand.Next(30, 90)`, `NPC.cs:32690-32693`), so the minimum wait is 90, not
+    /// the single-player 60. Across seeds it therefore never blinks before tick 90.
+    #[test]
+    fn the_exposed_blink_never_fires_before_the_multiplayer_minimum() {
+        let tiles = Crimson::default();
+        let earliest = (0..200u64)
+            .map(|seed| {
+                let mut b = brain();
+                b.local_ai[0] = 1.0;
+                b.ai[0] = -1.0;
+                let (cx, cy) = b.center();
+                let t = Some(player_at(cx + 400.0, cy));
+                let mut r = SmallRng::seed_from_u64(seed);
+                for tick in 0..400 {
+                    update(&mut b, &world(&tiles, t), 0, true, (0.0, 0.0), &mut r);
+                    if b.ai[0] != -1.0 {
+                        return tick;
+                    }
+                }
+                400
+            })
+            .min()
+            .unwrap();
+        assert!(
+            earliest >= 90,
+            "the earliest exposed blink should be the multiplayer 90, got {earliest}"
+        );
     }
 }

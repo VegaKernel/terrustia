@@ -134,8 +134,13 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) 
     if npc.ai[0] == state::DYING {
         // The death drama: it drifts upward and comes apart over ten seconds.
         npc.invulnerable = true;
-        npc.velocity.0 += (0.0 - npc.velocity.0) * 0.02;
-        npc.velocity.1 += (-0.5 - npc.velocity.1) * 0.02;
+        // ML-8: vanilla lerps the velocity 0.98 of the way toward (0, -0.5) each tick
+        // (`velocity = Vector2.Lerp(velocity, new Vector2(0f, -0.5f), 0.98f)`, `NPC.cs:41740`), so
+        // it sheds its fighting speed and settles onto the upward drift almost at once. The old
+        // 0.02 lerped the wrong way round, crawling toward the drift over dozens of ticks so the
+        // core kept coasting on its last combat velocity through most of the drama.
+        npc.velocity.0 += (0.0 - npc.velocity.0) * 0.98;
+        npc.velocity.1 += (-0.5 - npc.velocity.1) * 0.98;
         npc.ai[1] += 1.0;
         if npc.ai[1] >= MOON_LORD_DEATH_TICKS {
             out.spent = true;
@@ -677,6 +682,27 @@ mod tests {
             spent_after,
             Some(MOON_LORD_DEATH_TICKS as i32),
             "the drama runs its full ten seconds, then the kill"
+        );
+    }
+
+    /// ML-8: the dying core snaps onto its upward death drift. Vanilla lerps its velocity 0.98 of
+    /// the way toward (0, -0.5) each tick (`NPC.cs:41740`), so two ticks in it has all but arrived;
+    /// the old 0.02 crawled there and left it coasting on its last combat velocity for dozens of
+    /// ticks.
+    #[test]
+    fn the_dying_core_snaps_onto_its_upward_drift() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+        c.local_ai[3] = 1.0;
+        c.ai[0] = state::DYING;
+        c.velocity = (10.0, 10.0);
+        core(&mut c, &w, 3);
+        core(&mut c, &w, 3);
+        assert!(
+            c.velocity.0.abs() < 0.1 && (c.velocity.1 + 0.5).abs() < 0.1,
+            "the death drift should have snapped to (0, -0.5), got {:?}",
+            c.velocity
         );
     }
 

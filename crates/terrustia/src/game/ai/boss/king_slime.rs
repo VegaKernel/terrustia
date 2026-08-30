@@ -19,8 +19,8 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    KING_SLIME_ANTI_CHEESE, KING_SLIME_DRIFT, KING_SLIME_DRIFT_PUSH, KING_SLIME_FADE_IN,
-    KING_SLIME_FADE_OUT, KING_SLIME_GIVE_UP, KING_SLIME_HOPS, KING_SLIME_LEVEL,
+    KING_SLIME_ANTI_CHEESE, KING_SLIME_ANTI_CHEESE_RANGE, KING_SLIME_DRIFT, KING_SLIME_DRIFT_PUSH,
+    KING_SLIME_FADE_IN, KING_SLIME_FADE_OUT, KING_SLIME_GIVE_UP, KING_SLIME_HOPS, KING_SLIME_LEVEL,
     KING_SLIME_PATIENCE, KING_SLIME_RAGE, KING_SLIME_SCALE_FLOOR, KING_SLIME_SCALE_SPAN,
     KING_SLIME_SHED_STEP, KING_SLIME_SIZE, KING_SLIME_SPAWN, KING_SLIME_SPAWN_SPECIAL,
     KING_SLIME_WIND,
@@ -35,8 +35,9 @@ use crate::game::npc_ai::Target;
 const FADING_OUT: f32 = 5.0;
 const FADING_IN: f32 = 6.0;
 
-/// One slime dropping out of King Slime, with the throw it was given.
-pub type Shed = (u16, (f32, f32), (f32, f32));
+/// One slime dropping out of King Slime: type, position, the throw it was given, and the initial
+/// `ai[0..4]` slots to seed it with (KS-1's wake stagger).
+pub type Shed = (u16, (f32, f32), (f32, f32), [Option<f32>; 4]);
 
 /// What a tick of the fight produced.
 #[derive(Debug, Default)]
@@ -167,8 +168,16 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         npc.ai[2] = 0.0;
         npc.ai[0] = 0.0;
         npc.ai[1] = FADING_OUT;
-        let cornered = npc.local_ai[0] >= KING_SLIME_ANTI_CHEESE;
-        if cornered {
+        // KS-2: it lands on top of you when it has been unreachable too long OR when you are simply
+        // too far to bother hunting for a floor near you (`localAI[0] >= 360f ||
+        // vector.Length() > 2000f`, `NPC.cs:43643`). The old code checked only the sight timer, so a
+        // player held at range but intermittently in view was never cornered. The 360 ceiling still
+        // clamps only the timer, not the distance path.
+        let (kx, ky) = npc.center();
+        let too_far = ((t.center.0 - kx).powi(2) + (t.center.1 - ky).powi(2)).sqrt()
+            > KING_SLIME_ANTI_CHEESE_RANGE;
+        let cornered = npc.local_ai[0] >= KING_SLIME_ANTI_CHEESE || too_far;
+        if npc.local_ai[0] >= KING_SLIME_ANTI_CHEESE {
             npc.local_ai[0] = KING_SLIME_ANTI_CHEESE;
         }
         let landing = find_landing(world, t, cornered, rng);
@@ -283,14 +292,21 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             } else {
                 KING_SLIME_SPAWN
             };
-            court.shed.push((
-                shed_type,
-                at,
-                (
-                    rng.random_range(-15..16) as f32 * 0.1,
-                    rng.random_range(-30..1) as f32 * 0.1,
-                ),
-            ));
+            let throw = (
+                rng.random_range(-15..16) as f32 * 0.1,
+                rng.random_range(-30..1) as f32 * 0.1,
+            );
+            // KS-1: vanilla staggers each shed slime's wake with `ai[0] = -1000 * Main.rand.Next(3)`
+            // (0, -1000 or -2000, a negative jump timer that counts back up) and marks it
+            // `ai[1] = -1` (`NPC.cs:43868-43869`), so the crowd does not all hop in lockstep the
+            // instant it bursts out. The old `Shed` carried no ai, so every slime woke immediately.
+            let wake = [
+                Some(-1000.0 * rng.random_range(0..3) as f32),
+                Some(-1.0),
+                None,
+                None,
+            ];
+            court.shed.push((shed_type, at, throw, wake));
         }
         npc.dirty = true;
     }
@@ -448,9 +464,9 @@ mod tests {
         let court = update(&mut k, &world(&tiles, t), &mut rng());
         assert!(!court.shed.is_empty(), "should have shed something");
         assert!(court.shed.len() <= 3);
-        assert!(court.shed.iter().all(|(t, _, _)| *t == KING_SLIME_SPAWN));
+        assert!(court.shed.iter().all(|(t, _, _, _)| *t == KING_SLIME_SPAWN));
         assert!(
-            court.shed.iter().any(|(_, _, v)| v.1 <= 0.0),
+            court.shed.iter().any(|(_, _, v, _)| v.1 <= 0.0),
             "and thrown them upward"
         );
     }
@@ -481,7 +497,7 @@ mod tests {
             if court
                 .shed
                 .iter()
-                .any(|(t, _, _)| *t == KING_SLIME_SPAWN_SPECIAL)
+                .any(|(t, _, _, _)| *t == KING_SLIME_SPAWN_SPECIAL)
             {
                 saw_special = true;
                 break;
@@ -508,7 +524,7 @@ mod tests {
             k.life -= k.life_max / 10;
             let court = update(&mut k, &w, &mut r);
             assert!(
-                court.shed.iter().all(|(t, _, _)| *t == KING_SLIME_SPAWN),
+                court.shed.iter().all(|(t, _, _, _)| *t == KING_SLIME_SPAWN),
                 "classic mode should never shed the special minion"
             );
         }
@@ -590,5 +606,57 @@ mod tests {
             &mut rng(),
         );
         assert!(k.time_left <= 10);
+    }
+
+    /// KS-1: each shed slime is seeded with a wake stagger (`ai[0] = -1000 * rand(3)`, one of
+    /// 0/-1000/-2000) and marked `ai[1] = -1` (`NPC.cs:43868-43869`). The old `Shed` carried no ai,
+    /// so the crowd all woke at once.
+    #[test]
+    fn shed_slimes_wake_on_a_stagger() {
+        let tiles = arena();
+        let mut k = king();
+        let (cx, cy) = k.center();
+        let t = Some(player_at(cx + 200.0, cy));
+        update(&mut k, &world(&tiles, t), &mut rng());
+        k.life -= k.life_max / 10;
+        let court = update(&mut k, &world(&tiles, t), &mut rng());
+        assert!(!court.shed.is_empty(), "should have shed something");
+        for (_, _, _, ai) in &court.shed {
+            let delay = ai[0].expect("a wake delay in ai[0]");
+            assert!(
+                (-2000.0..=0.0).contains(&delay) && delay % 1000.0 == 0.0,
+                "ai[0] should be one of 0/-1000/-2000, got {delay}"
+            );
+            assert_eq!(ai[1], Some(-1.0), "ai[1] should be -1");
+        }
+    }
+
+    /// KS-2: past 2000px it lands on top of you outright, however visible you are and whatever the
+    /// sight timer says (`localAI[0] >= 360f || vector.Length() > 2000f`, `NPC.cs:43643`). The old
+    /// code checked only the sight timer, so a distant-but-seen player got a floor-search landing
+    /// offset from their column instead of one right on top.
+    #[test]
+    fn a_distant_player_is_landed_on_even_in_plain_sight() {
+        let tiles = arena();
+        let mut k = king();
+        // Well past 2000px but inside the 3000px give-up radius, at ground level and in clear sight.
+        let px = k.center().0 + 2500.0;
+        let t = Some(player_at(px, 299.0 * TILE));
+        // Prime it one tick short of a teleport: out of patience, grounded, sight timer far below
+        // the 360 anti-cheese ceiling, past its first-tick setup.
+        k.local_ai[3] = 1.0;
+        k.ai[3] = k.life_max as f32;
+        k.ai[2] = KING_SLIME_PATIENCE;
+        k.local_ai[0] = 10.0;
+        let mut r = rng();
+        for _ in 0..(KING_SLIME_FADE_OUT as i32 + 5) {
+            k.velocity.1 = 0.0;
+            update(&mut k, &world(&tiles, t), &mut r);
+        }
+        assert!(
+            (k.center().0 - px).abs() < 1.0,
+            "it should land right on the distant player's column ({px}), got {}",
+            k.center().0
+        );
     }
 }

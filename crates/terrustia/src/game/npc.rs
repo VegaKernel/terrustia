@@ -391,6 +391,14 @@ impl Npc {
         self.life > 0
     }
 
+    /// The per-player stat-scaling factor this NPC was scaled for, `NPC.GetMyBalance`
+    /// (`NPC.cs:18518-18526`): one for a lone player, climbing with the crowd it spawned against
+    /// (`GetStatScalingFactors`). Bosses read it to speed their fights up on a busy server; a
+    /// count of one (or none) is a flat one, as vanilla's own early return gives.
+    pub fn balance(&self) -> f32 {
+        terrustia_proto::difficulty::balance(self.scaling.players)
+    }
+
     /// Apply a non-critical hit, returning true if it killed the NPC.
     ///
     /// Most hits are not crits (a town blow, a contact tick, an invulnerability probe), so this is
