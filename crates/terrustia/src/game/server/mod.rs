@@ -608,23 +608,32 @@ pub enum ServerEvent {
     Join {
         addr: SocketAddr,
         out: mpsc::Sender<Bytes>,
-        /// Receives the assigned slot, or `None` when the server is full.
-        slot: oneshot::Sender<Option<u8>>,
+        /// Receives the assigned `(slot, epoch)`, or `None` when the server is full.
+        ///
+        /// `epoch` is [`GameServer::allocate_slot`]'s per-connection generation counter (see
+        /// [`GameServer::remove_player`]'s doc comment for the whole design): the connection
+        /// stamps it onto every [`ServerEvent::Packet`] and its own [`ServerEvent::Leave`] below,
+        /// so a ghost connection's stale events can be told apart from whoever has since taken
+        /// the same slot number.
+        slot: oneshot::Sender<Option<(u8, u32)>>,
     },
     Packet {
         slot: u8,
+        /// The epoch this connection was handed at `Join`. Dropped by `handle_event` as a ghost
+        /// if it no longer matches the slot's current epoch.
+        epoch: u32,
         frame: Frame,
     },
     Leave {
         slot: u8,
+        /// Same epoch as `Packet` above, checked the same way.
+        epoch: u32,
     },
     /// A line typed at the server's own console.
     ///
     /// Slot 255 is "the server" in chat, and the console is treated the same way: it owns the
     /// place unconditionally, because somebody with the terminal already has the world file.
-    Console {
-        line: String,
-    },
+    Console { line: String },
     /// The console asking who could be tab-completed, without typing a command.
     ///
     /// Names only — a snapshot for a completion popup, not something that should ever gate on the
@@ -652,14 +661,9 @@ pub enum ServerEvent {
     /// its own `admin::Throttle`s (see `panel::PanelState`'s doc comment for why), but the
     /// append-only audit log lives on the game task, so this is how a refusal reaches it. No
     /// reply: `login` has already decided to refuse the request either way.
-    PanelAuditThrottled {
-        target: String,
-        detail: String,
-    },
+    PanelAuditThrottled { target: String, detail: String },
     /// The web panel asking for a snapshot to show on its status view.
-    PanelStatus {
-        reply: oneshot::Sender<PanelStatus>,
-    },
+    PanelStatus { reply: oneshot::Sender<PanelStatus> },
     /// The web panel asking who is connected, for the player list and the live world view.
     PanelPlayers {
         reply: oneshot::Sender<Vec<PanelPlayer>>,
@@ -853,6 +857,11 @@ pub struct GameServer {
     config: Config,
     world: World,
     players: Vec<Option<Player>>,
+    /// One generation counter per slot, bumped by [`Self::allocate_slot`] every time it hands the
+    /// slot to somebody new. Never touched by [`Self::remove_player`] - only a fresh allocation
+    /// moves it - so it survives exactly as long as it needs to and no longer: see
+    /// `remove_player`'s doc comment for the race this closes.
+    slot_epochs: Vec<u32>,
     ticks: u64,
     items: ItemStore,
     npcs: NpcStore,
@@ -1109,6 +1118,7 @@ impl GameServer {
             config,
             world,
             players: (0..slots).map(|_| None).collect(),
+            slot_epochs: vec![0; slots],
             ticks: 0,
             items: ItemStore::new(),
             npcs: NpcStore::new(),
@@ -1895,8 +1905,26 @@ impl GameServer {
                 let assigned = self.allocate_slot(addr, out);
                 let _ = slot.send(assigned);
             }
-            ServerEvent::Packet { slot, frame } => self.handle_packet(slot, frame),
-            ServerEvent::Leave { slot } => self.remove_player(slot),
+            ServerEvent::Packet { slot, epoch, frame } => {
+                if self.slot_epoch_current(slot, epoch) {
+                    self.handle_packet(slot, frame);
+                } else {
+                    debug!(
+                        slot,
+                        epoch, "dropping a ghost packet: its connection epoch is stale"
+                    );
+                }
+            }
+            ServerEvent::Leave { slot, epoch } => {
+                if self.slot_epoch_current(slot, epoch) {
+                    self.remove_player(slot);
+                } else {
+                    debug!(
+                        slot,
+                        epoch, "dropping a ghost leave: its connection epoch is stale"
+                    );
+                }
+            }
             ServerEvent::Console { line } => self.run_console(&line),
             ServerEvent::ConsoleContext { reply } => {
                 let players = self
@@ -2192,12 +2220,24 @@ impl GameServer {
 
     // ---------------------------------------------------------------- players
 
-    fn allocate_slot(&mut self, addr: SocketAddr, out: mpsc::Sender<Bytes>) -> Option<u8> {
+    fn allocate_slot(&mut self, addr: SocketAddr, out: mpsc::Sender<Bytes>) -> Option<(u8, u32)> {
         let slot = self.players.iter().position(Option::is_none)?;
         let slot = u8::try_from(slot).ok()?;
         self.players[slot as usize] = Some(Player::new(slot, addr, out));
-        debug!(%addr, slot, "connection accepted into a slot");
-        Some(slot)
+        // Wrapping, not saturating: a slot would need to cycle through u32::MAX connections
+        // inside one process lifetime before this repeats, and if it somehow did, the result is
+        // only ever this same race reopening for one ghost - never worse than the bug this
+        // exists to fix - so an unbounded counter would buy nothing a real server could spend.
+        let epoch = self.slot_epochs[slot as usize].wrapping_add(1);
+        self.slot_epochs[slot as usize] = epoch;
+        debug!(%addr, slot, epoch, "connection accepted into a slot");
+        Some((slot, epoch))
+    }
+
+    /// Whether `epoch` is still what [`Self::allocate_slot`] most recently handed out for `slot`
+    /// - see [`Self::remove_player`]'s doc comment for what this tells apart.
+    fn slot_epoch_current(&self, slot: u8, epoch: u32) -> bool {
+        self.slot_epochs.get(slot as usize) == Some(&epoch)
     }
 
     fn player(&self, slot: u8) -> Option<&Player> {
@@ -2210,29 +2250,35 @@ impl GameServer {
 
     /// Take a player out of their slot.
     ///
-    /// **Known gap, deliberately recorded here rather than left to be rediscovered.** Removing a
-    /// player does not end their connection's read task. Dropping the [`Player`] drops the last
-    /// sender for its outbound queue, which ends `write_loop` and shuts down the *write* half of
-    /// the socket - but `read_loop` keeps going until the client closes or `idle_timeout_secs`
-    /// expires, and keeps forwarding `ServerEvent::Packet { slot }` and, finally,
-    /// `ServerEvent::Leave { slot }` for a slot the game no longer associates with it.
+    /// **A former known gap, closed by the epoch check below - recorded here rather than left to
+    /// be rediscovered if it ever regresses.** Removing a player does not end their connection's
+    /// read task. Dropping the [`Player`] drops the last sender for its outbound queue, which ends
+    /// `write_loop` and shuts down the *write* half of the socket - but `read_loop` keeps going
+    /// until the client closes or `idle_timeout_secs` expires, and keeps forwarding
+    /// `ServerEvent::Packet { slot, .. }` and, finally, `ServerEvent::Leave { slot, .. }` for a
+    /// slot the game no longer associates with it.
     ///
     /// While the slot stays empty that is harmless: every handler goes through
-    /// [`Self::player_mut`], which returns `None`. The gap is that [`Self::allocate_slot`] hands
-    /// out the first free slot, so a newcomer arriving inside that window inherits the number - and
-    /// then the ghost connection's packets are attributed to them, and its eventual `Leave` removes
-    /// them.
+    /// [`Self::player_mut`], which returns `None`. The danger was that [`Self::allocate_slot`]
+    /// hands out the first free slot, so a newcomer arriving inside that window would inherit the
+    /// number - and then the ghost connection's packets would be attributed to them, and its
+    /// eventual `Leave` would remove them.
     ///
     /// This is not new and is not specific to any one caller. Three paths reach here without the
     /// connection having ended: `/kick`, [`crate::game::server::GameServer::reap_stalled_handshakes`],
     /// and - reachable by any client with no privilege at all - [`Self::send_bytes`] dropping a
     /// player whose outbound queue filled up.
     ///
-    /// The fix is a per-connection epoch: `allocate_slot` hands back `(slot, epoch)`, the
-    /// connection stamps both onto every `Packet` and its `Leave`, and `handle_event` ignores any
-    /// that do not match the epoch currently in the slot. It is contained - the only three places
-    /// that build these events are in `net/connection.rs` - but it changes the shape of
-    /// [`ServerEvent`], so it is called out rather than smuggled in beside an unrelated change.
+    /// **The fix: a per-connection epoch.** [`Self::allocate_slot`] hands back `(slot, epoch)` and
+    /// bumps `slot_epochs[slot]` every time it hands the slot to somebody new; `remove_player`
+    /// itself never touches `slot_epochs` - only a fresh allocation does. `net/connection.rs`'s
+    /// `serve` learns its epoch from that reply and stamps it onto every `ServerEvent::Packet` it
+    /// forwards and onto its own eventual `ServerEvent::Leave` (the only three places that build
+    /// these events); `handle_event` drops anything whose epoch does not match
+    /// [`Self::slot_epoch_current`] and logs it as a ghost at debug level rather than acting on
+    /// it. So while the slot sits empty a ghost's events remain exactly as harmless as they always
+    /// were - `slot_epochs[slot]` has not moved - and only start being discarded once somebody new
+    /// actually occupies the slot, which is the one moment they were ever wrong.
     fn remove_player(&mut self, slot: u8) {
         // Before the early return, not after it. A client that disconnects mid-check would
         // otherwise hold one of the server's few hashing slots until its worker happened to
@@ -2603,6 +2649,118 @@ mod auth_cost {
         assert!(
             server.start_auth(5),
             "a slot freed by a disconnect must be usable again, or repeated joins exhaust the pool"
+        );
+    }
+}
+
+/// The race `remove_player`'s doc comment records, and the epoch check that closes it: a
+/// connection's read task outlives its player being removed, and can go on forwarding
+/// `ServerEvent::Packet`/`ServerEvent::Leave` for a slot number a newcomer has since taken.
+/// `allocate_slot` bumps `slot_epochs[slot]` on every fresh assignment; `handle_event` compares
+/// the epoch stamped on an incoming `Packet`/`Leave` against it and drops anything stale.
+#[cfg(test)]
+mod ghost_connection_epoch {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world(name: &str) -> World {
+        World::empty(200, 150, name)
+    }
+
+    /// The exact scenario from `remove_player`'s doc comment: a player is removed (here standing
+    /// in for `/kick`, the handshake reaper, or `send_bytes` dropping a backed-up client - all
+    /// three reach `remove_player` without the connection itself having ended), a newcomer is
+    /// handed the same slot number, and only then does the ghost's stale `Leave` arrive. Before
+    /// the epoch check this evicted the newcomer; the newcomer's own connection never sent it.
+    #[tokio::test]
+    async fn a_ghost_leave_does_not_evict_the_slots_new_occupant() {
+        let mut server = GameServer::new(Config::default(), tiny_world("ghost leave probe"));
+
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (old_slot, old_epoch) = server
+            .allocate_slot("127.0.0.1:6000".parse().expect("a literal"), tx1)
+            .expect("a free slot");
+        // Stands in for `/kick`, the handshake reaper, or a full outbound queue: the player is
+        // gone, but nothing told the ghost's `read_loop` that.
+        server.remove_player(old_slot);
+
+        let (tx2, _rx2) = mpsc::channel(16);
+        let (new_slot, new_epoch) = server
+            .allocate_slot("127.0.0.1:6001".parse().expect("a literal"), tx2)
+            .expect("the freed slot must be available again");
+        assert_eq!(
+            old_slot, new_slot,
+            "the newcomer must land on the same recycled slot number for this to be the race"
+        );
+        assert_ne!(
+            old_epoch, new_epoch,
+            "a fresh allocation must bump the slot's epoch, or there is nothing to check"
+        );
+        server
+            .player_mut(new_slot)
+            .expect("the newcomer is seated")
+            .name = "Newcomer".into();
+
+        // The ghost's read task, having no idea any of this happened, finally reports the
+        // disconnect it saw a while ago, stamped with the epoch it was handed at `Join`.
+        server.handle_event(ServerEvent::Leave {
+            slot: old_slot,
+            epoch: old_epoch,
+        });
+
+        assert!(
+            server.players[new_slot as usize].is_some(),
+            "a ghost Leave carrying a stale epoch must not evict whoever actually holds the slot \
+             now"
+        );
+        assert_eq!(
+            server.player(new_slot).expect("still seated").name,
+            "Newcomer",
+            "the newcomer specifically must still be there, not merely somebody"
+        );
+    }
+
+    /// The other half of the same race: not just the ghost's final `Leave`, but every `Packet` it
+    /// forwards in between also has to be told apart from a real one, or the newcomer's own state
+    /// gets mutated by a connection that is not theirs.
+    #[tokio::test]
+    async fn a_ghost_packet_with_a_stale_epoch_is_discarded_not_dispatched() {
+        let mut server = GameServer::new(Config::default(), tiny_world("ghost packet probe"));
+
+        let (tx1, _rx1) = mpsc::channel(16);
+        let (old_slot, old_epoch) = server
+            .allocate_slot("127.0.0.1:6100".parse().expect("a literal"), tx1)
+            .expect("a free slot");
+        server.remove_player(old_slot);
+
+        let (tx2, _rx2) = mpsc::channel(16);
+        let (new_slot, new_epoch) = server
+            .allocate_slot("127.0.0.1:6101".parse().expect("a literal"), tx2)
+            .expect("the freed slot must be available again");
+        assert_eq!(old_slot, new_slot);
+        assert_ne!(old_epoch, new_epoch);
+        assert!(
+            !server.player(new_slot).expect("the newcomer is seated").pvp,
+            "a fresh player must start without pvp, or the toggle below proves nothing"
+        );
+
+        // TOGGLE_P_V_P's payload is `[slot][hostile bool]` (`dispatch::on_pvp`); it flips `pvp`
+        // on whoever `slot` resolves to right now, which is exactly the attribution bug: a
+        // handler has no way to tell a ghost's packet apart from the real occupant's own.
+        let payload = Bytes::from(vec![new_slot, 1u8]);
+        server.handle_event(ServerEvent::Packet {
+            slot: old_slot,
+            epoch: old_epoch,
+            frame: Frame {
+                id: id::TOGGLE_P_V_P,
+                payload,
+            },
+        });
+
+        assert!(
+            !server.player(new_slot).expect("still seated").pvp,
+            "a ghost packet carrying a stale epoch must not be dispatched onto whoever holds the \
+             slot now"
         );
     }
 }
