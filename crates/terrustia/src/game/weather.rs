@@ -86,6 +86,10 @@ const DAY: i32 = 86_400;
 pub struct Sky {
     /// Whether a lantern night is up — it holds the wind's target and stops (or forestalls) rain.
     pub lantern_night: bool,
+    /// Whether the *next* night is already a guaranteed lantern night — `LanternNight.
+    /// NextNightIsLanternNight`. Rain will not begin the evening before one (m3), matching vanilla's
+    /// third rain-start condition at `Main.cs:65870`.
+    pub next_night_is_lantern_night: bool,
     /// Whether a slime rain is on — rain will not begin over one.
     pub slime_rain: bool,
     /// How many clouds the sky is holding, which decides how hard a shower comes down.
@@ -121,9 +125,10 @@ impl Weather {
     /// pause: freezing a storm mid-downpour should not also freeze which way the wind is blowing.
     /// Sandstorms have no Journey power of their own and are never frozen by either flag.
     ///
-    /// `sky` carries the rest of what vanilla's own weather reads: whether a lantern night is up
-    /// and whether a slime rain is on (both gate the wind and the rain, L3-19), and how many clouds
-    /// the sky is holding, which sets how hard a shower comes down (L3-18).
+    /// `sky` carries the rest of what vanilla's own weather reads: whether a lantern night is up,
+    /// whether the next night is a guaranteed one, and whether a slime rain is on (all three gate
+    /// the rain, L3-19 and m3), and how many clouds the sky is holding, which sets how hard a shower
+    /// comes down (L3-18).
     pub fn tick(
         &mut self,
         strong_enough: bool,
@@ -257,8 +262,10 @@ impl Weather {
         if !strong_enough {
             return;
         }
-        // L3-19: rain does not begin during a slime rain or a lantern night (`Main.cs:65870`).
-        if sky.slime_rain || sky.lantern_night {
+        // L3-19 + m3: rain does not begin during a slime rain, a lantern night, or the evening
+        // before a guaranteed lantern night (`Main.cs:65870`: `!slimeRain && !LanternsUp &&
+        // !NextNightIsLanternNight`). The third term was the undisclosed narrowing m3 flagged.
+        if sky.slime_rain || sky.lantern_night || sky.next_night_is_lantern_night {
             return;
         }
         // Roughly one shower every five and three-quarter days.
@@ -718,6 +725,32 @@ mod tests {
             !weather.raining,
             "rain should never begin during a slime rain"
         );
+    }
+
+    /// m3: rain does not begin the evening before a guaranteed lantern night — vanilla's third
+    /// rain-start condition `!NextNightIsLanternNight` (`Main.cs:65870`).
+    ///
+    /// Fails before the fix: the gate checked only `slime_rain || lantern_night`, so the server
+    /// could open a shower the evening before a scheduled lantern night when vanilla would not. The
+    /// same seeds `it_rains_of_its_own_accord` proves rain on with an open sky are held dry here by
+    /// the new term, which is what makes this a genuine fail-then-pass rather than a bad-seed pass.
+    #[test]
+    fn rain_does_not_start_the_evening_before_a_lantern_night() {
+        let sky = Sky {
+            next_night_is_lantern_night: true,
+            ..Default::default()
+        };
+        for seed in 0..8u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut weather = Weather::default();
+            for _ in 0..2_000_000 {
+                weather.tick_rain(true, sky, &mut rng);
+                assert!(
+                    !weather.raining,
+                    "rain should never begin before a guaranteed lantern night (seed {seed})"
+                );
+            }
+        }
     }
 
     /// L3-19: a lantern night holds the wind's target where it is (`Main.cs:59764`), though the
