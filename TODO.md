@@ -8,10 +8,16 @@ in them that is still live appears below. There is no separate gaps file.
 ## What v0.0.1 means
 
 A fully working, stable, production-usable, vanilla-identical replacement for the Terraria 1.4.5.8
-dedicated server. The one deliberate exception is worldgen: the remaining secret-seed
-generation-content differences and remaining micro-biomes are deferred to v0.0.2. That narrow
-deferral does not excuse unrelated inaccuracies. Versioning collapses to v0.0.x from here: the next
-release after v0.0.1 is v0.0.2 (the worldgen release), and the old v0.1.0 label is retired.
+dedicated server. There are two deliberate, documented exceptions. The first is worldgen: the
+remaining secret-seed generation-content differences and remaining micro-biomes are deferred to
+v0.0.2. The second is one place where vanilla is provably wrong: vanilla's liquid levelling rounds
+with `Math.Round` and so slowly creates water (a faithful port was built as a test probe and
+measured doing exactly that, +2 units on a thrash-prone pool), which on a long-running server would
+flood worlds; terrustia keeps a conserving model that levels and settles correctly but does not
+reproduce the duplication. The divergence is locked by the `faithful_port_converges_but_is_not_
+conservative` test that records both measurements. Neither exception excuses unrelated
+inaccuracies. Versioning collapses to v0.0.x from here: the next release after v0.0.1 is v0.0.2 (the
+worldgen release), and the old v0.1.0 label is retired.
 
 **The v0.0.1 gates:** parity completion plus a from-scratch re-audit; the error-handling and
 data-safety sweep; the `server.rs` architectural split; a zero-unknown-ID protocol classification;
@@ -28,14 +34,19 @@ item was verified against `main` with the gaps ticketed into the lanes below; th
 is retired in favour of one topic branch per lane off `main`; and the fork-collaboration review
 (spawn parity, VegaKernel/Xekep) was posted to PR #1 with the CLA-affirmation ask.
 
-## Phase 1: the v0.0.1 core campaign
+## Phase 1: the v0.0.1 core campaign (complete)
 
-Integrated, parity-first, per-subsystem. The from-scratch audit produces a findings ledger per
-subsystem, and fixes fold into that subsystem's single visit (split the file, clear its panics,
-apply the audit fixes, tidy) so heavy files are churned once. Single-owner hot files
-(`game/server.rs`, `world/worldgen/mod.rs`) take one change at a time.
+Integrated, parity-first, per-subsystem. The from-scratch audit produced a findings ledger per
+subsystem, and fixes folded into that subsystem's single visit (split the file, clear its panics,
+apply the audit fixes, tidy) so heavy files were churned once. Single-owner hot files
+(`game/server.rs`, `world/worldgen/mod.rs`) took one change at a time.
 
-### Lane A: split `game/server.rs` by responsibility (in flight)
+All eight lanes (A-H) below landed. The from-scratch re-audit (Lane C's C2) then ran as its own
+wave and is recorded under Lane C. The lane detail is kept below as the built record; the only
+open Phase 1 item is C3 (adopting the fork's spawn module), which is blocked on the fork, not on
+us. What remains before the tag is Phase 2 qualification.
+
+### Lane A: split `game/server.rs` by responsibility (done)
 
 The 16,058-line, 108-panic-site elephant becomes a `game/server/` directory: `dispatch` (the
 `handle_packet` receive match), `tick` (the loop and phase orchestration), `panel` (panel-request
@@ -62,7 +73,7 @@ the single-writer actor preserved; suite, clippy and fmt green per extraction.
 
 ### Lane C: parity completion and the from-scratch re-audit
 
-**C1, the known tail**, each with a fail-then-pass test:
+**C1, the known tail (done)**, each landed with a fail-then-pass test. Kept as the built record:
 - HC8: nebula headcrab applies buff 163 (needs a player-buff channel on the AI `Effects`/`Outcome`).
 - HC9/HC10: Solar Sroller multi-bounce and Sand Shark sand-swim collision physics in `npc.rs`.
 - The four AI-state drop gaps: Skeletron's RedHatSkeletron set (5624/5625/5626/5628/5737 when
@@ -78,25 +89,60 @@ the single-writer actor preserved; suite, clippy and fmt green per extraction.
 - Persistence: `wld.rs` refuses out-of-order section pointers with an error instead of an empty
   blob, with a corrupt-`.wld` fixture.
 
-**C2, the from-scratch audit** in about six consolidated lanes against the decompiled source, real
-clients and captures, producing a ledger; fixes fold into the subsystem visits. Seed list carried
-from the audit trail, still unverified or unchecked: drop *rates* (presence is checked, `one_in`
-values and chain ordering only partly), AI behavioural parity per style measured against the game
-in motion (coverage is complete, behaviour is asserted per-style not compared), liquid/wiring/
-housing compared against the real game in motion, boss phase transitions and stall-ability, NPC
-spawn *pool* composition, fishing, golf, dyes, painting and the cosmetic layer, plus the known
-minor divergences: `SendSection` does not sync the section's NPCs the way vanilla does at
-`NetMessage.cs:2732`, no `Main.SyncAnInvasion` on packet 6 (cosmetic), and section batching
-stricter than `Tile.isTheSameAs` (correct output, more bytes).
+**C2, the from-scratch audit (done)** ran in six consolidated read-only lanes against the
+decompiled source, tracing behaviour to root cause on both sides, and produced the consolidated
+ledger (about 12 blockers, 50 majors, 30 minors; the recurring shape was systems that ran and
+produced output but the wrong amount, which is why earlier passes read past them). Four cross-cutting
+root causes were named and fixed once each: the single-integer spawn identity (R1), difficulty
+scaling applied in the wrong layer (R2), the server originating damage vanilla computes client-side
+(R3), and Outcome flags produced but never consumed (R4). The fixes then landed as a wave, each
+finding with a fail-then-pass test citing the vanilla line:
+
+- **R1** multi-slot spawn identity (`Spawn.ai`), the shared prep both AI lanes built on.
+- **World runtime (FIX-1a/1b/1c/1d)**: growth and hardmode spread cadence (L3-01, the corruption/
+  hallow-never-creep blocker); liquid evaporation, merge origination, pacing and border margin;
+  BFS wire flood with per-colour pumps and teleporters; wind and weather; crystal-shard and
+  chlorophyte regrowth; the CheckMech split (per-colour skip, momentary detonator) and wired-light
+  toggling.
+- **Persistence (FIX-2)**: the Lunar Pillar save/load blocker (a free endgame skip) and the trailing
+  round-trips (town rooms, pressure plates, bestiary, journey powers, travelling merchant).
+- **Boss AI (FIX-3/3b/3c)**: the Moon Lord finale and True Eyes (dead code, boss unkillable-as-
+  designed), the mech-boss dawn despawn, Wall-of-Flesh lasers, the Martian Saucer phases, the Moon
+  Lord fixed per-part attack timeline, and the full boss minor tail.
+- **Combat and damage (FIX-4)**: the extraUpdates N+1 slow-motion blocker, the knockback curve, and
+  the R2/R3 difficulty-scaling and damage-origination corrections.
+- **Spawning and town (FIX-5/5b/5c)**: bound-NPC progression gates, arrival item sets, the eight
+  blocked townsfolk, the real biome-classification box, weighted spawn pools with per-type rates and
+  caps, the pre-Skeletron Dungeon Guardian gate, housing-through-doors, town regen, and pylon travel
+  validation against vanilla's five checks.
+- **Protocol and worldgen (FIX-6)**: the AreaTileChange field-merge blocker (ordinary building was
+  deleting a world's liquid and paint), the netmodule gaps, and the dungeon-loot and worldgen pass
+  ordering.
+- **Security and infra (FIX-7)**: the panel account-delete reach-check blocker, terminal-escape
+  sanitisation, and the CI and config hardening.
+
+**Phase 3 re-audit (done)**: a read-only pass over everything the wave changed, on the project's own
+lesson that a fix is a change and deserves the same suspicion. It found one major (an Old One's Army
+finishing-kill clamp that over-applied to every wave) and four minors, all fixed.
+
+**Deliberate seams, measured not skipped**: the liquid-levelling conservation divergence (see "What
+v0.0.1 means"); and C7-01, the Nebula Brain floater-hurry, which needs the NEBULA_FLOATER charge-up
+projectile AI (ai_style 102) that is not built yet, documented at its drop site. A handful of small
+narrowings are disclosed in-code where they were made (for example the liquid cycles round-robin,
+the CheckMech cross-frame refusal modelled per-trip, and a couple of cosmetic gaps).
+
+Known minor divergences that remain by design: `SendSection` does not sync the section's NPCs the
+way vanilla does at `NetMessage.cs:2732`, there is no `Main.SyncAnInvasion` on packet 6 (cosmetic),
+and section batching is stricter than `Tile.isTheSameAs` (correct output, more bytes).
 
 **C3, the spawn lane**: adopt the fork's spawn-parity module structure once Xekep affirms the CLA
 and the posted punch-list is fixed (or take the punch-list over if the fork goes quiet).
 
-**C4**: expand the golden/deterministic vanilla-derived tests that CAN run per-commit in CI; the
-live differential against a real `TerrariaServer` is a Phase 2 qualification step, since decompiled
-or installed game material can never ship to hosted CI.
+**C4 (done)**: expanded the golden/deterministic vanilla-derived tests that CAN run per-commit in
+CI; the live differential against a real `TerrariaServer` remains a Phase 2 qualification step, since
+decompiled or installed game material can never ship to hosted CI.
 
-### Lane D: protocol classification, zero unknown IDs (in flight)
+### Lane D: protocol classification, zero unknown IDs (done)
 
 One authoritative, machine-readable per-ID table for the full 0..=162 surface (direction,
 client/server send, live/dead/legacy, dedicated-server applicability, Steam/social/host-only,
@@ -151,7 +197,7 @@ smoke-tested on GitHub's native `windows-11-arm` runner (falling back to cross-c
 runner availability disappoints); keep `riscv64gc` compiling as a compile-only target; keep the
 matrix affordable.
 
-### Lane H: finish the codegen port (in flight)
+### Lane H: finish the codegen port (done)
 
 The eight remaining Python generators (`gen_drops`, `gen_projectiles`, `gen_banners`, `gen_buffs`,
 `gen_angler`, `gen_shimmer`, `gen_town_names`, `gen_travel_shop`) become `terrustia-codegen`
