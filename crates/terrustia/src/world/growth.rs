@@ -160,24 +160,36 @@ fn herb_for(ground: u16) -> Option<i16> {
     })
 }
 
-/// Plant a herb on suitable ground with open air above it, and ripen ones already planted.
+/// Ripen an immature herb already growing on this tile.
 ///
-/// Herbs were not renewable at all: the ones a world is generated with were every one it would
-/// ever have, so potions were a finite resource. The game plants them at a low rate over the
-/// whole world and thins them by refusing where several already grow nearby; this keeps the "not
-/// where there are already herbs" rule, which is what stops a field turning solid green.
-pub fn plant_herb(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
-    if !world.in_bounds(x, y) || !world.in_bounds(x, y - 1) {
+/// Vanilla runs `GrowAlch` whenever a sampled tile is an alchemy plant (`WorldGen.cs:72659`);
+/// this is the ripening half of that, kept apart from planting so the two can carry vanilla's very
+/// different rates - ripening on any sample that lands on a herb, planting only one sample in
+/// tens of thousands.
+pub fn ripen_herb(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
+    if !world.in_bounds(x, y) {
         return None;
     }
-
-    // Ripen anything already growing here before considering a new one.
     let here = world.tile(x, y);
     if here.is_active() && here.block == IMMATURE_HERB {
         let mut grown = here;
         grown.block = MATURE_HERB;
         world.set_tile(x, y, grown);
         return Some((x, y));
+    }
+    None
+}
+
+/// Plant a herb on suitable ground with open air above it.
+///
+/// Herbs were not renewable at all: the ones a world is generated with were every one it would
+/// ever have, so potions were a finite resource. Vanilla's `PlantAlch` plants them at a low rate
+/// over the whole world and thins them by refusing where several already grow nearby
+/// (`WorldGen.cs:46308`); this keeps the "not where there are already herbs" rule, which is what
+/// stops a field turning solid green. The ripening half is [`ripen_herb`].
+pub fn plant_herb(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
+    if !world.in_bounds(x, y) || !world.in_bounds(x, y - 1) {
+        return None;
     }
 
     let ground = world.tile(x, y);
@@ -430,57 +442,65 @@ pub fn fall_sand(world: &mut World, x: i32, y: i32) -> Option<(i32, i32)> {
     Some((x, y))
 }
 
-/// Sample tiles around a point and grow whatever will grow, the way `UpdateWorld` does.
+/// Grow whatever will grow on one sampled tile, the way vanilla's `UpdateWorld_OvergroundTile` and
+/// `UpdateWorld_UndergroundTile` do (`WorldGen.cs:72612,73812`). Every tile it changes is pushed
+/// onto `out`, so the caller can reuse one buffer across the whole per-tick sweep and this stays
+/// allocation-free on the common path where nothing grows.
 ///
-/// The game scales its sample count with the world's area; this takes the same shape but is driven
-/// from where the players actually are, because that is the only part of the world anybody can
-/// see changing and the only part worth spending a tick on.
-pub fn tick_growth(
+/// `herb_plant_odds` is vanilla's `num7 * 100` PlantAlch rate (`WorldGen.cs:72129,72657`), which
+/// widens with the world; a herb is planted on one sample in `herb_plant_odds`. `overground` keeps
+/// the surface-only growers (herb planting, trees, cactus) off the deep underground samples, which
+/// only ever creep grass, hang vines, settle sand and ripen what is already there.
+pub fn grow_at(
     world: &mut World,
-    around: &[(i32, i32)],
-    samples: usize,
-    reach: i32,
+    x: i32,
+    y: i32,
+    overground: bool,
+    herb_plant_odds: u32,
     rng: &mut SmallRng,
-) -> Vec<(i32, i32)> {
-    let mut changed = Vec::new();
-    for &(cx, cy) in around {
-        for _ in 0..samples {
-            let x = cx + rng.random_range(-reach..=reach);
-            let y = cy + rng.random_range(-reach..=reach);
-            if let Some(at) = spread_grass(world, x, y) {
-                changed.push(at);
-            }
-            // Herbs are rarer than grass by a wide margin, so they get their own, much longer,
-            // odds rather than a try per sample.
-            if rng.random_range(0..40) == 0
-                && let Some(at) = plant_herb(world, x, y)
-            {
-                changed.push(at);
-            }
-            // Saplings are rarer still, and a tree changes a lot of tiles at once.
-            if rng.random_range(0..60) == 0
-                && let Some(at) = grow_tree(world, x, y, rng)
-            {
-                changed.push(at);
-            }
-            if rng.random_range(0..12) == 0
-                && let Some(at) = grow_vine(world, x, y)
-            {
-                changed.push(at);
-            }
-            if rng.random_range(0..30) == 0
-                && let Some(at) = grow_cactus(world, x, y)
-            {
-                changed.push(at);
-            }
-            // Sand is physics rather than growth, so it is tried every sample: a ceiling that
-            // takes a minute to come down has already been walked under.
-            if let Some(at) = fall_sand(world, x, y) {
-                changed.push(at);
-            }
+    out: &mut Vec<(i32, i32)>,
+) {
+    // Grass creeps and herbs ripen on every sample that lands on the right tile, exactly as
+    // `SpreadGrass`/`GrowAlch` run ungated from any sampled grass-or-herb tile.
+    if let Some(at) = spread_grass(world, x, y) {
+        out.push(at);
+    }
+    if let Some(at) = ripen_herb(world, x, y) {
+        out.push(at);
+    }
+    // Vines hang from grass above and below ground alike - jungle grass reaches the caverns.
+    if rng.random_range(0..12) == 0
+        && let Some(at) = grow_vine(world, x, y)
+    {
+        out.push(at);
+    }
+    // Sand is physics rather than growth, so it is tried every sample: a ceiling that takes a
+    // minute to come down has already been walked under.
+    if let Some(at) = fall_sand(world, x, y) {
+        out.push(at);
+    }
+    if overground {
+        // `PlantAlch`: one planted herb per `herb_plant_odds` samples (`WorldGen.cs:72129`).
+        if rng.random_range(0..herb_plant_odds.max(1)) == 0
+            && let Some(at) = plant_herb(world, x, y)
+        {
+            out.push(at);
+        }
+        // A forest sapling grows one sample in twenty (`WorldGen.cs:73017`, `genRand.Next(20)`).
+        // This was `Next(60)`, three times too rare.
+        if rng.random_range(0..20) == 0
+            && let Some(at) = grow_tree(world, x, y, rng)
+        {
+            out.push(at);
+        }
+        // A cactus grows one sample in fifteen (`WorldGen.cs:72812`, `genRand.Next(15)`). This was
+        // `Next(30)`, twice too rare (L3-28).
+        if rng.random_range(0..15) == 0
+            && let Some(at) = grow_cactus(world, x, y)
+        {
+            out.push(at);
         }
     }
-    changed
 }
 
 #[cfg(test)]
@@ -626,7 +646,7 @@ mod tests {
         let mut world = dirt_field(None, 2);
         world.set_tile(10, 20, Tile::block(2));
         plant_herb(&mut world, 10, 20).expect("a herb");
-        assert_eq!(plant_herb(&mut world, 10, 19), Some((10, 19)));
+        assert_eq!(ripen_herb(&mut world, 10, 19), Some((10, 19)));
         assert_eq!(world.tile(10, 19).block, MATURE_HERB);
     }
 
@@ -802,7 +822,12 @@ mod tests {
     fn sampling_grows_something() {
         let mut world = dirt_field(Some((20, 20)), 2);
         let mut rng = SmallRng::seed_from_u64(7);
-        let changed = tick_growth(&mut world, &[(20, 20)], 400, 6, &mut rng);
+        let mut changed = Vec::new();
+        for _ in 0..400 {
+            let x = 20 + rng.random_range(-6..=6);
+            let y = 20 + rng.random_range(-6..=6);
+            grow_at(&mut world, x, y, true, 40, &mut rng, &mut changed);
+        }
         assert!(!changed.is_empty(), "nothing grew in four hundred tries");
     }
 }
