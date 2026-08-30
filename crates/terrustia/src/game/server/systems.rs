@@ -4719,6 +4719,9 @@ impl GameServer {
             // `Main.getGoodWorld`, the For-the-Worthy secret seed, persisted on the world from
             // worldgen. A handful of routines are genuinely harder here, not merely stat-scaled.
             get_good_world: self.world.secret_seeds.get_good,
+            // `Main.tenthAnniversaryWorld`, the celebrationmk10 secret seed. Only the Crimson big
+            // mimic's gag state reads it (C7-07).
+            tenth_anniversary: self.world.secret_seeds.tenth_anniversary,
             world_size: (self.world.width(), self.world.height()),
         }
     }

@@ -99,6 +99,9 @@ pub struct Conditions {
     /// routines are harder there in ways that are not merely stat scaling: the Wall of Flesh walks
     /// faster and the Destroyer grows a longer body.
     pub get_good_world: bool,
+    /// Whether this is a 10th-anniversary (`celebrationmk10`) world (`Main.tenthAnniversaryWorld`).
+    /// One routine reads it: the Crimson big mimic gains a gag "stuff cannon" state there (C7-07).
+    pub tenth_anniversary: bool,
     /// The world's size in tiles, for the handful of routines that steer away from its edges.
     pub world_size: (i32, i32),
 }
@@ -128,6 +131,7 @@ impl Default for Conditions {
             expert: false,
             hardmode: false,
             get_good_world: false,
+            tenth_anniversary: false,
             world_size: (4200, 1200),
         }
     }

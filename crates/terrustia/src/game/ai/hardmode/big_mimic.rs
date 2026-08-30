@@ -44,7 +44,13 @@ mod state {
     pub const RETURNING: f32 = 5.0;
     pub const CHARGING: f32 = 6.0;
     pub const GIVING_UP: f32 = 7.0;
+    /// C7-07: the 10th-anniversary "stuff cannon" curl, reached only in a celebrationmk10 world by
+    /// the Crimson big mimic (`NPC.cs:37956`).
+    pub const FIRING: f32 = 8.0;
 }
+
+/// The Crimson big mimic (`NPCID.BigMimicCrimson`), the one type the anniversary gag applies to.
+const MIMIC_BIG_CRIMSON: u16 = 476;
 
 /// What it did this tick.
 #[derive(Debug, Default)]
@@ -156,6 +162,16 @@ pub fn big_mimic(
                     }
                     _ => state::CHARGING,
                 };
+                // C7-07: in a 10th-anniversary world the Crimson big mimic (type 476) turns half of
+                // its curls into the gag "stuff cannon" state instead (`Main.tenthAnniversaryWorld &&
+                // type == 476 && ai[0] == 3f && Main.rand.Next(2) == 0`, `NPC.cs:37956-37959`).
+                if npc.ai[0] == state::CURLED
+                    && world.conditions.tenth_anniversary
+                    && npc.npc_type == MIMIC_BIG_CRIMSON
+                    && rng.random_ratio(1, 2)
+                {
+                    npc.ai[0] = state::FIRING;
+                }
                 npc.ai[1] = 0.0;
                 npc.ai[2] = 0.0;
                 npc.ai[3] = 0.0;
@@ -168,6 +184,22 @@ pub fn big_mimic(
             if world.conditions.expert {
                 out.reflecting = true;
             }
+            npc.ai[1] += 1.0;
+            if npc.ai[1] >= MIMIC_CURL_TICKS {
+                npc.ai[0] = state::HOPPING;
+                npc.ai[1] = 0.0;
+            }
+        }
+
+        s if s == state::FIRING => {
+            // C7-07: the 10th-anniversary "stuff cannon" curl. It sits still for the same three
+            // seconds as an ordinary curl and, in vanilla, lobs a burst of ten random junk items at
+            // you every twenty ticks (`AI_87_BigMimic_FireStuffCannonBurst`, `NPC.cs:38184-38198`).
+            // Unlike the ordinary curl it never sets `dontTakeDamage`, so it stays open to a hit the
+            // whole time. NARROWING: the item-throwing gag is not modelled - the server has no
+            // channel for an NPC to fling collectable world items - so only the state itself and its
+            // vulnerability window are transcribed here.
+            npc.velocity.0 *= 0.85;
             npc.ai[1] += 1.0;
             if npc.ai[1] >= MIMIC_CURL_TICKS {
                 npc.ai[0] = state::HOPPING;
@@ -392,8 +424,16 @@ mod tests {
     const BIG_MIMIC: u16 = 475;
 
     fn mimic(tiles: &Room, tile_x: i32, tile_y: i32) -> Npc {
-        let mut npc = Npc::new(BIG_MIMIC, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1)
-            .expect("big mimic");
+        make_mimic(tiles, BIG_MIMIC, tile_x, tile_y)
+    }
+
+    fn crimson_mimic(tiles: &Room, tile_x: i32, tile_y: i32) -> Npc {
+        make_mimic(tiles, MIMIC_BIG_CRIMSON, tile_x, tile_y)
+    }
+
+    fn make_mimic(tiles: &Room, npc_type: u16, tile_x: i32, tile_y: i32) -> Npc {
+        let mut npc =
+            Npc::new(npc_type, (tile_x as f32 * TILE, tile_y as f32 * TILE), 1).expect("big mimic");
         for _ in 0..200 {
             crate::game::npc::step_physics(&mut npc, tiles);
             if npc.on_ground && npc.velocity.1 == 0.0 {
@@ -514,6 +554,71 @@ mod tests {
             seen.len() >= 3,
             "all three specials should appear: {seen:?}"
         );
+    }
+
+    /// C7-07: in a 10th-anniversary world the Crimson big mimic (type 476) can turn a curl into the
+    /// gag "stuff cannon" state (`NPC.cs:37956-37959`). A plain world, or another mimic type, never
+    /// does.
+    #[test]
+    fn a_crimson_mimic_gets_the_stuff_cannon_in_an_anniversary_world() {
+        let tiles = floor(30);
+        let reaches_firing = |anniversary: bool, npc_type: u16| {
+            for seed in 0..120u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                let mut m = make_mimic(&tiles, npc_type, 0, 25);
+                m.ai[0] = state::HOPPING;
+                m.ai[2] = MIMIC_HOP_PATIENCE;
+                let mut w = world(&tiles, Some((30.0 * TILE, 30.0 * TILE)));
+                w.conditions.tenth_anniversary = anniversary;
+                for _ in 0..400 {
+                    big_mimic(&mut m, &w, &mut rng);
+                    if m.ai[0] == state::FIRING {
+                        return true;
+                    }
+                    if m.ai[0] != state::HOPPING {
+                        break;
+                    }
+                    crate::game::npc::step_physics(&mut m, &tiles);
+                }
+            }
+            false
+        };
+        assert!(
+            reaches_firing(true, MIMIC_BIG_CRIMSON),
+            "the anniversary Crimson mimic should reach the stuff-cannon state"
+        );
+        assert!(
+            !reaches_firing(false, MIMIC_BIG_CRIMSON),
+            "a plain world never gives it"
+        );
+        assert!(
+            !reaches_firing(true, BIG_MIMIC),
+            "and neither does the Corruption mimic, even in an anniversary world"
+        );
+    }
+
+    /// C7-07: the stuff-cannon curl stays open to a hit for its whole three seconds, unlike the
+    /// ordinary curl which takes nothing, and then resumes hopping.
+    #[test]
+    fn the_stuff_cannon_curl_is_vulnerable_and_ends() {
+        let tiles = floor(30);
+        let mut rng = SmallRng::seed_from_u64(1);
+        let mut m = crimson_mimic(&tiles, 0, 25);
+        m.ai[0] = state::FIRING;
+        let w = world(&tiles, Some((300.0, 400.0)));
+
+        big_mimic(&mut m, &w, &mut rng);
+        assert!(!m.invulnerable, "the stuff-cannon curl stays open to a hit");
+        let before = m.life;
+        m.take_damage(10, 0.0, 1);
+        assert!(m.life < before, "and a hit lands, unlike the ordinary curl");
+
+        m.ai[0] = state::FIRING;
+        m.ai[1] = 0.0;
+        for _ in 0..(MIMIC_CURL_TICKS as i32 + 1) {
+            big_mimic(&mut m, &w, &mut rng);
+        }
+        assert_eq!(m.ai[0], state::HOPPING, "then it resumes hopping");
     }
 
     /// Running away does not work: it comes back through the walls.
