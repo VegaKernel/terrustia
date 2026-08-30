@@ -1037,10 +1037,48 @@ impl GameServer {
         let mut r = PacketReader::new(payload);
         r.u8()?;
         let team = r.u8()?;
+        let old_team = self.player(slot).map_or(0, |p| p.team);
         if let Some(player) = self.player_mut(slot) {
             player.team = team;
         }
-        self.relay_player_packet(slot, id::TEAM_CHANGE, payload)
+        self.relay_player_packet(slot, id::TEAM_CHANGE, payload)?;
+
+        // Vanilla follows the state relay with a chat line — but only to the changer, whoever was
+        // on the old team, and whoever is now on the new one, never a full broadcast
+        // (`MessageBuffer.cs:2325-2364`). `Lang.mp[13 + team]` names it for teams 0-4; team 5
+        // (pink) is `Lang.mp[22]` specifically, not the `13 + team` formula's own `mp[18]` — a
+        // real quirk in vanilla's own switch, not a typo to "fix" here.
+        if let Some((name, playing)) = self.player(slot).map(|p| (p.name.clone(), p.is_playing()))
+            && playing
+        {
+            let key = if team == 5 {
+                "LegacyMultiplayer.22".to_string()
+            } else {
+                format!("LegacyMultiplayer.{}", 13 + u16::from(team))
+            };
+            let who = NetworkText::literal(name);
+            if let Ok(frame) = net_module::chat_broadcast(
+                net_module::SERVER_AUTHOR,
+                &NetworkText::key(key, vec![who]),
+                team_colour(team),
+            ) {
+                let targets: Vec<u8> = self
+                    .players
+                    .iter()
+                    .flatten()
+                    .filter(|p| {
+                        p.slot == slot
+                            || (old_team > 0 && p.team == old_team)
+                            || (team > 0 && p.team == team)
+                    })
+                    .map(|p| p.slot)
+                    .collect();
+                for target in targets {
+                    self.send(target, frame.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Packet 60 inbound: a player using the housing screen.
@@ -1120,7 +1158,31 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.pvp = hostile;
         }
-        self.relay_player_packet(slot, id::TOGGLE_P_V_P, payload)
+        self.relay_player_packet(slot, id::TOGGLE_P_V_P, payload)?;
+
+        // Vanilla always follows the state relay with a chat line to everyone, coloured to the
+        // toggling player's own team (`MessageBuffer.cs:1860-1864`): `Lang.mp[11]` for turning PvP
+        // on, `Lang.mp[12]` for turning it off.
+        if let Some((name, team, playing)) = self
+            .player(slot)
+            .map(|p| (p.name.clone(), p.team, p.is_playing()))
+            && playing
+        {
+            let key = if hostile {
+                "LegacyMultiplayer.11"
+            } else {
+                "LegacyMultiplayer.12"
+            };
+            let who = NetworkText::literal(name);
+            if let Ok(frame) = net_module::chat_broadcast(
+                net_module::SERVER_AUTHOR,
+                &NetworkText::key(key, vec![who]),
+                team_colour(team),
+            ) {
+                self.broadcast(frame, None);
+            }
+        }
+        Ok(())
     }
 
     fn on_buffs(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
@@ -2028,7 +2090,11 @@ impl GameServer {
             return Ok(());
         }
 
-        let square = TileSquare::decode(payload)?;
+        // Merged onto the tile already on the ground at each position, not decoded into a fresh
+        // one — `world.tile` is bounds-checked and returns air outside the world, which is fine
+        // here: an out-of-bounds square is discarded whole by the bounds check just below,
+        // whatever this merged against.
+        let square = TileSquare::decode(payload, |x, y| self.world.tile(x, y))?;
         let (x0, y0) = (i32::from(square.x), i32::from(square.y));
 
         // A square is at most 255 on a side, so a hostile one cannot cost much; still refuse any
@@ -2860,6 +2926,24 @@ impl GameServer {
             return self.on_creative_power(slot, message);
         }
 
+        // Modules 9 (particles) and 2 (ping): vanilla's own dedicated-server branches for both
+        // just re-broadcast the received frame to every other client
+        // (`NetParticlesModule.cs:22-25`, `NetPingModule.cs:19-22`) — this server has no opinion
+        // about the contents of either, only that they reach everyone else.
+        let module_id = net_module::peek_module_id(payload)?;
+        if module_id == net_module::MODULE_PARTICLES || module_id == net_module::MODULE_PING {
+            if !self.player(slot).is_some_and(Player::is_playing) {
+                return Ok(());
+            }
+            self.broadcast(net_module::relay_module(payload)?, Some(slot));
+            return Ok(());
+        }
+
+        // Module 12: craft using whatever a nearby chest can cover.
+        if let Some(request) = net_module::decode_craft_request(payload)? {
+            return self.on_craft_request(slot, request);
+        }
+
         let Some(chat) = IncomingChat::decode(payload)? else {
             return Ok(());
         };
@@ -2952,6 +3036,141 @@ impl GameServer {
         info!(target: crate::term::CHAT_TARGET, "<{name}> {}", chat.text);
         self.broadcast(frame, None);
         Ok(())
+    }
+
+    /// Module 12: craft a recipe using items in a nearby, currently-open-by-nobody-else chest.
+    ///
+    /// The client has already taken what it could reach on its own (its inventory, and any bank
+    /// chest) and is asking this server to cover the rest from specific chests it can see —
+    /// server-authoritative because two players quick-crafting from the same chest at once must
+    /// not both be told the same stack was theirs (`CraftingRequests.HandleRequest`,
+    /// `CraftingRequests.cs:308-321`). Approval is all-or-nothing: every requested entry must be
+    /// fully covered by the usable chests or the whole request is denied, never partially filled.
+    fn on_craft_request(
+        &mut self,
+        slot: u8,
+        request: net_module::CraftRequest,
+    ) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+
+        // `chests.RemoveAll(chest == null || !CanCraftFromChest(chest, whoAmI))`
+        // (`CraftingRequests.cs:310`) — a stale `None` index drops the same way a null `Chest`
+        // does, and the client's own chest order is preserved for the consume pass below.
+        let usable: Vec<i16> = request
+            .chests
+            .into_iter()
+            .flatten()
+            .filter(|&id| {
+                self.world
+                    .chest(id)
+                    .is_some_and(|chest| self.can_craft_from_chest(id, chest, slot))
+            })
+            .collect();
+
+        // `items.All(req => CountMatches(req, chests) >= req.stack)` (`CraftingRequests.cs:311`).
+        // A `RecipeGroup` entry can never be confirmed against real chest contents — this server
+        // has no `RecipeGroup` table (see `CraftIngredient::is_recipe_group`'s own doc) — so it is
+        // always treated as unavailable, which denies the whole request exactly the way a real
+        // shortfall would rather than fabricating an approval this server cannot actually verify.
+        let covered = request.items.iter().all(|entry| {
+            !entry.is_recipe_group()
+                && self.chest_stock(&usable, entry.item_id_or_group) >= i64::from(entry.stack)
+        });
+
+        if !covered {
+            self.send(slot, net_module::craft_response(false)?);
+            debug!(slot, chests = usable.len(), "craft request denied");
+            return Ok(());
+        }
+
+        for entry in &request.items {
+            self.consume_from_chests(&usable, entry.item_id_or_group, i64::from(entry.stack));
+        }
+        self.send(slot, net_module::craft_response(true)?);
+        Ok(())
+    }
+
+    /// `CraftingRequests.CanCraftFromChest` (`CraftingRequests.cs:294-306`): not locked, and not
+    /// open by anybody other than the requester.
+    fn can_craft_from_chest(
+        &self,
+        id: i16,
+        chest: &crate::world::objects::Chest,
+        requester: u8,
+    ) -> bool {
+        // `Chest.IsLocked` treats a null tile as locked (`Chest.cs:297-300`); a chest recorded
+        // outside the world (should never happen) is refused the same way.
+        if !self.world.in_bounds(i32::from(chest.x), i32::from(chest.y)) {
+            return false;
+        }
+        if is_chest_tile_locked(self.world.tile(i32::from(chest.x), i32::from(chest.y))) {
+            return false;
+        }
+        // `Chest.UsingChest` (`Chest.cs:492-505`): in use by somebody who is not the requester.
+        !self
+            .players
+            .iter()
+            .flatten()
+            .any(|p| p.slot != requester && p.open_chest == id)
+    }
+
+    /// `CraftingRequests.CountMatches` (`CraftingRequests.cs:199-207`), summed only over the
+    /// already-filtered, already-usable chest list.
+    fn chest_stock(&self, chests: &[i16], item_id: i32) -> i64 {
+        chests
+            .iter()
+            .filter_map(|&id| self.world.chest(id))
+            .flat_map(|chest| chest.items.iter())
+            .filter(|item| item.id == item_id)
+            .map(|item| i64::from(item.stack))
+            .sum()
+    }
+
+    /// `CraftingRequests.Consume`/`ConsumeItemsFrom` (`CraftingRequests.cs:223-292`), the
+    /// dedicated-server shape: no player inventory involved (that only happens on
+    /// `Main.netMode != 2`), every chest in the list eligible (`fromChests: true`). Each slot that
+    /// loses stock is told to every client (`NetMessage.SendData(32, ...)`,
+    /// `CraftingRequests.cs:285`), whether it emptied outright or only shrank.
+    fn consume_from_chests(&mut self, chests: &[i16], item_id: i32, mut to_consume: i64) {
+        for &chest_id in chests {
+            if to_consume <= 0 {
+                return;
+            }
+            let Some(chest) = self.world.chest_mut(chest_id) else {
+                continue;
+            };
+            let mut touched: Vec<(u8, ItemStack)> = Vec::new();
+            for (index, item) in chest.items.iter_mut().enumerate() {
+                if to_consume <= 0 {
+                    break;
+                }
+                if item.id != item_id {
+                    continue;
+                }
+                let held = i64::from(item.stack);
+                if held > to_consume {
+                    item.stack -= to_consume as i16;
+                    to_consume = 0;
+                } else {
+                    to_consume -= held;
+                    *item = ItemStack::EMPTY;
+                }
+                touched.push((index as u8, *item));
+            }
+            for (index, item) in touched {
+                if let Ok(frame) = (SyncChestItem {
+                    chest: chest_id,
+                    slot: index,
+                    item,
+                })
+                .encode()
+                {
+                    self.broadcast(frame, None);
+                }
+            }
+        }
     }
 
     /// A client asking to be taken to a pylon.
@@ -4267,6 +4486,41 @@ fn other_slots(slots: &[u8]) -> Vec<u8> {
     slots.to_vec()
 }
 
+/// `Main.teamColor` (`Main.cs:6795-6800`): none/red/green/blue/yellow/pink, in that team-index
+/// order. Used to colour the PvP-toggle and team-change chat lines the same way vanilla's own
+/// dedicated server does (`MessageBuffer.cs:1863-1864`, `:2337`).
+fn team_colour(team: u8) -> [u8; 3] {
+    match team {
+        1 => [218, 59, 59],
+        2 => [59, 218, 85],
+        3 => [59, 149, 218],
+        4 => [242, 221, 100],
+        5 => [224, 100, 242],
+        _ => [255, 255, 255],
+    }
+}
+
+/// `Chest.IsLocked(Tile)` (`Chest.cs:295-310`), used by [`GameServer::can_craft_from_chest`]. A
+/// locked chest is not a different tile type — the ordinary chest (21) shifted along its frame
+/// strip into one of six locked-style ranges, or the second chest tile (467) at style 13 exactly.
+/// `terrustia_proto::locks` already knows the same style numbers from the other direction
+/// (unlocking one), but not this "is it currently locked" read of an arbitrary frame.
+fn is_chest_tile_locked(tile: Tile) -> bool {
+    let frame_x = i32::from(tile.frame_x);
+    if tile.block == terrustia_proto::locks::CHEST {
+        return (72..=106).contains(&frame_x)
+            || (144..=178).contains(&frame_x)
+            || (828..=1006).contains(&frame_x)
+            || (1296..=1330).contains(&frame_x)
+            || (1368..=1402).contains(&frame_x)
+            || (1440..=1474).contains(&frame_x);
+    }
+    if tile.block == terrustia_proto::locks::CHEST_2 {
+        return frame_x / 36 == 13;
+    }
+    false
+}
+
 /// A join's own tile stream is spread across ticks (`drain_section_streams`) rather than sent in
 /// one synchronous loop inside `on_spawn_tile_data`'s own packet handler — see
 /// `SECTION_STREAM_BUDGET`'s own doc comment for the measured cost this bounds.
@@ -4516,6 +4770,146 @@ mod join_password_throttle {
             Some(ConnState::SlotAssigned),
             "a different address's own first attempt must not inherit someone else's backoff"
         );
+    }
+}
+
+/// FIX-6 [30]/[45,157]: `TogglePVP` and `TeamChange` relayed the state correctly but never sent
+/// the localized chat line vanilla always broadcasts alongside it (`MessageBuffer.cs:1851-1866`
+/// for PvP, `:2325-2364` for team).
+#[cfg(test)]
+mod pvp_and_team_chat_lines {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::net_text::TextMode;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "pvp/team chat line probe")
+    }
+
+    fn with_players(count: u8, mut server: GameServer) -> (GameServer, Vec<mpsc::Receiver<Bytes>>) {
+        let mut rxs = Vec::new();
+        for slot in 0..count {
+            let (tx, rx) = mpsc::channel(16);
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+            rxs.push(rx);
+        }
+        (server, rxs)
+    }
+
+    fn pvp_payload(hostile: bool) -> Vec<u8> {
+        vec![0, hostile as u8]
+    }
+
+    fn team_payload(team: u8) -> Vec<u8> {
+        vec![0, team]
+    }
+
+    /// Drain every module-1 (text) frame off a channel and decode it back to a `NetworkText`,
+    /// ignoring anything else (the ordinary packet-30/45 state relay lands on the same channel).
+    fn text_frames(rx: &mut mpsc::Receiver<Bytes>) -> Vec<NetworkText> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.get(2) != Some(&terrustia_proto::id::NET_MODULES) {
+                continue;
+            }
+            let mut r = PacketReader::new(&frame[3..]);
+            if r.u16() != Ok(net_module::MODULE_TEXT) {
+                continue;
+            }
+            r.u8().unwrap(); // author
+            out.push(NetworkText::read(&mut r).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn enabling_pvp_broadcasts_lang_mp_11_to_everyone_including_the_toggler() {
+        let (mut server, mut rxs) =
+            with_players(2, GameServer::new(Config::default(), tiny_world()));
+        server.on_pvp(0, &pvp_payload(true)).unwrap();
+
+        for (slot, rx) in rxs.iter_mut().enumerate() {
+            let texts = text_frames(rx);
+            let line = texts
+                .iter()
+                .find(|t| t.mode == TextMode::LocalizationKey)
+                .unwrap_or_else(|| panic!("slot {slot} should hear the PvP-on announcement"));
+            assert_eq!(line.text, "LegacyMultiplayer.11");
+            assert_eq!(line.substitutions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn disabling_pvp_broadcasts_lang_mp_12() {
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_pvp(0, &pvp_payload(false)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .expect("the disabling line should still be sent");
+        assert_eq!(line.text, "LegacyMultiplayer.12");
+    }
+
+    /// `MessageBuffer.cs:2348-2354`: the team-change line goes only to the changer, whoever was on
+    /// the old team, and whoever is now on the new team — never a full broadcast. Slot 0 changes
+    /// from team 1 to team 2; slot 1 stays on team 1 (old team — should hear it); slot 2 is
+    /// already on team 2 (new team — should hear it); slot 3 is on team 3 (neither — must not).
+    #[test]
+    fn a_team_change_reaches_only_the_changer_and_old_and_new_teammates() {
+        let (mut server, mut rxs) =
+            with_players(4, GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().team = 1;
+        server.player_mut(1).unwrap().team = 1;
+        server.player_mut(2).unwrap().team = 2;
+        server.player_mut(3).unwrap().team = 3;
+
+        server.on_team(0, &team_payload(2)).unwrap();
+
+        for slot in [0usize, 1, 2] {
+            assert!(
+                text_frames(&mut rxs[slot])
+                    .iter()
+                    .any(|t| t.mode == TextMode::LocalizationKey),
+                "slot {slot} should have heard the team-change line"
+            );
+        }
+        assert!(
+            text_frames(&mut rxs[3]).is_empty(),
+            "a bystander on an unrelated team must not hear it"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_team_uses_lang_mp_thirteen_plus_team() {
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_team(0, &team_payload(3)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .unwrap();
+        assert_eq!(line.text, "LegacyMultiplayer.16", "13 + team 3");
+    }
+
+    /// The one quirk worth pinning by itself: team 5 (pink) does not follow the `13 + team`
+    /// formula (which would be `mp[18]`) — vanilla special-cases it to `mp[22]`
+    /// (`MessageBuffer.cs:2344-2347`).
+    #[test]
+    fn team_five_uses_lang_mp_22_not_the_formula() {
+        let (mut server, mut rxs) =
+            with_players(1, GameServer::new(Config::default(), tiny_world()));
+        server.on_team(0, &team_payload(5)).unwrap();
+
+        let line = text_frames(&mut rxs[0])
+            .into_iter()
+            .find(|t| t.mode == TextMode::LocalizationKey)
+            .unwrap();
+        assert_eq!(line.text, "LegacyMultiplayer.22");
     }
 }
 
@@ -4847,6 +5241,286 @@ mod chest_open_minors {
                 .all(|frame| frame[2] != terrustia_proto::id::HIT_SWITCH),
             "an ordinary chest should never fire a switch"
         );
+    }
+}
+
+/// FIX-6 [82/9]/[82/2]: the particles and ping modules used not to be relayed at all — a real
+/// server re-broadcasts both to every other client (`NetParticlesModule.cs:22-25`,
+/// `NetPingModule.cs:19-22`), unconditionally, without acting on the contents.
+#[cfg(test)]
+mod net_module_relays {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "net module relay probe")
+    }
+
+    fn with_two_players(
+        mut server: GameServer,
+    ) -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        let (a_tx, a_rx) = mpsc::channel(16);
+        let (b_tx, b_rx) = mpsc::channel(16);
+        for (slot, tx) in [(0u8, a_tx), (1u8, b_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, a_rx, b_rx)
+    }
+
+    #[test]
+    fn a_particles_module_reaches_the_other_player_but_not_the_sender() {
+        let (mut server, mut sender_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let mut w = terrustia_proto::writer::Writer::new();
+        w.u16(net_module::MODULE_PARTICLES).u8(3).bytes(&[9, 9]);
+
+        server.on_net_module(0, w.as_slice()).unwrap();
+
+        let relayed = other_rx
+            .try_recv()
+            .expect("the other client should hear it");
+        assert_eq!(relayed[2], terrustia_proto::id::NET_MODULES);
+        assert_eq!(
+            &relayed[3..],
+            w.as_slice(),
+            "relayed byte for byte, unchanged"
+        );
+        assert!(
+            sender_rx.try_recv().is_err(),
+            "the sender should not hear its own particles back"
+        );
+    }
+
+    #[test]
+    fn a_ping_module_reaches_the_other_player_but_not_the_sender() {
+        let (mut server, mut sender_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let mut w = terrustia_proto::writer::Writer::new();
+        w.u16(net_module::MODULE_PING).f32(100.0).f32(200.0);
+
+        server.on_net_module(0, w.as_slice()).unwrap();
+
+        let relayed = other_rx
+            .try_recv()
+            .expect("the other client should hear it");
+        assert_eq!(&relayed[3..], w.as_slice());
+        assert!(sender_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn neither_relay_fires_for_a_connection_that_is_not_playing_yet() {
+        let (mut server, _sender_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        server.player_mut(0).unwrap().state = ConnState::Greeting;
+        let mut w = terrustia_proto::writer::Writer::new();
+        w.u16(net_module::MODULE_PING).f32(0.0).f32(0.0);
+
+        server.on_net_module(0, w.as_slice()).unwrap();
+
+        assert!(other_rx.try_recv().is_err());
+    }
+}
+
+/// FIX-6 [82/12]: `NetCraftingRequestsModule` (craft using a nearby open chest's materials) used
+/// to be entirely unimplemented — the module id was not even named, so a real client's request
+/// silently vanished and the craft neither completed nor refunded (it would have hung until the
+/// client gave up).
+#[cfg(test)]
+mod craft_requests {
+    use super::*;
+    use crate::config::Config;
+    use crate::world::objects::Chest;
+    use terrustia_proto::ItemStack;
+
+    const WOOD: i32 = 9;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "craft request probe")
+    }
+
+    fn with_two_players(
+        mut server: GameServer,
+    ) -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        let (a_tx, a_rx) = mpsc::channel(16);
+        let (b_tx, b_rx) = mpsc::channel(16);
+        for (slot, tx) in [(0u8, a_tx), (1u8, b_tx)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, a_rx, b_rx)
+    }
+
+    fn chest_with(items: &[ItemStack]) -> Chest {
+        let mut chest = Chest::empty_at(10, 10);
+        for (slot, item) in items.iter().enumerate() {
+            chest.items[slot] = *item;
+        }
+        chest
+    }
+
+    fn request(items: &[(i32, i32)], chests: &[i16]) -> net_module::CraftRequest {
+        net_module::CraftRequest {
+            items: items
+                .iter()
+                .map(|&(item_id_or_group, stack)| net_module::CraftIngredient {
+                    item_id_or_group,
+                    stack,
+                })
+                .collect(),
+            chests: chests.iter().map(|&id| Some(id)).collect(),
+        }
+    }
+
+    /// The ordinary case: the chest holds enough, so the request is approved, the stock actually
+    /// leaves the chest, and every client (not only the requester) is told the slot changed —
+    /// `NetMessage.SendData(32, ...)` is a broadcast, not a targeted send
+    /// (`CraftingRequests.cs:285`).
+    #[test]
+    fn a_covered_request_consumes_stock_and_approves() {
+        let (mut server, mut requester_rx, mut other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(chest_with(&[ItemStack::new(WOOD, 10, 0)]))
+            .unwrap();
+
+        server
+            .on_craft_request(0, request(&[(WOOD, 6)], &[id]))
+            .unwrap();
+
+        assert_eq!(
+            server.world.chest(id).unwrap().items[0].stack,
+            4,
+            "six of ten should have been taken"
+        );
+        let approved = std::iter::from_fn(|| requester_rx.try_recv().ok())
+            .find(|f| f[2] == terrustia_proto::id::NET_MODULES)
+            .expect("the requester should hear a response");
+        assert_eq!(
+            net_module::peek_module_id(&approved[3..]).unwrap(),
+            net_module::MODULE_CRAFTING_REQUESTS
+        );
+        assert_eq!(approved[approved.len() - 1], 1, "approved is a true byte");
+        let told_slot_change = std::iter::from_fn(|| other_rx.try_recv().ok())
+            .any(|f| f[2] == terrustia_proto::id::SYNC_CHEST_ITEM);
+        assert!(
+            told_slot_change,
+            "every client, not only the requester, should hear the chest slot changed"
+        );
+    }
+
+    /// Not enough of the item anywhere in the offered chests: denied, and nothing moves. Approval
+    /// is all-or-nothing (`CraftingRequests.cs:311`), never a partial take.
+    #[test]
+    fn an_uncovered_request_is_denied_and_untouched() {
+        let (mut server, mut requester_rx, _other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(chest_with(&[ItemStack::new(WOOD, 2, 0)]))
+            .unwrap();
+
+        server
+            .on_craft_request(0, request(&[(WOOD, 6)], &[id]))
+            .unwrap();
+
+        assert_eq!(
+            server.world.chest(id).unwrap().items[0].stack,
+            2,
+            "an uncovered request must not touch the chest at all"
+        );
+        let response = std::iter::from_fn(|| requester_rx.try_recv().ok())
+            .find(|f| f[2] == terrustia_proto::id::NET_MODULES)
+            .expect("the requester should still hear a response");
+        assert_eq!(response[response.len() - 1], 0, "denied is a false byte");
+    }
+
+    /// `Chest.IsLocked` (`Chest.cs:295-310`): a locked chest is refused outright, however much it
+    /// holds — style 2 (frame_x 72) is the ordinary locked dungeon/gold chest.
+    #[test]
+    fn a_locked_chest_is_never_usable_however_much_it_holds() {
+        let (mut server, mut requester_rx, _other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(chest_with(&[ItemStack::new(WOOD, 99, 0)]))
+            .unwrap();
+        // `can_craft_from_chest` reads the tile at exactly `(chest.x, chest.y)` — `Chest::empty_at`
+        // above recorded that as `(10, 10)`.
+        server.world.set_tile(10, 10, Tile::framed(21, 72, 0));
+
+        server
+            .on_craft_request(0, request(&[(WOOD, 6)], &[id]))
+            .unwrap();
+
+        assert_eq!(server.world.chest(id).unwrap().items[0].stack, 99);
+        let response = std::iter::from_fn(|| requester_rx.try_recv().ok())
+            .find(|f| f[2] == terrustia_proto::id::NET_MODULES)
+            .unwrap();
+        assert_eq!(response[response.len() - 1], 0, "a locked chest must deny");
+    }
+
+    /// `Chest.UsingChest` (`Chest.cs:492-505`): a chest somebody *else* has open is off limits,
+    /// but the requester's own open chest is fine (`num != whoAmI` in
+    /// `CraftingRequests.CanCraftFromChest`, `CraftingRequests.cs:300-304`).
+    #[test]
+    fn a_chest_open_by_someone_else_is_refused_but_the_requesters_own_is_fine() {
+        let (mut server, mut requester_rx, _other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(chest_with(&[ItemStack::new(WOOD, 10, 0)]))
+            .unwrap();
+        server.player_mut(1).unwrap().open_chest = id;
+
+        server
+            .on_craft_request(0, request(&[(WOOD, 6)], &[id]))
+            .unwrap();
+
+        assert_eq!(
+            server.world.chest(id).unwrap().items[0].stack,
+            10,
+            "someone else has it open, so nothing should move"
+        );
+        let response = std::iter::from_fn(|| requester_rx.try_recv().ok())
+            .find(|f| f[2] == terrustia_proto::id::NET_MODULES)
+            .unwrap();
+        assert_eq!(response[response.len() - 1], 0);
+
+        // Now the requester has it open instead — the exact same request should now succeed.
+        server.player_mut(1).unwrap().open_chest = -1;
+        server.player_mut(0).unwrap().open_chest = id;
+        server
+            .on_craft_request(0, request(&[(WOOD, 6)], &[id]))
+            .unwrap();
+        assert_eq!(server.world.chest(id).unwrap().items[0].stack, 4);
+    }
+
+    /// This server has no `RecipeGroup` table to check a fake-item-id entry against real chest
+    /// contents (`CraftIngredient::is_recipe_group`'s own doc), so it always denies rather than
+    /// guessing — the disclosed seam, not a silent wrong answer.
+    #[test]
+    fn a_recipe_group_entry_is_always_denied() {
+        let (mut server, mut requester_rx, _other_rx) =
+            with_two_players(GameServer::new(Config::default(), tiny_world()));
+        let id = server
+            .world
+            .add_chest(chest_with(&[ItemStack::new(WOOD, 99, 0)]))
+            .unwrap();
+        let group_id = net_module::CraftIngredient::RECIPE_GROUP_OFFSET + 1;
+
+        server
+            .on_craft_request(0, request(&[(group_id, 1)], &[id]))
+            .unwrap();
+
+        assert_eq!(server.world.chest(id).unwrap().items[0].stack, 99);
+        let response = std::iter::from_fn(|| requester_rx.try_recv().ok())
+            .find(|f| f[2] == terrustia_proto::id::NET_MODULES)
+            .unwrap();
+        assert_eq!(response[response.len() - 1], 0);
     }
 }
 
