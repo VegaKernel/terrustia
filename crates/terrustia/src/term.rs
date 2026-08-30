@@ -118,13 +118,40 @@ impl Visit for Parts {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let mut rendered = String::new();
         let _ = write!(rendered, "{value:?}");
-        let rendered = unquote(&rendered).to_string();
+        let rendered = sanitise_control(unquote(&rendered));
         if field.name() == "message" {
             self.message = rendered;
         } else {
             self.fields.push((field.name(), rendered));
         }
     }
+}
+
+/// Strip control code points that could reinterpret this line's meaning once it lands on a real
+/// terminal or in the panel's live feed, rather than merely reading as text: `ESC`-led sequences
+/// (clear the screen, move the cursor, retitle the window, spoof a prompt), a raw `CR`/`LF` (which
+/// could forge what looks like a second, unrelated log line), the rest of the C0 range, `DEL`, and
+/// the C1 control range (`U+0080..=U+009F`: some terminals still act on these). Every event's
+/// message and field values pass through here, in [`Parts::record_debug`], before `TermLayer` ever
+/// renders them for the TTY or hands a copy to [`console_feed`]: untrusted text from anywhere
+/// (unauthenticated chat, above all; see `game/server/dispatch.rs`'s `on_net_module`) therefore
+/// cannot smuggle terminal control codes into either destination, including a future call site
+/// nobody has written yet. Tab survives: it carries no cursor or line hazard and is occasionally
+/// legitimate content. Everything else (punctuation, accents, CJK, emoji, any ordinary Unicode
+/// text) passes through unchanged; only control code points are touched.
+fn sanitise_control(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            let code = c as u32;
+            match code {
+                0x09 => true,
+                0x00..=0x1f => false,
+                0x7f => false,
+                0x80..=0x9f => false,
+                _ => true,
+            }
+        })
+        .collect()
 }
 
 /// Strip the quotes a string's `Debug` adds, leaving everything else alone.
@@ -1150,5 +1177,57 @@ mod tests {
 
         // A short plain line is returned unchanged.
         assert_eq!(wrap_ansi("short", 80, 38), "short");
+    }
+
+    /// The pure filter behind L6-02's fix: C0 controls other than tab, `DEL`, and the C1 range are
+    /// stripped; tab and every other Unicode character (accents, CJK, emoji) survive untouched.
+    #[test]
+    fn sanitise_control_strips_c0_del_c1_but_keeps_tab_and_text() {
+        assert_eq!(sanitise_control("hello\tworld"), "hello\tworld");
+        // Only the ESC lead byte is stripped: the printable `[2J` that follows is inert text once
+        // the byte that would have turned it into a cursor command is gone, so it is left alone.
+        assert_eq!(sanitise_control("clear\x1b[2Jscreen"), "clear[2Jscreen");
+        assert_eq!(sanitise_control("a\r\nb"), "ab");
+        assert_eq!(sanitise_control("bell\x07"), "bell");
+        assert_eq!(sanitise_control("del\x7fete"), "delete");
+        assert_eq!(sanitise_control("c1\u{0085}end"), "c1end");
+        assert_eq!(
+            sanitise_control("caf\u{e9} \u{1f600} \u{4e2d}\u{6587}"),
+            "caf\u{e9} \u{1f600} \u{4e2d}\u{6587}",
+            "ordinary Unicode must pass through untouched"
+        );
+    }
+
+    /// Fail-then-pass for L6-02: unauthenticated chat text reaches `TermLayer` exactly the way
+    /// `on_net_module`'s `<name> {text}` chat line does, and nothing on the packet path validates
+    /// its content beyond length (`net_module::validate_chat`). Before `Parts::record_debug` ran the
+    /// value through `sanitise_control`, an embedded `ESC` byte rode straight through into both the
+    /// rendered line and the copy handed to the panel's live feed; this fires a real event through a
+    /// real subscriber and checks the feed's copy, which is built from the same sanitised `Parts` the
+    /// TTY line is.
+    #[test]
+    fn a_chat_line_with_an_embedded_escape_reaches_the_feed_sanitised() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let mut feed = console_feed().subscribe();
+        let subscriber =
+            tracing_subscriber::Registry::default().with(TermLayer::new(Palette::PLAIN));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: CHAT_TARGET, "<attacker> hi\x1b[2J\x1b[Hpwned-marker");
+        });
+
+        let line = feed
+            .try_recv()
+            .expect("the event should have reached the feed");
+        assert!(
+            !line.text.contains('\x1b'),
+            "an ESC byte reached the panel feed unsanitised: {:?}",
+            line.text
+        );
+        assert!(
+            line.text.contains("pwned-marker"),
+            "the rest of the message must still be there: {:?}",
+            line.text
+        );
     }
 }
