@@ -2591,12 +2591,11 @@ impl GameServer {
                     74 => stack * 1_000_000,
                     _ => 0,
                 };
-                // Bombs, dynamite and grenades; the guns the Arms Dealer answers to; and the dye
-                // plants the Dye Trader wants. Small named sets rather than a table, because that
-                // is what the game uses too.
-                has_explosives |= matches!(kind, 166 | 167 | 168 | 235 | 1167 | 3006);
-                has_gun |= matches!(kind, 24 | 39 | 43 | 96 | 98 | 99 | 120 | 434 | 1255);
-                has_dye_material |= matches!(kind, 1105..=1111);
+                // The real vanilla triggers, transcribed and tested in `arrivals`. The previous
+                // inline sets named a Wooden Sword as a gun and Orichalcum ore as dye material.
+                has_explosives |= crate::game::arrivals::counts_as_explosive(kind);
+                has_gun |= crate::game::arrivals::counts_as_gun(kind);
+                has_dye_material |= crate::game::arrivals::counts_as_dye_material(kind);
             }
         }
 
@@ -2621,6 +2620,9 @@ impl GameServer {
             has_dye_material,
             residents,
             hard_mode: self.world.progress.hard_mode,
+            // A genuine party (`BirthdayParty.GenuineParty`) is what a town Green Slime moves in
+            // during; a manually forced party is not.
+            party: self.party.genuine,
         };
         ready(town, &|kind| here.contains(&kind))
             .into_iter()
