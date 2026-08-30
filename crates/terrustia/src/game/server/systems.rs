@@ -1919,6 +1919,8 @@ impl GameServer {
         let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
+        // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
+        let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
         self.broadcast_npc_death(index);
         // An expert boss's coins ride inside its treasure bag, so the bag's own drop zeroes the
         // NPC's money (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0` sets `npc.value = 0f`,
@@ -1931,7 +1933,7 @@ impl GameServer {
         } else {
             value
         };
-        self.drop_coins(value, center);
+        self.drop_coins(value, center, midas);
         self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
@@ -2193,27 +2195,76 @@ impl GameServer {
 
     /// Scatter an NPC's coin value as item entities.
     ///
-    /// This is only the coin half of a death: it is universal and comes straight from the NPC's
-    /// `value`. What the thing was actually carrying is [`Self::drop_loot`].
-    fn drop_coins(&mut self, value: f32, center: (f32, f32)) {
-        let mut copper = value as i64;
-        if copper <= 0 {
+    /// Ported from `NPC.NPCLoot_DropMoney` (`NPC.cs:80436-80567`). The value is never paid at face:
+    /// it is varied (a base -20%..+75% roll plus a cascade of rarer jackpot bonuses), doubled up to
+    /// on a blood moon and raised by Midas, then peeled off largest-denomination-first into several
+    /// scattered stacks rather than one. The old code paid the raw value as one tidy pile of coins.
+    ///
+    /// Two disclosed narrowings. The luck double-roll (`num2 = 2` when a `luck` check passes, keep
+    /// the better or, for bad luck, worse of two rolls) is left out: the server does not track a
+    /// player's luck, so luck reads as zero and the roll happens once, which is the exact `luck ==
+    /// 0` behaviour. And the divide-into-more-stacks step is guarded to leave at least one coin of a
+    /// denomination it has entered, where source lets platinum/gold/silver divide to zero: that is a
+    /// latent spin loop and empty-item drop in source (only its copper branch guards it), unwanted
+    /// on this server's packet path.
+    fn drop_coins(&mut self, value: f32, center: (f32, f32), midas: bool) {
+        if value <= 0.0 {
             return;
         }
-        // Split into platinum, gold, silver and copper, largest denomination first.
-        for (tier, item) in COIN_ITEMS.iter().enumerate().rev() {
-            let unit = 100i64.pow(tier as u32);
-            let count = copper / unit;
-            if count == 0 {
-                continue;
+        let mut num = value;
+        if midas {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 30..=50) as f32 * 0.01;
+        }
+        num *= 1.0 + rand::Rng::random_range(&mut self.rng, -20..=75) as f32 * 0.01;
+        // The jackpot cascade: each rarer than the last, and each worth a little more.
+        for (one_in, lo, hi) in [
+            (2u32, 5i32, 10i32),
+            (4, 10, 20),
+            (8, 15, 30),
+            (16, 20, 40),
+            (32, 25, 50),
+            (64, 50, 100),
+        ] {
+            if rand::Rng::random_ratio(&mut self.rng, 1, one_in) {
+                num *= 1.0 + rand::Rng::random_range(&mut self.rng, lo..=hi) as f32 * 0.01;
             }
-            copper -= count * unit;
-            let stack = count.min(i64::from(i16::MAX)) as i16;
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(*item, stack, 0), (center.0, center.1))
-            {
-                self.broadcast_item(index);
+        }
+        if self.world.blood_moon {
+            num *= 1.0 + rand::Rng::random_range(&mut self.rng, 0..=100) as f32 * 0.01;
+        }
+
+        // Peel denominations off the top, scattering each into its own stack, high to low: copper
+        // 71, silver 72, gold 73, platinum 74.
+        while num as i64 > 0 {
+            let (unit, item, second_div_max): (f32, i32, i32) = if num > 1_000_000.0 {
+                (1_000_000.0, 74, 3)
+            } else if num > 10_000.0 {
+                (10_000.0, 73, 3)
+            } else if num > 100.0 {
+                (100.0, 72, 3)
+            } else {
+                (1.0, 71, 4)
+            };
+            let mut count = (num / unit) as i64;
+            if count > 50 && rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=3));
+            }
+            if rand::Rng::random_ratio(&mut self.rng, 1, 5) {
+                count /= i64::from(rand::Rng::random_range(&mut self.rng, 1..=second_div_max));
+            }
+            // Source only floors the copper branch at one; flooring every branch is what keeps the
+            // loop from stalling when a divide zeroes a higher denomination it has already entered.
+            let count = count.max(1);
+            num -= unit * count as f32;
+            // Platinum caps a stack at 999 in source; the others never approach the i16 limit but
+            // are clamped for safety all the same.
+            let mut left = count;
+            while left > 0 {
+                let stack = left.min(999).min(i64::from(i16::MAX)) as i16;
+                left -= i64::from(stack);
+                if let Some(index) = self.items.spawn(ItemStack::new(item, stack, 0), center) {
+                    self.broadcast_item(index);
+                }
             }
         }
     }
@@ -6532,6 +6583,53 @@ mod godmode {
                 "player {slot} should be sent its own instanced treasure bag"
             );
             assert!(!coin, "an expert boss with a bag drops no loose coins");
+        }
+    }
+
+    /// Coins are varied per roll, not paid at face (`NPC.NPCLoot_DropMoney`, `NPC.cs:80436`). The
+    /// old path paid the exact value as one pile every time; the game rolls a -20%..+75% base plus
+    /// jackpots, so different rolls of the same value pay different amounts.
+    #[test]
+    fn coin_drops_are_varied_not_paid_at_face() {
+        use rand::SeedableRng;
+        const FACE: f32 = 1000.0;
+        let total_for = |seed: u64| -> i64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            let (tx, mut rx) = mpsc::channel(256);
+            let mut p = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            server.players[0] = Some(p);
+            server.rng = rand::rngs::SmallRng::seed_from_u64(seed);
+            server.drop_coins(FACE, (1000.0, 1000.0), false);
+            let mut total = 0i64;
+            while let Ok(frame) = rx.try_recv() {
+                if frame.len() >= 23 && frame[2] == terrustia_proto::id::SYNC_ITEM {
+                    let id = i16::from_le_bytes([frame[frame.len() - 2], frame[frame.len() - 1]]);
+                    let stack = i64::from(i16::from_le_bytes([frame[21], frame[22]]));
+                    let unit = match id {
+                        71 => 1,
+                        72 => 100,
+                        73 => 10_000,
+                        74 => 1_000_000,
+                        _ => 0,
+                    };
+                    total += stack * unit;
+                }
+            }
+            total
+        };
+        let (a, b, c) = (total_for(1), total_for(2), total_for(3));
+        assert!(a > 0 && b > 0 && c > 0, "coins should drop");
+        assert!(
+            a != b || b != c,
+            "the value is varied per roll, not paid at face"
+        );
+        for t in [a, b, c] {
+            let t = t as f32;
+            assert!(
+                (FACE * 0.5..=FACE * 5.0).contains(&t),
+                "within a sane band: {t}"
+            );
         }
     }
 }
