@@ -5610,9 +5610,19 @@ impl GameServer {
                 debug!("item slots are full; a treasure bag was discarded");
                 break;
             };
-            let Some(item) = self.items.get(index).copied() else {
+            // Instance the bag to this one player: vanilla's `WorldItem.MakeInstanced`
+            // (`WorldItem.cs:326`) gives the item a real owner so only that client may ever take it.
+            // Without it the bag was an un-owned world item merely not broadcast, and the proximity
+            // reservation loop would hand each bag to whichever player stood nearest the boss (every
+            // bag spawns at the same point), letting one player be reserved bags meant for others.
+            // Owning it here keeps the pickup and update gates (`item.owner == slot`) tied to the
+            // intended player, and `is_reserved` keeps the proximity loop from ever touching it.
+            let Some(item) = self.items.get_mut(index) else {
                 continue;
             };
+            item.owner = slot;
+            item.instanced = true;
+            let item = *item;
             let sync = SyncItem::dropped(index, item.position, item.item);
             if let Ok(frame) = sync.encode_instanced() {
                 self.send(slot, frame);
@@ -7184,6 +7194,50 @@ mod godmode {
             );
             assert!(!coin, "an expert boss with a bag drops no loose coins");
         }
+    }
+
+    /// m5: an expert or master treasure bag is instanced to its one intended player, the way
+    /// vanilla's `WorldItem.MakeInstanced` (`WorldItem.cs:326`) reserves it, so no other client can
+    /// take it. Fails before the fix, when each bag was an un-owned world item and the proximity
+    /// reservation loop handed it to whoever stood nearest the boss (`WorldItem.FindOwner` skips only
+    /// instanced items, `WorldItem.cs:195`) - so a player parked on the drop point could be reserved
+    /// every bag, including ones meant for others.
+    #[test]
+    fn an_instanced_bag_stays_owned_by_its_player_and_a_bystander_cannot_take_it() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        let center = (1000.0, 1000.0);
+        for slot in 0u8..2 {
+            let (tx, _rx) = mpsc::channel(64);
+            let mut p = Player::new(slot, format!("127.0.0.1:{}", slot + 1).parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            // Park player 1 right on the drop point and player 0 far away: were the bags un-owned,
+            // the proximity loop would reserve every bag to the nearest player (player 1).
+            p.position = if slot == 1 { center } else { (2800.0, 1000.0) };
+            server.players[slot as usize] = Some(p);
+        }
+
+        server.drop_instanced_bag(3319, center);
+
+        // One bag per player, each instanced to a distinct real owner, none left un-owned.
+        let mut owners: Vec<u8> = server.items.iter().map(|(_, i)| i.owner).collect();
+        owners.sort_unstable();
+        assert_eq!(owners, vec![0, 1], "one bag instanced to each player");
+        assert!(
+            server.items.iter().all(|(_, i)| i.instanced),
+            "every treasure bag must be instanced to its owner"
+        );
+
+        // The proximity reservation loop, with player 1 sitting on both bags, must not steal
+        // player 0's bag: an instanced item is never re-offered to whoever is nearest.
+        server.tick_items();
+        let mut owners_after: Vec<u8> = server.items.iter().map(|(_, i)| i.owner).collect();
+        owners_after.sort_unstable();
+        assert_eq!(
+            owners_after,
+            vec![0, 1],
+            "a bystander on the drop point must not be reserved another player's instanced bag"
+        );
     }
 
     /// Coins are varied per roll, not paid at face (`NPC.NPCLoot_DropMoney`, `NPC.cs:80436`). The
