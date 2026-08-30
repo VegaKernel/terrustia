@@ -1704,15 +1704,19 @@ pub const BRAIN_CHARGE_SMOOTH: f32 = 50.0;
 /// How long between teleports in each phase, as (base, extra).
 pub const BRAIN_BLINK_SHIELDED: (u32, u32) = (120, 300);
 pub const BRAIN_BLINK_EXPOSED: (u32, u32) = (60, 120);
+/// On a dedicated server (netMode != 0) the exposed blink wait gains a further 30-89 ticks
+/// (`num859 += Main.rand.Next(30, 90)`, `NPC.cs:32690-32693`); single-player omits it.
+pub const BRAIN_BLINK_EXPOSED_MP_EXTRA: (u32, u32) = (30, 90);
 /// How far from the target it appears, in tiles, in each phase.
 pub const BRAIN_RANGE_SHIELDED: (i32, i32) = (12, 40);
 pub const BRAIN_RANGE_EXPOSED: (i32, i32) = (10, 12);
 /// How much of the target's own speed is added to that offset, so it leads a running player.
 pub const BRAIN_LEAD: f32 = 16.0;
 
-/// Fade rate per tick while blinking, in each phase.
+/// Fade rate per tick while blinking, in each phase. The exposed rate is the dedicated-server
+/// (netMode != 0) value of 15 (`NPC.cs:32744`); single-player fades faster, at 25 (`NPC.cs:32748`).
 pub const BRAIN_FADE_SHIELDED: f32 = 5.0;
-pub const BRAIN_FADE_EXPOSED: f32 = 25.0;
+pub const BRAIN_FADE_EXPOSED: f32 = 15.0;
 
 /// Beyond this Manhattan distance the Brain simply leaves.
 pub const BRAIN_GIVE_UP: f32 = 6000.0;
