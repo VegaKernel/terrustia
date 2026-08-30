@@ -78,12 +78,25 @@ pub struct TownNpc {
     pub homeless_despawn: bool,
 }
 
+/// One of the four Lunar Pillars, as `WorldFile.SaveNPCs`'s second loop remembers it
+/// (`WorldFile.cs:1745-1755`): the non-town NPCs the game persists, gated on
+/// `NPCID.Sets.SavesAndLoads` (`NPCID.cs:4807`), which in this build's target version names only
+/// the four pillars. Unlike a [`TownNpc`], vanilla's own second loop carries no name, no home and
+/// no variation - only enough to put the pillar back where it was.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedNpc {
+    /// `netID`, i.e. the type: one of [`crate::game::lunar::PILLARS`].
+    pub net_id: i32,
+    pub position: (f32, f32),
+}
+
 /// Byte ranges of a loaded save that this server does not model.
 ///
-/// Saving re-serialises only the header prefix, tiles, chests and signs. Everything else — NPCs,
-/// tile entities, pressure plates, the town manager, the bestiary, creative powers — is written
-/// back exactly as it was read, so opening a world here and saving it cannot quietly discard the
-/// parts we do not understand.
+/// Saving re-serialises the header prefix, tiles, chests and signs, and now also rewrites the
+/// townsfolk (with the pillars' own second list), the tile entities, the pressure-plate section,
+/// the town manager's room list, the bestiary and the Journey powers from live state. Only a
+/// section a load did not fully understand, or one this server genuinely keeps no state for,
+/// still passes through as the bytes it arrived as.
 #[derive(Debug, Clone, Default)]
 pub struct PreservedWorld {
     /// Format version of the file this came from.
@@ -134,7 +147,8 @@ pub struct PreservedWorld {
     pub hardmode_ores_offset: Option<usize>,
     /// Where the banner kill counts start, and how many the file has room for.
     pub banner_kills_offset: Option<(usize, usize)>,
-    /// Whether the townsfolk section decoded in full.
+    /// Whether the townsfolk section (both the residents and the pillars' own second list)
+    /// decoded in full.
     ///
     /// Both of these gate *rewriting* the section on save. A section we only partly understood is
     /// carried through as the bytes it arrived as, because rewriting it from a partial read is how
@@ -145,9 +159,12 @@ pub struct PreservedWorld {
     /// Sections 4 onwards, one blob each, in order.
     ///
     /// Kept separately rather than as one run of bytes so that a section this server *does* model
-    /// can be written from its own state while its neighbours are carried through untouched. Only
-    /// section 5, the tile entities, is currently rewritten that way; the rest — townsfolk,
-    /// pressure plates, the room assignments, the bestiary, the creative powers — pass through.
+    /// can be written from its own state while its neighbours are carried through untouched.
+    /// Sections 4 (townsfolk, gated on `town_npcs_understood`), 5 (tile entities, gated on
+    /// `tile_entities_understood`), 6 (pressure plates), 7 (the town manager's room list), 8 (the
+    /// bestiary) and 9 (Journey powers) are all rewritten this way; only a partially-understood
+    /// townsfolk/tile-entity section, or the footer riding on the tail of the last blob, still
+    /// passes through untouched.
     ///
     /// The last blob carries the file's footer with it, which is what the game checks a save
     /// against, so it must stay attached to the section it followed.
