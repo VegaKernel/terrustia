@@ -154,13 +154,17 @@ pub fn wall<T: TileView>(
 
     // It walks, and only ever the way it is already going. Expert Mode applies its own multiplier
     // on top of every threshold crossed above (its own five, and Normal's four) — separate from,
-    // and stacking with, get-fixed-boi's multiplier just below, which stays unconditional.
+    // and stacking with, get-fixed-boi's multiplier, which is applied only in a For-the-Worthy
+    // world (`NPC.cs`'s `aiStyle==27` block gates its `velocity.X *= 1.1; += 0.2` on
+    // `Main.getGoodWorld`). Applying it everywhere made every Wall walk at the secret seed's pace.
     let expert = world.conditions.expert;
     let mut speed = WALL_SPEED + rage(npc, expert);
     if expert {
         speed = speed * WALL_EXPERT_SPEED_SCALE + WALL_EXPERT_SPEED_BONUS;
     }
-    let speed = speed * WALL_SPEED_SCALE + WALL_SPEED_BONUS;
+    if world.conditions.get_good_world {
+        speed = speed * WALL_SPEED_SCALE + WALL_SPEED_BONUS;
+    }
     if npc.velocity.0 == 0.0 {
         // Its opening direction is toward whoever woke it.
         if let Some(t) = world.target {
@@ -603,35 +607,48 @@ mod tests {
 
     /// Real vanilla (`NPC.cs`, `aiStyle==27`): at low health, `num382 += 0.3` twice more
     /// (66%/33%) and `+= 0.6` three times more (5%/3.5%/2.5%) than Normal mode ever adds, and then
-    /// `num382 = num382 * 1.35f + 0.35f` on top of that — entirely separate from, and applied
-    /// before, get-fixed-boi's own `* 1.1f + 0.2f`. On the unfixed code neither `world.conditions
-    /// .expert` nor these five thresholds were read at all, so Expert and Normal produced the
-    /// exact same pace; this fails on that code since the two would come out equal instead.
+    /// `num382 = num382 * 1.35f + 0.35f` on top of that. Get-fixed-boi's own `* 1.1f + 0.2f` is
+    /// separate again and, WOF-3, applied only in a For-the-Worthy world. On the unfixed code
+    /// neither `world.conditions.expert` nor these five thresholds were read at all, so Expert and
+    /// Normal came out equal; and get-fixed-boi's pair was applied to every world, so an ordinary
+    /// world walked at the secret seed's pace.
     #[test]
     fn expert_mode_crosses_five_more_thresholds_and_its_own_final_multiplier() {
         let tiles = Hell;
-        let pace = |expert: bool| {
+        let pace = |expert: bool, get_good: bool| {
             let mut w = the_wall();
             // Below every threshold either mode has, so the whole ladder is climbed.
             w.life = (w.life_max as f32 * 0.02) as i32;
             let t = Some(player_at(11_000.0, 20_000.0));
             let mut world = hell(&tiles, t);
             world.conditions.expert = expert;
+            world.conditions.get_good_world = get_good;
             wall(&mut w, &world, 0, &mut rng());
             w.velocity.0.abs()
         };
-        let normal = pace(false);
-        let expert = pace(true);
-        // (1.5 + 1.75) * 1.1 + 0.2, all four Normal thresholds crossed, get-fixed-boi's pair only.
+        // An ordinary world: get-fixed-boi's pair is NOT applied. Normal is 1.5 + 1.75 (all four
+        // Normal thresholds); Expert is (1.5 + 1.75 + 2.4) * 1.35 + 0.35 (its own five and final
+        // multiplier). On the old, unconditional code these carried the extra * 1.1 + 0.2.
+        let normal = pace(false, false);
+        let expert = pace(true, false);
         assert!(
-            (normal - 3.775).abs() < 1e-4,
-            "Normal mode's own pace, got {normal}"
+            (normal - 3.25).abs() < 1e-4,
+            "an ordinary world does not get the secret-seed pace, got {normal}"
         );
-        // ((1.5 + 1.75 + 2.4) * 1.35 + 0.35) * 1.1 + 0.2: Normal's four thresholds, Expert's own
-        // five, Expert's final multiplier, then get-fixed-boi's — every stage transcribed in turn.
         assert!(
-            (expert - 8.975_25).abs() < 1e-3,
-            "Expert Mode's own pace, got {expert}"
+            (expert - 7.977_5).abs() < 1e-3,
+            "Expert Mode's own pace, without the secret seed, got {expert}"
+        );
+        // A For-the-Worthy world layers get-fixed-boi's `* 1.1 + 0.2` on top of each.
+        let normal_good = pace(false, true);
+        let expert_good = pace(true, true);
+        assert!(
+            (normal_good - 3.775).abs() < 1e-4,
+            "the secret seed adds its pair, got {normal_good}"
+        );
+        assert!(
+            (expert_good - 8.975_25).abs() < 1e-3,
+            "and on top of Expert too, got {expert_good}"
         );
         assert!(
             expert > normal * 2.0,

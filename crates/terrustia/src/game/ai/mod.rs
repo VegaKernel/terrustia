@@ -95,6 +95,10 @@ pub struct Conditions {
     pub expert: bool,
     /// Whether hardmode has begun. Some routines behave differently before the wall falls.
     pub hardmode: bool,
+    /// Whether this is a get-fixed-boi / For-the-Worthy world (`Main.getGoodWorld`). A handful of
+    /// routines are harder there in ways that are not merely stat scaling: the Wall of Flesh walks
+    /// faster and the Destroyer grows a longer body.
+    pub get_good_world: bool,
     /// The world's size in tiles, for the handful of routines that steer away from its edges.
     pub world_size: (i32, i32),
 }
@@ -123,6 +127,7 @@ impl Default for Conditions {
             surface_y: 0.0,
             expert: false,
             hardmode: false,
+            get_good_world: false,
             world_size: (4200, 1200),
         }
     }

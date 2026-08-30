@@ -2005,9 +2005,9 @@ pub const WALL_EXPERT_SPEED_SCALE: f32 = 1.35;
 pub const WALL_EXPERT_SPEED_BONUS: f32 = 0.35;
 /// The flat multiplier and bonus get-fixed-boi (`Main.getGoodWorld`) applies on top of that.
 ///
-/// Applied unconditionally here rather than gated on the secret seed: nothing in gameplay tracks
-/// `getGoodWorld` yet (`secret_seed.rs` only reaches worldgen), so there is no flag to read. Left
-/// exactly as it already behaved rather than silently dropped while adding Expert Mode above it.
+/// WOF-3: applied only in a For-the-Worthy world now, gated on `Conditions::get_good_world`
+/// (`secret_seeds.get_good`), matching vanilla's `Main.getGoodWorld` guard. It used to be
+/// unconditional because no gameplay flag tracked the secret seed; the world now carries one.
 pub const WALL_SPEED_SCALE: f32 = 1.1;
 pub const WALL_SPEED_BONUS: f32 = 0.2;
 /// How tall the wall is kept, at least.
@@ -3261,6 +3261,11 @@ pub const DESTROYER_TAIL: u16 = 136;
 /// j++)` (`NPC.cs:50358-50365`), inclusive, so it runs 81 times, not 80 — corrected here from an
 /// earlier, unused, off-by-one guess this constant held before anything actually consumed it.
 pub const DESTROYER_SEGMENTS: usize = 81;
+/// WOF-3: a For-the-Worthy world lengthens it. `GetDestroyerSegmentsCount()` returns 100 rather
+/// than 80 when `Main.getGoodWorld` (`NPC.cs:51488-51495`), so the same inclusive loop runs 101
+/// times: 100 body segments and the tail. The spawn path picks this over [`DESTROYER_SEGMENTS`]
+/// when the world carries the secret seed.
+pub const DESTROYER_SEGMENTS_GOOD: usize = 101;
 
 /// It burrows faster than anything else in the game, and turns no more sharply for it.
 pub const DESTROYER_SPEED: f32 = 16.0;
