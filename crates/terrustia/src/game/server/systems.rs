@@ -4389,8 +4389,12 @@ impl GameServer {
 
         // The biomes only creep in hardmode, and Journey mode's "Stop Biome Spread" power freezes
         // them where they are (`AllowedToSpreadInfections`, `WorldGen.cs:72047-72052`; L3-15).
-        let spreading = self.world.progress.hard_mode && !self.journey.stop_biome_spread;
+        let hard_mode = self.world.progress.hard_mode;
+        let spreading = hard_mode && !self.journey.stop_biome_spread;
         let downed_plantera = self.world.progress.downed_plantera;
+        // Crystal shards and chlorophyte regrow in hardmode regardless of the Stop Biome Spread
+        // power, because vanilla's `hardUpdateWorld` does them before its own spread gate (L3-14).
+        let rock_layer = i32::from(self.world.rock_layer);
 
         let mut changed: Vec<(i32, i32)> = Vec::new();
 
@@ -4409,6 +4413,16 @@ impl GameServer {
                     &mut self.rng,
                     &mut changed,
                 );
+                if hard_mode {
+                    changed.extend(crate::world::hardmode::regrow(
+                        &mut self.world,
+                        x,
+                        y,
+                        surface,
+                        rock_layer,
+                        &mut self.rng,
+                    ));
+                }
                 if spreading {
                     changed.extend(crate::world::hardmode::spread(
                         &mut self.world,
@@ -4436,6 +4450,16 @@ impl GameServer {
                     &mut self.rng,
                     &mut changed,
                 );
+                if hard_mode {
+                    changed.extend(crate::world::hardmode::regrow(
+                        &mut self.world,
+                        x,
+                        y,
+                        surface,
+                        rock_layer,
+                        &mut self.rng,
+                    ));
+                }
                 if spreading {
                     changed.extend(crate::world::hardmode::spread(
                         &mut self.world,

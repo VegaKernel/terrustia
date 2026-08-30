@@ -555,6 +555,222 @@ const SUNFLOWER_REACH: i32 = 2;
 /// How far a spread reaches from the tile that started it.
 const SPREAD_REACH: i32 = 3;
 
+/// `TileID.CrystalShards` — the harvestable Underground Hallow shard that regrows (L3-14).
+const CRYSTAL_SHARD: u16 = 129;
+/// `TileID.Mud`, `TileID.JungleGrass`, `TileID.ChlorophyteOre` and the chlorophyte plant
+/// (`TileID.PlantDetritus`, 346) — the tiles the chlorophyte cycle reads and writes.
+const MUD: u16 = 59;
+const JUNGLE_GRASS: u16 = 60;
+const CHLOROPHYTE_ORE: u16 = 211;
+const CHLOROPHYTE_PLANT: u16 = 346;
+
+/// Whether `x, y` is at least `margin` tiles inside every edge — vanilla's own `InWorld(x, y, m)`.
+fn in_world(world: &impl OreWorld, x: i32, y: i32, margin: i32) -> bool {
+    x >= margin && y >= margin && x < world.width() - margin && y < world.height() - margin
+}
+
+/// The Underground Hallow stone crystal shards grow on — `TileID.Sets.CanGrowCrystalShards`
+/// (`TileID.cs:345`): pearlstone, pearlsand, hardened pearlsand and the two pearl-sandstone forms.
+fn can_grow_crystal_shards(block: u16) -> bool {
+    matches!(block, 116 | 117 | 164 | 402 | 403)
+}
+
+/// `Convert(..., 8)` (`WorldGen.cs:56148-56153`): mud or jungle grass becomes chlorophyte ore.
+fn convert_to_chlorophyte(block: u16) -> Option<u16> {
+    matches!(block, MUD | JUNGLE_GRASS).then_some(CHLOROPHYTE_ORE)
+}
+
+/// `Convert(..., 9)` (`WorldGen.cs:56154-56203`): a tile is purified back toward the jungle around
+/// spreading chlorophyte. `Some(Some(block))` sets a new block, `Some(None)` kills the tile (a
+/// thorn or vine), `None` leaves it alone.
+fn convert_toward_jungle(block: u16) -> Option<Option<u16>> {
+    match block {
+        2 | 23 | 109 | 199 | 477 | 492 | 661 | 662 => Some(Some(JUNGLE_GRASS)),
+        0 => Some(Some(MUD)),
+        25 | 203 => Some(Some(1)),
+        112 | 234 => Some(Some(53)),
+        398 | 399 => Some(Some(397)),
+        400 | 401 => Some(Some(396)),
+        24 | 32 | 201 | 205 | 352 | 636 => Some(None),
+        _ => None,
+    }
+}
+
+/// Whether chlorophyte may grow at a tile, given how much chlorophyte ore already crowds it —
+/// `WorldGen.CanChlorophyteGrow` (`WorldGen.cs:70002-70053`). Too dense in either the inner or the
+/// outer radius and it refuses, which is what keeps a chlorophyte farm from filling a whole cavern.
+/// Above the rock layer the caps halve and the radii grow by half. The remix-world adjustments are
+/// not modelled (this project has no remix seed).
+fn can_chlorophyte_grow(world: &impl OreWorld, i: i32, j: i32, rock_layer: i32) -> bool {
+    let (mut inner_cap, mut outer_cap, mut inner_r, mut outer_r) = (40, 130, 35, 85);
+    if j < rock_layer {
+        inner_cap /= 2;
+        outer_cap /= 2;
+        inner_r = (f64::from(inner_r) * 1.5) as i32;
+        outer_r = (f64::from(outer_r) * 1.5) as i32;
+    }
+    let ore_within = |r: i32| -> i32 {
+        let mut n = 0;
+        for k in i - r..i + r {
+            for l in j - r..j + r {
+                let t = world.tile(k, l);
+                if t.is_active() && t.block == CHLOROPHYTE_ORE {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    ore_within(inner_r) <= inner_cap && ore_within(outer_r) <= outer_cap
+}
+
+/// Whether enough chlorophyte crowds a tile to hold an infection off it — `WorldGen.nearbyChlorophyte`
+/// (`WorldGen.cs:70055-70096`). Three within five tiles always counts; fewer is a weighted die roll.
+fn nearby_chlorophyte(world: &impl OreWorld, i: i32, j: i32, rng: &mut SmallRng) -> bool {
+    let r = 5;
+    if i <= r + 5 || i >= world.width() - r - 5 || j <= r + 5 || j >= world.height() - r - 5 {
+        return false;
+    }
+    let mut count = 0;
+    for k in i - r..=i + r {
+        for l in j - r..=j + r {
+            let t = world.tile(k, l);
+            if t.is_active() && matches!(t.block, CHLOROPHYTE_ORE | CHLOROPHYTE_PLANT) {
+                count += 1;
+                if count >= 3 {
+                    return true;
+                }
+            }
+        }
+    }
+    count > 0 && rng.random_range(-1..4) < count
+}
+
+/// Whether the tile above blocks a chlorophyte seed — one of the plants vanilla refuses to grow
+/// under (`WorldGen.cs:70194`: a tree, and three cactus/plant types).
+fn blocks_chlorophyte_above(world: &impl OreWorld, x: i32, y: i32) -> bool {
+    let above = world.tile(x, y - 1);
+    above.is_active() && matches!(above.block, 5 | 236 | 702 | 238)
+}
+
+/// Crystal shards and chlorophyte regrowing, from the front of `WorldGen.hardUpdateWorld`
+/// (`WorldGen.cs:70144-70239`). This runs from the same world-wide sampled tiles the biome spread
+/// does, and (like vanilla) before the infection-spread gate, so it is not stopped by the Journey
+/// "Stop Biome Spread" power the way [`spread`] is. Returns the tiles it changed.
+///
+/// One simplification, disclosed: a placed crystal shard is given a single frame from its rolled
+/// style rather than reproducing the multi-stage growth frames vanilla's `PlaceTile` builds — a
+/// cosmetic detail the client renders, not a gameplay one.
+pub fn regrow(
+    world: &mut impl OreWorld,
+    x: i32,
+    y: i32,
+    surface: i32,
+    rock_layer: i32,
+    rng: &mut SmallRng,
+) -> Vec<(i32, i32)> {
+    let mut changed = Vec::new();
+    let here = world.tile(x, y);
+    if !here.is_active() {
+        return changed;
+    }
+    let block = here.block;
+
+    // Crystal shards regrow on Underground Hallow stone below the rock layer, one attempt in five.
+    if can_grow_crystal_shards(block) && y > rock_layer && rng.random_range(0..5) == 0 {
+        // Left, right or down (twice as likely) — there is no upward case in vanilla's own switch.
+        let (dx, dy) = match rng.random_range(0..4) {
+            0 => (-1, 0),
+            1 => (1, 0),
+            _ => (0, 1),
+        };
+        let (nx, ny) = (x + dx, y + dy);
+        if !world.tile(nx, ny).is_active() {
+            let mut nearby = 0;
+            for k in x - 6..=x + 6 {
+                for l in y - 6..=y + 6 {
+                    let t = world.tile(k, l);
+                    if t.is_active() && t.block == CRYSTAL_SHARD {
+                        nearby += 1;
+                    }
+                }
+            }
+            if nearby < 2 {
+                let style = if rng.random_range(0..50) == 0 {
+                    18 + rng.random_range(0..6)
+                } else {
+                    rng.random_range(0..18)
+                };
+                let shard =
+                    terrustia_proto::tile::Tile::framed(CRYSTAL_SHARD, (style * 18) as i16, 0);
+                world.set_tile(nx, ny, shard);
+                changed.push((nx, ny));
+            }
+        }
+    }
+
+    // Chlorophyte cycles below the midpoint of the surface and rock layers.
+    if y > (surface + rock_layer) / 2 {
+        // Jungle grass rarely seeds chlorophyte ore into a patch of mud nearby.
+        if block == JUNGLE_GRASS && rng.random_range(0..300) == 0 {
+            let (tx, ty) = (
+                x + rng.random_range(-10..=10),
+                y + rng.random_range(-10..=10),
+            );
+            if in_world(world, tx, ty, 2)
+                && world.tile(tx, ty).is_active()
+                && world.tile(tx, ty).block == MUD
+                && !blocks_chlorophyte_above(world, tx, ty)
+                && can_chlorophyte_grow(world, tx, ty, rock_layer)
+                && let Some(ore) = convert_to_chlorophyte(world.tile(tx, ty).block)
+            {
+                let mut t = world.tile(tx, ty);
+                t.block = ore;
+                world.set_tile(tx, ty, t);
+                changed.push((tx, ty));
+            }
+        }
+        // Chlorophyte ore and the chlorophyte plant creep into adjacent mud or jungle grass, and
+        // purify a nearby tile back toward the jungle.
+        if block == CHLOROPHYTE_ORE || block == CHLOROPHYTE_PLANT {
+            if rng.random_range(0..3) != 0 {
+                let (dx, dy) = match rng.random_range(0..4) {
+                    0 => (1, 0),
+                    1 => (-1, 0),
+                    2 => (0, 1),
+                    _ => (0, -1),
+                };
+                let (tx, ty) = (x + dx, y + dy);
+                if in_world(world, tx, ty, 2)
+                    && world.tile(tx, ty).is_active()
+                    && matches!(world.tile(tx, ty).block, MUD | JUNGLE_GRASS)
+                    && can_chlorophyte_grow(world, tx, ty, rock_layer)
+                    && let Some(ore) = convert_to_chlorophyte(world.tile(tx, ty).block)
+                {
+                    let mut t = world.tile(tx, ty);
+                    t.block = ore;
+                    world.set_tile(tx, ty, t);
+                    changed.push((tx, ty));
+                }
+            }
+            let (tx, ty) = (x + rng.random_range(-6..=6), y + rng.random_range(-6..=6));
+            if in_world(world, tx, ty, 2)
+                && world.tile(tx, ty).is_active()
+                && let Some(conv) = convert_toward_jungle(world.tile(tx, ty).block)
+            {
+                let mut t = world.tile(tx, ty);
+                match conv {
+                    Some(new_block) => t.block = new_block,
+                    None => t = terrustia_proto::tile::Tile::AIR,
+                }
+                world.set_tile(tx, ty, t);
+                changed.push((tx, ty));
+            }
+        }
+    }
+    changed
+}
+
 /// One attempt at spreading from a tile.
 ///
 /// Returns where it took hold and what it became, or `None` if nothing did. It keeps trying from
@@ -589,6 +805,12 @@ pub fn spread(
             y + rng.random_range(-SPREAD_REACH..=SPREAD_REACH),
         );
         if tx < 10 || ty < 10 || tx >= world.width() - 10 || ty >= world.height() - 10 {
+            continue;
+        }
+        // Chlorophyte nearby holds the infection off — `nearbyChlorophyte`/`ChlorophyteDefense`
+        // (`WorldGen.cs:70256-70259`). The push-back itself (`Convert(..., 10)`) is a remix-world
+        // seed only, so in an ordinary world this simply refuses the spread onto this tile (L3-14).
+        if nearby_chlorophyte(world, tx, ty, rng) {
             continue;
         }
         let target = world.tile(tx, ty);
@@ -652,6 +874,15 @@ pub fn hardmode_stripes(world_width: i32, dungeon_x: i32, rng: &mut SmallRng) ->
 /// Drive one stripe down through the world, converting as it goes.
 ///
 /// Returns the tiles it changed.
+/// The band width of one hardmode stripe, scaled to the world's own width — `WorldGen.cs:76969-
+/// 76972`. Vanilla truncates the scaled value to an `int` (`num2 = (int)(num2 * num3)`) and uses
+/// that whole number for both the reach test and the bounding box; keeping it fractional (L3-31)
+/// runs a stripe a sub-tile wider than it should, which is invisible on a 4,200-wide world and
+/// shows on a 6,400-wide one where the fractional part is larger.
+fn stripe_width(world_width: i32, roll: i32) -> f64 {
+    (f64::from(roll) * f64::from(world_width) / 4200.0).trunc()
+}
+
 pub fn run_stripe(
     world: &mut impl OreWorld,
     x: i32,
@@ -660,7 +891,7 @@ pub fn run_stripe(
     rng: &mut SmallRng,
 ) -> Vec<(i32, i32)> {
     let mut changed = Vec::new();
-    let width = f64::from(rng.random_range(200..250)) * f64::from(world.width()) / 4200.0;
+    let width = stripe_width(world.width(), rng.random_range(200..250));
     let mut here = (f64::from(x), 0.0);
     let mut drift = (f64::from(drift_x), 5.0);
     // The drift wanders around the stripe's *own* starting lean, not around zero — GERunner
@@ -981,5 +1212,105 @@ mod spread_tests {
         for (x, y) in &changed {
             assert_eq!(world.tile(*x, *y).block, 117, "pearlstone");
         }
+    }
+
+    /// L3-31: a stripe's band width is truncated to a whole number of tiles, the way vanilla's
+    /// `(int)(num2 * num3)` is (`WorldGen.cs:76969-76972`).
+    ///
+    /// Fails before the fix: the width was kept fractional, running a stripe a sub-tile wider than
+    /// the game does — invisible at 4,200 wide, real at 6,400.
+    #[test]
+    fn the_stripe_width_is_truncated_to_whole_tiles() {
+        // 249 * 6400 / 4200 = 379.43..., truncated to 379.
+        assert_eq!(stripe_width(6400, 249), 379.0);
+        // At 4,200 wide the scale is exactly 1, so the roll passes through unchanged.
+        assert_eq!(stripe_width(4200, 233), 233.0);
+    }
+
+    /// L3-14: crystal shards regrow on Underground Hallow stone below the rock layer, onto a free
+    /// neighbour (`WorldGen.cs:70144-70187`).
+    ///
+    /// Fails before the fix: `regrow` did not exist, so a harvested shard patch never came back.
+    #[test]
+    fn crystal_shards_regrow_on_underground_hallow_stone() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(117)); // pearlstone
+        for free in [(249, 250), (251, 250), (250, 251)] {
+            world.set_tile(free.0, free.1, Tile::AIR);
+        }
+        let mut rng = SmallRng::seed_from_u64(1);
+        let mut grew = false;
+        for _ in 0..3000 {
+            if !regrow(&mut world, 250, 250, 100, 200, &mut rng).is_empty() {
+                grew = true;
+                break;
+            }
+        }
+        assert!(grew, "a crystal shard should have grown");
+        assert!(
+            [(249, 250), (251, 250), (250, 251)]
+                .iter()
+                .any(|&(x, y)| world.tile(x, y).block == 129),
+            "and it should be a crystal shard on a free neighbour"
+        );
+    }
+
+    /// L3-14: chlorophyte ore creeps into adjacent mud (`WorldGen.cs:70199-70226`, `Convert(...,8)`).
+    ///
+    /// Fails before the fix: chlorophyte never spread, so a harvested vein never regrew.
+    #[test]
+    fn chlorophyte_creeps_into_nearby_mud() {
+        let mut world = field();
+        world.set_tile(250, 250, Tile::block(211)); // chlorophyte ore
+        world.set_tile(251, 250, Tile::block(59)); // mud beside it
+        let mut rng = SmallRng::seed_from_u64(2);
+        let mut spread_in = false;
+        for _ in 0..2000 {
+            regrow(&mut world, 250, 250, 100, 200, &mut rng);
+            if world.tile(251, 250).block == 211 {
+                spread_in = true;
+                break;
+            }
+        }
+        assert!(
+            spread_in,
+            "chlorophyte should have crept into the adjacent mud"
+        );
+    }
+
+    /// L3-14: chlorophyte nearby holds an infection off — `nearbyChlorophyte`/`ChlorophyteDefense`
+    /// (`WorldGen.cs:70256-70259`).
+    ///
+    /// Fails before the fix: `spread` had no chlorophyte check, so an infection ate straight
+    /// through it.
+    #[test]
+    fn chlorophyte_holds_off_an_infection() {
+        let corrupts_the_stone = |chlorophyte: bool| -> bool {
+            let mut world = field();
+            world.set_tile(250, 250, Tile::block(25)); // ebonstone source
+            world.set_tile(248, 248, Tile::block(1)); // a stone target within reach
+            if chlorophyte {
+                for x in 246..251 {
+                    for y in 246..251 {
+                        if (x, y) != (250, 250) && (x, y) != (248, 248) {
+                            world.set_tile(x, y, Tile::block(211));
+                        }
+                    }
+                }
+            }
+            let mut rng = SmallRng::seed_from_u64(7);
+            for _ in 0..2000 {
+                spread(&mut world, 250, 250, false, &mut rng);
+            }
+            world.tile(248, 248).block == 25
+        };
+        assert!(
+            corrupts_the_stone(false),
+            "without chlorophyte the stone beside the source should have corrupted"
+        );
+        assert!(
+            !corrupts_the_stone(true),
+            "a dense chlorophyte cluster should have held the infection off that same tile"
+        );
     }
 }
