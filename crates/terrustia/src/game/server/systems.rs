@@ -1415,7 +1415,15 @@ impl GameServer {
                 continue;
             };
             let taken = damage_taken(damage, resident.defense, false);
-            let direction = if from_x < at.0 { -1 } else { 1 };
+            // hitDirection points away from the attacker, off the resident's centre, as everywhere
+            // else (`Player.cs:31618`): the old form inverted it and measured off the left edge. It
+            // is inert while the knockback is zero, but correct for when it is not. The knockback
+            // itself, and the global 30-tick immune clock this loop runs on, stay deliberate
+            // simplifications of the town-casualty path: the game strikes a townsperson through the
+            // attacking enemy's own AI, which carries a per-enemy contact knockback this server does
+            // not model.
+            let resident_centre = at.0 + resident.width() / 2.0;
+            let direction = if from_x < resident_centre { 1 } else { -1 };
             let (killed, name) = (
                 resident.take_damage(taken, 0.0, direction),
                 resident.stats.name,
