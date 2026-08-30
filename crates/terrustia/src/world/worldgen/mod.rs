@@ -992,9 +992,30 @@ mod tests {
         );
         let differing = (0..world.width())
             .flat_map(|x| (0..world.height()).map(move |y| (x, y)))
-            .filter(|&(x, y)| world.tile(x, y) != back.tile(x, y))
+            .filter(|&(x, y)| !tiles_equal_for_save(world.tile(x, y), back.tile(x, y)))
             .count();
         assert_eq!(differing, 0, "{differing} tiles changed across a save");
+    }
+
+    /// Whether two tiles are the same for the purpose of "did the save lose anything real".
+    ///
+    /// `liquid_kind` on a dry tile (`liquid == 0`) does not survive a save: the wire and file
+    /// format both, deliberately, only encode `liquid_kind` when `liquid != 0`
+    /// (`terrustia-proto/src/section.rs`'s `write_tile_with`, guarded by `if tile.liquid != 0`,
+    /// and its matching reader), the same as real vanilla's own tile section, which never
+    /// transmits a liquid type for a tile that currently holds none. A generated world can still
+    /// carry a stale, pre-drain `liquid_kind` on a tile that no longer has any liquid (several
+    /// worldgen passes drain liquid without resetting the type byte, matching vanilla's own
+    /// `Tile.liquidType`, which is not reset on drain either); that byte alone differing, with
+    /// both sides genuinely dry, is not a real difference a save lost.
+    fn tiles_equal_for_save(before: Tile, after: Tile) -> bool {
+        before == after
+            || (before.liquid == 0
+                && after.liquid == 0
+                && Tile {
+                    liquid_kind: after.liquid_kind,
+                    ..before
+                } == after)
     }
 
     /// Every header field survives a save.
