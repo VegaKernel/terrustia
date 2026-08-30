@@ -4058,91 +4058,117 @@ impl GameServer {
         self.broadcast_world_data();
     }
 
-    /// One tick of the world growing: grass creeping over bare dirt near whoever is playing.
+    /// One tick of the world updating itself: grass creeping over bare ground, herbs and trees and
+    /// cactus growing, vines hanging, sand falling, and - in hardmode - the biomes spreading.
     ///
-    /// Terraria samples random tiles across the whole world every tick. This samples around the
-    /// players instead, which costs a fraction as much and changes only the part of the world
-    /// anyone can see. The sample count is small deliberately — this runs every tick, and grass
-    /// that takes a minute to cross a field is indistinguishable from grass that takes ten
-    /// seconds, while a hundred times the sampling is very distinguishable in the tick budget.
-    pub(super) fn tick_growth(&mut self) {
-        /// Tiles tried per player per tick.
-        const SAMPLES: usize = 3;
-        /// How far from a player growth is considered, in tiles.
-        const REACH: i32 = 90;
-
-        if !self.ticks.is_multiple_of(GROWTH_EVERY) {
-            return;
-        }
-        let around: Vec<(i32, i32)> = self
-            .players
-            .iter()
-            .flatten()
-            .filter(|p| p.is_playing())
-            .map(|p| {
-                (
-                    (p.position.0 / crate::game::npc::TILE) as i32,
-                    (p.position.1 / crate::game::npc::TILE) as i32,
-                )
-            })
-            .collect();
-        if around.is_empty() {
-            return;
-        }
-
-        let changed = {
-            let world = &mut self.world;
-            crate::world::growth::tick_growth(world, &around, SAMPLES, REACH, &mut self.rng)
-        };
-        // A grown tile is a tile change like any other; clients re-request the section.
-        for (x, y) in changed {
-            self.liquids.wake(x, y);
-        }
-    }
-
-    /// One tick of the biomes creeping.
+    /// This is `WorldGen.UpdateWorld`'s per-tick sampling loop (`WorldGen.cs:72082-72172`). Vanilla
+    /// samples random tiles across the WHOLE world every tick, scaling the count with the world's
+    /// area: `maxTilesX * maxTilesY * 3e-5` overground points and `* 1.5e-5` underground points per
+    /// tick (`worldUpdateRate` is 1 in ordinary play - `GetWorldUpdateRate` caps
+    /// `desiredWorldTilesUpdateRate` at 24, and it defaults to 1). Rain multiplies the overground
+    /// count by 1.5. `hardUpdateWorld` - the biome spread - runs from every one of those same
+    /// sampled tiles, on the same budget.
     ///
-    /// A handful of tiles are picked at random near the players each tick rather than the whole
-    /// world being scanned. That is how the game does it too, and it is why an infection creeps
-    /// where somebody is standing and sits still where nobody is.
-    pub(super) fn tick_spread(&mut self) {
-        use crate::world::hardmode;
-        if !self.world.progress.hard_mode || !self.ticks.is_multiple_of(SPREAD_EVERY) {
+    /// Re-derived per-tick budgets (`area * 3e-5` overground + `area * 1.5e-5` underground):
+    ///   - large  8400x2400 = 20.16M -> 605 over + 302 under = 907/tick
+    ///   - medium 6400x1800 = 11.52M -> 346 over + 173 under = 519/tick
+    ///   - small  4200x1200 =  5.04M -> 151 over +  76 under = 227/tick
+    ///
+    /// This replaced a player-local sampler that ran a handful of tiles near each player once every
+    /// ten ticks - roughly three-thousand times below vanilla's rate, and only where somebody was
+    /// standing - so grass never spread, nothing regrew, and a hardmode infection never crept
+    /// (L3-01). The loop is bounded and allocation-free on its common (nothing-changed) path: one
+    /// `changed` buffer is reused across the whole sweep and both growth and spread push into it.
+    pub(super) fn tick_world_update(&mut self) {
+        let w = self.world.width();
+        let h = self.world.height();
+        let surface = i32::from(self.world.surface);
+        // A world too small to carry the 10-tile margins has nowhere to sample; the unit-test
+        // worlds are this size, and the real ones never are.
+        if w <= 20 {
             return;
         }
-        let here: Vec<(i32, i32)> = self
-            .players
-            .iter()
-            .flatten()
-            .filter(|p| p.is_playing())
-            .map(|p| {
-                (
-                    (p.position.0 / crate::game::npc::TILE) as i32,
-                    (p.position.1 / crate::game::npc::TILE) as i32,
-                )
-            })
-            .collect();
-        if here.is_empty() {
-            return;
-        }
+        let area = f64::from(w) * f64::from(h);
+        // Rain multiplies the overground count by 1.5 (`WorldGen.cs:72108`).
+        let rain_mult = if self.world.raining { 1.5 } else { 1.0 };
+        // `ceil`, not truncation: vanilla's `for (i = 0; (double)i < num5; i++)` runs `ceil(num5)`
+        // passes, so a budget of 604.8 is 605 samples, not 604.
+        let overground = (area * 3.0e-5 * rain_mult).ceil() as u32;
+        let underground = (area * 1.5e-5).ceil() as u32;
+
+        // PlantAlch's world-scaled odds: `num7 = Lerp(151, 151*2.8, clamp(w/4200 - 1, 0, 1))`, and
+        // a herb is planted on one sample in `num7 * 100` (`WorldGen.cs:72129-72130,72657`).
+        let t = (f64::from(w) / 4200.0 - 1.0).clamp(0.0, 1.0);
+        let num7 = (151.0 + t * (151.0 * 2.8 - 151.0)) as u32;
+        let herb_plant_odds = num7 * 100;
+
+        // The biomes only creep in hardmode, and Journey mode's "Stop Biome Spread" power freezes
+        // them where they are (`AllowedToSpreadInfections`, `WorldGen.cs:72047-72052`; L3-15).
+        let spreading = self.world.progress.hard_mode && !self.journey.stop_biome_spread;
         let downed_plantera = self.world.progress.downed_plantera;
-        let mut changed = Vec::new();
-        for (px, py) in here {
-            for _ in 0..SPREAD_TRIES {
-                let x = px + rand::Rng::random_range(&mut self.rng, -SPREAD_RANGE..=SPREAD_RANGE);
-                let y = py + rand::Rng::random_range(&mut self.rng, -SPREAD_RANGE..=SPREAD_RANGE);
-                if x < 10 || y < 10 || x >= self.world.width() - 10 || y >= self.world.height() - 10
-                {
-                    continue;
+
+        let mut changed: Vec<(i32, i32)> = Vec::new();
+
+        // Overground samples: `Next(10, w-10) x Next(10, worldSurface-1)` (`WorldGen.cs:72135`).
+        let og_hi = surface - 1;
+        if og_hi > 10 {
+            for _ in 0..overground {
+                let x = rand::Rng::random_range(&mut self.rng, 10..w - 10);
+                let y = rand::Rng::random_range(&mut self.rng, 10..og_hi);
+                crate::world::growth::grow_at(
+                    &mut self.world,
+                    x,
+                    y,
+                    true,
+                    herb_plant_odds,
+                    &mut self.rng,
+                    &mut changed,
+                );
+                if spreading {
+                    changed.extend(crate::world::hardmode::spread(
+                        &mut self.world,
+                        x,
+                        y,
+                        downed_plantera,
+                        &mut self.rng,
+                    ));
                 }
-                let taken = {
-                    let world = &mut self.world;
-                    hardmode::spread(world, x, y, downed_plantera, &mut self.rng)
-                };
-                changed.extend(taken);
             }
         }
+        // Underground samples: `Next(10, w-10) x Next(worldSurface-1, h-20)` (`WorldGen.cs:73815`).
+        let ug_lo = surface - 1;
+        let ug_hi = h - 20;
+        if ug_hi > ug_lo && ug_lo >= 10 {
+            for _ in 0..underground {
+                let x = self.rng.random_range(10..w - 10);
+                let y = self.rng.random_range(ug_lo..ug_hi);
+                crate::world::growth::grow_at(
+                    &mut self.world,
+                    x,
+                    y,
+                    false,
+                    herb_plant_odds,
+                    &mut self.rng,
+                    &mut changed,
+                );
+                if spreading {
+                    changed.extend(crate::world::hardmode::spread(
+                        &mut self.world,
+                        x,
+                        y,
+                        downed_plantera,
+                        &mut self.rng,
+                    ));
+                }
+            }
+        }
+
+        // Each changed tile is a tile change like any other. Vanilla pushes these live with
+        // `SendTileSquare(-1, ...)` (to every client), so a player watching grass creep or an
+        // infection advance sees it happen; the same broadcast wakes the liquid sim on tiles whose
+        // occupancy just changed (a fallen sand column, a grown trunk).
         for (x, y) in changed {
+            self.liquids.wake(x, y);
             let tile = self.world.tile(x, y);
             let square = TileSquare {
                 x: x as i16,
@@ -8110,5 +8136,121 @@ mod liquid_furniture_death {
         let tile = server.world.tile(x, y);
         assert!(tile.is_active(), "a torch should survive a lava flow");
         assert_eq!(tile.block, TORCH);
+    }
+}
+
+/// L3-01: the world-update sampler runs over the WHOLE world every tick, with nobody watching.
+///
+/// The old sampler grew grass and crept biomes only near a connected player, and only once every
+/// ten ticks - roughly three-thousand times below vanilla's `UpdateWorld` rate. These two prove
+/// the new one both samples world-wide and no longer needs a player at all: they connect nobody,
+/// and still see grass creep and an infection spread far from any spawn.
+#[cfg(test)]
+mod world_update {
+    use super::*;
+
+    /// A 500x300 world - big enough that the area-scaled budget (`500*300*3e-5` ~= 5 overground
+    /// samples a tick) actually samples, small enough to tick thousands of times cheaply.
+    fn probe_world() -> crate::world::World {
+        crate::world::World::empty(500, 300, "world update probe")
+    }
+
+    /// Grass creeps across a strip of exposed dirt with no player connected. Before the fix the
+    /// growth pass returned the moment `around.is_empty()`, so an empty server grew nothing.
+    #[test]
+    fn grass_spreads_world_wide_with_no_players() {
+        let mut server = GameServer::new(Config::default(), probe_world());
+        // A strip in the overground band (surface is 100): dirt with air above and below, seeded
+        // with plain grass every third tile so most of the strip is exposed dirt beside grass.
+        for x in 100..400 {
+            let block = if x % 3 == 0 {
+                2
+            } else {
+                crate::world::growth::DIRT
+            };
+            server.world.set_tile(x, 50, Tile::block(block));
+        }
+        assert!(
+            server.players.iter().flatten().next().is_none(),
+            "this test's whole point is that nobody is connected"
+        );
+
+        for _ in 0..4000 {
+            server.tick_world_update();
+        }
+
+        let grew = (100..400)
+            .filter(|&x| server.world.tile(x, 50).block == 2)
+            .count();
+        // Seeded ~100 grass tiles; anything above that is dirt that turned to grass on its own.
+        assert!(
+            grew > 100,
+            "grass did not creep across the strip with nobody watching (only {grew} grass tiles, \
+             started with ~100)"
+        );
+    }
+
+    /// An infection eats the stone around it with no player connected. Before the fix the spread
+    /// pass returned the moment `here.is_empty()`, so an empty hardmode server never crept.
+    #[test]
+    fn corruption_spreads_world_wide_with_no_players() {
+        let mut server = GameServer::new(Config::default(), probe_world());
+        server.world.progress.hard_mode = true;
+        // A field of stone with ebonstone cores threaded through it, in the overground band. Every
+        // core has takeable stone within reach, so a sampled core has somewhere to spread.
+        for x in 100..180 {
+            for y in 40..80 {
+                let block = if (x + y) % 2 == 0 { 25 } else { 1 };
+                server.world.set_tile(x, y, Tile::block(block));
+            }
+        }
+        let corrupt_before = count_ebonstone(&server.world);
+
+        for _ in 0..4000 {
+            server.tick_world_update();
+        }
+
+        let corrupt_after = count_ebonstone(&server.world);
+        assert!(
+            corrupt_after > corrupt_before,
+            "the infection never crept with nobody watching ({corrupt_before} -> {corrupt_after} \
+             ebonstone)"
+        );
+    }
+
+    /// With Journey mode's "Stop Biome Spread" power on, the same field stays clean - the runtime
+    /// half of L3-15, wired through the same `AllowedToSpreadInfections` gate vanilla uses.
+    #[test]
+    fn stop_biome_spread_freezes_the_infection() {
+        let mut server = GameServer::new(Config::default(), probe_world());
+        server.world.progress.hard_mode = true;
+        server.journey.stop_biome_spread = true;
+        for x in 100..180 {
+            for y in 40..80 {
+                let block = if (x + y) % 2 == 0 { 25 } else { 1 };
+                server.world.set_tile(x, y, Tile::block(block));
+            }
+        }
+        let before = count_ebonstone(&server.world);
+        for _ in 0..4000 {
+            server.tick_world_update();
+        }
+        assert_eq!(
+            before,
+            count_ebonstone(&server.world),
+            "the infection crept while Stop Biome Spread was on"
+        );
+    }
+
+    fn count_ebonstone(world: &crate::world::World) -> usize {
+        let mut n = 0;
+        for x in 90..190 {
+            for y in 30..90 {
+                if world.tile(x, y).block == 25 {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 }

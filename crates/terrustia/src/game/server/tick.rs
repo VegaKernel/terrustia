@@ -417,9 +417,11 @@ impl GameServer {
 
         self.tick_liquids();
         lap(&mut cost, Phase::Liquids);
-        self.tick_growth();
+        // Growth and biome spread are one world-wide sampling loop, exactly as vanilla's
+        // `UpdateWorld` runs both from the same sampled tiles (`WorldGen.cs:72082`). The Spread
+        // phase is timed as ~0 straight after, so the breakdown keeps its familiar shape.
+        self.tick_world_update();
         lap(&mut cost, Phase::Growth);
-        self.tick_spread();
         lap(&mut cost, Phase::Spread);
         self.tick_weather();
         lap(&mut cost, Phase::Weather);
