@@ -274,6 +274,11 @@ enum AuthOutcome {
         slot: u8,
         account: String,
         correct: bool,
+        /// The connecting address's own IP, captured before the hash was started (`self.player`
+        /// may be gone by the time this comes back, if they disconnected mid-check) so
+        /// [`GameServer::note_finished_auth`] can record the outcome against the same per-IP
+        /// throttle key `login_throttled` checked before spawning the hash at all.
+        ip_key: Option<String>,
     },
 }
 
@@ -643,6 +648,14 @@ pub enum ServerEvent {
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// The web panel's own `/api/login` throttle logging one summarised refusal — the panel keeps
+    /// its own `admin::Throttle`s (see `panel::PanelState`'s doc comment for why), but the
+    /// append-only audit log lives on the game task, so this is how a refusal reaches it. No
+    /// reply: `login` has already decided to refuse the request either way.
+    PanelAuditThrottled {
+        target: String,
+        detail: String,
+    },
     /// The web panel asking for a snapshot to show on its status view.
     PanelStatus {
         reply: oneshot::Sender<PanelStatus>,
@@ -926,6 +939,13 @@ pub struct GameServer {
     auth_results: (AuthReport, AuthReports),
     /// Slots with a hash already running. One at a time, so nobody can queue up work.
     auth_in_flight: std::collections::HashSet<u8>,
+    /// Per-IP login backoff, shared by the join password (`dispatch::on_password`) and `/login`
+    /// (`console::run_admin_command`'s `"login"` arm) — both are "does this address keep failing a
+    /// password check" in the same sense. See `admin::throttle`'s own doc comment for the design.
+    ip_throttle: crate::admin::Throttle,
+    /// Per-account `/login` backoff, keyed by the (lowercased) account name typed rather than
+    /// whether it actually exists — see `login_throttled`'s own doc comment for why that matters.
+    account_throttle: crate::admin::Throttle,
     /// A one-time secret for claiming an unclaimed server, printed to the console at startup.
     ///
     /// Without this, the first account made owns the server — so on a fresh public server whoever
@@ -1116,6 +1136,8 @@ impl GameServer {
             save_failures: 0,
             auth_results: std::sync::mpsc::channel(),
             auth_in_flight: std::collections::HashSet::new(),
+            ip_throttle: crate::admin::Throttle::new(),
+            account_throttle: crate::admin::Throttle::new(),
             claim_token: None,
             spare_world,
             world_returns: std::sync::mpsc::channel(),
@@ -1487,6 +1509,10 @@ impl GameServer {
     /// `owner` says this account claims the server. It is decided by the caller rather than
     /// re-derived here, because the two callers disagree about what earns it: from chat it takes
     /// the console's claim token, and from the console it takes nothing at all.
+    ///
+    /// `password` is never logged below, at any level — see `admin::mod`'s own "never logged"
+    /// convention. It only ever travels into `Account::new`, which turns it into a PHC hash and
+    /// nothing else.
     fn begin_registration(&mut self, slot: u8, account: &str, password: &str, owner: bool) {
         // Everything decidable without hashing is decided first, so a bad request costs nothing.
         if self.admin.name_taken(account) {
@@ -1681,6 +1707,55 @@ impl GameServer {
         true
     }
 
+    /// The gate `/login` checks before spending anything on the credential it was just handed:
+    /// whether either the caller's own address or the account name they typed (case-folded, so a
+    /// throttled attacker cannot dodge it by changing case — matches `Admin::account_hash`'s own
+    /// case-insensitive lookup) currently has a backoff window open. `account_key` is the name as
+    /// typed, not whether it resolves to a real account, deliberately: keying only on real names
+    /// would let an attacker distinguish "this account exists" from "it does not" by whether
+    /// their spam ever starts slowing down — see `admin::REFUSAL_MESSAGE`'s own doc comment.
+    ///
+    /// Tells `slot` the shared generic refusal and returns `true` if either window is open, in
+    /// which case the caller must stop right there: no hash, no lookup, nothing that could itself
+    /// leak anything a fast rejection would not. Any refusal worth a line in the audit log is
+    /// written here, already folded down to a summary by `Throttle::check` — see its own doc
+    /// comment for why this never becomes one log line per spam attempt.
+    fn login_throttled(&mut self, slot: u8, ip_key: Option<&str>, account_key: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut refused = false;
+        if let Some(ip_key) = ip_key
+            && let crate::admin::Verdict::Refused { log_summary, .. } =
+                self.ip_throttle.check(ip_key, now)
+        {
+            refused = true;
+            if let Some(n) = log_summary {
+                self.audit.record(
+                    "system",
+                    crate::admin::AuditAction::Throttled,
+                    &format!("ip:{ip_key}"),
+                    &format!("{n} refused login attempt(s) backed off"),
+                );
+            }
+        }
+        if let crate::admin::Verdict::Refused { log_summary, .. } =
+            self.account_throttle.check(account_key, now)
+        {
+            refused = true;
+            if let Some(n) = log_summary {
+                self.audit.record(
+                    "system",
+                    crate::admin::AuditAction::Throttled,
+                    &format!("account:{account_key}"),
+                    &format!("{n} refused login attempt(s) backed off"),
+                );
+            }
+        }
+        if refused {
+            self.tell(slot, crate::admin::REFUSAL_MESSAGE);
+        }
+        refused
+    }
+
     /// Apply any password hashing that finished since the last tick.
     ///
     /// Polled rather than awaited, for the same reason the save report is: the tick is not async
@@ -1741,15 +1816,29 @@ impl GameServer {
                     slot,
                     account,
                     correct,
+                    ip_key,
                 } => {
                     self.auth_in_flight.remove(&slot);
+                    let account_key = account.to_ascii_lowercase();
                     if correct {
+                        // No lockout: a right password always clears both windows immediately,
+                        // whatever backoff either key had built up — see `admin::throttle`'s own
+                        // top doc.
+                        self.account_throttle.record_success(&account_key);
+                        if let Some(ip_key) = &ip_key {
+                            self.ip_throttle.record_success(ip_key);
+                        }
                         self.admin.complete_sign_in(slot, &account);
                         let group = self.admin.group_of(slot).name.clone();
                         self.tell(slot, &format!("signed in as {account} ({group})."));
                         info!(slot, account, "signed in");
                         self.notify_update_if_pending(slot);
                     } else {
+                        let now = std::time::Instant::now();
+                        self.account_throttle.record_failure(&account_key, now);
+                        if let Some(ip_key) = &ip_key {
+                            self.ip_throttle.record_failure(ip_key, now);
+                        }
                         // One message for both, so it does not say which accounts exist.
                         self.tell(slot, "that name and password do not go together.");
                     }
@@ -1855,6 +1944,14 @@ impl GameServer {
                     );
                 }
                 let _ = reply.send(result);
+            }
+            ServerEvent::PanelAuditThrottled { target, detail } => {
+                self.audit.record(
+                    "system",
+                    crate::admin::AuditAction::Throttled,
+                    &target,
+                    &detail,
+                );
             }
             ServerEvent::PanelStatus { reply } => {
                 let player_count = self
@@ -2506,6 +2603,143 @@ mod auth_cost {
         assert!(
             server.start_auth(5),
             "a slot freed by a disconnect must be usable again, or repeated joins exhaust the pool"
+        );
+    }
+}
+
+/// Lane F: the claim-token compare (`console::run_admin_command`'s `"register"` arm) goes through
+/// the shared `admin::constant_time_eq` rather than a plain `!=`, and `/login` is backed off by
+/// `admin::throttle` per address and per account. This covers both from the in-game/chat side; the
+/// panel's own `/api/login` versions of the same two things are covered end-to-end, over a real
+/// socket, in `tests/panel.rs`.
+#[cfg(test)]
+mod claim_token_and_login_throttle {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> World {
+        World::empty(200, 150, "claim token / login throttle probe")
+    }
+
+    /// A real connected slot, so `ip_key` (`self.player(slot).map(|p| p.addr.ip()...)`) has an
+    /// address to key its half of the throttle on, exactly as a real join would.
+    fn with_player(mut server: GameServer, slot: u8, addr: &str) -> GameServer {
+        let (out_tx, _out_rx) = mpsc::channel(64);
+        let player = Player::new(slot, addr.parse().expect("valid test address"), out_tx);
+        server.players[usize::from(slot)] = Some(player);
+        server
+    }
+
+    /// `begin_registration`/`/login`'s hash always runs on a real worker thread and reports back
+    /// through `auth_results`, which `note_finished_auth` only ever drains on a tick — there is no
+    /// synchronous point to await here, so this polls the way `tests/panel.rs`'s own `wait_until`
+    /// does, on a deadline rather than a fixed sleep.
+    async fn wait_until(
+        server: &mut GameServer,
+        deadline: std::time::Duration,
+        mut done: impl FnMut(&GameServer) -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            server.note_finished_auth();
+            if done(server) {
+                return true;
+            }
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Fail-then-pass for the constant-time compare itself: a wrong token must never be able to
+    /// claim the server (and must not even start a hash — the whole point of checking the token
+    /// first), and the real one must.
+    #[tokio::test]
+    async fn the_claim_token_compare_rejects_wrong_and_accepts_right() {
+        let mut server = with_player(
+            GameServer::new(Config::default(), tiny_world()),
+            0,
+            "127.0.0.1:40001",
+        );
+        server.claim_token = Some("the-real-token".to_string());
+
+        server
+            .run_admin_command(0, "register", "owner ownerpassword the-wrong-token")
+            .unwrap();
+        assert!(
+            server.admin.unclaimed(),
+            "a wrong claim token must never claim the server"
+        );
+        assert!(
+            server.auth_in_flight.is_empty(),
+            "a refused token must be caught before any hash ever starts"
+        );
+
+        server
+            .run_admin_command(0, "register", "owner ownerpassword the-real-token")
+            .unwrap();
+        assert!(
+            wait_until(&mut server, std::time::Duration::from_secs(2), |s| {
+                !s.admin.unclaimed()
+            })
+            .await,
+            "the real claim token should claim the server"
+        );
+    }
+
+    /// Fail-then-pass for the throttle: `admin::throttle::FREE_ATTEMPTS + 1` wrong `/login`s in a
+    /// row open a backoff window (proven deterministically, with an injected clock, in
+    /// `admin::throttle`'s own tests), and this proves the wiring: a real `/login` landing inside
+    /// that window is refused before it even starts a hash — including one that would otherwise
+    /// have been the right password, which is the whole point of checking the window first rather
+    /// than racing the credential check against it.
+    ///
+    /// Kept to exactly the failures needed to open the window, checked immediately afterward with
+    /// no extra work in between: every failure here is a real Argon2 hash on a worker thread this
+    /// test has to wait out, so the less real time spent before the one assertion that depends on
+    /// the window still being open, the less this depends on how fast Argon2 happens to run on
+    /// whatever machine executes it.
+    #[tokio::test]
+    async fn a_throttled_login_is_refused_before_any_hash_starts() {
+        let mut server = with_player(
+            GameServer::new(Config::default(), tiny_world()),
+            0,
+            "127.0.0.1:40002",
+        );
+        server.claim_token = Some("tok".to_string());
+        server
+            .run_admin_command(0, "register", "victim rightpassword tok")
+            .unwrap();
+        assert!(
+            wait_until(&mut server, std::time::Duration::from_secs(2), |s| {
+                !s.admin.unclaimed()
+            })
+            .await,
+            "setup: the account must exist before it can be logged into"
+        );
+
+        for _ in 0..=crate::admin::throttle::FREE_ATTEMPTS {
+            server
+                .run_admin_command(0, "login", "victim wrongpassword")
+                .unwrap();
+            wait_until(&mut server, std::time::Duration::from_secs(2), |s| {
+                !s.auth_in_flight.contains(&0)
+            })
+            .await;
+        }
+
+        // Inside the window now: refused before a hash starts, even offering the real password.
+        server
+            .run_admin_command(0, "login", "victim rightpassword")
+            .unwrap();
+        assert!(
+            server.auth_in_flight.is_empty(),
+            "a throttled attempt must not start hashing, even with the right password"
+        );
+        assert!(
+            server.admin.signed_in_as(0).is_none(),
+            "and must not have signed in either"
         );
     }
 }

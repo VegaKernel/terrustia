@@ -238,10 +238,39 @@ impl GameServer {
         if self.config.password.is_empty() || !ready {
             return Ok(());
         }
+        // Per-IP backoff only: there is no account here, just the one shared server password, so
+        // there is nothing for a per-account window to key on — see `admin::throttle`'s top doc.
+        // Refused with the exact same "Incorrect password." a genuinely wrong guess gets, so a
+        // throttled attempt is not distinguishable from an ordinary wrong one by its wording.
+        let ip_key = self.player(slot).map(|p| p.addr.ip().to_string());
+        let now = std::time::Instant::now();
+        if let Some(ip_key) = &ip_key
+            && let crate::admin::Verdict::Refused { log_summary, .. } =
+                self.ip_throttle.check(ip_key, now)
+        {
+            if let Some(n) = log_summary {
+                self.audit.record(
+                    "system",
+                    crate::admin::AuditAction::Throttled,
+                    &format!("ip:{ip_key}"),
+                    &format!("{n} refused join-password attempt(s) backed off"),
+                );
+            }
+            self.kick(slot, "Incorrect password.");
+            return Ok(());
+        }
+        // `offered` never appears in a log line below, or anywhere else — see `admin::mod`'s own
+        // "never logged" convention.
         let offered = PacketReader::new(payload).string()?;
-        if constant_time_eq(offered.as_bytes(), self.config.password.as_bytes()) {
+        if crate::admin::constant_time_eq(offered.as_bytes(), self.config.password.as_bytes()) {
+            if let Some(ip_key) = &ip_key {
+                self.ip_throttle.record_success(ip_key);
+            }
             self.accept_player(slot)
         } else {
+            if let Some(ip_key) = &ip_key {
+                self.ip_throttle.record_failure(ip_key, now);
+            }
             info!(slot, "wrong password");
             self.kick(slot, "Incorrect password.");
             Ok(())
@@ -4232,17 +4261,6 @@ impl GameServer {
     }
 }
 
-/// Compare two byte strings without leaking their contents through timing.
-///
-/// A game password is hardly a high-value secret, but a length-independent compare costs nothing
-/// and avoids having to argue about it.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 /// Borrow helper: `introduce` needs the slot list detached from `self`.
 fn other_slots(slots: &[u8]) -> Vec<u8> {
     slots.to_vec()
@@ -4378,6 +4396,124 @@ mod section_streaming {
             "two simultaneous joiners together drained {paired_sent} sections in one call, \
              vs {solo_sent} for one alone — the budget is being given to each player \
              separately instead of shared across the whole call"
+        );
+    }
+}
+
+/// Lane F: the join password (`on_password`, above) is backed off per address by
+/// `admin::throttle`, and its compare goes through the shared `admin::constant_time_eq` rather
+/// than a plain `!=` (`constant_time_eq`'s own tests, in `admin::mod`, cover the primitive itself
+/// — timing is not something a unit test can observe, so what matters here is that this call site
+/// actually uses it and that the throttle actually gates it).
+#[cfg(test)]
+mod join_password_throttle {
+    use super::*;
+    use crate::config::Config;
+
+    fn server_with_password(password: &str) -> GameServer {
+        let config = Config {
+            password: password.to_string(),
+            ..Config::default()
+        };
+        GameServer::new(
+            config,
+            crate::world::World::empty(200, 150, "join password throttle probe"),
+        )
+    }
+
+    /// A fresh connection at `slot`, past the version check and ready for a password — what a real
+    /// client's handshake reaches by the time it may send one (`on_hello`'s own `player.greeted =
+    /// true` before it prompts for a password at all).
+    ///
+    /// Returns the outbound channel's receiver, which the caller must hold onto for as long as the
+    /// connection is meant to look alive: `send_bytes` treats a closed channel exactly like a dead
+    /// connection and removes the player on the very next thing sent to it — accept's own
+    /// `player_info` frame included, not only a kick — so dropping the receiver immediately would
+    /// make every outcome below look identical.
+    fn connect(server: &mut GameServer, slot: u8, addr: &str) -> mpsc::Receiver<Bytes> {
+        let (out_tx, out_rx) = mpsc::channel(64);
+        let mut player = Player::new(slot, addr.parse().expect("valid test address"), out_tx);
+        player.greeted = true;
+        server.players[usize::from(slot)] = Some(player);
+        out_rx
+    }
+
+    /// `BinaryReader.ReadString`'s own wire shape for a short ASCII string: a one-byte 7-bit-encoded
+    /// length (true for anything this test sends), then the bytes.
+    fn password_payload(password: &str) -> Vec<u8> {
+        let mut payload = vec![password.len() as u8];
+        payload.extend_from_slice(password.as_bytes());
+        payload
+    }
+
+    #[test]
+    fn the_right_password_is_accepted_when_nothing_has_throttled_it() {
+        let mut server = server_with_password("secret");
+        let _rx = connect(&mut server, 0, "127.0.0.1:51000");
+
+        server.on_password(0, &password_payload("secret")).unwrap();
+
+        assert_eq!(
+            server.player(0).map(|p| p.state),
+            Some(ConnState::SlotAssigned),
+            "the right password should be accepted and the connection kept"
+        );
+    }
+
+    /// Fail-then-pass for the throttle itself: `FREE_ATTEMPTS + 1` wrong passwords from the same
+    /// address opens a window (proven deterministically, with an injected clock, in
+    /// `admin::throttle`'s own tests) and the next connection from that address is refused before
+    /// its password is even compared. Proven here by offering the *right* password on that next
+    /// connection and it still getting kicked — the only way that happens is the throttle refusing
+    /// before `constant_time_eq` is ever reached.
+    ///
+    /// Each attempt is its own connection because a wrong join password kicks immediately
+    /// (`on_password`'s own `else` arm) — there was never a way to retry more than once on a
+    /// single socket, throttled or not, so this reconnects with a fresh `Player` each time exactly
+    /// as a real client retrying from the same address would.
+    #[test]
+    fn a_throttled_address_is_kicked_even_with_the_right_password() {
+        let mut server = server_with_password("secret");
+        let addr = "127.0.0.1:51001";
+
+        for attempt in 0..=crate::admin::throttle::FREE_ATTEMPTS {
+            let _rx = connect(&mut server, 0, addr);
+            server.on_password(0, &password_payload("wrong")).unwrap();
+            assert!(
+                server.player(0).is_none(),
+                "attempt {attempt}: a wrong password must still kick, exactly as before"
+            );
+        }
+
+        let _rx = connect(&mut server, 0, addr);
+        server.on_password(0, &password_payload("secret")).unwrap();
+        assert!(
+            server.player(0).is_none(),
+            "the window should still be open, so even the right password gets kicked"
+        );
+    }
+
+    /// A different address is never affected by another one's window — the reason a caller keys
+    /// this per-IP at all rather than refusing every join once one address fails enough times.
+    /// Same octets but for the port on purpose, matching this whole module's own point that the
+    /// throttle keys on the address alone: two different *ports* at the same address (an ordinary
+    /// reconnect) must still share one window, so proving "different" means a different address
+    /// outright, not just a different socket.
+    #[test]
+    fn an_unrelated_address_is_never_throttled_by_someone_elses_failures() {
+        let mut server = server_with_password("secret");
+        for attempt in 0..=crate::admin::throttle::FREE_ATTEMPTS {
+            let _rx = connect(&mut server, 0, "127.0.0.1:51002");
+            server.on_password(0, &password_payload("wrong")).unwrap();
+            assert!(server.player(0).is_none(), "attempt {attempt}");
+        }
+
+        let _rx = connect(&mut server, 1, "127.0.0.2:51002");
+        server.on_password(1, &password_payload("secret")).unwrap();
+        assert_eq!(
+            server.player(1).map(|p| p.state),
+            Some(ConnState::SlotAssigned),
+            "a different address's own first attempt must not inherit someone else's backoff"
         );
     }
 }

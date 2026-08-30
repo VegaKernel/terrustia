@@ -67,11 +67,12 @@
 //! panel-HTTP concern, not core game state, and doesn't need to survive a panel restart.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -80,7 +81,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::admin::{Account, BanKind, perm};
+use crate::admin::{Account, BanKind, Verdict, perm};
 use crate::config::Config;
 use crate::game::server::{
     PanelAccountInfo, PanelAuthLookup, PanelBackupEntry, PanelBackups, PanelConfigSnapshot,
@@ -140,6 +141,15 @@ struct PanelState {
     /// so it runs on its own `spawn_blocking` thread and reports progress through this shared cell
     /// rather than blocking the request that kicked it off. Only one at a time.
     worldgen: Arc<Mutex<WorldGenJob>>,
+    /// Per-caller-address `/api/login` backoff. Panel-local rather than shared with the game
+    /// task's own `/login` throttle: this surface is loopback-only, a different (much smaller)
+    /// trust boundary, and reaching across to the game task's state for every check would cost a
+    /// channel round trip this handler has no other reason to pay. See `admin::throttle`'s top doc
+    /// for the mechanism itself, which is identical either way.
+    ip_throttle: Arc<Mutex<crate::admin::Throttle>>,
+    /// Per-account (lowercased, as typed) `/api/login` backoff — see [`Self::ip_throttle`]'s doc
+    /// comment for why this is panel-local, and `admin::throttle`'s top doc for why both exist.
+    account_throttle: Arc<Mutex<crate::admin::Throttle>>,
 }
 
 /// Where a background world generation has got to. Coarse on purpose: `worldgen::generate` is a
@@ -200,6 +210,22 @@ impl PanelState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// The per-address login-throttle map, recovering a poisoned lock the same way
+    /// [`Self::sessions`] does and for the same reason.
+    fn ip_throttle(&self) -> std::sync::MutexGuard<'_, crate::admin::Throttle> {
+        self.ip_throttle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The per-account login-throttle map, recovering a poisoned lock the same way
+    /// [`Self::sessions`] does and for the same reason.
+    fn account_throttle(&self) -> std::sync::MutexGuard<'_, crate::admin::Throttle> {
+        self.account_throttle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 /// Start the panel. Returns once the listener is bound, so a startup failure (the port already
@@ -227,6 +253,8 @@ pub async fn run(
         sessions: Arc::new(Mutex::new(HashMap::new())),
         started: Instant::now(),
         worldgen: Arc::new(Mutex::new(WorldGenJob::default())),
+        ip_throttle: Arc::new(Mutex::new(crate::admin::Throttle::new())),
+        account_throttle: Arc::new(Mutex::new(crate::admin::Throttle::new())),
     };
     let router = Router::new()
         .route("/api/unclaimed", get(unclaimed))
@@ -267,7 +295,14 @@ pub async fn run(
 
     info!(%addr, "web panel listening (loopback only)");
     let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
+        // `with_connect_info` so `login`'s `ConnectInfo<SocketAddr>` extractor can see the real
+        // caller address for its per-address throttle — every other handler ignores it.
+        if let Err(e) = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        {
             warn!(error = %e, "web panel stopped");
         }
     });
@@ -470,6 +505,10 @@ async fn authorized_token(
     Ok(name)
 }
 
+// `password` and `claim_token` below are never logged, at any level, anywhere in `login` or the
+// functions it calls — see `admin::mod`'s own "never logged" convention. `#[derive(Deserialize)]`
+// gives this struct no `Debug`/`Display` on purpose: an errant `{req:?}` in a future edit would
+// fail to compile instead of quietly printing both.
 #[derive(Deserialize)]
 struct LoginRequest {
     name: String,
@@ -483,17 +522,32 @@ struct LoginResponse {
     name: String,
 }
 
-async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -> Response {
+async fn login(
+    State(state): State<PanelState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<LoginRequest>,
+) -> Response {
     let lookup = match auth_lookup(&state, req.name.clone()).await {
         Ok(l) => l,
         Err(resp) => return resp,
     };
 
     if lookup.unclaimed {
-        // Mirrors `/register <name> <password> <token>`'s own rules, including the length check
-        // `Admin::register` enforces — this path bypasses that function (it hashes inline, which
-        // would stall the game task), so the rule has to be repeated here rather than shared.
-        if lookup.claim_token.as_deref() != Some(req.claim_token.as_deref().unwrap_or_default()) {
+        // Not throttled: there is no existing password to check here at all (the claim path only
+        // ever creates the very first account), the same reasoning that leaves `/register` on a
+        // claimed server unthrottled too — see `TODO.md`'s Lane F entry. The token itself is a
+        // ~59-bit random secret (`GameServer::announce_claim_token`), not a guessable password;
+        // brute-forcing it is already infeasible, and it is spent after one use regardless.
+        //
+        // Constant-time for the same reason the console's own claim-token compare is
+        // (`console::run_admin_command`'s `"register"` arm): it is a secret compared byte for
+        // byte, so a plain `!=` would leak it one byte at a time through timing. `claim_token`
+        // being `None` (nothing to claim) always refuses, exactly as the old `!=` did.
+        let offered = req.claim_token.as_deref().unwrap_or_default();
+        let token_ok = lookup.claim_token.as_deref().is_some_and(|expected| {
+            crate::admin::constant_time_eq(expected.as_bytes(), offered.as_bytes())
+        });
+        if !token_ok {
             return err(StatusCode::UNAUTHORIZED, "wrong or missing claim token");
         }
         if req.password.len() < 6 {
@@ -536,6 +590,37 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
         return issue_session(&state, req.name);
     }
 
+    // Checked before the lookup result is even consulted: a throttled attempt must not learn
+    // "no such account" vs. "wrong password" any faster or slower than usual, so both are refused
+    // the same way, this early, with the one shared `REFUSAL_MESSAGE` — see `admin::throttle`'s
+    // top doc and `login_throttled`'s doc comment on the game-task side for the same rule applied
+    // to `/login`.
+    let ip_key = addr.ip().to_string();
+    let account_key = req.name.to_ascii_lowercase();
+    let now = Instant::now();
+    // Each verdict is read out of its `MutexGuard` into a plain value *before* the `if let` below
+    // — a guard borrowed straight in an `if let`'s own condition stays locked for the rest of that
+    // block by Rust's temporary-lifetime rules, and `record_throttled`'s `.await` inside it would
+    // then be holding a `std::sync::MutexGuard` (not `Send`) across a suspend point.
+    let ip_verdict = state.ip_throttle().check(&ip_key, now);
+    let account_verdict = state.account_throttle().check(&account_key, now);
+    let mut refused = false;
+    if let Verdict::Refused { log_summary, .. } = ip_verdict {
+        refused = true;
+        if let Some(n) = log_summary {
+            record_throttled(&state, format!("ip:{ip_key}"), n).await;
+        }
+    }
+    if let Verdict::Refused { log_summary, .. } = account_verdict {
+        refused = true;
+        if let Some(n) = log_summary {
+            record_throttled(&state, format!("account:{account_key}"), n).await;
+        }
+    }
+    if refused {
+        return err(StatusCode::TOO_MANY_REQUESTS, crate::admin::REFUSAL_MESSAGE);
+    }
+
     let Some((hash, _group)) = lookup.hash_and_group else {
         return err(StatusCode::UNAUTHORIZED, "no such account");
     };
@@ -543,7 +628,12 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
     let ok = tokio::task::spawn_blocking(move || Account::verify_hash(&hash, &password))
         .await
         .unwrap_or(false);
-    if !ok {
+    if ok {
+        state.ip_throttle().record_success(&ip_key);
+        state.account_throttle().record_success(&account_key);
+    } else {
+        state.ip_throttle().record_failure(&ip_key, now);
+        state.account_throttle().record_failure(&account_key, now);
         return err(StatusCode::UNAUTHORIZED, "wrong name or password");
     }
     // Authenticating an account is not enough to hold a panel session: the account's group must
@@ -558,6 +648,22 @@ async fn login(State(state): State<PanelState>, Json(req): Json<LoginRequest>) -
         );
     }
     issue_session(&state, req.name)
+}
+
+/// Sends the game task one summarised audit-log line for a login-throttle refusal — see
+/// `admin::throttle::Verdict::Refused`'s own doc comment for why this is called only once per
+/// summarised window rather than once per refusal. Fire-and-forget: `login` has already decided
+/// to refuse the request regardless of whether this record lands, matching `AuditLog::record`'s
+/// own "a write failure must never block the action it is recording" rule — if the game task is
+/// gone, there is nobody left to hold a session against anyway.
+async fn record_throttled(state: &PanelState, target: String, count: u32) {
+    let _ = state
+        .events
+        .send(ServerEvent::PanelAuditThrottled {
+            target,
+            detail: format!("{count} refused login attempt(s) backed off"),
+        })
+        .await;
 }
 
 fn issue_session(state: &PanelState, name: String) -> Response {
@@ -1638,6 +1744,8 @@ async fn set_account_group(
     }
 }
 
+// `password` is never logged below, at any level — see `admin::mod`'s own "never logged"
+// convention, and `LoginRequest`'s own doc comment for why this deliberately has no `Debug` either.
 #[derive(Deserialize)]
 struct CreateAccountRequest {
     name: String,

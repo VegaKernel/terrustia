@@ -33,6 +33,13 @@ pub struct Player {
     pub out: mpsc::Sender<Bytes>,
     pub state: ConnState,
     pub name: String,
+    /// The client's own self-reported identifier (packet 68). **Never proof of identity** — an
+    /// unmodified client sends whatever value it likes, so nothing here may key an auth or
+    /// permission decision off it: not sign-in, not account lookup, not a group or a permission
+    /// check. The one legitimate use is as a ban *kind* alongside name and address
+    /// (`admin::BanKind::Uuid`, `admin::store::Admin::ban_for`) — three different ways to name
+    /// somebody so a ban survives whichever the culprit can most easily change, never a claim
+    /// about who they are. See `admin::ban`'s own module doc.
     pub uuid: Option<String>,
     pub position: (f32, f32),
     /// How fast they were moving at the last position update.
