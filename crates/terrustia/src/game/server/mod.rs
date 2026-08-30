@@ -2468,18 +2468,6 @@ impl TileView for WorldTiles<'_> {
     }
 }
 
-/// How often the biomes are given a chance to creep, and how far from a player they may.
-const SPREAD_EVERY: u64 = 10;
-
-/// Ticks between passes of the world growing.
-///
-/// Slower than the biome spread because grass has nowhere to be: the game runs its own tile
-/// updates every tick over the whole world, and a sixth of that around the players is more than
-/// enough for a field to green over while somebody is looking at it.
-const GROWTH_EVERY: u64 = 10;
-const SPREAD_TRIES: usize = 3;
-const SPREAD_RANGE: i32 = 120;
-
 /// Tree tile types that share vanilla's own `KillTile_GetTreeDrops` branch (`WorldGen.cs`, `case
 /// 5: case 596: case 616: case 634:`). Only 5 (ordinary trees) is ever worldgen-placed by this
 /// project today (`world::trees`); the vanity-tree and ash-tree variants are included anyway
