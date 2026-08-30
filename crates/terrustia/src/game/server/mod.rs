@@ -1353,6 +1353,8 @@ impl GameServer {
             return;
         };
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
         let started = Instant::now();
         match wld_save::save(&self.world, &path) {
             Ok(()) => {
@@ -1450,8 +1452,11 @@ impl GameServer {
         }
 
         // The roster has to reach the world before the snapshot is taken, or the copy that goes to
-        // disk holds whoever lived here when it was loaded rather than who lives here now.
+        // disk holds whoever lived here when it was loaded rather than who lives here now - and
+        // the same goes for the Lunar Pillars, or a save mid-Lunar-Apocalypse drops them outright.
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
 
         // Copy into a buffer we already own where we have one. A fresh `snapshot()` asks the
         // allocator for a new forty-megabyte mapping and then faults in every page of it as it

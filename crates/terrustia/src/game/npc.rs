@@ -215,6 +215,13 @@ pub struct Npc {
     /// The Dryad, the Truffle, the Princess and the Guide each have an alternate; the game keeps
     /// the choice as a number rather than a flag because it is sent alongside the name.
     pub town_variation: i32,
+    /// Whether a homeless townsperson is on the way out because their house was destroyed.
+    ///
+    /// This server has no despawn-timer routine that acts on it yet — it is carried purely so a
+    /// world's own `homelessDespawn` flag round-trips rather than being clobbered to `false` on
+    /// every save (`WorldFile.cs`'s own field, from file version 315). Set only by
+    /// `restore_town_npcs` from what a load decoded; nothing here ever sets it `true`.
+    pub homeless_despawn: bool,
 }
 
 impl Npc {
@@ -266,6 +273,7 @@ impl Npc {
             given_name: String::new(),
             extra_value: 0,
             town_variation: 0,
+            homeless_despawn: false,
         })
     }
 
