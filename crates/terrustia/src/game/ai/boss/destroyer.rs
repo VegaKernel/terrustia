@@ -44,15 +44,25 @@ pub fn destroyer(
     // Daylight, or nobody left alive, drives it underground for good.
     let fleeing = world.conditions.day || world.target.is_none_or(|t| !t.alive);
     if fleeing {
-        out.fleeing = true;
         if npc.npc_type == DESTROYER_HEAD {
             // It dives, and faster once it is below the surface, so the retreat accelerates.
             npc.velocity.1 += 1.0;
             if npc.position.1 > world.conditions.surface_y {
                 npc.velocity.1 += 1.0;
                 npc.velocity.1 = npc.velocity.1.min(DESTROYER_FLEE_SPEED);
+                // Past the surface and burrowing away for good, the worm leaves. Vanilla removes
+                // every segment at once once the head is below the rock layer
+                // (`NPC.cs:50498-50507`); here the head reports the despawn and, once it is reaped,
+                // each segment behind it is orphaned, becomes a head of its own, flees the same way
+                // and follows it out one tick later. MECH-1: this flag was produced but consumed
+                // nowhere, so the Destroyer simply dived and then hung underground for ever.
+                out.fleeing = true;
             }
             npc.dirty = true;
+        } else {
+            // A body or tail segment reaches its own routine only after its leader has already
+            // left and it has become the head of what remains: at dawn it leaves the same way.
+            out.fleeing = true;
         }
         return out;
     }
@@ -226,7 +236,9 @@ mod tests {
         );
     }
 
-    /// Daybreak sends it down, and faster once it is under the surface.
+    /// Daybreak sends it down, and faster once it is under the surface; and only once the head is
+    /// under does the worm signal that it is leaving (MECH-1: it dives to the rock before it goes,
+    /// `NPC.cs:50489-50507`).
     #[test]
     fn daylight_drives_it_underground() {
         let tiles = open();
@@ -234,17 +246,44 @@ mod tests {
         let mut w = night(&tiles, Some((400.0, 0.0)));
         w.conditions.day = true;
 
+        // Above the surface (surface_y is 100 tiles down here): it dives, but is not yet gone.
         let mut head = segment(DESTROYER_HEAD, 0.0, 0.0);
         let out = destroyer(&mut head, &w, &mut rng);
-        assert!(out.fleeing);
+        assert!(
+            !out.fleeing,
+            "still above the surface: diving, not yet leaving"
+        );
         let above = head.velocity.1;
 
+        // Below the surface: it dives harder, and now the worm leaves.
         let mut deep = segment(DESTROYER_HEAD, 0.0, 200.0 * TILE);
-        destroyer(&mut deep, &w, &mut rng);
+        let deep_out = destroyer(&mut deep, &w, &mut rng);
         assert!(
             deep.velocity.1 > above,
             "below the surface it should dive harder: {} vs {above}",
             deep.velocity.1
+        );
+        assert!(
+            deep_out.fleeing,
+            "and once under, the worm signals it is gone"
+        );
+    }
+
+    /// MECH-1: the flee has to reach the server as a despawn. The dispatch routes it to `expired`,
+    /// which zeroes the boss's `time_left` (bosses never count down through `tick_life`). On the
+    /// pre-fix code the `fleeing` flag was dropped in the dispatch and the worm never left.
+    #[test]
+    fn daybreak_actually_despawns_the_worm_through_the_dispatch() {
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(9);
+        let mut w = night(&tiles, Some((400.0, 0.0)));
+        w.conditions.day = true;
+        // A head already below the surface, so it is past the dive and ready to go.
+        let mut head = segment(DESTROYER_HEAD, 0.0, 200.0 * TILE);
+        let effects = crate::game::ai::run(&mut head, &w, &mut rng);
+        assert!(
+            effects.expired,
+            "daybreak must reach the server as a despawn, not just a dive"
         );
     }
 }

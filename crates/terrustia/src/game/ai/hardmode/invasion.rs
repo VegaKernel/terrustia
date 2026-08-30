@@ -153,13 +153,18 @@ pub fn dutchman(
     // First tick: bolt the guns on.
     if npc.local_ai[0] == 0.0 {
         npc.local_ai[0] = 1.0;
-        for at in cannon_stations(npc) {
+        for (i, at) in cannon_stations(npc).into_iter().enumerate() {
             out.spawn.push(Spawn {
                 npc_type: DUTCHMAN_GUN,
                 position: at,
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
-                ai: [None; 4],
+                // C7-02: each gun's index along the hull is pinned in ai[1] (0..3), which the rider
+                // reads to seat it at its own station, and its reload is offset by ai[3] = 60*i so
+                // the four do not fire in unison (`NPC.cs:39252`, `NewNPC(..., num1355, 0f,
+                // 60 * num1355)`). Left to the signum fallback all four read the same identity and
+                // stacked at one hull point, firing together.
+                ai: [None, Some(i as f32), None, Some(60.0 * i as f32)],
             });
         }
         return out;
@@ -354,6 +359,38 @@ mod tests {
         assert!(
             dutchman(&mut s, &w, &mut rng, 0).spent,
             "no guns, no saucer"
+        );
+    }
+
+    /// C7-02: the four guns are each pinned with their own index (ai[1] = 0..3), which the rider
+    /// reads to seat them at their own station along the hull, and a staggered reload (ai[3] = 60*i)
+    /// so they do not all fire on the same tick (`NPC.cs:39252`). Left to the signum fallback all
+    /// four read one identity and stacked at a single hull point, firing in unison.
+    #[test]
+    fn its_four_guns_are_seated_and_staggered() {
+        let tiles = ground(120);
+        let w = world(&tiles, Some((500.0, 500.0)));
+        let mut rng = SmallRng::seed_from_u64(93);
+        let mut s = Npc::new(FLYING_DUTCHMAN, (0.0, 40.0 * TILE), 1).unwrap();
+        let guns = dutchman(&mut s, &w, &mut rng, 0).spawn;
+
+        let indices: Vec<f32> = guns
+            .iter()
+            .map(|g| g.ai[1].expect("a gun's index is pinned in ai[1], not left to signum"))
+            .collect();
+        assert_eq!(
+            indices,
+            vec![0.0, 1.0, 2.0, 3.0],
+            "each gun at its own station"
+        );
+        let reloads: Vec<f32> = guns
+            .iter()
+            .map(|g| g.ai[3].expect("a gun's reload offset is pinned in ai[3]"))
+            .collect();
+        assert_eq!(
+            reloads,
+            vec![0.0, 60.0, 120.0, 180.0],
+            "and its own place in the reload cycle"
         );
     }
 

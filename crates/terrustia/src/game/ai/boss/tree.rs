@@ -16,13 +16,14 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    EVERSCREAM, SCREAM_NEEDLES, SCREAM_ORNAMENTS, TREE_DESPERATE_AT, TREE_FLEE, TREE_STEER,
-    TREE_TOO_CLOSE, TREE_WAIT, TREE_WALK, TREE_WALK_HALF, TREE_WALK_HURT, TreeAttack,
-    WOOD_DESPERATE_SPEARS, WOOD_DESPERATE_SPHERES, WOOD_SPEARS, WOOD_SPHERES,
+    DESPAWN_ENCOURAGED_TICKS, EVERSCREAM, SCREAM_NEEDLES, SCREAM_ORNAMENTS, TREE_DESPERATE_AT,
+    TREE_FLEE, TREE_STEER, TREE_TOO_CLOSE, TREE_WAIT, TREE_WALK, TREE_WALK_HALF, TREE_WALK_HURT,
+    TreeAttack, WOOD_DESPERATE_SPEARS, WOOD_DESPERATE_SPHERES, WOOD_SPEARS, WOOD_SPHERES,
 };
 
-use crate::game::ai::{Shot, World, face};
-use crate::game::npc::{Npc, TileView};
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, Shot, World, face};
+use crate::game::npc::{Npc, TILE, TileView};
+use crate::game::npc_ai::Target;
 
 /// What one of them did this tick.
 #[derive(Debug, Default)]
@@ -69,10 +70,12 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
         return out;
     };
     if world.conditions.day {
-        // Daylight ends it. They walk away rather than fighting.
+        // Daylight ends it. They walk away rather than fighting. C7-05: vanilla forces the despawn
+        // hard here (`NPC.cs:33044`, `EncourageDespawn(10)`), so it is gone within ten ticks of
+        // leaving the area, not the six hundred the old cap allowed.
         out.fleeing = true;
         walk = TREE_FLEE;
-        npc.time_left = npc.time_left.min(600);
+        npc.time_left = npc.time_left.min(DESPAWN_ENCOURAGED_TICKS);
     } else {
         face(npc, target);
         match npc.ai[0] {
@@ -95,29 +98,30 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
                     };
                 }
             }
-            state => {
-                let Some(attack) = attack_for(npc.npc_type, state) else {
+            state => match attack_for(npc.npc_type, state) {
+                None => {
                     npc.ai[0] = 0.0;
                     npc.ai[1] = 0.0;
-                    return out;
-                };
-                // The desperate attacks are thrown on the move; the others stop it dead.
-                planted = state < 3.0;
-                if state >= 3.0 {
-                    walk = TREE_WALK_HALF;
                 }
-                npc.ai[1] += 1.0;
-                let due = npc.ai[1] > attack.warmup
-                    && (attack.warmup == 0.0 || npc.ai[1] < attack.ticks - 60.0)
-                    && npc.ai[1] % attack.every == 0.0;
-                if due {
-                    out.shots.push(throw(npc, target.center, &attack, rng));
+                Some(attack) => {
+                    // The desperate attacks are thrown on the move; the others stop it dead.
+                    planted = state < 3.0;
+                    if state >= 3.0 {
+                        walk = TREE_WALK_HALF;
+                    }
+                    npc.ai[1] += 1.0;
+                    let due = npc.ai[1] > attack.warmup
+                        && (attack.warmup == 0.0 || npc.ai[1] < attack.ticks - 60.0)
+                        && npc.ai[1] % attack.every == 0.0;
+                    if due {
+                        out.shots.push(throw(npc, target.center, &attack, rng));
+                    }
+                    if npc.ai[1] >= attack.ticks {
+                        npc.ai[1] = 0.0;
+                        npc.ai[0] = 0.0;
+                    }
                 }
-                if npc.ai[1] >= attack.ticks {
-                    npc.ai[1] = 0.0;
-                    npc.ai[0] = 0.0;
-                }
-            }
+            },
         }
     }
 
@@ -136,7 +140,67 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
         let wanted = walk * f32::from(npc.direction);
         npc.velocity.0 = (npc.velocity.0 * TREE_STEER + wanted) / (TREE_STEER + 1.0);
     }
+
+    // C7-04: its vertical drift, run every tick (`NPC.cs:33274-33323`). The old code wrote only
+    // `velocity.0`, so a tree floated at whatever height it spawned at for the whole fight; vanilla
+    // hovers a little above the ground beneath it, sinks when there is none, and drops straight
+    // down onto a player standing directly under it.
+    hover(npc, world, target);
     out
+}
+
+/// The tree's vertical drift (`NPC.cs:33274-33323`): drop onto a player directly beneath it,
+/// otherwise hover just above whatever ground is under its feet, and sink when there is nothing.
+fn hover(npc: &mut Npc, world: &World<'_, impl TileView>, target: Target) {
+    let player_left = target.center.0 - PLAYER_WIDTH as f32 / 2.0;
+    let player_right = target.center.0 + PLAYER_WIDTH as f32 / 2.0;
+    let player_bottom = target.center.1 + PLAYER_HEIGHT as f32 / 2.0;
+    let feet = npc.position.1 + npc.height();
+    // The player is within the trunk's own width and standing below its feet: come down on them.
+    let on_player = npc.position.0 < player_left
+        && npc.position.0 + npc.width() > player_right
+        && feet < player_bottom - 16.0;
+    if on_player {
+        npc.velocity.1 += 0.5;
+    } else if ground_beneath(world.tiles, npc) {
+        if npc.velocity.1 > 0.0 {
+            npc.velocity.1 = 0.0;
+        }
+        if npc.velocity.1 > -0.2 {
+            npc.velocity.1 -= 0.025;
+        } else {
+            npc.velocity.1 -= 0.2;
+        }
+        npc.velocity.1 = npc.velocity.1.max(-4.0);
+    } else {
+        if npc.velocity.1 < 0.0 {
+            npc.velocity.1 = 0.0;
+        }
+        if npc.velocity.1 < 0.1 {
+            npc.velocity.1 += 0.025;
+        } else {
+            npc.velocity.1 += 0.5;
+        }
+    }
+    npc.velocity.1 = npc.velocity.1.min(10.0);
+}
+
+/// Whether any solid block overlaps the 80x20-pixel box just below the tree's feet, the box vanilla
+/// tests with `Collision.SolidCollision` (`NPC.cs:33276,33286`). Narrowed to solid blocks: vanilla
+/// also catches platforms and slopes, which are not modelled here.
+fn ground_beneath(tiles: &impl TileView, npc: &Npc) -> bool {
+    let left = npc.center().0 - 40.0;
+    let top = npc.position.1 + npc.height() - 20.0;
+    let x0 = (left / TILE).floor() as i32;
+    let x1 = ((left + 80.0) / TILE).floor() as i32;
+    let y0 = (top / TILE).floor() as i32;
+    let y1 = ((top + 20.0) / TILE).floor() as i32;
+    (x0..=x1).any(|tx| {
+        (y0..=y1).any(|ty| {
+            let tile = tiles.tile(tx, ty);
+            tile.is_active() && terrustia_proto::tile_solid::solid(tile.block)
+        })
+    })
 }
 
 /// One thrown projectile: aimed at the player, lifted into an arc, and scattered.
@@ -317,6 +381,55 @@ mod tests {
             tree(&mut t, &w, &mut rng);
         }
         assert_eq!(t.velocity.0, 0.0, "it should have stopped");
+    }
+
+    /// C7-04: it moves vertically. The old code wrote only `velocity.0`, so a tree hung at its
+    /// spawn height for the whole fight. Vanilla (`NPC.cs:33274-33323`) sinks when there is nothing
+    /// beneath it, rises rather than sinking through ground just under its feet, and drops straight
+    /// down onto a player standing directly under it. On the pre-fix code `velocity.1` never moved.
+    #[test]
+    fn a_tree_moves_vertically() {
+        // A ground band around tile y = 40 (pixels 640..704).
+        let mut cells = HashMap::new();
+        for x in -100..100 {
+            for y in 40..44 {
+                cells.insert((x, y), Tile::block(1));
+            }
+        }
+        let tiles = Night(cells);
+        // A player far off to the side, so the descend-on-player rule never fires.
+        let far = night(&tiles, Some((9000.0, 0.0)));
+        let mut r = SmallRng::seed_from_u64(1);
+
+        // Hanging in open air well above the floor: nothing under its feet, so it sinks.
+        let mut hanging = boss(MOURNING_WOOD, 0.0, 0.0);
+        tree(&mut hanging, &far, &mut r);
+        assert!(
+            hanging.velocity.1 > 0.0,
+            "with nothing beneath it, it should sink: {}",
+            hanging.velocity.1
+        );
+
+        // Sitting with the floor just under its feet: it rises rather than sinking through.
+        let mut resting = boss(MOURNING_WOOD, 0.0, 40.0 * 16.0 - 154.0);
+        tree(&mut resting, &far, &mut r);
+        assert!(
+            resting.velocity.1 <= 0.0,
+            "on the ground it should not keep sinking: {}",
+            resting.velocity.1
+        );
+
+        // A player standing directly beneath it: it comes down on them.
+        let mut over = boss(MOURNING_WOOD, 0.0, 0.0);
+        let (ox, _) = over.center();
+        let feet = over.position.1 + over.height();
+        let below = night(&tiles, Some((ox, feet + 200.0)));
+        tree(&mut over, &below, &mut r);
+        assert!(
+            over.velocity.1 >= 0.5,
+            "it should drop onto a player standing under it: {}",
+            over.velocity.1
+        );
     }
 
     /// Daylight sends it away rather than letting the fight run on.

@@ -328,7 +328,7 @@ fn golem_state<T: TileView>(world: &World<'_, T>) -> boss::golem::GolemState {
 }
 
 /// The types worth counting each tick, because some routine's behaviour turns on how many are up.
-pub const CENSUS_TYPES: [u16; 15] = [
+pub const CENSUS_TYPES: [u16; 17] = [
     terrustia_proto::npc_params::CREEPER,
     terrustia_proto::npc_params::WALL_LEECH,
     terrustia_proto::npc_params::PAL_ESCORT,
@@ -344,6 +344,9 @@ pub const CENSUS_TYPES: [u16; 15] = [
     terrustia_proto::npc_params::CULTIST_CLONE,
     terrustia_proto::npc_params::MOON_LORD_HAND,
     terrustia_proto::npc_params::MOON_LORD_HEAD,
+    // The Martian Saucer's four guns: the core watches these to know when to end the fight (SAU-1).
+    terrustia_proto::npc_params::MARTIAN_SAUCER_TURRET,
+    terrustia_proto::npc_params::MARTIAN_SAUCER_CANNON,
 ];
 
 impl<T: TileView> World<'_, T> {
@@ -784,11 +787,18 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         37 => {
             let out = boss::destroyer::destroyer(npc, world, rng);
             effects.shots.extend(out.shots);
+            // MECH-1: daybreak (or the last player gone) sends it home. Vanilla caps its despawn
+            // timer (`EncourageDespawn`) so it counts out; here bosses skip `tick_life`, so the
+            // flee is routed straight to `expired` (`time_left = 0`), which the server reaps.
+            effects.expired = out.fleeing;
         }
         30 | 31 => {
             let out = boss::twins::twin(npc, world, rng);
             effects.shots.extend(out.shots);
             effects.reflecting = out.reflecting;
+            // MECH-1: as the Destroyer above. At dawn or with nobody left, both eyes climb away
+            // and go. Left unconsumed the Twins hung in the sky for ever after daybreak.
+            effects.expired = out.fleeing;
         }
         88 => {
             // Its brood is its eggs and its hatchlings together.
@@ -1035,10 +1045,17 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         76 => {
-            let out = hardmode::saucer::core(npc, world);
+            // SAU-1: the core watches its own four guns to know when the fight ends. Counted here
+            // and handed in, the way the Moon Lord core is told how many of its eyes are open.
+            let guns = world.count(terrustia_proto::npc_params::MARTIAN_SAUCER_TURRET)
+                + world.count(terrustia_proto::npc_params::MARTIAN_SAUCER_CANNON);
+            let out = hardmode::saucer::core(npc, world, guns);
             effects.spawn.extend(out.spawn);
             effects.shots.extend(out.shots);
             effects.expired = out.spent;
+            // A death, not a quiet despawn: the Classic-mode finish drops the loot and records the
+            // kill. Routed through `expired` (the old wiring) it vanished with nothing.
+            effects.died = out.died;
         }
         77 => {
             // A socket that has been broken open is still on the field, so counting the parts is
@@ -1046,12 +1063,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let parts = world.count(terrustia_proto::npc_params::MOON_LORD_HAND)
                 + world.count(terrustia_proto::npc_params::MOON_LORD_HEAD);
             let open = (3usize.saturating_sub(parts) + world.sockets_open).min(3);
-            let out = boss::moon_lord::core(npc, world, parts, open);
+            let out = boss::moon_lord::core(npc, world, open);
             effects.spawn.extend(out.spawn);
-            // A *death*, not an expiry. The core cannot be killed by damage — it comes apart over
-            // ten seconds once its three eyes are broken, and that ending is the kill. Routing it
-            // through `expired` removed it quietly: no luminite, and `downed_moon_lord` never set,
-            // so the world did not record that the game had been finished.
+            // A *death*, not an expiry. The core cannot be killed by damage outright: struck down
+            // it enters a ten-second death drama (`checkdead` sets `ai[0] == 2`), and only the end
+            // of that drama is the kill. Routing it through `expired` removed it quietly: no
+            // luminite, and `downed_moon_lord` never set, so the world did not record the win.
             effects.died = out.spent;
         }
         78 | 79 => {
