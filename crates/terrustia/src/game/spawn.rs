@@ -556,62 +556,114 @@ pub fn depth_at(world: &World, y: i32) -> Depth {
     }
 }
 
+/// Half-extents of the biome scan box, in tiles.
+///
+/// The game scans `SceneMetrics.ZoneScanSize`, a 169-by-124 tile box centred on the tile it is
+/// asked about (`SceneMetrics.cs:16`: `1920/16 + 25*2 - 1 = 169` across, `1200/16 + 25*2 - 1 = 124`
+/// down). This used a 41-by-41 box (radius 20), which is small enough to miss a biome the player is
+/// plainly standing in and large enough only to be fooled by a stray vein: both directions of
+/// wrong. 169 is odd, so it is symmetric at plus-or-minus 84; 124 is even, taken as -62..=61.
+const BIOME_SCAN_X: i32 = 84;
+const BIOME_SCAN_Y_UP: i32 = 62;
+const BIOME_SCAN_Y_DOWN: i32 = 61;
+
+/// The per-biome tile counts a scan must reach for the place to read as that biome.
+///
+/// These are the game's own `SceneMetrics` thresholds, not one flat number: the evils and the
+/// hallow are cheap to declare (a small pocket counts), snow and the desert are dear (a genuine
+/// biome, not a stray patch). A single flat 60 was used for all of them, which made a handful of
+/// sand read as a desert and a real snow field read as forest. (`SceneMetrics.cs:24-58`,`154-175`.)
+const EVIL_THRESHOLD: i32 = 300; // CorruptionTileThreshold
+const BLOOD_THRESHOLD: i32 = 300; // CrimsonTileThreshold
+const HOLY_THRESHOLD: i32 = 125; // HallowTileThreshold
+const JUNGLE_THRESHOLD: i32 = 140; // JungleTileThreshold
+const SNOW_THRESHOLD: i32 = 1500; // SnowTileNormalThreshold
+const DESERT_THRESHOLD: i32 = 1500; // DesertTileNormalThreshold
+const DUNGEON_THRESHOLD: i32 = 250; // DungeonTileThreshold
+
 /// Work out the biome from the tiles around a point, the way the game counts zone tiles.
+///
+/// Faithful to `SceneMetrics.ScanTiles`/`AggregateTileCounts`/`CalculateZones` in its scan box, its
+/// per-biome tile lists and thresholds, and its evil-versus-hallow subtraction. Two disclosed
+/// narrowings: the ocean is decided by position rather than by `oceanDepths`, as it was before; and
+/// the sunflower (`tile 27`) and a couple of hardmode-only additions the game folds into the evil
+/// and blood counts are omitted, because this server does not place them. The dungeon is taken on
+/// its tile count alone rather than also requiring a dungeon wall at the centre, since a run of
+/// dungeon brick is dungeon enough and the wall is not always modelled where this is called.
 pub fn biome_at(world: &World, x: i32, y: i32) -> Biome {
     // The ocean is defined by position rather than tiles.
     if x < 250 || x > world.width() - 250 {
         return Biome::Ocean;
     }
 
-    let (mut corrupt, mut crimson, mut jungle, mut snow, mut desert, mut dungeon, mut hallow) =
+    // The game's own per-biome tile lists (`SceneMetrics.AggregateTileCounts`). A tile can belong
+    // to several at once (corrupt sandstone is both evil and sand, hallowed ice both holy and
+    // snow), so each list is checked independently rather than in one match, exactly as the game
+    // sums them into separate counts.
+    // EvilTileCount (`SceneMetrics.cs:614`): ebonstone, corrupt grass/thorn/ice/sandstone/sand.
+    const EVIL_TILES: [u16; 9] = [23, 661, 24, 25, 32, 112, 163, 400, 398];
+    // BloodTileCount (`SceneMetrics.cs:615`): crimstone, crimson grass/thorn/ice/sandstone, crimsand, ichor.
+    const BLOOD_TILES: [u16; 9] = [199, 662, 201, 203, 200, 401, 399, 234, 352];
+    // HolyTileCount (`SceneMetrics.cs:603`): pearlstone, hallow-converted stones, pearlsand, hallowed grass/ice/sandstone.
+    const HOLY_TILES: [u16; 9] = [109, 492, 110, 113, 117, 116, 164, 403, 402];
+    // JungleTileCount (`SceneMetrics.cs:613`): jungle grass, plants, vines, mud, jungle thorn.
+    const JUNGLE_TILES: [u16; 6] = [60, 61, 62, 74, 226, 225];
+    // SnowTileCount (`SceneMetrics.cs:604`): snow, snow brick, ice, purple/red ice, slush.
+    const SNOW_TILES: [u16; 7] = [147, 148, 161, 162, 164, 163, 200];
+    // SandTileCount (`SceneMetrics.cs:620`): sand plus every converted sand/sandstone.
+    const SAND_TILES: [u16; 12] = [53, 396, 397, 112, 116, 234, 398, 402, 399, 400, 403, 401];
+    // DungeonTileCount (`SceneMetrics.cs:619`): the six dungeon bricks.
+    const DUNGEON_TILES: [u16; 6] = [41, 43, 44, 481, 482, 483];
+
+    // Raw tile counts, before the game's evil/hallow reconciliation.
+    let (mut evil, mut blood, mut holy, mut jungle, mut snow, mut sand, mut dungeon) =
         (0, 0, 0, 0, 0, 0, 0);
-    let radius = 20;
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
+    for dy in -BIOME_SCAN_Y_UP..=BIOME_SCAN_Y_DOWN {
+        for dx in -BIOME_SCAN_X..=BIOME_SCAN_X {
             let tile = world.tile(x + dx, y + dy);
             if !tile.is_active() {
                 continue;
             }
-            match tile.block {
-                // Ebonstone, corrupt grass, ebonsand, corrupt ice, corrupt sandstone.
-                23 | 25 | 112 | 163 | 400 | 398 => corrupt += 1,
-                // Crimstone, crimson grass, crimsand, crimson ice, crimson sandstone.
-                199 | 203 | 234 | 200 | 401 | 399 => crimson += 1,
-                // Jungle grass and mud.
-                59 | 60 => jungle += 1,
-                // Snow, ice, slush.
-                147 | 161 | 224 => snow += 1,
-                // Sand, sandstone, hardened sand.
-                53 | 396 | 397 => desert += 1,
-                // Dungeon bricks in all three colours.
-                41 | 43 | 44 | 481 | 482 | 483 => dungeon += 1,
-                // Pearlstone, hallowed grass, pearlsand, hallowed ice, hallowed sandstone.
-                109 | 116 | 117 | 164 | 402 | 403 => hallow += 1,
-                _ => {}
-            }
+            let b = tile.block;
+            evil += i32::from(EVIL_TILES.contains(&b));
+            blood += i32::from(BLOOD_TILES.contains(&b));
+            holy += i32::from(HOLY_TILES.contains(&b));
+            jungle += i32::from(JUNGLE_TILES.contains(&b));
+            snow += i32::from(SNOW_TILES.contains(&b));
+            sand += i32::from(SAND_TILES.contains(&b));
+            dungeon += i32::from(DUNGEON_TILES.contains(&b));
         }
     }
 
-    // Dungeon wins outright; the rest go to whichever is most represented, with a threshold so a
-    // handful of stray blocks does not rename the biome.
-    let threshold = 60;
-    if dungeon > 20 {
+    // The game reconciles the two evils against the hallow before thresholding, so a tile that reads
+    // as both does not count for both (`SceneMetrics.cs:648-664`).
+    let holy_before = holy;
+    holy -= evil;
+    holy -= blood;
+    evil -= holy_before;
+    blood -= holy_before;
+    let (holy, evil, blood) = (holy.max(0), evil.max(0), blood.max(0));
+
+    // The dungeon takes precedence, then the first biome to reach its own threshold in a fixed
+    // order (the evils first, as the game's own spawn checks read them first). Snow and desert sit
+    // last because their thresholds are the dearest and a corrupted snow reads as corruption in the
+    // game too.
+    if dungeon >= DUNGEON_THRESHOLD {
         return Biome::Dungeon;
     }
-    let candidates = [
-        (corrupt, Biome::Corruption),
-        (crimson, Biome::Crimson),
-        (jungle, Biome::Jungle),
-        (snow, Biome::Snow),
-        (desert, Biome::Desert),
-        (hallow, Biome::Hallow),
-    ];
-    candidates
-        .iter()
-        .filter(|(count, _)| *count >= threshold)
-        .max_by_key(|(count, _)| *count)
-        .map(|(_, biome)| *biome)
-        .unwrap_or(Biome::Forest)
+    for (count, threshold, biome) in [
+        (evil, EVIL_THRESHOLD, Biome::Corruption),
+        (blood, BLOOD_THRESHOLD, Biome::Crimson),
+        (holy, HOLY_THRESHOLD, Biome::Hallow),
+        (jungle, JUNGLE_THRESHOLD, Biome::Jungle),
+        (snow, SNOW_THRESHOLD, Biome::Snow),
+        (sand, DESERT_THRESHOLD, Biome::Desert),
+    ] {
+        if count >= threshold {
+            return biome;
+        }
+    }
+    Biome::Forest
 }
 
 /// The enemies that can appear at a given place and time, pre-hardmode.
@@ -649,7 +701,6 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             64,  // PinkJellyfish
             65,  // Shark
             221, // Squid
-            55,  // Goldfish
         ],
         (Surface, Corruption) => &[
             6,  // EaterofSouls
@@ -721,12 +772,11 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         ],
         (Surface, Forest) => {
             if day {
+                // Only the slime is hostile here. The bunny, bird, squirrel and frog this used to
+                // list are damage-0 critters the game spawns down its own `spawnFriendly` path
+                // (`friendly_pool`), never at the player as monsters (`NPC.cs:2452-2624`).
                 &[
-                    1,   // BlueSlime
-                    46,  // Bunny
-                    74,  // Bird
-                    299, // Squirrel
-                    361, // Frog
+                    1, // BlueSlime
                 ]
             } else {
                 &[
@@ -750,6 +800,173 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             10,  // GiantWormHead
             93,  // GiantBat
             498, // Salamander
+        ],
+    }
+}
+
+/// The ordinary draw weight, ten so a rarer type can be a single-digit fraction of it.
+const ORDINARY_WEIGHT: u32 = 10;
+
+/// Stands in for "this world's own cavern monsters" in a weighted pick, since that draw is a
+/// function call rather than a fixed type. Never a real NPC id.
+const CAVERN_SENTINEL: u16 = u16::MAX;
+
+/// The Dungeon Guardian (`NPCID.DungeonGuardian`), the near-unkillable scythe the dungeon throws at
+/// anyone who enters before Skeletron is down.
+const DUNGEON_GUARDIAN: u16 = 68;
+
+/// How often a hostile type is drawn relative to the others sharing its pool, the game's own
+/// per-type spawn rate reduced to one number.
+///
+/// A flat uniform pick ignored this: the underworld draws a Voodoo Demon roughly one time in
+/// seventy (`NPC.cs:4893-4897`: a one-in-seven branch, then a one-in-ten inside it), yet a
+/// six-way uniform pick handed one out one time in six, about a dozen times too often. Only the
+/// underworld's rates are transcribed here, because it is the one pre-hardmode pool whose cascade
+/// is a plain sequence of `rand.Next` rolls rather than a thicket of tile and zone flags this
+/// server does not model; every other pool keeps the ordinary weight, an even draw among its
+/// members, which is what this did before minus the mis-placed critters. The numbers are the
+/// cascade's effective shares (Hellbat is the fallthrough, the lava slime a one-in-three before it,
+/// and so on down to the Voodoo Demon).
+fn draw_weight(npc_type: u16) -> u32 {
+    match npc_type {
+        60 => 40, // Hellbat, the underworld fallthrough
+        59 => 20, // LavaSlime
+        62 => 9,  // Demon
+        24 => 5,  // FireImp
+        39 => 2,  // BoneSerpentHead (also capped, below)
+        66 => 1,  // VoodooDemon, the rare one this fix exists for
+        _ => ORDINARY_WEIGHT,
+    }
+}
+
+/// The most of a type the field will hold at once, where the game caps it, else `None`.
+///
+/// The only verified pre-hardmode cap among the types these pools name is the Bone Serpent, which
+/// the game gates on `!AnyNPCs(39)` so a second never begins while one is alive (`NPC.cs:4885`). A
+/// world feeder is a screen-long chain of segments; two at once is a wall of them. Other heavies
+/// are left uncapped rather than guessing a limit the game does not clearly set.
+fn active_cap(npc_type: u16) -> Option<usize> {
+    match npc_type {
+        39 => Some(1), // BoneSerpentHead
+        _ => None,
+    }
+}
+
+/// Choose one entry from `candidates`, weighted by [`draw_weight`] and skipping any type already at
+/// its [`active_cap`] per the live counts `alive` reports.
+///
+/// Returns the chosen id, which may be [`CAVERN_SENTINEL`] for a world's own cavern monsters, or
+/// `None` when everything on offer is capped out. This is the weighted, cap-aware pick that
+/// replaced a flat uniform index: the uniform one handed out a rare Voodoo Demon as often as a
+/// common Hellbat and let a second Bone Serpent begin while the first was still on screen.
+fn choose_weighted(
+    candidates: &[u16],
+    alive: &dyn Fn(u16) -> usize,
+    rng: &mut SmallRng,
+) -> Option<u16> {
+    let eligible = |ty: u16| match active_cap(ty) {
+        Some(cap) => alive(ty) < cap,
+        None => true,
+    };
+    let total: u32 = candidates
+        .iter()
+        .copied()
+        .filter(|&ty| eligible(ty))
+        .map(draw_weight)
+        .sum();
+    if total == 0 {
+        return None;
+    }
+    let mut roll = rng.random_range(0..total);
+    for &ty in candidates {
+        if !eligible(ty) {
+            continue;
+        }
+        let w = draw_weight(ty);
+        if roll < w {
+            return Some(ty);
+        }
+        roll -= w;
+    }
+    None
+}
+
+/// The friendly critters the game draws instead of a monster when `spawnFriendly` is set.
+///
+/// This is the deferred friendly-critter table `rates` promised: with a populated base quieting the
+/// wild, the game does not simply stop spawning, it spawns harmless critters (`NPC.cs:2099-2624`,
+/// the whole `else if (spawnFriendly)` branch). Every id here is a real damage-0 critter, keyed by
+/// the biome the player stands in rather than by the exact tile the game reads, which is the
+/// disclosed narrowing: the game chooses a bird over a bunny by the grass under the spawn and by
+/// weather, season and time this server does not all model, so this returns the ordinary set for
+/// the place and lets the caller pick evenly among it. The underworld's lava-bait critters and the
+/// gold and gem variants are left out on purpose; they are cosmetic rolls on top of these.
+pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
+    use Biome::*;
+    use Depth::*;
+    match (depth, biome) {
+        // Penguins on snow and ice (`NPC.cs:2328-2337`).
+        (_, Snow) => &[
+            148, // Penguin
+            149, // PenguinBlack
+        ],
+        // Scorpions on sand (`NPC.cs:2366-2368`).
+        (_, Desert) => &[
+            366, // ScorpionBlack
+            367, // Scorpion
+        ],
+        // Goldfish and ducks on the water (`NPC.cs:2288-2322`).
+        (_, Ocean) => &[
+            55,  // Goldfish
+            362, // Duck
+            364, // DuckWhite
+        ],
+        // The jungle's tropical birds by day, a frog otherwise (`NPC.cs:2340-2364`).
+        (Surface, Jungle) => {
+            if day {
+                &[
+                    361, // Frog
+                    671, // ScarletMacaw
+                    672, // BlueMacaw
+                    673, // Toucan
+                    674, // YellowCockatiel
+                    675, // GrayCockatiel
+                ]
+            } else {
+                &[
+                    361, // Frog
+                ]
+            }
+        }
+        (_, Jungle) => &[
+            361, // Frog
+        ],
+        // The ordinary surface: birds, a bunny, a squirrel and butterflies by day; fireflies by
+        // night (`NPC.cs:2414`,`2452-2552`). The evils and the hallow borrow it, as their own
+        // critter rolls fall back to the same set in the game.
+        (Surface, Forest | Corruption | Crimson | Hallow) => {
+            if day {
+                &[
+                    74,  // Bird
+                    297, // BirdBlue
+                    298, // BirdRed
+                    46,  // Bunny
+                    299, // Squirrel
+                    356, // Butterfly
+                ]
+            } else {
+                &[
+                    355, // Firefly
+                ]
+            }
+        }
+        // The underworld's friendly spawns are lava-bait critters this server does not model.
+        (Underworld, _) => &[],
+        // Underground and cavern: the game's own fallback is a bunny, with squirrels near the mouth
+        // of a cave (`NPC.cs:2600-2623`).
+        (_, _) => &[
+            46,  // Bunny
+            299, // Squirrel
         ],
     }
 }
@@ -837,6 +1054,31 @@ fn town_npcs_near(npcs: &NpcStore, at: (f32, f32)) -> u32 {
             (npc.position.0 - at.0).abs() < REACH && (npc.position.1 - at.1).abs() < REACH
         })
         .count() as u32
+}
+
+/// Half-extents, in pixels, of the box the cap looks in for the NPCs that already fill it.
+///
+/// The game counts against a player's `maxSpawns` only the NPCs whose active box overlaps that
+/// player (`NPC.cs:78706`: `activeRangeX = sWidth*2.1`, `activeRangeY = sHeight*2.1`, so 1920*2.1
+/// and 1200*2.1 pixels, about 252 tiles across and 157 down). The old cap counted every NPC in the
+/// whole world, so a monster on the far side of the map held a lone player's own spawns down.
+const ACTIVE_RANGE_X: f32 = 1920.0 * 2.1;
+const ACTIVE_RANGE_Y: f32 = 1200.0 * 2.1;
+
+/// The spawn weight already near a point: the sum of `npcSlots` over the live, non-town NPCs whose
+/// active box overlaps it, which is exactly what the game checks a player's `maxSpawns` against
+/// (`NPC.cs:313`, `player.nearbyActiveNPCs`, accumulated in `CheckActive` weighted by each NPC's
+/// own `npcSlots`). A statue-spawned monster does not count, as it does not in the game (it carries
+/// no spawn slots), which is what lets a statue farm keep working.
+fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
+    npcs.iter()
+        .filter(|(_, npc)| npc.is_alive() && !npc.stats.town_npc && !npc.from_statue)
+        .filter(|(_, npc)| {
+            (npc.position.0 - at.0).abs() < ACTIVE_RANGE_X
+                && (npc.position.1 - at.1).abs() < ACTIVE_RANGE_Y
+        })
+        .map(|(_, npc)| npc.stats.npc_slots)
+        .sum()
 }
 
 /// One spawn attempt in this many considers a bound townsperson instead of an enemy.
@@ -932,42 +1174,11 @@ pub fn try_spawn(
         return Vec::new();
     }
 
-    // The cap grows with the number of players, as it does in the game, and with wherever the
-    // deepest of them is standing: a cavern holds far more at once than a forest.
-    let deepest = active
-        .iter()
-        .map(|p| depth_at(world, (p.position.1 / 16.0) as i32))
-        .max_by_key(|d| match d {
-            Depth::Surface => 0,
-            Depth::Underground => 1,
-            Depth::Cavern => 2,
-            Depth::Underworld => 3,
-        })
-        .unwrap_or(Depth::Surface);
-    // The cap uses the *least* protected player, so one person out in the wild is not sheltered
-    // by everybody else standing in town.
-    let loneliest = active
-        .iter()
-        .map(|p| town_npcs_near(npcs, p.position))
-        .min()
-        .unwrap_or(0);
-    let (_, band, _) = rates(
-        Conditions {
-            depth: deepest,
-            hard_mode: world.progress.hard_mode,
-            day_time: world.day_time,
-            blood_moon: world.blood_moon,
-            eclipse: world.eclipse,
-            event_moon: world.pumpkin_moon || world.snow_moon,
-            town_npcs: loneliest,
-        },
-        rng,
-    );
-    let cap = band * (1.0 + 0.3 * active.len() as f32);
-    if npcs.used_slots() >= cap {
-        return Vec::new();
-    }
-
+    // The cap is per-player and near-player, as the game's is: each player is gated on their own
+    // `maxSpawns` against the spawn weight already close to them (`NPC.cs:312-313`), inside the loop
+    // below. There is no world-global slot total and no flat +30%-per-player multiplier here; a
+    // second player raises the world's monster count only because they carry their own near-player
+    // budget where they stand, which is what the game does and what a single global cap could not.
     let mut out = Vec::new();
     for player in active {
         let (px, py) = (
@@ -989,9 +1200,9 @@ pub fn try_spawn(
             continue;
         }
 
-        // The rate is the player's own, not one number for the world: two people in the same
-        // world can be standing in a quiet forest and a busy cavern at the same moment.
-        let (mut rate, _, spawn_friendly) = rates(
+        // The rate and cap are the player's own, not one number for the world: two people in the
+        // same world can be standing in a quiet forest and a busy cavern at the same moment.
+        let (mut rate, band, spawn_friendly) = rates(
             Conditions {
                 depth: depth_at(world, py),
                 hard_mode: world.progress.hard_mode,
@@ -1003,6 +1214,11 @@ pub fn try_spawn(
             },
             rng,
         );
+        // This player's own near-player cap, checked before the rate roll, exactly as the game does
+        // (`NPC.cs:312-317`: `nearbyActiveNPCs >= maxSpawns` first, then `rand.Next(spawnRate)`).
+        if nearby_active_npcs(npcs, player.position) >= band {
+            continue;
+        }
         if journey_world {
             let multiplier = journey.spawn_rate_multiplier(player.slot);
             rate = ((rate as f32) / multiplier).max(1.0) as u32;
@@ -1010,15 +1226,19 @@ pub fn try_spawn(
         if rng.random_range(0..rate.max(1)) != 0 {
             continue;
         }
-        // `spawnFriendly` (`NPC.cs:795-924`, see `rates`'s own doc): this attempt should draw a
-        // friendly critter instead of a monster. This project has no friendly-critter table to
-        // draw from yet — a disclosed, separate gap, not this one's to close — so the honest thing
-        // is to skip the attempt rather than spawn a monster real vanilla would not have here.
-        // What the town suppression this item exists to fix is actually for — fewer hostile
-        // spawns near a populated base — still holds either way.
-        if spawn_friendly {
-            continue;
-        }
+        // `spawnFriendly` (`NPC.cs:795-924`, see `rates`'s own doc): when a populated base has
+        // quieted the wild, this attempt draws a harmless critter instead of a monster rather than
+        // being thrown away. It is carried down into the candidate loop below, where the same
+        // ground and safe-zone checks apply, and resolved against `friendly_pool`'s critter table.
+
+        // The biome is the *player's* zone, worked out once from where they stand, not re-read at
+        // each candidate tile. The game classifies the zone on the player (`SceneMetrics` scans
+        // around the player's centre and `SetSpawnFlags` copies `player.Zone*` straight across,
+        // `NPC.cs:382-397`); reading it at the far edge of the spawn box instead let a player in
+        // the middle of a biome draw the wrong pool whenever a candidate happened to land just
+        // outside it. Computed here, after the rate roll, so the 169x124 scan is paid for only on
+        // the roughly one attempt in six hundred that will actually try to place something.
+        let player_biome = biome_at(world, px, py);
 
         // Try a handful of candidate tiles rather than scanning the whole area.
         for _ in 0..20 {
@@ -1071,9 +1291,11 @@ pub fn try_spawn(
             // her every piece of wire in the game. Each one is gated on its real vanilla condition
             // (`bound_gate`), so the Wizard, Mechanic and Goblin Tinkerer are no longer findable
             // day one and the Golfer wants the underground desert.
-            if matches!(depth, Depth::Underground | Depth::Cavern)
+            // A bound resident is a monster-path find, never a friendly attempt's.
+            if !spawn_friendly
+                && matches!(depth, Depth::Underground | Depth::Cavern)
                 && rng.random_range(0..BOUND_RARITY) == 0
-                && let Some(bound) = pick_bound(world, npcs, depth, biome_at(world, x, y), y, rng)
+                && let Some(bound) = pick_bound(world, npcs, depth, player_biome, y, rng)
             {
                 out.push((bound, (x as f32 * 16.0, y as f32 * 16.0)));
                 break;
@@ -1081,8 +1303,26 @@ pub fn try_spawn(
 
             let npc_type = match event_type {
                 Some(npc_type) => npc_type,
+                // A friendly attempt draws a harmless critter for this place; if there is no
+                // critter for it (the underworld), the attempt is dropped rather than turned into a
+                // monster the game would not have spawned here.
+                None if spawn_friendly => {
+                    let critters = friendly_pool(depth, player_biome, world.day_time);
+                    if critters.is_empty() {
+                        continue;
+                    }
+                    critters[rng.random_range(0..critters.len())]
+                }
+                // Below the dungeon before Skeletron falls, the dungeon answers with the Dungeon
+                // Guardian instead of its ordinary residents (`NPC.cs:2646-2654`: `!downedBoss3` in
+                // the `ZoneDungeon` branch spawns 68 and returns). This is the wall the game puts up
+                // so a fresh character cannot walk in and farm dungeon loot early; without it, Angry
+                // Bones and Dark Casters spawned pre-Skeletron.
+                None if player_biome == Biome::Dungeon && !world.progress.downed_boss3 => {
+                    DUNGEON_GUARDIAN
+                }
                 None => {
-                    let biome = biome_at(world, x, y);
+                    let biome = player_biome;
                     let ordinary = pool(depth, biome, world.day_time);
                     // Hardmode adds to what a place had rather than replacing it, so a hardmode
                     // forest still has zombies in it. The underworld's additions wait for a
@@ -1103,22 +1343,30 @@ pub fn try_spawn(
                     // The caverns also draw from the six this world happens to have, which is a
                     // world-specific list rather than a table. It counts as one entry in the
                     // draw, as the game counts it — not six — so a world's own monsters are a
-                    // seasoning on the cavern pool rather than most of it.
+                    // seasoning on the cavern pool rather than most of it. A sentinel stands in for
+                    // it in the weighted pick below.
                     let world_specific = depth == Depth::Cavern && biome == Biome::Forest;
-                    let total =
-                        ordinary.len() + extra.len() + bloody.len() + usize::from(world_specific);
-                    if total == 0 {
-                        continue;
+                    let mut candidates: Vec<u16> = Vec::with_capacity(
+                        ordinary.len() + extra.len() + bloody.len() + usize::from(world_specific),
+                    );
+                    candidates.extend_from_slice(ordinary);
+                    candidates.extend_from_slice(extra);
+                    candidates.extend_from_slice(bloody);
+                    if world_specific {
+                        candidates.push(CAVERN_SENTINEL);
                     }
-                    let at = rng.random_range(0..total);
-                    if at < ordinary.len() {
-                        ordinary[at]
-                    } else if at < ordinary.len() + extra.len() {
-                        extra[at - ordinary.len()]
-                    } else if at < ordinary.len() + extra.len() + bloody.len() {
-                        bloody[at - ordinary.len() - extra.len()]
-                    } else {
+                    let alive_count = |ty: u16| {
+                        npcs.iter()
+                            .filter(|(_, n)| n.npc_type == ty && n.is_alive())
+                            .count()
+                    };
+                    let Some(ty) = choose_weighted(&candidates, &alive_count, rng) else {
+                        continue;
+                    };
+                    if ty == CAVERN_SENTINEL {
                         events.cavern_monsters.pick(rng)
+                    } else {
+                        ty
                     }
                 }
             };
@@ -1294,6 +1542,134 @@ mod tests {
         }
     }
 
+    /// Every id in a hostile pool is a monster, never a damage-0 critter (`NPC.cs`: critters spawn
+    /// down the `spawnFriendly` path, never at the player). Fails before the fix, when the day
+    /// forest listed the bunny, bird, squirrel and frog and the ocean listed the goldfish, all
+    /// damage 0, so a base under attack could be "attacked" by a bunny.
+    #[test]
+    fn no_hostile_pool_names_a_critter() {
+        use terrustia_proto::npc_data::npc_stats;
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for biome in [
+                Biome::Forest,
+                Biome::Corruption,
+                Biome::Crimson,
+                Biome::Jungle,
+                Biome::Snow,
+                Biome::Desert,
+                Biome::Ocean,
+                Biome::Dungeon,
+                Biome::Hallow,
+            ] {
+                for day in [true, false] {
+                    for t in pool(depth, biome, day) {
+                        let stats = npc_stats(*t).expect("a real type");
+                        assert!(
+                            stats.damage > 0,
+                            "{depth:?}/{biome:?} lists the critter {} in its hostile pool",
+                            stats.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The friendly-critter table `rates` deferred names only real, harmless critters. Every entry
+    /// is a defined type and every one has zero contact damage, so the friendly fork can never hand
+    /// back a monster.
+    #[test]
+    fn spawn_friendly_lists_only_real_critters() {
+        use terrustia_proto::npc_data::npc_stats;
+        let mut saw_some = false;
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for biome in [
+                Biome::Forest,
+                Biome::Corruption,
+                Biome::Crimson,
+                Biome::Jungle,
+                Biome::Snow,
+                Biome::Desert,
+                Biome::Ocean,
+                Biome::Dungeon,
+                Biome::Hallow,
+            ] {
+                for day in [true, false] {
+                    for t in friendly_pool(depth, biome, day) {
+                        saw_some = true;
+                        let stats = npc_stats(*t).expect("a real critter type");
+                        assert_eq!(
+                            stats.damage, 0,
+                            "{depth:?}/{biome:?} friendly table names the monster {}",
+                            stats.name
+                        );
+                    }
+                }
+            }
+        }
+        assert!(saw_some, "the friendly table is empty everywhere");
+    }
+
+    /// The underworld draws its heavies at the game's rates, not a flat uniform share. The Voodoo
+    /// Demon is a roughly-one-in-seventy roll in the game (`NPC.cs:4893-4897`); a six-way uniform
+    /// pick handed it out one time in six. Sampling the weighted pick, the Voodoo Demon stays under
+    /// a twentieth and the Hellbat (the cascade's fallthrough) is the plurality. Fails before the
+    /// fix: a uniform pick puts every underworld type at one in six.
+    #[test]
+    fn the_underworld_draws_a_voodoo_demon_rarely() {
+        // The underworld pool, minus the capped Bone Serpent (uncapped here, count always 0).
+        let underworld = pool(Depth::Underworld, Biome::Forest, true);
+        let none_alive = |_: u16| 0usize;
+        let mut rng = SmallRng::seed_from_u64(99);
+        let mut voodoo = 0u32;
+        let mut hellbat = 0u32;
+        const N: u32 = 60_000;
+        for _ in 0..N {
+            match choose_weighted(underworld, &none_alive, &mut rng) {
+                Some(66) => voodoo += 1,
+                Some(60) => hellbat += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            voodoo < N / 20,
+            "voodoo demons drawn {voodoo}/{N}, far more than the game's ~1/70",
+        );
+        assert!(
+            hellbat > voodoo * 10,
+            "the hellbat should dominate the underworld: {hellbat} vs {voodoo} voodoo",
+        );
+    }
+
+    /// A type already at its active cap is never drawn (`active_cap`; the game's `!AnyNPCs(39)` on
+    /// the Bone Serpent, `NPC.cs:4885`). Fails before the fix, when a uniform pick had no notion of
+    /// a cap at all and would start a second serpent while the first was alive.
+    #[test]
+    fn a_capped_type_is_never_drawn_while_at_its_cap() {
+        let underworld = pool(Depth::Underworld, Biome::Forest, true);
+        assert!(
+            underworld.contains(&39),
+            "the underworld has the bone serpent"
+        );
+        // One bone serpent already alive: it is at its cap of one.
+        let serpent_alive = |t: u16| usize::from(t == 39);
+        let mut rng = SmallRng::seed_from_u64(7);
+        for _ in 0..20_000 {
+            let drawn = choose_weighted(underworld, &serpent_alive, &mut rng);
+            assert_ne!(drawn, Some(39), "drew a second bone serpent past its cap");
+        }
+    }
+
     #[test]
     fn surface_forest_swaps_between_day_and_night() {
         let day = pool(Depth::Surface, Biome::Forest, true);
@@ -1310,13 +1686,91 @@ mod tests {
         assert_eq!(biome_at(&world, world.width() - 10, 100), Biome::Ocean);
     }
 
+    /// Fill a `w`-by-`h` block of one tile type with its top-left `dx`,`dy` from a centre.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_block(
+        world: &mut World,
+        cx: i32,
+        cy: i32,
+        dx: i32,
+        dy: i32,
+        w: i32,
+        h: i32,
+        block: u16,
+    ) {
+        use terrustia_proto::tile::Tile;
+        for yy in 0..h {
+            for xx in 0..w {
+                world.set_tile(cx + dx + xx, cy + dy + yy, Tile::block(block));
+            }
+        }
+    }
+
+    /// Blank the whole 169x124 scan box (with a margin) to plain dirt, so what the scan reads is
+    /// only what a test then paints on. The generated test world is a cramped 800 wide, close
+    /// enough that its evil band sometimes sits inside the box around the middle; that is a fact
+    /// about a tiny world, not the scan, so a test that wants a clean forest makes one.
+    fn plain_box(world: &mut World, cx: i32, cy: i32) {
+        use terrustia_proto::tile::Tile;
+        for dy in -70..=70 {
+            for dx in -90..=90 {
+                world.set_tile(cx + dx, cy + dy, Tile::block(0)); // dirt
+            }
+        }
+    }
+
     #[test]
-    fn a_generated_forest_reads_as_forest() {
-        let world = test_world();
-        let x = world.width() / 2;
+    fn plain_terrain_reads_as_forest() {
+        let mut world = test_world();
+        let (cx, cy) = (world.width() / 2, i32::from(world.surface) + 30);
+        plain_box(&mut world, cx, cy);
+        assert_eq!(biome_at(&world, cx, cy), Biome::Forest);
+    }
+
+    /// The biome scan reads the game's 169x124 box against the game's per-biome thresholds, not a
+    /// 41x41 box against a flat 60 (`SceneMetrics.cs:16`,`24-58`). Fails before the fix on two
+    /// counts, each its own assertion below: a 100-tile pocket of corruption used to *be*
+    /// corruption (the flat 60 threshold, now 300), and corruption sitting thirty tiles out was
+    /// invisible (past the old radius-20 box, inside the new one).
+    #[test]
+    fn the_biome_scan_uses_the_games_box_and_thresholds() {
+        const EBONSTONE: u16 = 23;
+        let base = test_world();
+        let cx = base.width() / 2;
+        let cy = i32::from(base.surface) + 40;
+
+        // A clean forest, then a pocket of 100 corrupt tiles (10x10): over the old flat 60, under
+        // the real 300, so this must now read as forest where it used to read as corruption.
+        let mut world = test_world();
+        plain_box(&mut world, cx, cy);
         assert_eq!(
-            biome_at(&world, x, i32::from(world.surface) + 30),
-            Biome::Forest
+            biome_at(&world, cx, cy),
+            Biome::Forest,
+            "baseline is forest"
+        );
+        fill_block(&mut world, cx, cy, -5, -5, 10, 10, EBONSTONE);
+        assert_eq!(
+            biome_at(&world, cx, cy),
+            Biome::Forest,
+            "a 100-tile pocket is under the 300 corruption threshold",
+        );
+
+        // A genuine 400-tile corruption (20x20) does read as corruption.
+        let mut world = test_world();
+        plain_box(&mut world, cx, cy);
+        fill_block(&mut world, cx, cy, -10, -10, 20, 20, EBONSTONE);
+        assert_eq!(biome_at(&world, cx, cy), Biome::Corruption);
+
+        // 400 corrupt tiles placed entirely thirty-plus tiles to the right are inside the game's
+        // box but were outside the old radius-20 one: they must be counted, so this reads as
+        // corruption where the old scan saw an empty forest.
+        let mut world = test_world();
+        plain_box(&mut world, cx, cy);
+        fill_block(&mut world, cx, cy, 25, -10, 20, 20, EBONSTONE);
+        assert_eq!(
+            biome_at(&world, cx, cy),
+            Biome::Corruption,
+            "the scan must reach past the old radius-20 box",
         );
     }
 
@@ -1340,12 +1794,15 @@ mod tests {
     }
 
     /// A base with three or more residents stops producing monsters entirely (C1-b item 8):
-    /// `NPC.cs:917-921`'s own classic-mode `spawnFriendly = true` on every attempt, which this
-    /// project's own `try_spawn` skips outright rather than fabricate a friendly critter it has no
-    /// table for (see `try_spawn`'s own comment on the fork). Fails before the fix, when town
-    /// suppression was a flat `3.0x` rate multiplier that still let monsters through.
+    /// `NPC.cs:917-921`'s own classic-mode `spawnFriendly = true` on every attempt. What that
+    /// attempt draws instead is now a real thing, not a dropped spawn: the game spawns harmless
+    /// critters near a populated base, not nothing (`NPC.cs:2099-2624`). So a minute of ticks
+    /// produces spawns, and every one of them is a damage-0 critter, never a monster. Fails before
+    /// the critter table was wired: `try_spawn` used to skip the friendly attempt outright, so the
+    /// count was flatly zero and the "some critters appear" half of this could never hold.
     #[test]
-    fn a_populated_base_produces_no_monsters_at_all() {
+    fn a_populated_base_produces_critters_and_no_monsters() {
+        use terrustia_proto::npc_data::npc_stats;
         const GUIDE: u16 = 22;
         let world = test_world();
         let mut npcs = NpcStore::new();
@@ -1366,7 +1823,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(13);
         let mut spawned = 0;
         for _ in 0..3600 {
-            spawned += try_spawn(
+            for (npc_type, _) in try_spawn(
                 &world,
                 &npcs,
                 &players,
@@ -1374,12 +1831,123 @@ mod tests {
                 &JourneyPowers::default(),
                 &mut rng,
                 0,
-            )
-            .len();
+            ) {
+                spawned += 1;
+                let stats = npc_stats(npc_type).expect("a real type");
+                assert_eq!(
+                    stats.damage, 0,
+                    "a populated base spawned a monster ({}), not a critter",
+                    stats.name
+                );
+            }
+        }
+        assert!(
+            spawned > 0,
+            "a populated base should still produce friendly critters, not nothing"
+        );
+    }
+
+    /// Build a world whose middle is a dungeon: an open pocket around `(cx, cy)` with a dungeon-
+    /// brick floor and a deep dungeon-brick fill below it, enough brick in the scan box for
+    /// `biome_at` to read Dungeon. Returns the world and the tile centre.
+    fn dungeon_world() -> (World, (i32, i32)) {
+        use terrustia_proto::tile::Tile;
+        const DUNGEON_BRICK: u16 = 41;
+        let mut world = test_world();
+        let cx = world.width() / 2;
+        let cy = i32::from(world.surface) + 70; // underground, clear of the surface
+        for yy in (cy - 55)..=(cy + 55) {
+            for xx in (cx - 110)..=(cx + 110) {
+                // Air at and above the walk level, solid dungeon brick below it.
+                let tile = if yy <= cy {
+                    Tile::AIR
+                } else {
+                    Tile::block(DUNGEON_BRICK)
+                };
+                world.set_tile(xx, yy, tile);
+            }
         }
         assert_eq!(
-            spawned, 0,
-            "a minute of ticks in a populated base should produce no monsters at all"
+            biome_at(&world, cx, cy),
+            Biome::Dungeon,
+            "the middle is a dungeon"
+        );
+        (world, (cx, cy))
+    }
+
+    fn dungeon_player(cx: i32, cy: i32) -> Vec<Option<Player>> {
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (cx as f32 * 16.0, cy as f32 * 16.0);
+        vec![Some(player)]
+    }
+
+    /// The dungeon before Skeletron is beaten spawns the Dungeon Guardian (68), not its ordinary
+    /// residents (`NPC.cs:2646-2654`). Once Skeletron is down the same dungeon spawns Angry Bones
+    /// and the rest and never the Guardian. Fails before the gate: a fresh dungeon spawned ordinary
+    /// enemies a new character could farm.
+    #[test]
+    fn the_dungeon_gates_on_the_guardian_before_skeletron() {
+        let (mut world, (cx, cy)) = dungeon_world();
+        let npcs = NpcStore::new();
+        let players = dungeon_player(cx, cy);
+
+        // Skeletron not yet beaten: every spawn the dungeon offers is the Guardian.
+        world.progress.downed_boss3 = false;
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut before = 0;
+        for _ in 0..40_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            ) {
+                assert_eq!(
+                    npc_type, DUNGEON_GUARDIAN,
+                    "pre-Skeletron dungeon spawned an ordinary enemy"
+                );
+                before += 1;
+            }
+        }
+        assert!(
+            before > 0,
+            "the pre-Skeletron dungeon never spawned anything"
+        );
+
+        // Skeletron down: the ordinary dungeon pool returns and the Guardian never does.
+        world.progress.downed_boss3 = true;
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut after = 0;
+        for _ in 0..40_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            ) {
+                assert_ne!(
+                    npc_type, DUNGEON_GUARDIAN,
+                    "the Guardian should be gone once Skeletron is down"
+                );
+                assert!(
+                    pool(depth_at(&world, cy), Biome::Dungeon, world.day_time).contains(&npc_type),
+                    "post-Skeletron dungeon spawned {npc_type}, not a dungeon regular",
+                );
+                after += 1;
+            }
+        }
+        assert!(
+            after > 0,
+            "the post-Skeletron dungeon never spawned anything"
         );
     }
 
@@ -1517,6 +2085,62 @@ mod tests {
                 "spawned past the cap"
             );
         }
+    }
+
+    /// The cap is near-player, not world-global: a crowd of monsters on the far side of the map
+    /// does not hold a lone player's own spawns down (`NPC.cs:313`, `player.nearbyActiveNPCs`).
+    /// Fails before the fix, when the cap counted every NPC in the world, so the same far-off crowd
+    /// silenced spawns everywhere at once.
+    #[test]
+    fn far_off_monsters_do_not_cap_a_lone_player() {
+        let world = test_world();
+        let mut npcs = NpcStore::new();
+
+        // A whole screen of players' worth of monsters, parked at the far edge of the world.
+        let (sx, sy) = (world.spawn_x as i32, world.spawn_y as i32);
+        let far_x = if sx > world.width() / 2 {
+            10
+        } else {
+            world.width() - 10
+        };
+        assert!(
+            ((far_x - sx).abs() as f32 * 16.0) > ACTIVE_RANGE_X,
+            "the crowd must be outside the active range to make the point",
+        );
+        for _ in 0..60 {
+            npcs.spawn(3, (far_x as f32 * 16.0, sy as f32 * 16.0));
+        }
+
+        let players = {
+            let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+            drop(out_rx);
+            let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+            player.state = crate::game::ConnState::Playing;
+            player.position = (sx as f32 * 16.0, sy as f32 * 16.0);
+            vec![Some(player)]
+        };
+
+        let mut rng = SmallRng::seed_from_u64(4);
+        let mut seen = 0;
+        for _ in 0..20_000 {
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            )
+            .len();
+            if seen > 0 {
+                break;
+            }
+        }
+        assert!(
+            seen > 0,
+            "a lone player should still spawn with the only other monsters a map away",
+        );
     }
 
     /// A single test player, `is_playing` and clear of the safe zone, with a real channel behind
