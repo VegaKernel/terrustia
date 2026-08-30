@@ -2972,6 +2972,14 @@ impl GameServer {
             for (tx, ty) in fired.timers_stopped {
                 self.running_timers.remove(&(tx, ty));
             }
+            // A pressed Detonator is scheduled to pop back up. Like vanilla's `CheckMech(anchor, 60)`
+            // (`Wiring.cs:362`), an anchor already counting down is left alone rather than refreshed,
+            // so a second click within the window does not extend it (L3-26).
+            for anchor in fired.detonators {
+                self.detonator_resets
+                    .entry(anchor)
+                    .or_insert(DETONATOR_WINDOW);
+            }
 
             if rounds >= MAX_CASCADE {
                 if !fired.lamps.is_empty() {
@@ -3396,6 +3404,35 @@ impl GameServer {
             *ticks -= 1;
             *ticks > 0
         });
+    }
+
+    /// Count down every pressed Detonator and pop the ones whose window has run out back up.
+    ///
+    /// `UpdateMech`'s own type-411 branch (`Wiring.cs:212-244`): when the sixty-frame window a click
+    /// registered runs out, the two-by-two frame is shifted back and the change broadcast, and the
+    /// entry forgotten. Kept off the trap cooldown map because, unlike a trap, expiry here *does*
+    /// something (L3-26). The pressed anchors are collected first so the world can be mutated without
+    /// borrowing the map across the loop.
+    pub(super) fn tick_detonators(&mut self) {
+        if self.detonator_resets.is_empty() {
+            return;
+        }
+        let mut due = Vec::new();
+        self.detonator_resets.retain(|&anchor, ticks| {
+            *ticks -= 1;
+            if *ticks <= 0 {
+                due.push(anchor);
+                false
+            } else {
+                true
+            }
+        });
+        for anchor in due {
+            let changed = crate::world::wiring::reset_detonator(&mut self.world, anchor);
+            for (cx, cy) in changed {
+                self.broadcast_tile(cx, cy);
+            }
+        }
     }
 
     /// One tick of settling liquid.
@@ -6751,6 +6788,47 @@ mod wired_mines_and_doors {
             found[0].1,
             (50.0 * 16.0 + 8.0, 50.0 * 16.0 + 8.0),
             "dropped at the cut tile's own centre"
+        );
+    }
+
+    /// A clicked Detonator is momentary: it presses down, and pops back up once its window runs
+    /// out, driven end to end through `hit_switch` (the press and the report), `apply_circuit` (the
+    /// registration) and `tick_detonators` (the `UpdateMech` reset) (L3-26).
+    ///
+    /// Fails before the fix: the Detonator latched like a Lever with nothing to release it, so it
+    /// stayed pressed forever — `tick_detonators` and the report it consumes did not exist.
+    #[test]
+    fn a_wired_detonator_pops_back_up_after_its_window() {
+        let mut server = server();
+        // An unpressed 2x2 Detonator, anchor at (100,100): frameX is the column, frameY the row.
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                let mut cell = Tile::framed(411, (dx * 18) as i16, (dy * 18) as i16);
+                cell.flags.set(TileFlags::WIRE_RED, true);
+                server.world.set_tile(100 + dx, 100 + dy, cell);
+            }
+        }
+        let fired = crate::world::wiring::hit_switch(&mut server.world, 100, 100);
+        server.apply_circuit(fired, (100, 100));
+        assert_eq!(
+            server.world.tile(100, 100).frame_x,
+            36,
+            "the click presses it down"
+        );
+
+        for _ in 0..DETONATOR_WINDOW - 1 {
+            server.tick_detonators();
+        }
+        assert_eq!(
+            server.world.tile(100, 100).frame_x,
+            36,
+            "still down inside its window"
+        );
+        server.tick_detonators();
+        assert_eq!(
+            server.world.tile(100, 100).frame_x,
+            0,
+            "and pops back up when the window runs out"
         );
     }
 }

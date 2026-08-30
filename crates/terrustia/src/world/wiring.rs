@@ -278,30 +278,42 @@ pub struct Fired {
     pub reached: usize,
     /// Whether the circuit was cut short by its size cap.
     pub truncated: bool,
-    /// Tiles already acted on in this run, which are not acted on again — vanilla's `_wireSkip`,
-    /// added to by `SkipWire` (`Wiring.cs:117-122`).
+    /// Tiles already acted on for the colour flooding right now — vanilla's `_wireSkip`, added to by
+    /// `SkipWire` (`Wiring.cs:117-122`).
     ///
-    /// SEAM (L3-03/L3-26/L3-27/L3-30, the CheckMech group). Vanilla keeps *two* gates, and this
-    /// model has only this one. `_wireSkip` is cleared after **each** colour's `HitWire`
-    /// (`Wiring.cs:977`), so a device with two colours on it is acted on **once per colour** —
-    /// a double-wired lamp toggles twice (L3-03), ending where it started, which is intended.
-    /// This field is instead kept across all four colours, so such a device toggles only once.
+    /// Vanilla's two gates, transcribed as two sets (the CheckMech group). `_wireSkip` is the
+    /// per-colour one: cleared after each colour's `HitWire` (`Wiring.cs:977`) and reset before the
+    /// next in [`run_from`], so a device on two colours is acted on **once per colour** — a
+    /// double-wired lamp or light toggles twice, ending where it started, which is intended (L3-03).
+    /// Every lamp, light, conveyor belt, stone block and multi-tile device footprint is gated here.
     ///
-    /// The reason clearing it per colour is not a one-line fix is the other gate, `CheckMech`
-    /// (`Wiring.cs:455-475`) plus its per-frame `UpdateMech` (`145-257`): a persistent, cross-frame
-    /// cooldown table keyed by tile. In vanilla the two gates are split by device, and this model
-    /// routes several `CheckMech` devices through `_wireSkip` instead — most visibly the track
-    /// switch (`case 314: if (CheckMech(i, j, 5))`, `Wiring.cs:1749`), which vanilla flips **once
-    /// per trip** regardless of colour count, but which per-colour clearing here would flip twice.
-    /// Doing L3-03 correctly therefore means porting the `CheckMech`/`UpdateMech` table as a unit:
-    /// track switch (314, time 5), traps (137, 90/200/300 by subtype), geyser (443, 900), statues
-    /// (105, 30), and the Detonator (411, 60) become `CheckMech`-gated (act once per trip, on a
-    /// cross-frame cooldown), while lamps and the rest stay `_wireSkip`-gated (per colour). That
-    /// same table then resets the Detonator after firing (`UpdateMech` type 411, L3-26), re-homes
-    /// the wired track switch onto the circuit pulse (L3-27), and carries the timer self-fire
-    /// (type 144) so timers are not re-registered from a load scan (L3-30). Deferred as a unit,
-    /// not landed piecemeal, since each half contradicts the other without the whole table.
+    /// The other gate is the persistent, cross-frame `CheckMech` table (`Wiring.cs:455-475`) with its
+    /// per-frame `UpdateMech` (`145-257`). This model splits that table by device rather than holding
+    /// one thousand-entry array: the *reported* CheckMech devices (traps, geyser, statues, and the
+    /// clicked Detonator's reset) carry their cooldown on the caller's own `mech_cooldown`/timer
+    /// tables, and the one in-flood CheckMech device, the track switch (`case 314: CheckMech(i, j,
+    /// 5)`, `Wiring.cs:1749`), is gated by [`Self::acted`] so it flips once per trip whatever the
+    /// colour count (L3-27). The timer self-fire (type 144) is carried the same pragmatic way: timers
+    /// are re-derived from world state at load rather than from an unsaved table (L3-30). See
+    /// [`Self::acted`] for the per-trip half.
     skipped: HashSet<(i32, i32)>,
+    /// Tiles acted on already for the whole **trip**, across all four colours — the in-flood half of
+    /// vanilla's `CheckMech` (`Wiring.cs:455-475`).
+    ///
+    /// Only the track switch (`MINECART_TRACK`) uses this. Unlike [`Self::skipped`] it is never
+    /// cleared between colours, so the switch flips once per trip however many colours reach it,
+    /// which is what `CheckMech(i, j, 5)` does within one `TripWire` (`UpdateMech` cannot run
+    /// mid-trip, so the table only grows). The cross-*frame* half of `CheckMech(5)` — refusing a
+    /// second flip within five frames across separate trips — is not modelled: no realistic
+    /// contraption trips the same switch twice inside five frames (the fastest timer is fifteen), so
+    /// the per-trip set is behaviourally identical in practice. Disclosed rather than silent.
+    acted: HashSet<(i32, i32)>,
+    /// Detonators (`TileID.Detonator`, 411) a click just pressed, by their top-left anchor, for the
+    /// caller to pop back up after a cooldown — the `UpdateMech` reset that makes the button
+    /// momentary rather than latching (`Wiring.cs:219-244`, registered by the `CheckMech(_, _, 60)`
+    /// at `Wiring.cs:362`). Reported like traps and statues, since the reset happens sixty frames
+    /// later, outside any trip, on the caller's own clock (L3-26).
+    pub detonators: Vec<(i32, i32)>,
     /// Which way each pixel box the flood crossed has been entered — bit `2` for a vertical
     /// crossing, bit `1` for a horizontal one. A box crossed both ways (`3`) flips its frame in
     /// [`pixel_box_pass`]; accumulated across all four colours, exactly as vanilla's own
@@ -379,6 +391,14 @@ pub fn hit_switch(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
                 }
             }
         }
+        // A Detonator is momentary, not latching: clicking it registers a `CheckMech(anchor, 60)`
+        // (`Wiring.cs:360-363`) whose `UpdateMech` pass pops its frame back up sixty frames later
+        // (`Wiring.cs:219-244`). That reset happens outside any trip, on the caller's clock, so the
+        // anchor is reported here for the caller to time rather than latched shut forever (L3-26). A
+        // Lever really does latch, so only the Detonator is reported.
+        if tile.block == DETONATOR {
+            out.detonators.push((ax, ay));
+        }
         run_from(world, ax, ay, 2, 2, &mut out);
         return out;
     }
@@ -453,22 +473,6 @@ pub fn trip_wire(world: &mut impl WiredWorld, x: i32, y: i32) -> Fired {
 
 /// Flood every colour present on a footprint, each as its own circuit.
 fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &mut Fired) {
-    // The tiles a circuit starts from are not acted on by it, with one exception: a track switch.
-    // Every other trigger this protects (lever, switch, timer) either already had its own frame
-    // toggled directly, before `run_from` was ever called (`hit_switch`'s own lever/switch step),
-    // or fires on its own schedule and must not retrigger itself every time its own circuit reaches
-    // it (`trip_wire`'s timer — without this a timer's circuit would reach the timer and switch it
-    // straight back off, so every timer would fire exactly once). A track switch gets no such
-    // direct step (see `act`'s own `MINECART_TRACK` case for why) — the flood reaching *itself* is
-    // the only thing that ever flips one a player hits directly, wired to nothing else at all.
-    for dx in 0..w {
-        for dy in 0..h {
-            let (tx, ty) = (x + dx, y + dy);
-            if world.tile(tx, ty).block != MINECART_TRACK {
-                out.skipped.insert((tx, ty));
-            }
-        }
-    }
     for colour in Wire::ALL {
         let mut seeds = Vec::new();
         for dx in 0..w {
@@ -480,6 +484,26 @@ fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &m
         }
         if seeds.is_empty() {
             continue;
+        }
+        // `_wireSkip` is a *per-colour* set in vanilla, cleared after each colour's `HitWire`
+        // (`Wiring.cs:977`). Reset it here so a device on two colours is acted on once per colour
+        // rather than once per trip (L3-03) — a double-wired lamp or light toggles twice, ending
+        // where it started, which is intended.
+        out.skipped.clear();
+        // The tiles a circuit starts from are not acted on by it, with one exception: a track
+        // switch. `HitWire` pre-skips every seed at its head (`SkipWire(point)`, `Wiring.cs:843`),
+        // which is what stops a trigger's own tile being acted on by its own circuit: a lever and a
+        // switch already had their frame toggled directly (`hit_switch`), and a timer would
+        // otherwise switch itself straight back off the first time its own circuit reached it
+        // (`trip_wire`). A seed is pre-skipped only for the colours it actually carries, but that is
+        // every colour that could ever reach it, so the protection is complete. A track switch gets
+        // no such step (see `act`'s own `MINECART_TRACK` case): it is gated by the persistent
+        // `acted` set (vanilla's `CheckMech`), not `_wireSkip`, and the flood reaching its own tile
+        // is the only thing that flips one a player hits directly, wired to nothing else at all.
+        for &(sx, sy) in &seeds {
+            if world.tile(sx, sy).block != MINECART_TRACK {
+                out.skipped.insert((sx, sy));
+            }
         }
         // L3-05: pumps and teleporters are resolved per colour, not pooled. Each colour's flood
         // fills its own inlet/outlet and teleporter buffers, cleared here before it starts.
@@ -714,8 +738,13 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         // A frame in the ordinary group only actually has something to swap to if its own
         // `BackTrack()` (`frameY`) was ever set — not every track tile has a second track stacked
         // underneath it — matching vanilla's own `BackTrack() != -1` guard.
+        // Gated by `acted`, not `skipped`: vanilla's `CheckMech(i, j, 5)` is a cross-colour,
+        // cross-frame table, so a track switch flips **once per trip** however many colours reach it
+        // (L3-27), unlike the per-colour `_wireSkip` every lamp and light uses. `acted` is that table
+        // for the length of one trip: the first colour to reach the switch flips it and records it,
+        // and every later colour finds it already there and leaves it alone.
         if track_type(tile.frame_x) == 0 && tile.frame_y != -1 {
-            if !out.skipped.insert((x, y)) {
+            if !out.acted.insert((x, y)) {
                 return;
             }
             let mut flipped = tile;
@@ -724,7 +753,7 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
             world.set_tile(x, y, flipped);
             out.changed.push((x, y));
         } else if let Some(new_frame) = booster_switch_target(world, x, y, tile.frame_x) {
-            if !out.skipped.insert((x, y)) {
+            if !out.acted.insert((x, y)) {
                 return;
             }
             let mut flipped = tile;
@@ -1382,6 +1411,35 @@ pub fn timer_is_running(tile: Tile) -> bool {
     tile.is_active() && tile.block == TIMER && tile.frame_y != 0
 }
 
+/// Pop a pressed Detonator back up, returning the cells that changed for the caller to broadcast.
+///
+/// `UpdateMech`'s own type-411 reset (`Wiring.cs:219-244`), run when the sixty-frame `CheckMech`
+/// registered by a click (`Wiring.cs:362`) runs out. The direction is read from the anchor: a
+/// pressed pair (`frameX >= 36`) shifts back by 36, an already-released one forward by 36, and every
+/// cell of the two-by-two that is really a Detonator moves together. Reading the anchor live rather
+/// than remembering the press direction is deliberate: it is exactly what vanilla does, down to the
+/// edge case where a second click released the button early and the timer then presses it again.
+pub fn reset_detonator(world: &mut impl WiredWorld, anchor: (i32, i32)) -> Vec<(i32, i32)> {
+    let (ax, ay) = anchor;
+    let delta: i16 = if world.tile(ax, ay).frame_x >= 36 {
+        -36
+    } else {
+        36
+    };
+    let mut changed = Vec::new();
+    for k in ax..ax + 2 {
+        for l in ay..ay + 2 {
+            let mut cell = world.tile(k, l);
+            if cell.is_active() && cell.block == DETONATOR {
+                cell.frame_x += delta;
+                world.set_tile(k, l, cell);
+                changed.push((k, l));
+            }
+        }
+    }
+    changed
+}
+
 /// What one logic gate decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateResult {
@@ -2034,6 +2092,82 @@ mod tests {
         hit_switch(&mut board, 100, 100);
         assert!(board.tile(101, 100).flags.has(TileFlags::ACTUATED), "red");
         assert!(board.tile(100, 101).flags.has(TileFlags::ACTUATED), "blue");
+    }
+
+    /// A single device wired on two colours is acted on once *per colour*, not once per trip:
+    /// vanilla clears `_wireSkip` after each colour's `HitWire` (`Wiring.cs:977`), so a lamp on two
+    /// colours toggles twice and ends where it started (L3-03).
+    ///
+    /// Fails before the fix: the skip set persisted across all four colours, so the lamp toggled
+    /// only once and finished lit. Counting the reports distinguishes "toggled twice" (back to off)
+    /// from "never toggled" (also off), which a bare final-state check could not.
+    #[test]
+    fn a_device_on_two_colours_is_acted_on_once_per_colour() {
+        let mut board = Board(HashMap::new());
+        let mut lever = wired(136, Wire::Red);
+        lever.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(100, 100, lever);
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            wire.flags.set(TileFlags::WIRE_BLUE, true);
+            board.set_tile(x, 100, wire);
+        }
+        let mut lamp = wired(LAMP, Wire::Red);
+        lamp.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(105, 100, lamp);
+        assert_eq!(board.tile(105, 100).frame_x, 0, "starts off");
+
+        let fired = hit_switch(&mut board, 100, 100);
+        let toggles = fired.changed.iter().filter(|&&c| c == (105, 100)).count();
+        assert_eq!(toggles, 2, "the lamp toggled once for each colour");
+        assert_eq!(
+            board.tile(105, 100).frame_x,
+            0,
+            "two toggles leave it where it started"
+        );
+    }
+
+    /// A Detonator is reported for the caller to pop back up, and [`reset_detonator`] reverses the
+    /// press. Clicking it flips its 2x2 frame like a lever (`Wiring.cs:349-373`), reports its anchor
+    /// (the `CheckMech(_, _, 60)` at `Wiring.cs:362`), and the reset (`UpdateMech`, `Wiring.cs:219-
+    /// 244`) shifts every cell back (L3-26).
+    #[test]
+    fn a_clicked_detonator_is_reported_and_pops_back_up() {
+        let mut board = Board(HashMap::new());
+        // An unpressed 2x2 Detonator, anchor at (100,100): frameX is the column (0/18), frameY the
+        // row (0/18).
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                let mut cell = Tile::framed(DETONATOR, (dx * 18) as i16, (dy * 18) as i16);
+                cell.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(100 + dx, 100 + dy, cell);
+            }
+        }
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.detonators, vec![(100, 100)], "reported for reset");
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                assert_eq!(
+                    board.tile(100 + dx, 100 + dy).frame_x,
+                    (dx * 18) as i16 + 36,
+                    "pressed down"
+                );
+            }
+        }
+
+        let changed = reset_detonator(&mut board, (100, 100));
+        assert_eq!(changed.len(), 4, "all four cells reset");
+        for dx in 0..2i32 {
+            for dy in 0..2i32 {
+                assert_eq!(
+                    board.tile(100 + dx, 100 + dy).frame_x,
+                    (dx * 18) as i16,
+                    "popped back up"
+                );
+            }
+        }
     }
 
     /// A real Lever (`TileID.Lever`, 132) is two tiles wide and flips *both* halves of its own
@@ -3029,32 +3163,10 @@ mod tests {
         assert_eq!(board.tile(105, 100).frame_x, LAMP_ON, "the lamp came on");
     }
 
-    /// A lamp on two colours is toggled once, not twice: the four floods share one skip list, or
-    /// a two-colour lamp would end every circuit exactly where it started.
-    #[test]
-    fn a_lamp_on_two_colours_toggles_once() {
-        let mut board = Board(HashMap::new());
-        let mut lever = wired(136, Wire::Red);
-        lever.flags.set(TileFlags::WIRE_BLUE, true);
-        board.set_tile(100, 100, lever);
-        for x in 101..105 {
-            let mut wire = Tile::AIR;
-            wire.flags.set(TileFlags::WIRE_RED, true);
-            wire.flags.set(TileFlags::WIRE_BLUE, true);
-            board.set_tile(x, 100, wire);
-        }
-        let mut lamp = Tile::framed(LAMP, 0, 0);
-        lamp.flags.set(TileFlags::WIRE_RED, true);
-        lamp.flags.set(TileFlags::WIRE_BLUE, true);
-        board.set_tile(105, 100, lamp);
-
-        hit_switch(&mut board, 100, 100);
-        assert_eq!(
-            board.tile(105, 100).frame_x,
-            LAMP_ON,
-            "on, not back off again"
-        );
-    }
+    // A lamp on two colours toggles once *per colour*, ending where it started — see
+    // `a_device_on_two_colours_is_acted_on_once_per_colour`, which replaced an earlier test here that
+    // asserted the pre-L3-03 behaviour (one shared skip list across all four colours, so it toggled
+    // only once and stayed lit). Vanilla clears `_wireSkip` after each colour (`Wiring.cs:977`).
 
     /// Hitting a timer switches it on, and hitting it again switches it off.
     #[test]
