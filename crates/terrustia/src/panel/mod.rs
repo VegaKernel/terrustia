@@ -1828,10 +1828,12 @@ async fn delete_account(
     headers: axum::http::HeaderMap,
     Json(req): Json<DeleteAccountRequest>,
 ) -> Response {
-    if let Err(resp) = authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
-        return resp;
-    }
+    let actor = match authorized(&state, &headers, perm::ADMIN_ACCOUNTS).await {
+        Ok(actor) => actor,
+        Err(resp) => return resp,
+    };
     match ask(&state, |reply| ServerEvent::PanelDeleteAccount {
+        actor,
         name: req.name,
         reply,
     })

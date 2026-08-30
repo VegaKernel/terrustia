@@ -794,9 +794,14 @@ pub enum ServerEvent {
         account: crate::admin::Account,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is: the last account
-    /// that can still edit permissions cannot be removed.
+    /// Delete an account. Guarded the same way [`Self::PanelSetAccountGroup`] is, on both counts:
+    /// the last account that can still administer the server cannot be removed, and `actor` must
+    /// already reach everything the target account's own group holds (see
+    /// [`crate::admin::store::Admin::group_within_reach`]) or the deletion is refused. Without that
+    /// second guard an `admin.accounts` holder could delete an `owner` account outright, which is a
+    /// strictly bigger escalation than anything `PanelSetAccountGroup`'s reach check stops.
     PanelDeleteAccount {
+        actor: String,
         name: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -2188,8 +2193,8 @@ impl GameServer {
             } => {
                 let _ = reply.send(self.panel_create_account(&actor, account));
             }
-            ServerEvent::PanelDeleteAccount { name, reply } => {
-                let _ = reply.send(self.panel_delete_account(&name));
+            ServerEvent::PanelDeleteAccount { actor, name, reply } => {
+                let _ = reply.send(self.panel_delete_account(&actor, &name));
             }
             ServerEvent::PanelAuditTail { n, reply } => {
                 let _ = reply.send(self.audit.tail(n));

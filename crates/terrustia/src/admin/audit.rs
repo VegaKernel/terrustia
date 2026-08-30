@@ -68,6 +68,10 @@ pub enum AuditAction {
     Mute,
     Unmute,
     Register,
+    /// An account removed outright (currently only reachable from the web panel; the console has
+    /// no equivalent command). Distinct from [`Self::GroupChange`], which only ever moves an
+    /// account between groups.
+    DeleteAccount,
     GroupChange,
     PermissionChange,
     Claim,
@@ -88,6 +92,7 @@ impl AuditAction {
             Self::Mute => "mute",
             Self::Unmute => "unmute",
             Self::Register => "register",
+            Self::DeleteAccount => "delete-account",
             Self::GroupChange => "group-change",
             Self::PermissionChange => "permission-change",
             Self::Claim => "claim",
