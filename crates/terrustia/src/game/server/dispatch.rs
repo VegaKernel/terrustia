@@ -3199,20 +3199,73 @@ impl GameServer {
             return Ok(());
         };
         let at = (player.position.0 / 16.0, player.position.1 / 16.0);
-        if !known.iter().any(|p| {
-            (f32::from(p.x) - at.0).abs() <= PYLON_REACH
-                && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
-        }) {
+
+        // The game runs five checks before it will carry anyone
+        // (`TeleportPylonsSystem.HandleTeleportRequest`, `NPC.cs`-adjacent). This used to run only
+        // the first two: you were near a pylon, and the one you were going to had its townsfolk.
+        // The other three are added here, the biome one now that there is a biome scan to run it
+        // against (L2-11).
+
+        // (1) You are standing near a pylon at all.
+        let near: Vec<&net_module::Pylon> = known
+            .iter()
+            .filter(|p| {
+                (f32::from(p.x) - at.0).abs() <= PYLON_REACH
+                    && (f32::from(p.y) - at.1).abs() <= PYLON_REACH
+            })
+            .collect();
+        if near.is_empty() {
             self.tell(slot, "You need to be near a pylon to travel.");
             return Ok(());
         }
 
+        // (2) The destination has the townsfolk living near it that it needs (all but Victory).
         if destination.kind != net_module::Pylon::VICTORY
             && self.town_npcs_near(destination.x, destination.y) < PYLON_RESIDENTS_NEEDED
         {
             self.tell(
                 slot,
                 "That pylon needs two townsfolk living near it before it will work.",
+            );
+            return Ok(());
+        }
+
+        // (3) The Lihzahrd temple is sealed until Plantera falls: a pylon inside it (a temple-brick
+        // wall, below the surface) cannot be reached early (`HandleTeleportRequest`, wall 87 gate).
+        let below_surface = i32::from(destination.y) > i32::from(self.world.surface);
+        let in_temple = self
+            .world
+            .tile(i32::from(destination.x), i32::from(destination.y))
+            .wall
+            == 87;
+        if !self.world.progress.downed_plantera && below_surface && in_temple {
+            self.tell(
+                slot,
+                "The temple's pylon will not answer until Plantera is defeated.",
+            );
+            return Ok(());
+        }
+
+        // (4) The destination pylon still sits in the biome its network belongs to.
+        if !self.pylon_accepts(&destination) {
+            self.tell(
+                slot,
+                "That pylon is no longer in the right biome to travel to.",
+            );
+            return Ok(());
+        }
+
+        // (5) At least one of the pylons you are near is itself a working source: it has its own
+        // townsfolk and matches its own biome. Being near a broken pylon is not enough.
+        let source_ready = near.iter().any(|p| {
+            (p.kind == net_module::Pylon::VICTORY
+                || self.town_npcs_near(p.x, p.y) >= PYLON_RESIDENTS_NEEDED)
+                && self.pylon_accepts(p)
+        });
+        if !source_ready {
+            self.tell(
+                slot,
+                "The pylon you are standing at is not working: it needs its townsfolk and its own biome.",
             );
             return Ok(());
         }

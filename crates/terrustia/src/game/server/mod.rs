@@ -1305,6 +1305,52 @@ impl GameServer {
             .count()
     }
 
+    /// Whether a pylon's surroundings still match its network, the game's biome gate on travelling
+    /// to it (`TeleportPylonsSystem.DoesPylonAcceptTeleportation`).
+    ///
+    /// This is the check that was missing for want of a biome scan; it runs against the same scan
+    /// the spawner uses (`spawn::biome_at`). The biome networks (Jungle, Snow, Desert, Hallow)
+    /// simply demand their biome; Purity demands the plain surface, clear of the ocean edges and of
+    /// every special biome; Beach the surface near an edge; Underground anywhere below the surface;
+    /// Underworld the underworld. Victory travels from anywhere. Mushroom and Shimmer are accepted
+    /// unconditionally, a disclosed permissive gap: this server models neither biome, so it cannot
+    /// fairly refuse a pylon of that network rather than falsely block a correctly-placed one.
+    fn pylon_accepts(&self, pylon: &net_module::Pylon) -> bool {
+        use crate::game::spawn::{Biome, Depth, biome_at, depth_at};
+        let (x, y) = (i32::from(pylon.x), i32::from(pylon.y));
+        let depth = depth_at(&self.world, y);
+        let biome = biome_at(&self.world, x, y);
+        let near_edge = x <= 380 || x >= self.world.width() - 380;
+        match pylon.kind {
+            1 => biome == Biome::Jungle,
+            2 => biome == Biome::Hallow,
+            5 => biome == Biome::Desert,
+            6 => biome == Biome::Snow,
+            // SurfacePurity: the plain surface, clear of the ocean edges and of any special biome.
+            0 => {
+                depth == Depth::Surface
+                    && !near_edge
+                    && !matches!(
+                        biome,
+                        Biome::Jungle
+                            | Biome::Snow
+                            | Biome::Desert
+                            | Biome::Hallow
+                            | Biome::Corruption
+                            | Biome::Crimson
+                    )
+            }
+            // Beach: the surface band by an ocean edge.
+            4 => depth == Depth::Surface && near_edge,
+            // Underground: anywhere below the surface.
+            3 => depth != Depth::Surface,
+            // Underworld: the underworld layer.
+            9 => depth == Depth::Underworld,
+            // Victory (8), GlowingMushroom (7) and Shimmer (10): see the doc comment.
+            _ => true,
+        }
+    }
+
     /// The whole banner kill table, as module 11 message 0.
     fn banner_state_frame(&self) -> terrustia_proto::Result<Vec<u8>> {
         let mut kills = [0u32; net_module::BANNER_SLOTS];
@@ -3052,5 +3098,85 @@ mod announcements {
         assert_eq!(line.substitutions.len(), 1);
         assert_eq!(line.substitutions[0].mode, TextMode::LocalizationKey);
         assert_eq!(line.substitutions[0].text, "NPCName.MoonLord");
+    }
+}
+
+#[cfg(test)]
+mod pylon_biome_gate {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::tile::Tile;
+
+    fn server() -> GameServer {
+        let mut world = World::empty(1200, 400, "pylon biome gate probe");
+        world.surface = 100;
+        world.rock_layer = 200;
+        GameServer::new(Config::default(), world)
+    }
+
+    fn pylon(kind: u8, x: i16, y: i16) -> net_module::Pylon {
+        net_module::Pylon { x, y, kind }
+    }
+
+    /// Paint a `side*2`-square patch of one tile type centred on a point, enough to carry a biome.
+    fn paint(server: &mut GameServer, x: i16, y: i16, block: u16, side: i32) {
+        for dy in -side..side {
+            for dx in -side..side {
+                server
+                    .world
+                    .set_tile(i32::from(x) + dx, i32::from(y) + dy, Tile::block(block));
+            }
+        }
+    }
+
+    /// L2-21 check (4): a pylon is a valid destination only while it still sits in its own biome
+    /// (`TeleportPylonsSystem.DoesPylonAcceptTeleportation`). Fails before the fix, when there was
+    /// no biome gate at all and a pylon planted in the wrong biome still carried players.
+    #[test]
+    fn a_pylon_must_match_its_network_biome() {
+        const JUNGLE_GRASS: u16 = 60;
+
+        // A jungle-network pylon standing in a real jungle is accepted; in plain forest it is not.
+        let (jx, jy) = (600i16, 150i16);
+        let mut jungle = server();
+        paint(&mut jungle, jx, jy, JUNGLE_GRASS, 15); // 900 jungle tiles, over the 140 threshold
+        assert!(
+            jungle.pylon_accepts(&pylon(1, jx, jy)),
+            "a jungle pylon in the jungle should work",
+        );
+        let forest = server();
+        assert!(
+            !forest.pylon_accepts(&pylon(1, jx, jy)),
+            "a jungle pylon standing in plain forest should be refused",
+        );
+
+        // A Purity pylon wants the plain surface: accepted on clear surface, refused once the same
+        // spot is jungle.
+        let (sx, sy) = (600i16, 40i16); // above surface(100)
+        let plain = server();
+        assert!(
+            plain.pylon_accepts(&pylon(0, sx, sy)),
+            "a purity pylon on the plain surface should work",
+        );
+        let mut overgrown = server();
+        paint(&mut overgrown, sx, sy, JUNGLE_GRASS, 15);
+        assert!(
+            !overgrown.pylon_accepts(&pylon(0, sx, sy)),
+            "a purity pylon is refused once its ground is jungle",
+        );
+
+        // The depth-keyed networks: an Underworld pylon wants the underworld, not the surface.
+        let s = server();
+        assert!(
+            s.pylon_accepts(&pylon(9, 600, 260)), // y past height - 200 => underworld
+            "an underworld pylon in the underworld should work",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(9, 600, 40)),
+            "an underworld pylon on the surface should be refused",
+        );
+
+        // Victory travels from anywhere, biome or no biome.
+        assert!(s.pylon_accepts(&pylon(net_module::Pylon::VICTORY, 600, 40)));
     }
 }

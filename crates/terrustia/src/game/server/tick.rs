@@ -447,6 +447,7 @@ impl GameServer {
         self.tick_items();
         lap(&mut cost, Phase::Items);
         self.tick_npc_buffs();
+        self.tick_town_regen();
         self.tick_npcs();
         lap(&mut cost, Phase::Npcs);
         self.tick_projectiles();
