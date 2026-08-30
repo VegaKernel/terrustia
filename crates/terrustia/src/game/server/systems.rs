@@ -2290,6 +2290,40 @@ impl GameServer {
         Ok(())
     }
 
+    /// Mend hurt townsfolk a point at a time, the way the game does (`NPC.CheckLifeRegen`,
+    /// `NPC.cs:93622-93648`).
+    ///
+    /// A town NPC below full health builds a regen counter by one a tick, and heals a single point
+    /// each time it passes 180, so a resident who took a beating in a blood moon recovers over a
+    /// couple of minutes instead of standing at a sliver of health until they die or the world
+    /// reloads. Two named residents mend faster, exactly as the game's own switch does: the Guide
+    /// (`type 22`) adds five a tick and the Cyborg (`type 209`) nine (`NPC.cs:93631-93639`). The
+    /// base step is one, matching vanilla's `int num = 1`. The Dryad's ward (`+10`) is not modelled,
+    /// since this server has no dryad-ward buff. A heal marks the NPC dirty so the ordinary sync
+    /// carries the new health out, as vanilla's `NetUpdateLowPriority` does.
+    ///
+    /// Vanilla runs `CheckLifeRegen` for every friendly NPC (`NPC.cs:91592-91598`), not only town
+    /// NPCs; this pass narrows to town NPCs, the only friendly NPCs this server both hurts and keeps
+    /// around, so the counter never runs for anything else.
+    pub(super) fn tick_town_regen(&mut self) {
+        for (_, npc) in self.npcs.iter_mut() {
+            if !npc.stats.town_npc || !npc.is_alive() || npc.life >= npc.life_max {
+                continue;
+            }
+            let step = 1 + match npc.npc_type {
+                22 => 5,  // Guide
+                209 => 9, // Cyborg
+                _ => 0,
+            };
+            npc.friendly_regen += step;
+            if npc.friendly_regen > 180 {
+                npc.friendly_regen = 0;
+                npc.life = (npc.life + 1).min(npc.life_max);
+                npc.dirty = true;
+            }
+        }
+    }
+
     /// Look for a free house near the players and move a town NPC into it.
     ///
     /// Vanilla gates each resident behind conditions that mostly read the players' inventories,
@@ -5579,9 +5613,19 @@ impl GameServer {
                 debug!("item slots are full; a treasure bag was discarded");
                 break;
             };
-            let Some(item) = self.items.get(index).copied() else {
+            // Instance the bag to this one player: vanilla's `WorldItem.MakeInstanced`
+            // (`WorldItem.cs:326`) gives the item a real owner so only that client may ever take it.
+            // Without it the bag was an un-owned world item merely not broadcast, and the proximity
+            // reservation loop would hand each bag to whichever player stood nearest the boss (every
+            // bag spawns at the same point), letting one player be reserved bags meant for others.
+            // Owning it here keeps the pickup and update gates (`item.owner == slot`) tied to the
+            // intended player, and `is_reserved` keeps the proximity loop from ever touching it.
+            let Some(item) = self.items.get_mut(index) else {
                 continue;
             };
+            item.owner = slot;
+            item.instanced = true;
+            let item = *item;
             let sync = SyncItem::dropped(index, item.position, item.item);
             if let Ok(frame) = sync.encode_instanced() {
                 self.send(slot, frame);
@@ -6234,6 +6278,41 @@ mod town_npc_persistence {
         assert!(
             server.world.town_npcs[0].homeless_despawn,
             "a despawn timer a load decoded must round-trip, not reset to false"
+        );
+    }
+
+    /// L2-17: a hurt townsperson mends over time, the way the game's `CheckLifeRegen` heals a point
+    /// each time the regen counter passes 180 (`NPC.cs:93622-93648`). Fails before the fix, when a
+    /// town NPC had no regen at all and a resident wounded in a blood moon stayed at a sliver of
+    /// health until they died or the world reloaded.
+    #[test]
+    fn a_hurt_town_npc_regenerates_toward_full_but_not_past_it() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let guide = server.npcs.spawn(GUIDE, (100.0, 100.0)).expect("a slot");
+        let max = server.npcs.get(guide).unwrap().life_max;
+        assert!(max > 2, "the Guide has room to be hurt");
+
+        // Wound the Guide, then give it a minute of regen ticks.
+        server.npcs.get_mut(guide).unwrap().life = 1;
+        for _ in 0..600 {
+            server.tick_town_regen();
+        }
+        let healed = server.npcs.get(guide).unwrap().life;
+        assert!(
+            healed > 1,
+            "a hurt town NPC should recover health over a minute, still at {healed}",
+        );
+        assert!(healed <= max, "regen must never overshoot the maximum");
+
+        // At full health regen does nothing: it neither overshoots nor churns the counter.
+        server.npcs.get_mut(guide).unwrap().life = max;
+        for _ in 0..600 {
+            server.tick_town_regen();
+        }
+        assert_eq!(
+            server.npcs.get(guide).unwrap().life,
+            max,
+            "a healthy town NPC stays exactly at full",
         );
     }
 }
@@ -7118,6 +7197,50 @@ mod godmode {
             );
             assert!(!coin, "an expert boss with a bag drops no loose coins");
         }
+    }
+
+    /// m5: an expert or master treasure bag is instanced to its one intended player, the way
+    /// vanilla's `WorldItem.MakeInstanced` (`WorldItem.cs:326`) reserves it, so no other client can
+    /// take it. Fails before the fix, when each bag was an un-owned world item and the proximity
+    /// reservation loop handed it to whoever stood nearest the boss (`WorldItem.FindOwner` skips only
+    /// instanced items, `WorldItem.cs:195`) - so a player parked on the drop point could be reserved
+    /// every bag, including ones meant for others.
+    #[test]
+    fn an_instanced_bag_stays_owned_by_its_player_and_a_bystander_cannot_take_it() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.game_mode = 1; // expert
+        let center = (1000.0, 1000.0);
+        for slot in 0u8..2 {
+            let (tx, _rx) = mpsc::channel(64);
+            let mut p = Player::new(slot, format!("127.0.0.1:{}", slot + 1).parse().unwrap(), tx);
+            p.state = ConnState::Playing;
+            // Park player 1 right on the drop point and player 0 far away: were the bags un-owned,
+            // the proximity loop would reserve every bag to the nearest player (player 1).
+            p.position = if slot == 1 { center } else { (2800.0, 1000.0) };
+            server.players[slot as usize] = Some(p);
+        }
+
+        server.drop_instanced_bag(3319, center);
+
+        // One bag per player, each instanced to a distinct real owner, none left un-owned.
+        let mut owners: Vec<u8> = server.items.iter().map(|(_, i)| i.owner).collect();
+        owners.sort_unstable();
+        assert_eq!(owners, vec![0, 1], "one bag instanced to each player");
+        assert!(
+            server.items.iter().all(|(_, i)| i.instanced),
+            "every treasure bag must be instanced to its owner"
+        );
+
+        // The proximity reservation loop, with player 1 sitting on both bags, must not steal
+        // player 0's bag: an instanced item is never re-offered to whoever is nearest.
+        server.tick_items();
+        let mut owners_after: Vec<u8> = server.items.iter().map(|(_, i)| i.owner).collect();
+        owners_after.sort_unstable();
+        assert_eq!(
+            owners_after,
+            vec![0, 1],
+            "a bystander on the drop point must not be reserved another player's instanced bag"
+        );
     }
 
     /// Coins are varied per roll, not paid at face (`NPC.NPCLoot_DropMoney`, `NPC.cs:80436`). The

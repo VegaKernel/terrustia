@@ -31,6 +31,21 @@ pub struct WorldItem {
     pub owner: u8,
     /// Ticks left on the current reservation.
     pub reservation: u32,
+    /// Whether this item is instanced to exactly one player and only they may ever take it
+    /// (`WorldItem.instanced`/`playerIndexTheItemIsReservedFor`, `WorldItem.cs:36,18`; set through
+    /// `WorldItem.MakeInstanced`, `WorldItem.cs:326`).
+    ///
+    /// An expert or master treasure bag is dropped one per interacting player, each announced only
+    /// to its owner over packet `90`. Vanilla's server sends the packet to each qualifying player and
+    /// then turns its own copy to air, holding only the item slot, so the bag lives solely on each
+    /// client; this server keeps the bag as a real server-side item instead and ties it permanently
+    /// to its one owner. Set here, `owner` is a permanent claim rather than the ordinary proximity
+    /// reservation: the item stays reserved forever (so the proximity offer loop never hands it to
+    /// whoever is nearest, mirroring `WorldItem.FindOwner`'s own `if (instanced ...) return`,
+    /// `WorldItem.cs:195`), the owner is never cleared when the reservation lapses, and the pickup
+    /// gate still admits only `owner`, so no other client - modified or not - can race a bag meant
+    /// for someone else.
+    pub instanced: bool,
     /// Ticks this item has existed for.
     pub age: u32,
     /// How far through shimmering this item is, from zero to one.
@@ -57,6 +72,7 @@ impl WorldItem {
             velocity: (0.0, 0.0),
             owner: NO_OWNER,
             reservation: 0,
+            instanced: false,
             age: 0,
             resting: false,
             shimmer_time: 0.0,
@@ -65,7 +81,8 @@ impl WorldItem {
     }
 
     pub fn is_reserved(&self) -> bool {
-        self.owner != NO_OWNER && self.reservation > 0
+        // An instanced item is claimed for its one owner forever, not on a lapsing timer.
+        self.instanced || (self.owner != NO_OWNER && self.reservation > 0)
     }
 }
 
@@ -251,7 +268,9 @@ impl ItemStore {
             let Some(item) = slot else { continue };
             item.age = item.age.saturating_add(1);
             item.reservation = item.reservation.saturating_sub(1);
-            if item.reservation == 0 {
+            // An instanced item stays claimed for its one owner; only an ordinary proximity
+            // reservation lapses back to nobody.
+            if item.reservation == 0 && !item.instanced {
                 item.owner = NO_OWNER;
             }
             if item.age >= DESPAWN_TICKS {
