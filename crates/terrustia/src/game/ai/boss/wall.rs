@@ -102,7 +102,7 @@ pub fn wall<T: TileView>(
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
                 // Its fractional height along the wall, spread evenly and read straight back as
-                // ai[0] (`NPC.cs:26197`, `ai0 = num403 * 0.1 - 0.05`, so -0.05..0.85). This must be
+                // ai[0] (`NPC.cs:26197`, `ai0 = num403 * 0.1 - 0.05`, n=0..10 so -0.05..0.95). Must be
                 // set outright: the signum path would flatten every band to +/-1 and stack all
                 // eleven Hungry at two heights instead of spreading them down the Wall.
                 ai: [Some(n as f32 * 0.1 - 0.05), None, None, None],
@@ -541,7 +541,8 @@ mod tests {
     }
 
     /// WOF-1: each Hungry is raised with its own fractional band in `ai[0]`, spread evenly from
-    /// -0.05 to 0.85, the way vanilla seeds them (`NPC.cs:26197`, `ai0 = num403 * 0.1 - 0.05`). The
+    /// -0.05 to 0.95 (n=0..10), the way vanilla seeds them (`NPC.cs:26197`, `ai0 = num403 * 0.1 -
+    /// 0.05`). The
     /// Hungry reader multiplies this straight into its anchor height along the Wall, so the value
     /// has to survive as-is. Packed through the velocity, as it used to be, the consumer's
     /// `signum` would flatten all eleven to +/-1 and stack them at two heights.
@@ -560,7 +561,7 @@ mod tests {
         let expected: Vec<f32> = (0..WALL_HUNGRY_COUNT)
             .map(|n| n as f32 * 0.1 - 0.05)
             .collect();
-        assert_eq!(bands, expected, "eleven distinct bands, -0.05..0.85");
+        assert_eq!(bands, expected, "eleven distinct bands, -0.05..0.95");
         assert!(
             bands
                 .iter()

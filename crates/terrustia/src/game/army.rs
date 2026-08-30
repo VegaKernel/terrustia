@@ -108,15 +108,19 @@ impl Tier {
         if !belongs(npc_type) {
             return 0;
         }
-        // C7-08: the kill that would finish the wave only ever counts as one, so the quota cannot
-        // be jumped straight past the champion (`DD2Event.cs:994-998,1120-1186`). The guard is a
-        // strict `<`: at `required - 2` a double would land exactly on `required` and complete the
-        // wave without the champion, jumping the hold at `required - 1`. With `<` it counts one
-        // instead, so the count settles on the hold and only the champion finishes the wave.
-        if expert && kills + 2 < self.required_kills(wave) {
-            2
-        } else {
+        // C7-08: the finishing kill of the FINAL wave counts one, not two, so an Expert double
+        // cannot land exactly on the quota and complete the tier without the champion. Vanilla makes
+        // this a single-point special case that fires only on the last wave at exactly `required-2`:
+        // `waveNumber == 5 && waveKills == 138` (tier 1, `DD2Event.cs:1120`) and `waveNumber == 7 &&
+        // waveKills == 218` (tier 2, `DD2Event.cs:1213`). Everywhere else an Expert kill is worth
+        // two, so ordinary waves are not lengthened by a kill. The champion hold above `required-1`
+        // is handled by `held` above (matching vanilla's `currentKillCount` clamp back to 139,
+        // `DD2Event.cs:994-996`).
+        let finishes_final_wave = last && kills == self.required_kills(wave) - 2;
+        if !expert || finishes_final_wave {
             1
+        } else {
+            2
         }
     }
 }
@@ -940,24 +944,28 @@ mod tests {
         assert_eq!(army.wave, 1);
     }
 
-    /// Expert counts double on an ordinary wave, and the kill that would finish it counts as one so
-    /// the count lands exactly on the quota rather than over it.
+    /// Expert kills count double all the way to the quota on an ordinary wave: the C7-08
+    /// finishing-kill-counts-one rule fires only on the final wave, so an ordinary wave is not
+    /// lengthened by a kill. Thirty doubles clear wave one exactly; the over-clamped guard that
+    /// counted the finisher as one on every wave would have needed thirty-one.
     #[test]
-    fn expert_counts_double_but_the_finishing_kill_counts_one() {
+    fn expert_counts_double_on_ordinary_waves() {
         let mut army = ArmyState::default();
         army.start(Tier::One, (0, 0));
-        // Wave one asks for sixty. Twenty-nine doubles reach fifty-eight.
+        // Wave one asks for sixty. Twenty-nine doubles reach fifty-eight, none of them finishing.
         for _ in 0..29 {
-            army.note_kill(ids::DD2_GOBLIN_T1, true);
+            assert!(army.note_kill(ids::DD2_GOBLIN_T1, true).is_none());
         }
         assert_eq!(army.kills, 58, "twenty-nine kills at two apiece");
-        // The next double would land on sixty, so it counts as one and holds at fifty-nine.
-        army.note_kill(ids::DD2_GOBLIN_T1, true);
-        assert_eq!(army.kills, 59, "the kill that would finish counts as one");
-        // And the one after that finishes the wave, exactly on the line.
-        army.note_kill(ids::DD2_GOBLIN_T1, true);
-        assert_eq!(army.kills, 0, "the sixtieth finishes the wave");
-        assert_eq!(army.wave, 2);
+        // The thirtieth double lands exactly on sixty and finishes the wave. On an ordinary wave the
+        // finisher keeps its full double, so it is the thirtieth kill that clears it, not a thirty-first.
+        assert_eq!(
+            army.note_kill(ids::DD2_GOBLIN_T1, true),
+            Some(1),
+            "the thirtieth double clears wave one"
+        );
+        assert_eq!(army.wave, 2, "and the event moves on to wave two");
+        assert_eq!(army.kills, 0);
     }
 
     /// C7-08: on the final wave an Expert double must not land exactly on the quota and complete the
