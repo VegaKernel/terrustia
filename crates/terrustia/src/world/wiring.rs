@@ -47,7 +47,7 @@
 //! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
 //! timer switching itself off the first time it fires.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use terrustia_proto::tile::{Tile, TileFlags};
 
@@ -157,6 +157,13 @@ fn footprint(block: u16) -> (i32, i32) {
 /// lays wire across a continent has built a circuit that a server must not spend a whole tick
 /// walking. Stopping short is better than stalling — and a circuit this large is not a machine
 /// anybody is using, it is a mistake or an attack.
+///
+/// **This is a deliberate departure from vanilla (L3-32), not a transcription.** `HitWire` has no
+/// cap at all: it walks whatever is connected, however large, every time. That is safe for a
+/// single-player client hitting its own switch and unsafe for a dedicated server a stranger can
+/// hand a continent-sized circuit to on purpose. The cut is kept for that reason, and it is not
+/// silent: the flood raises [`Fired::truncated`], which the caller logs (`apply_circuit`'s own
+/// "circuit cut short" warning) so a legitimately-large contraption that trips it can be found.
 pub const MAX_CIRCUIT: usize = 20_000;
 
 /// What the world has to let a circuit do to it.
@@ -229,15 +236,28 @@ pub struct Fired {
     pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
-    /// The first two distinct teleporters the current reached, which are the pair it joins.
+    /// The teleporter pair each colour's flood joined, in colour order — one entry per colour that
+    /// reached two distinct teleporters (L3-05).
     ///
-    /// A third makes no difference: the game keeps room for two and ignores the rest, so a
-    /// circuit wired through three teleporters links the first two it happens to walk to.
-    pub teleporters: Vec<(i32, i32)>,
-    /// The cells of every inlet pump the current reached...
+    /// Vanilla resolves teleporters *per colour*: each `HitWire` keeps room for two, and every
+    /// colour's pair is saved and jumped separately, in colour order, after all four have flooded
+    /// (`Wiring.cs:554-663`). Pooling the first two across all four colours (as this once did) would
+    /// link a red pad to a blue one and drop the rest. A third pad on one colour still makes no
+    /// difference: that colour keeps its own first two.
+    pub teleport_pairs: Vec<((i32, i32), (i32, i32))>,
+    /// The cells of every inlet pump the current flood reached, for the colour being flooded right
+    /// now — a working buffer reset before each colour and consumed (into a per-colour
+    /// [`transfer_liquid`]) after it, never pooled across colours.
     pub pump_in: Vec<(i32, i32)>,
-    /// ...and of every outlet.
+    /// ...and of every outlet, the same way.
     pub pump_out: Vec<(i32, i32)>,
+    /// Tiles a per-colour pump transfer actually moved liquid on, for the caller to re-settle and
+    /// broadcast. The transfer itself already happened inside the flood (L3-05); this is only what
+    /// changed so the caller does not have to work it out again.
+    pub pump_changed: Vec<(i32, i32)>,
+    /// The working buffer for the two teleporters the *current* colour has reached so far, reset
+    /// before each colour's flood and drained into [`Self::teleport_pairs`] after it.
+    pub teleporters: Vec<(i32, i32)>,
     /// Logic-gate lamps the current toggled, for the caller to run the gates below them.
     pub lamps: Vec<(i32, i32)>,
     /// Timers the current switched on, which then run on their own until switched off.
@@ -258,6 +278,11 @@ pub struct Fired {
     /// two colours on it would toggle twice and end up where it started. The game keeps the same
     /// list and calls adding to it `SkipWire`.
     skipped: HashSet<(i32, i32)>,
+    /// Which way each pixel box the flood crossed has been entered — bit `2` for a vertical
+    /// crossing, bit `1` for a horizontal one. A box crossed both ways (`3`) flips its frame in
+    /// [`pixel_box_pass`]; accumulated across all four colours, exactly as vanilla's own
+    /// `_PixelBoxTriggers` is (`Wiring.cs:935-943`).
+    pixel_triggers: std::collections::HashMap<(i32, i32), u8>,
 }
 
 /// Hit a trigger, and run whatever it is connected to.
@@ -432,7 +457,48 @@ fn run_from(world: &mut impl WiredWorld, x: i32, y: i32, w: i32, h: i32, out: &m
         if seeds.is_empty() {
             continue;
         }
+        // L3-05: pumps and teleporters are resolved per colour, not pooled. Each colour's flood
+        // fills its own inlet/outlet and teleporter buffers, cleared here before it starts.
+        out.pump_in.clear();
+        out.pump_out.clear();
+        out.teleporters.clear();
         trip(world, colour, seeds, out);
+        // The water transfer happens immediately, so the next colour floods the world this one
+        // left — `TripWire`'s own `XferWater()` after each `HitWire` (`Wiring.cs:562-651`).
+        if !out.pump_in.is_empty() && !out.pump_out.is_empty() {
+            let inlets = std::mem::take(&mut out.pump_in);
+            let outlets = std::mem::take(&mut out.pump_out);
+            let changed = transfer_liquid(world, &inlets, &outlets);
+            out.pump_changed.extend(changed);
+        }
+        // This colour's teleporter pair is saved and jumped later, in colour order, after every
+        // colour has flooded.
+        if let [a, b] = out.teleporters[..] {
+            out.teleport_pairs.push((a, b));
+        }
+    }
+    out.pump_in.clear();
+    out.pump_out.clear();
+    out.teleporters.clear();
+    pixel_box_pass(world, out);
+}
+
+/// Flip every pixel box the flood crossed both vertically and horizontally — `Wiring.PixelBoxPass`
+/// (`Wiring.cs:668-681`), run once after all four colours have flooded. A box crossed only one way
+/// is left as it is.
+fn pixel_box_pass(world: &mut impl WiredWorld, out: &mut Fired) {
+    let triggers = std::mem::take(&mut out.pixel_triggers);
+    for (at, mask) in triggers {
+        if mask != 3 {
+            continue;
+        }
+        let mut tile = world.tile(at.0, at.1);
+        if tile.block != PIXEL_BOX {
+            continue;
+        }
+        tile.frame_x = if tile.frame_x != 18 { 18 } else { 0 };
+        world.set_tile(at.0, at.1, tile);
+        out.changed.push(at);
     }
 }
 
@@ -448,20 +514,26 @@ const STEP: [(i32, i32); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 /// junction box's own frame decides which of the four is allowed to leave again, and without that
 /// the box cannot do the one thing it exists for (see [`junction_lets_through`]).
 ///
-/// **Simplified relative to vanilla's own flood**, and worth knowing about: `HitWire` tracks a
-/// reference count per tile (`_toProcess`) that lets a tile already queued be reached again from a
-/// second direction before it is finally visited, which matters for exactly how a wire diamond or
-/// a loop back into a junction box settles. This keeps the simpler model the rest of the module
-/// already used before junction boxes existed — a tile visited once by any direction is not
-/// revisited by another — which is right for what a junction box is *for* (keeping two ordinary
-/// crossing runs apart) and does not attempt the rarer shapes vanilla's ref-counting also handles.
+/// The flood is breadth-first (`Liquid`'s own `DoubleStack.PopFront`, `Wiring.cs:849-853`, not a
+/// stack): the queue is drained from the front, so tiles are reached in ring order out from the
+/// seeds rather than down one arm and back. That order decides which two teleporters a circuit
+/// through three of them pairs, and the order statues and traps fire in (L3-06).
+///
+/// Junction boxes (`424`) and pixel boxes (`445`) are exempt from the once-only visited set — they
+/// carry `b = 0` in vanilla's own `_toProcess` ref-count (`Wiring.cs:899-904`), so a second run of
+/// the same colour reaches the box again from its own direction and crosses without joining the
+/// first. An ordinary tile is still visited once (L3-04). To keep that from looping, a box is
+/// tracked by the direction it was entered from, so the same box-and-direction is not re-queued.
 fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: &mut Fired) {
     let mut seen: HashSet<(i32, i32)> = seeds.iter().copied().collect();
+    // Boxes are re-enterable, but only once per arrival direction, which bounds the flood the way
+    // vanilla's ref-counted feeding wires do.
+    let mut seen_box: HashSet<((i32, i32), u8)> = HashSet::new();
     // Every seed is treated as having "arrived" from direction 0, exactly as vanilla's own
     // `_wireDirectionList.PushBack(0)` seeds every tile the flood starts from.
-    let mut queue: Vec<(i32, i32, u8)> = seeds.into_iter().map(|(x, y)| (x, y, 0)).collect();
+    let mut queue: VecDeque<(i32, i32, u8)> = seeds.into_iter().map(|(x, y)| (x, y, 0)).collect();
 
-    while let Some((x, y, arrived_via)) = queue.pop() {
+    while let Some((x, y, arrived_via)) = queue.pop_front() {
         if seen.len() > MAX_CIRCUIT {
             out.truncated = true;
             break;
@@ -469,8 +541,8 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
         out.reached += 1;
         act(world, x, y, out);
 
-        // A junction box is never itself acted on (no case for it in `act`), so its frame here is
-        // still whatever it was before the line above.
+        // A junction or pixel box is never itself acted on (no case for it in `act`), so its frame
+        // here is still whatever it was before the line above.
         let here = world.tile(x, y);
         for (leaving_via, &(dx, dy)) in STEP.iter().enumerate() {
             let leaving_via = leaving_via as u8;
@@ -479,14 +551,32 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
             {
                 continue;
             }
+            // A pixel box only ever passes current straight through, the way a straight junction
+            // box does, and records whether it was crossed vertically or horizontally so
+            // [`pixel_box_pass`] can flip it once it has been crossed both ways (L3-25).
+            if here.block == PIXEL_BOX {
+                if leaving_via != arrived_via {
+                    continue;
+                }
+                let bit = if leaving_via <= 1 { 2 } else { 1 };
+                *out.pixel_triggers.entry((x, y)).or_insert(0) |= bit;
+            }
             let (nx, ny) = (x + dx, y + dy);
             if nx < 2 || ny < 2 || nx >= world.width() - 2 || ny >= world.height() - 2 {
                 continue;
             }
-            if !colour.on(world.tile(nx, ny)) || !seen.insert((nx, ny)) {
+            let next = world.tile(nx, ny);
+            if !colour.on(next) {
                 continue;
             }
-            queue.push((nx, ny, leaving_via));
+            if next.block == JUNCTION_BOX || next.block == PIXEL_BOX {
+                if !seen_box.insert(((nx, ny), leaving_via)) {
+                    continue;
+                }
+            } else if !seen.insert((nx, ny)) {
+                continue;
+            }
+            queue.push_back((nx, ny, leaving_via));
         }
     }
 }
@@ -497,6 +587,12 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
 /// all, so a junction box was simply open ground: every wire crossing through the same tile joined
 /// into a single circuit, which is the opposite of what the piece is for.
 const JUNCTION_BOX: u16 = 424;
+
+/// The pixel box, `TileID.PixelBox` (`445`). It passes current straight through like a junction
+/// box's straight frame, but with a mechanism of its own: it flips its own frame between two states
+/// only when the *same* circuit reaches it from both a vertical and a horizontal direction in one
+/// run — `Wiring.cs:929-943`, resolved in [`pixel_box_pass`] after every colour has flooded.
+const PIXEL_BOX: u16 = 445;
 
 /// Whether current arriving at a junction box from `arrived_via` may leave again via
 /// `leaving_via` — transcribed from `Wiring.cs:900-928`'s own three-armed `switch` on
@@ -1951,6 +2047,153 @@ mod tests {
         );
     }
 
+    /// Lay a plain wire tile of one colour.
+    fn red_wire(board: &mut Board, x: i32, y: i32) {
+        let mut w = Tile::AIR;
+        w.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(x, y, w);
+    }
+
+    /// L3-04: one circuit can reach a junction box from two directions and cross both ways — the
+    /// box is exempt from the once-only visited set (vanilla's `b = 0` ref-count, `Wiring.cs:899-
+    /// 904`). Here a lever feeds a straight box from the west along one arm and from the south along
+    /// another; both continuations past the box should run.
+    ///
+    /// Fails before the fix: the box sat in the visited set, so whichever arm reached it first
+    /// routed its own direction and the other arm's continuation was never reached — only one of
+    /// the two actuators fired.
+    #[test]
+    fn a_junction_box_can_be_crossed_from_two_directions_by_one_circuit() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        // West-to-east arm through a straight box, on to actuator E.
+        for x in 101..105 {
+            red_wire(&mut board, x, 100);
+        }
+        let mut jb = wired(JUNCTION_BOX, Wire::Red);
+        jb.frame_x = 0;
+        board.set_tile(105, 100, jb);
+        for x in 106..110 {
+            red_wire(&mut board, x, 100);
+        }
+        board.set_tile(110, 100, actuated(Wire::Red));
+        // Second arm from the lever, looping round to approach the box from the south, on to
+        // actuator N above it.
+        for y in 101..106 {
+            red_wire(&mut board, 100, y);
+        }
+        for x in 101..106 {
+            red_wire(&mut board, x, 105);
+        }
+        for y in 101..105 {
+            red_wire(&mut board, 105, y);
+        }
+        for y in 96..100 {
+            red_wire(&mut board, 105, y);
+        }
+        board.set_tile(105, 95, actuated(Wire::Red));
+
+        hit_switch(&mut board, 100, 100);
+        assert!(
+            board.tile(110, 100).flags.has(TileFlags::ACTUATED),
+            "the east arm should have crossed the box"
+        );
+        assert!(
+            board.tile(105, 95).flags.has(TileFlags::ACTUATED),
+            "and the north arm should have crossed it too, from the other direction"
+        );
+    }
+
+    /// L3-06: the flood is breadth-first, so a circuit branching two ways reaches the near tiles of
+    /// both arms before the far tiles of either — which decides the pair a circuit through three
+    /// teleporters joins (`Wiring.cs:849-853`, `DoubleStack.PopFront`).
+    ///
+    /// Fails before the fix: the flood popped its queue from the back (depth-first), so it ran one
+    /// arm to its end first and paired the two teleporters on that arm, never reaching the one on
+    /// the other arm within the first two.
+    #[test]
+    fn the_flood_is_breadth_first() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        // A short north arm with one teleporter, and a long east arm with two.
+        red_wire(&mut board, 100, 99);
+        let tp = |board: &mut Board, x: i32, y: i32| {
+            let mut t = wired(TELEPORTER, Wire::Red);
+            t.frame_x = 0;
+            board.set_tile(x, y, t);
+        };
+        tp(&mut board, 100, 98); // north-arm teleporter A
+        for x in 101..108 {
+            red_wire(&mut board, x, 100);
+        }
+        tp(&mut board, 102, 100); // east-arm teleporter B (near)
+        tp(&mut board, 106, 100); // east-arm teleporter C (far)
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(fired.teleport_pairs.len(), 1, "still only one pair");
+        let (a, b) = fired.teleport_pairs[0];
+        assert!(
+            a == (100, 98) || b == (100, 98),
+            "breadth-first should reach the near teleporter of the short arm within the first two, \
+             not run the long arm to its end first: {a:?}, {b:?}"
+        );
+    }
+
+    /// L3-25: a pixel box flips its own frame only when one circuit crosses it both vertically and
+    /// horizontally (`Wiring.cs:929-943,668-681`). Crossed one way only, it does not flip.
+    ///
+    /// Fails before the fix: tile 445 was an unimplemented no-op — it never routed as a straight
+    /// crossing nor flipped, so nothing happened to it at all.
+    #[test]
+    fn a_pixel_box_flips_only_when_crossed_both_ways() {
+        // Crossed both ways: a lever feeds the box from the west and, via a loop, from the south.
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            red_wire(&mut board, x, 100);
+        }
+        let mut pb = wired(PIXEL_BOX, Wire::Red);
+        pb.frame_x = 0;
+        board.set_tile(105, 100, pb);
+        for x in 106..109 {
+            red_wire(&mut board, x, 100);
+        }
+        for y in 101..106 {
+            red_wire(&mut board, 100, y);
+        }
+        for x in 101..106 {
+            red_wire(&mut board, x, 105);
+        }
+        for y in 101..105 {
+            red_wire(&mut board, 105, y);
+        }
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(105, 100).frame_x,
+            18,
+            "a pixel box crossed both ways should have flipped"
+        );
+
+        // Crossed only horizontally: it stays put.
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            red_wire(&mut board, x, 100);
+        }
+        let mut pb = wired(PIXEL_BOX, Wire::Red);
+        pb.frame_x = 0;
+        board.set_tile(105, 100, pb);
+        for x in 106..109 {
+            red_wire(&mut board, x, 100);
+        }
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(105, 100).frame_x,
+            0,
+            "a pixel box crossed only one way should not flip"
+        );
+    }
+
     /// A circuit big enough to be a mistake is cut short rather than stalling the tick.
     #[test]
     fn an_enormous_circuit_is_cut_short() {
@@ -2303,13 +2546,64 @@ mod tests {
         }
 
         let fired = hit_switch(&mut board, 100, 100);
-        assert_eq!(fired.teleporters.len(), 2, "only two make a pair");
+        assert_eq!(fired.teleport_pairs.len(), 1, "one colour, one pair");
+        let (a, b) = fired.teleport_pairs[0];
         assert!(
-            fired
-                .teleporters
-                .iter()
-                .all(|p| [110, 120, 130].contains(&p.0))
+            [110, 120, 130].contains(&a.0) && [110, 120, 130].contains(&b.0),
+            "the pair should be two of the three pads: {a:?}, {b:?}"
         );
+    }
+
+    /// L3-05: each colour resolves its own teleporter pair, in colour order — a switch on two
+    /// colours joins the red pair *and* the blue pair, not the first two pads across both
+    /// (`Wiring.cs:554-663`).
+    ///
+    /// Fails before the fix: the two teleporters were pooled across all four colours, so the red
+    /// flood filled both slots and the blue pair was dropped entirely — one pair, not two.
+    #[test]
+    fn teleporters_resolve_per_colour() {
+        let mut board = Board(HashMap::new());
+        let mut lever = wired(136, Wire::Red);
+        lever.flags.set(TileFlags::WIRE_BLUE, true);
+        board.set_tile(100, 100, lever);
+
+        let pad = |board: &mut Board, x: i32, y: i32, colour: Wire| {
+            let mut t = wired(TELEPORTER, colour);
+            t.frame_x = 0;
+            board.set_tile(x, y, t);
+        };
+        // A red arm east to two pads.
+        for x in 101..110 {
+            let mut w = Tile::AIR;
+            w.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, w);
+        }
+        pad(&mut board, 105, 100, Wire::Red);
+        pad(&mut board, 109, 100, Wire::Red);
+        // A blue arm south to two more.
+        for y in 101..110 {
+            let mut w = Tile::AIR;
+            w.flags.set(TileFlags::WIRE_BLUE, true);
+            board.set_tile(100, y, w);
+        }
+        pad(&mut board, 100, 105, Wire::Blue);
+        pad(&mut board, 100, 109, Wire::Blue);
+
+        let fired = hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            fired.teleport_pairs.len(),
+            2,
+            "the red pair and the blue pair should both be resolved: {:?}",
+            fired.teleport_pairs
+        );
+        let (r0, r1) = fired.teleport_pairs[0];
+        assert_eq!(
+            (r0, r1),
+            ((105, 100), (109, 100)),
+            "red pair, in colour order first"
+        );
+        let (b0, b1) = fired.teleport_pairs[1];
+        assert_eq!((b0, b1), ((100, 105), (100, 109)), "then the blue pair");
     }
 
     /// Build a gate with a stack of lamps above it. `lamps` is on/off from the top down.

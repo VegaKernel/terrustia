@@ -2922,12 +2922,14 @@ impl GameServer {
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
-            if let [a, b] = fired.teleporters[..] {
+            // L3-05: each colour's teleporter pair is jumped separately, in the colour order the
+            // flood collected them.
+            for (a, b) in fired.teleport_pairs {
                 self.run_teleporters(a, b);
             }
-            if !fired.pump_in.is_empty() && !fired.pump_out.is_empty() {
-                self.run_pumps(&fired.pump_in, &fired.pump_out);
-            }
+            // Pumps already moved their water per colour inside the flood; all that is left is to
+            // re-settle and broadcast the cells that changed.
+            self.broadcast_pump_changes(&fired.pump_changed);
             for (tx, ty) in fired.timers_started {
                 self.running_timers.insert((tx, ty), TIMER_WINDOW);
             }
@@ -3305,13 +3307,11 @@ impl GameServer {
         }
     }
 
-    /// Move liquid from the inlet pumps a circuit reached to its outlets.
-    fn run_pumps(&mut self, inlets: &[(i32, i32)], outlets: &[(i32, i32)]) {
-        let changed = {
-            let world = &mut self.world;
-            crate::world::wiring::transfer_liquid(world, inlets, outlets)
-        };
-        for (x, y) in changed {
+    /// Re-settle and broadcast the cells a per-colour pump transfer moved liquid on. The transfer
+    /// itself already ran inside the flood (L3-05, `run_from`'s own [`transfer_liquid`] call), so
+    /// this only wakes the liquid sim and tells clients.
+    fn broadcast_pump_changes(&mut self, changed: &[(i32, i32)]) {
+        for &(x, y) in changed {
             // The moved liquid has to settle from where it landed, or it would sit in a column of
             // its own until something else disturbed it.
             self.liquids.disturb(x, y);
