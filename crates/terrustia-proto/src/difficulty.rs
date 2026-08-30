@@ -75,6 +75,26 @@ pub fn money_multiplier(difficulty: f32) -> f32 {
     )
 }
 
+/// `GameDifficultyData.KnockbackToEnemiesMultiplier` (`GameDifficultyData.cs:69`).
+///
+/// How much a hit's knockback moves an NPC, scaled down as the world gets harder: classic 1,
+/// expert 0.9, master 0.8. Applied to `knockBackResist` in `NPC.ScaleStats_ByDifficulty`
+/// (`NPC.cs:18211`) via `GetKnockbackMultiplier_ScaledByDifficulty` (`NPC.cs:7058`), so a harder
+/// world's enemies stagger less.
+pub fn knockback_to_enemies_multiplier(difficulty: f32) -> f32 {
+    sample(&[(1.0, 1.0), (3.0, 0.8)], difficulty)
+}
+
+/// `GameDifficultyData.DebuffTimeMultiplier` (`GameDifficultyData.cs:75`).
+///
+/// How much longer a debuff in `BuffID.Sets.BuffTimeIsExtendedWithGameDifficulty` lasts on the
+/// harder modes: classic 1, expert 2, master 2.5. `Player.AddBuff_DetermineBuffTimeToAdd`
+/// (`Player.cs:5426-5429`) multiplies the requested time by this, but only in expert mode and up
+/// and only for the flagged debuff types.
+pub fn debuff_time_multiplier(difficulty: f32) -> f32 {
+    sample(&[(1.0, 1.0), (2.0, 2.0), (3.0, 2.5)], difficulty)
+}
+
 /// The boss life multiplier for a given number of players, from `NPC.GetStatScalingFactors`.
 ///
 /// Not `1 + 0.35 * (n - 1)`, and not a decaying series either: `boost` climbs a third of the way
@@ -119,6 +139,22 @@ mod tests {
         assert_eq!(hostile_projectile_multiplier(of_game_mode(0)), 1.0);
         assert_eq!(hostile_projectile_multiplier(of_game_mode(1)), 2.0);
         assert_eq!(hostile_projectile_multiplier(of_game_mode(2)), 3.0);
+
+        // Knockback to enemies falls off as the world hardens: classic 1, expert 0.9, master 0.8.
+        assert_eq!(knockback_to_enemies_multiplier(of_game_mode(0)), 1.0);
+        assert!((knockback_to_enemies_multiplier(of_game_mode(1)) - 0.9).abs() < 1e-6);
+        assert!((knockback_to_enemies_multiplier(of_game_mode(2)) - 0.8).abs() < 1e-6);
+        assert_eq!(
+            knockback_to_enemies_multiplier(of_game_mode(3)),
+            1.0,
+            "journey"
+        );
+
+        // Flagged debuffs last longer on the harder modes: classic 1, expert 2, master 2.5.
+        assert_eq!(debuff_time_multiplier(of_game_mode(0)), 1.0);
+        assert_eq!(debuff_time_multiplier(of_game_mode(1)), 2.0);
+        assert_eq!(debuff_time_multiplier(of_game_mode(2)), 2.5);
+        assert_eq!(debuff_time_multiplier(of_game_mode(3)), 1.0, "journey");
     }
 
     /// One player changes nothing, and each one after that adds more than the last.

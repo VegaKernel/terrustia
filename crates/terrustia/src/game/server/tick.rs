@@ -167,6 +167,12 @@ impl GameServer {
     pub async fn run(mut self, mut events: mpsc::Receiver<ServerEvent>) -> Stopped {
         // Whoever lived here when the world was last saved lives here again.
         self.restore_town_npcs();
+        // Before the first tick, or `tick_lunar`'s own "a pillar that was active and is not
+        // standing has fallen" diff reads an empty roster as every tower having just been beaten.
+        self.restore_lunar_pillars();
+        // Before the first tick, or a Journey world's toggles/sliders stay at their in-memory
+        // defaults until someone flips them again this session.
+        self.restore_journey_powers();
         self.announce_claim_token();
 
         let mut ticker = interval(TICK);
@@ -411,9 +417,9 @@ impl GameServer {
                 .filter(|p| p.is_playing())
                 .count() as u32,
         });
-        self.projectiles.set_hostile_damage_scale(
-            terrustia_proto::difficulty::hostile_projectile_multiplier(difficulty),
-        );
+        // Hostile-shot damage is no longer pre-scaled at launch: the wire carries the base and the
+        // difficulty multiplier (and the flat x2) is applied where the game applies it, at the
+        // moment the shot hits a player (`tick_contact_damage`), so a real client scales it once.
 
         self.tick_liquids();
         lap(&mut cost, Phase::Liquids);

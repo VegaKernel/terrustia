@@ -1363,6 +1363,8 @@ impl GameServer {
             return;
         };
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
         let started = Instant::now();
         match wld_save::save(&self.world, &path) {
             Ok(()) => {
@@ -1460,8 +1462,11 @@ impl GameServer {
         }
 
         // The roster has to reach the world before the snapshot is taken, or the copy that goes to
-        // disk holds whoever lived here when it was loaded rather than who lives here now.
+        // disk holds whoever lived here when it was loaded rather than who lives here now - and
+        // the same goes for the Lunar Pillars, or a save mid-Lunar-Apocalypse drops them outright.
         self.record_town_npcs();
+        self.record_lunar_pillars();
+        self.record_journey_powers();
 
         // Copy into a buffer we already own where we have one. A fresh `snapshot()` asks the
         // allocator for a new forty-megabyte mapping and then faults in every page of it as it
@@ -2538,9 +2543,6 @@ const BUFF_SLOW: u16 = 32;
 const HEAL_REACH: (f32, f32) = terrustia_proto::npc_params::DARK_MAGE_HEAL_RANGE;
 const RAISE_CHECK_RANGE: f32 = terrustia_proto::npc_params::RAISE_CHECK_RANGE;
 const RAISE_MINIMUM: usize = terrustia_proto::npc_params::RAISE_MINIMUM;
-
-/// Coin item ids, smallest first.
-const COIN_ITEMS: [i32; 4] = [71, 72, 73, 74];
 
 /// Does a panic on the untrusted-packet path actually get caught, and does the world still reach
 /// disk on the way out?

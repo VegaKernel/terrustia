@@ -358,6 +358,7 @@ fn scream(
                 position: at,
                 velocity: (0.0, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
+                ai: [None; 4],
             });
         }
         out.screamed = true;

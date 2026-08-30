@@ -68,6 +68,10 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
                     ),
                     velocity: (0.0, 0.0),
                     parent: Some(Spawn::OWN_PARENT),
+                    // Which of the mirrored pair this gun is, seated left (0) or right (1) by ai[1]
+                    // (`NPC.cs:36433,36442`, `Main.npc[num1164].ai[1] = num1163`). Left unset every
+                    // gun defaults to 0 and the whole battery seats on one side.
+                    ai: [None, Some(side as f32), None, None],
                 });
             }
         }
@@ -76,6 +80,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>) -> SaucerOutcome {
             position: (cx, cy),
             velocity: (0.0, 0.0),
             parent: Some(Spawn::OWN_PARENT),
+            ai: [None; 4],
         });
     }
 
@@ -488,6 +493,38 @@ mod tests {
         assert!(
             (xs[0] - xs[1]).abs() > SAUCER_PART_OUT,
             "one either side: {xs:?}"
+        );
+    }
+
+    /// SAU-2: each gun is seated on its own side by `ai[1]` (0, then 1), the index vanilla hands
+    /// each turret and cannon (`NPC.cs:36433,36442`, `Main.npc[...].ai[1] = num116x`). The rider
+    /// routine reads that as its side; left unset every gun defaults to 0 and the whole battery
+    /// seats on one side.
+    #[test]
+    fn its_guns_seat_on_both_sides_by_ai1() {
+        let tiles = ground();
+        let w = world(&tiles, Some((2000.0, 3100.0)));
+        let mut n = saucer();
+        let mut parts = Vec::new();
+        for _ in 0..600 {
+            parts.extend(tick(&mut n, &w, &tiles).spawn);
+        }
+        let sides = |ty| -> Vec<f32> {
+            parts
+                .iter()
+                .filter(|p| p.npc_type == ty)
+                .map(|p| p.ai[1].expect("a gun's side is pinned in ai[1], not left to signum"))
+                .collect()
+        };
+        assert_eq!(
+            sides(MARTIAN_SAUCER_TURRET),
+            vec![0.0, 1.0],
+            "the two turrets seat either side"
+        );
+        assert_eq!(
+            sides(MARTIAN_SAUCER_CANNON),
+            vec![0.0, 1.0],
+            "and so do the two cannons"
         );
     }
 

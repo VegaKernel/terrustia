@@ -23,18 +23,14 @@
 //! that continuous value; `server.rs`'s own `effective_difficulty()` is the fallback-aware
 //! accessor every call site now goes through instead of reading `world.game_mode` directly.
 //!
-//! **In-memory only, on purpose for now, disclosed rather than silent.** Every *shared* field this
-//! struct holds (`freeze_time`/`freeze_rain`/`freeze_wind`/`stop_biome_spread`/`time_rate_slider`/
-//! `difficulty_slider`) is `IPersistentPerWorldContent` in real vanilla — they belong in the `.wld`
-//! file. That file's own creative-powers section is one of the ones this project currently carries
-//! through opaquely
-//! rather than parses (`wld.rs`'s own comment on `trailing_sections` — the same shape tile entities
-//! and townsfolk started in before they were peeled out into sections this server actively models).
-//! Doing that properly means writing a real parser/writer for that section's binary format, which
-//! is follow-up work of its own, not a side effect of wiring up the toggles' live gameplay effect.
-//! Until then: these powers work for the life of one server run and reset on restart, which is
-//! wrong relative to vanilla but not silently wrong — a restart is the only way to lose them, there
-//! is no ordinary path that drops a setting a player is relying on mid-session.
+//! **The six shared fields persist; the three per-player ones deliberately do not.** Every
+//! *shared* field this struct holds (`freeze_time`/`freeze_rain`/`freeze_wind`/
+//! `stop_biome_spread`/`time_rate_slider`/`difficulty_slider`) is `IPersistentPerWorldContent` in
+//! real vanilla, and now round-trips through the `.wld` file's own creative-powers section
+//! (`wld::read_journey_powers`/`wld_save::write_journey_powers`), mirrored onto `world.journey_*`
+//! by `GameServer::record_journey_powers` before every save and back by
+//! `GameServer::restore_journey_powers` at startup — the same shape `town_npcs` and the Lunar
+//! Pillars' own `saved_npcs` use to cross from live server state to world state and back.
 //!
 //! The three *per-player* fields are a different, genuinely correct kind of session-only: real
 //! vanilla is `IPersistentPerPlayerContent` for these, saved into each player's own `.plr` file —

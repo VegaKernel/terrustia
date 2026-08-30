@@ -8,6 +8,20 @@ use std::{env, path::PathBuf, process::ExitCode};
 
 use terrustia::world::{wld, wld_save};
 
+/// Report whether a trailing section's bytes survived a save byte-for-byte, and count it as a
+/// problem if they did not.
+fn report_identical(label: &str, a: &[u8], b: &[u8], problems: &mut usize) {
+    if a != b {
+        println!(
+            "  MISMATCH: {label} ({} bytes) differs after a save",
+            a.len()
+        );
+        *problems += 1;
+    } else {
+        println!("  ok    {label}: {} bytes, byte-identical", a.len());
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let (Some(input), Some(output)) = (args.next(), args.next()) else {
@@ -107,14 +121,13 @@ fn main() -> ExitCode {
         problems += 1;
     }
 
-    // The trailing sections this server never parses into fields at all — pressure plates, the
-    // town manager, the bestiary, and Journey mode's research/creative-powers state (file section
-    // index 6 onward; 0 and 1 above are the townsfolk/tile-entity *fallback* bytes, only used if
-    // that section failed to decode, which is a different path from this one). These are carried
-    // through as opaque bytes on every save regardless of whether this server understands them,
-    // which is the entire point — but nothing before this checked a *real, played-in* world's
-    // actual trailing bytes, only a freshly generated world's mostly-empty ones. A generated world
-    // has no real Journey research or bestiary kills to lose; only a real save does.
+    // File section index 6 onward (indices 2-5 of the trailing run; 0 and 1 above are the
+    // townsfolk/tile-entity *fallback* bytes, only used if that section failed to decode, which
+    // is a different path from this one). Every one of these is now written from this server's
+    // own live state rather than carried through, so "byte-identical to the source file" is the
+    // right expectation for only some of them — the rest are *supposed* to change on a real,
+    // played-in world, and reporting that as a mismatch would be false alarm noise on exactly the
+    // cases this fix exists for.
     if let (Some(orig_p), Some(reload_p)) = (&original.preserved, &reloaded.preserved) {
         if orig_p.trailing_sections.len() != reload_p.trailing_sections.len() {
             println!(
@@ -131,21 +144,53 @@ fn main() -> ExitCode {
             .enumerate()
         {
             let file_section = i + 4;
-            let label = match i {
-                0 => "townsfolk fallback".to_string(),
-                1 => "tile-entity fallback".to_string(),
-                _ => format!(
-                    "preserved section {file_section} (pressure plates/town manager/bestiary/Journey research)"
+            match i {
+                0 => report_identical("townsfolk fallback", a, b, &mut problems),
+                1 => report_identical("tile-entity fallback", a, b, &mut problems),
+                // Pressure plates and the bestiary always save as the genuinely empty shape now
+                // (L3-21/L3-22) — a real file's own bytes here are exactly what must NOT survive.
+                2 => {
+                    let empty = 0i32.to_le_bytes();
+                    if b.as_slice() == empty {
+                        println!(
+                            "  ok    pressure plates: saved empty, as a server-owned world must"
+                        );
+                    } else {
+                        println!(
+                            "  MISMATCH: pressure plates did not save empty ({} bytes)",
+                            b.len()
+                        );
+                        problems += 1;
+                    }
+                }
+                4 => {
+                    let empty = [0i32.to_le_bytes(); 3].concat();
+                    if *b == empty {
+                        println!("  ok    bestiary: saved empty (no live kill/sight tracker yet)");
+                    } else {
+                        println!(
+                            "  MISMATCH: bestiary did not save empty ({} bytes)",
+                            b.len()
+                        );
+                        problems += 1;
+                    }
+                }
+                // The town manager's room list (L3-20) is derived from the live residents this
+                // same save just wrote into section 4, so it need not match the source file's own
+                // bytes at all — only informational here, not a pass/fail check.
+                3 => println!(
+                    "  info  town manager rooms: {} -> {} bytes (derived from live residents, \
+                     not compared)",
+                    a.len(),
+                    b.len()
                 ),
-            };
-            if a != b {
-                println!(
-                    "  MISMATCH: {label} ({} bytes) differs after a save",
-                    a.len()
-                );
-                problems += 1;
-            } else {
-                println!("  ok    {label}: {} bytes, byte-identical", a.len());
+                // Journey powers (L3-23) now round-trip for real, so this one genuinely should be
+                // byte-identical when nothing else about the world's powers changed.
+                5 => report_identical("Journey powers", a, b, &mut problems),
+                _ => {
+                    let label = format!("preserved section {file_section}");
+                    report_identical(&label, a, b, &mut problems);
+                }
             }
         }
     } else {
