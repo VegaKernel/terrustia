@@ -3773,6 +3773,14 @@ pub struct TreeAttack {
     pub spread_scale: f32,
     /// Whether it starts partway through, as the two lobbing attacks do.
     pub warmup: f32,
+    /// How far the aim is jittered on each axis, in pixels: the Everscream's ornaments are thrown
+    /// off by up to this either way in both x and y (`NPC.cs:33088-33089`, `rand(-50, 51)`). Zero
+    /// for the attacks that do not scatter their aim point.
+    pub scatter: i32,
+    /// The most the aim is lofted upward, as a per-shot random percentage of the horizontal gap
+    /// (`NPC.cs:33090`, `-= abs(dx) * rand(0, 21) * 0.01`). Zero for the attacks with no loft. This
+    /// is distinct from `arc`, which is a fixed lob for the heavy attacks.
+    pub loft: i32,
 }
 
 const NO_SPREAD: TreeAttack = TreeAttack {
@@ -3789,6 +3797,8 @@ const NO_SPREAD: TreeAttack = TreeAttack {
     spread: 20,
     spread_scale: 0.01,
     warmup: 0.0,
+    scatter: 0,
+    loft: 0,
 };
 
 /// Mourning Wood's flaming spears, straight at you.
@@ -3837,7 +3847,9 @@ pub const WOOD_DESPERATE_SPHERES: TreeAttack = TreeAttack {
     spread_scale: 0.005,
     ..NO_SPREAD
 };
-/// The Everscream's ornaments, thrown fast and wide.
+/// The Everscream's ornaments, thrown fast and wide: aimed at you, then jittered up to fifty pixels
+/// either way on both axes and lofted upward by up to a fifth of the horizontal gap
+/// (`NPC.cs:33087-33093`), so a volley arrives spread out rather than flat and stacked.
 pub const SCREAM_ORNAMENTS: TreeAttack = TreeAttack {
     projectile: 345,
     damage: 43,
@@ -3846,6 +3858,8 @@ pub const SCREAM_ORNAMENTS: TreeAttack = TreeAttack {
     speed: 12.5,
     spread: 20,
     spread_scale: 0.02,
+    scatter: 50,
+    loft: 20,
     ..NO_SPREAD
 };
 /// ...and its pine needles, lobbed slowly.
