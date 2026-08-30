@@ -522,6 +522,18 @@ struct LoginResponse {
     name: String,
 }
 
+/// A real argon2 hash of a throwaway password, built once and verified against whenever a login
+/// names an account that does not exist. Its only job is costing exactly one ordinary
+/// verification, so probing account names cannot be told apart from guessing passwords by timing.
+fn dummy_login_hash() -> &'static str {
+    static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DUMMY.get_or_init(|| {
+        Account::new("timing-dummy", "timing-dummy-password", "default")
+            .map(|account| account.hash)
+            .unwrap_or_default()
+    })
+}
+
 async fn login(
     State(state): State<PanelState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -621,13 +633,19 @@ async fn login(
         return err(StatusCode::TOO_MANY_REQUESTS, crate::admin::REFUSAL_MESSAGE);
     }
 
-    let Some((hash, _group)) = lookup.hash_and_group else {
-        return err(StatusCode::UNAUTHORIZED, "no such account");
+    // A missing account and a wrong password must be indistinguishable from outside: same
+    // message, same argon2 cost (verified against a dummy hash when the account does not exist,
+    // instead of returning early), and the same throttle failure recorded, so probing names is
+    // exactly as slow and exactly as throttled as guessing passwords.
+    let (hash, exists) = match lookup.hash_and_group {
+        Some((hash, _group)) => (hash, true),
+        None => (dummy_login_hash().to_owned(), false),
     };
     let password = req.password.clone();
     let ok = tokio::task::spawn_blocking(move || Account::verify_hash(&hash, &password))
         .await
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && exists;
     if ok {
         state.ip_throttle().record_success(&ip_key);
         state.account_throttle().record_success(&account_key);

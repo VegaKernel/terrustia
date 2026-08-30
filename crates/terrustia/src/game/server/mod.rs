@@ -2367,7 +2367,6 @@ impl GameServer {
     }
 }
 
-/// Look up an NPC by numeric id or by its `NPCID` name, case-insensitively.
 /// What a broken tile gives back.
 ///
 /// Two tables, and the order matters. [`tile_drop`] is the game's own statement of what *mining*

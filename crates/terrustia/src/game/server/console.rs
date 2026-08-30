@@ -811,6 +811,7 @@ impl GameServer {
     }
 }
 
+/// Look up an NPC by numeric id or by its `NPCID` name, case-insensitively.
 fn resolve_npc(argument: &str) -> Option<u16> {
     if argument.is_empty() {
         return None;
