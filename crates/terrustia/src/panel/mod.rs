@@ -24,9 +24,10 @@
 //! **Off the game task, always.** Every handler here runs on the panel's own tokio task. Nothing
 //! it does blocks the game's single-writer actor: reading live state goes through a `ServerEvent`
 //! (a channel send and an `.await` on a `oneshot` reply — [`ask`] is the one place that shape is
-//! written down, and every handler below reuses it) and the one expensive operation — argon2 —
-//! runs in a `spawn_blocking` on the panel's own task, the same discipline
-//! `admin::store::Admin::account_hash`'s doc comment requires for player logins.
+//! written down, and every handler below reuses it) and the two expensive operations run in a
+//! `spawn_blocking` on the panel's own task: argon2, the same discipline
+//! `admin::store::Admin::account_hash`'s doc comment requires for player logins, and the audit
+//! log's whole-file read ([`audit_log`], which asks the game task only where the file is).
 //!
 //! **Every endpoint below `/api/` other than `/api/unclaimed` and `/api/login` requires a valid
 //! session and its own permission**, checked by [`authorized`] (or [`authorized_token`] for the two
@@ -94,21 +95,38 @@ use crate::term::{ConsoleLine, ConsoleLineKind};
 #[folder = "web-panel/dist/"]
 struct Assets;
 
+/// Whether a request path may be resolved against the panel's asset directory at all.
+///
+/// Every component has to be an ordinary name: that rejects `..`, a leading root (`/etc/passwd`,
+/// which `Path::join` does not append but *replaces the whole path with*) and a Windows drive
+/// prefix, on the platform's own path-parsing rules rather than on a guess about separators.
+///
+/// The rule this replaces was `path.split('/').any(|s| s == "..")`, which is only correct where `/`
+/// is the only separator. On Windows `Path::join` treats `\` as one too, so `..\..\windows\win.ini`
+/// is a single segment to `split('/')`, passes that check, and traverses. `worlds.rs`'s
+/// `new_world_path` already guards on the same principle.
+fn is_safe_asset_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn load_static_asset(path: &str) -> Option<Vec<u8>> {
+    // `path` comes straight from the request URI (`static_handler`), and `Uri::path()` does not
+    // reject a literal `..` segment the way a browser's own address bar would. Only the
+    // disk-serving branch below (a local frontend-development convenience, off by default) touches
+    // the filesystem with it, but a dev build listening on localhost is still a real process on a
+    // real machine. The check sits ahead of both branches rather than inside that one, so there is
+    // a single place to get it right and no build where it is missing.
+    if !is_safe_asset_path(path) {
+        return None;
+    }
     #[cfg(feature = "embed-web")]
     {
         Assets::get(path).map(|f| f.data.into_owned())
     }
     #[cfg(not(feature = "embed-web"))]
     {
-        // `path` comes straight from the request URI (`static_handler`), and `Uri::path()` does
-        // not reject a literal `..` segment the way a browser's own address bar would — only
-        // `embed-web`'s off-by-default disk-serving path (a local frontend-development
-        // convenience, never compiled into a normal build) touches the filesystem with it, but a
-        // dev build listening on localhost is still a real process on a real machine.
-        if path.split('/').any(|segment| segment == "..") {
-            return None;
-        }
         std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("web-panel/dist")
@@ -1083,10 +1101,17 @@ struct MuteRequest {
     name: String,
     #[serde(default)]
     reason: String,
-    /// Seconds, or absent/`null` for a permanent mute. A plain number rather than the console's
-    /// `10m`/`2h` duration words, since this is a form field, not a chat line to parse.
+    /// How long, in the console's own `10m`/`2h`/`1d`/`1h30m`/bare-seconds grammar
+    /// ([`crate::game::tile_log::parse_duration`]), or absent/empty for a permanent mute.
+    ///
+    /// Parsed here rather than in the browser on purpose. The panel used to parse it client-side
+    /// and send seconds, with a narrower grammar than the console's, and anything that grammar did
+    /// not match (`10 min`, `1w`, `1.5h`) became an *omitted* field: a permanent mute, silently,
+    /// through the same success path as the intended one. A duration the server cannot read is now
+    /// refused with a message naming what it does read, which is the only reading of a typo that
+    /// is not the most destructive one available.
     #[serde(default)]
-    duration_secs: Option<u64>,
+    duration: Option<String>,
 }
 
 async fn mute_player(
@@ -1098,11 +1123,31 @@ async fn mute_player(
         Ok(actor) => actor,
         Err(resp) => return resp,
     };
+    let duration_secs = match req
+        .duration
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        None => None,
+        Some(text) => match crate::game::tile_log::parse_duration(text) {
+            Some(d) => Some(d.as_secs()),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "'{text}' is not a duration: use 10m, 2h, 1d, 1h30m or a plain number of \
+                         seconds, and leave it empty for a permanent mute"
+                    ),
+                );
+            }
+        },
+    };
     match ask(&state, |reply| ServerEvent::PanelMute {
         actor,
         name: req.name,
         reason: req.reason,
-        duration_secs: req.duration_secs,
+        duration_secs,
         reply,
     })
     .await
@@ -1976,6 +2021,15 @@ fn default_audit_n() -> usize {
     50
 }
 
+/// `n` comes off the query string, so it is whatever the caller typed. The frontend asks for 200;
+/// this is the ceiling on how much of the file a single request can be made to parse and serialize.
+const MAX_AUDIT_N: usize = 1000;
+
+/// The tail of the audit log. Two steps on purpose: the game task is asked only where the log
+/// lives (a `PathBuf` clone), and the read and the JSON parse happen on the panel's own blocking
+/// pool. Reading it on the game task instead put a whole-file read of a file capped at 8 MB by
+/// default against the tick, every five seconds, which is exactly what this module's own
+/// "off the game task, always" rule exists to prevent.
 async fn audit_log(
     State(state): State<PanelState>,
     Query(q): Query<AuditQuery>,
@@ -1984,21 +2038,33 @@ async fn audit_log(
     if let Err(resp) = authorized(&state, &headers, perm::ADMIN_AUDIT).await {
         return resp;
     }
-    match ask(&state, |reply| ServerEvent::PanelAuditTail {
-        n: q.n,
-        reply,
-    })
-    .await
-    {
-        Ok(events) => Json(
-            events
-                .into_iter()
-                .map(AuditEntryResponse::from)
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(resp) => resp,
-    }
+    let path = match ask(&state, |reply| ServerEvent::PanelAuditPath { reply }).await {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+    // An in-memory log (a world with nowhere to save) has no file and no history to show.
+    let Some(path) = path else {
+        return Json(Vec::<AuditEntryResponse>::new()).into_response();
+    };
+    let n = q.n.min(MAX_AUDIT_N);
+    let events =
+        match tokio::task::spawn_blocking(move || crate::admin::audit::tail_file(&path, n)).await {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(error = %e, "the audit-log read task failed");
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not read the audit log",
+                );
+            }
+        };
+    Json(
+        events
+            .into_iter()
+            .map(AuditEntryResponse::from)
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
 }
 
 // ---- world management: generate a brand-new world -------------------------------------------
@@ -2180,4 +2246,38 @@ async fn new_world(
     });
 
     (StatusCode::ACCEPTED, Json(snapshot_worldgen(&state))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_asset_path;
+
+    /// The traversal guard on the asset path, which is the only thing standing between a request
+    /// URI and `fs::read` in a `--no-default-features` (disk-serving) build.
+    #[test]
+    fn the_asset_path_guard_rejects_everything_that_is_not_an_ordinary_name() {
+        // What the panel actually serves.
+        assert!(is_safe_asset_path("index.html"));
+        assert!(is_safe_asset_path("assets/index-DEADBEEF.js"));
+        assert!(is_safe_asset_path("favicon.svg"));
+
+        // Ordinary traversal.
+        assert!(!is_safe_asset_path("../etc/passwd"));
+        assert!(!is_safe_asset_path("assets/../../etc/passwd"));
+
+        // An absolute path is the case the old `split('/')` rule let through on every platform:
+        // no segment equals "..", so it passed, and `Path::join` replaces rather than appends when
+        // the argument is absolute, so the read went straight to the named file.
+        assert!(!is_safe_asset_path("/etc/passwd"));
+
+        // Percent-encoding is not decoded anywhere on this path, so this stays a literal name and
+        // is safe either way. Asserted so that a future decode step has to look at this test.
+        assert!(is_safe_asset_path("%2e%2e/etc/passwd"));
+
+        // The Windows case the old rule missed: `\` is a separator to `Path::join` there but never
+        // to `split('/')`. It is one ordinary (if odd) file name on unix, so this can only be
+        // asserted where it is actually a traversal.
+        #[cfg(windows)]
+        assert!(!is_safe_asset_path("..\\..\\windows\\win.ini"));
+    }
 }

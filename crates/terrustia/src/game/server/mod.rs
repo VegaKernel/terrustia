@@ -930,11 +930,11 @@ pub enum ServerEvent {
         grant: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// The last `n` audit-log entries, for the panel's audit view. See
-    /// [`crate::admin::AuditLog::tail`].
-    PanelAuditTail {
-        n: usize,
-        reply: oneshot::Sender<Vec<crate::admin::audit::AuditEvent>>,
+    /// Where the audit log writes, for the panel's audit view, or `None` for an in-memory log with
+    /// nothing to read. The panel reads and parses the file itself, off the game task
+    /// (`crate::admin::audit::tail_file`); the game task hands back only the path.
+    PanelAuditPath {
+        reply: oneshot::Sender<Option<std::path::PathBuf>>,
     },
 }
 
@@ -2667,8 +2667,8 @@ impl GameServer {
             ServerEvent::PanelDeleteAccount { actor, name, reply } => {
                 let _ = reply.send(self.panel_delete_account(&actor, &name));
             }
-            ServerEvent::PanelAuditTail { n, reply } => {
-                let _ = reply.send(self.audit.tail(n));
+            ServerEvent::PanelAuditPath { reply } => {
+                let _ = reply.send(self.audit.path().map(std::path::Path::to_path_buf));
             }
             ServerEvent::PanelAuthorize {
                 name,

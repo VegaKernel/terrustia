@@ -54,11 +54,19 @@ input {
   border: 1px solid var(--border);
   border-radius: 2px;
   padding: 0.5rem 0.6rem;
-  outline: none;
 }
 
 input:focus {
   border-color: var(--accent-dim);
+}
+
+/* The UA focus ring used to be removed here (`outline: none`) and replaced by the border change
+   above, which is `--border` to `--accent-dim`: two near-black colours on a near-black ground, so a
+   keyboard user could not tell which field they were in on the login form, the console input or any
+   dialog. `button` and `select` never had it removed and keep their own ring. */
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 button {
