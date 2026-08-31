@@ -411,13 +411,13 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         for arr in re.finditer(r"&\[([\d,\s]+)\]", body):
             items.update(int(n) for n in re.findall(r"\d+", arr.group(1)))
         items.update(int(n) for n in re.findall(r"item:\s*(\d+)", body))
-        # `for item in [5624, 5625, ...] { out.push(always(item)); }` — a bare array literal
+        # `for item in [5624, 5625, ...] { out.push(always(item)); }` is a bare array literal
         # rather than a `&[...]` slice, and the only thing that carries Skeleton's five
         # RedHatSkeletron drops. They read as missing loot on a boss until this was added.
         for arr in re.finditer(r"in \[([\d,\s]+)\]", body):
             items.update(int(n) for n in re.findall(r"\d+", arr.group(1)))
         ours.setdefault(npc, set()).update(items)
-    # `if matches!(npc_type, 6 | 7 | 173..=181) { out.push(...) }` — a third guard shape, and the
+    # `if matches!(npc_type, 6 | 7 | 173..=181) { out.push(...) }` is a third guard shape, and the
     # one the Don't Starve crossover drops use, where one item goes to a long list of NPCs that
     # would be noise as twenty separate match arms.
     for m in re.finditer(r"if matches!\(\s*npc_type,\s*([^)]*)\)\s*\{", cond):
