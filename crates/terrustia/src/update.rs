@@ -797,7 +797,20 @@ mod tests {
         (dir.join("cosign.key"), dir.join("cosign.pub"))
     }
 
-    fn sign_with_key(key: &Path, file: &Path) -> PathBuf {
+    /// Sign a fixture, or say the network was the reason we could not.
+    ///
+    /// `None` means cosign could not reach the public transparency log, and the caller skips.
+    /// Signing with a local key needs no network of its own, but cosign posts the entry to
+    /// rekor.sigstore.dev regardless, and modern versions have removed `--tlog-upload=false` in
+    /// favour of a signing-config file whose only published source is itself a download. So these
+    /// two tests genuinely depend on somebody else's uptime.
+    ///
+    /// They failed roughly one run in three here on a TLS handshake timeout, which is corrosive:
+    /// a suite that fails at random teaches everyone to re-run it rather than read it, and it cost
+    /// real time during a merge when it looked like a union break. Only a transparency-log failure
+    /// is tolerated. Anything else, including cosign being absent or the key being wrong, still
+    /// fails loudly, because those are real breakage rather than weather.
+    fn sign_with_key(key: &Path, file: &Path) -> Option<PathBuf> {
         let bundle = PathBuf::from(format!("{}.cosign.bundle", file.display()));
         let output = Command::new("cosign")
             .arg("sign-blob")
@@ -810,12 +823,22 @@ mod tests {
             .env("COSIGN_PASSWORD", "")
             .output()
             .expect("running cosign sign-blob");
+        if output.status.success() {
+            return Some(bundle);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let unreachable_log = stderr.contains("rekor.sigstore.dev")
+            || stderr.contains("TLS handshake")
+            || stderr.contains("giving up after");
         assert!(
-            output.status.success(),
-            "cosign sign-blob failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            unreachable_log,
+            "cosign sign-blob failed for a reason that is not the transparency log: {stderr}"
         );
-        bundle
+        eprintln!(
+            "SKIPPED: cosign could not reach the sigstore transparency log, so this test could not \
+             build its fixture. This is the network, not the code."
+        );
+        None
     }
 
     fn test_scratch_dir(label: &str) -> PathBuf {
@@ -839,7 +862,9 @@ mod tests {
         let (key, pubkey) = cosign_keypair(&dir);
         let file = dir.join("payload.bin");
         std::fs::write(&file, b"a real payload, signed for real").unwrap();
-        let bundle = sign_with_key(&key, &file);
+        let Some(bundle) = sign_with_key(&key, &file) else {
+            return;
+        };
         let identity = Identity::Key {
             public_key: &pubkey,
         };
@@ -942,7 +967,9 @@ mod tests {
         let tag = "v9.9.9";
         let sums_path = dir.join("SHA256SUMS");
         std::fs::write(&sums_path, b"deadbeef  a-fixture-file\n").unwrap();
-        let sums_bundle = sign_with_key(&key, &sums_path);
+        let Some(sums_bundle) = sign_with_key(&key, &sums_path) else {
+            return;
+        };
 
         let inner_name = format!("terrustia-{tag}-{target}");
         let staging = dir.join(&inner_name);
@@ -963,7 +990,9 @@ mod tests {
             .status()
             .expect("running tar");
         assert!(tar_status.success());
-        let archive_bundle = sign_with_key(&key, &archive_path);
+        let Some(archive_bundle) = sign_with_key(&key, &archive_path) else {
+            return;
+        };
 
         let sums_bytes = std::fs::read(&sums_path).unwrap();
         let sums_bundle_bytes = std::fs::read(&sums_bundle).unwrap();
