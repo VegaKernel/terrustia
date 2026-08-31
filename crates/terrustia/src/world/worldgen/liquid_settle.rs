@@ -29,7 +29,8 @@ use crate::world::liquid::Liquids;
 
 /// How many rounds of [`Liquids::tick`] to allow before giving up.
 ///
-/// Each round processes up to `Liquids::BUDGET` (8,000) queue entries. Lava and honey each cost a
+/// Each round processes up to `liquid::BUDGET` (2,500, vanilla's own zero-player slice) queue
+/// entries. Lava and honey each cost a
 /// handful of dead requeues per tile before they are allowed to actually move (`LAVA_DELAY`,
 /// `HONEY_DELAY` in `liquid.rs`), which is a pacing device for a live server and pure overhead
 /// here — so the bound is set generously rather than tightly, and [`Report::converged`] says

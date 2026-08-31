@@ -3483,6 +3483,16 @@ impl GameServer {
         if self.liquids.pending() == 0 {
             return;
         }
+        // `UpdateLiquid` recomputes its per-pass slice from the player count every pass
+        // (`Liquid.cs:993-1012`), so liquid takes less of the frame the busier the server is. See
+        // `liquid::budget_for`. Vanilla's own loop only counts the first fifteen slots, and
+        // `budget_for` saturates there, so a full server is not a special case.
+        let playing = self
+            .players
+            .iter()
+            .filter(|p| p.as_ref().is_some_and(|p| p.is_playing()))
+            .count();
+        self.liquids.set_player_count(playing);
         let settled = {
             let world = &mut self.world;
             self.liquids.tick(world)
