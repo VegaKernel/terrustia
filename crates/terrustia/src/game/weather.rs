@@ -31,6 +31,13 @@ pub const RAIN_WIND_BOOST: f32 = 5.0 / 9.0;
 /// A day counts as windy past this, which is what several routines are actually asking.
 pub const WINDY: f32 = 0.4;
 
+/// `Main._minWind`/`_maxWind`/`_minRain`/`_maxRain` (`Main.cs:67642-67645`), the hysteresis band
+/// `UpdateWindyDayState` latches [`Weather::storming`] on and off with.
+const STORM_MIN_WIND: f32 = 0.34;
+const STORM_MAX_WIND: f32 = 0.4;
+const STORM_MIN_RAIN: f32 = 0.4;
+const STORM_MAX_RAIN: f32 = 0.5;
+
 /// The weather as the world keeps it between ticks.
 #[derive(Debug, Clone, Copy)]
 pub struct Weather {
@@ -57,6 +64,23 @@ pub struct Weather {
     pub severity: f32,
     /// What the severity is heading toward. Kept public so a loaded world can restore it.
     pub intended_severity: f32,
+    /// `Main.numCloudsTemp`: the working cloud count the per-tick walk moves, which is allowed to
+    /// sit outside the published 0..=200 range between publications.
+    pub clouds_temp: i32,
+    /// `Main.weatherCounter`: ticks until the working count is published as the real one.
+    pub weather_counter: i32,
+    /// `Main.cloudBGActive`: the cloud-background layer. Positive while it is coming in or up,
+    /// counting down through 1 for as long as it stays, then a large negative number it climbs
+    /// back through before another can start (`Main.updateCloudLayer`, `Main.cs:13346-13400`).
+    ///
+    /// Not a visual on a dedicated server, whatever its name suggests: at or above 1 it opens the
+    /// heaviest rain band and it is half of vanilla's second rain-start roll, so an overcast sky
+    /// really does mean a storm is more likely and heavier.
+    pub cloud_bg_active: f32,
+    /// `Main._shouldUseStormMusic`, which is a latch rather than a predicate: it needs both the
+    /// rain and the wind past their upper thresholds to come on, and either below its lower one to
+    /// go off (`Main.UpdateWindyDayState`, `Main.cs:13160-13195`).
+    pub storming: bool,
 }
 
 impl Default for Weather {
@@ -73,6 +97,10 @@ impl Default for Weather {
             sandstorm_time: 0,
             severity: 0.0,
             intended_severity: 0.0,
+            clouds_temp: 0,
+            weather_counter: 0,
+            cloud_bg_active: 0.0,
+            storming: false,
         }
     }
 }
@@ -96,14 +124,12 @@ pub struct Sky {
     pub num_clouds: u16,
 }
 
-/// How hard a shower comes down, rolled from how cloudy the sky already is — `Main.ChangeRain`'s
-/// own three cloud-dependent branches (`Main.cs:65710`). The `cloudBGActive >= 1` half of vanilla's
-/// top branch is not modelled (this project does not track the visual cloud alpha), so only the
-/// `numClouds` thresholds select the branch; that is a narrowing, not a different formula.
-fn roll_rain_strength(num_clouds: u16, rng: &mut SmallRng) -> f32 {
+/// How hard a shower comes down, rolled from how cloudy the sky already is: `Main.ChangeRain`'s own
+/// three cloud-dependent branches (`Main.cs:65710`).
+fn roll_rain_strength(num_clouds: u16, cloud_bg_active: f32, rng: &mut SmallRng) -> f32 {
     // Two rolls in three take the common (narrower, stronger) range; the last takes the wider one.
     let common = rng.random_range(0..3) != 0;
-    let range = if num_clouds > 150 {
+    let range = if cloud_bg_active >= 1.0 || num_clouds > 150 {
         if common { 40..=90 } else { 20..=90 }
     } else if num_clouds > 100 {
         if common { 20..=60 } else { 10..=70 }
@@ -137,27 +163,30 @@ impl Weather {
         freeze_rain: bool,
         sky: Sky,
         rng: &mut SmallRng,
-    ) {
+    ) -> u16 {
+        // `UpdateWindyDayState` then `updateCloudLayer` then `UpdateWeather`, which is the order
+        // `Main.Update` runs them in on a dedicated server (`Main.cs:17363-17403`).
+        self.tick_storm_latch();
+        self.tick_cloud_layer(rng);
+        // The wind's approach runs whatever the Journey power says: vanilla's
+        // `FreezeWindDirectionAndStrength` gate is at `Main.cs:59762`, *after* the approach at
+        // `:59738-59756`, so freezing the wind stops it picking new targets and leaves it still
+        // closing on the one it has. Ours froze both, which meant switching the power on mid-gust
+        // pinned the current speed rather than the direction it was heading.
+        self.approach_wind();
         if !freeze_wind {
-            self.tick_wind(strong_enough, sky.lantern_night, rng);
+            self.tick_wind_target_gated(strong_enough, sky.lantern_night, rng);
         }
         if !freeze_rain {
             self.tick_rain(strong_enough, sky, rng);
         }
         self.tick_sandstorm(hard_mode, rng);
+        self.tick_clouds(sky.num_clouds, rng)
     }
 
-    fn tick_wind(&mut self, strong_enough: bool, lantern_night: bool, rng: &mut SmallRng) {
-        // L3-19: a lantern night holds the wind's target where it is (`Main.cs:59764`). The wind
-        // still creeps toward that frozen target below; it only stops picking a *new* one.
-        if !lantern_night {
-            self.tick_wind_target(strong_enough, rng);
-        }
-        self.target = self.target.clamp(-WIND_LIMIT, WIND_LIMIT);
-
-        // L3-13: the wind closes on its target exponentially (fast when far, easing in when near,
-        // never quite still), toward a target rain drives harder — `Main.cs:59738-59756`, not the
-        // fixed drift this used, which approached several times too fast and ignored the rain.
+    /// L3-13: the wind closes on its target exponentially (fast when far, easing in when near,
+    /// never quite still), toward a target rain drives harder (`Main.cs:59738-59756`).
+    fn approach_wind(&mut self) {
         let effective = self.target * (1.0 + RAIN_WIND_BOOST * self.max_rain);
         let step = WIND_APPROACH_FLOOR + (effective - self.wind).abs() * WIND_APPROACH_RATE;
         if self.wind < effective {
@@ -165,6 +194,166 @@ impl Weather {
         } else if self.wind > effective {
             self.wind = (self.wind - step).max(effective);
         }
+    }
+
+    /// The two wind halves together, in the order [`Weather::tick`] runs them. Only the tests want
+    /// this: the real tick has to be able to run the approach while the target roll is frozen.
+    #[cfg(test)]
+    fn tick_wind(&mut self, strong_enough: bool, lantern_night: bool, rng: &mut SmallRng) {
+        self.approach_wind();
+        self.tick_wind_target_gated(strong_enough, lantern_night, rng);
+    }
+
+    fn tick_wind_target_gated(
+        &mut self,
+        strong_enough: bool,
+        lantern_night: bool,
+        rng: &mut SmallRng,
+    ) {
+        // L3-19: a lantern night holds the wind's target where it is (`Main.cs:59764`). The wind
+        // still creeps toward that frozen target; it only stops picking a *new* one.
+        if lantern_night {
+            return;
+        }
+        self.tick_wind_target(strong_enough, rng);
+        self.target = self.target.clamp(-WIND_LIMIT, WIND_LIMIT);
+    }
+
+    /// `Main.UpdateWindyDayState` (`Main.cs:13160-13195`), the half of it a dedicated server runs.
+    ///
+    /// `cloudAlpha` is simply `maxRaining` on a server (`Main.cs:17366`), so this reads the rain
+    /// directly. Both thresholds have to be crossed together for the latch to come on, and either
+    /// one falling below its lower threshold turns it off, which is why it is state and not a
+    /// predicate.
+    fn tick_storm_latch(&mut self) {
+        if self.max_rain == 0.0 {
+            self.storming = false;
+            return;
+        }
+        if self.max_rain < STORM_MIN_RAIN || self.target.abs() < STORM_MIN_WIND {
+            self.storming = false;
+        } else if self.max_rain >= STORM_MAX_RAIN && self.target.abs() >= STORM_MAX_WIND {
+            self.storming = true;
+        }
+    }
+
+    /// `Main.updateCloudLayer` (`Main.cs:13346-13400`) at `dayRate = 1`.
+    ///
+    /// The layer comes in as a countdown of a few hours to a couple of days, holds at exactly 1
+    /// while it is overhead, then flips to a large negative number it has to climb back through
+    /// before another can begin. Rain makes it climb three times as fast, and a storm can start one
+    /// straight away.
+    fn tick_cloud_layer(&mut self, rng: &mut SmallRng) {
+        const HOUR: i32 = DAY / 24;
+        // `cloudAlpha` is `maxRaining` on a dedicated server.
+        let rate = (1.0 + 4.0 * self.max_rain).max(1.0);
+        if self.cloud_bg_active > 0.0 {
+            if self.cloud_bg_active > 1.0 {
+                self.cloud_bg_active -= 1.0 / rate;
+            }
+            if self.cloud_bg_active < 1.0 {
+                self.cloud_bg_active = 1.0;
+            }
+            if self.cloud_bg_active == 1.0
+                && rng.random_range(0..((HOUR * 2) as f32 * rate) as i32) == 0
+            {
+                self.cloud_bg_active = -(rng.random_range(HOUR * 4..DAY * 4) as f32);
+            }
+            return;
+        }
+        if self.cloud_bg_active < 0.0 {
+            self.cloud_bg_active += rate;
+            if self.raining {
+                self.cloud_bg_active += 2.0 * rate;
+            }
+            if self.cloud_bg_active > 0.0 {
+                self.cloud_bg_active = 0.0;
+            }
+        }
+        if self.cloud_bg_active == 0.0
+            && rng.random_range(0..((HOUR * 12) as f32 / rate) as i32) == 0
+        {
+            self.cloud_bg_active = rng.random_range(HOUR * 3..DAY * 2) as f32;
+        } else if self.storming {
+            self.cloud_bg_active = rng.random_range(HOUR..HOUR * 4) as f32;
+        }
+    }
+
+    /// `Main.UpdateWeather`'s cloud walk (`Main.cs:59860-59943`). Returns the cloud count to
+    /// publish, given the one that is currently published.
+    ///
+    /// This was never run: the count was set once at world generation, in 10..59, and left there
+    /// forever. That is the whole of why the weather could not get bad. `ChangeRain`'s heaviest
+    /// band needs `numClouds > 150` (or an overcast sky) and its middle band needs `> 100`, so a
+    /// world stuck under 60 clouds could only ever roll the weakest band: `max_rain` capped at 0.40
+    /// against vanilla's 0.90, and Heavy Rain (above 0.6) could not happen at all.
+    ///
+    /// The working count wanders every tick and is published every 3,600 to 10,800 ticks, with a
+    /// jump of up to 250 half the time it is published, which is what puts the sky over 150 often
+    /// enough for a real storm.
+    fn tick_clouds(&mut self, published: u16, rng: &mut SmallRng) -> u16 {
+        const HOUR: i32 = DAY / 24;
+        if self.weather_counter <= 0 {
+            // Fresh from a publication, or the very first tick of all: the walk carries on from
+            // the published value, which is exactly what `numCloudsTemp` holds at that moment
+            // (`numClouds = numCloudsTemp`, `Main.cs:59939`).
+            self.clouds_temp = i32::from(published);
+            self.weather_counter = rng.random_range(HOUR..HOUR * 3);
+        }
+        let mut published = i32::from(published);
+        // `cloudAlpha` is `maxRaining` on a dedicated server; `cloudBGAlpha` is moved only by the
+        // drawing path (`Main.cs:60294-60308`) and so is always 0 here, which makes vanilla's
+        // `Next(1000) < 50 * cloudBGAlpha` dead and its `Next(1300) < 25 * (1 - cloudBGAlpha)` a
+        // flat 25 in 1,300.
+        let alpha = self.max_rain;
+        if rng.random_range(0..60) == 0 {
+            self.clouds_temp += rng.random_range(-1..=1);
+        }
+        if rng.random_range(0..1300) < 25 {
+            self.clouds_temp -= 1;
+        }
+        if (rng.random_range(0..1000) as f32) < 200.0 * alpha && self.clouds_temp < 100 {
+            self.clouds_temp += 1;
+        }
+        if (rng.random_range(0..1000) as f32) < 50.0 * alpha {
+            self.clouds_temp += 1;
+        }
+        if self.clouds_temp > 66 && rng.random_range(0..100) == 0 {
+            self.clouds_temp -= rng.random_range(1..3);
+        }
+        if self.clouds_temp < 50 && rng.random_range(0..100) == 0 {
+            self.clouds_temp += rng.random_range(1..3);
+        }
+        if self.cloud_bg_active <= 0.0 && self.clouds_temp > 100 && alpha == 0.0 {
+            self.clouds_temp = 100;
+        }
+        self.clouds_temp = self.clouds_temp.max(-20);
+        // Rain raises the *published* count straight away rather than waiting for the counter, so a
+        // downpour looks overcast the moment it starts. Bounded rather than vanilla's bare `while`:
+        // each step adds `Next(30)`, which can be zero, and this runs on the game loop.
+        if alpha > 0.0 {
+            for _ in 0..64 {
+                if published as f32 >= 200.0 * alpha {
+                    break;
+                }
+                published = (published + rng.random_range(0..30)).min(200);
+                self.clouds_temp = self.clouds_temp.max(published);
+            }
+        }
+        self.weather_counter -= 1;
+        if self.weather_counter > 0 {
+            return published as u16;
+        }
+        if rng.random_range(0..2) == 0 {
+            self.clouds_temp += if rng.random_range(0..2) == 0 {
+                rng.random_range(0..250)
+            } else {
+                rng.random_range(0..100)
+            };
+        }
+        self.clouds_temp = self.clouds_temp.clamp(0, 200);
+        self.weather_counter = rng.random_range(HOUR..HOUR * 3);
+        self.clouds_temp as u16
     }
 
     /// Roll a new wind target, once its counter has run out. Split from the approach so a lantern
@@ -255,7 +444,7 @@ impl Weather {
             // L3-18: one tick in 7,200 the intensity is re-rolled mid-storm (`Main.cs:65862-65865`,
             // `86400 / 24 * 2`), so a shower is not one flat strength start to finish.
             if rng.random_range(0..7200) == 0 {
-                self.max_rain = roll_rain_strength(sky.num_clouds, rng);
+                self.max_rain = roll_rain_strength(sky.num_clouds, self.cloud_bg_active, rng);
             }
             return;
         }
@@ -268,8 +457,15 @@ impl Weather {
         if sky.slime_rain || sky.lantern_night || sky.next_night_is_lantern_night {
             return;
         }
-        // Roughly one shower every five and three-quarter days.
-        if rng.random_range(0..(DAY as f32 * 5.75) as i32) == 0 {
+        // Roughly one shower every five and three-quarter days, and a second, better chance again
+        // under an overcast sky: `else if (cloudBGActive >= 1f && rand.Next((int)(num2 * 4.25)) ==
+        // 0)` (`Main.cs:65894-65899`). Only the first of the two was implemented, and since
+        // `cloudBGActive` sits at or above 1 roughly a third of the time, rain was about 1.42 times
+        // too rare. Vanilla has a third roll again on `ladyBugRainBoost` (`:65898`), the luck
+        // effect from releasing a ladybug, which this project does not model.
+        if rng.random_range(0..(DAY as f32 * 5.75) as i32) == 0
+            || (self.cloud_bg_active >= 1.0 && rng.random_range(0..(DAY as f32 * 4.25) as i32) == 0)
+        {
             self.start_rain(sky.num_clouds, rng);
         }
     }
@@ -294,7 +490,7 @@ impl Weather {
         }
         self.rain_time = (length as f32 * stretch) as i32;
         self.raining = true;
-        self.max_rain = roll_rain_strength(num_clouds, rng);
+        self.max_rain = roll_rain_strength(num_clouds, self.cloud_bg_active, rng);
     }
 
     pub fn stop_rain(&mut self) {
@@ -383,9 +579,89 @@ mod tests {
     }
 
     /// The strongest the wind can ever reach: its ordinary limit, driven harder by the heaviest
-    /// rain (`max_rain` tops out at 0.40 in [`Weather::start_rain`]) — the rain-amplified target
-    /// from L3-13.
-    const AMPLIFIED_LIMIT: f32 = WIND_LIMIT * (1.0 + RAIN_WIND_BOOST * 0.40);
+    /// rain, which is the rain-amplified target from L3-13.
+    ///
+    /// 0.90, not the 0.40 this used to say: that number was a consequence of the cloud count never
+    /// moving off its worldgen value, which held `ChangeRain` in its weakest band forever. With the
+    /// count walking as vanilla's does, the top band is reachable and `max_rain` tops out at 0.90.
+    const AMPLIFIED_LIMIT: f32 = WIND_LIMIT * (1.0 + RAIN_WIND_BOOST * 0.90);
+
+    /// Like [`run`], but feeding the published cloud count back in the way the server does, so the
+    /// sky can actually get cloudy.
+    fn run_with_clouds(ticks: i32, seed: u64) -> (Weather, u16, u16) {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut weather = Weather::default();
+        // What worldgen leaves behind (`worldgen/scenery.rs:47`, `Next(10, 60)`).
+        let mut clouds = 35u16;
+        let mut peak = clouds;
+        let mut heaviest = 0.0f32;
+        for _ in 0..ticks {
+            clouds = weather.tick(
+                true,
+                false,
+                false,
+                false,
+                Sky {
+                    num_clouds: clouds,
+                    ..Sky::default()
+                },
+                &mut rng,
+            );
+            peak = peak.max(clouds);
+            heaviest = heaviest.max(weather.max_rain);
+        }
+        (weather, peak, (heaviest * 100.0) as u16)
+    }
+
+    /// The cloud count walks and is republished, so the sky can get cloudy enough for the heavier
+    /// rain bands (`Main.cs:59860-59943`).
+    ///
+    /// Fails before the fix: `num_clouds` was set once at world generation, in 10..59, and never
+    /// touched again. `ChangeRain`'s bands need more than 150 clouds for the heaviest and more than
+    /// 100 for the middle one (`Main.cs:65710`), so a world was stuck in the weakest band forever:
+    /// `max_rain` capped at 0.40 against vanilla's 0.90, and Heavy Rain (above 0.6) could not
+    /// happen at all.
+    #[test]
+    fn the_cloud_count_walks_and_lets_the_sky_get_heavy() {
+        let mut cloudiest = 0u16;
+        let mut heaviest = 0u16;
+        for seed in 0..4u64 {
+            let (_, peak, rain) = run_with_clouds(3_000_000, seed);
+            cloudiest = cloudiest.max(peak);
+            heaviest = heaviest.max(rain);
+        }
+        assert!(
+            cloudiest > 150,
+            "the sky never got past 150 clouds: {cloudiest}"
+        );
+        assert!(heaviest > 60, "it never rained hard: max_rain {heaviest}%");
+    }
+
+    /// Journey's `FreezeWindDirectionAndStrength` stops the wind picking new targets and leaves it
+    /// still closing on the one it has: vanilla's gate is at `Main.cs:59762`, *after* the approach
+    /// at `:59738-59756`.
+    ///
+    /// Fails before the fix: the freeze wrapped both, so switching the power on mid-gust pinned the
+    /// current speed instead of the direction.
+    #[test]
+    fn the_journey_wind_freeze_leaves_the_approach_running() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut weather = Weather {
+            target: 0.5,
+            counter: i32::MAX,
+            ..Default::default()
+        };
+        let before = weather.wind;
+        for _ in 0..100 {
+            weather.tick(true, false, true, false, Sky::default(), &mut rng);
+        }
+        assert!(
+            weather.wind > before,
+            "a frozen wind should still be closing on its target: {before} -> {}",
+            weather.wind
+        );
+        assert_eq!(weather.target, 0.5, "but the target should not have moved");
+    }
 
     /// The wind actually moves, and never past its limit — the ordinary one in the dry, and the
     /// rain-amplified one when it is pouring.

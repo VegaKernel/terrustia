@@ -3609,7 +3609,7 @@ impl GameServer {
             slime_rain: self.slime_rain.is_active(),
             num_clouds: u16::from(self.world.num_clouds),
         };
-        self.weather.tick(
+        let clouds = self.weather.tick(
             strong_enough,
             hard_mode,
             self.journey.freeze_wind,
@@ -3626,12 +3626,20 @@ impl GameServer {
         self.world.sandstorm_time = self.weather.sandstorm_time;
         self.world.sandstorm_severity = self.weather.severity;
         self.world.sandstorm_intended_severity = self.weather.intended_severity;
+        // The cloud count moves on its own timetable (`Main.cs:59939`, republished every 3,600 to
+        // 10,800 ticks) and is part of world data, so a change goes out to clients the same way the
+        // rain starting does. `NetMessage.SendData(7)` is exactly what vanilla sends here.
+        let clouds = clouds.min(u16::from(u8::MAX)) as u8;
+        let clouds_changed = clouds != self.world.num_clouds;
+        self.world.num_clouds = clouds;
         if was_raining != self.weather.raining {
             self.announce(if self.weather.raining {
                 "It has started to rain."
             } else {
                 "The rain has stopped."
             });
+            self.broadcast_world_data();
+        } else if clouds_changed {
             self.broadcast_world_data();
         }
     }
