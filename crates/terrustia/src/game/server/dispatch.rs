@@ -1509,6 +1509,17 @@ impl GameServer {
         if let Some(player) = self.player_mut(slot) {
             player.talking_to = if npc >= 0 { Some(npc as u8) } else { None };
         }
+        // `Player.SetTalkNPC` (`Player.cs:4360-4375`) takes the resident's happiness here and
+        // nowhere else: once per chat, never on a tick. Closing the chat resets it to
+        // `ShoppingSettings.NotInShop` (`ShoppingSettings.cs:9-13`), which quotes a flat price.
+        let multiplier = if npc >= 0 {
+            self.shop_multiplier(slot, npc as u8)
+        } else {
+            1.0
+        };
+        if let Some(player) = self.player_mut(slot) {
+            player.shop_multiplier = multiplier;
+        }
         if npc >= 0 {
             self.try_rescue(npc as u8);
         }

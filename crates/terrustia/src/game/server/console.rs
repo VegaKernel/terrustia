@@ -5,7 +5,7 @@
 //! with `/`, and [`GameServer::run_admin_command`] for the subset that both of those hand off to,
 //! which is every command that needs its argument's case left alone.
 
-use terrustia_proto::{NetworkText, net_module, npc_data::npc_stats};
+use terrustia_proto::{NetworkText, happiness, net_module, npc_data::npc_stats};
 use tracing::info;
 
 use crate::{
@@ -575,7 +575,7 @@ impl GameServer {
     ///
     /// Commands are gated per-command against the namespaced vocabulary in `admin::group::perm` —
     /// see the table below. Self-service (`register`/`login`/`logout`/`whoami`) and the read-only
-    /// "look" commands (`help`/`players`/`npcs`/`house`/`where`) need no permission at all, matching
+    /// "look" commands (`help`/`players`/`npcs`/`house`/`happy`/`where`) need no permission at all, matching
     /// the behaviour before this system existed (`Permission::Look`, its predecessor, never gated
     /// anything in this dispatcher either). Until somebody registers, the server is unclaimed and
     /// every check passes regardless — see `Admin::unclaimed`.
@@ -646,6 +646,7 @@ impl GameServer {
                     "/npcs            what is alive right now",
                     "/butcher         remove every hostile NPC",
                     "/house           is the room you are standing in a valid house?",
+                    "/happy           what the resident you are talking to thinks of the place",
                     "/register <name> <password>   make an account",
                     "/login <name> <password>      sign in",
                     "/logout          give up whatever you signed in for",
@@ -803,6 +804,32 @@ impl GameServer {
                         room.bottom - room.top + 1
                     ),
                     Err(reason) => format!("not a house: {}", reason.describe()),
+                };
+                self.tell(slot, &line);
+            }
+            "happy" => {
+                // What the server makes of the resident this player has open. The number the
+                // *client* charges is its own (see `terrustia_proto::happiness`); this is here so
+                // the two can be compared, which is the only way to tell they agree.
+                let line = match self.player(slot).map(|p| (p.talking_to, p.shop_multiplier)) {
+                    Some((Some(index), multiplier)) => {
+                        let name = self
+                            .npcs
+                            .get(index)
+                            .and_then(|npc| npc_stats(npc.npc_type))
+                            .map_or("?", |stats| stats.name);
+                        let mood = if multiplier <= happiness::MAX_HAPPINESS_MULTIPLIER {
+                            "delighted"
+                        } else if multiplier < 1.0 {
+                            "content"
+                        } else if multiplier >= happiness::HIGHEST_MULTIPLIER {
+                            "furious"
+                        } else {
+                            "unimpressed"
+                        };
+                        format!("{name} is {mood}: prices x{multiplier:.2}")
+                    }
+                    _ => "you are not talking to anybody".to_string(),
                 };
                 self.tell(slot, &line);
             }

@@ -16,6 +16,7 @@ pub mod conditional_drops;
 pub mod convert;
 pub mod difficulty;
 pub mod error;
+pub mod happiness;
 pub mod housing;
 pub mod hurt;
 pub mod hurt_tiles;

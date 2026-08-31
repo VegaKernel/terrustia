@@ -128,9 +128,25 @@ const PYLON_RESIDENTS_NEEDED: usize = 2;
 ///
 /// `SceneMetrics.ZoneScanSize` works out to 169 x 124 tiles — a screen at the game's assumed
 /// 1920x1200, plus twenty-five tiles of padding on every side — and the box is centred on the
-/// pylon.
+/// pylon. 169 is odd so it is symmetric at plus-or-minus 84; 124 is even, and
+/// `Utils.CenteredRectangle` plus `Rectangle.Contains` make that -62..=61 rather than -62..=62.
 const PYLON_SCAN_HALF_WIDTH: i32 = 84;
-const PYLON_SCAN_HALF_HEIGHT: i32 = 62;
+const PYLON_SCAN_HALF_HEIGHT_UP: i32 = 62;
+const PYLON_SCAN_HALF_HEIGHT_DOWN: i32 = 61;
+
+/// How far a resident may stray from its house and still count towards its pylon, in tiles.
+/// `TeleportPylonsSystem.cs:237`.
+const PYLON_RESIDENT_HOME_RANGE: f32 = 100.0;
+
+/// The fraction of the surface line below which a Beach pylon stops being a Beach pylon.
+///
+/// `TeleportPylonsSystem.cs:284`: `Y <= worldSurface && Y > worldSurface * 0.35`. Without the
+/// lower bound a pylon parked in the sky, hundreds of tiles above any water, still read as a
+/// coastal one.
+///
+/// The decompiler prints that constant as `0.3499999940395355`, which is only the `double` the
+/// game's `0.35f` widens to; as an `f32` this is the same bit pattern.
+const BEACH_PYLON_SKY_LIMIT: f32 = 0.35;
 
 /// `NPC.cs:785`, `spawnRate = 20` during an invasion: a one-in-twenty roll per player per tick,
 /// rather than a fixed cadence. An invasion arrives steadily rather than all at once, but it
@@ -1348,7 +1364,17 @@ impl GameServer {
         }
     }
 
-    /// How many housed town NPCs live within a pylon's scan box.
+    /// How many housed town NPCs live within a pylon's scan box *and are actually home*.
+    ///
+    /// `TeleportPylonsSystem.DoesPositionHaveEnoughNPCs`, TeleportPylonsSystem.cs:224-247. Three
+    /// conditions, not one: the resident has a home, that home is inside the scan box, and the
+    /// resident is standing within a hundred tiles of it (`Vector2.Distance(home, Center / 16f) <
+    /// 100f`, TeleportPylonsSystem.cs:235-237).
+    ///
+    /// The last of those was missing, so a pylon stayed usable while both its residents were off
+    /// wandering the far side of the world. It is the same "is anybody actually there" idea the
+    /// happiness check spells out at 120 tiles (`ShopHelper.IsFarFromHome`), and leaving it out
+    /// made the pylon network answer a question about houses when the game asks one about people.
     fn town_npcs_near(&self, x: i16, y: i16) -> usize {
         self.npcs
             .iter()
@@ -1358,10 +1384,104 @@ impl GameServer {
                     // Homeless townsfolk do not count towards a pylon, in the game or here.
                     return false;
                 };
-                (hx - i32::from(x)).abs() <= PYLON_SCAN_HALF_WIDTH
-                    && (hy - i32::from(y)).abs() <= PYLON_SCAN_HALF_HEIGHT
+                // `Utils.CenteredRectangle(centre, SceneMetrics.ZoneScanSize)` is 169 by 124 tiles
+                // (`SceneMetrics.cs:16`), and `Rectangle.Contains` is inclusive at the top-left and
+                // exclusive at the bottom-right: -84..=84 across, -62..=61 down. The lower bound
+                // read `<= 62`, which is one row of houses too generous.
+                if (hx - i32::from(x)).abs() > PYLON_SCAN_HALF_WIDTH
+                    || hy - i32::from(y) < -PYLON_SCAN_HALF_HEIGHT_UP
+                    || hy - i32::from(y) > PYLON_SCAN_HALF_HEIGHT_DOWN
+                {
+                    return false;
+                }
+                let (cx, cy) = npc.center();
+                let (dx, dy) = (
+                    cx / crate::game::npc::TILE - hx as f32,
+                    cy / crate::game::npc::TILE - hy as f32,
+                );
+                (dx * dx + dy * dy).sqrt() < PYLON_RESIDENT_HOME_RANGE
             })
             .count()
+    }
+
+    /// The shopping zones a player is standing in, as `ShopHelper` wants to see them.
+    ///
+    /// The game reads these off the client's own `SceneMetrics` scan, which a dedicated server
+    /// never runs. Here they come from the per-player [`BiomeCache`] the spawner already keeps,
+    /// through `last` rather than `read`: this is reached from a packet handler, and a handler
+    /// must never be able to make a client pay for a fresh 78 us scan on demand. The spawn pass
+    /// refreshes that entry every tick for every active player, so the answer is the current one;
+    /// a player with no entry yet (dead, or in their first tick) reads as plain forest.
+    ///
+    /// Three disclosed narrowings. The game's zone flags are independent and several can be true
+    /// at once (`Player.ShoppingZone_AnyBiome`, `Player.cs:3807-3817`), while `biome_at` returns
+    /// the single first biome to cross its threshold, so at most one biome flag is ever set here.
+    /// The glowing mushroom biome is not modelled by this server at all, so `mushroom` is never
+    /// set and the Truffle never gets his one biome like. And the scan is centred on the player's
+    /// top-left corner rather than their centre, which is what every other caller here does.
+    ///
+    /// [`BiomeCache`]: crate::game::spawn::BiomeCache
+    fn shopping_zones(&self, slot: u8) -> terrustia_proto::happiness::Zones {
+        use crate::game::spawn::Biome;
+        use terrustia_proto::happiness::Zones;
+
+        let Some(position) = self.player(slot).map(|p| p.position) else {
+            return Zones::default();
+        };
+        let y = (position.1 / crate::game::npc::TILE) as i32;
+        let biome = self
+            .player_biomes
+            .last(usize::from(slot))
+            .unwrap_or(Biome::Forest);
+        Zones {
+            ocean: biome == Biome::Ocean,
+            snow: biome == Biome::Snow,
+            desert: biome == Biome::Desert,
+            jungle: biome == Biome::Jungle,
+            hallow: biome == Biome::Hallow,
+            mushroom: false,
+            corruption: biome == Biome::Corruption,
+            crimson: biome == Biome::Crimson,
+            dungeon: biome == Biome::Dungeon,
+            // `Player.ShoppingZone_BelowSurface`, `Player.cs:3819`.
+            below_surface: y > i32::from(self.world.surface),
+        }
+    }
+
+    /// What one town NPC's happiness does to the prices it quotes a player.
+    ///
+    /// The game's `Player.SetTalkNPC` (`Player.cs:4360-4375`) calls this once when the chat opens
+    /// and caches the answer, and so does this: it is not a per-tick cost, and there is no cadence
+    /// to invent because the game has none. Measured at 0.27 us for a thirty-five-resident town
+    /// (`examples/happiness_cost.rs`), so even the absurd case of every player on a full server
+    /// opening a chat in the same tick is 68 us of a 16.67 ms budget.
+    fn shop_multiplier(&self, slot: u8, index: u8) -> f32 {
+        use terrustia_proto::happiness::Resident;
+
+        let resident = |npc: &crate::game::npc::Npc| {
+            let (cx, cy) = npc.center();
+            Resident {
+                npc_type: npc.npc_type,
+                home: npc.home,
+                center: (cx / crate::game::npc::TILE, cy / crate::game::npc::TILE),
+            }
+        };
+        let Some(shopkeeper) = self.npcs.get(index).map(&resident) else {
+            return 1.0;
+        };
+        let others: Vec<Resident> = self
+            .npcs
+            .iter()
+            .filter(|(other, npc)| *other != index && npc.stats.town_npc && npc.is_alive())
+            .map(|(_, npc)| resident(npc))
+            .collect();
+        let zones = self.shopping_zones(slot);
+        terrustia_proto::happiness::price_multiplier(
+            &shopkeeper,
+            &others,
+            zones,
+            self.world.secret_seeds.remix,
+        )
     }
 
     /// Whether a pylon's surroundings still match its network, the game's biome gate on travelling
@@ -1408,8 +1528,15 @@ impl GameServer {
                             | Biome::Crimson
                     )
             }
-            // Beach: the surface band by an ocean edge (TeleportPylonsSystem.cs:282-292).
-            4 => depth == Depth::Surface && near_edge,
+            // Beach: the surface band by an ocean edge (TeleportPylonsSystem.cs:282-292). The band
+            // is bounded at both ends, `Y <= worldSurface && Y > worldSurface * 0.35`: `Surface`
+            // alone reaches all the way to row zero, which let a pylon in the clouds pass as a
+            // coastal one.
+            4 => {
+                depth == Depth::Surface
+                    && near_edge
+                    && y as f32 > f32::from(self.world.surface) * BEACH_PYLON_SKY_LIMIT
+            }
             // Underground: anywhere at or below the surface line (TeleportPylonsSystem.cs:301-302).
             3 => depth != Depth::Surface,
             // Underworld: the underworld layer (TeleportPylonsSystem.cs:305-306).
@@ -3356,6 +3483,172 @@ mod pylon_gates {
         assert!(
             !plain.temple_pylon_sealed(&pylon(1, tx, ty)),
             "a pylon that is not on temple brick is not a temple pylon",
+        );
+    }
+
+    /// A Beach pylon's band has a floor as well as a ceiling: `Y <= worldSurface && Y >
+    /// worldSurface * 0.35` (TeleportPylonsSystem.cs:284). The arm only tested `Depth::Surface`,
+    /// which reaches all the way to row zero, so a pylon hung in the sky over an ocean passed.
+    #[test]
+    fn a_beach_pylon_in_the_sky_is_refused() {
+        let s = server(); // surface = 100, so the floor is row 35
+        assert!(
+            s.pylon_accepts(&pylon(4, 200, 40)),
+            "a beach pylon just above the shoreline should still work",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(4, 200, 30)),
+            "a beach pylon in the sky band should be refused",
+        );
+        assert!(
+            !s.pylon_accepts(&pylon(4, 200, 35)),
+            "the floor is exclusive: exactly 0.35 of the surface is already too high",
+        );
+    }
+
+    /// `DoesPositionHaveEnoughNPCs` counts residents who are *home*, not houses: each one must be
+    /// within a hundred tiles of its own front door (TeleportPylonsSystem.cs:235-237). Without
+    /// that clause a pylon stayed live while its townsfolk were off across the world, which is the
+    /// whole point of the check.
+    #[test]
+    fn a_pylon_only_counts_residents_who_are_near_home() {
+        use crate::game::npc::TILE;
+        const GUIDE: u16 = 22;
+        let (px, py) = (600i16, 150i16);
+
+        let place = |s: &mut GameServer, home: (i32, i32), standing: (i32, i32)| {
+            let index = s
+                .npcs
+                .spawn(GUIDE, (standing.0 as f32 * TILE, standing.1 as f32 * TILE))
+                .expect("a free NPC slot");
+            s.npcs.get_mut(index).expect("just spawned").home = Some(home);
+        };
+
+        // Two residents at home beside the pylon: enough for it to carry anybody.
+        let mut s = server();
+        place(&mut s, (600, 150), (600, 150));
+        place(&mut s, (601, 150), (601, 150));
+        assert_eq!(s.town_npcs_near(px, py), 2);
+
+        // Same two houses, but one of them has wandered a hundred and fifty tiles away. Its house
+        // is still in the box; it is not.
+        let mut s = server();
+        place(&mut s, (600, 150), (600, 150));
+        place(&mut s, (601, 150), (751, 150));
+        assert_eq!(
+            s.town_npcs_near(px, py),
+            1,
+            "a resident more than a hundred tiles from home should not count",
+        );
+
+        // The scan box is 169 by 124 and `Rectangle.Contains` is exclusive at the bottom, so it
+        // reaches 62 rows up and only 61 down.
+        let mut s = server();
+        place(&mut s, (600, 150 - 62), (600, 150 - 62));
+        place(&mut s, (600, 150 + 62), (600, 150 + 62));
+        assert_eq!(
+            s.town_npcs_near(px, py),
+            1,
+            "the box reaches 62 rows above the pylon and 61 below",
+        );
+    }
+}
+
+/// The happiness wiring: that the server hands `ShopHelper`'s transcription the shopper's zones
+/// and the resident's neighbours, and gets the game's number back. The formula itself is checked
+/// in `terrustia_proto::happiness`; what is checked here is the mapping into it.
+#[cfg(test)]
+mod happiness_wiring {
+    use super::*;
+    use crate::config::Config;
+
+    const GUIDE: u16 = 22;
+
+    /// A world with a surface at row 100, one player standing where asked, and one Guide living
+    /// beside the pylon-free middle of it.
+    fn town(player_tile: (i32, i32)) -> (GameServer, u8) {
+        let mut world = World::empty(1200, 400, "happiness probe");
+        world.surface = 100;
+        world.rock_layer = 200;
+        let mut server = GameServer::new(Config::default(), world);
+
+        let (out_tx, _out_rx) = mpsc::channel(1024);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().expect("test address"), out_tx);
+        player.state = ConnState::WorldSent;
+        player.position = (
+            player_tile.0 as f32 * crate::game::npc::TILE,
+            player_tile.1 as f32 * crate::game::npc::TILE,
+        );
+        server.players[0] = Some(player);
+
+        let guide = server
+            .npcs
+            .spawn(
+                GUIDE,
+                (
+                    600.0 * crate::game::npc::TILE,
+                    90.0 * crate::game::npc::TILE,
+                ),
+            )
+            .expect("a free NPC slot");
+        server.npcs.get_mut(guide).expect("just spawned").home = Some((600, 90));
+        (server, guide)
+    }
+
+    /// A Guide alone in a forest, quoted to a shopper standing on the plain surface: the solitude
+    /// bonus (`ShopHelper.cs:151-155`) and the Guide's Forest like
+    /// (`PersonalityDatabasePopulator.cs:27-31`), 0.95 * 0.94 = 0.89.
+    #[test]
+    fn a_lone_guide_on_the_surface() {
+        let (server, guide) = town((600, 50));
+        assert_eq!(server.shop_multiplier(0, guide), 0.89);
+    }
+
+    /// The same Guide, quoted to a shopper who has gone underground. `ShoppingZone_Forest` is
+    /// false below the surface line (`Player.cs:3819-3831`), so the Forest like drops out and only
+    /// the solitude bonus is left.
+    #[test]
+    fn the_forest_like_is_a_property_of_where_the_shopper_stands() {
+        let (server, guide) = town((600, 150));
+        assert_eq!(server.shop_multiplier(0, guide), 0.95);
+    }
+
+    /// Opening and closing a chat is what takes and clears the number, exactly where
+    /// `Player.SetTalkNPC` does it (`Player.cs:4360-4375`). Nothing else touches it, and in
+    /// particular no tick does.
+    #[test]
+    fn talking_takes_the_number_and_closing_the_chat_clears_it() {
+        let (mut server, guide) = town((600, 50));
+        // Packet 40's body is the claimed player slot (rewritten to the sender's) and the NPC
+        // index, or -1 for "stopped talking" (`MessageBuffer.cs:2246-2263`).
+        let talk = |server: &mut GameServer, npc: i16| {
+            let mut payload = vec![0u8];
+            payload.extend_from_slice(&npc.to_le_bytes());
+            server.handle_packet(
+                0,
+                crate::net::codec::Frame {
+                    id: id::SYNC_TALK_N_P_C,
+                    payload: Bytes::from(payload),
+                },
+            );
+        };
+
+        talk(&mut server, i16::from(guide));
+        assert_eq!(
+            server.players[0].as_ref().expect("player").talking_to,
+            Some(guide)
+        );
+        assert_eq!(
+            server.players[0].as_ref().expect("player").shop_multiplier,
+            0.89
+        );
+
+        talk(&mut server, -1);
+        assert_eq!(server.players[0].as_ref().expect("player").talking_to, None);
+        assert_eq!(
+            server.players[0].as_ref().expect("player").shop_multiplier,
+            1.0,
+            "closing the chat is ShoppingSettings.NotInShop",
         );
     }
 }

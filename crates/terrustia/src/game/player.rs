@@ -79,6 +79,17 @@ pub struct Player {
     pub selected_item: u8,
     /// Which town NPC this player has open, if any. A shop needs to know.
     pub talking_to: Option<u8>,
+    /// What that resident's happiness does to his prices, as of the moment they started talking.
+    ///
+    /// The game's `Player.currentShoppingSettings.PriceAdjustment`: 1.0 when nobody is being
+    /// talked to (`ShoppingSettings.NotInShop`, `ShoppingSettings.cs:9-13`), otherwise the number
+    /// `ShopHelper` quotes. Taken once, at the moment `SetTalkNPC` runs (`Player.cs:4360-4375`),
+    /// and deliberately not refreshed until the next one: the game snapshots it too, so a shopper
+    /// who wanders into the corruption mid-purchase keeps the price they were quoted.
+    ///
+    /// Read only by `/happy`. See `terrustia_proto::happiness` for why nothing else can read it:
+    /// prices are client-authoritative in this protocol.
+    pub shop_multiplier: f32,
     /// Which way this player is looking.
     ///
     /// Only a wiring tool reads it, and only to decide which way its path turns the corner — but
@@ -198,6 +209,7 @@ impl Player {
             sitting: false,
             selected_item: 0,
             talking_to: None,
+            shop_multiplier: 1.0,
             facing_right: true,
             angler_quests: 0,
             golf_score: 0,
