@@ -194,6 +194,25 @@ fixing rather than the audit, both by building a better instrument rather than r
 
 Both are the argument for the instrument campaign below.
 
+**The secret seeds, quantified for the first time, and it is a disclosure problem as much as a
+parity one.** An audit lane counted the sites rather than estimating them:
+
+- **`Main.getGoodWorld` (For the Worthy): 101 sites in `NPC.cs`, 79 of them in NPC AI.** Three are
+  implemented (the Wall of Flesh pace, the lunar pillar surface clamp, `DESTROYER_SEGMENTS_GOOD`),
+  five more are explicitly disclosed as absent at their sites, and **roughly 71 are silently
+  absent**, including all eleven of the Eye of Cthulhu's and all nine of the Twins'.
+- **`Main.remixWorld`: 85 sites, zero consumed.** The seed is detected, persisted, and
+  **advertised to clients** (`world.rs:788`, `F::RemixWorld`), while no AI reads it.
+  `world/hardmode.rs:602-603` still says "this project has no remix seed", which is stale twice over.
+- **`WorldGen.Skyblock.lowTiles`: about 20 sites, zero consumed.** Detected and persisted, unread.
+
+The parity gap is ordinary deferred work. The **disclosure** gap is not: the server currently tells a
+client it is running a remix world and then does not behave like one, and a stale comment tells a
+reader the seed does not exist when it does. Under this project's own rules a narrowing is disclosed
+at its site, so either these seeds are wired up or their absence is stated where a reader will meet
+it, and the advertisement to clients is reconsidered. That is a v0.0.1 decision, not a v0.0.2 one,
+because it concerns what the server claims about itself.
+
 **C4 (done)**: expanded the golden/deterministic vanilla-derived tests that CAN run per-commit in
 CI; the live differential against a real `TerrariaServer` remains a Phase 2 qualification step, since
 decompiled or installed game material can never ship to hosted CI.
