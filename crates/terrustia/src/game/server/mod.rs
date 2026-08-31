@@ -1148,6 +1148,18 @@ pub struct GameServer {
     /// Set by the console's `stop`, so the loop ends and the world is saved on the way out.
     stopping: bool,
     worst_tick: TickCost,
+    /// The cheapest and dearest tick since the status footer last drew, about a second's worth.
+    ///
+    /// The footer used to print the cost of whichever single tick happened to land on the refresh
+    /// boundary, and that reads as wild instability: an idle server showed 70 us one second and
+    /// 350 the next, which looks like the server misbehaving. It is not. Subsystems run on
+    /// different cadences (liquid every other tick, the spawn pass periodically, section streaming
+    /// only when somebody crosses a boundary, the save drain only while a save is armed), so tick
+    /// cost is genuinely multi-modal and one sample in sixty is a random draw from it. Measured on
+    /// an idle 4200x1200 world, the *worst* tick per ten-second window sat in a tight 255 to 342 us
+    /// band across seven windows while the footer swung by 5x. Showing the range says both true
+    /// things at once: the floor, and what it actually peaks at.
+    status_span: (Duration, Duration),
     /// The longest a tick has been held off the processor this window.
     worst_stall: Duration,
     /// The palette the boot chose, so the live status footer can colour itself to match — or emit
@@ -1317,6 +1329,7 @@ impl GameServer {
             },
             stopping: false,
             worst_tick: TickCost::default(),
+            status_span: (Duration::MAX, Duration::ZERO),
             worst_stall: Duration::ZERO,
             last_tick: TickCost::default(),
             save_path,

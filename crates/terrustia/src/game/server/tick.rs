@@ -142,7 +142,7 @@ impl GameServer {
     /// Refresh the live status footer: who is online, how long the server has been up, and the last
     /// tick's cost. Called about once a second from [`Self::note_tick_cost`]. Cheap, and a no-op on
     /// screen when there is no interactive prompt to sit above (a piped or service console).
-    fn update_status(&self, cost: TickCost) {
+    fn update_status(&self) {
         let p = self.palette;
         let online = self
             .players
@@ -154,7 +154,17 @@ impl GameServer {
         // timestamp, and one that never has to reach for `Instant::now` on the hot path.
         let secs = self.ticks / TICKS_PER_SECOND;
         let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
-        let tick_us = cost.cpu.as_micros();
+        // The span since this last drew, not one arbitrary tick out of the sixty. See
+        // `GameServer::status_span` for why a single sample reads as instability that is not there.
+        let (low, high) = self.status_span;
+        let tick = if low > high {
+            // No tick has been costed yet, only reachable on the very first draw.
+            "tick -".to_string()
+        } else if low == high {
+            format!("tick {}µs", high.as_micros())
+        } else {
+            format!("tick {}-{}µs", low.as_micros(), high.as_micros())
+        };
         use crate::term::sgr;
         let dot_colour = if online > 0 {
             sgr::BRIGHT_GREEN
@@ -166,7 +176,7 @@ impl GameServer {
             p.paint(dot_colour, "●"),
             p.paint(sgr::BOLD, &online.to_string()),
             p.paint(sgr::DIM, &format!("up {h:02}:{m:02}:{s:02}")),
-            p.paint(sgr::DIM, &format!("tick {tick_us}µs")),
+            p.paint(sgr::DIM, &tick),
         );
         crate::term::set_status(&status);
     }
@@ -272,8 +282,11 @@ impl GameServer {
     /// windows and skews its own tail. `tools/soak_scale.sh` does; it once did not.
     fn note_tick_cost(&mut self, cost: TickCost) {
         self.last_tick = cost;
+        self.status_span.0 = self.status_span.0.min(cost.cpu);
+        self.status_span.1 = self.status_span.1.max(cost.cpu);
         if self.ticks.is_multiple_of(STATUS_EVERY) {
-            self.update_status(cost);
+            self.update_status();
+            self.status_span = (Duration::MAX, Duration::ZERO);
         }
         if cost.cpu > self.worst_tick.cpu {
             self.worst_tick = cost;
