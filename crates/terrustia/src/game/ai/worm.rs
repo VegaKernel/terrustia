@@ -197,7 +197,13 @@ fn swim_through_rock(npc: &mut Npc, offset: (f32, f32), speed: f32, turn: f32) {
 
 /// Drive one worm head for a tick.
 pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, expert: bool) {
-    let motion = worm_motion(npc.npc_type, expert);
+    // `Player.ZoneSandstorm` is `ZoneDesert && SurfaceAtmospherics && Sandstorm.Happening`
+    // (`SceneMetrics.cs:706`); the two flags the conditions carry are the same pair every other
+    // sandstorm-aware routine here reads.
+    let target_in_sandstorm = world.target.is_some_and(|t| t.alive)
+        && world.conditions.sandstorm
+        && world.conditions.desert;
+    let motion = worm_motion(npc.npc_type, expert, target_in_sandstorm);
 
     if let Some(t) = world.target {
         face(npc, t);
@@ -277,6 +283,8 @@ mod tests {
         }
         r
     }
+
+    use terrustia_proto::npc_params::SOLAR_CRAWLTIPEDE_HEAD;
 
     fn worm(npc_type: u16, tile: (i32, i32)) -> Npc {
         Npc::new(npc_type, (tile.0 as f32 * TILE, tile.1 as f32 * TILE), 1).expect("a style 6 type")
@@ -398,10 +406,46 @@ mod tests {
 
     #[test]
     fn each_worm_swims_at_its_own_pace() {
-        assert_eq!(worm_motion(10, false).speed, 6.0, "a giant worm is slow");
-        assert_eq!(worm_motion(7, false).speed, 9.0, "a devourer is not");
-        assert_eq!(worm_motion(13, false).turn, 0.07);
-        assert_eq!(worm_motion(13, true).turn, 0.15, "expert sharpens it");
+        assert_eq!(
+            worm_motion(10, false, false).speed,
+            6.0,
+            "a giant worm is slow"
+        );
+        assert_eq!(worm_motion(7, false, false).speed, 9.0, "a devourer is not");
+        assert_eq!(worm_motion(13, false, false).turn, 0.07);
+        assert_eq!(
+            worm_motion(13, true, false).turn,
+            0.15,
+            "expert sharpens it"
+        );
+    }
+
+    /// B3: two of three vanilla branches that were missing from the table.
+    ///
+    /// The Solar Crawltipede sets its own 10.0/0.30 after the whole chain (`NPC.cs:52325-52328`)
+    /// and was falling to the 8.0/0.07 default: four-fifths of the speed and less than a quarter
+    /// of the turn rate. The tomb crawler doubles down on a target caught in a sandstorm
+    /// (`NPC.cs:52255-52267`) and was pinned at its calm-weather numbers.
+    #[test]
+    fn the_crawltipede_and_the_tomb_crawler_read_their_own_branches() {
+        let default_worm = worm_motion(1000, false, false);
+        let crawltipede = worm_motion(SOLAR_CRAWLTIPEDE_HEAD, false, false);
+        assert_eq!(crawltipede.speed, 10.0);
+        assert_eq!(crawltipede.turn, 0.3);
+        assert!(
+            crawltipede.turn > default_worm.turn * 4.0,
+            "it was taking the default's 0.07"
+        );
+
+        let calm = worm_motion(510, false, false);
+        assert_eq!((calm.speed, calm.turn), (10.0, 0.25));
+        let storm = worm_motion(510, false, true);
+        assert_eq!((storm.speed, storm.turn), (16.0, 0.35));
+        assert_eq!(
+            worm_motion(10, false, true),
+            worm_motion(10, false, false),
+            "no other worm reads the weather"
+        );
     }
 
     #[test]

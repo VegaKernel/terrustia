@@ -877,13 +877,21 @@ pub fn firefly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut Small
             npc.local_ai[1] -= 1.0;
         } else if settled {
             npc.local_ai[1] = SHIMMERFLY_CHECK_EVERY;
-            // Anything alive nearby sends it off in the opposite direction, hard.
+            // Anything alive *nearby* sends it off in the opposite direction, hard. The reach is
+            // carried per entry because vanilla uses two of them: a hostile counts within a
+            // hundred pixels (`NPC.cs:34446`) and a player within a hundred and fifty
+            // (`NPC.cs:34451`). Without the test a shimmerfly bolts every fifteen ticks for as
+            // long as anything hostile is loaded anywhere in the world, averaged over creatures
+            // thousands of pixels away, and never settles.
             let mut away = (0.0f32, 0.0f32);
             let mut crowd = 0.0f32;
-            for (kx, ky) in world.avoid {
+            for &(kx, ky, reach) in world.avoid {
                 let (dx, dy) = (cx - kx, cy - ky);
-                let gap = dx.hypot(dy);
-                if gap > 0.0 {
+                // Compared squared, which is the same test without the square root: most of the
+                // list is out of reach, and this way those entries never pay for one.
+                let gap2 = dx * dx + dy * dy;
+                if gap2 > 0.0 && gap2 <= reach * reach {
+                    let gap = gap2.sqrt();
                     crowd += 1.0;
                     away.0 += dx / gap;
                     away.1 += dy / gap;
@@ -1008,6 +1016,8 @@ mod firefly_tests {
         )
     }
 
+    use terrustia_proto::npc_params::{SHIMMERFLY_SHY_OF_NPCS, SHIMMERFLY_SHY_OF_PLAYERS};
+
     const FIREFLY: u16 = 355;
     const SHIMMERFLY_TYPE: u16 = 677;
 
@@ -1096,7 +1106,7 @@ mod firefly_tests {
     fn a_shimmerfly_bolts_from_company() {
         let tiles = meadow(320);
         let w = world(&tiles, None);
-        let run = |company: &[(f32, f32)]| {
+        let run = |company: &[(f32, f32, f32)]| {
             // A fresh generator each time: two bugs sharing one stream diverge for reasons that
             // have nothing to do with the thing under test.
             let mut rng = SmallRng::seed_from_u64(677);
@@ -1114,10 +1124,32 @@ mod firefly_tests {
 
         let (cx, cy) = bug(SHIMMERFLY_TYPE, 200, 300).center();
         let quiet = run(&[]);
-        let crowded = run(&[(cx - 40.0, cy)]);
+        let crowded = run(&[(cx - 40.0, cy, SHIMMERFLY_SHY_OF_NPCS)]);
         assert!(
             crowded > quiet + 1.0,
             "company on the left should shove it right, hard: {crowded} vs {quiet}"
+        );
+
+        // B6: vanilla counts a hostile only within a hundred pixels and a player within a hundred
+        // and fifty (`NPC.cs:34444-34453`). Before this the loop took every entry in the list at
+        // any distance, so a shimmerfly bolted every fifteen ticks for as long as anything hostile
+        // existed anywhere in the loaded world.
+        let far = run(&[(cx - 4000.0, cy, SHIMMERFLY_SHY_OF_NPCS)]);
+        assert!(
+            (far - quiet).abs() < 1e-6,
+            "something four thousand pixels away is not company: {far} vs {quiet}"
+        );
+        // The two reaches are different numbers, and the entry carries its own: a player at 120
+        // pixels registers where a hostile at the same distance does not.
+        let hostile_at_120 = run(&[(cx - 120.0, cy, SHIMMERFLY_SHY_OF_NPCS)]);
+        let player_at_120 = run(&[(cx - 120.0, cy, SHIMMERFLY_SHY_OF_PLAYERS)]);
+        assert!(
+            (hostile_at_120 - quiet).abs() < 1e-6,
+            "a hostile at 120 is outside its hundred-pixel reach"
+        );
+        assert!(
+            player_at_120 > quiet + 1.0,
+            "a player at 120 is inside its hundred-and-fifty: {player_at_120} vs {quiet}"
         );
     }
 }

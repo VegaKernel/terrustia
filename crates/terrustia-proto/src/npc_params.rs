@@ -144,8 +144,15 @@ pub fn fighter_tall_step(npc_type: u16) -> bool {
 /// How fast a slime's hop timer fills, beyond the one tick every slime gets.
 ///
 /// From the `ai[0]` accumulation at the top of the hop block in `AI_001_Slimes`.
-pub fn slime_timer_bonus(npc_type: u16) -> f32 {
+///
+/// `hurt` is whether the NPC has taken any damage at all, which only Hoppin' Jack reads. Vanilla
+/// writes its bonus as `(1 - life / lifeMax) * 10` over two `int`s (`NPC.cs:62200-62204`), so the
+/// division is integer: exactly 1 while untouched and 0 from the first point of damage, making the
+/// term a step from nothing to ten rather than the ramp the arithmetic looks like.
+pub fn slime_timer_bonus(npc_type: u16, hurt: bool) -> f32 {
     match npc_type {
+        304 if hurt => 10.0,
+        304 => 0.0,
         59 => 2.0, // LavaSlime
         71 => 3.0, // DungeonSlime
         667 => 3.0,
@@ -168,29 +175,52 @@ pub fn slime_hop_window(npc_type: u16) -> f32 {
     }
 }
 
+/// The arapaima, the one swimmer with its own set of numbers (`NPC.cs:23892-23919`).
+pub const ARAPAIMA: u16 = 157;
+
 /// How a swimmer accelerates and how fast it may go, from the `aiStyle == 16` block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwimSpeed {
-    pub accel: f32,
-    pub max_x: f32,
-    pub max_y: f32,
+    /// Per-tick acceleration, x then y. Only the arapaima steers differently on the two axes.
+    pub accel: (f32, f32),
+    /// The speed a hunting swimmer is tested against on each axis, and what one found over it is
+    /// set back to.
+    ///
+    /// For every type but the arapaima the two numbers are equal, which is a plain clamp. The
+    /// arapaima is tested against 8 and 5 but knocked back to 7 and 4 (`NPC.cs:23897-23919`), so
+    /// it surges and falls back rather than riding a flat ceiling.
+    pub max_x: (f32, f32),
+    pub max_y: (f32, f32),
 }
 
 /// Swim speeds by type. Sharks and their kin move noticeably faster than a goldfish.
 pub fn swim_speed(npc_type: u16) -> SwimSpeed {
     match npc_type {
+        // `NPC.cs:23892-23919`. The fastest swimmer in the game by a wide margin, and the only one
+        // that accelerates harder sideways than vertically.
+        ARAPAIMA => SwimSpeed {
+            accel: (0.25, 0.2),
+            max_x: (8.0, 7.0),
+            max_y: (5.0, 4.0),
+        },
         65 | 102 | 692 => SwimSpeed {
-            accel: 0.15,
-            max_x: 5.0,
-            max_y: 3.0,
+            accel: (0.15, 0.15),
+            max_x: (5.0, 5.0),
+            max_y: (3.0, 3.0),
         },
         _ => SwimSpeed {
-            accel: 0.1,
-            max_x: 3.0,
-            max_y: 2.0,
+            accel: (0.1, 0.1),
+            max_x: (3.0, 3.0),
+            max_y: (2.0, 2.0),
         },
     }
 }
+
+/// How hard a swimmer already moving against its facing is slowed before it accelerates.
+///
+/// Only the arapaima does this (`NPC.cs:23886-23891`); it is what stops the fastest fish in the
+/// game from overshooting every time its prey doubles back.
+pub const ARAPAIMA_REVERSE_DAMPING: f32 = 0.95;
 
 /// Swimmers that never hunt: they drift regardless of who is in the water with them.
 pub fn swimmer_is_passive(npc_type: u16) -> bool {
@@ -228,22 +258,64 @@ mod tests {
     #[test]
     fn slime_timers_match_the_types_the_game_singles_out() {
         assert_eq!(
-            slime_timer_bonus(1),
+            slime_timer_bonus(1, false),
             0.0,
             "a blue slime just gets its one tick"
         );
-        assert_eq!(slime_timer_bonus(59), 2.0, "LavaSlime is twitchier");
-        assert_eq!(slime_timer_bonus(658), 5.0);
+        assert_eq!(slime_timer_bonus(59, false), 2.0, "LavaSlime is twitchier");
+        assert_eq!(slime_timer_bonus(658, false), 5.0);
         assert_eq!(slime_hop_window(1), -1000.0);
         assert_eq!(slime_hop_window(659), -500.0);
         assert_eq!(slime_hop_window(667), -400.0);
     }
 
+    /// M2: `NPC.cs:62200-62204` writes Hoppin' Jack's bonus as `(1 - life / lifeMax) * 10` over
+    /// two `int`s, so the division is integer and the term is a step, not a ramp: nothing at all
+    /// while untouched, and the full ten from the first point of damage onward.
+    #[test]
+    fn a_hoppin_jack_only_speeds_up_once_it_has_been_hit() {
+        assert_eq!(
+            slime_timer_bonus(304, false),
+            0.0,
+            "untouched, it is normal"
+        );
+        assert_eq!(slime_timer_bonus(304, true), 10.0, "hurt, it is frantic");
+        assert_eq!(
+            slime_timer_bonus(1, true),
+            0.0,
+            "no other slime reads its own health"
+        );
+    }
+
     #[test]
     fn sharks_swim_faster_than_goldfish() {
-        assert_eq!(swim_speed(65).max_x, 5.0, "shark");
-        assert_eq!(swim_speed(55).max_x, 3.0, "goldfish takes the default");
-        assert!(swim_speed(65).accel > swim_speed(55).accel);
+        assert_eq!(swim_speed(65).max_x.0, 5.0, "shark");
+        assert_eq!(swim_speed(55).max_x.0, 3.0, "goldfish takes the default");
+        assert!(swim_speed(65).accel.0 > swim_speed(55).accel.0);
+    }
+
+    /// B2: `NPC.cs:23892-23919` gives type 157 a branch of its own ahead of the shark's, and it is
+    /// the only swimmer whose speed test and speed assignment are different numbers: over eight it
+    /// is knocked back to seven, so it surges instead of riding a ceiling. Before this the
+    /// arapaima fell to the default and swam at three pixels a tick with a tenth of acceleration.
+    #[test]
+    fn the_arapaima_outswims_every_other_fish() {
+        let it = swim_speed(ARAPAIMA);
+        assert_eq!(it.accel, (0.25, 0.2), "harder sideways than vertically");
+        assert_eq!(it.max_x, (8.0, 7.0));
+        assert_eq!(it.max_y, (5.0, 4.0));
+        assert!(
+            it.accel.0 > swim_speed(65).accel.0,
+            "it out-accelerates a shark"
+        );
+        assert!(it.max_x.1 > swim_speed(65).max_x.1, "and outruns one");
+        // Every other type tests and assigns the same number, which is a plain clamp.
+        for other in [55u16, 65, 102, 692] {
+            let s = swim_speed(other);
+            assert_eq!(s.max_x.0, s.max_x.1, "type {other} clamps on x");
+            assert_eq!(s.max_y.0, s.max_y.1, "type {other} clamps on y");
+            assert_eq!(s.accel.0, s.accel.1, "type {other} steers evenly");
+        }
     }
 
     #[test]
@@ -545,8 +617,10 @@ pub const DESPAWN_ENCOURAGED_TICKS: i32 = 10;
 /// `2 - scale` to turn a bigger body into a slower one, and its stinger's damage scales with it
 /// directly.
 ///
-/// Types 304 pick their scale per-variant inside a branch rather than once, so they are left at
-/// one here; neither is pre-hardmode.
+/// Two groups set their scale inside a nested per-variant branch rather than once at the top of
+/// their own block: the scarecrows (305-314, `NPC.cs:12966-13003`) and the mourning wood /
+/// pumpking family (338-340). Both are transcribed below; the halves of each pair that vanilla
+/// leaves alone (305, 310, 338) keep the default of one.
 pub fn npc_scale(npc_type: u16) -> f32 {
     match npc_type {
         16 => 1.25,
@@ -579,6 +653,13 @@ pub fn npc_scale(npc_type: u16) -> f32 {
         183 => 1.10,
         184 => 1.10,
         204 => 1.15,
+        // Hoppin' Jack (`NPC.cs:12953`) and the scarecrows, whose scale is set per-variant inside
+        // the 305-314 block (`NPC.cs:12979`, `:12987`, `:12995`, `:13003`).
+        304 => 1.10,
+        306 | 311 => 1.05,
+        307 | 312 => 0.90,
+        308 | 313 => 0.95,
+        309 | 314 => 1.10,
         319 => 0.90,
         320 => 1.05,
         321 => 1.10,
@@ -789,8 +870,18 @@ pub struct WormMotion {
 }
 
 /// Speed and turn rate for a worm.
-pub fn worm_motion(npc_type: u16, expert: bool) -> WormMotion {
+///
+/// `target_in_sandstorm` is the target's `ZoneSandstorm` (`SceneMetrics.cs:706`), which only the
+/// tomb crawler reads: a sandstorm is the one thing that makes it worth outrunning.
+pub fn worm_motion(npc_type: u16, expert: bool, target_in_sandstorm: bool) -> WormMotion {
     match npc_type {
+        // The Solar Crawltipede (`NPC.cs:52325-52328`), which vanilla sets after the rest of the
+        // chain rather than alongside it; no other branch claims 412, so the order does not matter
+        // here.
+        SOLAR_CRAWLTIPEDE_HEAD => WormMotion {
+            speed: 10.0,
+            turn: 0.3,
+        },
         // The Destroyer, which is the fastest burrower in the game and turns no better for it.
         DESTROYER_HEAD | DESTROYER_BODY | DESTROYER_TAIL => WormMotion {
             speed: DESTROYER_SPEED,
@@ -819,6 +910,12 @@ pub fn worm_motion(npc_type: u16, expert: bool) -> WormMotion {
         13 => WormMotion {
             speed: 10.0,
             turn: 0.07,
+        },
+        // The tomb crawler, which more than doubles its turn rate and half again its speed while
+        // its target is out in a sandstorm (`NPC.cs:52255-52267`).
+        510 if target_in_sandstorm => WormMotion {
+            speed: 16.0,
+            turn: 0.35,
         },
         510 => WormMotion {
             speed: 10.0,
@@ -979,8 +1076,52 @@ pub fn town_scurries(npc_type: u16) -> bool {
     matches!(npc_type, 300 | 447 | 610)
 }
 
+/// How close something hostile has to be before a resident counts itself in danger.
+///
+/// `NPCID.Sets.DangerDetectRange` (`NPCID.cs:4841`), whose default is -1 and read as 200
+/// (`NPC.cs:54010-54014`). The spread is the point: the Guide notices trouble at 300 pixels and the
+/// Tax Collector at 1200, while the Stylist and the Golfer barely look up.
+pub fn town_danger_range(npc_type: u16) -> f32 {
+    match npc_type {
+        441 => 50.0,
+        207 | 353 => 60.0,
+        633 => 100.0,
+        550 | 588 => 120.0,
+        637 | 638 | 656 | 670 | 678..=684 => 250.0,
+        17 => 320.0,
+        18 | 38 | 107 | 369 | 453 => 300.0,
+        208 => 400.0,
+        142 => 500.0,
+        22 | 54 | 108 | 160 | 663 => 700.0,
+        124 | 227 | 228 => 800.0,
+        19 | 178 | 368 => 900.0,
+        209 | 229 => 1000.0,
+        20 => 1200.0,
+        _ => 200.0,
+    }
+}
+
 /// Walking speed for a type in the town style.
-pub fn town_walk(npc_type: u16, wet: bool) -> Walk {
+///
+/// `alarmed` is vanilla's `friendly && (flag16 | flag21)` (`NPC.cs:54467`): a resident with a
+/// hostile inside [`town_danger_range`], or one that is drowning. `hurt` is `1 - life / lifeMax`,
+/// which is what turns a wounded resident's retreat into a run.
+pub fn town_walk(npc_type: u16, wet: bool, alarmed: bool, hurt: f32) -> Walk {
+    // A town slime in water is the one case vanilla writes *after* the danger override
+    // (`NPC.cs:54473-54477`), so it wins outright.
+    if town_is_slime(npc_type) && wet {
+        return Walk {
+            max: 2.0,
+            accel: 0.2,
+        };
+    }
+    // `NPC.cs:54467-54473`, which overrides the whole per-type table below rather than joining it.
+    if alarmed {
+        return Walk {
+            max: 1.5 + hurt * 0.9,
+            accel: 0.1,
+        };
+    }
     match npc_type {
         // Mice outrun everything else on land, and stop just as sharply.
         300 | 447 | 610 => Walk {
@@ -1006,10 +1147,6 @@ pub fn town_walk(npc_type: u16, wet: bool) -> Walk {
         299 | 538 | 539 | 639..=645 => Walk {
             max: 1.5,
             accel: 0.07,
-        },
-        t if town_is_slime(t) && wet => Walk {
-            max: 2.0,
-            accel: 0.2,
         },
         _ => Walk {
             max: 1.0,
@@ -3668,8 +3805,19 @@ pub const SUMMON_SAFE_Y: i32 = 12;
 // --- Duke Fishron ---------------------------------------------------------------------------------
 
 pub const FISHRON: u16 = 370;
-pub const SHARKRON: u16 = 371;
-pub const SHARKRON_2: u16 = 372;
+/// What Duke Fishron actually throws (`NPC.cs:49768`, `:49999`).
+///
+/// This was named `SHARKRON` on the 1.4.3 numbering, where 371 was the sharkron. On 1.4.5.8 the
+/// ids shifted: 371 is the detonating bubble, 372 the sharkron and 373 its second form
+/// (`NPCID.cs:11813-11817`). The number was right and only the name was a lie, so nothing about
+/// the fight changes here.
+pub const DETONATING_BUBBLE: u16 = 371;
+/// The real sharkron, style 71 (`NPCID.cs:11815`).
+///
+/// Nothing in the game's own tree spawns it or its second form (373), so nothing here does either;
+/// the constant exists because the style is implemented and its test has to name a type that
+/// really runs it.
+pub const SHARKRON: u16 = 372;
 
 /// One phase of the fight. Fishron runs the same skeleton three times over with different numbers,
 /// which is why they are a table rather than a stack of branches.
@@ -4197,9 +4345,11 @@ pub const PHANTASMAL_DEATHRAY: u16 = 455;
 pub const PHANTASMAL_DEATHRAY_DAMAGE: i32 = 75;
 pub const PHANTASMAL_BOLT: u16 = 462;
 pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
-/// The bolts come in threes, a fifth of a second apart.
-pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
-pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;
+/// The bolts come in threes, seven ticks apart: the hand and the head both fire at `num2 - 14`,
+/// `num2 - 7` and `num2` (`NPC.cs:42274-42278` and `:42780-42784`), and the shot leaves at eight
+/// pixels a tick.
+pub const MOON_LORD_BOLT_EVERY: f32 = 7.0;
+pub const MOON_LORD_BOLT_SPEED: f32 = 8.0;
 /// The head's deathray sweeps across nine seconds.
 pub const MOON_LORD_RAY_SWEEP: f32 = 540.0;
 /// A free eye, once its socket is broken, hunts on its own.

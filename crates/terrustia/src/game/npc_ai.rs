@@ -49,8 +49,10 @@ pub struct Surroundings<'a> {
     pub conditions: super::ai::Conditions,
     /// Anything nearby that a timid critter would rather not be next to.
     pub hazards: &'a [Hazard],
-    /// Centres of whatever the crowded styles keep away from; see [`avoidance`].
-    pub avoid: &'a [(f32, f32)],
+    /// Whatever the crowded styles keep away from; see [`avoidance`]. Each entry is a centre and
+    /// the reach at which a style with no separation distance of its own notices it. See
+    /// [`super::ai::World::avoid`].
+    pub avoid: &'a [(f32, f32, f32)],
     /// The nearest hostile NPC a town resident might fight — `slot` is an NPC table index, built
     /// by the caller from the NPC table rather than from `targets` (which is players only).
     pub hostile: Option<Target>,
@@ -249,7 +251,14 @@ pub fn update_with(
             // only for the two styles that read it. Working it out for all two hundred NPCs would
             // be a quadratic scan every tick to feed a butterfly.
             crowding: if reads_crowding(npc.stats.ai_style) {
-                crowding_at(npc, around.hazards)
+                // The two styles that read this each name their own reach; they agree on a hundred
+                // pixels, and the constants are the source rather than a literal here.
+                let reach = if npc.stats.ai_style == 26 {
+                    terrustia_proto::npc_params::BUTTERFLY_FEAR_RANGE
+                } else {
+                    terrustia_proto::npc_params::DRAGONFLY_FEAR_NPC
+                };
+                crowding_at(npc, around.hazards, reach)
             } else {
                 (0.0, 0.0)
             },
@@ -407,8 +416,7 @@ pub fn avoidance(style: i32) -> Option<Avoids> {
 ///
 /// A butterfly bolts from anything dangerous within a hundred pixels; a dragonfly counts players
 /// too. Returns a zero vector when there is nothing to avoid.
-fn crowding_at(npc: &Npc, hazards: &[Hazard]) -> (f32, f32) {
-    const REACH: f32 = 100.0;
+fn crowding_at(npc: &Npc, hazards: &[Hazard], reach: f32) -> (f32, f32) {
     let (cx, cy) = npc.center();
     let mut sum = (0.0, 0.0);
     let mut n = 0.0;
@@ -416,7 +424,7 @@ fn crowding_at(npc: &Npc, hazards: &[Hazard]) -> (f32, f32) {
         // Distance from the box, not from its middle, which is what the game measures.
         let dx = (cx - hazard.center.0).abs() - hazard.half.0;
         let dy = (cy - hazard.center.1).abs() - hazard.half.1;
-        if dx.max(0.0).hypot(dy.max(0.0)) > REACH {
+        if dx.max(0.0).hypot(dy.max(0.0)) > reach {
             continue;
         }
         let away = (cx - hazard.center.0, cy - hazard.center.1);

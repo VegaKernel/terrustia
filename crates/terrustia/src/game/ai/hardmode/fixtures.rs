@@ -101,7 +101,7 @@ pub fn pirate_ghost(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome 
 
     // Ghosts stacked on one another shove apart, and harder sideways than up: a pack fans out into
     // a line rather than a column.
-    for (kx, ky) in world.avoid {
+    for (kx, ky, _) in world.avoid {
         let (ox, oy) = (kx - cx, ky - cy);
         let gap = ox.hypot(oy);
         if gap > 0.0 && gap < GHOST_PERSONAL_SPACE {
@@ -310,7 +310,7 @@ mod tests {
         let tiles = tiles_with_floor(40);
         let mut w = world(&tiles, Some((600.0, 0.0)));
         let mut a = ghost(0.0);
-        let kin = [a.center()];
+        let kin = [(a.center().0, a.center().1, 0.0)];
         w.avoid = &kin;
         let before = a.velocity.0;
         pirate_ghost(&mut a, &w);
@@ -320,7 +320,7 @@ mod tests {
 
         // A neighbour to the left pushes it right, on top of its pull toward the player.
         let mut b = ghost(0.0);
-        let left = [(b.center().0 - 20.0, b.center().1)];
+        let left = [(b.center().0 - 20.0, b.center().1, 0.0)];
         w.avoid = &left;
         pirate_ghost(&mut b, &w);
         let mut c = ghost(0.0);

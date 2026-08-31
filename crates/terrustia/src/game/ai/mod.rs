@@ -492,7 +492,14 @@ pub struct World<'a, T: TileView> {
     /// What this one keeps its distance from: the rest of its own kind for a pirate ghost,
     /// anything alive at all for a shimmerfly. Empty unless the style asks for it, because
     /// building it is a scan of the whole table.
-    pub avoid: &'a [(f32, f32)],
+    ///
+    /// Each entry is `(x, y, reach)`. The reach is how close the entry has to be before a style
+    /// that has no separation distance of its own reacts to it, and zero means "this one is not
+    /// something to bolt from at all". Only the shimmerfly reads it, because it is the only style
+    /// whose reach is a property of what it is looking at rather than of itself: a hundred pixels
+    /// for a hostile, a hundred and fifty for a player (`NPC.cs:34444-34453`). Every other reader
+    /// brings its own constant and ignores the third element.
+    pub avoid: &'a [(f32, f32, f32)],
     /// A unit push away from whatever nearby the NPC would rather not be next to.
     ///
     /// The routines that read this cannot see other NPCs, so the caller averages the directions
