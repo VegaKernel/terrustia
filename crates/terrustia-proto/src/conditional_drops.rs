@@ -58,6 +58,14 @@ pub struct Conditions {
     /// Clothier's repeatable vanity re-fight share a type and are told apart only by `ai[3]`. The
     /// caller reads it off the dying NPC itself, the same way `npc_from_statue` does.
     pub red_hat_skeletron: bool,
+    /// `NPC.AI_120_HallowBoss_IsGenuinelyEnraged()` for *this* Empress (`NPC.cs:46321-46328`,
+    /// `ai[3] == 2 || ai[3] == 3`): per-instance state again, and the only gate on the Terraprisma.
+    ///
+    /// It means "this fight was begun in daylight", not "it is daytime now". The mark is set only
+    /// while she is at full health or on the tick she finishes arriving (`NPC.cs:46472-46475`,
+    /// `:46565-46568`), so summoning her at night and letting dawn break mid-fight does not earn
+    /// it. The caller reads it off the dying NPC, as `red_hat_skeletron` above does.
+    pub empress_genuinely_enraged: bool,
 }
 
 /// One conditional drop.
@@ -280,6 +288,16 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
         for item in [5624, 5625, 5626, 5628, 5737] {
             out.push(always(item));
         }
+    }
+
+    // The Terraprisma: the Empress of Light's one reward for fighting her in daylight, which is the
+    // fight she is built to refuse (`RegisterBoss_HallowBoss`'s own
+    // `LeadingConditionRule(EmpressOfLightIsGenuinelyEnraged).OnSuccess(Common(5005))`,
+    // `ItemDropDatabase.cs:333-334`). Unconditional inside that gate, and outside the `NotExpert`
+    // wrapper the rest of her loot sits under, so an expert daylight kill earns it too. It was
+    // simply absent from the tables, which made the hardest thing in the game unobtainable.
+    if npc_type == 636 && at.empress_genuinely_enraged {
+        out.push(always(5005));
     }
 
     // Hardmode's crafting materials. Every one of these is what gates the tier above it, so
@@ -1784,6 +1802,7 @@ mod tests {
             downed_all_mech_bosses: true,
             pumpkin_moon_wave: Some(1),
             red_hat_skeletron: true,
+            empress_genuinely_enraged: true,
         };
         // A bunny, a goldfish, a guide.
         for ordinary in [46u16, 1, 22] {

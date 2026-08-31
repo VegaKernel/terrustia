@@ -27,6 +27,19 @@ fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
     occupants.iter().any(|&b| boxes_overlap(tile, b))
 }
 
+/// The facts about *this* dead NPC that its loot depends on, read off it before the table lets it
+/// go. Every one of these is a per-instance condition in `ItemDropDatabase`, not a fact about the
+/// type: two NPCs of the same type dying side by side can answer them differently.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeadNpc {
+    /// It came out of a statue, so a farm cannot grind the blood-moon-exclusive drops.
+    from_statue: bool,
+    /// It was the Clothier's repeatable vanity Skeletron rather than the ordinary boss.
+    red_hat_skeletron: bool,
+    /// This Empress's fight was begun in daylight, which is the Terraprisma's only gate.
+    empress_genuinely_enraged: bool,
+}
+
 impl GameServer {
     /// Advance every NPC and tell clients about the ones that changed.
     /// Run every NPC's buffs: count the timers down, work out what they cost, and tell clients.
@@ -1986,6 +1999,8 @@ impl GameServer {
     /// a debuff can finish something off between two ticks, with no player credited, and every
     /// one of these still has to happen.
     pub(super) fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
+        // Named rather than three positional bools, because they are all `false` most of the time
+        // and swapping two of them would be silent.
         // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
         // *this* NPC came from a statue, not just whether one exists somewhere in the world, and
         // `RedHatSkeletronAdjustmentsEnabled` (`NPC.cs:67435-67446`) reads `ai[3]` off this exact
@@ -1995,6 +2010,13 @@ impl GameServer {
         let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
+        // The Terraprisma's only gate, and per-instance for the same reason:
+        // `AI_120_HallowBoss_IsGenuinelyEnraged` (`NPC.cs:46321-46328`) asks *this* Empress whether
+        // her fight was begun in daylight, which her own routine records in `ai[3]`.
+        let empress_genuinely_enraged = npc_type == 636
+            && removed
+                .as_ref()
+                .is_some_and(|npc| matches!(npc.ai[3] as i32, 2 | 3));
         // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
         let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
         self.broadcast_npc_death(index);
@@ -2010,7 +2032,15 @@ impl GameServer {
             value
         };
         self.drop_coins(value, center, midas);
-        self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
+        self.drop_loot(
+            npc_type,
+            center,
+            DeadNpc {
+                from_statue,
+                red_hat_skeletron,
+                empress_genuinely_enraged,
+            },
+        );
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
         self.note_army_kill(npc_type);
@@ -2065,13 +2095,12 @@ impl GameServer {
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
     /// has fallen.
-    fn drop_loot(
-        &mut self,
-        npc_type: u16,
-        center: (f32, f32),
-        from_statue: bool,
-        red_hat_skeletron: bool,
-    ) {
+    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32), dead: DeadNpc) {
+        let DeadNpc {
+            from_statue,
+            red_hat_skeletron,
+            empress_genuinely_enraged,
+        } = dead;
         let (tx, ty) = (
             (center.0 / crate::game::npc::TILE) as i32,
             (center.1 / crate::game::npc::TILE) as i32,
@@ -2111,6 +2140,7 @@ impl GameServer {
             pumpkin_moon_wave: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin))
                 .then_some(self.moon.wave),
             red_hat_skeletron,
+            empress_genuinely_enraged,
         };
 
         // Pools that give exactly one of their options.
@@ -8029,7 +8059,7 @@ mod difficulty_slider {
         const TREASURE_BAG: i32 = 3318;
 
         let mut gentle = journey_at(0.0);
-        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
+        gentle.drop_loot(KING_SLIME, (0.0, 0.0), DeadNpc::default());
         assert!(
             !gentle
                 .items
@@ -8039,7 +8069,7 @@ mod difficulty_slider {
         );
 
         let mut fierce = journey_at(1.0);
-        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
+        fierce.drop_loot(KING_SLIME, (0.0, 0.0), DeadNpc::default());
         assert!(
             fierce
                 .items
@@ -8787,7 +8817,7 @@ mod boss_drop_table_fixes {
     /// afterward belongs to that kill alone — no need to diff against a running total.
     fn kill_and_collect(server: &mut GameServer, npc_type: u16) -> Vec<(i32, i16)> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false, false);
+        server.drop_loot(npc_type, (0.0, 0.0), DeadNpc::default());
         let mut items: Vec<(i16, i32, i16)> = server
             .items
             .iter()
@@ -9040,6 +9070,42 @@ mod boss_drop_table_fixes {
         }
     }
 
+    /// The Terraprisma, driven through the real `npc_died` entry point.
+    ///
+    /// `RegisterBoss_HallowBoss` hangs item 5005 off a single gate,
+    /// `Conditions.EmpressOfLightIsGenuinelyEnraged` (`ItemDropDatabase.cs:333-334`), which asks
+    /// *this* Empress whether her fight was begun in daylight -
+    /// `AI_120_HallowBoss_IsGenuinelyEnraged` (`NPC.cs:46321-46328`), her own `ai[3]` being 2 or 3.
+    /// Her ai style already keeps that mark; the drop was simply absent from the tables, so the
+    /// hardest thing in the game could not be obtained at all. Dropping the `npc_type == 636` arm
+    /// in `conditional_drops` turns the first half of this red, and dropping the `ai[3]` read in
+    /// `npc_died` turns it red as well.
+    #[test]
+    fn a_daylight_empress_kill_drops_the_terraprisma_and_a_night_one_does_not() {
+        const EMPRESS: u16 = 636;
+        const TERRAPRISMA: i32 = 5005;
+
+        let dropped_with = |ai3: f32| {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            let index = server
+                .npcs
+                .spawn(EMPRESS, (0.0, 0.0))
+                .expect("a slot for the Empress");
+            server.npcs.get_mut(index).expect("just spawned").ai[3] = ai3;
+            server.items = ItemStore::new();
+            server.npc_died(index, EMPRESS, (0.0, 0.0), 0.0);
+            let ids: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+            ids.contains(&TERRAPRISMA)
+        };
+
+        // 2 is "enraged from full health", 3 the same after she has turned into her second phase.
+        assert!(dropped_with(2.0), "a daylight kill earns it");
+        assert!(dropped_with(3.0), "and so does one after the turn");
+        // 0 is an ordinary night fight, 1 the same after the turn. Neither is the daylight fight.
+        assert!(!dropped_with(0.0), "a night fight does not");
+        assert!(!dropped_with(1.0), "nor a night fight past its turn");
+    }
+
     /// The control case: an ordinary Skeletron kill (`ai[3]` left at its default) must not carry
     /// the vanity set — otherwise every Skeletron kill would hand it out, which real vanilla never
     /// does outside the Clothier's own repeatable re-fight.
@@ -9093,7 +9159,7 @@ mod conditional_numerator_fixes {
     /// `boss_drop_table_fixes` for why resetting the store first makes this exact.
     fn kill_and_collect_ids(server: &mut GameServer, npc_type: u16) -> Vec<i32> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false, false);
+        server.drop_loot(npc_type, (0.0, 0.0), DeadNpc::default());
         let mut items: Vec<(i16, i32)> = server
             .items
             .iter()
