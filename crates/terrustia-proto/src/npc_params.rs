@@ -3324,7 +3324,13 @@ pub const DESTROYER_FLEE_SPEED: f32 = 32.0;
 pub const DESTROYER_FUSE_STEP: u32 = 4;
 pub const DESTROYER_FUSE: (u32, u32) = (1400, 26000);
 pub const DESTROYER_LASER: u16 = 100;
+/// `GetAttackDamage_ForProjectiles(22f, 18f)` (`NPC.cs:50399`): a launch-time lerp between a
+/// classic figure and a separate, lower expert one, which the impact-time
+/// `hostileDamageProjectileMultiplier` then doubles on top. `Remap` clamps outside classic..expert,
+/// so master reads the same 18 as expert. Using the classic 22 in every mode made an expert
+/// Destroyer's lasers 22% heavier than the game's.
 pub const DESTROYER_LASER_DAMAGE: i32 = 22;
+pub const DESTROYER_LASER_DAMAGE_EXPERT: i32 = 18;
 pub const DESTROYER_LASER_SPEED: f32 = 8.0;
 /// The aim is scattered twice: once in pixels before it is normalised, once in speed after.
 pub const DESTROYER_AIM_SPREAD: i32 = 20;

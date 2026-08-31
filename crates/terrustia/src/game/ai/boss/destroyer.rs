@@ -17,7 +17,8 @@ use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     DESTROYER_AIM_SPREAD, DESTROYER_BODY, DESTROYER_FLEE_SPEED, DESTROYER_FUSE,
     DESTROYER_FUSE_STEP, DESTROYER_HEAD, DESTROYER_LASER, DESTROYER_LASER_DAMAGE,
-    DESTROYER_LASER_LEAD, DESTROYER_LASER_LIFE, DESTROYER_LASER_SPEED, DESTROYER_SPEED_SPREAD,
+    DESTROYER_LASER_DAMAGE_EXPERT, DESTROYER_LASER_LEAD, DESTROYER_LASER_LIFE,
+    DESTROYER_LASER_SPEED, DESTROYER_SPEED_SPREAD,
 };
 
 use crate::game::ai::{Shot, World, can_see};
@@ -109,7 +110,16 @@ pub fn destroyer(
 
     out.shots.push(Shot {
         projectile: DESTROYER_LASER,
-        damage: DESTROYER_LASER_DAMAGE,
+        // The launch-time figure, which vanilla lerps between a classic and a separate expert one
+        // (`GetAttackDamage_ForProjectiles(22f, 18f)`, `NPC.cs:50399`); the impact-time
+        // `hostileDamageScaling` doubling is applied where this server already applies it, in
+        // `tick_contact_damage`. `Remap` clamps outside classic..expert, so master reads the expert
+        // figure too, which is why this is a two-way branch rather than a curve.
+        damage: if world.conditions.expert {
+            DESTROYER_LASER_DAMAGE_EXPERT
+        } else {
+            DESTROYER_LASER_DAMAGE
+        },
         position: (
             cx + aim.0 * DESTROYER_LASER_LEAD,
             cy + aim.1 * DESTROYER_LASER_LEAD,
@@ -194,6 +204,35 @@ mod tests {
             0,
             "nor does the tail"
         );
+    }
+
+    /// Its laser carries a separate expert figure, and it is the *lower* one.
+    ///
+    /// `GetAttackDamage_ForProjectiles(22f, 18f)` (`NPC.cs:50399`) lerps between a classic 22 and an
+    /// expert 18 at launch, and the impact-time `hostileDamageScaling` doubles whichever landed.
+    /// Carrying the classic 22 into every mode made an expert Destroyer's lasers 22% heavier than
+    /// the game's. `Remap` clamps above expert, so master reads 18 too.
+    #[test]
+    fn the_laser_carries_its_own_expert_figure() {
+        let tiles = open();
+        let damage_in = |expert: bool| {
+            let mut rng = SmallRng::seed_from_u64(37);
+            let mut s = segment(DESTROYER_BODY, 0.0, 0.0);
+            let mut w = night(&tiles, Some((400.0, 0.0)));
+            w.conditions.expert = expert;
+            (0..40_000)
+                .flat_map(|_| destroyer(&mut s, &w, &mut rng).shots)
+                .map(|shot| shot.damage)
+                .next()
+                .expect("a body segment should fire")
+        };
+        assert_eq!(damage_in(false), DESTROYER_LASER_DAMAGE);
+        assert_eq!(
+            damage_in(true),
+            DESTROYER_LASER_DAMAGE_EXPERT,
+            "and the expert figure is the lower of the two, which is the point"
+        );
+        assert!(damage_in(true) < damage_in(false));
     }
 
     /// A segment you cannot see cannot see you, so cover works.
