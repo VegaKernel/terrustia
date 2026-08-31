@@ -387,7 +387,19 @@ impl GameServer {
     ///
     /// Split out of `on_spawn_tile_data` so `drain_section_streams` can call it too, the moment a
     /// player's own queue empties on whichever tick that happens to land on.
+    ///
+    /// Once only, hence the guard on the state it sets. That queue now also carries the sections
+    /// the per-tick stream pushes as a player walks ([`GameServer::check_player_sections`]), and
+    /// re-running the join tail every time one of those drains would replay every dropped item and
+    /// every NPC and then send `InitialSpawn` again, respawning a client that was only crossing a
+    /// section boundary.
     fn finish_join_stream(&mut self, slot: u8) {
+        if self
+            .player(slot)
+            .is_none_or(|p| p.state >= ConnState::TilesSent)
+        {
+            return;
+        }
         // Vanilla sends the live entities after the tiles and before StartPlaying; without this a
         // joining player sees an empty world where everyone else sees dropped loot.
         let existing: Vec<(i16, (f32, f32), ItemStack)> = self
@@ -577,10 +589,12 @@ impl GameServer {
         Ok(())
     }
 
-    /// Packet 159: the client asking for one section as it moves.
+    /// Packet 159: the client asking for one section it finds it is missing.
     ///
-    /// New in 1.4.5 — previously the server pushed sections from the player's position. Without
-    /// this a player can walk out of the area streamed at spawn and see nothing but sky.
+    /// A repair, not the streaming path. The server still pushes sections from player positions
+    /// every tick (`check_player_sections`, `Main.cs:65601`); 159's only two senders in the whole
+    /// game are `WorldItem.cs:380` (a dropped item looking for an owner) and `Player.cs:41852` (a
+    /// rope placed onto a tile `IsTileLoaded` says is not there yet).
     fn on_request_section(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if self
             .player(slot)

@@ -178,7 +178,9 @@ Differences from 1.4.4 that matter, and that stale documentation gets wrong:
 - Packet `3` carries a trailing bool after the player slot.
 - Tile sections are a bare DEFLATE stream with no leading "is compressed" flag byte.
 - `WorldData` has eleven world-flag bytes and a trailing extra-spawn-point list.
-- The server no longer pushes sections as players move; clients pull them with packet `159`.
+- The server still pushes sections as players move, once a tick, from each player's own position.
+  Packet `159` is a client-side repair for a section it finds missing, not the streaming path, and
+  documentation that calls it the streaming path is wrong.
 
 ## What works
 

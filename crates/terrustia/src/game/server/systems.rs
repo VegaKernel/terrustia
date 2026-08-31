@@ -1596,6 +1596,83 @@ impl GameServer {
             .collect()
     }
 
+    /// Keep every player's own block of sections loaded as they move.
+    ///
+    /// The server pushes sections; it does not wait to be asked. `Main.cs:65601` calls
+    /// `RemoteClient.CheckSection(k, player[k].position)` for every active player on every server
+    /// tick, and `CheckSection_ForClient` (`RemoteClient.cs:152-190`) walks the `fluff = 1` block
+    /// around wherever that player is *now*, announces how many of those sections are new
+    /// (`SendData(9, ..)`, `Lang.inter[44]`) and then sends each one. Packet 159 is not the
+    /// streaming path: its only two senders in the whole game are a dropped item's owner search
+    /// and a rope placement onto an unloaded tile, both repairs for a miss.
+    ///
+    /// Without this a player who walked out of the block sent at their join saw sky forever, and
+    /// could not build out there either, because `on_tile_manipulation` and `on_place_object` both
+    /// refuse an edit in a section the client was never sent.
+    ///
+    /// Two departures from the game's own shape, both for the 16.67ms tick at 255 players:
+    ///
+    /// - A player whose section has not changed since the last tick is skipped outright, rather
+    ///   than re-walking nine sections to conclude the same thing (`Player::last_section`).
+    /// - New sections are queued rather than sent here, so they go out through the same shared,
+    ///   time-bounded drain a join already uses (`drain_section_streams`,
+    ///   [`SECTION_STREAM_BUDGET`]). Sending three to five sections inline would reproduce exactly
+    ///   the synchronous burst that drain exists to prevent, just triggered by walking instead of
+    ///   joining.
+    ///
+    /// Every server-side relocation is covered by this one place, because each of them moves
+    /// `Player::position`: a Teleportation Potion, a pylon (whose own
+    /// `RemoteClient.CheckSection`, `TeleportPylonsSystem.cs:199`, is this check run a tick
+    /// early), a magic mirror, a death respawn.
+    pub(super) fn check_player_sections(&mut self) {
+        let (max_x, max_y) = (self.world.sections_x(), self.world.sections_y());
+        // Slot and how many sections are newly owed, for the status line vanilla sends first.
+        let mut announce: Vec<(u8, i32)> = Vec::new();
+
+        for player in self.players.iter_mut().flatten() {
+            // `player[k].active` in vanilla's own loop: someone actually in the world. A client
+            // still working through its join stream has a queue of its own and is not moving yet.
+            if !player.is_playing() {
+                continue;
+            }
+            let at = section_of(player.position);
+            if player.last_section == Some(at) {
+                continue;
+            }
+            player.last_section = Some(at);
+
+            let mut owed = 0;
+            // `SECTION_REACH` is vanilla's `fluff` under another name, and deliberately the same
+            // constant `near_section` culls broadcasts by: what a client is sent and what the
+            // server assumes it has loaded must be the same block, or an NPC gets skipped for a
+            // section the player really does have (or vice versa).
+            for sx in (at.0 - SECTION_REACH)..=(at.0 + SECTION_REACH) {
+                for sy in (at.1 - SECTION_REACH)..=(at.1 + SECTION_REACH) {
+                    if sx < 0 || sy < 0 || sx >= max_x || sy >= max_y {
+                        continue;
+                    }
+                    if player.sent_sections.contains(&(sx, sy)) {
+                        continue;
+                    }
+                    player.pending_sections.push_back((sx, sy));
+                    owed += 1;
+                }
+            }
+            if owed > 0 {
+                announce.push((player.slot, owed));
+            }
+        }
+
+        for (slot, owed) in announce {
+            // The key rather than the English, for the same reason the join sends the key.
+            match packets::status_text(owed, &NetworkText::key("LegacyInterface.44", Vec::new()), 0)
+            {
+                Ok(frame) => self.send(slot, frame),
+                Err(e) => warn!(slot, error = %e, "could not encode a section status line"),
+            }
+        }
+    }
+
     /// Drop cached sections whose tiles have changed.
     ///
     /// This has to run before a section is served, not merely once a tick: an edit and a join can
@@ -9734,5 +9811,161 @@ mod world_update {
             }
         }
         n
+    }
+}
+
+/// Sections stream to a player as they move, not only at their join.
+///
+/// `Main.cs:65601` calls `RemoteClient.CheckSection(k, player[k].position)` for every active
+/// player on every server tick, and `CheckSection_ForClient` (`RemoteClient.cs:152-190`) sends the
+/// 3x3 block around wherever that player now is. This server had no per-tick push at all: the only
+/// place `pending_sections` was ever written was the join. A player who walked out of the block
+/// sent at their join saw sky forever and could not build there either, because
+/// `on_tile_manipulation` and `on_place_object` both refuse an edit in a section the client was
+/// never sent.
+#[cfg(test)]
+mod section_streaming_as_players_move {
+    use super::*;
+
+    /// Twelve sections by six, so a player can be put well outside their own starting block
+    /// without leaving the world. Empty rather than generated: what is being proved is which
+    /// sections go out, not what is in them, and an empty world ticks in a fraction of the time.
+    fn one_player_at(at: (f32, f32)) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let mut server = GameServer::new(
+            Config::default(),
+            crate::world::World::empty(2400, 900, "section streaming probe"),
+        );
+        let (tx, rx) = mpsc::channel(100_000);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        player.state = ConnState::Playing;
+        player.position = at;
+        server.players[0] = Some(player);
+        (server, rx)
+    }
+
+    /// A world position a little way inside the named section.
+    fn in_section(sx: i32, sy: i32) -> (f32, f32) {
+        (
+            (sx * terrustia_proto::section::SECTION_WIDTH * 16 + 16) as f32,
+            (sy * terrustia_proto::section::SECTION_HEIGHT * 16 + 16) as f32,
+        )
+    }
+
+    /// How many frames of one packet id have reached this client.
+    fn count(rx: &mut mpsc::Receiver<Bytes>, id: u8) -> usize {
+        let mut n = 0;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.get(2) == Some(&id) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Tick until nothing is queued, or give up.
+    ///
+    /// `drain_section_streams` is bounded by wall clock (`SECTION_STREAM_BUDGET`) and guarantees
+    /// only one section a tick, so how many of a block go out on any single tick depends on how
+    /// busy the machine is. Anything that asserts on a *whole* block has to settle first or it is
+    /// a test that passes alone and fails under a loaded CI run.
+    fn settle(server: &mut GameServer) {
+        for _ in 0..200 {
+            server.tick();
+            if server
+                .player(0)
+                .is_some_and(|p| p.pending_sections.is_empty())
+            {
+                return;
+            }
+        }
+        panic!("a section queue never drained");
+    }
+
+    /// The bug itself: walk past the join block and the world is still sent.
+    #[test]
+    fn walking_into_a_new_section_streams_the_block_around_it() {
+        let (mut server, mut rx) = one_player_at(in_section(1, 1));
+        settle(&mut server);
+        assert!(
+            server.player(0).unwrap().sent_sections.contains(&(1, 1)),
+            "a standing player should be sent the section they are standing in"
+        );
+        let _ = count(&mut rx, id::TILE_SECTION);
+
+        // Eight sections away: 1,600 tiles, far outside anything a join could have covered.
+        server.player_mut(0).unwrap().position = in_section(9, 4);
+        settle(&mut server);
+
+        let sent = &server.player(0).unwrap().sent_sections;
+        for sx in 8..=10 {
+            for sy in 3..=5 {
+                assert!(
+                    sent.contains(&(sx, sy)),
+                    "section ({sx},{sy}) never reached the player standing in it: past their join \
+                     block the world is sky, and they cannot build there either"
+                );
+            }
+        }
+        assert_eq!(
+            count(&mut rx, id::TILE_SECTION),
+            9,
+            "the nine sections of the new block should have gone out as real frames"
+        );
+    }
+
+    /// The cost bound, and the guard that comes with reusing the join's own queue: a player who
+    /// has not crossed a boundary queues nothing, and draining a walker's queue must not replay
+    /// the join tail (`finish_join_stream`) and re-send `InitialSpawn`, which would respawn a
+    /// client that was only walking.
+    #[test]
+    fn standing_still_queues_nothing_and_never_replays_the_join() {
+        let (mut server, mut rx) = one_player_at(in_section(3, 2));
+        settle(&mut server);
+        let settled = server.player(0).unwrap().sent_sections.len();
+        assert_eq!(settled, 9, "a settled player holds their own 3x3 block");
+        let _ = count(&mut rx, id::TILE_SECTION);
+
+        for _ in 0..120 {
+            server.tick();
+        }
+
+        assert_eq!(
+            server.player(0).unwrap().sent_sections.len(),
+            settled,
+            "standing still re-sent sections"
+        );
+        assert!(
+            server.player(0).unwrap().pending_sections.is_empty(),
+            "standing still left work queued"
+        );
+        assert_eq!(
+            count(&mut rx, id::TILE_SECTION),
+            0,
+            "standing still cost section frames"
+        );
+    }
+
+    /// Every server-side relocation rides the same per-tick check, because each of them moves
+    /// `Player::position`: a pylon (`TeleportPylonsSystem.cs:199` makes the same call inline), a
+    /// Teleportation Potion, a magic mirror, a respawn. Landing in sky is the failure this rules
+    /// out.
+    #[test]
+    fn a_teleport_streams_where_the_player_lands() {
+        let (mut server, mut rx) = one_player_at(in_section(1, 1));
+        settle(&mut server);
+        let _ = count(&mut rx, id::INITIAL_SPAWN);
+
+        server.player_mut(0).unwrap().position = in_section(10, 1);
+        settle(&mut server);
+
+        assert!(
+            server.player(0).unwrap().sent_sections.contains(&(10, 1)),
+            "a teleported player landed in a section they were never sent"
+        );
+        assert_eq!(
+            count(&mut rx, id::INITIAL_SPAWN),
+            0,
+            "a walker's section stream replayed the join tail and respawned the client"
+        );
     }
 }
