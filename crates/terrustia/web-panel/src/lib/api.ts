@@ -232,14 +232,17 @@ export async function kickPlayer(session: string, name: string, reason: string):
   await postJson("/api/players/kick", session, { name, reason });
 }
 
-/** `duration_secs` is `undefined`/omitted for a permanent mute. */
+/** `duration` is the server's own `10m`/`2h`/`1d`/`1h30m`/bare-seconds grammar, sent verbatim: an
+ *  empty string is a permanent mute, and anything the server cannot read comes back as a `400` with
+ *  a message to show. The panel used to parse this in the browser and send seconds, which turned
+ *  every unparseable duration into an omitted field, and an omitted field into a permanent mute. */
 export async function mutePlayer(
   session: string,
   name: string,
   reason: string,
-  duration_secs?: number,
+  duration: string,
 ): Promise<void> {
-  await postJson("/api/players/mute", session, { name, reason, duration_secs });
+  await postJson("/api/players/mute", session, { name, reason, duration });
 }
 
 export async function unmutePlayer(session: string, name: string): Promise<boolean> {
@@ -532,10 +535,14 @@ type WorldWsFrame =
   | { type: "players"; players: Player[] }
   | ({ type: "tiles" } & WorldTiles);
 
+/** `onConnectionChange` is not optional on purpose. The world view keeps rendering its last frame
+ *  forever after the socket drops, so without it a dead connection looks exactly like a quiet
+ *  server: a map with avatars parked in place. Same contract as `watchStatus`. */
 export function watchWorld(
   session: string,
   onPlayers: (players: Player[]) => void,
   onTiles: (tiles: WorldTiles) => void,
+  onConnectionChange: (live: boolean) => void,
 ): () => void {
   let closed = false;
   let socket: WebSocket | null = null;
@@ -543,6 +550,7 @@ export function watchWorld(
   const connect = () => {
     if (closed) return;
     socket = new WebSocket(wsUrl("/api/ws/world", session));
+    socket.onopen = () => onConnectionChange(true);
     socket.onmessage = (event) => {
       try {
         const frame = JSON.parse(event.data) as WorldWsFrame;
@@ -553,6 +561,7 @@ export function watchWorld(
       }
     };
     socket.onclose = () => {
+      onConnectionChange(false);
       if (!closed) setTimeout(connect, 2000);
     };
     socket.onerror = () => socket?.close();

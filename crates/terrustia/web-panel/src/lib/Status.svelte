@@ -2,6 +2,8 @@
   import { onDestroy } from "svelte";
   import {
     watchStatus,
+    fetchStatus,
+    storedSession,
     logout,
     hasPermission,
     type StatusResponse,
@@ -83,9 +85,26 @@
     },
     (isLive) => {
       live = isLive;
+      if (!isLive) probeSession();
     },
   );
   onDestroy(stop);
+
+  // A WebSocket upgrade rejected with 401 reaches the browser as a bare `onclose`: the API does not
+  // expose the upgrade's HTTP status, so `watchStatus` cannot tell a dead session from a server
+  // that is down, and its 2-second retry loop would go on forever with a token the server will
+  // never accept. Sessions are an in-memory map rebuilt empty on every `panel::run`, so the console
+  // `panel` toggle, a panel-initiated world switch and any restart all reach this state.
+  //
+  // One REST call does see the status. `unwrap` already clears the stored session on a 401 (and
+  // only on a 401, so a 503 from a stopped game task does not sign anyone out), which makes "the
+  // session vanished from storage" the exact signal, and `onLoggedOut` is `App`'s own
+  // `checkSession`: it finds nothing stored and renders the login form.
+  function probeSession() {
+    fetchStatus(session).catch(() => {
+      if (!storedSession()) onLoggedOut();
+    });
+  }
 
   function signOut() {
     logout();

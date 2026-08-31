@@ -451,6 +451,12 @@ impl GameServer {
     /// the same reach rule as account/group changes, applied to a single permission instead of a
     /// whole group's worth, so the group editor cannot be used to grant a permission nobody making
     /// the change actually has. An unrecognised permission name is refused outright.
+    ///
+    /// Revoking is additionally held to the same last-admin guard
+    /// [`Self::panel_delete_account`] and [`Self::panel_set_account_group`] enforce (see
+    /// [`Self::account_can_admin`]'s doc comment for why the invariant exists). Without it, an
+    /// owner unticking `*` on their own group locks themselves out of the editor on the very next
+    /// request, and the permission needed to undo it is the one they just removed.
     pub(super) fn panel_set_group_permission(
         &mut self,
         actor: &str,
@@ -477,6 +483,19 @@ impl GameServer {
         } else {
             target.permissions.remove(permission)
         };
+        // Whether a group can still administer depends on its whole permission set (a wildcard
+        // covers `admin.groups` without naming it), so this applies the removal and asks, rather
+        // than trying to predict which permission names matter. The actor holds `admin.groups` to
+        // have reached this route at all, so the count was at least one before the change.
+        if changed && !grant && self.admin_capable_accounts() == 0 {
+            if let Some(target) = self.admin.groups.iter_mut().find(|g| g.name == group) {
+                target.permissions.insert(permission.to_string());
+            }
+            return Err(format!(
+                "removing '{permission}' from {group} would leave no account able to administer \
+                 the server; nobody could fix a permissions mistake from the panel again"
+            ));
+        }
         if changed {
             let _ = self.admin.save();
             self.audit.record(

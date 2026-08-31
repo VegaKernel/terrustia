@@ -228,21 +228,44 @@ impl AuditLog {
     /// something this reads back in. A line that fails to parse (hand-edited, or truncated by a
     /// crash mid-write) is skipped rather than aborting the whole read.
     pub fn tail(&self, n: usize) -> Vec<AuditEvent> {
-        let Some(path) = &self.path else {
-            return Vec::new();
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
-        let mut events: Vec<AuditEvent> = text
-            .lines()
-            .rev()
-            .take(n)
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        events.reverse();
-        events
+        self.path
+            .as_deref()
+            .map(|path| tail_file(path, n))
+            .unwrap_or_default()
     }
+
+    /// Where this log writes, if it writes anywhere. The panel's `/api/audit` asks the game task
+    /// for this and then reads the file itself, off the game task, rather than having the game
+    /// task read it inline: see [`tail_file`].
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+/// [`AuditLog::tail`]'s body, as a free function over the path alone.
+///
+/// Split out because the caller that matters is the web panel, and the panel's own rule is "off the
+/// game task, always" (`panel/mod.rs`'s module doc). `/api/audit` polls every five seconds; running
+/// this inline in the game task's `select!` put a synchronous whole-file read of a file whose
+/// default cap is 8 MB (and which `audit_log_max_bytes` can raise) against a 16.67 ms tick budget.
+/// The panel now asks the game task only for [`AuditLog::path`], a `PathBuf` clone, and calls this
+/// from a `spawn_blocking`.
+///
+/// Still reads the whole live file: the parse is already bounded by `n`, and a bounded seek-from-
+/// the-end read would have to deal with a partial first line and a UTF-8 boundary for a saving that
+/// no longer lands anywhere near the tick.
+pub fn tail_file(path: &Path, n: usize) -> Vec<AuditEvent> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut events: Vec<AuditEvent> = text
+        .lines()
+        .rev()
+        .take(n)
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    events.reverse();
+    events
 }
 
 #[cfg(test)]

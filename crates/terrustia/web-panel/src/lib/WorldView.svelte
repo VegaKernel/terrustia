@@ -31,6 +31,7 @@
   let players = $state<Player[]>([]);
   let hoverName = $state<string | null>(null);
   let canvasEl = $state<HTMLCanvasElement | undefined>(undefined);
+  let live = $state(false);
 
   const CELL = 10; // backing-store pixels per tile sample; the canvas is then scaled to fit
 
@@ -39,6 +40,7 @@
     session,
     (p) => (players = p),
     (t) => (tiles = t),
+    (isLive) => (live = isLive),
   );
   onDestroy(stop);
 
@@ -194,6 +196,9 @@
       <canvas bind:this={canvasEl} onmousemove={pointerMove} onmouseleave={() => (hoverName = null)}
       ></canvas>
       {#if hoverName}<div class="hover-label">{hoverName}</div>{/if}
+      <!-- Without this the last frame keeps rendering after the socket drops, and a dead
+           connection is indistinguishable from a server where nobody is moving. -->
+      {#if !live}<div class="stale">not live - reconnecting</div>{/if}
     </div>
     <p class="dim caption">
       stylized, procedural render from real position and appearance data — colours come from each
@@ -234,6 +239,19 @@
     max-width: 100%;
     max-height: 100%;
     cursor: crosshair;
+  }
+
+  .stale {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    border-radius: 3px;
+    padding: 0.3rem 0.55rem;
+    font-size: 0.78rem;
+    pointer-events: none;
   }
 
   .hover-label {

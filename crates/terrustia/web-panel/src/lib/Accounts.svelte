@@ -252,9 +252,16 @@
   >
     <div class="dialog" role="dialog" aria-label="confirm delete" tabindex="-1">
       <h3 class="danger">delete {deleteTarget.name}?</h3>
+      <!-- What actually happens: `PanelAuthorize` resolves through `account_hash_and_group`, which
+           returns nothing for a deleted account, so every panel request under that session is
+           refused from the next one onwards. In-game, `Admin::group_of` falls back to `default` for
+           an unknown account, so those privileges go too. The one thing that survives is a
+           WebSocket that was already open when the account went, because both sockets are
+           authorized at upgrade and never re-checked. -->
       <p class="dim">
-        this removes the account permanently. anyone signed in under it keeps their current session
-        until they leave, but can never sign in again.
+        this removes the account permanently. every panel request under it is refused from the next
+        one onwards, and in game it drops to the default group. a live feed already open in a
+        browser keeps streaming until that socket drops.
       </p>
       <div class="dialog-actions">
         <button onclick={() => (deleteTarget = null)}>cancel</button>

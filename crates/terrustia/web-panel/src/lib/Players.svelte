@@ -22,6 +22,9 @@
   let muteTarget = $state<Player | null>(null);
   let muteDuration = $state("");
   let muteReason = $state("");
+  // Kept apart from `error` (which renders at the top of the page, behind the overlay) so a
+  // rejected duration is visible in the dialog the operator is actually looking at.
+  let muteError = $state<string | null>(null);
 
   async function refresh() {
     try {
@@ -75,29 +78,24 @@
     muteTarget = p;
     muteDuration = "";
     muteReason = "";
+    muteError = null;
   }
 
-  /** A bare number is seconds; a trailing `m`/`h`/`d` scales it. Empty means permanent. Mirrors
-   *  the shape the console's `/mute` command accepts, in a form field instead of a chat line. */
-  function parseDurationSecs(text: string): number | undefined {
-    const trimmed = text.trim().toLowerCase();
-    if (!trimmed) return undefined;
-    const match = trimmed.match(/^(\d+)([smhd]?)$/);
-    if (!match) return undefined;
-    const n = Number(match[1]);
-    const scale = { s: 1, m: 60, h: 3600, d: 86400, "": 1 }[match[2]] ?? 1;
-    return n * scale;
-  }
-
+  // The duration is sent verbatim and parsed by the server, which owns the one grammar the
+  // console's own `/mute` uses. There used to be a second, narrower parser here; anything it could
+  // not read (`10 min`, `1w`, `1.5h`) became an omitted field, and an omitted field is a permanent
+  // mute. A duration the server rejects now comes back as a `400` and lands in `muteError`, in the
+  // dialog, with the dialog still open.
   async function confirmMute() {
     if (!muteTarget) return;
     acting = muteTarget.name;
+    muteError = null;
     try {
-      await mutePlayer(session, muteTarget.name, muteReason, parseDurationSecs(muteDuration));
+      await mutePlayer(session, muteTarget.name, muteReason, muteDuration);
       muteTarget = null;
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      muteError = e instanceof Error ? e.message : String(e);
     } finally {
       acting = null;
     }
@@ -219,12 +217,13 @@
       </p>
       <label>
         duration
-        <input bind:value={muteDuration} placeholder="e.g. 10m, 2h, 1d — empty for permanent" />
+        <input bind:value={muteDuration} placeholder="e.g. 10m, 2h, 1d, 1h30m - empty for permanent" />
       </label>
       <label>
         reason
         <input bind:value={muteReason} placeholder="muted from the web panel" />
       </label>
+      {#if muteError}<p class="danger">{muteError}</p>{/if}
       <div class="dialog-actions">
         <button onclick={() => (muteTarget = null)}>cancel</button>
         <button class="danger-btn" onclick={confirmMute}>confirm mute</button>

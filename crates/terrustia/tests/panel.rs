@@ -1157,6 +1157,221 @@ async fn the_group_permission_editor_is_reach_limited() {
         )
         .await;
     assert_eq!(status, 400, "the last admin.groups-capable account: {body}");
+
+    // The same lock-out, reached through the permission editor instead of the account routes.
+    // `owner` is the only group holding `admin.groups` (through `*`), and `adminacct` above is in
+    // `admin`, which deliberately does not, so unticking "all (*)" on `owner` would take the
+    // admin-capable account count to zero. `panel_delete_account` and `panel_set_account_group`
+    // both refuse that; the editor used to allow it, and the permission needed to undo it is the
+    // one being removed.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/groups/permissions"),
+            r#"{"group":"owner","permission":"*","grant":false}"#,
+            &owner_session,
+        )
+        .await;
+    assert_eq!(
+        status, 400,
+        "revoking the last admin-capable group's `*` must be refused: {body}"
+    );
+
+    // Refused, and rolled back rather than applied-then-reported: the very next request from the
+    // same session still gets through the editor's own `admin.groups` check.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/permissions"), Some(&owner_session))
+        .await;
+    assert_eq!(
+        status, 200,
+        "the refused revoke must not have taken effect: {body}"
+    );
+
+    // A revoke that leaves somebody admin-capable is untouched by the guard. `admin.groups` is
+    // granted to `admin` (so two groups now hold it), then taken away again.
+    for grant in ["true", "false"] {
+        let (status, body) = client
+            .post_json_auth(
+                &format!("{base}/api/groups/permissions"),
+                &format!(r#"{{"group":"admin","permission":"admin.groups","grant":{grant}}}"#),
+                &owner_session,
+            )
+            .await;
+        assert_eq!(status, 200, "grant={grant} should be allowed: {body}");
+    }
+}
+
+/// The three player routes `tests/panel.rs` never touched: mute, unmute and unban.
+///
+/// The one that carried a bug is mute. A duration the server cannot parse used to arrive as an
+/// omitted field, and an omitted field is a permanent mute: every typo in that box (`10 min`,
+/// `1w`, `1.5h`) silently applied the most destructive reading of the input, through the same
+/// success path as the intended one. It is now a `400`, and this asserts the mute did not happen
+/// by unmuting afterwards and requiring `changed: false`.
+#[tokio::test]
+async fn mute_unmute_and_unban_work_and_a_bad_duration_is_refused() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: addr,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "muting", 21);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{addr}");
+    let client = reqwest_lite::Client::new();
+
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let session = extract_session(&body);
+
+    // The bug. Every one of these is something an operator could plausibly type into a box whose
+    // placeholder reads "e.g. 10m, 2h, 1d"; none of them is a duration this server knows.
+    for bad in ["1w", "10 min", "1.5h", "soon", "10m5"] {
+        let (status, body) = client
+            .post_json_auth(
+                &format!("{base}/api/players/mute"),
+                &format!(r#"{{"name":"chatty","reason":"spam","duration":"{bad}"}}"#),
+                &session,
+            )
+            .await;
+        assert_eq!(
+            status, 400,
+            "'{bad}' must be refused, not silently permanent: {body}"
+        );
+        assert!(
+            body.contains("is not a duration"),
+            "the refusal should say what it wanted: {body}"
+        );
+
+        // And nothing was muted: a permanent mute would have been applied here before the fix.
+        let (status, body) = client
+            .post_json_auth(
+                &format!("{base}/api/players/unmute"),
+                r#"{"name":"chatty"}"#,
+                &session,
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("\"changed\":false"),
+            "'{bad}' must not have muted anyone: {body}"
+        );
+    }
+
+    // A duration the console accepts, the panel accepts. `1h30m` is deliberately in this list: the
+    // parser the browser used to run could not read it, so it was one of the inputs that became a
+    // permanent mute.
+    for good in ["10m", "2h", "1d", "1h30m", "90"] {
+        let (status, body) = client
+            .post_json_auth(
+                &format!("{base}/api/players/mute"),
+                &format!(r#"{{"name":"chatty","reason":"spam","duration":"{good}"}}"#),
+                &session,
+            )
+            .await;
+        assert_eq!(status, 200, "'{good}' is a real duration: {body}");
+        let (status, body) = client
+            .post_json_auth(
+                &format!("{base}/api/players/unmute"),
+                r#"{"name":"chatty"}"#,
+                &session,
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            body.contains("\"changed\":true"),
+            "'{good}' should have muted somebody to unmute: {body}"
+        );
+    }
+
+    // An absent duration, and an empty one, are the two ways to ask for a permanent mute. Both are
+    // still allowed: the fix distinguishes "unparseable" from "not given", it does not remove the
+    // permanent case.
+    for body_json in [
+        r#"{"name":"chatty","reason":"spam"}"#,
+        r#"{"name":"chatty","reason":"spam","duration":""}"#,
+        r#"{"name":"chatty","reason":"spam","duration":"   "}"#,
+    ] {
+        let (status, body) = client
+            .post_json_auth(&format!("{base}/api/players/mute"), body_json, &session)
+            .await;
+        assert_eq!(status, 200, "a permanent mute is still allowed: {body}");
+        let (_, body) = client
+            .post_json_auth(
+                &format!("{base}/api/players/unmute"),
+                r#"{"name":"chatty"}"#,
+                &session,
+            )
+            .await;
+        assert!(body.contains("\"changed\":true"), "{body}");
+    }
+
+    // Unmuting a name that is not muted reports so rather than pretending it did something.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/unmute"),
+            r#"{"name":"nobody"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"changed\":false"), "{body}");
+
+    // Unban, the third untested route: it answers with the count it actually removed, which the
+    // panel renders. Ban a name, lift it, and the second lift finds nothing left.
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/ban"),
+            r#"{"kind":"name","value":"griefer","reason":"wrecked spawn"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/unban"),
+            r#"{"value":"griefer"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"removed\":1"), "one ban was lifted: {body}");
+    let (status, body) = client
+        .post_json_auth(
+            &format!("{base}/api/players/unban"),
+            r#"{"value":"griefer"}"#,
+            &session,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("\"removed\":0"),
+        "nothing left to lift: {body}"
+    );
 }
 
 /// A ban placed through the panel shows up in the audit log, attributed to the real signed-in
