@@ -34,10 +34,11 @@ const PROMPT: &str = "❯ ";
 /// small enough that it costs nothing.
 const HISTORY_CAP: usize = 500;
 
-/// The known command names, for completing the first word. Kept here rather than derived from
-/// `game::server` at runtime — the two can drift, and `help`'s own text is the other place this
-/// would need to come from if it were generated, which is more machinery than a command list this
-/// short is worth.
+/// The known command names, for completing the first word. Still written out rather than derived
+/// from `help` at runtime, because completion wants only the bare names and `help` is prose; the
+/// drift the old note here accepted as the price of that is now a test instead (see
+/// `every_command_help_lists_can_be_completed`). It had already happened: `mute`, `unmute` and
+/// `audit` were all real commands, all listed by `help`, and none of them completed.
 const COMMANDS: &[&str] = &[
     "help",
     "say",
@@ -50,14 +51,19 @@ const COMMANDS: &[&str] = &[
     "kick",
     "ban",
     "unban",
+    "mute",
+    "unmute",
     "group",
     "world",
+    "audit",
     "panel",
     "stop",
 ];
 
-/// Commands whose second word is worth completing against the connected player roster.
-const PLAYER_ARG_COMMANDS: &[&str] = &["kick", "ban", "unban"];
+/// Commands whose second word is worth completing against the connected player roster. `mute`
+/// takes a connected player's name exactly as `kick` and `ban` do; `unmute` does not, because like
+/// `unban` it lifts an entry by value against somebody who need not be online.
+const PLAYER_ARG_COMMANDS: &[&str] = &["kick", "ban", "unban", "mute"];
 /// Commands whose second word is worth completing against the known groups.
 const GROUP_ARG_COMMANDS: &[&str] = &["group"];
 
@@ -607,5 +613,48 @@ mod tests {
         assert!(names.contains(&&"say"));
         assert!(names.contains(&&"save"));
         assert!(names.contains(&&"stop"));
+    }
+
+    /// `help` is the list of record. Anything it tells an operator to type must also complete,
+    /// or the console quietly offers a smaller server than the one it is running. This had already
+    /// drifted by three commands.
+    #[test]
+    fn every_command_help_lists_can_be_completed() {
+        let missing: Vec<&str> = crate::game::server::console_help_commands()
+            .into_iter()
+            .filter(|name| !COMMANDS.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "help lists these commands but tab completion does not know them: {missing:?}"
+        );
+    }
+
+    /// And the other direction, so completion cannot offer something that does not exist. `help`
+    /// does not list itself, which is the one allowed difference.
+    #[test]
+    fn completion_offers_nothing_help_does_not_list() {
+        let listed = crate::game::server::console_help_commands();
+        let extra: Vec<&&str> = COMMANDS
+            .iter()
+            .filter(|name| **name != "help" && !listed.contains(name))
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "tab completion offers these, but help does not list them: {extra:?}"
+        );
+    }
+
+    /// The guard against both checks passing by reading an empty list, the failure mode this
+    /// project has now hit in several of its own checkers.
+    #[test]
+    fn the_help_command_list_is_actually_parsed() {
+        let listed = crate::game::server::console_help_commands();
+        assert!(
+            listed.len() >= 15,
+            "expected help to list at least fifteen commands, parsed {}: {listed:?}",
+            listed.len()
+        );
+        assert!(listed.contains(&"mute"), "the parse dropped a real command");
     }
 }

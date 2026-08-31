@@ -20,7 +20,7 @@
 //! refused outright if it already has anything in it, rather than writing into whatever is there.
 
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -40,6 +40,21 @@ use crate::config::Config;
 /// this project's own plan calls out by name.
 pub fn should_auto_trigger(args_are_empty: bool) -> bool {
     if !args_are_empty {
+        return false;
+    }
+    // An interactive wizard needs somebody to interact with, and the shape it recognises below is
+    // also exactly the shape of a headless install: extract the release archive to /opt/terrustia
+    // and start it under systemd, a container, or `nohup`, and the working directory is the
+    // binary's own with nothing terrustia-shaped in it yet. Without this the wizard launched at
+    // every boot of a real server and went straight to `io::stdin().read_line`, which on a closed
+    // stdin returns `Ok(0)` for every prompt, so the run took silent defaults and a
+    // `terrustia.toml` appeared from nowhere. Backgrounded with a tty still attached it is worse:
+    // reading stdin raises `SIGTTIN` and the process stops, with nothing printed to say why.
+    // Falling through returns the caller to the ordinary non-interactive zero-flag path, which
+    // already does the right thing for a headless host. Same guard, and same reasoning, as
+    // `console::spawn`'s: both ends, because output that nobody can read is as useless as input
+    // nobody can give.
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return false;
     }
     let Ok(cwd) = std::env::current_dir() else {

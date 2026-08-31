@@ -15,6 +15,50 @@ use crate::{
 
 use super::{AuthOutcome, GameServer, SERVER_CHAT_COLOUR};
 
+/// What `help` prints, and the list of console commands of record.
+///
+/// One command per line, aligned, rather than a single run-on that wraps hard in any ordinary
+/// terminal. This is often the first thing an operator ever types.
+///
+/// A named constant rather than an array inline in the `help` arm because it is also what
+/// `console::COMMANDS` (the tab-completion list, in the other crate half) is checked against. That
+/// list had drifted: `mute`, `unmute` and `audit` were all real, all listed here, and none of them
+/// completed. The comment above `COMMANDS` predicted exactly that drift and accepted it, so the
+/// answer is a check rather than a promise to remember.
+///
+/// The convention the check relies on: every line after the first is two spaces, the command name,
+/// then whitespace.
+pub(crate) const CONSOLE_HELP: &[&str] = &[
+    "commands:",
+    "  say <text>                          broadcast a message",
+    "  players                             who is connected",
+    "  save                                write the world now",
+    "  backups                             list the rotating backups",
+    "  rollback <n>                        restore backup n",
+    "  whitelist add|remove|list [name]    manage the whitelist",
+    "  claim <name> <password>             claim an unclaimed server",
+    "  kick <name> [reason]                disconnect a player",
+    "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
+    "  unban <value>                       lift a ban",
+    "  mute <name> [duration] [reason]     mute a player, e.g. 10m, 2h, 1d",
+    "  unmute <value>                      lift a mute",
+    "  group <account> <group>             set an account's group",
+    "  world undo <player> <duration>      revert a player's recent tile edits",
+    "  audit [n]                           show the last n audit-log entries",
+    "  panel                               toggle the web panel",
+    "  stop                                save and shut down",
+];
+
+/// The command names `help` lists, one word each, with the leading `commands:` header dropped.
+#[cfg(test)]
+pub(crate) fn console_help_commands() -> Vec<&'static str> {
+    CONSOLE_HELP
+        .iter()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
 impl GameServer {
     /// A line typed at the server's own terminal.
     ///
@@ -82,28 +126,7 @@ impl GameServer {
                 }
             }
             "help" => {
-                // One command per line, aligned, rather than a single run-on that wraps hard in any
-                // ordinary terminal. This is often the first thing an operator ever types.
-                for line in [
-                    "commands:",
-                    "  say <text>                          broadcast a message",
-                    "  players                             who is connected",
-                    "  save                                write the world now",
-                    "  backups                             list the rotating backups",
-                    "  rollback <n>                        restore backup n",
-                    "  whitelist add|remove|list [name]    manage the whitelist",
-                    "  claim <name> <password>             claim an unclaimed server",
-                    "  kick <name> [reason]                disconnect a player",
-                    "  ban <name|ip|uuid> <value> [reason] ban by name, address or uuid",
-                    "  unban <value>                       lift a ban",
-                    "  mute <name> [duration] [reason]     mute a player, e.g. 10m, 2h, 1d",
-                    "  unmute <value>                      lift a mute",
-                    "  group <account> <group>             set an account's group",
-                    "  world undo <player> <duration>      revert a player's recent tile edits",
-                    "  audit [n]                           show the last n audit-log entries",
-                    "  panel                               toggle the web panel",
-                    "  stop                                save and shut down",
-                ] {
+                for line in CONSOLE_HELP {
                     info!(target: CONSOLE_REPLY, "{line}");
                 }
             }

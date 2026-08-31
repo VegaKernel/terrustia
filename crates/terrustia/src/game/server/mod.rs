@@ -58,6 +58,10 @@ use crate::{
 };
 
 mod console;
+// Test-only: the tab-completion list in `crate::console` is checked against it. Nothing in a
+// production build needs it, and `warnings = "deny"` would reject an unused re-export.
+#[cfg(test)]
+pub(crate) use console::console_help_commands;
 mod dispatch;
 mod panel;
 mod systems;

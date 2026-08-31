@@ -70,13 +70,17 @@
 
   {#if error}<p class="danger">{error}</p>{/if}
 
+  <!-- The command placeholder below has to name commands the *console* actually runs. It used to
+       suggest "time noon", which is a player slash command handled by `run_command`; the console's
+       own `run_console` has no `time` arm, so typing the example this box gave you came straight
+       back as `unknown command "time"`. `CONSOLE_HELP` is the list of record. -->
   <form class="send" onsubmit={(e) => { e.preventDefault(); send(); }}>
     <select bind:value={mode}>
       <option value="chat">chat</option>
       <option value="command">command</option>
     </select>
     <input
-      placeholder={mode === "chat" ? "message to everyone in-game" : "e.g. players, save, time noon"}
+      placeholder={mode === "chat" ? "message to everyone in-game" : "e.g. players, save, help"}
       bind:value={input}
       disabled={sending}
     />

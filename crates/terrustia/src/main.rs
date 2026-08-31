@@ -529,6 +529,86 @@ fn relaunch_into(
 }
 
 #[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    /// Every long flag `Args::parse` matches on, read out of this file's own source at compile
+    /// time. Reflection is not available, and a hand-kept second list would drift exactly the way
+    /// the help text already did, so the parser's source is the authority.
+    ///
+    /// The arms are all string literals in a `match`, of the form `"--name" =>` or
+    /// `"-x" | "--name" =>`, so scanning for a `"--` and taking to the closing quote finds them
+    /// all. Two literals in this file are deliberately not parser arms: the catch-all's error
+    /// message and the doc comments, neither of which is followed by a quote-then-`=>`, which is
+    /// what the shape check below requires.
+    fn flags_the_parser_accepts() -> Vec<String> {
+        let source = include_str!("main.rs");
+        // `rsplit_once`, not `split_once`: that signature appears twice in this file, once as the
+        // real definition and once as this very string literal, and the literal comes first.
+        // Splitting on the first occurrence anchored the scan inside this test module, where the
+        // next `fn` is a few lines down, so it scanned nothing and found no flags at all. The
+        // scanner-finds-something test below is what caught that, which is the whole reason it
+        // is there.
+        let (_, body) = source
+            .rsplit_once("fn parse(args: impl Iterator<Item = String>)")
+            .expect("Args::parse's signature; update this scanner if it is renamed");
+        let body = body.split_once("\n    fn ").map_or(body, |(head, _)| head);
+        let mut found = Vec::new();
+        for (index, _) in body.match_indices("\"--") {
+            let rest = &body[index + 1..];
+            let Some(end) = rest.find('"') else { continue };
+            let flag = &rest[..end];
+            // Only a match arm counts: the literal has to be followed by `=>` or by another
+            // alternative, past any whitespace. This is what keeps error-message text out.
+            let after = rest[end + 1..].trim_start();
+            if after.starts_with("=>") || after.starts_with('|') {
+                found.push(flag.to_string());
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// The check that makes the class impossible rather than fixing one instance of it.
+    #[test]
+    fn every_flag_the_parser_accepts_is_documented_in_help() {
+        let documented: Vec<&str> = usage_options().iter().map(|(name, _, _)| *name).collect();
+        let mut missing = Vec::new();
+        for flag in flags_the_parser_accepts() {
+            if !documented.iter().any(|d| d.contains(&flag)) {
+                missing.push(flag);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these flags are accepted by Args::parse but absent from --help: {missing:?}. Add \
+             them to usage_options, or the server keeps offering a flag it will not tell anyone \
+             about."
+        );
+    }
+
+    /// The scanner has to actually find things, or the test above passes by finding nothing and
+    /// is worth less than no test at all. This is the guard against that failure mode, which this
+    /// project has now hit in four separate checkers.
+    #[test]
+    fn the_flag_scanner_finds_the_parsers_real_arms() {
+        let flags = flags_the_parser_accepts();
+        assert!(
+            flags.len() >= 10,
+            "expected the parser to have at least ten long flags, scanner found {}: {flags:?}",
+            flags.len()
+        );
+        for expected in ["--world", "--panel", "--headless", "--seed", "--setup"] {
+            assert!(
+                flags.iter().any(|f| f == expected),
+                "the scanner missed {expected}, so it cannot be trusted to catch a missing one"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod relaunch_tests {
     use super::*;
 
@@ -778,11 +858,15 @@ impl Args {
 /// has not updated for no reason at all. See `id::SUPPORTED_RELEASES`.
 const GAME_VERSION: &str = "1.4.5.8";
 
-fn print_usage(palette: Palette) {
-    let heading = |text: &str| palette.paint(term::sgr::BOLD, text);
-    let flag = |text: &str| palette.paint(term::sgr::BRIGHT_CYAN, text);
-    let note = |text: &str| palette.paint(term::sgr::DIM, text);
-    let options = [
+/// Every option `--help` lists: the flag spelling, what it does, and its default (empty for none).
+///
+/// Split out from [`print_usage`] so a test can check it against the flags `Args::parse` actually
+/// accepts. `--panel` was added to the parser and to the boot card, which told the operator to
+/// "start it with --panel", while `--help` never mentioned it: the card named a flag the help did
+/// not have. That is the same shape as the bug the card row was itself written to fix, so the
+/// answer is a check rather than one more careful edit.
+fn usage_options() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
         ("-c, --config <PATH>", "Config file", "terrustia.toml"),
         ("-l, --listen <ADDR>", "Address to bind", "0.0.0.0:7777"),
         (
@@ -826,8 +910,20 @@ fn print_usage(palette: Palette) {
             "Start and serve without the interactive console (for services)",
             "",
         ),
+        (
+            "    --panel",
+            "Start the web admin panel, on loopback only (see panel_listen)",
+            "off",
+        ),
         ("-h, --help", "Show this message", ""),
-    ];
+    ]
+}
+
+fn print_usage(palette: Palette) {
+    let heading = |text: &str| palette.paint(term::sgr::BOLD, text);
+    let flag = |text: &str| palette.paint(term::sgr::BRIGHT_CYAN, text);
+    let note = |text: &str| palette.paint(term::sgr::DIM, text);
+    let options = usage_options();
 
     println!(
         "{} {}\n",
