@@ -172,6 +172,10 @@ pub struct AiOutput {
     pub ritual_complete: bool,
     /// Set on the tick the Moon Lord's death drama clears the stage.
     pub cleared_stage: bool,
+    /// Minions of the NPC just updated that it wants destroyed, as (type, how many at most).
+    pub cull_kin: Option<(u16, usize)>,
+    /// Set when the NPC just updated wants whatever it hangs off punished for its destruction.
+    pub punish_owner: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -302,6 +306,8 @@ pub fn update_with(
         out.teleport_to = effects.teleport_to;
         out.ritual_complete = effects.ritual_complete;
         out.cleared_stage = effects.cleared_stage;
+        out.cull_kin = effects.cull_kin;
+        out.punish_owner = effects.punish_owner;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         out.roared = effects.roared;

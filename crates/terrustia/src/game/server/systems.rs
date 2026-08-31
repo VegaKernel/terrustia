@@ -275,6 +275,10 @@ impl GameServer {
         let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
         let mut clear_stage = false;
+        // A boss that wants some of its own minions destroyed, as (its slot, their type, how many).
+        let mut culls: Vec<(u8, u16, usize)> = Vec::new();
+        // Slots of NPCs one of whose parts was just destroyed and that owe a penalty for it.
+        let mut punished: Vec<u8> = Vec::new();
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
         // A buff a routine wants put straight onto one named player, as (slot, buff id, ticks) —
         // a latched nebula headcrab's Obstructed is currently the only source of these
@@ -679,6 +683,17 @@ impl GameServer {
                 }
                 // BS3-M5: a second into the Moon Lord's death drama the stage is cleared.
                 clear_stage |= std::mem::take(&mut ai_out.cleared_stage);
+                // The Lunatic Cultist's ritual, both ways round. A right guess destroys some of
+                // its own decoys; a decoy destroyed by a wrong guess stuns whatever it was a copy
+                // of. Both reach past the NPC being ticked, so both are carried out below.
+                if let Some((npc_type, count)) = ai_out.cull_kin.take() {
+                    culls.push((index, npc_type, count));
+                }
+                if std::mem::take(&mut ai_out.punish_owner)
+                    && let Some(owner) = npc.follows_boss
+                {
+                    punished.push(owner);
+                }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -986,6 +1001,32 @@ impl GameServer {
         // A probe that got away with what it saw brings the Martians down on the world.
         if escaped_probe {
             self.start_invasion(Invasion::Martian);
+        }
+
+        // The Lunatic Cultist's right guess: up to N of its own decoys, destroyed outright. A bare
+        // kill (`NPC.cs:65243-65262` sets `life = 0; active = false;`), so no loot and no credit.
+        for (owner, npc_type, count) in culls {
+            let doomed: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == npc_type && n.follows_boss == Some(owner))
+                .map(|(index, _)| index)
+                .take(count)
+                .collect();
+            for index in doomed {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+            }
+        }
+
+        // And its wrong guess: the decoy that took the hit has gone, and whatever it was a copy of
+        // is stunned for two seconds.
+        for owner in punished {
+            if let Some(npc) = self.npcs.get_mut(owner)
+                && npc.npc_type == terrustia_proto::npc_params::CULTIST
+            {
+                crate::game::ai::boss::cultist::punish(npc);
+            }
         }
 
         // BS3-M5: a second into the Moon Lord's death drama, every True Eye still hunting is killed

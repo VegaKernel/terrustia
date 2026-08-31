@@ -4140,12 +4140,28 @@ pub const CULTIST_ORBIT: (f32, f32) = (300.0, 200.0);
 pub const CULTIST_ORBIT_SPREAD: f32 = 0.4;
 pub const CULTIST_MOVE_STEP: f32 = 50.0;
 /// The ritual: it makes clones and only the real one flinches.
-pub const CULTIST_CLONES: usize = 4;
+///
+/// Not a fixed four. Each ritual tops the group up by at most two, and never past six in all
+/// (`NPC.cs:65808-65812`, `num28 = 6 - existing`, clamped to 2), so the first ritual is a choice
+/// between three and the last between seven. They are laid out on a circle of this radius around
+/// the boss, which then takes the slot furthest from the player (`NPC.cs:65798`, `:65826`).
+pub const CULTIST_CLONES_PER_RITUAL: usize = 2;
+pub const CULTIST_CLONES_MAX: usize = 6;
+pub const CULTIST_CLONE_RING: f32 = 180.0;
 pub const CULTIST_RITUAL_TICKS: f32 = 420.0;
 pub const CULTIST_RITUAL_WINDOW: (f32, f32) = (120.0, 420.0);
-/// Guessing wrong costs you: ten of its clones' lights survive, or three in expert.
-pub const CULTIST_WRONG_GUESS: i32 = 10;
-pub const CULTIST_WRONG_GUESS_EXPERT: i32 = 3;
+/// How many clones a *correct* guess destroys (`NPC.cs:65229-65232`, `num9`).
+///
+/// The name is vanilla's own framing: `num9` counts the ones that are culled, and the ten is more
+/// than can ever be out, so a classic guess clears the group outright. Expert's three is the real
+/// number: against a group grown past three, some always survive, and that asymmetry is the expert
+/// fight. This doc comment used to say the opposite - that these were the clones' *lights* that
+/// *survive* - which would have had anyone wiring it up implement the mechanic backwards.
+pub const CULTIST_RIGHT_GUESS_CULL: usize = 10;
+pub const CULTIST_RIGHT_GUESS_CULL_EXPERT: usize = 3;
+/// What a wrong guess costs: the decoy dies and the real one is stunned for two seconds
+/// (`NPC.cs:65203-65206` sets its owner to state 6, `NPC.cs:65936-65948` counts that state out).
+pub const CULTIST_STUN_TICKS: f32 = 120.0;
 
 /// The tablet the cultists gather at, and the devotes that kneel around it.
 pub const CULTIST_TABLET: u16 = 437;

@@ -577,6 +577,12 @@ pub struct Effects {
     /// hunting is killed and every shot the fight left in the air is dropped
     /// (`NPC.cs:41752-41764`).
     pub cleared_stage: bool,
+    /// Minions of this NPC's own that it wants destroyed outright, as (type, how many at most).
+    /// The Lunatic Cultist's right-guess cull is the only source.
+    pub cull_kin: Option<(u16, usize)>,
+    /// Set by a part that wants whatever it hangs off punished for its destruction. A destroyed
+    /// Cultist decoy is the only source.
+    pub punish_owner: bool,
     /// A buff this NPC wants put straight onto a player, as (player slot, buff id, ticks) — a
     /// latched nebula headcrab riding a head applies `Obstructed` to its rider every tick it sits
     /// there (`NPC.cs:37508-37526`, `player22.AddBuff(163, 59)`).
@@ -1146,6 +1152,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
             effects.teleport_to = out.move_to;
+            // The ritual's two consequences, both of which reach past this NPC: a right guess
+            // destroys some of the group, a wrong one stuns whatever the decoy was a copy of.
+            effects.cull_kin = out
+                .cull_clones
+                .map(|n| (terrustia_proto::npc_params::CULTIST_CLONE, n));
+            effects.punish_owner = out.punish_owner;
         }
         105 => {
             let out = army::crystal::crystal(npc, world.army.arena);
