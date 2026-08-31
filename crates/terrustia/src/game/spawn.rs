@@ -2175,6 +2175,143 @@ pub fn try_spawn(
 mod tests {
     use super::*;
 
+    /// Every NPC type this server can put into a world by itself, from every ambient producer it
+    /// has, with no console command and nobody summoning anything.
+    ///
+    /// Built by *calling* the producers rather than by reading them, so it cannot drift from what
+    /// they actually answer. It is the half of the reachability check that has to run here;
+    /// vanilla's half needs the decompiled tree and lives in `tools/check_spawn_reach.py`, which
+    /// runs this test to get this set. A type in vanilla's list and not in this one is an NPC
+    /// nobody playing here can ever meet, which is exactly how the Harpy and the Wyvern went
+    /// missing.
+    ///
+    /// Deliberately not counted as reachable, because none of them is ambient spawning: statues,
+    /// the admin `/spawn` command, boss summon items, the transformations one NPC undergoes on
+    /// another's death, and the segments a worm head grows behind itself.
+    fn ambient_roster() -> std::collections::BTreeSet<u16> {
+        use crate::game::{army, cavern_monsters, event::Invasion, lunar, moons, rescues};
+
+        let mut set = std::collections::BTreeSet::new();
+        const DEPTHS: [Depth; 4] = [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ];
+        const BIOMES: [Biome; 9] = [
+            Biome::Forest,
+            Biome::Corruption,
+            Biome::Crimson,
+            Biome::Jungle,
+            Biome::Snow,
+            Biome::Desert,
+            Biome::Ocean,
+            Biome::Dungeon,
+            Biome::Hallow,
+        ];
+        for depth in DEPTHS {
+            for biome in BIOMES {
+                for day in [true, false] {
+                    set.extend(pool(depth, biome, day));
+                    set.extend(hardmode_pool(depth, biome, day));
+                    set.extend(friendly_pool(depth, biome, day));
+                }
+                set.extend(water_pool(depth, biome));
+            }
+            for hard_mode in [true, false] {
+                set.extend(blood_moon_pool(depth, hard_mode));
+            }
+        }
+
+        // The sky, asked through its own chain rather than listed, so deleting an arm of it shows
+        // up here as a type that stopped being reachable.
+        let mut sky = World::empty(800, 600, "roster");
+        sky.progress.downed_golem = true;
+        for seed in 0..200u64 {
+            for hard_mode in [false, true] {
+                for probe_gate in [false, true] {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    set.insert(sky_pick(
+                        hard_mode,
+                        probe_gate,
+                        &sky,
+                        false,
+                        &|_| false,
+                        &mut rng,
+                    ));
+                }
+            }
+        }
+        // The dungeon's doorman, and the residents found tied up underground.
+        set.insert(DUNGEON_GUARDIAN);
+        set.extend(rescues::RESCUES.iter().map(|r| r.bound));
+        // The six a world happens to have are drawn from thirteen, so every world's own set counts.
+        for world_id in 0..200 {
+            set.extend(cavern_monsters::CavernMonsters::for_world(world_id).flat());
+        }
+        // King Slime arrives on his own during a slime rain, which nothing else summons.
+        set.insert(crate::game::slime_rain::KING_SLIME);
+
+        // The rosters that already carry a membership test are read through it, which is exact
+        // where sampling their spawn functions would only be likely.
+        for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
+            if moons::moon_points(npc_type) > 0
+                || army::belongs(npc_type)
+                || lunar::belongs_to(npc_type).is_some()
+                || [
+                    Invasion::Goblin,
+                    Invasion::FrostLegion,
+                    Invasion::Pirate,
+                    Invasion::Martian,
+                ]
+                .into_iter()
+                .any(|kind| belongs_to(kind, npc_type))
+            {
+                set.insert(npc_type);
+            }
+        }
+
+        // The eclipse has no membership table, so its own function is asked directly, enough times
+        // and under both progression states for every arm of it to have answered.
+        for seed in 0..4000u64 {
+            for (plantera, mechs) in [(false, false), (true, true)] {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.insert(crate::game::moons::eclipse_spawn(
+                    plantera,
+                    mechs,
+                    &|_| 0,
+                    &mut rng,
+                ));
+            }
+        }
+        set
+    }
+
+    /// The reachable set, printed for `tools/check_spawn_reach.py` and checked for the one thing
+    /// that needs no decompiled tree: that every producer names a type that exists and can be
+    /// spawned at somebody.
+    #[test]
+    fn every_ambient_producer_names_a_real_type() {
+        use terrustia_proto::npc_data::npc_stats;
+
+        let roster = ambient_roster();
+        assert!(roster.len() > 150, "only {} types reachable", roster.len());
+        for npc_type in &roster {
+            assert!(
+                npc_stats(*npc_type).is_some(),
+                "{npc_type} is reachable from a spawn producer but is not an NPC type",
+            );
+        }
+        println!(
+            "SPAWN-REACH {}",
+            roster
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
     /// Nothing running: what the ordinary world looks like to `try_spawn`.
     fn quiet() -> EventSpawns<'static> {
         EventSpawns {

@@ -156,6 +156,22 @@ check-drops:
 check-recipes:
     python3 tools/check_recipes.py {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
 
+# An NPC nobody can meet is silent: nothing errors, no test fails, the type simply never comes up.
+# That is how the Harpy and the Wyvern sat in no spawn pool at all while every test passed. This
+# reads vanilla's ambient roster out of `NPC.Spawner` and this server's out of the server itself
+# (by running the test that prints it), and diffs them against `docs/spawn-gaps.tsv`.
+#
+# Rebuild the gap list with `spawn-reach-update` and review the diff, as with the other tables.
+#
+# Report NPCs vanilla's own ambient spawning can produce and this server cannot
+check-spawn-reach:
+    python3 tools/check_spawn_reach.py --self-test
+    python3 tools/check_spawn_reach.py {{DECOMPILED}}
+
+# Rebuild docs/spawn-gaps.tsv from the decompiled tree. Review the diff before committing
+spawn-reach-update:
+    python3 tools/check_spawn_reach.py {{DECOMPILED}} --update
+
 # `dead_code` cannot see these, because a read inside `#[cfg(test)]` counts as a read: a field the
 # tests assert on and production ignores is invisible to it. Needs no decompiled tree; it is here
 # because it belongs to the same qualification pass, not because it needs the game.
@@ -203,7 +219,7 @@ check-mutants *ARGS:
 # end means the three that pass still report before it does.
 #
 # Every data cross-check in one go: the tables, the citations, the dead writes, and the checkers
-check-data: check-drops check-recipes check-parity check-mutants check-dead-writes
+check-data: check-drops check-recipes check-parity check-spawn-reach check-mutants check-dead-writes
 
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:
