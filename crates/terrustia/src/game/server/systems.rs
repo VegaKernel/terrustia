@@ -7865,9 +7865,12 @@ mod godmode {
         expert.world.game_mode = 1;
         for server in [&mut classic, &mut expert] {
             let difficulty = server.effective_difficulty();
+            // Only difficulty and player count matter here; spread the rest so a later field
+            // added to Scaling does not break a test that does not care about it.
             server.npcs.set_scaling(crate::game::npc::Scaling {
                 difficulty,
                 players: 1,
+                ..Default::default()
             });
         }
 
