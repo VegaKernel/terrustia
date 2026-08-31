@@ -858,7 +858,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // Each helper arrives through a portal rather than simply appearing.
             for at in out.summons {
                 effects.shots.push(Shot {
-                    projectile: terrustia_proto::npc_params::NAUTILUS_HELPER_PORTAL,
+                    projectile: terrustia_proto::projectile::ids::NAUTILUS_HELPER_PORTAL,
                     damage: 0,
                     position: at,
                     velocity: (0.0, 0.0),

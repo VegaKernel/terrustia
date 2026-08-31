@@ -191,6 +191,163 @@ impl KillProjectile {
     }
 }
 
+/// Projectile type ids, in vanilla's `ProjectileID` numbering.
+///
+/// These sit here rather than beside the NPC-type ids in [`crate::npc_params`] because both spaces
+/// are `u16` and both are dense over the same range, so a bare name cannot say which space it
+/// belongs to. Twelve numbers are claimed twice across the two: 574 is a nebula floater here and a
+/// Kobold Flyer there, 438 a scutlix rider's shot here and a Cultist Devote there, 264 an angry
+/// nimbus's rain here and a Plantera tentacle there. That class of mix-up has already cost this
+/// project twice (see `npc_params`'s Mothron and Duke Fishron notes), and the import path is the
+/// only thing that catches it: an id destined for a `Shot.projectile` belongs in this module, an id
+/// destined for an NPC type belongs in `npc_params`, and neither ever moves the other way.
+pub mod ids {
+    /// The antlion's sand ball. Its speed, damage and reload are `npc_params::ANTLION_*`.
+    pub const ANTLION_SHOT_TYPE: u16 = 31;
+
+    /// The giant cursed skull's shot.
+    pub const GIANT_SKULL_SHOT_TYPE: u16 = 299;
+
+    /// Skeletron's skull barrage, thrown while it hovers (`NPC.cs:22059-22114`).
+    pub const SKELETRON_BARRAGE: u16 = 270;
+
+    /// The stinger Queen Bee spits.
+    pub const STINGER: u16 = 719;
+
+    /// Deerclops' three: the ice spike, the falling rubble, and the shadow hand.
+    pub const DEER_SPIKE: u16 = 961;
+    pub const DEER_RUBBLE: u16 = 962;
+    pub const DEER_SHADOW_HAND: u16 = 965;
+
+    /// The Wall of Flesh eye's laser.
+    pub const WALL_LASER: u16 = 83;
+
+    /// The big stardust jellyfish's shot.
+    pub const JELLYFISH_SHOT: u16 = 539;
+
+    /// The missile an elf copter drops.
+    pub const COPTER_SHOT: u16 = 180;
+
+    /// What an angry nimbus rains.
+    pub const NIMBUS_SHOT: u16 = 264;
+
+    /// The four shots an ancient doom lets go.
+    pub const DOOM_SHOT: u16 = 593;
+
+    /// What a style-73 caster turret throws.
+    pub const CASTER_SHOT: u16 = 435;
+
+    /// The web a wall crawler spits in expert.
+    pub const CRAWLER_SPIT: u16 = 472;
+
+    /// The sandnado a sand elemental raises.
+    pub const SANDNADO: u16 = 658;
+
+    /// A scutlix rider's shot.
+    pub const RIDER_SHOT: u16 = 438;
+
+    /// A Dutchman cannon's shot: a slow lobbed ball.
+    pub const CANNON_SHOT: u16 = 240;
+
+    /// The floaters a nebula brain puts out (vanilla hurries these on a teleport,
+    /// `NPC.cs:39982-40002`).
+    pub const NEBULA_FLOATER: u16 = 574;
+
+    /// The Dreadnautilus's spray bolt, and the portal its helpers come out of. The helper itself is
+    /// an NPC, `npc_params::NAUTILUS_HELPER`.
+    pub const NAUTILUS_SPRAY_SHOT: u16 = 814;
+    pub const NAUTILUS_HELPER_PORTAL: u16 = 813;
+
+    /// The laser every Destroyer body segment's probe fires.
+    pub const DESTROYER_LASER: u16 = 100;
+
+    /// The Golem head's fireball, and the eye-laser it only grows past half health
+    /// (`NPC.cs:31504-31564` attached, `:31736-31801` free).
+    pub const GOLEM_FIREBALL: u16 = 258;
+    pub const GOLEM_LASER: u16 = 259;
+
+    /// Plantera's first form: the seed, and the thorn ball and spiky seed it mixes in below eighty
+    /// per cent.
+    pub const PLANTERA_SEED: u16 = 275;
+    pub const PLANTERA_THORN_BALL: u16 = 276;
+    pub const PLANTERA_SPIKY: u16 = 277;
+
+    /// Duke Fishron's bubble.
+    pub const FISHRON_BUBBLE: u16 = 385;
+
+    /// The spheres Pumpking throws while hovering: one of three, picked at random over
+    /// `npc_params::PUMPKING_SPHERE_SPAN`.
+    pub const PUMPKING_SPHERE: u16 = 326;
+
+    /// The Ice Queen's mode-0 forward mist (`NPC.cs:33751-33796`) and mode-1 ice shard
+    /// (`NPC.cs:33811-33919`).
+    pub const ICE_QUEEN_MIST: u16 = 348;
+    pub const ICE_QUEEN_SHARD: u16 = 349;
+
+    /// The Santa-NK1's bullet.
+    pub const SANTA_BULLET: u16 = 180;
+
+    /// Queen Slime's dive burst (`NPC.cs:46024-46118`) and the ring her swoop fires
+    /// (`NPC.cs:46159-46236`).
+    pub const QUEEN_SLIME_DIVE_SHOT: u16 = 922;
+    pub const QUEEN_SLIME_RING_SHOT: u16 = 926;
+
+    /// The Lunatic Cultist's three spells: `ProjectileID.CultistBossIceMist`
+    /// (`NPC.cs:65569-65639`), `CultistBossFireBall` (`NPC.cs:65640-65719`) and
+    /// `CultistBossLightningOrb` (`NPC.cs:65720-65779`).
+    pub const CULTIST_ICE: u16 = 464;
+    pub const CULTIST_LIGHTNING: u16 = 465;
+    pub const CULTIST_FIRE: u16 = 467;
+
+    /// A shard off the shattering cultist tablet.
+    pub const TABLET_SHARD: u16 = 526;
+
+    /// What the Moon Lord's parts throw, from the `NewProjectile` calls in `AI_078`/`AI_079`: the
+    /// eye stream (`NPC.cs:42155`), the sphere barrage (`NPC.cs:42199`), the head's deathray
+    /// (`NPC.cs:42667`) and the bolt spread (`NPC.cs:42502`). The names match `ProjectileID.cs`:
+    /// 452 is the eye, 454 the sphere, 462 the bolt. Damage for each is
+    /// `npc_params::PHANTASMAL_*_DAMAGE`.
+    pub const PHANTASMAL_EYE: u16 = 452;
+    pub const PHANTASMAL_SPHERE: u16 = 454;
+    pub const PHANTASMAL_DEATHRAY: u16 = 455;
+    pub const PHANTASMAL_BOLT: u16 = 462;
+
+    /// The Old One's Army lightning bug's bolt.
+    pub const LIGHTNING_BUG_BOLT: u16 = 682;
+
+    /// The Martian saucer's three: the deathray that opens a strafe, the missiles it sprays while
+    /// hovering, and the lasers it aims through the low hold.
+    pub const SAUCER_DEATHRAY: u16 = 447;
+    pub const SAUCER_MISSILE: u16 = 448;
+    pub const SAUCER_LASER: u16 = 449;
+
+    /// The Dark Mage's aimed bolt, the healing sigil it plants on the ground, and the portal its
+    /// skeletons come out of.
+    pub const DARK_MAGE_PORTAL: u16 = 673;
+    pub const DARK_MAGE_HEAL: u16 = 674;
+    pub const DARK_MAGE_BOLT: u16 = 675;
+
+    /// Betsy's two.
+    pub const BETSY_FIREBALL: u16 = 686;
+    pub const BETSY_FLAME_BREATH: u16 = 687;
+
+    /// The projectiles the Old One's Army troops throw.
+    pub const OGRE_SPIT: u16 = 676;
+    pub const OGRE_POUND: u16 = 683;
+    pub const DRAKIN_FIREBALL: u16 = 671;
+    pub const JAVELIN: u16 = 662;
+    pub const JAVELIN_T3: u16 = 685;
+    pub const GOBLIN_BOMB: u16 = 681;
+    pub const GOBLIN_SHARK_SHOT: u16 = 811;
+
+    /// The Empress of Light's five.
+    pub const EMPRESS_RAINBOW: u16 = 872;
+    pub const EMPRESS_BLAST: u16 = 873;
+    pub const EMPRESS_SUN_DANCE: u16 = 874;
+    pub const EMPRESS_LANCE: u16 = 919;
+    pub const EMPRESS_ETHEREAL_LANCE: u16 = 923;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

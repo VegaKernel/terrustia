@@ -6,9 +6,10 @@
 //! pretending.
 
 use terrustia_proto::npc_params::{
-    ANTLION_RELOAD, ANTLION_SHOT_DAMAGE, ANTLION_SHOT_SPEED, ANTLION_SHOT_TYPE, LOST_GIRL_RANGE,
-    LOST_GIRL_WINDUP, NYMPH,
+    ANTLION_RELOAD, ANTLION_SHOT_DAMAGE, ANTLION_SHOT_SPEED, LOST_GIRL_RANGE, LOST_GIRL_WINDUP,
+    NYMPH,
 };
+use terrustia_proto::projectile::ids::ANTLION_SHOT_TYPE;
 use terrustia_proto::tile_solid::solid;
 
 use super::{Shot, World, can_see, face, sight::within_firing_range};
