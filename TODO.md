@@ -22,9 +22,18 @@ worldgen release), and the old v0.1.0 label is retired.
 **The v0.0.1 gates:** parity completion plus a from-scratch re-audit; the error-handling and
 data-safety sweep; the `server.rs` architectural split; a zero-unknown-ID protocol classification;
 the admin overhaul (namespaced permissions, audit log, moderation toolkit); Windows ARM64 in the
-release matrix; the codegen port finished in Rust; and a 255-player qualification run per release
-candidate. A human fresh-character Moon Lord playthrough is a strongly-expected but waivable
-qualification step.
+release matrix; the codegen port finished in Rust; town NPC happiness and shop pricing; and a
+255-player qualification run per release candidate. A human fresh-character Moon Lord playthrough is
+a strongly-expected but waivable qualification step.
+
+**Town NPC happiness and shop pricing, added to the gates 2026-08-31.** The C3 audit established
+that the system does not exist anywhere in this repo: no happiness, no price multiplier, no
+`ShopHelper` equivalent, and no pylon happiness threshold. That is an absent subsystem rather than a
+bug, which is why no earlier pass reported it and why it had never been named here at all. Under a
+vanilla-identical bar an absent vanilla system is a gap like any other, so it is in scope and being
+built from `Terraria.GameContent.Personalities/` rather than deferred. Recording it explicitly
+because a system missing from both the code and the plan is invisible twice over, and this file is
+meant to be the honest contract.
 
 ## Phase 0: preconditions (complete)
 
@@ -151,7 +160,39 @@ at 73,465 of 73,472; with it, zero drops, 255 of 255 held, and a peak of 38,713.
 own comment had predicted exactly this fix and left it for whoever owned the broadcast next.
 
 **C3, the spawn lane**: adopt the fork's spawn-parity module structure once Xekep affirms the CLA
-and the posted punch-list is fixed (or take the punch-list over if the fork goes quiet).
+and the posted punch-list is fixed (or take the punch-list over if the fork goes quiet). This is a
+restructure of code we already own and have now audited and fixed, not a gap: `game/spawn.rs` is
+2,340 lines transcribed from `Spawner.SpawnAnNPC` with 34 tests. Nothing about the release waits on
+it.
+
+**C5, the third from-scratch audit (2026-08-30) and its fix wave.** Eleven read-only lanes over the
+whole tree, ten parity lanes against the decompiled source plus one over-engineering lane kept
+separate so simplification proposals could not contaminate parity work. Generated tables were in
+scope and re-derived with independent parsers rather than sampled. It found **9 blockers, 45 majors
+and 44 minors**, recorded in `.scratch/audit-2026-08-30/LEDGER.md` with the fix assignments in
+`FIXPLAN.md` beside it.
+
+The recurring shape was the same one C2 named and is worth restating, because six passes had read
+past it: **nothing crashed**. Every blocker was a system that ran, produced output, and produced the
+wrong amount. Gel's registrations matched a generator regex that silently returned nothing. The
+liquid wake queue terminated only because its cap discarded roughly 97% of the work it was given.
+`damage_bonus` was written in 13 production sites and read in none outside `#[cfg(test)]`, so every
+boss enrage multiplier was inert while the tests that read the field passed.
+
+Three of the four data-table blockers and both liquid causes were generator or design faults that
+`just regen` and the test suite faithfully reproduced. Two further defects were found during the
+fixing rather than the audit, both by building a better instrument rather than reading harder:
+
+- **Bone (item 154) was unobtainable**, so every bone recipe was uncraftable. Its only two
+  registrations are `ByCondition` lines (`ItemDropDatabase.cs:1162-1164`), and `tools/check_drops.py`
+  could not see them: its argument slices made every `ByCondition` rule in the game source invisible,
+  and its epilogue explicitly excused treasure bags and master-mode drops, which is where a fourth
+  blocker was hiding. Fixing the checker surfaced Bone within the hour.
+- **Nothing here ever woke the tile above.** Vanilla does it twice (`Liquid.cs:947-966` and
+  `:1518-1521`); without it a column draining from the bottom never learns its floor has gone. This
+  was the larger of the two causes of water hanging in mid-air, and the audit did not have it.
+
+Both are the argument for the instrument campaign below.
 
 **C4 (done)**: expanded the golden/deterministic vanilla-derived tests that CAN run per-commit in
 CI; the live differential against a real `TerrariaServer` remains a Phase 2 qualification step, since
@@ -243,8 +284,94 @@ both generators to emit exactly what is committed rather than touching either ta
 - **Performance discipline**: maintain the benchmarks, measure meaningful changes, reject confirmed
   regressions on CPU, memory, latency, startup, saves and joins, and keep the instrumentation. The
   deep optimisation campaign comes after the feature waves, not now.
+
+  **Ruled 2026-08-31: no merge may be measurably slower than `main` on a hot path.** Parity work
+  does add real work, because vanilla does things this server was skipping, so the rule is not "never
+  cost anything": it is that a lane measures the cost, optimises until it is negligible against the
+  16.67 ms per-tick budget at 255 players, and reports the number. Correctness is never traded away
+  to hit it; the implementation is what gets optimised, not the behaviour.
+
+  The standard was set by the case that forced the rule. Moving `biome_at` ahead of the spawn rate
+  roll, which parity requires, cost 82 us per scan, or **20.8 ms per tick at 255 players, over the
+  entire frame budget on its own**. Vanilla pays nothing for this because the client runs
+  `SceneMetrics`. A `BiomeCache` brought it to 345 us, about 2% of budget, and
+  `crates/terrustia/examples/biome_scan_cost.rs` reproduces both numbers so the claim stays checkable.
+  Where a fix is locally slower and correct, as the walled liquid cases are now that water completes
+  its fall instead of stranding partway, that is documented with its measurement rather than hidden.
+
+  Shorter 255-player soaks run as frequent regression checks and are never treated as definitive
+  while the machine is contended; the full quiet-machine 30-minute run is reserved for milestones and
+  release candidates. The README's comparison table against the official server is refreshed on the
+  same cadence, so its numbers never drift from the build they describe.
 - **Docs**: de-slop `AUDIT.md` and `docs/*.md` (em dashes and the usual tells); this file replaces
   `plan.md` and `GAPS.md`.
+
+## Instrumenting for the next audit
+
+Runs after the C3 fix wave lands and **before** the coverage-gap pass, because most of what it
+builds does that pass's job mechanically and deterministically, and because a checker that cannot
+see a class of defect makes a clean run indistinguishable from a real one.
+
+The C3 audit found nine blockers by hand. Not one of them crashed. Gel's registrations matched a
+generator regex that silently returned nothing; Bone was registered only through two `ByCondition`
+lines and dropped from no NPC at all; the liquid wake queue terminated only because its cap was
+discarding roughly 97% of the work it was given. Every one was a system that ran, produced output,
+and produced the wrong amount, which is precisely what a reader looking for something broken reads
+past, six passes running.
+
+Worse, **the tools built to catch this were part of why it was missed**. `check_drops.py`'s epilogue
+excused treasure bags and master-mode drops, the exact two categories a blocker was hiding in, and
+its `[^)]*` argument slices made every `ByCondition` rule in the game source invisible, which is
+where Bone lived. Fixing that checker surfaced Bone within the hour. The same shape had already
+appeared twice: three release bars that nothing evaluated, and a `cpu_us` double-count in the
+instrument built to measure the fourth.
+
+So the lesson is not "audit harder". It is that these defects have mechanical signatures, and the
+leverage is in tools that find a *class* rather than a person finding an instance. Ranked by value
+over effort; the first three are roughly a day each.
+
+1. **Mutation-test the verifiers.** The highest-leverage item here and the only one that checks the
+   checkers. If `check_drops.py` cannot see a `ByCondition` rule, then deleting a `ByCondition`
+   drop from the committed table does not make it fail, and that is directly testable: corrupt or
+   remove entries programmatically, run the checker and the suite, and assert every mutation is
+   caught. A surviving mutant is a blind spot by definition. This would have found the Bone gap
+   without anyone knowing Bone existed. `cargo-mutants` covers the Rust side; the tables need a
+   small script. Run at qualification the way `just fuzz` is, not per commit.
+
+2. **Reachability as a gate, from an independent implementation.** "Every item vanilla can produce,
+   can we produce, and vice versa" is a set difference, and it collapses Gel, Bone, the lunar
+   fragments, the four missing treasure bags, the 102 unreachable items, the 57 master-mode items
+   and the 80 missing projectiles into one query. Most of it exists: the audit lane wrote parsers
+   over `ItemDropDatabase.cs` and a full interpreter of `SetupRecipes`, and the C3 wave repaired
+   the checker. What is missing is that it must exit non-zero and be wired into `just check-data`.
+   **It must stay a second, independent implementation.** Re-running the generator and diffing
+   against its own output proves nothing; that is the same tautology as asserting `BUFF_COUNT`
+   against the array the same generator sized.
+
+3. **A dead-write lint.** `damage_bonus` was assigned in 13 production sites and read in none
+   outside `#[cfg(test)]`. So were `wet`, slime's `ai[3]`, `TreeOutcome::fleeing` and
+   `FairyOutcome::wants_treasure`: one class, five findings, two of them blockers, and the same
+   root cause (R4) as four blockers in the C2 wave. Rust's own `dead_code` misses it because a test
+   read counts as a read. About a hundred lines over `syn`: collect field assignments, collect
+   reads outside test modules, report the difference. The boss lane ran this sweep by hand and
+   found one the ledger did not have, so the yield is demonstrated rather than assumed.
+
+4. **Invariants in the soak, not just thresholds.** Liquid conservation is a property: the total in
+   a sealed world does not change however many passes run. FIX-B found its blocker by measuring
+   exactly that across nine release sizes, where the existing tests used 40x30 worlds, pools of at
+   most 180 tiles and zero fall distance. The same shape applies to tile-state legality, NPC
+   position bounds, and drop distributions over many kills.
+
+5. **Generate the golden pins.** The Frost Legion and Pirate invasion sizes were swapped *and a
+   test asserted the swap*, so a correct implementation would have failed the suite. That is
+   structurally impossible when a constant transcribed from vanilla is codegen output rather than
+   hand-typed: a wrong pin cannot survive being derived from the source it exists to pin.
+
+**Explicitly not on this list: another audit pass by reading.** The C3 pass found 99 findings and
+still missed Bone and the absent upward wake in `Liquid.Update`, both of which turned up during
+fixing, and both of which were found by building an instrument rather than reading harder. Reading
+passes are good at discovering a class and poor at exhausting one, and they are not repeatable, so
+a clean one carries little information. Use them to find the class, then automate the class.
 
 ## Phase 2: release qualification
 
