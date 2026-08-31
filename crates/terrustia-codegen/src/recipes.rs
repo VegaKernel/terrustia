@@ -18,7 +18,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::csharp::{int_set, read_lossy};
+use crate::csharp::{int_set, read_lossy, resolve_locals};
 
 const HEADER: &str = "\
 //! What crafted things are made of, generated from the game's recipes.
@@ -94,13 +94,23 @@ impl Recipe {
 /// Whether a recipe is one the world has not earned yet.
 ///
 /// Two gates: some recipes cannot be decrafted until Skeletron is down, others until the Golem
-/// is. The game keeps these as recipe sets; both are small and are passed in rather than tabled,
-/// since the caller already knows the world's progress.
-pub fn decraft_locked(_recipe: &Recipe, _downed_skeletron: bool, _downed_golem: bool) -> bool {
-    // `RecipeSets.PostSkeletron` and `PostGolem` are empty in 1.4.5.7 — the gates exist and
-    // nothing is behind them. Kept as a named function so a later version that fills them in
-    // needs a table rather than a new concept.
-    false
+/// is. `ShimmerTransforms.IsRecipeIndexDecraftLocked` (`ShimmerTransforms.cs:47-61`) checks
+/// `RecipeSets.PostSkeletron` and `RecipeSets.PostGolem`, and those two sets are not tables at
+/// all: `UpdateRecipeSets` (`:81-85`) fills them at load time from the recipes themselves,
+///
+/// ```text
+/// RecipeSets.PostSkeletron = Utils.MapArray(Main.recipe, (Recipe r) => r.ContainsIngredient(154));
+/// RecipeSets.PostGolem    = Utils.MapArray(Main.recipe, (Recipe r) => r.ContainsIngredient(1101));
+/// ```
+///
+/// so the rule is simply "made of Bone" and "made of Lihzahrd Brick". Reading them at their bare
+/// `bool[]` declarations and concluding they were empty is what left this returning `false` for
+/// every recipe, which let a world decraft the 97 Bone recipes before Skeletron and the 21
+/// Lihzahrd ones before the Golem. `ContainsIngredient` is an exact item-id test, which is what
+/// [`Recipe::ingredients`] holds.
+pub fn decraft_locked(recipe: &Recipe, downed_skeletron: bool, downed_golem: bool) -> bool {
+    let wants = |item: u16| recipe.ingredients().iter().any(|&(i, _)| i == item);
+    (!downed_skeletron && wants(154)) || (!downed_golem && wants(1101))
 }
 
 #[cfg(test)]
@@ -284,11 +294,171 @@ mod tests {
     fn the_decraft_table_includes_the_loop_built_families() {
         assert_eq!(
             CRAFTED_BY.len(),
-            3083,
-            "expected 2536 pre-D1 craftable items plus 547 loop-built ones"
+            3090,
+            "expected 2536 pre-D1 craftable items, 547 loop-built ones, and the 7 that only \
+             appeared once `SetupRecipes`' integer locals were resolved"
+        );
+    }
+
+    /// The two progression gates on decrafting are real, not empty sets.
+    ///
+    /// `ShimmerTransforms.UpdateRecipeSets` builds them from the ingredients themselves, so
+    /// anything made of Bone waits for Skeletron and anything made of Lihzahrd Brick waits for the
+    /// Golem. This used to return `false` for everything.
+    #[test]
+    fn bone_and_lihzahrd_recipes_wait_for_their_boss() {
+        let count = |pred: fn(&Recipe) -> bool| RECIPES.iter().filter(|r| pred(r)).count();
+        assert_eq!(count(|r| decraft_locked(r, false, true)), 96, "Bone recipes");
+        assert_eq!(
+            count(|r| decraft_locked(r, true, false)),
+            21,
+            "Lihzahrd Brick recipes"
+        );
+        // A finished world is gated on nothing.
+        assert_eq!(count(|r| decraft_locked(r, true, true)), 0);
+        let bone = RECIPES
+            .iter()
+            .find(|r| r.ingredients().iter().any(|&(i, _)| i == 154))
+            .expect("something is made of Bone");
+        assert!(decraft_locked(bone, false, true));
+        assert!(!decraft_locked(bone, true, true));
+    }
+
+    /// The three integer locals `SetupRecipes` hoists its materials into, one recipe each.
+    ///
+    /// Every one of these read as garbage while `ingredients_of` could only see digits: the
+    /// Lesion Bed was "one of item 7", the Crystal Bathtub had no Crystal Block at all, and every
+    /// sofa gave back 1 + 1 rather than 5 + 2.
+    #[test]
+    fn hoisted_materials_survive_extraction() {
+        let of = |item: u16| decraft_recipe(item, false).expect("crafted").ingredients();
+        assert_eq!(of(3959), &[(3955, 15), (225, 5)], "Lesion Bed");
+        assert_eq!(of(3918), &[(3234, 12), (225, 2)], "Crystal Bathtub");
+        assert_eq!(of(2397), &[(9, 5), (225, 2)], "a sofa");
+    }
+
+    /// Potions are alchemy recipes, which is what makes decrafting them lossy.
+    ///
+    /// `Recipe.AddRecipe` sets the flag from `requiredTile == 13`, text that never appears in
+    /// `SetupRecipes`, so every row used to say `false` and shimmer handed back 100% of a potion's
+    /// ingredients.
+    #[test]
+    fn potions_are_alchemy() {
+        let alchemy = RECIPES.iter().filter(|r| r.alchemy).count();
+        assert_eq!(alchemy, 52, "the alchemy-table recipes that survive last-wins");
+        assert!(
+            decraft_recipe(288, false).expect("Shine Potion is crafted").alchemy,
+            "a potion brewed at the alchemy table"
         );
     }
 }"#;
+
+/// Substitute `SetupRecipes`' integer locals and its ingredient arrays into the lines the recipe
+/// parser reads, so an ingredient hoisted out of the literal text is not lost.
+///
+/// Three declarations in `Recipe.cs` between them account for 62 wrong or missing recipes, every
+/// one of them because [`ingredients_of`] can only see digits:
+///
+/// * `int num = 5; int stack = 2;` (`:608-609`), used by the 26 sofa-style recipes as
+///   `requiredItem[N].stack = num`. Read as no stack at all, they each gave back 1+1 rather than
+///   5+2, so decrafting a sofa was a net loss of four wood.
+/// * `int type = 3234;` (`:6280`), the Crystal Block that 18 crystal furniture recipes take as
+///   `requiredItem[0].SetDefaults(type)`. Invisible, so six of those recipes came out with *no*
+///   ingredients at all (dropped entirely) and twelve came out missing their main material.
+/// * `int num = 3955;` (`:15721`), the Lesion Block behind 18 Lesion furniture recipes, half of
+///   them passed through an `int[] objN = new int[K] { 0, ... }; objN[0] = num;` array. Reading
+///   `obj7` for its trailing digit turned the Lesion Bed's (3955, 15) + (225, 5) into a single
+///   ingredient 7.
+///
+/// The array form is expanded here too: `recipe7.SetIngredients(obj7)` becomes
+/// `recipe7.SetIngredients(3955, 15, 225, 5)`, which the existing `SetIngredients` parse then
+/// reads without further help.
+///
+/// Substitution is deliberately confined to the statement forms the recipe parser looks at
+/// (`currentRecipe.…`, `<recipe>.SetIngredients(…)`, an array element assignment). Applying it to
+/// the whole body would rewrite `SetupRecipes`' own loop and helper text, which
+/// [`loop_built_recipes`] matches against verbatim.
+fn resolve_recipe_locals(body: &str) -> String {
+    let int_decl = Regex::new(r"^int (\w+) = (\d+);$").unwrap();
+    let arr_decl = Regex::new(r"^int\[\] (\w+) = new int\[\d*\] \{([^}]*)\};$").unwrap();
+    let arr_store = Regex::new(r"^(\w+)\[(\d+)\] = (-?\d+);$").unwrap();
+    let arr_use = Regex::new(r"^(\w+\.SetIngredients\()(\w+)(\);)$").unwrap();
+    let interesting =
+        Regex::new(r"^(?:currentRecipe\.|\w+\.SetIngredients\(|\w+\[\d+\] = )").unwrap();
+    let cast_re = Regex::new(r"\(int\)\(\(float\)(\d+) \* ([\d.]+)f\)").unwrap();
+    let num_re = Regex::new(r"-?\d+").unwrap();
+
+    let mut ints: BTreeMap<String, String> = BTreeMap::new();
+    let mut arrays: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    let mut out = String::with_capacity(body.len());
+    for raw in body.lines() {
+        let trimmed = raw.trim();
+        if let Some(caps) = int_decl.captures(trimmed) {
+            ints.insert(caps[1].to_string(), caps[2].to_string());
+            out.push_str(raw);
+            out.push('\n');
+            continue;
+        }
+        if let Some(caps) = arr_decl.captures(trimmed) {
+            arrays.insert(
+                caps[1].to_string(),
+                num_re
+                    .find_iter(&caps[2])
+                    .map(|m| m.as_str().parse().unwrap())
+                    .collect(),
+            );
+            out.push_str(raw);
+            out.push('\n');
+            continue;
+        }
+        let line = if interesting.is_match(trimmed) {
+            resolve_locals(trimmed, &ints)
+        } else {
+            trimmed.to_string()
+        };
+        // `obj7[0] = 3955;` patches the placeholder the declaration left.
+        if let Some(caps) = arr_store.captures(&line)
+            && let Some(values) = arrays.get_mut(&caps[1])
+            && let Ok(at) = caps[2].parse::<usize>()
+            && at < values.len()
+        {
+            values[at] = caps[3].parse().unwrap();
+        }
+        // `recipe7.SetIngredients(obj7);` becomes the numbers themselves.
+        let line = match arr_use.captures(&line) {
+            Some(caps) => match arrays.get(&caps[2]) {
+                Some(values) => format!(
+                    "{}{}{}",
+                    &caps[1],
+                    values
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    &caps[3]
+                ),
+                None => line,
+            },
+            None => line,
+        };
+        // `stack = (int)((float)5 * 2.5f);` — the one arithmetic stack in `SetupRecipes`
+        // (`Recipe.cs:6374`, the Crystal Bathtub's twelve Crystal Blocks). Folded to its C# value:
+        // a `(int)` cast of a positive float truncates.
+        let line = cast_re
+            .replace_all(&line, |caps: &regex::Captures| {
+                let n: f64 = caps[1].parse().unwrap();
+                let by: f64 = caps[2].parse().unwrap();
+                ((n * by) as i64).to_string()
+            })
+            .into_owned();
+        // Keep the original indentation so byte offsets stay comparable line for line.
+        let indent = &raw[..raw.len() - raw.trim_start().len()];
+        out.push_str(indent);
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
 
 /// One parsed recipe declaration, before the last-wins filtering.
 struct RecipeData {
@@ -893,6 +1063,9 @@ pub fn generate(root: &Path) -> String {
         .find("public static void SetupRecipes()")
         .expect("SetupRecipes not found");
     let body = &src[start..];
+    // The literal-text scan below reads the resolved copy; `loop_built_recipes` keeps the raw one,
+    // because its per-family regexes match `SetupRecipes`' own loop and helper text verbatim.
+    let resolved = resolve_recipe_locals(body);
 
     let chunk_re =
         Regex::new(r"(?s)currentRecipe\.createItem\.SetDefaults\((\d+)\);(.*?)AddRecipe\(\);")
@@ -904,10 +1077,10 @@ pub fn generate(root: &Path) -> String {
     // `createItem`, but a loop-variable `requiredItem[1]` that the generic ingredient parse can't
     // see, so left in it would produce a real but wrong single-ingredient recipe. Exclude it here;
     // `loop_built_recipes` supplies the correct six recipes instead.
-    let (strung_exclude, _) = strung_counterweight_loop(body);
+    let (strung_exclude, _) = strung_counterweight_loop(&resolved);
 
     let mut recipes: Vec<RecipeData> = Vec::new();
-    for cap in chunk_re.captures_iter(body) {
+    for cap in chunk_re.captures_iter(&resolved) {
         if strung_exclude.contains(&cap.get(0).unwrap().start()) {
             continue;
         }
@@ -924,7 +1097,14 @@ pub fn generate(root: &Path) -> String {
                 || text.contains(".AddCondition(Condition.InCrimson"),
             corruption: text.contains("corruption = true")
                 || text.contains(".AddCondition(Condition.InCorruption"),
-            alchemy: text.contains("alchemy = true"),
+            // `Recipe.AddRecipe` (`Recipe.cs:16795-16800`) sets `alchemy` itself, from the
+            // crafting station: `if (currentRecipe.requiredTile == 13) currentRecipe.alchemy =
+            // true;` (tile 13 is the Bottle/Alchemy Table). The literal `alchemy = true` never
+            // appears anywhere in `SetupRecipes`, so looking for it left the flag false on all
+            // 3,098 rows and shimmer-decrafting a potion returned every ingredient instead of
+            // losing one in three: a free material duplicator, which is exactly what the flag
+            // exists to prevent. Both spellings of the assignment count.
+            alchemy: text.contains("requiredTile = 13;") || text.contains("SetCraftingStation(13)"),
         });
     }
     assert!(
