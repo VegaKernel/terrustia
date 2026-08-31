@@ -100,6 +100,12 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
+    // One-way, like every other boolean flag here: `--panel` turns it on, and turning it off again
+    // is the config file's or the environment's job. A `--no-panel` would be the only negative flag
+    // on the surface and nobody has wanted one.
+    if args.panel {
+        config.panel_enabled = true;
+    }
     if let Some(seed) = &args.seed {
         // Keeps `config.seed` meaningful for anything that reads it besides generation itself
         // (e.g. a numeric `--seed` still round-trips exactly). The word/secret-seed path below,
@@ -225,7 +231,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // failure here can never print beneath a "ready" line that would be a lie. `listener::bind`
     // turns a bare errno (a port in use, or `os error 28` socket exhaustion) into a message that
     // says what to do about it.
-    let listener = listener::bind(config.listen).await?;
+    let listener = listener::bind(config.listen, "--listen").await?;
 
     let recorder = match &args.record {
         Some(path) => Some(terrustia::net::record::Recorder::create(path)?),
@@ -240,11 +246,20 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // passes to `panel::supervise` below, which handles every later start/stop (the console's
     // `panel` command) without that same all-or-nothing behaviour — see its own doc comment for why
     // a runtime toggle failure should not take the rest of the server down too.
+    // Both states say what to do next. Off used to be the bare word "off", which named a feature
+    // and then gave the reader nowhere to go: there was no flag for it at all, and the two ways in
+    // were a config key and an environment variable that this card never mentioned. On used to say
+    // "loopback only" without the address, so anyone wanting to open it had to go and find the
+    // default port. The claim-token warning printed moments later already sets the house standard
+    // by giving the exact command to type.
     let (initial_panel, panel_state) = if config.panel_enabled {
         let handle = terrustia::panel::run(config.clone(), events_tx.clone()).await?;
-        (Some(handle), "loopback only")
+        (
+            Some(handle),
+            format!("http://{} · loopback only", config.panel_listen),
+        )
     } else {
-        (None, "off")
+        (None, "off · start it with --panel".to_string())
     };
 
     // The settled facts, one aligned key/value card on a single left margin: what the world is,
@@ -277,7 +292,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         "saves to",
         match config.save_target() {
             None => "nowhere, this world will not be saved".to_string(),
-            Some(path) => display_path(path),
+            Some(path) => terrustia::worlds::display_path(path),
         },
     ));
     rows.push((
@@ -423,26 +438,6 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("could not restart into {}: {e}", new_world.display()).into());
     }
     Ok(())
-}
-
-/// How a path is shown in the boot card. A path under the working directory is shown relative to it,
-/// so a server-owned world in `worlds/` reads as `worlds/Name.wld` the way a Minecraft server names
-/// its own files; a path under the user's home directory collapses that prefix to `~`; anything else
-/// is shown as it is. Presentation only, so nothing ever opens the shortened form.
-fn display_path(path: &Path) -> String {
-    if let Ok(cwd) = std::env::current_dir()
-        && let Ok(rel) = path.strip_prefix(&cwd)
-        && !rel.as_os_str().is_empty()
-    {
-        return rel.display().to_string();
-    }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-        && let Ok(rest) = path.strip_prefix(&home)
-        && !rest.as_os_str().is_empty()
-    {
-        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
-    }
-    path.display().to_string()
 }
 
 /// Replace this process with a fresh one pointed at `world`, keeping the config file and listen
@@ -608,6 +603,13 @@ struct Args {
     /// about, and for anyone who just wants it to autostart. `-h` stays `--help`, so this is
     /// `--headless` with no short form.
     headless: bool,
+    /// Start the web panel, the same as setting `panel_enabled` in the config file or
+    /// `TERRUSTIA_PANEL_ENABLED=1`.
+    ///
+    /// It exists because the boot card names the panel on every start and, until this, gave no way
+    /// to act on it: the row said `off` and the only ways in were a config key and an environment
+    /// variable, neither of which the card mentioned. Every other thing on that card has a flag.
+    panel: bool,
     help: bool,
 }
 
@@ -624,6 +626,7 @@ impl Args {
             list_worlds: false,
             setup: false,
             headless: false,
+            panel: false,
             help: false,
         };
         let mut args = args.peekable();
@@ -652,6 +655,7 @@ impl Args {
                 "--worlds" => parsed.list_worlds = true,
                 "--setup" => parsed.setup = true,
                 "--headless" => parsed.headless = true,
+                "--panel" => parsed.panel = true,
                 "--save" => {
                     parsed.save = Some(args.next().ok_or("--save needs a path")?.into());
                 }

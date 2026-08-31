@@ -246,7 +246,11 @@ pub async fn run(
             ),
         ));
     }
-    let listener = crate::net::listener::bind(config.panel_listen).await?;
+    let listener = crate::net::listener::bind(
+        config.panel_listen,
+        "panel_listen in the config file, or TERRUSTIA_PANEL_LISTEN",
+    )
+    .await?;
     let addr = listener.local_addr().unwrap_or(config.panel_listen);
     let state = PanelState {
         events,

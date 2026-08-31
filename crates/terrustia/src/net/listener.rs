@@ -14,20 +14,30 @@ use crate::{config::Config, game::ServerEvent, net::connection};
 /// about it. A raw `Os { code: 28 }` in a server log tells an operator nothing; the same failure
 /// carrying "the OS is out of socket resources, raise the open-file limit" tells them where to look.
 /// Used for both the game port and the web panel's own bind, so neither surfaces a bare errno.
-pub async fn bind(addr: SocketAddr) -> std::io::Result<TcpListener> {
+///
+/// `how_to_change` names the knob that moves *this* address, and the caller has to supply it
+/// because this function cannot know which of the two it is being used for. It used to hard-code
+/// `--listen` in the address-in-use advice, which is the game port: a panel that failed to bind
+/// told the operator to change the wrong thing, and `--listen` would have moved the game and left
+/// the panel exactly where it was.
+pub async fn bind(addr: SocketAddr, how_to_change: &str) -> std::io::Result<TcpListener> {
     TcpListener::bind(addr)
         .await
-        .map_err(|e| explain_bind_failure(addr, e))
+        .map_err(|e| explain_bind_failure(addr, how_to_change, e))
 }
 
 /// Rewrite a bind failure into an explanation, keeping the original [`std::io::ErrorKind`] so a
 /// caller that matches on the kind still can.
-fn explain_bind_failure(addr: SocketAddr, e: std::io::Error) -> std::io::Error {
+fn explain_bind_failure(
+    addr: SocketAddr,
+    how_to_change: &str,
+    e: std::io::Error,
+) -> std::io::Error {
     use std::io::ErrorKind;
     let advice = match e.kind() {
         ErrorKind::AddrInUse => format!(
             "{addr} is already in use; another server is probably bound there. Stop it, or choose a \
-             different address with --listen."
+             different address with {how_to_change}."
         ),
         ErrorKind::PermissionDenied => format!(
             "not permitted to bind {addr}; ports below 1024 need elevated privileges. Pick a port \
@@ -326,24 +336,25 @@ mod tests {
         use std::io::{Error, ErrorKind};
         let a: SocketAddr = "0.0.0.0:7777".parse().unwrap();
 
-        let in_use = explain_bind_failure(a, Error::from(ErrorKind::AddrInUse));
+        let in_use = explain_bind_failure(a, "--listen", Error::from(ErrorKind::AddrInUse));
         assert_eq!(in_use.kind(), ErrorKind::AddrInUse, "kind is preserved");
         assert!(in_use.to_string().contains("7777") && in_use.to_string().contains("in use"));
 
-        let denied = explain_bind_failure(a, Error::from(ErrorKind::PermissionDenied));
+        let denied = explain_bind_failure(a, "--listen", Error::from(ErrorKind::PermissionDenied));
         assert!(denied.to_string().contains("privilege"));
 
-        let unavailable = explain_bind_failure(a, Error::from(ErrorKind::AddrNotAvailable));
+        let unavailable =
+            explain_bind_failure(a, "--listen", Error::from(ErrorKind::AddrNotAvailable));
         assert!(unavailable.to_string().contains("0.0.0.0"));
 
-        let no_space = explain_bind_failure(a, Error::from_raw_os_error(28));
+        let no_space = explain_bind_failure(a, "--listen", Error::from_raw_os_error(28));
         let msg = no_space.to_string();
         assert!(
             msg.contains("error 28") && msg.contains("socket") && msg.contains("not a full disk"),
             "ENOSPC must be explained as socket exhaustion, got: {msg}"
         );
 
-        let other = explain_bind_failure(a, Error::from(ErrorKind::ConnectionReset));
+        let other = explain_bind_failure(a, "--listen", Error::from(ErrorKind::ConnectionReset));
         assert!(other.to_string().contains("could not bind"));
     }
 

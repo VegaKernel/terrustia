@@ -86,6 +86,16 @@ const MAX_SIGN_TEXT: usize = 1000;
 /// on the *first* failure regardless; this constant only governs the in-game broadcast.
 pub const SAVE_FAILURES_BEFORE_ALARM: u32 = 3;
 
+/// A save this slow is worth a line in the log even when it succeeded and nobody asked for it.
+///
+/// One second. A healthy autosave on a 4200x1200 world is around 120 ms, so a second is roughly
+/// eight times that: comfortably past ordinary variance, and the point at which the cause is
+/// something an operator would want to know about (a contended disk, a network mount, a filesystem
+/// filling up) rather than noise. Below it a successful autosave logs at debug, because a server
+/// left running produces one of these every five minutes forever and twenty identical lines saying
+/// nothing went wrong is how a log stops being read at all.
+pub const SLOW_SAVE_MS: u64 = 1_000;
+
 /// How far a player can be from an item and still have it reserved for them, in pixels.
 ///
 /// Generous on purpose: the reservation only grants the right to pick the item up, and a client
@@ -1629,12 +1639,12 @@ impl GameServer {
         match wld_save::save(&self.world, &path) {
             Ok(()) => {
                 let ms = started.elapsed().as_millis();
-                info!(path = %path.display(), reason, elapsed_ms = ms as u64, "world saved");
+                info!(path = %crate::worlds::display_path(&path), reason, elapsed_ms = ms as u64, "world saved");
                 self.note_save_succeeded(reason);
                 self.announce(&format!("World saved ({ms} ms)."));
             }
             Err(e) => {
-                error!(path = %path.display(), error = %e, "world save failed");
+                error!(path = %crate::worlds::display_path(&path), error = %e, "world save failed");
                 self.note_save_failed(reason);
             }
         }
@@ -1785,11 +1795,22 @@ impl GameServer {
             let outcome = match wld_save::save(&snapshot, &path) {
                 Ok(()) => {
                     let ms = started.elapsed().as_millis() as u64;
-                    info!(path = %path.display(), reason, elapsed_ms = ms, "world saved");
+                    // A routine autosave that worked is not news, and on a default server it
+                    // happens every five minutes for as long as the server runs: a couple of hours
+                    // of ordinary operation was producing twenty-odd identical lines saying nothing
+                    // had gone wrong. It goes to debug, and anything an operator would actually
+                    // want to see stays at info: a save they asked for, a shutdown save, and any
+                    // autosave slow enough to be worth knowing about. Failures are `error!` below
+                    // and are never quieted.
+                    if reason == "autosave" && ms < SLOW_SAVE_MS {
+                        debug!(path = %crate::worlds::display_path(&path), reason, elapsed_ms = ms, "world saved");
+                    } else {
+                        info!(path = %crate::worlds::display_path(&path), reason, elapsed_ms = ms, "world saved");
+                    }
                     Ok(ms)
                 }
                 Err(e) => {
-                    error!(path = %path.display(), error = %e, "world save failed");
+                    error!(path = %crate::worlds::display_path(&path), error = %e, "world save failed");
                     Err(())
                 }
             };
@@ -2444,7 +2465,7 @@ impl GameServer {
                     return;
                 }
                 self.announce("The server is restarting into a different world.");
-                info!(path = %path.display(), "world switch requested from the web panel");
+                info!(path = %crate::worlds::display_path(&path), "world switch requested from the web panel");
                 *self
                     .pending_world_switch
                     .lock()

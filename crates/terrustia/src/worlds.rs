@@ -151,6 +151,31 @@ pub fn list() -> Vec<PathBuf> {
     worlds
 }
 
+/// How a path is shown to a person. A path under the working directory is shown relative to it, so
+/// a server-owned world in `worlds/` reads as `worlds/Name.wld` the way a Minecraft server names
+/// its own files; a path under the user's home directory collapses that prefix to `~`; anything
+/// else is shown as it is. Presentation only, so nothing ever opens the shortened form.
+///
+/// Lives here rather than in `main.rs` because the boot card is not the only place a path reaches a
+/// human. The save log prints one every autosave, which on a default server is every five minutes
+/// for as long as it runs, and printing the absolute form there put the operator's account name
+/// into every one of those lines and into any log they pasted anywhere.
+pub fn display_path(path: &Path) -> String {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(rel) = path.strip_prefix(&cwd)
+        && !rel.as_os_str().is_empty()
+    {
+        return rel.display().to_string();
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        && let Ok(rest) = path.strip_prefix(&home)
+        && !rest.as_os_str().is_empty()
+    {
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display());
+    }
+    path.display().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
