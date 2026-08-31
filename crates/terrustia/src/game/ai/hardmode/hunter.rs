@@ -501,7 +501,13 @@ mod tests {
     }
 
     const DEADLY_SPHERE: u16 = 522;
-    const MOTHRON_SPAWN: u16 = 491;
+    /// Taken from the shared table rather than typed again here. It was typed again here, as 491,
+    /// and 491 is `PirateShip`: the Flying Dutchman's hull, a different creature with different
+    /// stats and a different AI style. Both Mothron-spawn tests below were driving this routine
+    /// with a pirate ship and asserting on what came out, so neither could ever have caught a
+    /// Mothron regression. This is the same mistake `npc_params.rs:3352` records against itself,
+    /// where two ids were 470/471 and an eclipse had Mothron laying Crimson Penguins.
+    use terrustia_proto::npc_params::MOTHRON_SPAWN;
 
     fn sphere(x: f32, y: f32) -> Npc {
         Npc::new(DEADLY_SPHERE, (x, y), 1).expect("deadly sphere")
