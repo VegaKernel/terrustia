@@ -633,7 +633,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 effects.doors.push(action);
             }
         }
-        9 => orb::update(npc, target),
+        9 => effects.died = orb::update(npc, world, rng),
         19 => {
             if let Some(shot) = ambush::antlion(npc, world) {
                 effects.shots.push(shot);
