@@ -42,7 +42,7 @@ pub struct Offer {
 }
 
 /// The chain, in the order the game walks it. Later entries win.
-pub const OFFERS: [Offer; 64] = [
+pub const OFFERS: [Offer; 66] = [
     // `Chest.cs:980-987` — BlackCounterweight and YellowCounterweight each carry their own
     // leading `minimumRarity <= F &&` guard rather than sitting behind one of the
     // `if (minimumRarity > N) return;` checkpoints the rest of the chain uses, and both sit
@@ -309,6 +309,18 @@ pub const OFFERS: [Offer; 64] = [
         item: 4666,
         tier: 2,
         needs: Needs(0),
+        floor: 2,
+    },
+    Offer {
+        item: 4347,
+        tier: 2,
+        needs: Needs(0),
+        floor: 2,
+    },
+    Offer {
+        item: 4348,
+        tier: 2,
+        needs: Needs(Needs::HARDMODE),
         floor: 2,
     },
     Offer {
