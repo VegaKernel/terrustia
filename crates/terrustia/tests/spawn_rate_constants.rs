@@ -8,32 +8,50 @@
 //! source rather than merely plausible.
 //!
 //! Every citation is to the non-`remixWorld` branch of `GetSpawnRate`: this server does not model
-//! the "Don't Starve" seed, and `spawn.rs`'s own module doc already restricts scope to
-//! depth/hardmode/events/town suppression, so nothing here claims coverage of the rest of the real
-//! method (journey mode's slider, the jungle/desert/sandstorm/dungeon/getGoodWorld branches, the
-//! `nearbyActiveNPCs` self-correction, and more all exist in source and are simply out of scope for
-//! what this module implements).
+//! the "Don't Starve" seed. The zone chain, the `nearbyActiveNPCs` self-correction and the moon and
+//! dungeon overrides are all modelled and pinned here now. What remains genuinely out of scope is
+//! the set of branches whose *input* this server has no notion of: journey mode's slider (handled
+//! by the caller instead), `getGoodWorld`, `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`,
+//! `cloudAlpha`, the dual-dungeon seeds, the Wall of Flesh's underworld suppression, and every
+//! player-carried buff (candles, potions, the sunflower, the angler set).
 //!
 //! `rates()` keeps the running rate and cap as `f32` throughout and casts once at the very end,
 //! where the game's own `GetSpawnRate` reassigns an `int` at every step and so truncates after each
-//! multiplication. Every combination this file exercises happens to land on an exact multiple at
-//! every intermediate step (600, 540, 300, 360, 243, 240, 108, 120, 72 — never a fraction), so the
-//! two truncation orders cannot disagree here. That is a property of these specific inputs, not a
-//! general proof the two orders always agree.
+//! multiplication. Every *rate* this file exercises lands on the same integer either way: the
+//! intermediates are whole numbers or float noise a hair above one (600, 540, 480, 420, 390, 360,
+//! 330, 324, 300, 252, 243, 240, 156, 120, 108, 48), and the one stacked chain that does produce
+//! fractions (`the_bounds_are_exactly_60_and_15`) is clamped to the floor from either side. The
+//! *caps* do diverge by design and always have: 5 * 1.9 is 9.5 here and 9 in the game, because this
+//! module keeps the cap fractional until the caller compares against it. That is a property of
+//! these inputs, not a general proof the two orders always agree.
 
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use terrustia::game::spawn::{Conditions, Depth, MAX_SPAWNS, SPAWN_RATE, rates};
+use terrustia::game::spawn::{Biome, Conditions, Depth, MAX_SPAWNS, SPAWN_RATE, rates};
 
+/// A neutral world: plain forest surface, daytime, nothing running, nobody about.
+///
+/// `nearby_active_npcs` is far above the emptiness ramp's top rung (`maxSpawns * 0.8`,
+/// `NPC.cs:668-680`) for any cap the modifiers below can build, so the ramp stays off and each pin
+/// measures the one modifier it names. Zero would be the *fastest* case in the game, not the
+/// neutral one, and would fold a x0.42 into every number in this file.
+///
+/// `downed_boss3: true` for the same reason: `NPC.cs:787-790` overrides the rate to a flat 10 in
+/// the dungeon before Skeletron, which would swallow every other modifier in a dungeon pin.
 fn plain() -> Conditions {
     Conditions {
         depth: Depth::Surface,
+        biome: Biome::Forest,
         hard_mode: false,
         day_time: true,
         blood_moon: false,
         eclipse: false,
         event_moon: false,
         town_npcs: 0,
+        nearby_active_npcs: 1_000.0,
+        below_dirt_midline: false,
+        downed_boss3: true,
+        active_players: 1,
     }
 }
 
@@ -212,8 +230,13 @@ fn a_blood_moon_is_03_times_the_already_nighttime_rate() {
 /// ```
 /// A pumpkin/frost moon only ever runs at night, so this is exercised together with `day_time:
 /// false` here, the same as the game's own nesting.
+///
+/// This branch is real but *unobservable in the result*: `NPC.cs:772-776` reassigns both numbers
+/// further down, and every path that reaches this branch reaches that one too (identical
+/// conditions). The 72 this used to pin was the whole finding, so the pin now names both halves and
+/// asserts the one that survives. See `a_moon_overrides_the_clamped_rate_with_a_flat_20`.
 #[test]
-fn an_event_moon_is_02_times_the_already_nighttime_rate() {
+fn an_event_moon_is_02_times_the_already_nighttime_rate_and_then_overridden() {
     let (rate, cap, _) = rates(
         Conditions {
             day_time: false,
@@ -222,11 +245,8 @@ fn an_event_moon_is_02_times_the_already_nighttime_rate() {
         },
         &mut any_rng(),
     );
-    assert_eq!(
-        rate, 72,
-        "NPC.cs:545 stacked on NPC.cs:536: 600 * 0.6 * 0.2"
-    );
-    assert_eq!(cap, 5.0 * 1.3 * 2.0, "NPC.cs:546, maxSpawns *= 2");
+    assert_eq!(rate, 20, "NPC.cs:775 replaces NPC.cs:545's 72 outright");
+    assert_eq!(cap, 5.0 * 2.3, "NPC.cs:774 replaces NPC.cs:546's 13");
 }
 
 /// `NPC.cs:549-553`, the daytime counterpart:
@@ -276,20 +296,245 @@ fn the_bounds_are_exactly_60_and_15() {
     );
     assert_eq!(MAX_SPAWNS * 3.0, 15.0, "NPC.cs:756, defaultMaxSpawns * 3");
 
+    // A hardmode blood-moon night in a cleared corruption: 600 * 0.9 * 0.6 * 0.3 * 0.65 = 63, then
+    // both emptiness ladders (`NPC.cs:668`, `:686`, the evil qualifies for the second) take it to
+    // 26.5, well under the floor. The cap goes 5 + 1, * 1.3, * 1.8, * 1.3 = 18.25, over the
+    // ceiling. No moon: `NPC.cs:772-776` is an *assignment* placed after these clamps, so a moon
+    // does not stack toward them, it replaces what they produced. Pinned separately in
+    // `a_moon_overrides_the_clamped_rate_with_a_flat_20`.
     let worst = rates(
         Conditions {
             depth: Depth::Surface,
+            biome: Biome::Corruption,
             hard_mode: true,
             day_time: false,
             blood_moon: true,
-            eclipse: false,
-            event_moon: true,
-            town_npcs: 0,
+            nearby_active_npcs: 0.0,
+            ..plain()
         },
         &mut any_rng(),
     );
     assert_eq!(worst.0, 60, "clamped at the floor");
     assert_eq!(worst.1, 15.0, "clamped at the ceiling");
+}
+
+/// `NPC.cs:772-776`, the moon override, which is applied *after* the clamps above:
+/// ```csharp
+/// if ((Main.pumpkinMoon || Main.snowMoon) && (Main.remixWorld || (double)player.position.Y < Main.worldSurface * 16.0)) {
+///     maxSpawns = (int)((double)defaultMaxSpawns * (2.0 + 0.3 * (double)numberOfActivePlayers));
+///     spawnRate = 20;
+/// }
+/// ```
+/// It assigns rather than multiplies, so nothing before it survives. `spawn.rs` reached 64 (night's
+/// `0.6 * 0.2 * 600 = 72`, then the hardmode 0.9) or 72, against the game's flat 20: 3.2 to 3.6
+/// times too slow, which is why the late waves of a pumpkin or frost moon were unreachable.
+/// The cap is `5 * (2 + 0.3n)`, so 11 for one player and 12 (11.5 truncated by the caller's own
+/// integer use of it) for two.
+#[test]
+fn a_moon_overrides_the_clamped_rate_with_a_flat_20() {
+    let one = rates(
+        Conditions {
+            day_time: false,
+            event_moon: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(one.0, 20, "NPC.cs:775, spawnRate = 20 flat");
+    assert_eq!(one.1, 5.0 * 2.3, "NPC.cs:774, defaultMaxSpawns * (2 + 0.3)");
+
+    // Hardmode, night and a blood moon on top would all have been clamped to 60; the override
+    // still wins.
+    let stacked = rates(
+        Conditions {
+            day_time: false,
+            blood_moon: true,
+            hard_mode: true,
+            event_moon: true,
+            active_players: 4,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(
+        stacked.0, 20,
+        "the override is absolute, not another multiplier"
+    );
+    assert_eq!(stacked.1, 5.0 * 3.2, "four players: 5 * (2 + 1.2)");
+}
+
+/// `NPC.cs:591-595`, `NPC.cs:787-790`: the dungeon is busy, and before Skeletron it is relentless.
+/// ```csharp
+/// if (inDualDungeon || ZoneDungeon) { spawnRate *= 0.3; maxSpawns *= 1.8; }
+/// ...
+/// if (ZoneDungeon && !downedBoss3) { spawnRate = 10; }
+/// ```
+/// PR #32 landed the Dungeon Guardian this pairs with but not either rate, so a fresh character
+/// met one every 240 to 600 ticks instead of every 10, which made early-dungeon farming practical.
+#[test]
+fn the_dungeon_is_three_times_busier_and_relentless_before_skeletron() {
+    let after = rates(
+        Conditions {
+            biome: Biome::Dungeon,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(after.0, 180, "NPC.cs:593, spawnRate * 0.3");
+    assert_eq!(after.1, 9.0, "NPC.cs:594, maxSpawns * 1.8");
+
+    let before = rates(
+        Conditions {
+            biome: Biome::Dungeon,
+            downed_boss3: false,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(before.0, 10, "NPC.cs:789, spawnRate = 10 flat");
+    assert_eq!(before.1, 9.0, "the cap is untouched by that override");
+}
+
+/// `NPC.cs:603-660`, the rest of the zone chain this server can model. Each is isolated against
+/// `plain()`, and each was entirely absent: `Conditions` carried no biome at all.
+#[test]
+fn every_modelled_biome_carries_its_own_rate_and_cap() {
+    let one = |at: Conditions| rates(at, &mut any_rng());
+
+    // NPC.cs:603-607, ZoneUndergroundDesert. Five times too quiet before this: it ran at the
+    // cavern's own 240 and 9.5.
+    //
+    // Both of its numbers land outside the game's own clamps and are pinned at them, in vanilla as
+    // here: the cavern band gives 600 * 0.4 = 240 and a 9.5 cap, then 240 * 0.2 = 48 is below the
+    // 60 floor and 9.5 * 3 = 28.5 is above the 15 ceiling. So the observable result is the pair of
+    // clamps, and the multipliers are what drive it there.
+    let desert = one(Conditions {
+        biome: Biome::Desert,
+        depth: Depth::Cavern,
+        ..plain()
+    });
+    assert_eq!(desert.0, 60, "spawnRate * 0.2, driven into the floor");
+    assert_eq!(desert.1, 15.0, "maxSpawns * 3, driven into the ceiling");
+    // ...and a *surface* desert is not the underground desert and takes nothing.
+    assert_eq!(
+        one(Conditions {
+            biome: Biome::Desert,
+            ..plain()
+        }),
+        one(plain()),
+        "the surface desert has no branch of its own",
+    );
+
+    // NPC.cs:609-635, ZoneJungle, on the town headcount rather than a flat number.
+    for (town, r, m) in [
+        (0u32, 0.4, 1.5),
+        (1, 0.55, 1.4),
+        (2, 0.7, 1.3),
+        (3, 0.85, 1.2),
+    ] {
+        let jungle = one(Conditions {
+            biome: Biome::Jungle,
+            town_npcs: town,
+            ..plain()
+        });
+        // Town suppression applies on top of this for a non-zero headcount, and its friendly fork
+        // leaves the rate alone, so only the cap is comparable across every headcount. Compare the
+        // rate only where the town has no say.
+        if town == 0 {
+            assert_eq!(
+                jungle.0,
+                (600.0f32 * r) as u32,
+                "jungle at {town} residents"
+            );
+        }
+        let expected_cap = 5.0 * m * if town == 0 { 1.0 } else { 0.6 };
+        assert!(
+            (jungle.1 - expected_cap).abs() < 0.001 || jungle.1 == 5.0 * m,
+            "jungle cap at {town} residents: {} vs {expected_cap}",
+            jungle.1,
+        );
+    }
+
+    // NPC.cs:637-641, either evil.
+    for biome in [Biome::Corruption, Biome::Crimson] {
+        let evil = one(Conditions { biome, ..plain() });
+        assert_eq!(
+            evil.0,
+            (600.0f32 * 0.65) as u32,
+            "{biome:?} spawnRate * 0.65"
+        );
+        assert_eq!(evil.1, 5.0 * 1.3, "{biome:?} maxSpawns * 1.3");
+    }
+
+    // NPC.cs:656-660, the hallow, and only below the rock layer.
+    let deep_hallow = one(Conditions {
+        biome: Biome::Hallow,
+        depth: Depth::Cavern,
+        ..plain()
+    });
+    assert_eq!(deep_hallow.0, (240.0f32 * 0.65) as u32, "spawnRate * 0.65");
+    assert_eq!(deep_hallow.1, 9.5 * 1.3, "maxSpawns * 1.3");
+    assert_eq!(
+        one(Conditions {
+            biome: Biome::Hallow,
+            ..plain()
+        }),
+        one(plain()),
+        "a surface hallow takes nothing: the branch is gated on the rock layer",
+    );
+}
+
+/// `NPC.cs:668-698`, the emptiness ramp: two stacked ladders keyed on `nearbyActiveNPCs` against
+/// the *running* `maxSpawns`. `nearby_active_npcs` was read only as a hard cap gate, so a cleared
+/// area refilled up to 2.38 times slower than the game refills it.
+#[test]
+fn an_empty_area_refills_faster_than_a_crowded_one() {
+    let at = |near: f32| {
+        rates(
+            Conditions {
+                nearby_active_npcs: near,
+                ..plain()
+            },
+            &mut any_rng(),
+        )
+        .0
+    };
+    // The cap here is a plain 5, so the rungs sit at 1, 2, 3 and 4.
+    assert_eq!(
+        at(0.0),
+        (600.0f32 * 0.6) as u32,
+        "NPC.cs:670, < 20% -> x0.6"
+    );
+    assert_eq!(
+        at(1.5),
+        (600.0f32 * 0.7) as u32,
+        "NPC.cs:674, < 40% -> x0.7"
+    );
+    assert_eq!(
+        at(2.5),
+        (600.0f32 * 0.8) as u32,
+        "NPC.cs:678, < 60% -> x0.8"
+    );
+    assert_eq!(
+        at(3.5),
+        (600.0f32 * 0.9) as u32,
+        "NPC.cs:682, < 80% -> x0.9"
+    );
+    assert_eq!(at(4.5), 600, "at 80% or more the ramp is off");
+
+    // NPC.cs:686-698, the second ladder, which only applies below the dirt-layer midline or in an
+    // evil. Both stack, so an empty corrupt cavern is 0.6 * 0.7 = 0.42 of the base rate.
+    let deep = rates(
+        Conditions {
+            nearby_active_npcs: 0.0,
+            below_dirt_midline: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(deep.0, (600.0f32 * 0.6 * 0.7) as u32, "both ladders stack");
+    // 600 against 252 is the 2.38x an empty deep area was too slow by when neither ladder existed.
+    assert_eq!(deep.0, 252);
 }
 
 /// Town suppression's real shape (C1-b item 8, fixed): `spawn.rs` used to model it as one

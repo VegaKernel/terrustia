@@ -16,14 +16,34 @@ use crate::world::World;
 /// The player-carried modifiers — water and peace candles, battle and calming potions, invisibility,
 /// the sunflower, the angler set — are deliberately absent: the server does not model a player's
 /// inventory or buffs, so it cannot know them. Everything here is world state the server owns.
+///
+/// Also absent, and for the same reason (the server has no notion of the thing they test):
+/// `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`, `cloudAlpha`'s snow-in-a-storm bonus, the
+/// dual-dungeon seeds, `getGoodWorld`, and the Wall of Flesh's underworld suppression
+/// (`NPC.cs:662-666`). Journey mode's slider is real and is applied by the caller, where the power
+/// lives, rather than threaded through here.
 #[derive(Debug, Clone, Copy)]
 pub struct Conditions {
+    /// Which rate band the *player* is in, from [`rate_depth_at`] rather than [`depth_at`]: the
+    /// game's rate bands carry a screen-height offset its pool tests do not.
     pub depth: Depth,
+    /// The biome the player is standing in.
+    ///
+    /// `SetSpawnFlags` (`NPC.cs:382-397`) copies the player's own `Zone*` flags across, and
+    /// `GetSpawnRate` reads them for a whole block of rate and cap modifiers (`NPC.cs:591-660`).
+    /// This was missing entirely, so the underground desert was five times too quiet, the jungle
+    /// two and a half times, and the corruption one and a half.
+    pub biome: Biome,
     pub hard_mode: bool,
     pub day_time: bool,
     pub blood_moon: bool,
     pub eclipse: bool,
-    /// A pumpkin or frost moon, which only matters above ground.
+    /// A pumpkin or frost moon, *and* the player above the surface line.
+    ///
+    /// Both of the game's moon branches carry the same `(pumpkinMoon || snowMoon) &&
+    /// player.position.Y < Main.worldSurface * 16.0` test (`NPC.cs:543` and `:772`), so the height
+    /// half lives in the caller rather than being re-derived here from a band that is offset by a
+    /// screen height and would not agree.
     pub event_moon: bool,
     /// Townsfolk living near the player.
     ///
@@ -33,6 +53,46 @@ pub struct Conditions {
     /// eclipse or a moon all overrule it, because an event that a town could turn off would not be
     /// much of an event.
     pub town_npcs: u32,
+    /// `player.nearbyActiveNPCs`: the spawn weight already close to this player.
+    ///
+    /// This was read only as a hard cap gate. The game *also* ramps the rate down as the area
+    /// empties (`NPC.cs:668-698`, two stacked ladders), so a cleared cave refills faster than a
+    /// crowded one: up to 2.38x faster than we were managing.
+    pub nearby_active_npcs: f32,
+    /// Whether the player is below `(worldSurface + rockLayer) / 2`, which is the second emptiness
+    /// ladder's own gate (`NPC.cs:686`). Not derivable from [`Depth`]: it is a midline between two
+    /// of its boundaries.
+    pub below_dirt_midline: bool,
+    /// `downedBoss3`, for the dungeon's pre-Skeletron flat rate (`NPC.cs:787-790`).
+    pub downed_boss3: bool,
+    /// `numberOfActivePlayers` (`NPC.cs:266`), which the moon override's cap is a function of.
+    pub active_players: u32,
+}
+
+/// Which rate band a *player* is in, which is not the same question [`depth_at`] answers.
+///
+/// `GetSpawnRate`'s boundaries carry a screen height on top of the layer they name
+/// (`NPC.cs:487`: `position.Y > Main.rockLayer * 16.0 + sHeight`; `:508` the same for
+/// `worldSurface`), where `sHeight => 1200` px (`NPC.cs:6793`), which is 75 tiles. The *pool*
+/// tests do not: `underGround` and `deeperThanRockLayer` (`NPC.cs:1144`, `:1204`) compare the
+/// chosen tile against the bare layer. So the two need different functions, and sharing one put
+/// every rate band 75 tiles too shallow, roughly doubling the rate through the dirt-layer band.
+///
+/// The underworld boundary has no offset in the game either (`NPC.cs:485`,
+/// `position.Y > Main.UnderworldLayer * 16`), so it is the same on both sides.
+pub fn rate_depth_at(world: &World, y: i32) -> Depth {
+    /// `NPC.sHeight` (1200 px) in tiles.
+    const SCREEN_TILES: i32 = 75;
+
+    if y >= world.height() - UNDERWORLD_DEPTH {
+        Depth::Underworld
+    } else if y > i32::from(world.rock_layer) + SCREEN_TILES {
+        Depth::Cavern
+    } else if y > i32::from(world.surface) + SCREEN_TILES {
+        Depth::Underground
+    } else {
+        Depth::Surface
+    }
 }
 
 /// The spawn rate and cap for a set of conditions, after `NPC.GetSpawnRate`.
@@ -90,6 +150,94 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
         }
     }
 
+    // The biome block, `NPC.cs:591-660`. It is one `if`/`else if` chain in the game, so a dungeon
+    // takes its own modifier and none of the others; only the hallow's is a separate `if`. Five
+    // branches of that chain are absent here because this server has no notion of the zone they
+    // test: `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`, `inDualDungeon` and
+    // `tresspassingDualDungeon`. `ZoneUndergroundDesert` is real vanilla's
+    // "desert + below the surface + a sandstone or hardened-sand wall that is not a house wall"
+    // (`SceneMetrics.cs:699`), narrowed here to the first two, since the server does not track
+    // which wall a player is standing in front of.
+    match at.biome {
+        // NPC.cs:591-595.
+        Biome::Dungeon => {
+            rate *= 0.3;
+            max *= 1.8;
+        }
+        // NPC.cs:603-607.
+        Biome::Desert if at.depth != Depth::Surface => {
+            rate *= 0.2;
+            max *= 3.0;
+        }
+        // NPC.cs:609-635: the jungle thins out as a town fills up, on its own ladder rather than
+        // the general town suppression further down (which it does not replace: both apply).
+        Biome::Jungle => {
+            let (r, m) = match at.town_npcs {
+                0 => (0.4, 1.5),
+                1 => (0.55, 1.4),
+                2 => (0.7, 1.3),
+                _ => (0.85, 1.2),
+            };
+            rate *= r;
+            max *= m;
+        }
+        // NPC.cs:637-641.
+        Biome::Corruption | Biome::Crimson => {
+            rate *= 0.65;
+            max *= 1.3;
+        }
+        _ => {}
+    }
+    // NPC.cs:656-660, a separate `if`: the hallow is busier only below the rock layer.
+    if at.biome == Biome::Hallow && matches!(at.depth, Depth::Cavern | Depth::Underworld) {
+        rate *= 0.65;
+        max *= 1.3;
+    }
+
+    // The emptiness ramp, `NPC.cs:668-698`. Two stacked ladders: everywhere, then again below the
+    // dirt-layer midline or in either evil. An area that has been cleared refills faster than one
+    // that is still full, which is what stops a farmed cave going quiet for minutes at a time.
+    // Both read the *running* `maxSpawns`, before its own ceiling is applied, as the game does.
+    let near = at.nearby_active_npcs;
+    if near < max * 0.2 {
+        rate *= 0.6;
+    } else if near < max * 0.4 {
+        rate *= 0.7;
+    } else if near < max * 0.6 {
+        rate *= 0.8;
+    } else if near < max * 0.8 {
+        rate *= 0.9;
+    }
+    if at.below_dirt_midline || matches!(at.biome, Biome::Corruption | Biome::Crimson) {
+        if near < max * 0.2 {
+            rate *= 0.7;
+        } else if near < max * 0.4 {
+            rate *= 0.9;
+        }
+    }
+
+    // The game's own floor and ceiling, which stop a stack of modifiers running away
+    // (`NPC.cs:738-745`). Everything below this point is an *override*: the game assigns rather
+    // than multiplies, so a clamp placed after them would undo them. Putting the clamps last is
+    // what made a pumpkin moon three and a half times too slow.
+    rate = rate.max(SPAWN_RATE as f32 * 0.1);
+    max = max.min(MAX_SPAWNS * 3.0);
+
+    // `NPC.cs:772-776`, the moon override, absolute in both directions: it replaces the rate with a
+    // flat 20 and the cap with a function of the party size, whatever the clamps just said. Reached
+    // at 64 or 72 before this, against the game's 20.
+    if at.event_moon {
+        max = MAX_SPAWNS * (2.0 + 0.3 * at.active_players as f32);
+        rate = 20.0;
+    }
+
+    // `NPC.cs:787-790`: below the dungeon before Skeletron falls, the rate is a flat 10, which is
+    // the pressure that makes early-dungeon farming impractical. The Dungeon Guardian this pairs
+    // with landed in PR #32; the rate did not, so it arrived every 240 to 600 ticks instead.
+    if at.biome == Biome::Dungeon && !at.downed_boss3 {
+        rate = 10.0;
+    }
+
     // Townsfolk quiet the place down, but only when nothing else is happening: an event overrules
     // them, so a blood moon still comes to a full town. Real vanilla (`NPC.cs:795-924`) is not a
     // flat multiplier here: past the event gate, every attempt is a coin flip between throttling
@@ -140,9 +288,12 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
         }
     }
 
-    // The game's own floor and ceiling, which stop a stack of modifiers running away.
-    rate = rate.max(SPAWN_RATE as f32 * 0.1);
-    max = max.min(MAX_SPAWNS * 3.0);
+    // `NPC.cs:925-929` ends the function with a `RollOnlyBadLuckExtreme(50) == 0` bonus of
+    // `rate * 0.85` and `cap * 1.15`. It is deliberately not transcribed, because it can never
+    // fire here: `Luck.RollOnlyBadLuckExtreme` (`Terraria.GameContent/Luck.cs:53-60`) returns -1
+    // unless `luck < 0`, and this server does not model player luck at all, so its players are at
+    // luck 0 exactly as a vanilla player with no luck effects is. Vanilla skips it for them too.
+
     (rate as u32, max.max(1.0), spawn_friendly)
 }
 
@@ -151,15 +302,27 @@ mod rate_tests {
     use super::*;
     use rand::SeedableRng;
 
+    /// A neutral world: plain forest surface, daytime, nothing running, nobody about.
+    ///
+    /// `nearby_active_npcs` is deliberately *not* zero. An empty area is the game's fastest case,
+    /// not its neutral one (`NPC.cs:668`, rate x0.6), so pinning a modifier against an empty
+    /// baseline would fold that ramp into every number here. This is far above the ramp's top rung
+    /// (`maxSpawns * 0.8`) for any cap the modifiers can build, so it leaves the ramp off entirely
+    /// and each pin measures the one modifier it names.
     fn plain() -> Conditions {
         Conditions {
             depth: Depth::Surface,
+            biome: Biome::Forest,
             hard_mode: false,
             day_time: true,
             blood_moon: false,
             eclipse: false,
             event_moon: false,
             town_npcs: 0,
+            nearby_active_npcs: 1_000.0,
+            below_dirt_midline: false,
+            downed_boss3: true,
+            active_players: 1,
         }
     }
 
@@ -323,15 +486,18 @@ mod rate_tests {
     /// However the modifiers stack, they stay inside the game's own floor and ceiling.
     #[test]
     fn the_rate_is_bounded() {
+        // No moon here: the moon override (`NPC.cs:772-776`) is *outside* the clamps by design and
+        // sets a flat 20, so including it would be asking the clamps to bound something the game
+        // deliberately puts beyond them. It has its own pin below.
         let worst = rates(
             Conditions {
                 depth: Depth::Underworld,
                 hard_mode: true,
                 day_time: false,
                 blood_moon: true,
-                eclipse: false,
-                event_moon: true,
-                town_npcs: 0,
+                nearby_active_npcs: 0.0,
+                below_dirt_midline: true,
+                ..plain()
             },
             &mut any_rng(),
         );
@@ -1245,6 +1411,8 @@ pub fn try_spawn(
     // second player raises the world's monster count only because they carry their own near-player
     // budget where they stand, which is what the game does and what a single global cap could not.
     let mut out = Vec::new();
+    // `NPC.cs:266`, `numberOfActivePlayers`: read once, before the loop consumes the list.
+    let active_players = active.len() as u32;
     for player in active {
         let (px, py) = (
             (player.position.0 / 16.0) as i32,
@@ -1265,23 +1433,45 @@ pub fn try_spawn(
             continue;
         }
 
+        // The biome is the *player's* zone, worked out once from where they stand, not re-read at
+        // each candidate tile. The game classifies the zone on the player (`SceneMetrics` scans
+        // around the player's centre and `SetSpawnFlags` copies `player.Zone*` straight across,
+        // `NPC.cs:382-397`); reading it at the far edge of the spawn box instead let a player in
+        // the middle of a biome draw the wrong pool whenever a candidate happened to land just
+        // outside it.
+        //
+        // It is computed here, before the rate roll rather than after, because `GetSpawnRate`
+        // itself reads it: a whole block of rate and cap modifiers keys on the zone
+        // (`NPC.cs:591-660`), so the scan is no longer something only a successful roll pays for.
+        let player_biome = biome_at(world, px, py);
+        let near = nearby_active_npcs(npcs, player.position);
+
         // The rate and cap are the player's own, not one number for the world: two people in the
         // same world can be standing in a quiet forest and a busy cavern at the same moment.
         let (mut rate, band, spawn_friendly) = rates(
             Conditions {
-                depth: depth_at(world, py),
+                depth: rate_depth_at(world, py),
+                biome: player_biome,
                 hard_mode: world.progress.hard_mode,
                 day_time: world.day_time,
                 blood_moon: world.blood_moon,
                 eclipse: world.eclipse,
-                event_moon: world.pumpkin_moon || world.snow_moon,
+                // `NPC.cs:543` and `:772` both carry the height half of this condition.
+                event_moon: (world.pumpkin_moon || world.snow_moon)
+                    && py < i32::from(world.surface),
                 town_npcs: town_npcs_near(npcs, player.position),
+                nearby_active_npcs: near,
+                // `NPC.cs:686`, `player.position.Y / 16 > (worldSurface + rockLayer) / 2`.
+                below_dirt_midline: py
+                    > (i32::from(world.surface) + i32::from(world.rock_layer)) / 2,
+                downed_boss3: world.progress.downed_boss3,
+                active_players,
             },
             rng,
         );
         // This player's own near-player cap, checked before the rate roll, exactly as the game does
         // (`NPC.cs:312-317`: `nearbyActiveNPCs >= maxSpawns` first, then `rand.Next(spawnRate)`).
-        if nearby_active_npcs(npcs, player.position) >= band {
+        if near >= band {
             continue;
         }
         if journey_world {
@@ -1295,15 +1485,6 @@ pub fn try_spawn(
         // quieted the wild, this attempt draws a harmless critter instead of a monster rather than
         // being thrown away. It is carried down into the candidate loop below, where the same
         // ground and safe-zone checks apply, and resolved against `friendly_pool`'s critter table.
-
-        // The biome is the *player's* zone, worked out once from where they stand, not re-read at
-        // each candidate tile. The game classifies the zone on the player (`SceneMetrics` scans
-        // around the player's centre and `SetSpawnFlags` copies `player.Zone*` straight across,
-        // `NPC.cs:382-397`); reading it at the far edge of the spawn box instead let a player in
-        // the middle of a biome draw the wrong pool whenever a candidate happened to land just
-        // outside it. Computed here, after the rate roll, so the 169x124 scan is paid for only on
-        // the roughly one attempt in six hundred that will actually try to place something.
-        let player_biome = biome_at(world, px, py);
 
         // Try a handful of candidate tiles rather than scanning the whole area.
         for _ in 0..20 {
@@ -1510,6 +1691,36 @@ mod tests {
         assert_eq!(depth_at(&world, 250), Depth::Underground);
         assert_eq!(depth_at(&world, 350), Depth::Cavern);
         assert_eq!(depth_at(&world, 599 - 1), Depth::Underworld);
+    }
+
+    /// The rate bands sit a screen height (75 tiles) below the layers the pool bands use
+    /// (`NPC.cs:487`, `:508`, `sHeight => 1200` at `:6793`).
+    ///
+    /// Fails before the fix, when both questions were answered by `depth_at`: every rate band was
+    /// 75 tiles too shallow, roughly doubling the spawn rate through the dirt-layer band.
+    #[test]
+    fn the_rate_bands_sit_a_screen_height_below_the_pool_bands() {
+        let mut world = test_world();
+        world.surface = 200;
+        world.rock_layer = 300;
+
+        // Just below the surface line is still the surface for rate purposes, and already
+        // underground for pool purposes.
+        assert_eq!(depth_at(&world, 210), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 210), Depth::Surface);
+        assert_eq!(rate_depth_at(&world, 275), Depth::Surface);
+        assert_eq!(rate_depth_at(&world, 276), Depth::Underground);
+
+        // The same 75 tiles again at the rock layer.
+        assert_eq!(depth_at(&world, 310), Depth::Cavern);
+        assert_eq!(rate_depth_at(&world, 310), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 375), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 376), Depth::Cavern);
+
+        // The underworld boundary carries no offset in the game either, so the two agree there.
+        let underworld = world.height() - UNDERWORLD_DEPTH;
+        assert_eq!(rate_depth_at(&world, underworld), Depth::Underworld);
+        assert_eq!(depth_at(&world, underworld), Depth::Underworld);
     }
 
     /// Every hardmode pool names real, hostile types, and each biome's are its own.
@@ -2035,6 +2246,13 @@ mod tests {
                     npc_type, DUNGEON_GUARDIAN,
                     "the Guardian should be gone once Skeletron is down"
                 );
+                // The bound Mechanic's own gate is exactly "the dungeon, after Skeletron"
+                // (`NPC.cs:2656`), so she is a correct find here rather than a stray draw from the
+                // pool. Rescues are not what this test is about.
+                let stats = terrustia_proto::npc_data::npc_stats(npc_type).expect("a real type");
+                if stats.friendly {
+                    continue;
+                }
                 assert!(
                     pool(depth_at(&world, cy), Biome::Dungeon, world.day_time).contains(&npc_type),
                     "post-Skeletron dungeon spawned {npc_type}, not a dungeon regular",
