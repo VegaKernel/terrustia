@@ -441,7 +441,7 @@ fn resolve_recipe_locals(body: &str) -> String {
             },
             None => line,
         };
-        // `stack = (int)((float)5 * 2.5f);` — the one arithmetic stack in `SetupRecipes`
+        // `stack = (int)((float)5 * 2.5f);` is the one arithmetic stack in `SetupRecipes`
         // (`Recipe.cs:6374`, the Crystal Bathtub's twelve Crystal Blocks). Folded to its C# value:
         // a `(int)` cast of a positive float truncates.
         let line = cast_re
