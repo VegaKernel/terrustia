@@ -26,6 +26,13 @@ const STATUS_EVERY: u64 = 60;
 /// How often the worst tick in the window is reported, when it is worth reporting.
 const TICK_REPORT_EVERY: u64 = 600;
 
+/// How often the outbound queues are sampled for their depth, ten times a second.
+///
+/// The sample walks every connection, so it is not free, and it does not need to be finer: a
+/// backlog deep enough to account for hundreds of megabytes lasts for seconds, not for a sixth of
+/// one. Reported per window as `queue_peak`.
+const QUEUE_SAMPLE_EVERY: u64 = 6;
+
 /// How often the tick looks for connections that took a slot and never finished joining.
 ///
 /// Once a second. The sweep is a walk over the slot table - at most 255 entries, most of them
@@ -266,11 +273,28 @@ impl GameServer {
             self.worst_tick = cost;
         }
         self.worst_stall = self.worst_stall.max(cost.wall.saturating_sub(cost.cpu));
+
+        // Sample how deep the outbound queues have got. Ten times a second rather than every tick:
+        // the walk is over every connection, and a burst deep enough to matter for memory lasts
+        // far longer than a sixth of a second, so a finer sample would cost more than it tells.
+        if self.ticks.is_multiple_of(QUEUE_SAMPLE_EVERY) {
+            let deepest = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .map(|p| p.out.max_capacity().saturating_sub(p.out.capacity()))
+                .max()
+                .unwrap_or(0);
+            self.queue_high_water = self.queue_high_water.max(deepest);
+        }
+
         if !self.ticks.is_multiple_of(TICK_REPORT_EVERY) {
             return;
         }
         let worst = std::mem::take(&mut self.worst_tick);
         let stall = std::mem::take(&mut self.worst_stall);
+        let queue_peak = std::mem::take(&mut self.queue_high_water);
         debug!(
             cpu_us = worst.cpu.as_micros() as u64,
             wall_us = worst.wall.as_micros() as u64,
@@ -286,6 +310,10 @@ impl GameServer {
             // turns "memory is climbing" into an answer instead of a hunt. Measured at 20k to 27k
             // entries across a 255-player hold, which is the expected 255x255 plus the NPCs.
             skips = self.skips.len(),
+            // The deepest single connection's backlog in this window, against a capacity of
+            // `outbound_queue(max_players)`. Memory under load is queued frames, so this is the
+            // number that says whether a high RSS is backlog or something else entirely.
+            queue_peak,
             "tick window"
         );
         if worst.cpu * 2 > TICK {

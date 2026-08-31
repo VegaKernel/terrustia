@@ -951,6 +951,13 @@ pub struct GameServer {
     ///
     /// One ledger for NPCs, player movement and projectiles: see [`Withheld`].
     skips: HashMap<(Withheld, u8), u8>,
+    /// The deepest any connection's outbound queue has been seen since the last tick report.
+    ///
+    /// Memory under load is queued frames, not the world: a 255-player hold peaks around 1.5 GiB
+    /// against an idle 95 MiB, and `OUTBOUND_PER_PLAYER` was widened to 4096 precisely to let that
+    /// backlog build rather than drop clients. Sampling the depth is what turns "memory is high"
+    /// into a number attached to a cause, the same way `skips` did for the ledger.
+    queue_high_water: usize,
     /// Scratch for [`GameServer::broadcast`]'s recipient list, reused across calls.
     ///
     /// The list has to be collected before sending because a send can remove a player and so
@@ -1192,6 +1199,7 @@ impl GameServer {
             census: crate::world::census::Census::new(terrustia_proto::tile_sets::TILE_COUNT),
             pylon_kinds: HashMap::new(),
             skips: HashMap::new(),
+            queue_high_water: 0,
             broadcast_targets: Vec::new(),
             npc_stream: HashMap::new(),
             housing_turn: 0,
