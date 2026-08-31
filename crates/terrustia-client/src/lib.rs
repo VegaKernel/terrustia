@@ -91,6 +91,14 @@ pub struct Client {
     timeout: Duration,
     /// Where to record the raw stream, when someone has asked for a capture.
     tap: Option<Tap>,
+    /// Events interpreted during the closing stretch of the handshake, kept for the caller.
+    ///
+    /// Everything between `12 PlayerSpawn` going out and `129 FinishedConnectingToServer` coming
+    /// back is join state a caller may well be waiting on: the angler quest, the cavern monster
+    /// types, the travelling merchant's stock, the journey powers. Vanilla sends all of it *before*
+    /// 129 (`MessageBuffer.cs:937`), so the handshake loop is what reads it, and dropping it on the
+    /// floor made those packets unobservable to anyone using this crate.
+    joined_with: std::collections::VecDeque<Event>,
 }
 
 impl Client {
@@ -114,6 +122,7 @@ impl Client {
             position: (0.0, 0.0),
             timeout: DEFAULT_TIMEOUT,
             tap: None,
+            joined_with: std::collections::VecDeque::new(),
         })
     }
 
@@ -234,7 +243,8 @@ impl Client {
         loop {
             let frame = self.read_frame().await?;
             let done = frame.id == id::FINISHED_CONNECTING_TO_SERVER;
-            self.interpret(frame)?;
+            let event = self.interpret(frame)?;
+            self.joined_with.push_back(event);
             if done {
                 break;
             }
@@ -629,6 +639,10 @@ impl Client {
 
     /// Wait for the next event, interpreting the packet and updating the world view.
     pub async fn next_event(&mut self) -> Result<Event> {
+        // Whatever arrived ahead of 129 comes out first, in the order the server sent it.
+        if let Some(event) = self.joined_with.pop_front() {
+            return Ok(event);
+        }
         let frame = self.read_frame().await?;
         self.interpret(frame)
     }
