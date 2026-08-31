@@ -84,6 +84,12 @@ fn run_new(home: &Path, name: &str, listen: &str) -> std::process::Child {
         .env("XDG_DATA_HOME", home.join("xdg"))
         .env("USERPROFILE", home)
         .env_remove("TERRUSTIA_LOG")
+        // No test may depend on the network. Both of these are `tokio::spawn`ed at boot, so left
+        // on, every server spawned here makes a real GitHub request and multicasts for a UPnP
+        // gateway. This is hygiene, not a fix for anything: the CLI-test flake recorded in TODO.md
+        // was measured with both already off and still failed 5 runs in 8, so the cause is elsewhere.
+        .env("TERRUSTIA_UPDATE_CHECK_ENABLED", "false")
+        .env("TERRUSTIA_UPNP_ENABLED", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -160,6 +166,8 @@ fn new_ignores_a_stale_world_file_left_in_the_config() {
         .env("XDG_DATA_HOME", home.join("xdg"))
         .env("USERPROFILE", &home)
         .env_remove("TERRUSTIA_LOG")
+        .env("TERRUSTIA_UPDATE_CHECK_ENABLED", "false")
+        .env("TERRUSTIA_UPNP_ENABLED", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -209,6 +217,8 @@ fn new_still_validates_dimensions_even_with_a_world_file_set() {
         .env("XDG_DATA_HOME", home.join("xdg"))
         .env("USERPROFILE", &home)
         .env_remove("TERRUSTIA_LOG")
+        .env("TERRUSTIA_UPDATE_CHECK_ENABLED", "false")
+        .env("TERRUSTIA_UPNP_ENABLED", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -275,6 +285,8 @@ fn new_refuses_a_name_that_already_exists() {
         .env("XDG_DATA_HOME", home.join("xdg"))
         .env("USERPROFILE", &home)
         .env_remove("TERRUSTIA_LOG")
+        .env("TERRUSTIA_UPDATE_CHECK_ENABLED", "false")
+        .env("TERRUSTIA_UPNP_ENABLED", "false")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

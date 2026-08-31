@@ -153,6 +153,36 @@ impl Config {
         self.save_file.as_deref().or(self.world_file.as_deref())
     }
 
+    /// Resume the world we last saved: adopt [`Config::save_target`] as the world to load when
+    /// nothing else names one and that file is already there.
+    ///
+    /// `save_target` has always fallen back from `save_file` to `world_file`, but the load in
+    /// `main` only ever read `world_file`, and the two halves being asymmetric is a data-loss bug.
+    /// Three flows set a save target and no world file, and two of them are the ones a new
+    /// operator meets first: the first-run wizard (`setup.rs`, which writes `save_file` and
+    /// promises the world "will be generated on first start"), the bare-directory placement in
+    /// `main` (whose whole stated point is that a world persists into `worlds/` "rather than
+    /// serving something that vanishes on shutdown"), and a lone `--save`. Every one of them
+    /// generated a *fresh* world on every boot and then autosaved it over the world that was
+    /// already sitting at that path, so a server restart silently destroyed the save.
+    ///
+    /// Only an existing file is adopted, which is what makes "generated on first start" still
+    /// true: nothing is there the first time, so generation happens exactly once. `--new` cannot
+    /// be caught by this either - it refuses outright when its destination exists, so by the time
+    /// this runs its file is provably absent.
+    pub fn resume_from_save_target(&mut self) {
+        if self.world_file.is_some() {
+            return;
+        }
+        let target = self
+            .save_target()
+            .filter(|t| t.is_file())
+            .map(Path::to_path_buf);
+        if let Some(target) = target {
+            self.world_file = Some(target);
+        }
+    }
+
     /// Load from a TOML file, falling back to defaults when the file does not exist.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
@@ -551,6 +581,81 @@ mod tests {
     #[test]
     fn a_generated_world_has_nowhere_to_save() {
         assert_eq!(Config::default().save_target(), None);
+    }
+
+    /// The wizard's own config shape (`setup.rs` writes `save_file` and no `world_file`) on its
+    /// second boot. Before `resume_from_save_target` this config generated a fresh world every
+    /// time and the next autosave wrote it over the real save.
+    #[test]
+    fn a_save_file_that_already_exists_is_the_world_to_load() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let world = dir.path().join("A_Test_World.wld");
+        std::fs::write(
+            &world,
+            b"not really a world, only its presence matters here",
+        )
+        .expect("write the world file");
+        let mut config = Config {
+            save_file: Some(world.clone()),
+            ..Config::default()
+        };
+        config.resume_from_save_target();
+        assert_eq!(
+            config.world_file.as_deref(),
+            Some(world.as_path()),
+            "a restart must resume the world it saved, not regenerate over it"
+        );
+    }
+
+    /// The other half, and the reason only an *existing* file is adopted: the wizard's promise
+    /// that the world "will be generated on first start" has to stay true.
+    #[test]
+    fn a_save_file_that_is_not_there_yet_still_generates() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut config = Config {
+            save_file: Some(dir.path().join("Never_Generated.wld")),
+            ..Config::default()
+        };
+        config.resume_from_save_target();
+        assert_eq!(
+            config.world_file, None,
+            "first boot has nothing to resume and must still generate"
+        );
+    }
+
+    /// A directory sitting where the save should go is not a world. `is_file` rather than
+    /// `exists`, so this reaches generation instead of handing `wld::load` a directory.
+    #[test]
+    fn a_directory_at_the_save_path_is_not_a_world_to_resume() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let occupied = dir.path().join("Occupied.wld");
+        std::fs::create_dir(&occupied).expect("create the directory");
+        let mut config = Config {
+            save_file: Some(occupied),
+            ..Config::default()
+        };
+        config.resume_from_save_target();
+        assert_eq!(config.world_file, None);
+    }
+
+    /// `--new` clears `world_file` and points `save_file` at a destination it has already proven
+    /// does not exist, so it still generates. Guards the interaction rather than assuming it.
+    #[test]
+    fn an_explicit_world_file_is_never_overridden() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let save = dir.path().join("save.wld");
+        std::fs::write(&save, b"a save that is not the world being loaded").expect("write");
+        let mut config = Config {
+            world_file: Some(PathBuf::from("/tmp/loaded.wld")),
+            save_file: Some(save),
+            ..Config::default()
+        };
+        config.resume_from_save_target();
+        assert_eq!(
+            config.world_file.as_deref(),
+            Some(Path::new("/tmp/loaded.wld")),
+            "an explicit world_file names the world; save_file only names where it goes"
+        );
     }
 
     #[test]

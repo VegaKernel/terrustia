@@ -185,6 +185,12 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
     }
+    // Last, once every layer above has had its say about where saves go: if that place already
+    // holds a world and nothing named one to load, load it. This is what makes a restart resume
+    // rather than regenerate — see `Config::resume_from_save_target` for the three flows that
+    // reached the `None` arm below on every boot and autosaved a fresh world over a real save.
+    // Placed before the stage label so "loading world" and the match below cannot disagree.
+    config.resume_from_save_target();
 
     let started = Instant::now();
     // One spinner covers the single slow step, generating or loading the world. It clears when the

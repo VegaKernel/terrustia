@@ -557,6 +557,21 @@ over effort; the first three are roughly a day each.
    structurally impossible when a constant transcribed from vanilla is codegen output rather than
    hand-typed: a wrong pin cannot survive being derived from the source it exists to pin.
 
+6. **A flaky CLI test is an unmeasured test, and A/B-ing one needs a matched rebuild.**
+   `new_world_cli` fails whenever the world file never lands, timing out on the full 120s. It
+   reproduces only when the whole *test binary set* has just been relinked, which any lib-file
+   change causes; `touch`ing `main.rs` rebuilds the binary alone and hides it completely. Measured
+   the wrong way, `main` looks clean 7 runs out of 7 and whatever branch is under test looks guilty
+   3 out of 3. Measured with a matched relink, `main` fails 3 runs in 4, so it is pre-existing and
+   any A/B that does not relink both trees identically will confidently blame the wrong change.
+   Eliminated by measurement, each: the network (5 failures in 8 with the update check and UPnP
+   both off), autosave (15 saves in 15s at `autosave_secs = 1`, first at 1.108s), leaked processes
+   and held ports (none at the instant of failure; every test port is unique), first-execution
+   code-signature validation (0.42s), and machine load. It is a heisenbug: a diagnostic that dumps
+   the child's output on failure stops it reproducing. The next attempt should have the spawned
+   server log to a file unconditionally, so a failing run leaves evidence without the act of
+   looking changing the run. Full write-up in `.scratch/audit-2026-08-30/FLAKE-new-world-cli.md`.
+
 **Explicitly not on this list: another audit pass by reading.** The C3 pass found 99 findings and
 still missed Bone and the absent upward wake in `Liquid.Update`, both of which turned up during
 fixing, and both of which were found by building an instrument rather than reading harder. Reading
