@@ -3,6 +3,14 @@
 //! Terraria writes these as branches inside the AI itself — `AI_003_Fighters` is 85% such
 //! branches by line count. They are numbers, not logic, so they live here as data and the
 //! behaviour modules stay algorithms.
+//!
+//! The type ids here are NPC types. Projectile types live in [`crate::projectile::ids`], because
+//! both spaces are `u16` and a dozen numbers mean one thing in each: the import path is what keeps
+//! them apart.
+
+use crate::projectile::ids::{
+    DRAKIN_FIREBALL, GOBLIN_BOMB, GOBLIN_SHARK_SHOT, JAVELIN, JAVELIN_T3, OGRE_POUND, OGRE_SPIT,
+};
 
 /// How a fighter accelerates and how fast it walks.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1197,10 +1205,10 @@ pub const WHEEL_SPIN: f32 = 0.13;
 pub const SPIKE_BALL_SPEED: f32 = 6.0;
 pub const SPIKE_BALL_ACCEL: f32 = 0.2;
 
-/// The antlion's sand ball: speed, damage, projectile type and reload.
+/// The antlion's sand ball: speed, damage and reload. The type is
+/// `projectile::ids::ANTLION_SHOT_TYPE`.
 pub const ANTLION_SHOT_SPEED: f32 = 12.0;
 pub const ANTLION_SHOT_DAMAGE: i32 = 10;
-pub const ANTLION_SHOT_TYPE: u16 = 31;
 pub const ANTLION_RELOAD: f32 = 200.0;
 
 /// How close a player has to come, and for how long, before a lost girl drops her disguise.
@@ -1410,14 +1418,14 @@ pub const SKULL_JITTER_PUSH: f32 = 0.019;
 pub const SKULL_JITTER_PERIOD: f32 = 200.0;
 pub const SKULL_JITTER_TURN: f32 = 100.0;
 
-/// The giant cursed skull's shot: range, cycle, speed, damage and type.
+/// The giant cursed skull's shot: range, cycle, speed and damage. The type is
+/// `projectile::ids::GIANT_SKULL_SHOT_TYPE`.
 pub const GIANT_SKULL_RANGE: f32 = 500.0;
 pub const GIANT_SKULL_WINDUP: f32 = 120.0;
 pub const GIANT_SKULL_RECOVER: f32 = 40.0;
 pub const GIANT_SKULL_RELEASE: f32 = 20.0;
 pub const GIANT_SKULL_SHOT_SPEED: f32 = 6.0;
 pub const GIANT_SKULL_SHOT_DAMAGE: i32 = 25;
-pub const GIANT_SKULL_SHOT_TYPE: u16 = 299;
 
 /// How long a butterfly holds a heading before picking another, as an inclusive-exclusive range.
 pub const BUTTERFLY_REPLAN: (u32, u32) = (90, 240);
@@ -2137,7 +2145,6 @@ pub const SKELETRON_BARRAGE_HEALTH_AT: f32 = 0.75;
 /// The barrage fires every eighty ticks, or forty once every hand is dead.
 pub const SKELETRON_BARRAGE_INTERVAL: f32 = 80.0;
 pub const SKELETRON_BARRAGE_INTERVAL_NO_HANDS: f32 = 40.0;
-pub const SKELETRON_BARRAGE: u16 = 270;
 pub const SKELETRON_BARRAGE_DAMAGE: i32 = 17;
 /// Its speed, faster still with no hands left to soak hits for it.
 pub const SKELETRON_BARRAGE_SPEED: f32 = 3.0;
@@ -2164,10 +2171,10 @@ pub const HAND_LUNGE_LIMIT: f32 = 2000.0;
 pub const HAND_SWEEP: f32 = 0.1;
 pub const HAND_SWEEP_CAP: f32 = 8.0;
 
-/// The bees the Queen calls up, and the stinger she spits.
+/// The bees the Queen calls up, and what the stinger she spits
+/// (`projectile::ids::STINGER`) does.
 pub const BEE: u16 = 210;
 pub const BEE_STRONG: u16 = 211;
-pub const STINGER: u16 = 719;
 pub const STINGER_DAMAGE: i32 = 11;
 pub const STINGER_SPEED: f32 = 8.0;
 
@@ -2235,10 +2242,7 @@ pub const QUEEN_GIVE_UP: f32 = 3000.0;
 /// defence never moves from the type table.
 pub const QUEEN_DEFENSE_RAMP: f32 = 20.0;
 
-/// Deerclops' three projectiles: the ice spike, the falling rubble, and the shadow hand.
-pub const DEER_SPIKE: u16 = 961;
-pub const DEER_RUBBLE: u16 = 962;
-pub const DEER_SHADOW_HAND: u16 = 965;
+/// What Deerclops' three projectiles hit for; their types are `projectile::ids::DEER_*`.
 pub const DEER_SPIKE_DAMAGE: i32 = 13;
 pub const DEER_RUBBLE_DAMAGE: i32 = 18;
 pub const DEER_SHADOW_DAMAGE: i32 = 15;
@@ -2326,8 +2330,7 @@ pub const WALL_EYE: u16 = 114;
 pub const WALL_HUNGRY: u16 = 115;
 pub const WALL_LEECH: u16 = 117;
 pub const WALL_IMP: u16 = 24;
-/// The eye's laser.
-pub const WALL_LASER: u16 = 83;
+/// What the eye's laser (`projectile::ids::WALL_LASER`) does.
 pub const WALL_LASER_DAMAGE: i32 = 11;
 pub const WALL_LASER_SPEED: f32 = 9.0;
 
@@ -2482,7 +2485,6 @@ pub const JELLYFISH_ABOVE: f32 = 250.0;
 pub const JELLYFISH_SPEED: f32 = 5.0;
 pub const JELLYFISH_EASE: f32 = 0.15;
 pub const JELLYFISH_EVERY: f32 = 70.0;
-pub const JELLYFISH_SHOT: u16 = 539;
 pub const JELLYFISH_SHOT_DAMAGE: i32 = 60;
 
 /// Solar goop: how long it sits before it dries up once it has landed.
@@ -2492,7 +2494,6 @@ pub const GOOP_SETTLE_TICKS: f32 = 5.0;
 pub const COPTER_SPEED: f32 = 7.0;
 pub const COPTER_RANGE: f32 = 600.0;
 pub const COPTER_RELOAD: f32 = 15.0;
-pub const COPTER_SHOT: u16 = 180;
 pub const COPTER_SHOT_DAMAGE: i32 = 32;
 pub const COPTER_SHOT_SPEED: f32 = 10.0;
 
@@ -2501,7 +2502,6 @@ pub const NIMBUS_ABOVE: f32 = 200.0;
 pub const NIMBUS_SPEED: f32 = 4.0;
 pub const NIMBUS_ACCEL: f32 = 0.25;
 pub const NIMBUS_EVERY: f32 = 8.0;
-pub const NIMBUS_SHOT: u16 = 264;
 pub const NIMBUS_SHOT_DAMAGE: i32 = 20;
 
 /// A detonating bubble: how long it drifts before it goes off, and how near you have to be to
@@ -2520,7 +2520,6 @@ pub const FLYING_WEAPON_REST: f32 = 120.0;
 /// and the four shots it lets go.
 pub const DOOM_LIFETIME: f32 = 420.0;
 pub const DOOM_FADE_IN: f32 = 120.0;
-pub const DOOM_SHOT: u16 = 593;
 pub const DOOM_SHOT_SPEED: f32 = 4.0;
 
 /// A water strider: how hard it pushes off the surface, and how long it waits between skips.
@@ -2560,7 +2559,6 @@ pub const CASTER_COOLDOWN: f32 = -120.0;
 /// Being hit interrupts the cast and costs half a reload.
 pub const CASTER_FLINCH: f32 = -30.0;
 pub const CASTER_SPREAD: i32 = 100;
-pub const CASTER_SHOT: u16 = 435;
 pub const CASTER_SHOT_SPEED: f32 = 14.0;
 pub const CASTER_SHOT_DAMAGE: i32 = 35;
 /// The friction a stationary caster settles under.
@@ -2657,8 +2655,8 @@ pub const CRAWLER_DRIFT_CAP: f32 = 3.0;
 /// It rebounds off terrain at half the speed it hit at, but never slower than this.
 pub const CRAWLER_BOUNCE: f32 = 0.5;
 pub const CRAWLER_BOUNCE_FLOOR: f32 = 2.0;
-/// In expert it spits web, on a random fuse, and being hit sets the fuse back.
-pub const CRAWLER_SPIT: u16 = 472;
+/// In expert it spits web (`projectile::ids::CRAWLER_SPIT`), on a random fuse, and being hit sets
+/// the fuse back.
 pub const CRAWLER_SPIT_DAMAGE: i32 = 18;
 pub const CRAWLER_SPIT_SPEED: f32 = 8.0;
 /// The wall forms and the ground forms they turn into once they have room.
@@ -2792,7 +2790,6 @@ pub const ELEMENTAL_CAST_REST: f32 = -300.0;
 pub const ELEMENTAL_MISS_REST: f32 = -200.0;
 pub const ELEMENTAL_CAST_RANGE: f32 = 900.0;
 pub const ELEMENTAL_DRAG: f32 = 0.96;
-pub const SANDNADO: u16 = 658;
 pub const SANDNADOES: usize = 3;
 /// They are raised within this many tiles of where the player is heading, and no two within ten.
 pub const SANDNADO_SPREAD: i32 = 30;
@@ -3058,8 +3055,7 @@ pub fn seat(npc_type: u16) -> Option<Seat> {
 /// The Dutchman's guns are spaced this far apart along the hull.
 pub const DUTCHMAN_GUN_SPACING: f32 = 68.0;
 
-/// A scutlix rider's shot.
-pub const RIDER_SHOT: u16 = 438;
+/// What a scutlix rider's shot (`projectile::ids::RIDER_SHOT`) does.
 pub const RIDER_SHOT_DAMAGE: i32 = 30;
 pub const RIDER_SHOT_SPEED: f32 = 7.0;
 pub const RIDER_RELOAD: f32 = 60.0;
@@ -3067,8 +3063,8 @@ pub const RIDER_FLINCH: f32 = -30.0;
 pub const RIDER_RANGE: f32 = 700.0;
 pub const RIDER_SPREAD: i32 = 50;
 
-/// A Dutchman cannon's shot: a slow lobbed ball, fired every four seconds.
-pub const CANNON_SHOT: u16 = 240;
+/// A Dutchman cannon's shot (`projectile::ids::CANNON_SHOT`): a slow lobbed ball, fired every four
+/// seconds.
 pub const CANNON_SHOT_DAMAGE: i32 = 30;
 pub const CANNON_SHOT_SPEED: f32 = 14.0;
 pub const CANNON_SHOT_RISE: f32 = -5.0;
@@ -3217,8 +3213,8 @@ pub const BRAIN_TELEPORT_EVERY: f32 = 480.0;
 pub const BRAIN_TELEPORT_RANGE: i32 = 20;
 /// ...but never within twelve tiles of a player, so it cannot land on top of you.
 pub const BRAIN_TELEPORT_CLEARANCE: i32 = 12;
-/// The floaters it puts out: three of them, one a second, at the start of its life.
-pub const NEBULA_FLOATER: u16 = 574;
+/// The floaters it puts out (`projectile::ids::NEBULA_FLOATER`): three of them, one a second, at
+/// the start of its life.
 pub const BRAIN_FLOATER_WINDOW: f32 = 180.0;
 pub const BRAIN_FLOATER_EVERY: f32 = 60.0;
 pub const BRAIN_FLOATER_SPEED: (f32, f32) = (4.0, 2.5);
@@ -3251,15 +3247,14 @@ pub const NAUTILUS_SPRAY_WINDUP: f32 = 90.0;
 pub const NAUTILUS_SPRAY_TICKS: f32 = 90.0;
 pub const NAUTILUS_SPRAY_BURSTS: i32 = 3;
 pub const NAUTILUS_SPRAY_RECOIL: f32 = -8.0;
-pub const NAUTILUS_SPRAY_SHOT: u16 = 814;
 pub const NAUTILUS_SPRAY_DAMAGE: i32 = 30;
 pub const NAUTILUS_SPRAY_SPEED: f32 = 10.0;
 pub const NAUTILUS_SPRAY_SPREAD: f32 = 6.0;
 pub const NAUTILUS_SPRAY_COUNT: (u32, u32) = (5, 11);
-/// The summon: it holds still and calls three helpers out of the blood moon.
+/// The summon: it holds still and calls three helpers out of the blood moon, through
+/// `projectile::ids::NAUTILUS_HELPER_PORTAL`.
 pub const NAUTILUS_SUMMON_TICKS: f32 = 180.0;
 pub const NAUTILUS_SUMMON_AT: [f32; 3] = [10.0, 20.0, 30.0];
-pub const NAUTILUS_HELPER_PORTAL: u16 = 813;
 pub const NAUTILUS_HELPER: u16 = 619;
 pub const NAUTILUS_HELPERS_MAX: usize = 3;
 /// Where its mouth is, and how far off the body's own rotation it points.
@@ -3636,7 +3631,6 @@ pub const DESTROYER_FLEE_SPEED: f32 = 32.0;
 /// segment fires rarely.
 pub const DESTROYER_FUSE_STEP: u32 = 4;
 pub const DESTROYER_FUSE: (u32, u32) = (1400, 26000);
-pub const DESTROYER_LASER: u16 = 100;
 /// `GetAttackDamage_ForProjectiles(22f, 18f)` (`NPC.cs:50399`): a launch-time lerp between a
 /// classic figure and a separate, lower expert one, which the impact-time
 /// `hostileDamageProjectileMultiplier` then doubles on top. `Remap` clamps outside classic..expert,
@@ -3827,7 +3821,6 @@ pub const GOLEM_LEASH: f32 = 3000.0;
 /// The head, while attached: it hovers on the body and spits fireballs.
 pub const GOLEM_HEAD_TETHER_SPEED: f32 = 100.0;
 pub const GOLEM_HEAD_CHARGE: f32 = 300.0;
-pub const GOLEM_FIREBALL: u16 = 258;
 pub const GOLEM_FIREBALL_DAMAGE: i32 = 18;
 pub const GOLEM_FIREBALL_SPEED: f32 = 8.0;
 /// Past half health the attached head's fireball hits harder (`NPC.cs:31480`).
@@ -3843,7 +3836,6 @@ pub const GOLEM_FREE_FIREBALL_DAMAGE: i32 = 20;
 /// every tick until crossed. This module has no source of randomness available to it without
 /// threading one in from outside its lane, so both use the roll's fixed average instead — the
 /// same cadence, without the jitter.
-pub const GOLEM_LASER: u16 = 259;
 pub const GOLEM_LASER_DAMAGE: i32 = 28;
 /// Centred on the player it fires two; off to one side of the body, one.
 pub const GOLEM_LASER_SPEED: f32 = 11.0;
@@ -3927,15 +3919,13 @@ pub const PLANTERA_LEASH_EXPERT: f32 = 150.0;
 pub const PLANTERA_DEFENSE: i32 = 36;
 pub const PLANTERA_DAMAGE: i32 = 50;
 pub const PLANTERA_CHARGE: f32 = 80.0;
-pub const PLANTERA_SEED: u16 = 275;
 pub const PLANTERA_SEED_DAMAGE: i32 = 22;
 pub const PLANTERA_SEED_SPEED: f32 = 15.0;
 pub const PLANTERA_SEED_SPEED_EXPERT: f32 = 17.0;
-/// Below eighty per cent it mixes in thorn balls and spiky seeds, which cost it a pause.
-pub const PLANTERA_THORN_BALL: u16 = 276;
+/// Below eighty per cent it mixes in thorn balls and spiky seeds (`projectile::ids::PLANTERA_*`),
+/// which cost it a pause.
 pub const PLANTERA_THORN_BALL_DAMAGE: i32 = 27;
 pub const PLANTERA_THORN_BALL_REST: f32 = -30.0;
-pub const PLANTERA_SPIKY: u16 = 277;
 pub const PLANTERA_SPIKY_DAMAGE: i32 = 31;
 pub const PLANTERA_SPIKY_REST: f32 = -120.0;
 pub const PLANTERA_MIX_AT: f32 = 0.8;
@@ -4118,7 +4108,6 @@ pub const FISHRON_BURST_LATER_CURVE: f32 = std::f32::consts::TAU / 60.0;
 /// The bubbles: two, thrown from its mouth partway through the wind-up.
 pub const FISHRON_BUBBLE_TICKS: f32 = 90.0;
 pub const FISHRON_BUBBLE_AT: f32 = 30.0;
-pub const FISHRON_BUBBLE: u16 = 385;
 pub const FISHRON_BUBBLE_SPEED: (f32, f32) = (2.0, 8.0);
 /// The pause between phases, during which it does nothing at all.
 pub const FISHRON_SHIFT_TICKS: f32 = 120.0;
@@ -4289,8 +4278,8 @@ pub const PUMPKING_CHARGE_SMOOTH: f32 = 49.0;
 pub const PUMPKING_CHARGE_TICKS: f32 = 600.0;
 /// It closes faster the further off you are while it is in its charging mood.
 pub const PUMPKING_RUSH_STEPS: [(f32, f32); 3] = [(900.0, 12.0), (600.0, 10.0), (300.0, 8.0)];
-/// The spheres it throws while hovering.
-pub const PUMPKING_SPHERE: u16 = 326;
+/// The spheres it throws while hovering (`projectile::ids::PUMPKING_SPHERE`): one of three,
+/// picked at random over this span.
 pub const PUMPKING_SPHERE_SPAN: u16 = 3;
 pub const PUMPKING_SPHERE_DAMAGE: i32 = 40;
 pub const PUMPKING_SPHERE_SPEED: f32 = 5.0;
@@ -4318,7 +4307,6 @@ pub const QUEEN_PACE: [(f32, f32, f32); 4] = [
 /// advances by a flat one a tick rather than vanilla's `rand(1..4)`, since this routine has no
 /// source of randomness available to it without threading one in from outside its lane — the
 /// mode-switch thresholds below inherit the same simplification.
-pub const ICE_QUEEN_MIST: u16 = 348;
 pub const ICE_QUEEN_MIST_DAMAGE: i32 = 42;
 pub const ICE_QUEEN_MIST_INTERVAL: [(f32, f32); 4] =
     [(1.0, 14.0), (0.75, 13.0), (0.5, 12.0), (0.25, 11.0)];
@@ -4329,7 +4317,6 @@ pub const ICE_QUEEN_MIST_RANGE: f32 = 500.0;
 /// Mode 1: a gentler pursuit that drops ice shards straight down instead of sweeping and firing
 /// forward (`NPC.cs:33811-33919`). Vanilla has a third mode (a random scatter shot) reached the
 /// same way; not implemented here; see `ice_queen`'s doc comment.
-pub const ICE_QUEEN_SHARD: u16 = 349;
 pub const ICE_QUEEN_SHARD_DAMAGE: i32 = 37;
 /// (accel, cap) — already carrying vanilla's flat `-0.05`/`-1` adjustments.
 pub const ICE_QUEEN_MODE2_PACE: [(f32, f32, f32); 4] = [
@@ -4359,7 +4346,6 @@ pub const SANTA_WAIT: f32 = 300.0;
 pub const SANTA_FIRE_TICKS: f32 = 240.0;
 /// Its gun fires faster as it is worn down: every sixteen ticks down to every eight.
 pub const SANTA_FIRE_RATE: [(f32, f32); 4] = [(1.0, 16.0), (0.75, 14.0), (0.5, 11.0), (0.25, 8.0)];
-pub const SANTA_BULLET: u16 = 180;
 pub const SANTA_BULLET_DAMAGE: i32 = 36;
 pub const SANTA_BULLET_SPEED: f32 = 15.0;
 pub const SANTA_MUZZLE: f32 = 50.0;
@@ -4402,7 +4388,6 @@ pub const QUEEN_SLIME_DIVE_RANGE: f32 = 250.0;
 
 /// The dive: a stationary burst dropped where it lands, on the ground or in the air alike
 /// (`NPC.cs:46024-46118`).
-pub const QUEEN_SLIME_DIVE_SHOT: u16 = 922;
 pub const QUEEN_SLIME_DIVE_DAMAGE: i32 = 40;
 /// It hangs above the aim point for up to this many ticks before committing to the fall.
 pub const QUEEN_SLIME_DIVE_WINDUP: f32 = 60.0;
@@ -4415,7 +4400,6 @@ pub const QUEEN_SLIME_DIVE_FALL_CAP: f32 = 14.0;
 
 /// The swoop: a ring of these fired outward once it commits — six on the ground, ten in the air
 /// (`NPC.cs:46159-46236`; vanilla's getGoodWorld bump to fifteen is disclosed and not counted).
-pub const QUEEN_SLIME_RING_SHOT: u16 = 926;
 pub const QUEEN_SLIME_RING_DAMAGE: i32 = 30;
 pub const QUEEN_SLIME_RING_SPEED: f32 = 9.0;
 pub const QUEEN_SLIME_RING_COUNT_GROUND: usize = 6;
@@ -4453,13 +4437,11 @@ pub const CULTIST_SCRIPT_HEALTHY: [u8; 12] = [0, 2, 0, 1, 0, 3, 0, 2, 0, 1, 0, 4
 pub const CULTIST_SCRIPT_WOUNDED: [u8; 14] = [0, 2, 0, 5, 0, 3, 0, 5, 0, 1, 0, 3, 0, 4];
 
 /// The ice mist: a slow, heavy shot. (`ProjectileID.CultistBossIceMist`, `NPC.cs:65569-65639`.)
-pub const CULTIST_ICE: u16 = 464;
 pub const CULTIST_ICE_DAMAGE: i32 = 35;
 pub const CULTIST_ICE_EVERY: f32 = 120.0;
 pub const CULTIST_ICE_EVERY_EXPERT: f32 = 90.0;
 /// The fireballs: a burst of three, or four in expert.
 /// (`ProjectileID.CultistBossFireBall`, `NPC.cs:65640-65719`.)
-pub const CULTIST_FIRE: u16 = 467;
 pub const CULTIST_FIRE_DAMAGE: i32 = 30;
 pub const CULTIST_FIRE_EVERY: f32 = 18.0;
 pub const CULTIST_FIRE_EVERY_EXPERT: f32 = 12.0;
@@ -4467,7 +4449,6 @@ pub const CULTIST_FIRE_COUNT: i32 = 3;
 pub const CULTIST_FIRE_COUNT_EXPERT: i32 = 4;
 /// The lightning orb: rarer and harder.
 /// (`ProjectileID.CultistBossLightningOrb`, `NPC.cs:65720-65779`.)
-pub const CULTIST_LIGHTNING: u16 = 465;
 pub const CULTIST_LIGHTNING_DAMAGE: i32 = 45;
 pub const CULTIST_LIGHTNING_EVERY: f32 = 80.0;
 pub const CULTIST_LIGHTNING_EVERY_EXPERT: f32 = 40.0;
@@ -4519,7 +4500,6 @@ pub const TABLET_CULTISTS: usize = 4;
 pub const TABLET_SHATTER_TICKS: f32 = 300.0;
 pub const TABLET_SHARD_FROM: f32 = 120.0;
 pub const TABLET_SHARD_EVERY: f32 = 10.0;
-pub const TABLET_SHARD: u16 = 526;
 /// A devote paces, turning to face the tablet, and gives up after five seconds of nothing.
 pub const DEVOTE_DRAG: f32 = 0.93;
 pub const DEVOTE_PATIENCE: f32 = 300.0;
@@ -4566,18 +4546,13 @@ pub const MOON_LORD_DEATH_TICKS: f32 = 600.0;
 /// Past this it leaves.
 pub const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
 
-/// What its parts throw. Ids are vanilla `ProjectileID` values and the damage each `NewProjectile`
-/// call passes in `AI_078`/`AI_079`: the eye stream (452, 30, `NPC.cs:42155`), the sphere barrage
-/// (454, 40, `NPC.cs:42199`), the head's deathray (455, 75, `NPC.cs:42667`) and the bolt spread
-/// (462, 30, `NPC.cs:42502`). The names match `ProjectileID.cs`: 452 is the eye, 454 the sphere,
-/// 462 the bolt.
-pub const PHANTASMAL_EYE: u16 = 452;
+/// What its parts throw for. The damage each `NewProjectile` call passes in `AI_078`/`AI_079`: the
+/// eye stream (30, `NPC.cs:42155`), the sphere barrage (40, `NPC.cs:42199`), the head's deathray
+/// (75, `NPC.cs:42667`) and the bolt spread (30, `NPC.cs:42502`). The ids themselves are
+/// `projectile::ids::PHANTASMAL_*`.
 pub const PHANTASMAL_EYE_DAMAGE: i32 = 30;
-pub const PHANTASMAL_SPHERE: u16 = 454;
 pub const PHANTASMAL_SPHERE_DAMAGE: i32 = 40;
-pub const PHANTASMAL_DEATHRAY: u16 = 455;
 pub const PHANTASMAL_DEATHRAY_DAMAGE: i32 = 75;
-pub const PHANTASMAL_BOLT: u16 = 462;
 pub const PHANTASMAL_BOLT_DAMAGE: i32 = 30;
 /// The bolts come in threes, seven ticks apart: the hand and the head both fire at `num2 - 14`,
 /// `num2 - 7` and `num2` (`NPC.cs:42274-42278` and `:42780-42784`), and the shot leaves at eight
@@ -4821,7 +4796,6 @@ pub const LIGHTNING_BUG_DECAY: f32 = 0.96;
 pub const LIGHTNING_BUG_CHARGE: f32 = 5.0;
 pub const LIGHTNING_BUG_COOLDOWN: f32 = 30.0;
 pub const LIGHTNING_BUG_SEPARATION: f32 = 0.1;
-pub const LIGHTNING_BUG_BOLT: u16 = 682;
 pub const LIGHTNING_BUG_BOLT_DAMAGE: i32 = 50;
 pub const LIGHTNING_BUG_BOLT_SPEED: f32 = 10.0;
 /// How long a spawned army enemy spends fading in out of its gate.
@@ -4947,21 +4921,19 @@ pub const FAIRY_PATIENCE: f32 = 18000.0;
 pub const MARTIAN_SAUCER_BODY: u16 = 392;
 pub const MARTIAN_SAUCER_TURRET: u16 = 393;
 pub const MARTIAN_SAUCER_CANNON: u16 = 394;
-/// Its deathray, fired once at the start of each strafe of the last phase.
-pub const SAUCER_DEATHRAY: u16 = 447;
+/// Its deathray (`projectile::ids::SAUCER_DEATHRAY`), fired once at the start of each strafe of
+/// the last phase.
 pub const SAUCER_DEATHRAY_DAMAGE: i32 = 80;
 /// Whole, it is not toothless: a single, weaker deathray as the strafe of its circuit opens.
 pub const SAUCER_CIRCUIT_RAY_AT: f32 = 20.0;
 pub const SAUCER_CIRCUIT_RAY_DAMAGE: i32 = 50;
 /// Missiles, sprayed loosely outward through the whole overhead hover of an intact circuit.
-pub const SAUCER_MISSILE: u16 = 448;
 pub const SAUCER_MISSILE_DAMAGE: i32 = 50;
 pub const SAUCER_MISSILE_DAMAGE_EXPERT: i32 = 37;
 pub const SAUCER_MISSILE_SPEED: f32 = 8.0;
 pub const SAUCER_MISSILE_FROM: f32 = 440.0;
 pub const SAUCER_MISSILE_PERIOD: f32 = 20.0;
 /// Lasers, aimed at you, through the whole low hold of an intact circuit.
-pub const SAUCER_LASER: u16 = 449;
 pub const SAUCER_LASER_DAMAGE: i32 = 35;
 pub const SAUCER_LASER_DAMAGE_EXPERT: i32 = 30;
 pub const SAUCER_LASER_SPEED: f32 = 16.0;
@@ -4997,12 +4969,11 @@ pub const SAUCER_HALF_BEAT: f32 = 60.0;
 ///
 /// Its three spells cycle in order and each has its own wind-up. The bolt is the only one aimed at
 /// you; the other two are why leaving its escort dead near it is a mistake.
-pub const DARK_MAGE_BOLT: u16 = 675;
+///
+/// The three are `projectile::ids::DARK_MAGE_BOLT`, `_HEAL` (the sigil it plants on the ground)
+/// and `_PORTAL` (what its skeletons come out of).
 pub const DARK_MAGE_BOLT_DAMAGE: i32 = 40;
 pub const DARK_MAGE_BOLT_SPEED: f32 = 14.0;
-/// The healing sigil it plants on the ground, and the portal its skeletons come out of.
-pub const DARK_MAGE_HEAL: u16 = 674;
-pub const DARK_MAGE_PORTAL: u16 = 673;
 /// The skeletons it raises, per tier.
 pub const DD2_SKELETON_BY_TIER: [u16; 3] = [DD2_SKELETON_T1, DD2_SKELETON_T1, DD2_SKELETON_T3];
 /// How long each of the three spells takes, and the cooldown after each.
@@ -5033,9 +5004,7 @@ pub const DARK_MAGE_HEAL_OUT: f32 = 240.0;
 pub const BETSY_SCRIPT: [u8; 8] = [2, 2, 3, 2, 4, 5, 3, 6];
 /// The slot that sometimes gets skipped, and what it turns into.
 pub const BETSY_SKIPPABLE: usize = 5;
-/// Her two projectiles.
-pub const BETSY_FLAME_BREATH: u16 = 687;
-pub const BETSY_FIREBALL: u16 = 686;
+/// What either of her two projectiles (`projectile::ids::BETSY_*`) hits for.
 pub const BETSY_ATTACK_DAMAGE: i32 = 35;
 /// The wyverns she screams up, and how many she will have out at once.
 pub const BETSY_WYVERN: u16 = DD2_WYVERN_T3;
@@ -5203,14 +5172,6 @@ impl Walker {
     };
 }
 
-/// The projectiles the army's troops throw.
-pub const OGRE_SPIT: u16 = 676;
-pub const OGRE_POUND: u16 = 683;
-pub const DRAKIN_FIREBALL: u16 = 671;
-pub const JAVELIN: u16 = 662;
-pub const JAVELIN_T3: u16 = 685;
-pub const GOBLIN_BOMB: u16 = 681;
-pub const GOBLIN_SHARK_SHOT: u16 = 811;
 /// How large a kobold's blast is, and how long the fuse burns before it goes.
 pub const KOBOLD_BLAST: f32 = 192.0;
 pub const KOBOLD_BLAST_DAMAGE: i32 = 80;
@@ -5469,12 +5430,6 @@ pub const EMPRESS_IDLE_PHASE_2: f32 = 20.0;
 pub const EMPRESS_SCRIPT: [u8; 10] = [2, 8, 6, 8, 5, 2, 8, 4, 8, 5];
 pub const EMPRESS_SCRIPT_PHASE_2: [u8; 9] = [7, 2, 8, 5, 2, 6, 4, 8, 12];
 pub const EMPRESS_SCRIPT_PHASE_2_EXPERT: [u8; 10] = [7, 2, 8, 11, 5, 2, 6, 4, 8, 12];
-/// Her projectiles.
-pub const EMPRESS_RAINBOW: u16 = 872;
-pub const EMPRESS_BLAST: u16 = 873;
-pub const EMPRESS_SUN_DANCE: u16 = 874;
-pub const EMPRESS_LANCE: u16 = 919;
-pub const EMPRESS_ETHEREAL_LANCE: u16 = 923;
 /// The sun dance's own damage: flat regardless of phase, difficulty, or the enrage override.
 ///
 /// `AI_120_HallowBoss`, `NPC.cs:46462` declares it (`num5 = 40`) alongside the other five damage

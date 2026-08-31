@@ -641,9 +641,9 @@ mod tests {
     use std::collections::HashMap;
     use terrustia_proto::npc_params::{
         DD2_DRAKIN_T3, DD2_GOBLIN_BOMBER_T1, DD2_GOBLIN_T1, DD2_JAVELINST_T3, DD2_KOBOLD_WALKER_T2,
-        DD2_OGRE_T2, DD2_SKELETON_T1, DD2_WITHER_BEAST_T2, GOBLIN_BOMB, JAVELIN_T3, OGRE_POUND,
-        OGRE_SPIT,
+        DD2_OGRE_T2, DD2_SKELETON_T1, DD2_WITHER_BEAST_T2,
     };
+    use terrustia_proto::projectile::ids::{GOBLIN_BOMB, JAVELIN_T3, OGRE_POUND, OGRE_SPIT};
     use terrustia_proto::tile::Tile;
 
     struct Arena(HashMap<(i32, i32), Tile>);
@@ -953,7 +953,7 @@ mod tests {
         assert!(
             thrown
                 .iter()
-                .all(|s| s.projectile == terrustia_proto::npc_params::DRAKIN_FIREBALL)
+                .all(|s| s.projectile == terrustia_proto::projectile::ids::DRAKIN_FIREBALL)
         );
     }
 

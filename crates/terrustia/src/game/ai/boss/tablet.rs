@@ -8,9 +8,10 @@
 //! is struck. Its only real job is to be in the way.
 
 use terrustia_proto::npc_params::{
-    CULTIST_ARCHER, CULTIST_DEVOTE, DEVOTE_DRAG, TABLET_CULTISTS, TABLET_SHARD, TABLET_SHARD_EVERY,
+    CULTIST_ARCHER, CULTIST_DEVOTE, DEVOTE_DRAG, TABLET_CULTISTS, TABLET_SHARD_EVERY,
     TABLET_SHARD_FROM, TABLET_SHATTER_TICKS,
 };
+use terrustia_proto::projectile::ids::TABLET_SHARD;
 
 use super::skeletron::Parent;
 use crate::game::ai::{Shot, World};
