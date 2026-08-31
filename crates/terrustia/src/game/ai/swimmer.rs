@@ -232,7 +232,9 @@ pub fn flying_fish<T: TileView>(npc: &mut Npc, world: &World<'_, T>) {
         // `NPC.cs:31191-31228`: a nudge away from each of its own kind close enough to touch, and
         // the roll that goes with it. Only the two lunar swarmers do this.
         let (cx, cy) = npc.center();
-        for &(kx, ky) in world.avoid {
+        // The reach an entry carries is ignored here, as in every other avoid consumer: this one
+        // has its own threshold, vanilla's "close enough to touch" test against the hitbox width.
+        for &(kx, ky, _) in world.avoid {
             let (dx, dy) = (cx - kx, cy - ky);
             // Its own entry in the list, which the game skips by slot.
             if dx == 0.0 && dy == 0.0 {
@@ -666,7 +668,9 @@ mod tests {
     fn a_flying_antlion_shoves_its_own_kind_aside() {
         let tiles = Sea::default();
         let (cx, cy) = at(581, 500, 500).center();
-        let kin = [(cx + 4.0, cy)];
+        // Third element is the entry's own reach, which this consumer ignores in favour of the
+        // hitbox-width test, so any value does.
+        let kin = [(cx + 4.0, cy, 0.0)];
 
         let mut alone = at(581, 500, 500);
         let mut crowded = at(581, 500, 500);
