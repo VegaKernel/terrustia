@@ -1312,6 +1312,55 @@ pub fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
         .sum()
 }
 
+/// Each player's last biome scan, so the rate can read a zone without paying for one every tick.
+///
+/// `biome_at` walks a 169-by-124 tile box, measured at 78 us on a full-size world. The rate needs
+/// it on every attempt, not only the roughly one in six hundred that places something
+/// (`NPC.cs:591-660`), and 78 us per player per tick is 19.8 ms at this server's 255-player bar,
+/// which is the whole 16.67 ms tick budget and then some. Vanilla has no equivalent cost: a real
+/// dedicated server never scans at all, because the *client* runs `SceneMetrics` and sends its
+/// zones up in packet 36.
+///
+/// So the scan is reused until it is either a second old or the player has walked far enough for it
+/// to be stale. Both bounds are conservative against the box being scanned: 16 tiles is a fifth of
+/// its half-width, so a cached answer is still one taken from well inside the same neighbourhood.
+#[derive(Debug, Default)]
+pub struct BiomeCache {
+    /// What tick it is, set by [`Self::advance`] before each spawn pass.
+    now: u64,
+    /// Indexed by player slot: the tick it was taken, where, and what it said.
+    entries: Vec<Option<(u64, i32, i32, Biome)>>,
+}
+
+impl BiomeCache {
+    /// Ticks a scan stays good for when the player has not moved far.
+    const REFRESH: u64 = 60;
+    /// ...and how far they may move before it is taken again anyway, in tiles.
+    const DRIFT: i32 = 16;
+
+    /// Tell the cache what tick it is. Called once, before the spawn pass.
+    pub fn advance(&mut self, ticks: u64) {
+        self.now = ticks;
+    }
+
+    /// This player's zone, scanning only when the last answer has gone stale.
+    pub fn read(&mut self, world: &World, slot: usize, x: i32, y: i32) -> Biome {
+        if self.entries.len() <= slot {
+            self.entries.resize(slot + 1, None);
+        }
+        if let Some((at, sx, sy, biome)) = self.entries[slot]
+            && self.now.saturating_sub(at) < Self::REFRESH
+            && (x - sx).abs() <= Self::DRIFT
+            && (y - sy).abs() <= Self::DRIFT
+        {
+            return biome;
+        }
+        let biome = biome_at(world, x, y);
+        self.entries[slot] = Some((self.now, x, y, biome));
+        biome
+    }
+}
+
 /// One spawn attempt in this many considers a bound townsperson instead of an enemy.
 ///
 /// Deliberately steep. A handful of them exist in a world's whole lifetime and each is a resident
@@ -1393,8 +1442,8 @@ pub fn try_spawn(
     players: &[Option<Player>],
     events: &EventSpawns<'_>,
     journey: &JourneyPowers,
+    biomes: &mut BiomeCache,
     rng: &mut SmallRng,
-    _ticks: u64,
 ) -> Vec<(u16, (f32, f32))> {
     let active: Vec<&Player> = players
         .iter()
@@ -1419,6 +1468,28 @@ pub fn try_spawn(
             (player.position.1 / 16.0) as i32,
         );
 
+        // `CanSpawnEnemiesNear` (`NPC.cs:358-362`): nothing spawns anywhere near a live Moon Lord,
+        // `player.isNearNPC(398, MoonLordFightingDistance)` with that distance being 4500 px
+        // (`NPC.cs:6036`). The fight is meant to be the Moon Lord and its parts, not the Moon Lord
+        // plus whatever the surface would ordinarily have sent.
+        const MOON_LORD: u16 = 398;
+        const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
+        let player_centre = (
+            player.position.0 + crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            player.position.1 + crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        if npcs.iter().any(|(_, n)| {
+            n.npc_type == MOON_LORD && n.is_alive() && {
+                let (dx, dy) = (
+                    n.center().0 - player_centre.0,
+                    n.center().1 - player_centre.1,
+                );
+                dx.hypot(dy) < MOON_LORD_FIGHTING_DISTANCE
+            }
+        }) {
+            continue;
+        }
+
         // Journey mode's `SpawnRate`, gated on the world's own difficulty being literally
         // Journey (`Main.IsJourneyMode` — every one of its five real vanilla call sites checks
         // this before reading the power at all; the power itself has no effect outside a Journey
@@ -1440,10 +1511,12 @@ pub fn try_spawn(
         // the middle of a biome draw the wrong pool whenever a candidate happened to land just
         // outside it.
         //
-        // It is computed here, before the rate roll rather than after, because `GetSpawnRate`
-        // itself reads it: a whole block of rate and cap modifiers keys on the zone
-        // (`NPC.cs:591-660`), so the scan is no longer something only a successful roll pays for.
-        let player_biome = biome_at(world, px, py);
+        // It is read here, before the rate roll rather than after, because `GetSpawnRate` itself
+        // reads it: a whole block of rate and cap modifiers keys on the zone (`NPC.cs:591-660`).
+        // That is why it now goes through [`BiomeCache`] rather than scanning outright: paying for
+        // the scan on every attempt rather than only a successful one is 78 us per player per tick,
+        // which does not fit in a tick at this server's player bar.
+        let player_biome = biomes.read(world, usize::from(player.slot), px, py);
         let near = nearby_active_npcs(npcs, player.position);
 
         // The rate and cap are the player's own, not one number for the world: two people in the
@@ -1651,6 +1724,13 @@ pub fn try_spawn(
 
             // Position is the NPC's top-left, so it stands on the tile below.
             out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+            break;
+        }
+        // `SpawnNPC` (`NPC.cs:291-306`) walks the player list and `break`s the moment
+        // `TrySpawnAnNPC` returns true, so at most one NPC is spawned server-wide per tick however
+        // many people are playing. Without this each player got their own draw, so a busy server
+        // spawned monsters N times as fast as the game does.
+        if !out.is_empty() {
             break;
         }
     }
@@ -2094,8 +2174,8 @@ mod tests {
                 &[],
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0
             )
             .is_empty()
         );
@@ -2137,8 +2217,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 spawned += 1;
                 let stats = npc_stats(npc_type).expect("a real type");
@@ -2213,8 +2293,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 assert_eq!(
                     npc_type, DUNGEON_GUARDIAN,
@@ -2239,8 +2319,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 assert_ne!(
                     npc_type, DUNGEON_GUARDIAN,
@@ -2290,8 +2370,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 seen += 1;
                 assert!(
@@ -2375,8 +2455,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
         }
@@ -2397,12 +2477,156 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
         }
         assert!(open > 0, "an unwalled hall of the same shape should spawn");
+    }
+
+    /// `SpawnNPC` (`NPC.cs:291-306`) stops at the first player who spawns something, so a tick
+    /// produces at most one NPC however many people are playing.
+    ///
+    /// Fails before the fix, which gave every player their own draw: a busy server spawned
+    /// monsters N times as fast as the game does. Driven hard with journey mode's slider at the top
+    /// so the rate is fast enough for two players to collide on the same tick often.
+    #[test]
+    fn a_tick_spawns_at_most_one_npc_however_many_players_there_are() {
+        let mut world = test_world();
+        world.game_mode = 3;
+        let npcs = NpcStore::new();
+        let (tx, ty) = (world.spawn_x as i32, world.spawn_y as i32);
+
+        let mut players = Vec::new();
+        for (slot, offset) in [(0u8, 0), (1, 400)] {
+            let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+            drop(out_rx);
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), out_tx);
+            player.state = crate::game::ConnState::Playing;
+            player.position = ((tx + offset) as f32 * 16.0, ty as f32 * 16.0);
+            players.push(Some(player));
+        }
+
+        let mut boosted = JourneyPowers::default();
+        boosted.set_spawn_rate_slider(0, 1.0);
+        boosted.set_spawn_rate_slider(1, 1.0);
+
+        let mut rng = SmallRng::seed_from_u64(31);
+        let mut cache = BiomeCache::default();
+        let mut total = 0;
+        for tick in 0..40_000u64 {
+            cache.advance(tick);
+            let batch = try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &boosted,
+                &mut cache,
+                &mut rng,
+            );
+            assert!(
+                batch.len() <= 1,
+                "a tick spawned {} NPCs: {batch:?}",
+                batch.len()
+            );
+            total += batch.len();
+        }
+        assert!(total > 100, "the run has to actually spawn things: {total}");
+    }
+
+    /// The biome cache answers with the scan it would have run, and takes a fresh one once it is a
+    /// second old or the player has walked out of its neighbourhood.
+    ///
+    /// It exists because `biome_at` is 78 us on a full-size world and the rate needs it on every
+    /// attempt: uncached, that is 19.8 ms per tick at 255 players, over the whole tick budget.
+    #[test]
+    fn the_biome_cache_agrees_with_a_fresh_scan_and_refreshes_on_time() {
+        let mut world = test_world();
+        let (x, y) = (world.width() / 2, i32::from(world.surface) + 10);
+        let mut cache = BiomeCache::default();
+
+        let fresh = biome_at(&world, x, y);
+        assert_eq!(cache.read(&world, 0, x, y), fresh, "a first read scans");
+
+        // Walking beyond the drift bound takes a new scan: the outer columns read as ocean by
+        // position, which is a different answer from the forest just cached.
+        assert_ne!(fresh, Biome::Ocean);
+        cache.advance(30);
+        assert_eq!(cache.read(&world, 0, x + 8, y), fresh, "still fresh");
+        assert_eq!(cache.read(&world, 0, 10, y), Biome::Ocean, "and drifted");
+        // A slot of its own is not the same slot.
+        assert_eq!(cache.read(&world, 1, x, y), fresh);
+
+        // Age alone is only observable when the world underneath changes, so paint enough
+        // ebonstone into the scan box to cross `EVIL_THRESHOLD` and watch the answer follow.
+        let mut aged = BiomeCache::default();
+        aged.advance(100);
+        assert_eq!(aged.read(&world, 0, x, y), fresh);
+        for dx in -20..20 {
+            for dy in -20..20 {
+                world.set_tile(x + dx, y + dy, terrustia_proto::Tile::block(23));
+            }
+        }
+        assert_eq!(biome_at(&world, x, y), Biome::Corruption, "a real evil now");
+        aged.advance(100 + BiomeCache::REFRESH - 1);
+        assert_eq!(
+            aged.read(&world, 0, x, y),
+            fresh,
+            "a scan under a second old is still used",
+        );
+        aged.advance(100 + BiomeCache::REFRESH);
+        assert_eq!(
+            aged.read(&world, 0, x, y),
+            Biome::Corruption,
+            "and a second later it is taken again",
+        );
+    }
+
+    /// Nothing spawns while a Moon Lord is on the field near you (`NPC.cs:358-362`,
+    /// `MoonLordFightingDistance = 4500` at `NPC.cs:6036`).
+    ///
+    /// Fails before the fix, which had no suppression at all: the fight came with whatever the
+    /// surface would ordinarily have sent, on top of the Moon Lord and its parts.
+    #[test]
+    fn a_moon_lord_on_the_field_stops_everything_else_spawning() {
+        const MOON_LORD: u16 = 398;
+        let world = test_world();
+        let (tx, ty) = (world.spawn_x as i32, world.spawn_y as i32);
+        let players = player_at((tx as f32 * 16.0, ty as f32 * 16.0));
+
+        let count = |npcs: &NpcStore, seed: u64| {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut seen = 0;
+            for _ in 0..20_000 {
+                seen += try_spawn(
+                    &world,
+                    npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
+                    &mut rng,
+                )
+                .len();
+            }
+            seen
+        };
+
+        assert!(count(&NpcStore::new(), 4) > 0, "the world spawns normally");
+
+        // A Moon Lord standing on the player.
+        let mut npcs = NpcStore::new();
+        npcs.spawn(MOON_LORD, (tx as f32 * 16.0, ty as f32 * 16.0))
+            .expect("a slot");
+        assert_eq!(count(&npcs, 4), 0, "not while the Moon Lord is here");
+
+        // ...and one 500 tiles away is well past the 4500 px reach, so it suppresses nothing.
+        let mut far = NpcStore::new();
+        far.spawn(MOON_LORD, ((tx + 500) as f32 * 16.0, ty as f32 * 16.0))
+            .expect("a slot");
+        assert!(count(&far, 4) > 0, "a distant Moon Lord is not this fight");
     }
 
     /// Lava is refused at any depth and water is not refused at all (`NPC.cs:5431-5442`).
@@ -2496,8 +2720,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 seen.insert(npc_type);
             }
@@ -2544,8 +2768,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
         }
@@ -2580,8 +2804,8 @@ mod tests {
                     &players,
                     &quiet(),
                     &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
                     &mut rng,
-                    0
                 )
                 .is_empty(),
                 "spawned past the cap"
@@ -2631,8 +2855,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
             if seen > 0 {
@@ -2673,7 +2897,16 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut seen = 0;
         for _ in 0..20_000 {
-            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &journey,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert_eq!(seen, 0, "spawns should be disabled outright at the floor");
     }
@@ -2694,7 +2927,16 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut seen = 0;
         for _ in 0..20_000 {
-            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &journey,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert!(
             seen > 0,
@@ -2720,14 +2962,30 @@ mod tests {
         let mut ordinary_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            ordinary_seen +=
-                try_spawn(&world, &npcs, &players, &quiet(), &ordinary, &mut rng, 0).len();
+            ordinary_seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &ordinary,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         let mut boosted_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            boosted_seen +=
-                try_spawn(&world, &npcs, &players, &quiet(), &boosted, &mut rng, 0).len();
+            boosted_seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &boosted,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert!(
             boosted_seen > ordinary_seen * 5,

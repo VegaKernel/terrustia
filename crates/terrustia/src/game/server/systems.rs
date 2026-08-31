@@ -5522,14 +5522,15 @@ impl GameServer {
             census: &count,
             cavern_monsters: self.cavern_monsters,
         };
+        self.player_biomes.advance(self.ticks);
         let spawned = spawn::try_spawn(
             &self.world,
             &self.npcs,
             &self.players,
             &events,
             &self.journey,
+            &mut self.player_biomes,
             &mut self.rng,
-            self.ticks,
         );
         for (npc_type, position) in spawned {
             if let Some(index) = self.npcs.spawn(npc_type, position) {

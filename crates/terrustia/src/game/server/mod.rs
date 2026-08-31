@@ -1042,6 +1042,9 @@ pub struct GameServer {
     /// Drawn from the world's id rather than from the run's generator, so the same world always
     /// has the same six. Worked out once when the world is opened.
     cavern_monsters: crate::game::cavern_monsters::CavernMonsters,
+    /// Each player's last biome scan, reused by the spawn rate rather than re-scanned every tick.
+    /// See [`crate::game::spawn::BiomeCache`] for why it has to be cached at all.
+    player_biomes: crate::game::spawn::BiomeCache,
     /// The last pillar shields, invasion progress and Moon Lord countdown that went out.
     ///
     /// All three are recomputed every tick and almost never move, so they are compared before
@@ -1221,6 +1224,7 @@ impl GameServer {
             spare_world,
             world_returns: std::sync::mpsc::channel(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
+            player_biomes: crate::game::spawn::BiomeCache::default(),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
             last_sent_countdown: -1,
