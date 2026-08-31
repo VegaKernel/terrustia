@@ -368,12 +368,20 @@ impl GameServer {
                 }
             };
             // Where Plantera's hooks have bitten, and how many are still on their way somewhere.
-            let hook_anchors: Vec<(f32, f32)> = self
-                .npcs
-                .iter()
-                .filter(|(_, n)| n.stats.ai_style == 52)
-                .map(|(_, n)| n.center())
-                .collect();
+            // The body's own tentacles (the ones with no hook of their own in `ai[3]`) are counted
+            // in the same pass rather than a second one, because only they regrow and the roll is
+            // against a count of themselves.
+            let mut hook_anchors: Vec<(f32, f32)> = Vec::new();
+            let mut body_tentacles = 0usize;
+            for (_, n) in self.npcs.iter() {
+                if n.stats.ai_style == 52 {
+                    hook_anchors.push(n.center());
+                } else if n.npc_type == terrustia_proto::npc_params::PLANTERA_TENTACLE
+                    && n.ai[3] == 0.0
+                {
+                    body_tentacles += 1;
+                }
+            }
             let hooks = if hook_anchors.is_empty() {
                 None
             } else {
@@ -572,8 +580,11 @@ impl GameServer {
                         avoid: &avoid,
                         // A headcrab already on this player's head is the only thing that stops
                         // another trying, so it is worked out once per NPC that asks.
-                        // Plantera swings from the average of wherever its hooks have bitten.
+                        // Plantera swings from the average of wherever its hooks have bitten; its
+                        // hook-borne tentacles want them one at a time.
                         hooks,
+                        hook_anchors: &hook_anchors,
+                        body_tentacles,
                         // A hook holds on while any of its siblings is still travelling.
                         kin_moving: npc.stats.ai_style == 52
                             && moving_hooks > usize::from(npc.velocity != (0.0, 0.0)),

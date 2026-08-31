@@ -417,6 +417,8 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         avoid: &[],
         target_taken: false,
         hooks: None,
+        hook_anchors: &[],
+        body_tentacles: 0,
         kin_moving: false,
         sockets_open: 0,
         army: ArmyView::default(),
@@ -487,6 +489,13 @@ pub struct World<'a, T: TileView> {
     pub parent_health: f32,
     /// Where Plantera's hooks have bitten, averaged. `None` when none have.
     pub hooks: Option<(f32, f32)>,
+    /// ...and each of them on its own, in slot order. An expert Plantera grows a set of tentacles
+    /// per hook that orbit *that hook* rather than the body (`NPC.cs:32235-32248`,
+    /// `:32505-32508`), and a tentacle names its own by the index it carries in `ai[3]`.
+    pub hook_anchors: &'a [(f32, f32)],
+    /// How many of Plantera's tentacles are the body's own (`ai[3] == 0`) rather than a hook's.
+    /// Only those regrow, and only against a count of themselves (`NPC.cs:32250-32264`).
+    pub body_tentacles: usize,
     /// How many of the Moon Lord's sockets have been broken open without the part dying.
     pub sockets_open: usize,
     /// What the Old One's Army looks like right now, for the crystal and its gates.
@@ -1337,6 +1346,8 @@ mod tests {
                 avoid: &[],
                 target_taken: false,
                 hooks: None,
+                hook_anchors: &[],
+                body_tentacles: 0,
                 kin_moving: false,
                 sockets_open: 0,
                 army: ArmyView::default(),

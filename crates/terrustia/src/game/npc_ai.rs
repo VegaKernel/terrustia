@@ -60,6 +60,12 @@ pub struct Surroundings<'a> {
     pub target_taken: bool,
     /// Where Plantera's hooks have bitten, averaged.
     pub hooks: Option<(f32, f32)>,
+    /// ...and each of them on its own, in slot order, which is what an expert Plantera's
+    /// hook-borne tentacles orbit rather than the body.
+    pub hook_anchors: &'a [(f32, f32)],
+    /// How many of Plantera's tentacles are the body's own rather than a hook's, which is the
+    /// count vanilla's regrow roll is against.
+    pub body_tentacles: usize,
     /// Whether another hook is still travelling.
     pub kin_moving: bool,
     /// How many of the Moon Lord's sockets are broken open.
@@ -274,6 +280,8 @@ pub fn update_with(
             target_taken: around.target_taken,
             hostile: around.hostile,
             hooks: around.hooks,
+            hook_anchors: around.hook_anchors,
+            body_tentacles: around.body_tentacles,
             kin_moving: around.kin_moving,
             sockets_open: around.sockets_open,
             army: around.army,
