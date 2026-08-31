@@ -363,21 +363,33 @@ impl Drop for PanelHandle {
 /// unlike the startup path (`run`, called directly with `?` in `main`), a toggle happens against a
 /// server already serving real players, and a configuration mistake discovered this way should not
 /// take the rest of the server down with it.
+/// `live` mirrors whether the panel is actually up, for the one caller that cannot ask: a world
+/// switch `exec`s a replacement process (`main`'s `relaunch_into`) and has to pass `--panel` if the
+/// panel should survive it. `config.panel_enabled` is the boot-time answer and goes stale the first
+/// time somebody types `panel` at the console, so it is written here, where the truth changes.
+/// Note it is only set on a *successful* start: a toggle that fails to bind leaves the panel down,
+/// and the flag has to say so or the restart would try to bring back something that is not running.
 pub async fn supervise(
     config: Config,
     events: mpsc::Sender<ServerEvent>,
     mut toggle: mpsc::UnboundedReceiver<()>,
     initial: Option<tokio::task::JoinHandle<()>>,
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
     let mut handle = PanelHandle(initial);
     while toggle.recv().await.is_some() {
         match handle.take() {
             Some(running) => {
                 running.abort();
+                live.store(false, Ordering::Relaxed);
                 info!("web panel stopped (console toggle)");
             }
             None => match run(config.clone(), events.clone()).await {
-                Ok(started) => handle = PanelHandle(Some(started)),
+                Ok(started) => {
+                    handle = PanelHandle(Some(started));
+                    live.store(true, Ordering::Relaxed);
+                }
                 Err(e) => warn!(error = %e, "could not start the web panel"),
             },
         }
@@ -804,15 +816,42 @@ enum WsMessage {
     },
 }
 
+/// Whether `account` currently holds `permission`, as a plain yes or no.
+///
+/// [`authorized_token`] answers the same question for a request, where a "no" has to become a 403.
+/// A long-lived socket has no response to fail: it simply withholds what the account may not see.
+/// A failed round-trip is a "no" for the same reason every other gate here is deny-by-default.
+async fn has_permission(
+    state: &PanelState,
+    account: &str,
+    permission: crate::admin::Permission,
+) -> bool {
+    ask(state, |reply| ServerEvent::PanelAuthorize {
+        name: account.to_string(),
+        permission: permission.as_str().to_string(),
+        reply,
+    })
+    .await
+    .unwrap_or(false)
+}
+
 async fn stream_status(mut socket: WebSocket, state: PanelState, account: String) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     // Subscribing here, not earlier, is deliberate: a `broadcast` receiver only ever sees frames
     // sent *after* it subscribes, so this socket's console tab starts from "now" rather than
     // trying to catch up on everything since the process started.
     let mut console_rx = crate::term::console_feed().subscribe();
+    // `panel.view` is enough to *open* this socket, but the console feed carries the entire server
+    // log, and `panel.console` is the permission for that. It used to gate writing only, so a
+    // moderator holding just `panel.view` received every log line and was merely not shown a tab
+    // to read them in, which is not a gate at all. Re-evaluated on each status tick rather than
+    // once at connect, so granting or revoking it mid-session takes effect within one refresh,
+    // the same staleness every other number on this socket already carries.
+    let mut may_read_console = has_permission(&state, &account, perm::PANEL_CONSOLE).await;
     loop {
         let message = tokio::select! {
             _ = interval.tick() => {
+                may_read_console = has_permission(&state, &account, perm::PANEL_CONSOLE).await;
                 match build_status(&state, &account).await {
                     Ok(s) => WsMessage::Status(s),
                     Err(_) => break,
@@ -820,6 +859,7 @@ async fn stream_status(mut socket: WebSocket, state: PanelState, account: String
             }
             line = console_rx.recv() => {
                 match line {
+                    Ok(_) if !may_read_console => continue,
                     Ok(ConsoleLine { kind, level, text }) => WsMessage::Console {
                         line_kind: line_kind_name(kind),
                         level,

@@ -332,11 +332,18 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // just one level down. Closed structurally in `panel::supervise` itself (see its own
     // `PanelHandle` type's doc comment) rather than here, since nothing `main` could do to this
     // outer `JoinHandle` fixes an inner one it never sees.
+    // Whether the panel is up *right now*, which is not the same question as `config.panel_enabled`
+    // once the console's `panel` command can toggle it. A world switch is a real process restart
+    // (see `relaunch_into`), so the replacement has to be told; without this the panel silently
+    // disappears across a switch while `Worlds.svelte` is promising the page will reconnect.
+    let panel_live =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(initial_panel.is_some()));
     let panel_supervisor = tokio::spawn(terrustia::panel::supervise(
         config.clone(),
         events_tx.clone(),
         panel_toggle_rx,
         initial_panel,
+        panel_live.clone(),
     ));
 
     // Check-and-notify only, entirely in the background: never blocks startup, never downloads a
@@ -440,8 +447,13 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         .take();
     if let Some(new_world) = requested {
         info!(world = %new_world.display(), "restarting into the requested world");
-        return relaunch_into(&new_world, &args.config, listen_addr)
-            .map_err(|e| format!("could not restart into {}: {e}", new_world.display()).into());
+        return relaunch_into(
+            &new_world,
+            &args.config,
+            listen_addr,
+            panel_live.load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .map_err(|e| format!("could not restart into {}: {e}", new_world.display()).into());
     }
     Ok(())
 }
@@ -454,21 +466,48 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
 /// detached child followed by this process exiting — a real PID change a process-monitor keyed on
 /// PID would need to notice, the same platform gap `main`'s own `ctrl_close`/`ctrl_shutdown`
 /// handling already lives with.
+///
+/// `panel` carries the panel across the restart. It is one-way, matching the flag: `--panel` turns
+/// the panel on and there is no `--no-panel` to turn it off again, so a panel the operator stopped
+/// from the console comes back if the config file or the environment says it should be on. That
+/// asymmetry is the flag surface's, not this function's, and the case that actually broke people
+/// was the other one: switching worlds from the panel used to `exec` a replacement without the
+/// flag, so the panel deleted itself and the page it was serving waited for a reconnect that could
+/// never come.
+/// The arguments the replacement process is started with, split out from the two platform bodies
+/// below so there is one list rather than two that have to be kept in step, and so it can be
+/// tested without a process actually being replaced by it.
+fn relaunch_args(
+    world: &Path,
+    config_path: &Path,
+    listen: std::net::SocketAddr,
+    panel: bool,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--config".into(),
+        config_path.into(),
+        "--listen".into(),
+        listen.to_string().into(),
+        "--world".into(),
+        world.into(),
+    ];
+    if panel {
+        args.push("--panel".into());
+    }
+    args
+}
+
 #[cfg(unix)]
 fn relaunch_into(
     world: &Path,
     config_path: &Path,
     listen: std::net::SocketAddr,
+    panel: bool,
 ) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
     let error = std::process::Command::new(exe)
-        .arg("--config")
-        .arg(config_path)
-        .arg("--listen")
-        .arg(listen.to_string())
-        .arg("--world")
-        .arg(world)
+        .args(relaunch_args(world, config_path, listen, panel))
         .exec();
     // `exec` only returns here on failure — a successful call replaces this process and never
     // reaches this line at all.
@@ -480,17 +519,61 @@ fn relaunch_into(
     world: &Path,
     config_path: &Path,
     listen: std::net::SocketAddr,
+    panel: bool,
 ) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     std::process::Command::new(exe)
-        .arg("--config")
-        .arg(config_path)
-        .arg("--listen")
-        .arg(listen.to_string())
-        .arg("--world")
-        .arg(world)
+        .args(relaunch_args(world, config_path, listen, panel))
         .spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod relaunch_tests {
+    use super::*;
+
+    fn args(panel: bool) -> Vec<String> {
+        relaunch_args(
+            Path::new("/w/Next.wld"),
+            Path::new("/etc/terrustia.toml"),
+            "127.0.0.1:7777".parse().expect("a literal address"),
+            panel,
+        )
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    /// The bug this exists for: a world switch `exec`s a replacement, and without `--panel` the
+    /// panel that asked for the switch deleted itself while its own page waited to reconnect.
+    #[test]
+    fn a_running_panel_survives_a_world_switch() {
+        assert!(
+            args(true).contains(&"--panel".to_string()),
+            "the replacement process must be told to bring the panel back up"
+        );
+    }
+
+    /// And the other way, or every switch would turn on a panel the operator never asked for.
+    #[test]
+    fn a_panel_that_is_not_running_is_not_started_by_a_switch() {
+        assert!(!args(false).contains(&"--panel".to_string()));
+    }
+
+    #[test]
+    fn the_world_config_and_listen_address_all_carry_over() {
+        let a = args(false);
+        for expected in [
+            "--config",
+            "/etc/terrustia.toml",
+            "--listen",
+            "127.0.0.1:7777",
+            "--world",
+            "/w/Next.wld",
+        ] {
+            assert!(a.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
 }
 
 /// List the worlds the server keeps in its own `worlds/` directory.

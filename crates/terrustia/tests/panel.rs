@@ -284,17 +284,24 @@ async fn the_console_panel_command_starts_and_stops_a_real_listener() {
             .with_panel_toggle(toggle_tx)
             .run(rx),
     );
+    // `live` is what `main` reads when a world switch `exec`s a replacement process, to decide
+    // whether to pass `--panel`. It has to follow the console toggle, not the boot-time config, or
+    // a panel started this way vanishes across a switch (and one stopped this way comes back).
+    let live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     tokio::spawn(panel::supervise(
         config.clone(),
         tx.clone(),
         toggle_rx,
         None,
+        live.clone(),
     ));
+    let is_live = || live.load(std::sync::atomic::Ordering::Relaxed);
 
     assert!(
         !port_answers(addr).await,
         "the panel must not be listening before anyone asks for it"
     );
+    assert!(!is_live(), "nothing has started the panel yet");
 
     tx.send(ServerEvent::Console {
         line: "panel".to_string(),
@@ -304,6 +311,11 @@ async fn the_console_panel_command_starts_and_stops_a_real_listener() {
     assert!(
         wait_until(|| port_answers(addr)).await,
         "the panel should be listening within the deadline after the first toggle"
+    );
+    assert!(
+        is_live(),
+        "a panel started from the console must survive a world switch, which means `live` has to \
+         say it is up"
     );
 
     // Actually reachable, not just holding the port — the same static-asset path the foundation
@@ -324,6 +336,10 @@ async fn the_console_panel_command_starts_and_stops_a_real_listener() {
     assert!(
         wait_until(|| async { !port_answers(addr).await }).await,
         "the panel should stop listening within the deadline after the second toggle"
+    );
+    assert!(
+        !is_live(),
+        "a panel stopped from the console must not be restarted by a world switch"
     );
 }
 
