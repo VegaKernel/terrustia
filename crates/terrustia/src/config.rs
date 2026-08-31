@@ -96,7 +96,7 @@ pub struct Config {
     /// (`LaunchInitializer.cs:152`). With it off, `RemoteClient.SpamUpdate` zeroes all four
     /// counters every tick and returns before any of them can reach a ceiling
     /// (`RemoteClient.cs:70-80`), and the liquid counter is not even incremented
-    /// (`MessageBuffer.cs:2415`) — so a stock server never boots anybody for spam.
+    /// (`MessageBuffer.cs:2415`), so a stock server never boots anybody for spam.
     ///
     /// Off by default for the same reason it is off in vanilla: the ceilings are tight enough that
     /// ordinary play reaches them. A stick of dynamite clears hundreds of tiles in one burst, which

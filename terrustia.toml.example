@@ -89,3 +89,11 @@ mute_escalation_max_secs = 3600
 # A minimum gap, in milliseconds, between one account's chat lines — a line sent before the
 # previous one's cooldown has elapsed is dropped rather than broadcast. 0 disables it.
 chat_cooldown_ms = 0
+
+# Kick a client that edits tiles or moves liquid faster than the game's own ceilings allow
+# (100 placements, 500 breaks, 50 liquid moves, each decaying every tick). This is vanilla's
+# `secure=1` / `-secure`, and like vanilla it is off by default: the ceilings are tight enough that
+# ordinary play reaches them, and a stick of dynamite clears more tiles in one burst than the break
+# ceiling allows. Turn it on if you would rather disconnect a suspected scripted client than let it
+# keep going.
+spam_check = false

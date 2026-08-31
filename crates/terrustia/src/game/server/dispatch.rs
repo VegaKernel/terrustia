@@ -4,7 +4,12 @@
 //! through; everything below it is one packet id's handler, plus the few helpers that exist only to
 //! serve them (the join handshake, the section stream, and the presence frames a new arrival needs).
 //! Nothing here is trusted: a handler validates first and gives up quietly rather than panicking,
-//! because the loop that calls it owns the world.
+//! because the loop that calls it owns the world. Before any of them runs, [`handshake_allows`]
+//! refuses whatever the connection's own state does not allow yet, which is where vanilla puts the
+//! same check (`MessageBuffer.GetData`) and is not something an individual handler can be relied on
+//! to do for itself.
+//!
+//! [`handshake_allows`]: GameServer::handshake_allows
 
 // The parent module's prelude, wholesale, rather than a copy of it. Sixty-odd packet handlers
 // between them name most of what `server/mod.rs` imports plus about twenty of its own private

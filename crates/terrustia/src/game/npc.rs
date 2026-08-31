@@ -711,8 +711,8 @@ fn move_vertical(npc: &mut Npc, tiles: &impl TileView) {
 /// Which liquid an NPC is standing in, if any.
 ///
 /// The centre tile, which is the same approximation of vanilla's `Collision.WetCollision` over the
-/// whole hitbox that [`super::npc_ai`] already hands the AI routines as `World::wet` — read here
-/// too so a routine and the physics under it never disagree about being in water.
+/// whole hitbox that [`super::npc_ai`] already hands the AI routines as `World::wet`. It is read
+/// here too, so a routine and the physics under it never disagree about being in water.
 pub fn liquid_at(
     tiles: &impl TileView,
     point: (f32, f32),

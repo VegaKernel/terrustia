@@ -11,7 +11,7 @@
 //!
 //! Deliberately not modelled: the Lava Slime's own buoyancy numbers (`type == 59 && !remixWorld`,
 //! `NPC.cs:62095-62106`, which pushes up 0.8 harder when `directionY < 0` and lets it rise to -10
-//! rather than -4) — this port has no remix-world flag, and nothing here ever sets a slime's
+//! rather than -4). This port has no remix-world flag, and nothing here ever sets a slime's
 //! `directionY`, so a lava slime swims by the ordinary rules below.
 
 use terrustia_proto::npc_params::{slime_hop_window, slime_timer_bonus};

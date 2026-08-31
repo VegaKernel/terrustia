@@ -13,7 +13,7 @@
 //! * It only refuses to walk off a ledge when it has no target. With a target, it walks off.
 //!
 //! Deliberately not modelled: `directionY`. Vanilla's `SetTargetTrackingValues` gives style 3 its
-//! own rule for it (`NPC.cs:78565-78572` — a fighter looks up only when the target's *feet* are
+//! own rule for it (`NPC.cs:78565-78572`: a fighter looks up only when the target's *feet* are
 //! above its own head, rather than the centre-to-centre test every other style uses), and one
 //! branch of `AI_003` reads it: a fighter whose target is above it launches off a ledge edge at
 //! -8 with 1.5x its horizontal speed instead of stepping down (`NPC.cs:60729-60734`). This port
