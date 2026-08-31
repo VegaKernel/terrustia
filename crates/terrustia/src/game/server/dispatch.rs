@@ -597,6 +597,13 @@ impl GameServer {
             return;
         }
 
+        // The lunar pillars' shields, in the same place vanilla sends them: case 8's tail, after
+        // the entities and before `49 InitialSpawn` (`MessageBuffer.cs:869`).
+        match self.tower_shield_frame() {
+            Ok(frame) => self.send(slot, frame),
+            Err(e) => warn!(slot, error = %e, "could not encode the tower shield strengths"),
+        }
+
         if let Some(player) = self.player_mut(slot) {
             player.advance_to(ConnState::TilesSent);
         }
@@ -922,8 +929,6 @@ impl GameServer {
             );
         }
 
-        self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
-
         // What the Travelling Merchant is carrying, if he is here. A client that joins mid-visit
         // and is not told finds him with nothing to sell.
         if !self.travel_shop.is_empty() {
@@ -1013,6 +1018,16 @@ impl GameServer {
                 self.send(slot, frame);
             }
         }
+
+        // Last, and it has to be last. 129 is the "you are connected, start playing" signal, and
+        // vanilla sends it as the closing act of `MessageBuffer` case 12 (`MessageBuffer.cs:937`):
+        // after 139 (`:934`) and after `SyncConnectedPlayer` has already sent 60, 72 and 74
+        // (`NetMessage.cs:2841-2856`), with only `greetPlayer`'s chat behind it. This used to sit
+        // above the travelling-merchant stock, the cavern monster types and the angler quest, so a
+        // client that treats 129 as the end of the handshake, which is what it is, never read any
+        // of them. The same-world differential against a real `TerrariaServer`
+        // (`tools/differential.sh`) is what caught it.
+        self.send(slot, packets::empty(id::FINISHED_CONNECTING_TO_SERVER)?);
 
         let name = self
             .player(slot)

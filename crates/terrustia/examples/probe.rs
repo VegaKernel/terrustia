@@ -7,6 +7,10 @@
 //! cargo run --example probe -- 127.0.0.1:7778   # vanilla
 //! cargo run --example probe -- 127.0.0.1:7777   # terrustia
 //! ```
+//!
+//! Two environment knobs: `PROBE_DUMP_DIR` writes every tile-section payload to that directory, and
+//! `PROBE_LINGER=<seconds>` keeps reading past `129 FinishedConnectingToServer` instead of stopping
+//! there. `tools/differential.sh` drives both servers through this.
 
 use std::{env, time::Duration};
 
@@ -38,19 +42,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut slot = 0u8;
     let mut sections = 0usize;
     let mut requested_tiles = false;
+    // Seconds to keep reading *after* packet 129. Zero, the default, stops there: exactly what a
+    // client that treats 129 as the end of the handshake would see, and exactly why our own
+    // out-of-order 129 was invisible. Anything a server sends after 129 needs the linger to be
+    // observed at all, so the differential asks for one.
+    let linger = Duration::from_secs(
+        env::var("PROBE_LINGER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    );
+    let mut deadline: Option<tokio::time::Instant> = None;
 
     loop {
         let frame: Frame = loop {
             if let Some(frame) = codec.decode(&mut buf)? {
                 break frame;
             }
-            match timeout(Duration::from_secs(5), stream.read_buf(&mut buf)).await {
+            let mut wait = Duration::from_secs(5);
+            if let Some(at) = deadline {
+                let left = at.saturating_duration_since(tokio::time::Instant::now());
+                if left.is_zero() {
+                    println!("-- linger elapsed; {sections} sections received");
+                    return Ok(());
+                }
+                wait = wait.min(left);
+            }
+            match timeout(wait, stream.read_buf(&mut buf)).await {
                 Ok(Ok(0)) => {
                     println!("-- server closed the connection");
                     return Ok(());
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => return Err(e.into()),
+                // Inside the linger a quiet stretch is not the end of the session; the deadline
+                // above is what ends it.
+                Err(_) if deadline.is_some() => {}
                 Err(_) => {
                     println!("-- idle for 5s; stopping. sections received: {sections}");
                     return Ok(());
@@ -69,14 +96,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("could not write {path}: {e}");
                     }
                 }
-                if sections <= 2 {
-                    println!(
-                        "<- {:3} {:<28} {:6} bytes (deflate)",
-                        frame.id,
-                        id::name(frame.id),
-                        frame.payload.len()
-                    );
-                }
+                // Every one of them, not the first two: a section is a packet like any other, and
+                // a differential that compares two servers' packet order cannot leave a hole in
+                // the middle of the sequence where thirty-odd frames used to be.
+                println!(
+                    "<- {:3} {:<28} {:6} bytes (deflate)",
+                    frame.id,
+                    id::name(frame.id),
+                    frame.payload.len()
+                );
                 continue;
             }
             id::WORLD_DATA => {
@@ -150,8 +178,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             id::FINISHED_CONNECTING_TO_SERVER => {
                 println!("== handshake complete; {sections} sections received");
-                // A live server keeps streaming world updates forever, so stop here.
-                return Ok(());
+                // A live server keeps streaming world updates forever, so without a linger this
+                // is where a probe stops, same as a client would.
+                if linger.is_zero() {
+                    return Ok(());
+                }
+                deadline = Some(tokio::time::Instant::now() + linger);
             }
             id::KICK => {
                 let mut r = PacketReader::new(&frame.payload);

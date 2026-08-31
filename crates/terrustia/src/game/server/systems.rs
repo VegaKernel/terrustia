@@ -2541,14 +2541,29 @@ impl GameServer {
     }
 
     /// Stream every live NPC to a client that has just finished loading the world.
+    ///
+    /// A `23` and then a `54` per NPC, which is exactly vanilla's own join loop
+    /// (`MessageBuffer.cs:851-857`, case 8). The buff list went out only when it *changed*
+    /// (`broadcast_npc_buffs`), so a player joining a world where something was already poisoned or
+    /// ichor-covered was told nothing about it and computed its own armour penetration from an
+    /// empty list. Vanilla sends the packet even when there is nothing on the NPC, and this does
+    /// too: the empty list is what tells a client to clear whatever it had cached for that slot.
     pub(super) fn send_npcs(&mut self, slot: u8) -> terrustia_proto::Result<()> {
-        let syncs: Vec<SyncNpc> = self
+        let live: Vec<(u8, Vec<(u16, i32)>)> = self
             .npcs
             .iter()
-            .filter_map(|(index, _)| self.npc_sync(index))
+            .map(|(index, npc)| {
+                (
+                    index,
+                    npc.buffs.active().map(|s| (s.kind, s.time)).collect(),
+                )
+            })
             .collect();
-        for sync in syncs {
-            self.send(slot, sync.encode()?);
+        for (index, buffs) in live {
+            if let Some(sync) = self.npc_sync(index) {
+                self.send(slot, sync.encode()?);
+                self.send(slot, packets::npc_buffs(index, buffs)?);
+            }
         }
         Ok(())
     }
@@ -3952,6 +3967,19 @@ impl GameServer {
         self.broadcast_lunar_state();
     }
 
+    /// Packet `101`: what the four lunar pillar shields read right now.
+    ///
+    /// Sent both on change and to a joining client, because vanilla does both: `TrySendData(101,
+    /// whoAmI)` sits in the join loop (`MessageBuffer.cs:869`, case 8, before `49 InitialSpawn`).
+    /// Change-only left a player who joined during a pillar fight looking at four full bars.
+    pub(super) fn tower_shield_frame(&self) -> terrustia_proto::Result<Vec<u8>> {
+        let mut w = terrustia_proto::PacketWriter::new(id::UPDATE_TOWER_SHIELD_STRENGTHS);
+        for shield in self.lunar.shields {
+            w.u16(u16::try_from(shield.max(0)).unwrap_or(u16::MAX));
+        }
+        w.finish()
+    }
+
     /// Tell clients what the four shields read, and how long is left before the Moon Lord.
     ///
     /// Neither was ever sent. The shield is the pillar fight's entire feedback loop — it is what
@@ -3964,11 +3992,7 @@ impl GameServer {
         let countdown = self.lunar.countdown;
         if shields != self.last_sent_shields {
             self.last_sent_shields = shields;
-            let mut w = terrustia_proto::PacketWriter::new(id::UPDATE_TOWER_SHIELD_STRENGTHS);
-            for shield in shields {
-                w.u16(u16::try_from(shield.max(0)).unwrap_or(u16::MAX));
-            }
-            if let Ok(frame) = w.finish() {
+            if let Ok(frame) = self.tower_shield_frame() {
                 self.broadcast(frame, None);
             }
         }
