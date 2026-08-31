@@ -152,6 +152,30 @@ check-recipes:
 check-dead-writes:
     cargo run -q -p terrustia-codegen --bin deadwrite
 
+# AGENTS.md rule 2 makes every transcription cite its source, so the tree holds ~1900
+# `NPC.cs:12345` references. `docs/parity-index.tsv` is derived from them and is never hand-edited:
+# a hand-maintained parity ledger that rots does not say "unknown", it says "verified". Each entry
+# carries a hash of the cited vanilla lines and a hash of our own item's body, so a claim expires on
+# its own the moment either side moves, and this says which side that was. It answers "is this still
+# the code it was checked against" and "what is cited by nothing", never "is this right".
+#
+# Rebuild the index with `parity-update` and review the diff, exactly as with the generated tables.
+# A regenerated decompiled tree moves every line number at once; that is reported as one sentence
+# rather than 1900 drifts.
+#
+# Check every vanilla citation against the decompiled tree, and report what is cited by nothing
+check-parity:
+    python3 tools/parity_index.py --self-test
+    python3 tools/parity_index.py {{DECOMPILED}}
+
+# What fraction of each vanilla source file anything this project wrote has actually cited
+parity-coverage:
+    python3 tools/parity_index.py {{DECOMPILED}} --coverage
+
+# Rebuild docs/parity-index.tsv from the citations in the source. Review the diff before committing
+parity-update:
+    python3 tools/parity_index.py {{DECOMPILED}} --update
+
 # A surviving mutant is a blind spot in a checker, which is how a missing drop stays missing. Pass
 # `--rust` to also measure the proto test suite, at a rebuild per mutant.
 #
@@ -166,8 +190,8 @@ check-mutants *ARGS:
 # production and read by nothing), and `just` stops a chain at the first failure. Putting it at the
 # end means the three that pass still report before it does.
 #
-# Every data cross-check in one go: the tables, the dead writes, and the checkers themselves
-check-data: check-drops check-recipes check-mutants check-dead-writes
+# Every data cross-check in one go: the tables, the citations, the dead writes, and the checkers
+check-data: check-drops check-recipes check-parity check-mutants check-dead-writes
 
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:
