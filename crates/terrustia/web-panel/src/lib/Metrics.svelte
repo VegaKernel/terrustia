@@ -184,10 +184,14 @@
       </span>
       <span class="sub">{budgetPct().toFixed(0)}% of {fmtUs(m.budget_us)} budget</span>
     </div>
+    <!-- "this window" named a window the page neither controls nor draws: `worst_cpu_us` is reset
+         by the server every TICK_REPORT_EVERY = 600 ticks, which is the log reporter's own 10s
+         cycle, not the 120-sample chart directly below. The number visibly sawtoothed on a cadence
+         nothing here explained. Say which window it is. -->
     <div class="stat">
       <span class="label">worst cpu</span>
       <span class="value">{fmtUs(m.worst_cpu_us)}</span>
-      <span class="sub">this window</span>
+      <span class="sub">server's last 10s</span>
     </div>
     <div class="stat">
       <span class="label">players</span>

@@ -138,10 +138,26 @@ impl TickCost {
     }
 }
 
+/// The footer's save-failure clause: empty while saves are working, a red count when they are not.
+///
+/// Split out so it can be checked without standing up a server and reading a global. The rule it
+/// encodes is that a healthy server's footer is byte for byte the one it always was, and that a
+/// failing one says so somewhere that does not scroll.
+fn save_failure_note(palette: crate::term::Palette, failures: u32) -> String {
+    if failures == 0 {
+        return String::new();
+    }
+    palette.paint(
+        crate::term::sgr::BRIGHT_RED,
+        &format!("   saves failing ({failures})"),
+    )
+}
+
 impl GameServer {
-    /// Refresh the live status footer: who is online, how long the server has been up, and the last
-    /// tick's cost. Called about once a second from [`Self::note_tick_cost`]. Cheap, and a no-op on
-    /// screen when there is no interactive prompt to sit above (a piped or service console).
+    /// Refresh the live status footer: who is online, how long the server has been up, the last
+    /// tick's cost, and whether saves are failing. Called about once a second from
+    /// [`Self::note_tick_cost`]. Cheap, and a no-op on screen when there is no interactive prompt
+    /// to sit above (a piped or service console).
     fn update_status(&self) {
         let p = self.palette;
         let online = self
@@ -171,8 +187,14 @@ impl GameServer {
         } else {
             sgr::DIM
         };
+        // A failing save is the one condition an operator has to notice, and it was the one the
+        // terminal made easiest to miss: a single `error!` that scrolls away behind ordinary log
+        // traffic, while the panel pins it twice (a header badge and an overview card). The
+        // footer is the only part of the terminal that does not scroll, so it belongs here too.
+        // Only ever shown when non-zero, so a healthy server's footer is exactly what it was.
+        let saves = save_failure_note(p, self.save_failures);
         let status = format!(
-            "  {} {} online   {}   {}",
+            "  {} {} online   {}   {}{saves}",
             p.paint(dot_colour, "●"),
             p.paint(sgr::BOLD, &online.to_string()),
             p.paint(sgr::DIM, &format!("up {h:02}:{m:02}:{s:02}")),
@@ -949,6 +971,23 @@ mod failing_saves {
 
     fn tiny_world() -> crate::world::World {
         crate::world::World::empty(200, 150, "failing saves probe")
+    }
+
+    /// The panel pinned a failing save twice; the terminal had one `error!` that scrolls away.
+    /// The footer is the only part of the terminal that does not scroll.
+    #[test]
+    fn the_status_footer_names_failing_saves() {
+        let note = save_failure_note(crate::term::Palette::PLAIN, 3);
+        assert!(
+            note.contains("saves failing (3)"),
+            "an operator watching the footer must see it: {note:?}"
+        );
+    }
+
+    /// And a healthy server's footer is exactly what it always was, with nothing added.
+    #[test]
+    fn a_healthy_server_adds_nothing_to_the_footer() {
+        assert_eq!(save_failure_note(crate::term::Palette::PLAIN, 0), "");
     }
 
     /// A player in `ConnState::Playing`, with their outbound queue kept so what the server said to

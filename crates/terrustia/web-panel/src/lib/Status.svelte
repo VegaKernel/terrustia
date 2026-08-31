@@ -120,7 +120,20 @@
 </script>
 
 <header>
-  <span class="dot" class:live></span>
+  <!-- Colour alone is not a signal. This dot is the only thing on the page saying whether what
+       you are reading is live or frozen, and as a bare 8px circle it said it to nobody using a
+       screen reader and to nobody who cannot separate that red from that green. The `.save-warn`
+       badge four lines below already does this properly, with text and a title. -->
+  <span
+    class="dot"
+    class:live
+    role="status"
+    aria-label={live ? "live: receiving updates" : "disconnected: these numbers are frozen"}
+    title={live ? "live: receiving updates" : "disconnected: these numbers are frozen"}
+  ></span>
+  {#if !live}
+    <span class="stale">not live</span>
+  {/if}
   <strong>terrustia</strong>
   {#if status}<span class="dim">v{status.version}</span>{/if}
   {#if status && status.save_failures > 0}
@@ -209,6 +222,12 @@
 
   .dot.live {
     background: var(--accent);
+  }
+
+  /* Shown only while disconnected, so the live case stays as quiet as it was. */
+  .stale {
+    color: var(--danger);
+    font-size: 0.8rem;
   }
 
   .save-warn {
