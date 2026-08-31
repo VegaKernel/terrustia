@@ -5365,43 +5365,48 @@ impl GameServer {
         }
         let cap = spawn::MAX_SPAWNS * (2.0 + 0.3 * active.len() as f32);
 
-        // The first player who is both under their own near-player cap and wins the one-in-twenty
-        // roll takes the spawn, and the loop stops there.
-        let Some(at_player) = active.iter().find(|position| {
-            spawn::nearby_active_npcs(&self.npcs, **position) < cap
-                && rand::Rng::random_range(&mut self.rng, 0..INVASION_SPAWN_RATE) == 0
-        }) else {
-            return;
-        };
-        // The army only arrives where its front has actually reached.
-        let toward = (at_player.0 / crate::game::npc::TILE) as i32;
-        if !state.reaches(toward) {
-            return;
-        }
+        // `SpawnNPC`'s own shape (`NPC.cs:291-306`): walk the players, and stop at the first one
+        // who actually spawns something. A player who fails any gate is passed over rather than
+        // ending the tick, exactly as `TrySpawnAnNPC` returning false lets the loop go on.
+        for position in active {
+            if spawn::nearby_active_npcs(&self.npcs, position) >= cap {
+                continue;
+            }
+            if rand::Rng::random_range(&mut self.rng, 0..INVASION_SPAWN_RATE) != 0 {
+                continue;
+            }
+            // The army only arrives where its front has actually reached.
+            let toward = (position.0 / crate::game::npc::TILE) as i32;
+            if !state.reaches(toward) {
+                continue;
+            }
 
-        let present: Vec<u16> = self.npcs.iter().map(|(_, n)| n.npc_type).collect();
-        let Some(npc_type) =
-            state.next_invader(self.world.progress.hard_mode, &present, &mut self.rng)
-        else {
-            return;
-        };
+            let present: Vec<u16> = self.npcs.iter().map(|(_, n)| n.npc_type).collect();
+            let Some(npc_type) =
+                state.next_invader(self.world.progress.hard_mode, &present, &mut self.rng)
+            else {
+                continue;
+            };
 
-        // They arrive around the player rather than at the front itself, which is what puts an
-        // invasion in front of somebody instead of over the horizon.
-        let side = if state.from_x > state.toward_x { 1 } else { -1 };
-        // Just off screen on the side the army is coming from.
-        let column = (toward + side * rand::Rng::random_range(&mut self.rng, 40..80))
-            .clamp(10, self.world.width() - 10);
-        let Some(ground) = spawn::find_ground(&self.world, column, i32::from(self.world.spawn_y))
-        else {
-            return;
-        };
-        let at = (
-            column as f32 * crate::game::npc::TILE,
-            (ground - 1) as f32 * crate::game::npc::TILE,
-        );
-        if let Some(index) = self.npcs.spawn(npc_type, at) {
-            self.broadcast_npc(index);
+            // They arrive around the player rather than at the front itself, which is what puts an
+            // invasion in front of somebody instead of over the horizon.
+            let side = if state.from_x > state.toward_x { 1 } else { -1 };
+            // Just off screen on the side the army is coming from.
+            let column = (toward + side * rand::Rng::random_range(&mut self.rng, 40..80))
+                .clamp(10, self.world.width() - 10);
+            let Some(ground) =
+                spawn::find_ground(&self.world, column, i32::from(self.world.spawn_y))
+            else {
+                continue;
+            };
+            let at = (
+                column as f32 * crate::game::npc::TILE,
+                (ground - 1) as f32 * crate::game::npc::TILE,
+            );
+            if let Some(index) = self.npcs.spawn(npc_type, at) {
+                self.broadcast_npc(index);
+                break;
+            }
         }
     }
 
