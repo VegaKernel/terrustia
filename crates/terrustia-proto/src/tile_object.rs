@@ -1,6 +1,6 @@
 //! Multi-tile objects — how big each one is and how its frames are laid out.
 //!
-//! GENERATED from `TileObjectData.Initialize` in the 1.4.5.7 build, which sets these up
+//! Extracted from `TileObjectData.Initialize` in the 1.4.5.7 build, which sets these up
 //! imperatively rather than as a table: a shared "current object" is mutated field by field and
 //! then stamped into a slot. Transcribing the end state is the only way to get the numbers right,
 //! and the numbers matter — a chest is two by two anchored at its bottom-left, a door one by three
@@ -8,6 +8,12 @@
 //!
 //! `full_width` and `full_height` are the size of one style's block in the sprite sheet, which is
 //! what a style index is multiplied by to find its frames.
+//!
+//! **There is no generator for this file, and `just regen` does not touch it.** It is not on
+//! AGENTS.md rule 7's list for that reason. A correction here is made in place, by hand, citing the
+//! `TileObjectData` line it comes from. Said plainly because this paragraph used to open with the
+//! word GENERATED, which would tell a reader either to leave a wrong number alone or to expect a
+//! regeneration that never comes.
 
 /// The shape of one placeable object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

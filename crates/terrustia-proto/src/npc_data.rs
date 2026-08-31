@@ -1,7 +1,14 @@
 //! Stats for every NPC type, transcribed from `NPC.SetDefaults` in the 1.4.5.7 build.
 //!
-//! The game assigns these in a long `if (type == N)` chain; this table is generated from it, so
-//! the numbers are the game's own rather than remembered ones.
+//! The game assigns these in a long `if (type == N)` chain, and this table was extracted from it,
+//! so the numbers are the game's own rather than remembered ones.
+//!
+//! **There is no generator for this file, and `just regen` does not touch it.** It is not on
+//! AGENTS.md rule 7's list for that reason. Unlike `npc_drops.rs` or `recipes.rs`, a correction
+//! here is made in place, by hand, with the `NPC.cs` line it comes from cited at the entry. Said
+//! plainly because the word "generated" used to sit in this paragraph, and a reader who believed
+//! it would either refuse to fix a wrong number or expect a regeneration to preserve their fix.
+//! Writing a real generator is worth doing and is tracked in TODO.md.
 //!
 //! Five of the 691 entries deliberately do *not* match `SetDefaults`, and each one is flagged at
 //! its own entry with what source really says and what depends on the difference. Both are

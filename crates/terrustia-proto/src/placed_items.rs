@@ -1,6 +1,7 @@
 //! Which item a placed object gives back when it is mined.
 //!
-//! GENERATED. A framed object — a chair, a chest, a statue, a door — does not name its item
+//! Extracted, by hand, with no generator: see the note at the end of this comment. A framed
+//! object — a chair, a chest, a statue, a door — does not name its item
 //! anywhere in the world. All the world stores is a frame, and the frame names a *style*; what
 //! that style is worth is a separate table for every kind of object.
 //!
@@ -13,6 +14,12 @@
 //! of 573 entries before merging, which is the check that the inversion is sound.
 //!
 //! A style with no entry drops nothing, which is what happens today for all of them.
+//!
+//! **There is no generator for this file, and `just regen` does not touch it.** It is not on
+//! AGENTS.md rule 7's list for that reason. A correction here is made in place, by hand, citing the
+//! `Item.SetDefaults` entry it comes from. Said plainly because this comment used to open with the
+//! word GENERATED, which would tell a reader either to leave a wrong number alone or to expect a
+//! regeneration that never comes.
 //!
 //! **This is not the same question as "what does mining give".** Grass seeds place grass; mining
 //! grass gives dirt. Of 241 plain blocks in both this and [`crate::tile_drops`], 223 agree and 18

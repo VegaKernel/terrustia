@@ -278,7 +278,70 @@ both generators to emit exactly what is committed rather than touching either ta
   (1,197), `game/npc.rs` (1,179), `game/npc_ai.rs` (1,164), `term.rs` (1,154), `game/ai/town.rs`
   (1,150), `game/buffs.rs` (1,136), `game/ai/critter.rs` (1,123), `game/army.rs` (1,088). The
   generated proto tables are excluded: codegen output, never hand-edited, size is fine.
-- **The one dependency cut**: hand-roll UPnP to drop `igd-next` (see the dependency section below).
+- **Feature-cohesive layout and a periodic hygiene scan** (requested 2026-08-31, explicitly lower
+  priority than parity work and never allowed to derail it). The dense-file list above is organised
+  by size; this is the layer above it, organised by subject. A reader who wants to know how Martian
+  Madness works should find it in one place rather than tracing it through `event.rs`,
+  `invasion.rs`, `moons.rs`, `spawn.rs`, `systems.rs`, `ai/hardmode/saucer.rs` and `npc_params.rs`.
+  The `game/server/` split by responsibility is the precedent that worked.
+
+  Two guardrails, because a reorganisation that churns a file without making anything clearer is
+  pure cost. First, size alone is not a reason: a long file implementing one algorithm transcribed
+  faithfully from vanilla is not a problem, and moving transcribed code away from the shape of its
+  source makes every future parity check harder. Second, the hot files (`game/server/systems.rs`,
+  `dispatch.rs`, `game/ai/`) are under near-constant edit, so any move touching them is sequenced
+  after the wave that owns them, never during.
+
+  The periodic scan is the durable half: files past a line threshold, modules with too many inbound
+  dependencies, exact-body-hash duplicate helpers (name matching is not enough, an earlier pass
+  found eleven copies of one helper that turned out to be **two** subtly different helpers whose
+  merge would have been a behaviour change), doc comments naming a file or function that no longer
+  exists, and `pub` items with no reader outside their own module. Most of that is a script; the
+  last one is better served by `unreachable_pub` on `crates/terrustia` alone, never on
+  `terrustia-proto`, whose public surface is the whole point of the crate.
+
+  **The first scan already found four things worth acting on** (2026-08-31, full detail in
+  `.scratch/audit-2026-08-30/HYGIENE.md`):
+
+  1. **The dense-file list above is measured on the wrong number.** It counts total lines including
+     `#[cfg(test)]` bodies. By production lines, **ten of its seventeen entries are already under
+     1,000** and should come off: `world/wiring.rs` is 1,690 production against 1,626 test, not
+     2,575. Meanwhile the two largest production files in the tree are absent from it entirely,
+     `game/server/systems.rs` (6,358) and `game/server/mod.rs` (2,642), the latter being the file
+     Lane A meant to leave thin.
+  2. **Stale prose.** About 190 references to `game/server.rs` survive the Lane A split, across code
+     comments, `docs/*.md` (one of them a link that 404s) and AGENTS.md. Many sit in files under
+     active edit, so this is a single sweep to run once the parity lanes land, not piecemeal.
+  3. **`docs/generated-tables.md` documents a workflow that no longer exists**: a runnable command
+     block invoking ten `tools/gen_*.py` scripts that Lane H deleted.
+  4. **Table provenance, fixed in part.** `npc_data.rs`, `tile_object.rs` and `placed_items.rs`
+     (21,768 lines together) described themselves as generated while having **no generator**, and
+     none is on rule 7's list. So `just regen` never touched them, yet a reader seeing "GENERATED"
+     would either refuse to correct a wrong number or expect a regeneration to preserve their fix.
+     `npc_data.rs` was in fact hand-edited on 2026-08-31, correctly, in a file whose header forbade
+     it. That is the same trap Lane H hit with `shimmer.rs` and `travel_shop.rs`. The three headers
+     now say plainly that no generator exists and corrections are made in place with a citation.
+     **Writing real generators for them remains open** and is the proper fix.
+
+  **The owner's own example, Martian Madness in its own folder, is declined with reasons.**
+  `game/ai/mod.rs::run` is a `match npc.stats.ai_style` mirroring vanilla's `NPC.AI()` switch arm for
+  arm, and every module under `game/ai/` is named for the style it implements. A `martian/` folder
+  would cut `invasion.rs` in half (the probe is Martian, the Flying Dutchman is Pirate) and
+  `charger.rs` too (the drone is Martian, the Solar corite is the Lunar event), leaving the tree half
+  indexed by style and half by event, and moving transcribed code away from the shape of its source.
+  `game/ai/army/` exists only because the Old One's Army roster happens to share a style band, which
+  does not generalise. What Martian Madness actually needs is the subsystem map (now written down)
+  and the roughly 140 lines of orchestration currently scattered across five ranges of `systems.rs`,
+  which the `systems.rs` split below delivers properly.
+
+  Three splits proposed, in order: `panel/mod.rs` (2,139 production lines, no in-file tests, not
+  transcribed code) by resource, **before** Lane E adds its views; `game/{housing,arrivals,rescues}.rs`
+  into `game/town/`, **before** the newly-gated happiness and pricing work needs a home; and
+  `systems.rs` into `game/server/systems/` along its already-contiguous feature bands, **after** the
+  parity lanes let go of it. Explicitly do not touch: `wiring.rs` (one algorithm from `Wiring.cs`),
+  `wld.rs` and `wld_save.rs` (sequential readers in the file format's own order), `npc_params.rs`
+  (banded by AI style on purpose, which is exactly why its Martian constants sit 2,300 lines apart),
+  `game/spawn.rs`, and all of `game/ai/`.
   Scheduled in-campaign but not a release gate; its worst failure is a boot convenience that
   already falls back to a logged manual-port-forward message.
 - **Performance discipline**: maintain the benchmarks, measure meaningful changes, reject confirmed
