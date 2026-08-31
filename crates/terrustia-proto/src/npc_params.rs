@@ -1770,7 +1770,14 @@ pub const EYE_SPIN_RAMP: f32 = 0.005;
 pub const EYE_SPIN_MAX: f32 = 0.5;
 
 /// Its damage and defence once it has split.
+///
+/// The damage is a pre-scaling figure that Expert Mode lerps *down* before the difficulty
+/// multiplier is applied (`NPC.cs:20447-20461`): 23 in classic, 18 in Expert and Master, and 20 in
+/// the `flag3` band where it is nearly dead. The multiplier is what makes an Expert one hit harder
+/// (18 x 2 = 36), not the base figure.
 pub const EYE_SECOND_FORM_DAMAGE: i32 = 23;
+pub const EYE_SECOND_FORM_DAMAGE_EXPERT: i32 = 18;
+pub const EYE_SECOND_FORM_DAMAGE_EXPERT_LOW: i32 = 20;
 pub const EYE_SECOND_FORM_DEFENSE: i32 = 0;
 /// Expert Mode strips even more armour once it is nearly dead (`flag2`/`flag3` in source, each
 /// overwriting the last since the lower threshold always implies the higher one).

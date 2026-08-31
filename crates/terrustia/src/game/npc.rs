@@ -391,6 +391,32 @@ impl Npc {
         self.life > 0
     }
 
+    /// What touching this one costs right now, the live equivalent of vanilla's `NPC.damage`.
+    ///
+    /// Vanilla keeps two numbers: `defDamage`, fixed at spawn once `ScaleStats` has applied the
+    /// world's difficulty (`NPC.cs:18197`), and `damage`, which an AI routine is free to move for
+    /// the phase it is in (`defense *= 2; damage *= 2;` for the Prime's spin, `NPC.cs:27938-27939`).
+    /// Contact reads the moved one (`Player.cs:31623` takes `Main.npc[i].damage` straight). Here
+    /// `stats.damage` is the fixed one and [`Self::damage_bonus`] the routine's multiplier, so this
+    /// is the product, truncated the way every one of vanilla's own `damage = (int)(defDamage * x)`
+    /// writes truncate.
+    pub fn contact_damage(&self) -> i32 {
+        (self.stats.damage as f32 * self.damage_bonus) as i32
+    }
+
+    /// Set [`Self::damage_bonus`] from a plain vanilla-normal damage number.
+    ///
+    /// Some routines name an absolute figure rather than a multiple: Plantera's second form "hits
+    /// for 70" (`NPC.cs:32209`). Vanilla writes those through `GetAttackDamage_ScaledByDifficulty`
+    /// (`NPC.cs:7063`), which applies the difficulty multiplier itself, so the figure is a
+    /// pre-scaling one. `stats.damage` has already been scaled once, so the bonus has to be measured
+    /// against the table's raw damage: dividing by the scaled value would cancel the world's
+    /// difficulty straight back out and leave an expert Plantera hitting for a classic 70.
+    pub fn set_contact_damage(&mut self, normal_damage: i32) {
+        let base = npc_stats(self.npc_type).map_or(1, |s| s.damage).max(1);
+        self.damage_bonus = normal_damage as f32 / base as f32;
+    }
+
     /// The per-player stat-scaling factor this NPC was scaled for, `NPC.GetMyBalance`
     /// (`NPC.cs:18518-18526`): one for a lone player, climbing with the crowd it spawned against
     /// (`GetStatScalingFactors`). Bosses read it to speed their fights up on a busy server; a

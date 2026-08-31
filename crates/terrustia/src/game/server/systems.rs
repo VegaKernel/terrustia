@@ -1282,10 +1282,13 @@ impl GameServer {
             // the player's left edge, so contact knockback shoved the player the wrong way.
             let player_centre = box_at.0 + box_size.0 / 2.0;
 
-            // An enemy you are standing in.
+            // An enemy you are standing in. The skip is on the *live* damage, as vanilla's own
+            // `Main.npc[i].damage <= 0` is (`Player.cs:31564`), so a routine that has zeroed its
+            // damage for the phase it is in - a Big Mimic that has given up, say - is walked
+            // through rather than merely hit for the table's minimum of one.
             let hit = self.npcs.iter().find(|(_, npc)| {
                 !npc.stats.friendly
-                    && npc.stats.damage > 0
+                    && npc.contact_damage() > 0
                     && npc.is_alive()
                     && npc.position.0 < box_at.0 + box_size.0
                     && npc.position.0 + npc.width() > box_at.0
@@ -1293,11 +1296,15 @@ impl GameServer {
                     && npc.position.1 + npc.height() > box_at.1
             });
             if let Some((index, npc)) = hit {
-                // Contact damage is the NPC's own `damage`, which `ScaleStats` has already scaled by
-                // difficulty at spawn, so no further multiplier here (`Player.cs:31623`, which reads
+                // Contact damage is the NPC's *live* `damage` (`Player.cs:31623` reads
                 // `Main.npc[i].damage` straight, times a GetMeleeCollisionData multiplier we leave
-                // at one and a DamageVar the owning client rolls for itself).
-                let damage = npc.stats.damage;
+                // at one and a DamageVar the owning client rolls for itself). Vanilla's live number
+                // is the spawn-scaled `defDamage` as the routine currently has it, which is
+                // [`Npc::contact_damage`]: the difficulty scaling from `ScaleStats` plus whatever
+                // phase multiplier the AI is holding. Reading `stats.damage` here instead dropped
+                // every one of those phases on the floor, so a Prime spin hit like a hover and a
+                // Mothron chase hit twice as hard as it should.
+                let damage = npc.contact_damage();
                 let direction = if npc.center().0 < player_centre {
                     1
                 } else {
@@ -1400,7 +1407,7 @@ impl GameServer {
             let attacker = self.npcs.iter().find(|(other, n)| {
                 *other != index
                     && !n.stats.friendly
-                    && n.stats.damage > 0
+                    && n.contact_damage() > 0
                     && n.is_alive()
                     && n.position.0 < at.0 + size.0
                     && n.position.0 + n.width() > at.0
@@ -1410,7 +1417,9 @@ impl GameServer {
             let Some((_, enemy)) = attacker else {
                 continue;
             };
-            let (damage, from_x) = (enemy.stats.damage, enemy.center().0);
+            // The live number again, not the table's: a rolling tortoise that walks through a town
+            // hits the residents as hard as it hits a player.
+            let (damage, from_x) = (enemy.contact_damage(), enemy.center().0);
             let Some(resident) = self.npcs.get_mut(index) else {
                 continue;
             };
@@ -7488,6 +7497,84 @@ mod godmode {
             !blocked,
             "a godmoded hit reports no strike, so no debuff follows"
         );
+    }
+
+    /// BS3-B1: contact damage is the *live* number, so the phase multiplier a routine wrote
+    /// actually lands. `Player.cs:31623` reads `Main.npc[i].damage`, which is exactly the field
+    /// `NPC.cs:27938-27939` has just doubled for the Prime's spin, and Mothron's chase has just
+    /// halved (`NPC.cs:38387`). This server keeps the fixed half in `stats.damage` and the routine's
+    /// half in `damage_bonus`, and read only the first: every one of the thirteen production writes
+    /// of `damage_bonus` was discarded. Reverting `contact_damage()` to `npc.stats.damage` turns
+    /// both halves of this red - the doubled hit reads as a plain one, and the given-up Big Mimic
+    /// still hits for full.
+    #[test]
+    fn contact_damage_carries_the_routines_phase_multiplier() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let pos = (1000.0, 1000.0);
+        server.players[0].as_mut().unwrap().position = pos;
+
+        // A Demon Eye sitting on the player, mid-way through some phase that hits twice as hard.
+        let index = server.npcs.spawn(2, pos).expect("a slot");
+        let base = {
+            let npc = server.npcs.get_mut(index).expect("just spawned");
+            npc.damage_bonus = 2.0;
+            npc.stats.damage
+        };
+        server.tick_contact_damage();
+        let after_double = server.players[0].as_ref().unwrap().life;
+        assert_eq!(
+            100 - after_double,
+            (base * 2) as i16,
+            "a doubled phase has to hit for double"
+        );
+
+        // And a routine that has given up hits for nothing at all, the way a Big Mimic that has
+        // stopped fighting does (`big_mimic.rs`, `damage_bonus = 0.0`).
+        {
+            let p = server.players[0].as_mut().unwrap();
+            p.life = 100;
+            p.immune_ticks = 0;
+        }
+        server
+            .npcs
+            .get_mut(index)
+            .expect("still there")
+            .damage_bonus = 0.0;
+        server.tick_contact_damage();
+        assert_eq!(
+            server.players[0].as_ref().unwrap().life,
+            100,
+            "a zeroed phase does no damage"
+        );
+    }
+
+    /// BS3-B1, the other half: a routine that names an absolute vanilla-normal figure is naming a
+    /// *pre-scaling* one, because vanilla writes those through `GetAttackDamage_ScaledByDifficulty`
+    /// (`NPC.cs:7063`), which applies the difficulty multiplier itself. Plantera's second form
+    /// "hits for 70" (`NPC.cs:32209`), so an expert one hits for 140. Measuring the bonus against
+    /// the already-scaled `stats.damage` instead of the table's raw damage cancels the world's
+    /// difficulty straight back out and leaves it at a classic 70.
+    #[test]
+    fn an_absolute_phase_damage_still_scales_with_the_worlds_difficulty() {
+        let mut classic = GameServer::new(Config::default(), tiny_world());
+        let mut expert = GameServer::new(Config::default(), tiny_world());
+        expert.world.game_mode = 1;
+        for server in [&mut classic, &mut expert] {
+            let difficulty = server.effective_difficulty();
+            server.npcs.set_scaling(crate::game::npc::Scaling {
+                difficulty,
+                players: 1,
+            });
+        }
+
+        let hits = |server: &mut GameServer| {
+            let index = server.npcs.spawn(262, (1000.0, 1000.0)).expect("Plantera");
+            let npc = server.npcs.get_mut(index).expect("just spawned");
+            npc.set_contact_damage(terrustia_proto::npc_params::PLANTERA_SECOND_DAMAGE);
+            npc.contact_damage()
+        };
+        assert_eq!(hits(&mut classic), 70, "classic: the plain figure");
+        assert_eq!(hits(&mut expert), 140, "expert: doubled by the difficulty");
     }
 
     /// An expert boss hands every player its own bag over packet 90 and drops no loose coins (they

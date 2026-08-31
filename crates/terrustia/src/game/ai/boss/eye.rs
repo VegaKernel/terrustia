@@ -23,8 +23,9 @@ use terrustia_proto::npc_params::{
     EYE_DASH_DRAG_FIRST, EYE_DASH_DRAG_SECOND, EYE_DASH_DRIVE, EYE_DASH_FIRST, EYE_DASH_SECOND,
     EYE_DASH_TICKS_FIRST, EYE_DASH_TICKS_SECOND, EYE_DASHES, EYE_HOVER_FIRST,
     EYE_HOVER_FIRST_EXPERT, EYE_HOVER_SECOND, EYE_HOVER_TICKS_FIRST, EYE_HOVER_TICKS_FIRST_EXPERT,
-    EYE_HOVER_TICKS_SECOND, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DEFENSE,
-    EYE_SECOND_FORM_DEFENSE_LOW, EYE_SECOND_FORM_DEFENSE_LOW_AT, EYE_SECOND_FORM_DEFENSE_VERY_LOW,
+    EYE_HOVER_TICKS_SECOND, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DAMAGE_EXPERT,
+    EYE_SECOND_FORM_DAMAGE_EXPERT_LOW, EYE_SECOND_FORM_DEFENSE, EYE_SECOND_FORM_DEFENSE_LOW,
+    EYE_SECOND_FORM_DEFENSE_LOW_AT, EYE_SECOND_FORM_DEFENSE_VERY_LOW,
     EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT, EYE_SERVANT_EVERY, EYE_SERVANT_EVERY_EXPERT,
     EYE_SERVANT_RANGE, EYE_SERVANT_SPEED, EYE_SERVANT_SPEED_EXPERT, EYE_SPIN_MAX, EYE_SPIN_RAMP,
     EYE_SPLIT_AT, EYE_SPLIT_AT_EXPERT, EYE_SPLIT_TICKS, SERVANT_OF_CTHULHU,
@@ -149,15 +150,24 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     // actually reads, not the type's own baseline stats.
     if second {
         npc.defense = EYE_SECOND_FORM_DEFENSE;
+        // `NPC.cs:20446-20461`: the classic figure is 23, but Expert lerps it *down* to 18 before
+        // the difficulty multiplier doubles it, and only the near-dead `flag3` band pushes it back
+        // up to 20. `GetAttackDamage_LerpBetweenFinalValues` clamps outside classic..expert, so
+        // master reads the same 18 as expert and journey the same 23 as classic; the following
+        // `GetAttackDamage_CappedAtMaster` is then the ordinary difficulty scaling for every mode a
+        // world can actually be in.
+        let mut normal = EYE_SECOND_FORM_DAMAGE;
         if expert {
+            normal = EYE_SECOND_FORM_DAMAGE_EXPERT;
             let health = npc.life as f32 / npc.life_max as f32;
             if health < EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT {
                 npc.defense = EYE_SECOND_FORM_DEFENSE_VERY_LOW;
+                normal = EYE_SECOND_FORM_DAMAGE_EXPERT_LOW;
             } else if health < EYE_SECOND_FORM_DEFENSE_LOW_AT {
                 npc.defense = EYE_SECOND_FORM_DEFENSE_LOW;
             }
         }
-        npc.damage_bonus = EYE_SECOND_FORM_DAMAGE as f32 / npc.stats.damage.max(1) as f32;
+        npc.set_contact_damage(normal);
     }
 
     if npc.ai[1] == HOVERING {
