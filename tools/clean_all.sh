@@ -11,6 +11,19 @@
 #
 # Cleaning a worktree an agent is actively building in destroys its build state and wastes the
 # rebuild, so pass --keep for anything still running.
+#
+# DO NOT point several worktrees at one CARGO_TARGET_DIR to save space. It looks like the obvious
+# fix and it silently produces wrong builds. Cargo's unit hash for a workspace-local crate does not
+# include the worktree path, so every worktree's `terrustia-proto` writes the same artefact filename
+# and the last writer wins: the next worktree's `terrustia` then links against a sibling's proto
+# crate. The lock cargo takes on a target directory makes concurrent builds serialise, which is a
+# different guarantee from making them correct, and it is easy to mistake one for the other.
+#
+# The failure is quiet and misleading rather than loud. It surfaced here as a reproducible
+# `unresolved import terrustia_proto::happiness` in a worktree whose source did define it, with
+# `cargo test -p terrustia-proto` passing while `cargo test --workspace` failed. Identical artefact
+# hashes were confirmed across both directories. If several trees must build at once, give each its
+# own target directory and clean it afterwards, which is what this script is for.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
