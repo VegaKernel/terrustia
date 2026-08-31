@@ -16,15 +16,16 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    PRIME_ABOVE_MAX, PRIME_ABOVE_MIN, PRIME_CANNON, PRIME_DRIFT, PRIME_DRIFT_CAP,
-    PRIME_DRIFT_CAP_EXPERT, PRIME_DRIFT_EXPERT, PRIME_ENRAGED_GAIN, PRIME_ENRAGED_MAX,
-    PRIME_ENRAGED_MIN, PRIME_ENRAGED_SPEED, PRIME_HOVER_TICKS, PRIME_LASER, PRIME_LEAVE_CAP,
-    PRIME_LEAVE_SINK, PRIME_LIFT, PRIME_LIFT_CAP, PRIME_LIFT_CAP_EXPERT, PRIME_LIFT_EXPERT,
-    PRIME_LIMB_FOUND, PRIME_LIMB_LOST, PRIME_LIMB_RETURN_X, PRIME_LIMB_RETURN_X_CAP,
-    PRIME_LIMB_RETURN_Y, PRIME_LIMB_RETURN_Y_CAP, PRIME_LOSE_RANGE, PRIME_SAW,
-    PRIME_SHOT_SPREAD_STEPS, PRIME_SLACK, PRIME_SPIN_DAMAGE, PRIME_SPIN_DEFENSE,
-    PRIME_SPIN_RANGE_FROM, PRIME_SPIN_RANGE_GAIN, PRIME_SPIN_RANGE_STEP, PRIME_SPIN_SPEED,
-    PRIME_SPIN_SPEED_EXPERT, PRIME_SPIN_TICKS, PRIME_VICE, PrimeLimb, prime_limb,
+    PRIME_ABOVE_MAX, PRIME_ABOVE_MIN, PRIME_ARM_HEAD_START, PRIME_CANNON, PRIME_DRIFT,
+    PRIME_DRIFT_CAP, PRIME_DRIFT_CAP_EXPERT, PRIME_DRIFT_EXPERT, PRIME_ENRAGED_GAIN,
+    PRIME_ENRAGED_MAX, PRIME_ENRAGED_MIN, PRIME_ENRAGED_SPEED, PRIME_ENRAGED_STAT,
+    PRIME_HOVER_TICKS, PRIME_LASER, PRIME_LEAVE_SINK, PRIME_LIFT, PRIME_LIFT_CAP,
+    PRIME_LIFT_CAP_EXPERT, PRIME_LIFT_EXPERT, PRIME_LIMB_FOUND, PRIME_LIMB_LOST,
+    PRIME_LIMB_RETURN_X, PRIME_LIMB_RETURN_X_CAP, PRIME_LIMB_RETURN_Y, PRIME_LIMB_RETURN_Y_CAP,
+    PRIME_LOSE_RANGE, PRIME_SAW, PRIME_SHOT_SPREAD_STEPS, PRIME_SLACK, PRIME_SPIN_DAMAGE,
+    PRIME_SPIN_DEFENSE, PRIME_SPIN_RANGE_FROM, PRIME_SPIN_RANGE_GAIN, PRIME_SPIN_RANGE_GAIN_FIRST,
+    PRIME_SPIN_RANGE_STEP, PRIME_SPIN_SPEED, PRIME_SPIN_SPEED_EXPERT, PRIME_SPIN_TICKS, PRIME_VICE,
+    PrimeLimb, prime_limb,
 };
 
 use super::skeletron::Parent;
@@ -78,18 +79,22 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
         // Side matches vanilla exactly (`NewNPC(..., 128/129/130/131, ...)`, `ai[0]` per call);
         // the consumer that fulfils `Spawn` requests reads a parented spawn's side from the sign
         // of `velocity.0`, the same encoding `skeletron::head`'s own hands already use.
-        for (limb, side) in [
-            (PRIME_CANNON, -1.0),
-            (PRIME_SAW, 1.0),
-            (PRIME_VICE, -1.0),
-            (PRIME_LASER, 1.0),
+        for (limb, side, head_start) in [
+            (PRIME_CANNON, -1.0, None),
+            (PRIME_SAW, 1.0, None),
+            // The Vice and the Laser start their attack timer a hundred and fifty ticks in
+            // (`NPC.cs:27824`, `:27831`, `Main.npc[num508].ai[3] = 150f`). Without it all four arms
+            // wind up and switch together, which turns a boss of four independent limbs into one
+            // limb played four times.
+            (PRIME_VICE, -1.0, Some(PRIME_ARM_HEAD_START)),
+            (PRIME_LASER, 1.0, Some(PRIME_ARM_HEAD_START)),
         ] {
             out.spawn.push(Spawn {
                 npc_type: limb,
                 position: at,
                 velocity: (side, 0.0),
                 parent: Some(Spawn::OWN_PARENT),
-                ai: [None; 4],
+                ai: [None, None, None, head_start],
             });
         }
     }
@@ -116,7 +121,11 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
             npc.velocity.1 *= 0.95;
         }
         npc.velocity.0 *= 0.95;
-        npc.velocity.1 = npc.velocity.1.min(PRIME_LEAVE_CAP);
+        // No terminal speed on the way down. Vanilla's `velocity.Y > 13f` clamp
+        // (`NPC.cs:28100-28103`) lives inside the `IsMechQueenUp` half of this branch, which is the
+        // Mechdusa fight this server does not model; the ordinary one (`NPC.cs:28105-28113`) simply
+        // accelerates away. Capping it here held a departing Prime on screen far longer than it
+        // should have been.
         return out;
     }
     let Some(target) = target else { return out };
@@ -187,9 +196,16 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
             let mut speed = if expert {
                 let mut s = PRIME_SPIN_SPEED_EXPERT;
                 // In expert the spin closes faster the further off you are, in fifty-pixel steps,
-                // so backing away from a spinning Prime does not help.
-                let mut step = PRIME_SPIN_RANGE_FROM;
-                while reach > step && step < 650.0 {
+                // so backing away from a spinning Prime does not help. The *first* step is a
+                // gentler one: `NPC.cs:27970` multiplies by 1.05 past 150 pixels and only then by
+                // 1.1 at each of 200 through 600. Using 1.1 for the first step too made every
+                // expert spin past 150 pixels 4.76% faster than it should be, compounding into
+                // every step above it.
+                if reach > PRIME_SPIN_RANGE_FROM {
+                    s *= PRIME_SPIN_RANGE_GAIN_FIRST;
+                }
+                let mut step = PRIME_SPIN_RANGE_FROM + PRIME_SPIN_RANGE_STEP;
+                while reach > step && step <= 600.0 {
                     s *= PRIME_SPIN_RANGE_GAIN;
                     step += PRIME_SPIN_RANGE_STEP;
                 }
@@ -205,8 +221,14 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
         }
 
         _ => {
-            // Enraged. Nothing can hurt it and it simply runs you down.
-            npc.invulnerable = true;
+            // Enraged, and it simply runs you down. `NPC.cs:28034-28035`: `damage = 9999; defense =
+            // 9999;`, both live numbers, and neither is `dontTakeDamage`. The 9999 armour is what
+            // makes daylight a fail-state (`damage_taken` floors at one, so it is about four and a
+            // half thousand hits), and the 9999 damage is what makes touching it fatal. This set
+            // `invulnerable` instead and left the damage at the table's, so the boss could not be
+            // hurt at all but was also no more dangerous to stand next to than a hovering one.
+            npc.defense = PRIME_ENRAGED_STAT;
+            npc.damage_bonus = PRIME_ENRAGED_STAT as f32 / npc.stats.damage.max(1) as f32;
             npc.rotation += f32::from(npc.direction) * 0.3;
             let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
             let reach = dx.hypot(dy).max(1.0);
@@ -547,9 +569,75 @@ mod tests {
 
         prime_head(&mut h, &w);
         assert_eq!(h.ai[1], head_state::ENRAGED);
-        assert!(h.invulnerable, "nothing can kill it now");
+        // `NPC.cs:28034-28035`: nine thousand armour and nine thousand damage, both live numbers,
+        // and neither of them `dontTakeDamage`. This asserted `invulnerable`, which the routine set
+        // instead, and left the damage at the table's: an enraged Prime could not be hurt at all
+        // but was no more dangerous to stand next to than a hovering one.
+        assert_eq!(h.defense, PRIME_ENRAGED_STAT, "nothing is getting through");
+        assert_eq!(
+            h.contact_damage(),
+            PRIME_ENRAGED_STAT,
+            "and touching it is fatal"
+        );
         let speed = h.velocity.0.hypot(h.velocity.1);
         assert!(speed >= PRIME_ENRAGED_MIN, "and it comes at you: {speed}");
+    }
+
+    /// The expert spin's first range step is the gentle one.
+    ///
+    /// `NPC.cs:27968-28008` multiplies by 1.05 past 150 pixels and only then by 1.1 at each of 200
+    /// through 600. Using 1.1 for the first step too made every expert spin past 150 pixels 4.76%
+    /// fast, compounding through every step above it. Setting `PRIME_SPIN_RANGE_GAIN_FIRST` back to
+    /// 1.1 turns this red.
+    #[test]
+    fn the_expert_spins_first_range_step_is_the_gentle_one() {
+        let tiles = Sky(HashMap::new());
+        // Measured from the head's own centre, so the range bands are the ones under test rather
+        // than an accident of where its corner happens to sit.
+        let speed_at = |reach: f32| {
+            let mut h = piece(PRIME_HEAD, 0.0, 0.0);
+            h.ai[0] = 1.0;
+            h.ai[1] = head_state::SPINNING;
+            let (cx, cy) = h.center();
+            let mut w = night(&tiles, Some((cx + reach, cy)));
+            w.conditions.expert = true;
+            prime_head(&mut h, &w);
+            h.velocity.0.hypot(h.velocity.1)
+        };
+        let base = PRIME_SPIN_SPEED_EXPERT;
+        let near = speed_at(100.0);
+        assert!((near - base).abs() < 0.01, "inside 150 it is flat: {near}");
+        let first = speed_at(175.0);
+        assert!(
+            (first - base * PRIME_SPIN_RANGE_GAIN_FIRST).abs() < 0.01,
+            "the first step is 1.05, got {first}"
+        );
+        let second = speed_at(225.0);
+        assert!(
+            (second - base * PRIME_SPIN_RANGE_GAIN_FIRST * PRIME_SPIN_RANGE_GAIN).abs() < 0.01,
+            "and the second 1.1 on top of it, got {second}"
+        );
+    }
+
+    /// The Vice and the Laser start their attack timer a hundred and fifty ticks in
+    /// (`NPC.cs:27824`, `:27831`), so the four arms do not wind up and switch in lockstep. Without
+    /// it a boss of four independent limbs is one limb played four times.
+    #[test]
+    fn the_vice_and_the_laser_get_a_head_start() {
+        let tiles = Sky(HashMap::new());
+        let mut h = piece(PRIME_HEAD, 0.0, 0.0);
+        let w = night(&tiles, Some((600.0, 0.0)));
+        let arms = prime_head(&mut h, &w).spawn;
+
+        let start_of = |npc_type: u16| {
+            arms.iter()
+                .find(|s| s.npc_type == npc_type)
+                .and_then(|s| s.ai[3])
+        };
+        assert_eq!(start_of(PRIME_VICE), Some(PRIME_ARM_HEAD_START));
+        assert_eq!(start_of(PRIME_LASER), Some(PRIME_ARM_HEAD_START));
+        assert_eq!(start_of(PRIME_CANNON), None, "and the other two do not");
+        assert_eq!(start_of(PRIME_SAW), None);
     }
 
     /// An arm holds station while the head hovers and comes for you while it spins.

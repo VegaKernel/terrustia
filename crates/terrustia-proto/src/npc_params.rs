@@ -3365,15 +3365,26 @@ pub const PRIME_SPIN_SPEED: f32 = 2.0;
 pub const PRIME_SPIN_SPEED_EXPERT: f32 = 6.0;
 pub const PRIME_SPIN_RANGE_STEP: f32 = 50.0;
 pub const PRIME_SPIN_RANGE_FROM: f32 = 150.0;
+/// The first step is gentler than the rest: 1.05 past 150 pixels, then 1.1 at each of 200 through
+/// 600 (`NPC.cs:27968-28008`). Reading the first as 1.1 too made every expert spin past 150 pixels
+/// 4.76% fast, and the error compounded through every step above it.
+pub const PRIME_SPIN_RANGE_GAIN_FIRST: f32 = 1.05;
 pub const PRIME_SPIN_RANGE_GAIN: f32 = 1.1;
-/// Daylight enrages it: unkillable, and it runs you down.
+/// Daylight enrages it: `damage = 9999; defense = 9999;` (`NPC.cs:28034-28035`), and it runs you
+/// down. Both are live numbers, and neither is `dontTakeDamage`: the armour is what makes daylight
+/// a fail-state rather than a nuisance, and the damage is what makes touching it fatal.
+pub const PRIME_ENRAGED_STAT: i32 = 9999;
 pub const PRIME_ENRAGED_SPEED: f32 = 10.0;
 pub const PRIME_ENRAGED_GAIN: f32 = 100.0;
 pub const PRIME_ENRAGED_MIN: f32 = 8.0;
 pub const PRIME_ENRAGED_MAX: f32 = 32.0;
-/// Losing you entirely sends it down and away.
+/// Losing you entirely sends it down and away, with no terminal speed: vanilla's own 13-pixel clamp
+/// (`NPC.cs:28100-28103`) is inside the `IsMechQueenUp` half of that branch, and the ordinary fight
+/// simply accelerates (`NPC.cs:28105-28113`).
 pub const PRIME_LEAVE_SINK: f32 = 0.1;
-pub const PRIME_LEAVE_CAP: f32 = 13.0;
+/// How far into their attack timer the Vice and the Laser start, so the four arms do not switch in
+/// lockstep (`NPC.cs:27824`, `:27831`, `ai[3] = 150f`).
+pub const PRIME_ARM_HEAD_START: f32 = 150.0;
 pub const PRIME_LOSE_RANGE: f32 = 6000.0;
 
 /// One limb's numbers.
@@ -4207,8 +4218,10 @@ pub const MOON_LORD_SCRIPTS: [[(u8, i32); 5]; 3] = [
 pub const MOON_LORD_BELOW: f32 = 130.0;
 pub const MOON_LORD_SPEED: f32 = 8.0;
 pub const MOON_LORD_ACCEL: f32 = 0.5;
-/// Its parts stand this far out from the core.
-pub const MOON_LORD_HAND_OUT: f32 = 400.0;
+/// Its parts stand this far out from the core: `Center + (350 * side, -100)` for a hand
+/// (`NPC.cs:42073`, `:42094`) and `Center + (0, -400)` for the head (`NPC.cs:42534`). The hands
+/// were fifty pixels too far out, which widens the whole arena the fight is fought in.
+pub const MOON_LORD_HAND_OUT: f32 = 350.0;
 pub const MOON_LORD_HAND_UP: f32 = 100.0;
 pub const MOON_LORD_HEAD_UP: f32 = 400.0;
 /// The opening and the death both take a second.

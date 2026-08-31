@@ -279,15 +279,27 @@ pub fn eye_socket(
 
     // It rides its station on the core.
     let (bx, by) = core.center();
-    let station = if head {
-        (bx, by - MOON_LORD_HEAD_UP)
+    if head {
+        // The head does not travel to its station, it *is* its station: vanilla assigns the centre
+        // outright and zeroes the velocity every tick (`NPC.cs:42533-42534`). Easing toward it left
+        // the head trailing the core through every move, which is visible on a boss that follows
+        // the player about, and put the deathray's origin behind where it should have been.
+        npc.velocity = (0.0, 0.0);
+        let (w, h) = (npc.width(), npc.height());
+        npc.position = (bx - w / 2.0, by - MOON_LORD_HEAD_UP - h / 2.0);
     } else {
+        // A hand eases toward its own station. Vanilla flies it there with `SimpleFlyMovement`
+        // and lets each attack pull it off station on its own path (the sphere barrage's
+        // `SmoothStep` swing out to `400 * side, -60`, for one); those per-attack paths are not
+        // modelled here, so a hand holds its station throughout, which is the narrowing this
+        // module's projectile-gathering note already carries.
+        //
         // `ai[2]` is which hand this is.
         let side = if npc.ai[2] >= 1.0 { 1.0 } else { -1.0 };
-        (bx + side * MOON_LORD_HAND_OUT, by - MOON_LORD_HAND_UP)
-    };
-    let (cx, cy) = npc.center();
-    npc.velocity = ((station.0 - cx) * 0.2, (station.1 - cy) * 0.2);
+        let station = (bx + side * MOON_LORD_HAND_OUT, by - MOON_LORD_HAND_UP);
+        let (cx, cy) = npc.center();
+        npc.velocity = ((station.0 - cx) * 0.2, (station.1 - cy) * 0.2);
+    }
 
     // BS3-M3: the eyelid. Vanilla decides a socket's damageability from the eye's own openness,
     // read off *last* tick's lid counter before the attack runs (`dontTakeDamage = frameCounter >=
