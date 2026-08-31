@@ -695,13 +695,11 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             34, // CursedSkull
             71, // DungeonSlime
         ],
-        (_, Ocean) => &[
-            67,  // Crab
-            63,  // BlueJellyfish
-            64,  // PinkJellyfish
-            65,  // Shark
-            221, // Squid
-        ],
+        // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
+        // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
+        // A dry beach tile falls through to the ordinary surface pool the same way vanilla's does,
+        // which is why standing on the shore at night still brings zombies.
+        (depth, Ocean) => pool(depth, Forest, day),
         (Surface, Corruption) => &[
             6,  // EaterofSouls
             7,  // DevourerHead
@@ -980,25 +978,92 @@ pub const GROUND_SCAN: i32 = 30;
 /// column there is usually one standable row in a 90-tile band, so picking blind would almost
 /// never find it.
 pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
-    (from_y..from_y + GROUND_SCAN).find(|&y| {
+    find_ground_within(world, x, from_y, from_y + GROUND_SCAN)
+}
+
+/// The same descent, stopped at an explicit row rather than a fixed distance.
+///
+/// `FindSpawnTile` (`NPC.cs:990-993`) walks `for (; j < maxTilesY && j < spawnArea.Bottom && !solid;
+/// j++)`, so its budget is "however far it is to the bottom of the spawn box", not a constant. From
+/// the top of the box that is a full `2 * SPAWN_RANGE_Y` (94 tiles) rather than [`GROUND_SCAN`]'s
+/// 30, which is the difference between reaching an ocean floor and giving up in the water above it.
+fn find_ground_within(world: &World, x: i32, from_y: i32, bottom: i32) -> Option<i32> {
+    (from_y..bottom.min(world.height())).find(|&y| {
         let tile = world.tile(x, y);
         tile.is_active() && solid(tile.block)
     })
 }
 
 /// Whether an NPC can stand at this tile: open space with something solid underneath.
+///
+/// The open-space half is `NPC.CanSpawnInTile` (`NPC.cs:5431-5442`), which rejects exactly two
+/// things: an active solid tile, and lava at *any* depth. Water is explicitly allowed, which is
+/// what lets a shark exist.
+///
+/// This used to be `tile.liquid > 200`, a test blind to which liquid it was looking at, so it had
+/// both halves backwards at once: deep water was refused where the game permits it (the whole ocean
+/// roster could only appear on a shoreline strip) and shallow lava was accepted where the game
+/// refuses it at a single drop.
 fn has_room(world: &World, x: i32, y: i32) -> bool {
     for dy in 0..3 {
         let tile = world.tile(x, y - dy);
         if tile.is_active() && solid(tile.block) {
             return false;
         }
-        if tile.liquid > 200 {
-            return false; // deep water is not a walking spot
+        // `Tile.anyLava()`: the kind, not the depth. `liquid_kind` is only meaningful when there is
+        // some liquid there, hence the amount test first.
+        if tile.liquid > 0 && tile.liquid_kind == terrustia_proto::tile::Liquid::Lava {
+            return false;
         }
     }
     let floor = world.tile(x, y + 1);
     floor.is_active() && solid(floor.block)
+}
+
+/// Whether a spawn point stands in water deep enough to draw the aquatic roster.
+///
+/// `NPC.SetSpawnFlagsForChosenTile` (`NPC.cs:1058`): `waterTile = tile[x, y-1].liquid > 0 &&
+/// tile[x, y-2].liquid > 0 && tile[x, y-1].liquidType() == 0`, where its `y` is the solid ground
+/// row. Ours is one above that (the row the NPC's feet occupy), so the two tiles to test are `y`
+/// and `y - 1`. Both must be wet, so a single puddle underfoot is not the sea.
+fn water_tile(world: &World, x: i32, y: i32) -> bool {
+    let feet = world.tile(x, y);
+    feet.liquid > 0
+        && world.tile(x, y - 1).liquid > 0
+        && feet.liquid_kind == terrustia_proto::tile::Liquid::Water
+}
+
+/// What a tile of water draws instead of the land pool.
+///
+/// Vanilla keeps the water rosters in their own `waterTile` branches ahead of every land branch
+/// (`NPC.cs:1766-2000`), which is why a shark is never on the sand and a zombie is never in the sea.
+/// Two of those branches are transcribed here, being the two whose types this server already
+/// fields:
+///
+/// * the ocean, `waterTile && isOcean` (`NPC.cs:1798-1920`): Shark, Squid, Crab, Pink Jellyfish;
+/// * water below the surface line, `waterTile && spawnTileY > worldSurface` (`NPC.cs:1988-1997`):
+///   Blue Jellyfish.
+///
+/// Deliberately not transcribed, because each would need an NPC this server has no AI for: the
+/// hardmode jungle's Arapaima (157), the hardmode crimson's water pair, the Piranha/Angler Fish
+/// branch at `NPC.cs:1932`, the corrupt and crimson goldfish at `:1999`, and the ocean's own Sea
+/// Snail (220) and Orca (692). An empty slice here means "no water roster for this place", and the
+/// caller falls back to the land pool rather than inventing one.
+pub fn water_pool(depth: Depth, biome: Biome) -> &'static [u16] {
+    match (depth, biome) {
+        (_, Biome::Ocean) => &[
+            65,  // Shark
+            221, // Squid
+            67,  // Crab
+            64,  // PinkJellyfish
+        ],
+        // `spawnTileY > Main.worldSurface`: anything below the surface line, which is every band
+        // this enum has except the surface itself.
+        (Depth::Surface, _) => &[],
+        (_, _) => &[
+            63, // BlueJellyfish
+        ],
+    }
 }
 
 /// Pick spawns for this tick.
@@ -1248,8 +1313,33 @@ pub fn try_spawn(
                 continue;
             }
 
-            // Drop to whatever ground is under the chosen point, then stand on top of it.
-            let Some(ground) = find_ground(world, x, from_y) else {
+            // A house wall is the reason a walled base is safe, and it is tested on the *chosen*
+            // tile before the descent to ground, not on where the descent lands (`NPC.cs:977`):
+            //
+            // ```csharp
+            // if ((Main.tile[num, j].nactive() && Main.tileSolid[Main.tile[num, j].type])
+            //     || (!ignoreSafeWalls && Main.wallHouse[Main.tile[num, j].wall])) continue;
+            // ```
+            //
+            // `wall_encloses` is `Main.wallHouse` exactly (all 279 ids, `Main.cs:9880-10745`), which
+            // is why housing and spawn suppression agree about what a wall is: the same set decides
+            // both, in the game and here. `ignoreSafeWalls` is set only inside a lunar pillar's zone
+            // (`NPC.cs:404-409`), an event this server does not field, so it is left out rather than
+            // threaded through as a constant `false`.
+            //
+            // Without this test, a fully walled and fully lit base spawned zombies inside itself.
+            let chosen = world.tile(x, from_y);
+            if (chosen.is_active() && solid(chosen.block))
+                || terrustia_proto::housing::wall_encloses(chosen.wall)
+            {
+                continue;
+            }
+
+            // Drop to whatever ground is under the chosen point, then stand on top of it. The
+            // descent stops at the bottom of the spawn box, as `NPC.cs:990-993` does, rather than a
+            // fixed 30 tiles: from the top of the box that is up to 94 tiles, which is the reach an
+            // ocean needs.
+            let Some(ground) = find_ground_within(world, x, from_y, py + SPAWN_RANGE_Y) else {
                 continue;
             };
             let y = ground - 1;
@@ -1320,6 +1410,13 @@ pub fn try_spawn(
                 // Bones and Dark Casters spawned pre-Skeletron.
                 None if player_biome == Biome::Dungeon && !world.progress.downed_boss3 => {
                     DUNGEON_GUARDIAN
+                }
+                // Standing in water draws the aquatic roster instead of the land one, which is how
+                // vanilla orders it: every `waterTile` branch (`NPC.cs:1766-2000`) sits ahead of
+                // every land branch, so the sea gets sharks and the beach gets zombies.
+                None if water_tile(world, x, y) && !water_pool(depth, player_biome).is_empty() => {
+                    let wet = water_pool(depth, player_biome);
+                    wet[rng.random_range(0..wet.len())]
                 }
                 None => {
                     let biome = player_biome;
@@ -2015,6 +2112,193 @@ mod tests {
         let world = test_world();
         // Deep sky above the terrain, more than the scan depth.
         assert_eq!(find_ground(&world, world.width() / 2, 0), None);
+    }
+
+    /// One playing player standing where the test world's spawn point is, for the whole-loop tests
+    /// below.
+    fn player_at(position: (f32, f32)) -> Vec<Option<Player>> {
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = position;
+        vec![Some(player)]
+    }
+
+    /// A walled base suppresses spawns inside itself (`NPC.cs:977`).
+    ///
+    /// Fails before the fix: the candidate loop had no wall test at all, so a fully walled, fully
+    /// lit base spawned zombies in its own living room. Built as a flat hall with stone walls behind
+    /// every open tile and a stone floor, wide enough that the whole spawn box is inside it.
+    #[test]
+    fn a_walled_base_suppresses_spawns_inside_itself() {
+        let mut world = World::empty(800, 600, "walled");
+        let floor = 300;
+        // A wide, tall hall: solid floor, and every open tile above it backed by a stone wall.
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+            for y in (floor - 120)..floor {
+                let mut walled = terrustia_proto::Tile::AIR;
+                walled.wall = 4; // stone wall, one of `Main.wallHouse`
+                world.set_tile(x, y, walled);
+            }
+        }
+        world.surface = 100;
+        world.rock_layer = 200;
+
+        let npcs = NpcStore::new();
+        let players = player_at(((world.width() / 2) as f32 * 16.0, (floor - 1) as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut seen = 0;
+        for _ in 0..60_000 {
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            )
+            .len();
+        }
+        assert_eq!(seen, 0, "{seen} spawns inside a fully walled base");
+
+        // The same hall with the walls stripped out is not safe, so the test is measuring the wall
+        // and not some other reason nothing could spawn there.
+        for x in 0..world.width() {
+            for y in (floor - 120)..floor {
+                world.set_tile(x, y, terrustia_proto::Tile::AIR);
+            }
+        }
+        let mut open = 0;
+        for _ in 0..60_000 {
+            open += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            )
+            .len();
+        }
+        assert!(open > 0, "an unwalled hall of the same shape should spawn");
+    }
+
+    /// Lava is refused at any depth and water is not refused at all (`NPC.cs:5431-5442`).
+    ///
+    /// Fails before the fix, which tested `liquid > 200` without looking at the kind: it rejected
+    /// deep water the game permits and accepted shallow lava the game forbids.
+    #[test]
+    fn lava_is_refused_at_any_depth_and_water_is_not_refused_at_all() {
+        use terrustia_proto::tile::Liquid;
+        let mut world = World::empty(200, 200, "liquids");
+        let floor = 100;
+        for x in 90..110 {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+        }
+
+        // Dry: room to stand.
+        assert!(has_room(&world, 100, floor - 1));
+
+        // Filled to the brim with water: still room, because a shark lives there.
+        for dy in 1..=3 {
+            world.set_tile(
+                100,
+                floor - dy,
+                terrustia_proto::Tile::AIR.with_liquid(Liquid::Water, 255),
+            );
+        }
+        assert!(
+            has_room(&world, 100, floor - 1),
+            "deep water is where the ocean roster lives",
+        );
+
+        // A single drop of lava, far short of the old 200 threshold, is refused.
+        world.set_tile(
+            100,
+            floor - 1,
+            terrustia_proto::Tile::AIR.with_liquid(Liquid::Lava, 1),
+        );
+        assert!(
+            !has_room(&world, 100, floor - 1),
+            "`anyLava()` is about the kind, not the depth",
+        );
+    }
+
+    /// Water draws the aquatic roster and dry land does not (`NPC.cs:1798`, `:1988`).
+    ///
+    /// Fails before the fix twice over: the ocean roster was in the *land* pool, so sharks appeared
+    /// on dry sand, and `has_room` refused the water they should actually have come from.
+    #[test]
+    fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand() {
+        let ocean_water = water_pool(Depth::Surface, Biome::Ocean);
+        assert!(
+            ocean_water.contains(&65) && ocean_water.contains(&221),
+            "the shark and the squid are the ocean's water roster: {ocean_water:?}",
+        );
+        for &wet in ocean_water {
+            assert!(
+                !pool(Depth::Surface, Biome::Ocean, true).contains(&wet)
+                    && !pool(Depth::Surface, Biome::Ocean, false).contains(&wet),
+                "{wet} is aquatic and must not be drawable from dry ocean sand",
+            );
+        }
+        // Below the surface, still water, a different roster.
+        assert_eq!(water_pool(Depth::Cavern, Biome::Forest), &[63]);
+        assert!(water_pool(Depth::Surface, Biome::Forest).is_empty());
+
+        // And end to end: a player floating in a walled-off sea gets the water roster.
+        let mut world = World::empty(800, 600, "sea");
+        world.surface = 100;
+        world.rock_layer = 200;
+        let floor = 150;
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+            for y in (floor - 60)..floor {
+                world.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Water, 255),
+                );
+            }
+        }
+        // `biome_at` calls the outer 250 columns ocean, so stand there.
+        let npcs = NpcStore::new();
+        let players = player_at((100.0 * 16.0, (floor - 30) as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(5);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..60_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut rng,
+                0,
+            ) {
+                seen.insert(npc_type);
+            }
+        }
+        assert!(!seen.is_empty(), "nothing spawned in the sea at all");
+        for npc_type in &seen {
+            // A bound resident is a rescue rather than a spawn from any roster, and vanilla's own
+            // ocean branch is where the Angler is found (`NPC.cs:1800`), so they are not the
+            // subject here.
+            let stats = terrustia_proto::npc_data::npc_stats(*npc_type).expect("a real type");
+            if stats.friendly {
+                continue;
+            }
+            assert!(
+                ocean_water.contains(npc_type),
+                "the sea drew {npc_type} ({}), which is not in its water roster",
+                stats.name,
+            );
+        }
     }
 
     #[test]
