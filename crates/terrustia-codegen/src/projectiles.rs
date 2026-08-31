@@ -55,69 +55,150 @@ fn read_names(root: &Path) -> BTreeMap<i64, String> {
     names
 }
 
+/// Whether a `SetDefaults` condition holds for `want`, or `None` when it is not about `type` at
+/// all.
+///
+/// The conditions in this chain are ORs of two term shapes, sometimes parenthesised:
+/// `type == N` and `type >= A && type <= B`. Anything else (`Main.getGoodWorld`,
+/// `Main.remixWorld`, `Main.infectedSeed`) is a world-seed switch this project does not model, and
+/// answering `None` for it is what keeps its body out: reading the Tombstones' and the Falling
+/// Star's `if (Main.getGoodWorld) { hostile = true; }` unconditionally is what marked 45 harmless
+/// projectiles hostile.
+fn condition_holds(condition: &str, want: i64) -> Option<bool> {
+    let eq = Regex::new(r"^type == (\d+)$").unwrap();
+    let range = Regex::new(r"^type >= (\d+) && type <= (\d+)$").unwrap();
+    let mut holds = false;
+    for term in condition.split("||") {
+        let term = term
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        if let Some(c) = eq.captures(term) {
+            holds |= c[1].parse::<i64>().unwrap() == want;
+        } else {
+            let c = range.captures(term)?;
+            let (lo, hi): (i64, i64) = (c[1].parse().unwrap(), c[2].parse().unwrap());
+            holds |= (lo..=hi).contains(&want);
+        }
+    }
+    Some(holds)
+}
+
 /// Fold a block's assignments for one type.
 ///
 /// A grouped block narrows again inside itself: `if (type == 76) ... else if (type == 77) ...
-/// else ...`, and the trailing bare `else` belongs to whichever member fell through. When the
-/// condition line is not immediately followed by a brace-only line, its body is not captured at
-/// all here (the following statement falls through to plain assignment, unconditionally) —
-/// exactly as the original parser reads it.
+/// else ...`, and the trailing bare `else` belongs to whichever member fell through. Nested
+/// blocks are read recursively rather than flattened, so a condition several levels down still
+/// decides whether its own body applies.
 fn read(lines: &[&str], want: i64) -> Stats {
-    let if_one = Regex::new(r"^\s*if \(type == (\d+)\)\s*$").unwrap();
-    let elif_one = Regex::new(r"^\s*else if \(type == (\d+)\)\s*$").unwrap();
-    let else_one = Regex::new(r"^\s*else\s*$").unwrap();
-
     let mut stats = DEFAULTS;
-    let mut depth: i64 = 0;
-    let mut taken_at: BTreeMap<i64, bool> = BTreeMap::new();
+    read_into(lines, want, &mut stats);
+    stats
+}
+
+fn read_into(lines: &[&str], want: i64, stats: &mut Stats) {
+    let cond_re = Regex::new(r"^\s*(else )?if \((.*)\)\s*$").unwrap();
+    let else_re = Regex::new(r"^\s*else\s*$").unwrap();
+    let switch_re = Regex::new(r"^\s*switch \(type\)\s*$").unwrap();
+    let case_re = Regex::new(r"^\s*case (\d+):\s*$").unwrap();
+
+    // The `{ ... }` starting at `lines[at]`, and the index just past its closing brace.
+    let block = |at: usize| -> Option<(Vec<&str>, usize)> {
+        if lines.get(at).map(|l| l.trim()) != Some("{") {
+            return None;
+        }
+        let mut i = at + 1;
+        let mut depth: i64 = 1;
+        let mut body: Vec<&str> = Vec::new();
+        while i < lines.len() && depth > 0 {
+            depth += lines[i].matches('{').count() as i64 - lines[i].matches('}').count() as i64;
+            if depth > 0 {
+                body.push(lines[i]);
+            }
+            i += 1;
+        }
+        Some((body, i))
+    };
+
+    // Whether some earlier arm of the current if/else chain already ran.
+    let mut already = false;
     let mut i = 0usize;
     while i < lines.len() {
         let line = lines[i];
-        let m_if = if_one.captures(line);
-        let m_elif = elif_one.captures(line);
-        let m_else = else_one.is_match(line);
 
-        if m_if.is_some() || m_elif.is_some() || m_else {
-            let already = if m_elif.is_some() || m_else {
-                *taken_at.get(&depth).unwrap_or(&false)
-            } else {
-                false
-            };
-            let take = if let Some(c) = &m_if {
-                c[1].parse::<i64>().unwrap() == want
-            } else if let Some(c) = &m_elif {
-                !already && c[1].parse::<i64>().unwrap() == want
-            } else {
-                !already
-            };
-            taken_at.insert(depth, already || take);
-
-            i += 1;
-            if i < lines.len() && lines[i].trim() == "{" {
-                i += 1;
-                let mut inner: i64 = 1;
-                let mut body: Vec<&str> = Vec::new();
-                while i < lines.len() && inner > 0 {
-                    inner +=
-                        lines[i].matches('{').count() as i64 - lines[i].matches('}').count() as i64;
-                    if inner > 0 {
-                        body.push(lines[i]);
+        if switch_re.is_match(line)
+            && let Some((body, next)) = block(i + 1)
+        {
+            // C# forbids falling out of a non-empty case, so each `case` label list runs up to its
+            // own `break;`. Only the group naming `want` applies. `Projectile.cs:7141-7154` is the
+            // one that matters: `DD2FlameBurstTower`'s three tiers differ only here, and reading
+            // the cases flat gave all three the last one's size.
+            let mut labels: Vec<i64> = Vec::new();
+            let mut ran = false;
+            for inner in &body {
+                if let Some(c) = case_re.captures(inner) {
+                    if ran {
+                        labels.clear();
+                        ran = false;
                     }
-                    i += 1;
+                    labels.push(c[1].parse().unwrap());
+                    continue;
                 }
-                if take {
-                    for b in &body {
-                        assign(b, &mut stats);
+                let trimmed = inner.trim();
+                if trimmed == "default:" {
+                    labels.clear();
+                    ran = false;
+                    continue;
+                }
+                if trimmed == "break;" {
+                    labels.clear();
+                    ran = false;
+                    continue;
+                }
+                ran = true;
+                if labels.contains(&want) {
+                    assign(inner, stats);
+                }
+            }
+            i = next;
+            continue;
+        }
+
+        let arm = if let Some(c) = cond_re.captures(line) {
+            let chained = c.get(1).is_some();
+            Some((chained, condition_holds(&c[2], want).unwrap_or(false)))
+        } else if else_re.is_match(line) {
+            Some((true, true))
+        } else {
+            None
+        };
+
+        if let Some((chained, holds)) = arm {
+            let take = holds && !(chained && already);
+            already = (chained && already) || take;
+            match block(i + 1) {
+                Some((body, next)) => {
+                    if take {
+                        read_into(&body, want, stats);
                     }
+                    i = next;
+                }
+                // A braceless single-statement arm: consume it either way rather than letting it
+                // fall through as an unconditional assignment.
+                None => {
+                    if take && let Some(only) = lines.get(i + 1) {
+                        assign(only, stats);
+                    }
+                    i += 2;
                 }
             }
             continue;
         }
-        assign(line, &mut stats);
-        depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
+
+        assign(line, stats);
         i += 1;
     }
-    stats
 }
 
 fn assign(line: &str, stats: &mut Stats) {
@@ -134,6 +215,15 @@ fn assign(line: &str, stats: &mut Stats) {
     numeric!(r"^\s*penetrate\s*=\s*(-?\d+);", penetrate);
     numeric!(r"^\s*timeLeft\s*=\s*(-?\d+);", time_left);
     numeric!(r"^\s*extraUpdates\s*=\s*(-?\d+);", extra_updates);
+
+    // `timeLeft *= 5;` is how 136 of these lengthen the 3600-tick default rather than restating a
+    // number, so a scan that only reads `timeLeft = N` leaves every one of them at 3600.
+    if let Some(c) = Regex::new(r"^\s*timeLeft \*= (\d+);")
+        .unwrap()
+        .captures(line)
+    {
+        stats.time_left *= c[1].parse::<i64>().unwrap();
+    }
 
     if let Some(c) = Regex::new(r"^\s*tileCollide\s*=\s*(true|false);")
         .unwrap()
@@ -155,9 +245,37 @@ fn assign(line: &str, stats: &mut Stats) {
     }
 }
 
+/// Inline the eight `DefaultToX()` helpers (`Projectile.cs:10693-10786`) at their call sites.
+///
+/// Each is a plain run of field assignments and nothing else, so pasting the body in place of the
+/// call needs no more understanding of C# than the rest of this parser has, and it is where the
+/// whips, spears, flails, kites, yoyos, sprays, shortswords, drills and chainsaws get their ai
+/// style and their `penetrate = -1`. 87 call sites, every one of which was reading as a blank line.
+fn inline_default_helpers(text: &str) -> String {
+    let def_re = Regex::new(r"(?s)\tpublic void (DefaultTo\w+)\(\)\n\t\{\n(.*?)\n\t\}").unwrap();
+    let bodies: BTreeMap<String, String> = def_re
+        .captures_iter(text)
+        .map(|c| (c[1].to_string(), c[2].to_string()))
+        .collect();
+    assert!(
+        bodies.len() >= 8,
+        "only found {} DefaultTo helpers; Projectile.cs's shape changed",
+        bodies.len()
+    );
+    let call_re = Regex::new(r"(?m)^\s*(DefaultTo\w+)\(\);$").unwrap();
+    call_re
+        .replace_all(text, |c: &regex::Captures| {
+            bodies
+                .get(&c[1])
+                .cloned()
+                .unwrap_or_else(|| c[0].to_string())
+        })
+        .into_owned()
+}
+
 /// Every type `SetDefaults` describes, and how many types had no size and were skipped.
 fn parse(root: &Path) -> (BTreeMap<i64, Stats>, usize) {
-    let text = read_lossy(&root.join("Terraria/Projectile.cs"));
+    let text = inline_default_helpers(&read_lossy(&root.join("Terraria/Projectile.cs")));
     let lines: Vec<&str> = text.lines().collect();
 
     let start = lines
@@ -165,11 +283,18 @@ fn parse(root: &Path) -> (BTreeMap<i64, Stats>, usize) {
         .position(|l| l.contains("public void SetDefaults(int Type)"))
         .expect("SetDefaults not found");
 
-    // Conditions come singly and in groups: `if (type == 674 || type == 673)`. Missing the
-    // grouped form is what left the Dark Mage with no portal and no heal.
-    let chain =
-        Regex::new(r"^\s*(?:else\s+)?if \((type == \d+(?:\s*\|\|\s*type == \d+)*)\)\s*$").unwrap();
+    // Conditions come singly, in groups (`if (type == 674 || type == 673)`) and as ranges
+    // (`else if (type >= 541 && type <= 555)`), the last sometimes parenthesised and mixed with
+    // singles. Missing the grouped form is what left the Dark Mage with no portal and no heal;
+    // missing the range form dropped 80 types outright, every yoyo among them, and left six more
+    // (326-328, 400-402, 1107-1109) reading only the *nested* `if (type == N)` that sets their
+    // size, so they came out with no ai style and no hostility.
+    let chain = Regex::new(
+        r"^\s*(?:else\s+)?if \(((?:\(?type (?:==|>=) \d+(?: && type <= \d+)?\)?)(?:\s*\|\|\s*\(?type (?:==|>=) \d+(?: && type <= \d+)?\)?)*)\)\s*$",
+    )
+    .unwrap();
     let type_id_re = Regex::new(r"type == (\d+)").unwrap();
+    let type_range_re = Regex::new(r"type >= (\d+) && type <= (\d+)").unwrap();
 
     // Groups, in the order the file declares them, keyed by the tuple of type ids in the
     // condition. A repeated identical group re-assigns its body in place, matching how a Python
@@ -180,10 +305,16 @@ fn parse(root: &Path) -> (BTreeMap<i64, Stats>, usize) {
     while i < lines.len() {
         let line = lines[i];
         if let Some(m) = chain.captures(line) {
-            let kinds: Vec<i64> = type_id_re
+            let mut kinds: Vec<i64> = type_id_re
                 .captures_iter(&m[1])
                 .map(|c| c[1].parse().unwrap())
                 .collect();
+            for c in type_range_re.captures_iter(&m[1]) {
+                let (lo, hi): (i64, i64) = (c[1].parse().unwrap(), c[2].parse().unwrap());
+                kinds.extend(lo..=hi);
+            }
+            kinds.sort_unstable();
+            kinds.dedup();
             i += 2; // skip the `{`
             let mut depth: i64 = 1;
             let mut body: Vec<&str> = Vec::new();
