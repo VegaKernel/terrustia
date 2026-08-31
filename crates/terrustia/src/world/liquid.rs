@@ -1012,13 +1012,14 @@ mod tests {
     /// A column falling a long way conserves every drop, at every fall distance.
     ///
     /// This is the shape the two older conservation tests could not see: they used 40x30 worlds,
-    /// pools of at most 180 tiles and *zero* fall distance, and a fall is what produced the loss.
-    /// A long drop leaves a thin remainder on every tile of the column it passed through, and each
-    /// of those remainders used to bleed a unit a pass until it was gone, so the loss grew with the
-    /// distance fallen.
+    /// pools of at most 180 tiles and *zero* fall distance. A fall down a shaft wide enough to
+    /// level in leaves a thin remainder behind on the way, and each of those remainders used to
+    /// bleed a unit a pass until it was gone. The shaft has to be more than one tile wide for that
+    /// to happen at all: a single-tile column moves its whole 255 down each time and leaves no film
+    /// to lose, which is why a narrower version of this test passes against the bug.
     ///
-    /// Fails before the fix: at these three distances it lost 3, 8 and 13 units of 255 (1.2%, 3.1%
-    /// and 5.1%), rising with the drop exactly as described.
+    /// Fails before the fix, measured: 20, 33 and 33 units lost of 3,825 (0.52%, 0.86%, 0.86%) at
+    /// the three distances.
     #[test]
     fn a_long_fall_loses_nothing() {
         for drop in [5i32, 40, 200] {
@@ -1032,21 +1033,28 @@ mod tests {
             for x in 0..60 {
                 cave.tiles.insert((x, floor), Tile::block(1));
             }
+            // A five-wide shaft: the water levels as well as falls, and levelling is what leaves
+            // the films behind.
             for y in 0..=floor {
-                cave.tiles.insert((6, y), Tile::block(1));
-                cave.tiles.insert((53, y), Tile::block(1));
+                cave.tiles.insert((27, y), Tile::block(1));
+                cave.tiles.insert((33, y), Tile::block(1));
             }
             let mut liquids = Liquids::default();
-            cave.pour(30, 10, Liquid::Water, FULL);
-            liquids.disturb(30, 10);
-            let before = cave.total();
-            run(&mut cave, &mut liquids, (drop as usize + 20) * 4);
-
-            let after: i32 = (0..60)
-                .flat_map(|x| (0..height).map(move |y| (x, y)))
-                .map(|(x, y)| i32::from(cave.liquid_at(x, y)))
-                .sum();
-            assert_eq!(after, before, "a {drop}-tile fall lost liquid");
+            for x in 28..=32 {
+                for y in 10..13 {
+                    cave.pour(x, y, Liquid::Water, FULL);
+                    liquids.disturb(x, y);
+                }
+            }
+            let total = |cave: &Cave| -> i32 {
+                (0..60)
+                    .flat_map(|x| (0..height).map(move |y| (x, y)))
+                    .map(|(x, y)| i32::from(cave.liquid_at(x, y)))
+                    .sum()
+            };
+            let before = total(&cave);
+            run(&mut cave, &mut liquids, (drop as usize + 40) * 8);
+            assert_eq!(total(&cave), before, "a {drop}-tile fall lost liquid");
         }
     }
 

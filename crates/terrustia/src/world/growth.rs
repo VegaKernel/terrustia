@@ -593,11 +593,12 @@ const FALLS: [u16; 6] = [53, 112, 116, 123, 224, 234];
 ///
 /// **This is only half of vanilla's behaviour, and the missing half is the trigger.** Vanilla drops
 /// sand from `TileFrame`, which runs on every tile edit, so a ceiling collapses the instant the
-/// block under it is mined. Here the only trigger is a world-update sample landing on the tile,
-/// which on a 4200x1200 world is one sample in ~33,000 per tick overground and one in ~66,000
-/// underground: 2.4 minutes and 13 minutes respectively before the collapse starts. Falling the
-/// whole way once it does start is what this can fix from inside the world module; wiring it to the
-/// tile-edit path needs the mine and place handlers, which live elsewhere.
+/// block under it is mined. Here the only trigger is a world-update sample landing on the tile: on
+/// a 4200x1200 world that is 152 overground samples a tick spread over roughly 1.4 million
+/// candidate cells, and 76 underground ones over roughly 3.5 million, so a given tile waits about
+/// two and a half minutes on the surface and about thirteen underground before its collapse even
+/// starts. Falling the whole way once it does start is what can be fixed from inside the world
+/// module; wiring it to the tile-edit path needs the mine and place handlers, which live elsewhere.
 pub fn fall_sand(world: &mut World, x: i32, y: i32, out: &mut Vec<(i32, i32)>) -> bool {
     if !world.in_bounds(x, y) || !world.in_bounds(x, y + 1) {
         return false;
@@ -983,8 +984,8 @@ mod tests {
     /// comes down with it.
     ///
     /// Fails before the fix: one call moved one tile, so a ten-tile ceiling needed ten separate
-    /// world-update samples to land on it, at 2.4 minutes a sample on the surface and 13 minutes
-    /// underground.
+    /// world-update samples to land on it, each a couple of minutes apart on the surface and about
+    /// thirteen underground.
     #[test]
     fn sand_falls_until_it_lands() {
         let mut world = World::empty(40, 40, "sand");
