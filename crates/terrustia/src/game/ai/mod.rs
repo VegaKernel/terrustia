@@ -925,6 +925,10 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let out = hardmode::invasion::dutchman(npc, world, rng, cannon);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
+            // A death, not a quiet despawn, exactly as the saucer above: losing the last cannon is
+            // `StrikeNPCNoInteraction(9999, 0f, 0)` in source (`NPC.cs:39275`), so it has to drop
+            // its loot and count toward the invasion.
+            effects.died = out.died;
         }
         72 => {
             // A pinned part is drawn on its parent, so it needs the parent's centre rather than

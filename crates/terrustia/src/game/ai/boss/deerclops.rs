@@ -18,6 +18,7 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     DEER_DEN, DEER_GIVE_UP, DEER_GOING_HOME, DEER_LEAVING, DEER_PASSIVE_SHADOW_FAST,
+    DEER_PASSIVE_SHADOW_RANGE, DEER_PASSIVE_SHADOW_RING, DEER_PASSIVE_SHADOW_ROTATION,
     DEER_PASSIVE_SHADOW_SLOW, DEER_PASSIVE_SHADOW_WAVES, DEER_PATIENCE, DEER_PATIENCE_DEEP,
     DEER_ROAR, DEER_ROAR_RANGE, DEER_ROAR_SLOW, DEER_ROAR_TICKS, DEER_RUBBLE, DEER_RUBBLE_DAMAGE,
     DEER_RUBBLE_SLAM, DEER_RUBBLE_TICKS, DEER_RUBBLE_WINDUP, DEER_SHADOW_AT, DEER_SHADOW_DAMAGE,
@@ -176,7 +177,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
     });
     npc.local_ai[3] =
         (npc.local_ai[3] + if far { 1.0 } else { -1.0 }).clamp(0.0, DEER_SHIELD_AFTER);
-    npc.stats.dont_take_damage = npc.local_ai[3] >= DEER_SHIELD_AFTER;
+    npc.invulnerable = npc.local_ai[3] >= DEER_SHIELD_AFTER;
 
     // DEER-1: in Expert Mode a passive rain of shadow hands runs throughout the fight, quite apart
     // from the dedicated shadow-hands attack below (`SpawnPassiveShadowHands`,
@@ -192,21 +193,38 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         .max(1.0);
         npc.local_ai[2] += 1.0;
         if npc.local_ai[2] % interval == 0.0 {
-            // One hand out of the dark around the target, as the dedicated attack raises them.
-            let angle = rng.random::<f32>() * std::f32::consts::TAU;
-            let radius = 300.0 + rng.random::<f32>() * 200.0;
-            out.shots.push(Shot {
-                projectile: DEER_SHADOW_HAND,
-                damage: DEER_SHADOW_DAMAGE_PASSIVE,
-                position: (
-                    target.center.0 + angle.cos() * radius,
-                    target.center.1 + angle.sin() * radius,
-                ),
-                velocity: (-angle.cos() * 4.0, -angle.sin() * 4.0),
-                time_left: 300,
-            });
+            let wave = (npc.local_ai[2] / interval) as u32;
             if npc.local_ai[2] / interval >= DEER_PASSIVE_SHADOW_WAVES {
                 npc.local_ai[2] = 0.0;
+            }
+            // BS3-M4: a wave is not a hand for everybody. `Boss_CanShootExtraAt`
+            // (`NPC.cs:47474-47494`) takes the wave's index modulo three and raises a hand only for
+            // the players whose own slot matches, and refuses outright past 1200 pixels from the
+            // boss. So three waves are one hand for any given player, not three, and running out of
+            // the fight stops the rain rather than merely spreading it. Every wave fired here from
+            // any distance, three times too often.
+            //
+            // Narrowing: vanilla walks all 255 slots and this server carries one target, so the
+            // rotation is checked against that target's own slot. The rest of the predicate
+            // (active, not dead, has interacted) is what `world.target` already means.
+            let (bx, by) = npc.center();
+            let in_rotation = u32::from(target.slot) % DEER_PASSIVE_SHADOW_ROTATION
+                == wave % DEER_PASSIVE_SHADOW_ROTATION;
+            let reach = (target.center.0 - bx).hypot(target.center.1 - by);
+            if in_rotation && reach <= DEER_PASSIVE_SHADOW_RANGE {
+                // One hand out of the dark around the target, at the two hundred pixels
+                // `RandomizeInsanityShadowFor` places a hostile one at (`Projectile.cs:43187`).
+                let angle = rng.random::<f32>() * std::f32::consts::TAU;
+                out.shots.push(Shot {
+                    projectile: DEER_SHADOW_HAND,
+                    damage: DEER_SHADOW_DAMAGE_PASSIVE,
+                    position: (
+                        target.center.0 + angle.cos() * DEER_PASSIVE_SHADOW_RING,
+                        target.center.1 + angle.sin() * DEER_PASSIVE_SHADOW_RING,
+                    ),
+                    velocity: (-angle.cos() * 4.0, -angle.sin() * 4.0),
+                    time_left: 300,
+                });
             }
         }
     }
@@ -632,6 +650,50 @@ mod tests {
         assert_eq!(passive(false), 0, "Classic does not");
     }
 
+    /// BS3-M4: one hand per three-wave cycle for any given player, and none at all past 1200 pixels.
+    ///
+    /// `Boss_CanShootExtraAt` (`NPC.cs:47474-47494`) takes the wave's index modulo three and only
+    /// raises a hand for the players whose slot matches, then refuses outright past its scan
+    /// distance. Every wave used to fire, from any distance, so a lone player took three times the
+    /// passive hands and could not walk out from under them. The ring is 200 pixels, the radius
+    /// `RandomizeInsanityShadowFor` places a hostile hand at (`Projectile.cs:43187`), not the
+    /// 300-to-500 spread this used.
+    #[test]
+    fn the_passive_rain_picks_one_wave_in_three_and_stops_at_range() {
+        let tiles = snowfield();
+        let hands = |gap: f32| {
+            let mut d = deerclops(200);
+            let (cx, _) = d.center();
+            let at = (cx + gap, 299.0 * TILE);
+            let t = Some(player_at(at.0, at.1));
+            let mut world = tundra(&tiles, t);
+            world.conditions.expert = true;
+            let mut out = Vec::new();
+            // A full cycle is three waves of eighty ticks at full health.
+            for _ in 0..(DEER_PASSIVE_SHADOW_SLOW * DEER_PASSIVE_SHADOW_WAVES) as i32 {
+                out.extend(update(&mut d, &world, &mut rng()).shots.into_iter().filter(
+                    |s: &Shot| {
+                        s.projectile == DEER_SHADOW_HAND && s.damage == DEER_SHADOW_DAMAGE_PASSIVE
+                    },
+                ));
+            }
+            (out, at)
+        };
+
+        let (near, at) = hands(400.0);
+        assert_eq!(near.len(), 1, "one hand a cycle, not three");
+        let reach = (near[0].position.0 - at.0).hypot(near[0].position.1 - at.1);
+        assert!(
+            (reach - DEER_PASSIVE_SHADOW_RING).abs() < 1.0,
+            "it comes up two hundred pixels out, got {reach}"
+        );
+
+        assert!(
+            hands(DEER_PASSIVE_SHADOW_RANGE + 200.0).0.is_empty(),
+            "and not at all once the player is out of scan range"
+        );
+    }
+
     #[test]
     fn the_roar_is_reported_so_the_caller_can_apply_it() {
         let tiles = snowfield();
@@ -717,13 +779,19 @@ mod tests {
         for _ in 0..(DEER_SHIELD_AFTER as i32 + 2) {
             update(&mut d, &tundra(&tiles, far), &mut rng());
         }
-        assert!(d.stats.dont_take_damage, "no killing it from range");
+        assert!(d.invulnerable, "no killing it from range");
+        assert!(
+            !d.take_damage(500, 0.0, 1) && d.life == d.life_max,
+            "and a hit through `strike` really is refused"
+        );
 
         let close = Some(player_at(200.0 * TILE + 50.0, 299.0 * TILE));
         for _ in 0..(DEER_SHIELD_AFTER as i32 + 2) {
             update(&mut d, &tundra(&tiles, close), &mut rng());
         }
-        assert!(!d.stats.dont_take_damage, "get close and it is fair game");
+        assert!(!d.invulnerable, "get close and it is fair game");
+        d.take_damage(500, 0.0, 1);
+        assert!(d.life < d.life_max, "and the hit lands");
     }
 
     #[test]

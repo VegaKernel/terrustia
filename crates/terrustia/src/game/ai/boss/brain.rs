@@ -148,8 +148,9 @@ pub fn update<T: TileView>(
     }
 
     let exposed = npc.ai[0] < 0.0;
-    // The creepers are the armour. While one lives, nothing you do lands.
-    npc.stats.dont_take_damage = !exposed;
+    // The creepers are the armour. While one lives, nothing you do lands. The live flag, not the
+    // type's seed: see `Npc::invulnerable`.
+    npc.invulnerable = !exposed;
 
     let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
     let reach = (dx * dx + dy * dy).sqrt().max(f32::MIN_POSITIVE);
@@ -368,13 +369,19 @@ mod tests {
         let (cx, cy) = b.center();
         let t = Some(player_at(cx + 300.0, cy));
         update(&mut b, &world(&tiles, t), 20, true, (0.0, 0.0), &mut rng());
-        assert!(b.stats.dont_take_damage, "untouchable while shielded");
+        assert!(b.invulnerable, "untouchable while shielded");
+        assert!(
+            !b.take_damage(500, 0.0, 1) && b.life == b.life_max,
+            "and a real hit through `strike` does nothing"
+        );
 
         // Kill them all: it drops into the second phase and becomes vulnerable.
         update(&mut b, &world(&tiles, t), 0, true, (0.0, 0.0), &mut rng());
         assert_eq!(b.ai[0], -1.0);
         update(&mut b, &world(&tiles, t), 0, true, (0.0, 0.0), &mut rng());
-        assert!(!b.stats.dont_take_damage, "now you can hurt it");
+        assert!(!b.invulnerable, "now you can hurt it");
+        b.take_damage(500, 0.0, 1);
+        assert!(b.life < b.life_max, "and the hit lands for real");
     }
 
     #[test]

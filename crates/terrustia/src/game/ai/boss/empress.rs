@@ -889,6 +889,30 @@ mod tests {
         assert!(hurtable > 40, "but the dash itself is yours: {hurtable}");
     }
 
+    /// And when she is touchable, a hit has to actually land.
+    ///
+    /// The damage gate used to ask the type's `dont_take_damage` seed as well as the live flag, and
+    /// npc 636 carries that seed (`npc_data.rs`, as vanilla's `SetDefaults` does), so `strike`
+    /// refused every hit the routine had opened the window for. Seventy thousand health that no
+    /// weapon could touch, in a fight that deals nine thousand a hit in daylight. This has to go
+    /// through `strike`, because reading `invulnerable` alone is what let it hide.
+    #[test]
+    fn a_hit_lands_when_she_is_open() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((5000.0, 3400.0)));
+        let mut rng = SmallRng::seed_from_u64(9);
+        let mut n = her();
+        assert!(
+            n.stats.dont_take_damage,
+            "the type's seed says untouchable, and that is only where it starts"
+        );
+
+        tick(&mut n, &w, &tiles, false, false, &mut rng);
+        assert!(!n.invulnerable, "the idle is not a safe phase");
+        n.strike(1000, 0.0, 1, false);
+        assert!(n.life < n.life_max, "so the hit has to land");
+    }
+
     /// A fight begun in daylight is marked, and the mark makes everything she does lethal.
     #[test]
     fn daylight_enrages_her_for_good() {

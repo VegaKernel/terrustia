@@ -1086,7 +1086,7 @@ mod boss_tests {
             terrustia_proto::npc_params::BRAIN_CREEPERS,
             "it should put its whole guard up at once"
         );
-        assert!(brain.stats.dont_take_damage, "and hide behind them");
+        assert!(brain.invulnerable, "and hide behind them");
 
         // With them gone it exposes itself and charges.
         let start = distance(brain.center(), targets[0].center);
@@ -1106,7 +1106,7 @@ mod boss_tests {
                 },
             );
         }
-        assert!(!brain.stats.dont_take_damage, "now it can be hurt");
+        assert!(!brain.invulnerable, "now it can be hurt");
         assert!(
             distance(brain.center(), targets[0].center) < start,
             "and it comes at you"

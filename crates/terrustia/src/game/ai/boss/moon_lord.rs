@@ -931,6 +931,35 @@ mod tests {
         assert!(!c.invulnerable, "all three: now it is open");
     }
 
+    /// The whole game hangs on this: the exposed core can be struck down, and the lethal blow is
+    /// what starts the death drama.
+    ///
+    /// The damage gate used to ask the type's `dont_take_damage` seed as well as the live flag, and
+    /// npc 398 carries that seed (`npc_data.rs`, as vanilla's `SetDefaults` does). So `strike`
+    /// refused every hit no matter what the routine said, `checkdead` was never reached, `ai[0]`
+    /// never became `DYING`, and the Moon Lord could not be killed by anything: the game could not
+    /// be finished. Going through `checkdead` directly, as the older tests did, walks straight past
+    /// the gate that was broken, which is exactly how it hid.
+    #[test]
+    fn the_exposed_core_can_actually_be_struck_down() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+        c.local_ai[3] = 1.0;
+        c.ai[0] = state::WAITING;
+        assert!(
+            c.stats.dont_take_damage,
+            "the type's seed says untouchable, and that is only where it starts"
+        );
+
+        core(&mut c, &w, 3);
+        // The server's own path: the hit lands, and `checkdead` intercepts the lethal one.
+        let killed = c.strike(c.life_max, 0.0, 1, false);
+        assert!(killed, "the exposed core takes a lethal blow");
+        assert!(checkdead(&mut c), "which `checkdead` turns into the drama");
+        assert_eq!(c.ai[0], state::DYING, "and the drama is what kills it");
+    }
+
     /// ML-1: the core is not removed the instant its last limb falls. In vanilla the sockets stay
     /// as broken shells and the core leaves only through its death drama (`NPC.cs:41697-41722`);
     /// the old `parts == 0 -> spent` killed the boss outright and left the finale as dead code.

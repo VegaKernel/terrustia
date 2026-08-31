@@ -508,6 +508,42 @@ mod tests {
         out
     }
 
+    /// Its stripped last stand can be shot down.
+    ///
+    /// The damage gate used to ask the type's `dont_take_damage` seed as well as the live flag, and
+    /// npc 395 carries that seed (`npc_data.rs`, as vanilla's `SetDefaults` does). Classic got away
+    /// with it because losing the last gun sets `out.died` outright; expert did not, because expert
+    /// goes to the spin and then the last stand, where the only way out is being killed. An expert
+    /// saucer looped its deathray for ever. The hit has to go through `strike`, because that is the
+    /// gate that was broken.
+    #[test]
+    fn a_stripped_saucer_can_be_shot_down_in_expert() {
+        let tiles = ground();
+        let mut w = world(&tiles, Some((2000.0, 3100.0)));
+        w.conditions.expert = true;
+        let mut n = saucer();
+        assert!(
+            n.stats.dont_take_damage,
+            "the type's seed says untouchable, and that is only where it starts"
+        );
+
+        // Its guns come off: expert tumbles, then stands its ground.
+        n.ai[0] = state::CIRCUIT;
+        n.local_ai[0] = 1.0;
+        for _ in 0..(SAUCER_SPIN as i32 + 2) {
+            tick_with_guns(&mut n, &w, &tiles, 0);
+        }
+        assert_eq!(
+            n.ai[0],
+            state::LAST_STAND,
+            "expert strips it rather than ending it"
+        );
+        assert!(!n.invulnerable, "and a stripped saucer is the target");
+
+        let killed = n.strike(n.life_max, 0.0, 1, false);
+        assert!(killed, "which means a lethal blow has to be lethal");
+    }
+
     /// It builds itself out of five pieces, once.
     #[test]
     fn it_assembles_itself() {

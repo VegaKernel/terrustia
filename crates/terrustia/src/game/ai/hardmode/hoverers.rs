@@ -279,7 +279,7 @@ pub fn detonating_bubble<T: TileView>(
             return out;
         }
         // Going off: briefly enormous, and nothing can stop it now.
-        npc.stats.dont_take_damage = true;
+        npc.invulnerable = true;
         let middle = npc.center();
         npc.stats.width = BUBBLE_BLAST_SIZE;
         npc.stats.height = BUBBLE_BLAST_SIZE;
@@ -635,7 +635,7 @@ mod tests {
         b.ai[1] = BUBBLE_BLAST_TICKS;
         detonating_bubble(&mut b, &world(&tiles, Some(player_at(cx, cy))), &mut r);
         assert!(b.stats.width > small, "it should have swelled");
-        assert!(b.stats.dont_take_damage, "and be past stopping");
+        assert!(b.invulnerable, "and be past stopping");
     }
 
     #[test]

@@ -103,7 +103,22 @@ pub struct Npc {
     /// Set while a routine is in a phase that shrugs off knockback regardless of the type's
     /// resistance — a rolling tortoise is not going to be shoved off course.
     pub knockback_immune: bool,
-    /// Set while a routine is in a phase that cannot be hurt — an arrival, a burrow, a shell.
+    /// Whether anything can hurt this one right now. Vanilla's `NPC.dontTakeDamage`, and the only
+    /// thing [`Self::strike`] asks.
+    ///
+    /// There is exactly one of these, because vanilla has exactly one. `SetDefaults` seeds it from
+    /// the type (that seed is `NpcStats::dont_take_damage`, copied in here at spawn and again on
+    /// [`Self::become_type`]) and from then on it belongs to the routine: a phase that cannot be
+    /// hurt sets it, a phase that can clears it, and a type vanilla never lets you hurt simply has
+    /// no routine that clears it.
+    ///
+    /// It was briefly two: this field for the routine, and `stats.dont_take_damage` for the type,
+    /// with the damage gate taking either. That made the type's seed permanent, so the three
+    /// bosses whose routines open the window by clearing the routine flag - the Empress, the Moon
+    /// Lord's core and the Martian Saucer's core - could not be hurt at all, by anything, ever. The
+    /// Moon Lord one meant the game could not be finished: `checkdead` is reached through a lethal
+    /// blow, and no blow was ever lethal. Anything writing `stats.dont_take_damage` after spawn is
+    /// writing to a copy of the type table that nothing reads; write here instead.
     pub invulnerable: bool,
     /// Counts down while no player is near; the NPC despawns at zero.
     pub time_left: i32,
@@ -440,9 +455,9 @@ impl Npc {
     /// with no bound, so a rapid weapon accelerated an enemy without limit rather than shoving it a
     /// fixed distance.
     pub fn strike(&mut self, amount: i32, knockback: f32, direction: i8, crit: bool) -> bool {
-        // `dont_take_damage` is the type saying it can never be hurt; `invulnerable` is a routine
-        // saying not right now. Either one turns a hit into nothing.
-        if self.stats.dont_take_damage || self.invulnerable {
+        // One flag, as vanilla has one flag (`NPC.dontTakeDamage`). See [`Self::invulnerable`]:
+        // asking the type's own seed here as well is what made three bosses unkillable.
+        if self.invulnerable {
             return false;
         }
         let num = amount.max(0);
@@ -1110,6 +1125,48 @@ mod tests {
 
     fn zombie_at(x: f32, y: f32) -> Npc {
         Npc::new(3, (x, y), 1).expect("zombie stats")
+    }
+
+    /// One flag decides whether a hit lands, because vanilla has one flag.
+    ///
+    /// `NpcStats::dont_take_damage` is the type's *seed* for [`Npc::invulnerable`], the way
+    /// `SetDefaults` seeds `NPC.dontTakeDamage`, and nothing more. Asking it again inside
+    /// [`Npc::strike`] made the seed permanent, which left the Empress, the Moon Lord's core and
+    /// the Martian Saucer's core unkillable by anything at all: all three carry the seed and all
+    /// three clear the live flag when their routine opens the window. Restoring the `||` in
+    /// `strike` turns the second half of this red.
+    #[test]
+    fn the_types_untouchable_flag_is_a_seed_and_not_a_second_gate() {
+        // The Moon Lord's core, and the two others that shipped broken behind the same seed.
+        for npc_type in [398u16, 636, 395] {
+            let mut npc = Npc::new(npc_type, (0.0, 0.0), 1).expect("a real type");
+            assert!(
+                npc.stats.dont_take_damage,
+                "{npc_type} is seeded untouchable by its table"
+            );
+            assert!(npc.invulnerable, "so it starts untouchable");
+            assert!(
+                !npc.take_damage(9999, 0.0, 1) && npc.life == npc.life_max,
+                "{npc_type} refuses a hit while the live flag stands"
+            );
+
+            // A routine opening its window is the last word on the matter.
+            npc.invulnerable = false;
+            npc.take_damage(1, 0.0, 1);
+            assert!(
+                npc.life < npc.life_max,
+                "{npc_type} has to be hurtable once its routine says so"
+            );
+        }
+    }
+
+    /// Every type starts where its table says, including on a transform.
+    #[test]
+    fn a_transform_reseeds_the_untouchable_flag_from_the_new_type() {
+        let mut npc = zombie_at(0.0, 0.0);
+        assert!(!npc.invulnerable, "an ordinary zombie is fair game");
+        npc.become_type(398);
+        assert!(npc.invulnerable, "and the Moon Lord's core is not");
     }
 
     /// An NPC's generation counts reuses of *its slot*, not spawns anywhere.

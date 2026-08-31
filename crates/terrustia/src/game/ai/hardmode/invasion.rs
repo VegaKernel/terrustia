@@ -34,6 +34,9 @@ pub struct Outcome {
     pub spawn: Vec<Spawn>,
     /// Set when it is finished — for a probe, because it got away.
     pub spent: bool,
+    /// Set when it was killed rather than merely finished, which is a different thing entirely: a
+    /// death pays the loot and records the kill, an expiry removes the NPC and pays nothing.
+    pub died: bool,
     /// Set when leaving means the invasion begins.
     pub called_the_invasion: bool,
 }
@@ -170,7 +173,13 @@ pub fn dutchman(
         return out;
     }
     if cannon_alive == 0 {
-        out.spent = true;
+        // Shooting the last cannon off kills the ship outright: vanilla runs
+        // `StrikeNPCNoInteraction(9999, 0f, 0)` on the hull (`NPC.cs:39275`), a real death. This
+        // was routed through `spent`, which zeroes `time_left` and has the server *remove* the NPC:
+        // no `npc_died`, so no Coin Gun, no Cutlass, no Discount Card, no Lucky Coin, no treasure
+        // bag, and no pirate-invasion credit either. The ship simply vanished and the invasion was
+        // no closer to over. The Martian Saucer's own `died` carries the identical fix.
+        out.died = true;
         return out;
     }
 
@@ -354,11 +363,20 @@ mod tests {
         assert!(!first.spent, "it does not die on the tick it arms itself");
 
         // Guns still up: it flies.
-        assert!(!dutchman(&mut s, &w, &mut rng, 4).spent);
-        // Guns gone: it does not.
+        let flying = dutchman(&mut s, &w, &mut rng, 4);
+        assert!(!flying.spent && !flying.died);
+
+        // Guns gone: it does not. And this is a *death*, not a quiet expiry. Vanilla runs
+        // `StrikeNPCNoInteraction(9999, 0f, 0)` on the hull (`NPC.cs:39275`), which
+        // `StrikeNPC_Inner` carries out without so much as looking at `dontTakeDamage`. Reported as
+        // `spent` the server merely removed the ship: `npc_died` never ran, so the Coin Gun, the
+        // Cutlass, the Discount Card, the Lucky Coin and the treasure bag were all skipped and the
+        // pirate invasion was no closer to over. Shooting its guns off made it vanish for nothing.
+        let sunk = dutchman(&mut s, &w, &mut rng, 0);
+        assert!(sunk.died, "no guns, no ship - and it is a kill");
         assert!(
-            dutchman(&mut s, &w, &mut rng, 0).spent,
-            "no guns, no saucer"
+            !sunk.spent,
+            "reported as a death rather than an expiry, or the loot and the invasion credit are lost"
         );
     }
 

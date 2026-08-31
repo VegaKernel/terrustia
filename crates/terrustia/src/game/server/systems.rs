@@ -86,9 +86,7 @@ impl GameServer {
             };
 
             let immortal = is_immortal(npc);
-            let toll = npc
-                .buffs
-                .dots(&around, immortal, npc.stats.dont_take_damage);
+            let toll = npc.buffs.dots(&around, immortal, npc.invulnerable);
             if toll.healed > 0 && npc.life < npc.life_max {
                 npc.life = (npc.life + toll.healed).min(npc.life_max);
                 npc.dirty = true;

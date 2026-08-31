@@ -1938,6 +1938,17 @@ pub const DEER_SHADOW_DAMAGE_PASSIVE: i32 = 10;
 pub const DEER_PASSIVE_SHADOW_SLOW: f32 = 80.0;
 pub const DEER_PASSIVE_SHADOW_FAST: f32 = 40.0;
 pub const DEER_PASSIVE_SHADOW_WAVES: f32 = 3.0;
+/// BS3-M4: a wave does not hit everybody. `Boss_CanShootExtraAt` (`NPC.cs:47474-47494`) takes each
+/// wave's index modulo three and only raises a hand for the players whose own slot matches, so any
+/// one player is picked by one wave in three: three waves are one hand each, not three. And it
+/// refuses outright past 1200 pixels from the boss, so running away from the fight really does stop
+/// the passive rain rather than merely spreading it out.
+pub const DEER_PASSIVE_SHADOW_ROTATION: u32 = 3;
+pub const DEER_PASSIVE_SHADOW_RANGE: f32 = 1200.0;
+/// How far from the player a hostile shadow hand comes up. `RandomizeInsanityShadowFor`'s own
+/// `num3 = isHostile ? 200f : 100f` (`Projectile.cs:43187`), used as the radius by all four of its
+/// placements. A wider ring gives the player room the game does not.
+pub const DEER_PASSIVE_SHADOW_RING: f32 = 200.0;
 
 /// Deerclops' states, as `ai[0]` records them.
 pub const DEER_STALKING: f32 = 0.0;
