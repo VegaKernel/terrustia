@@ -214,3 +214,32 @@ fn four_orphaned_items_have_a_source_again() {
     let bat = conditional(49, Conditions::default());
     assert!(bat.iter().any(|d| d.item == 5097 && d.one_in == 300));
 }
+
+/// Bone. `ItemDropDatabase.cs:1162-1164` is the only place in the whole drop database that gives
+/// out item 154, and both lines are `ByCondition`, so the flat generator left them alone and
+/// nothing else picked them up. Found by strengthening `tools/check_drops.py`, whose own
+/// `ByCondition` parsing could not see the item either.
+#[test]
+fn bone_drops_from_the_angry_bones_family() {
+    for npc in [31u16, 32, 34, 294, 295, 296, 693] {
+        let classic = conditional(npc, Conditions::default());
+        let rule = classic
+            .iter()
+            .find(|d| d.item == 154)
+            .unwrap_or_else(|| panic!("npc {npc} drops no bone"));
+        assert_eq!((rule.min, rule.max), (1, 3));
+
+        let expert = conditional(
+            npc,
+            Conditions {
+                expert: true,
+                ..Default::default()
+            },
+        );
+        let rule = expert
+            .iter()
+            .find(|d| d.item == 154)
+            .expect("and in expert");
+        assert_eq!((rule.min, rule.max), (2, 6));
+    }
+}

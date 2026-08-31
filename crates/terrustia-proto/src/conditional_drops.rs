@@ -545,6 +545,23 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if npc_type == 663 && at.hard_mode {
         out.push(sometimes(5065, 8));
     }
+    // Bone, from the Angry Bones family (`npcNetIds20`, `ItemDropDatabase.cs:1162-1164`). These
+    // two lines are the *only* place in the whole drop database that gives out item 154, and both
+    // are `ByCondition`, so the flat generator correctly left them alone and nothing else picked
+    // them up: Bone was unobtainable, which also makes every Bone recipe uncraftable.
+    //
+    // The classic branch is the tail of a failed-roll chain whose first three links
+    // (932, 3095, 327) already live in [`crate::npc_drops`] as an ordinary chain, so it is rolled
+    // independently here rather than as that chain's fourth link. The difference is that about
+    // 3.4% of kills give both a weapon and the bones where vanilla gives only the weapon: a
+    // documented over-give, and the alternative is no Bone in the world at all.
+    if matches!(npc_type, 31 | 32 | 34 | 294 | 295 | 296 | 693) {
+        out.push(if at.expert {
+            a_few(154, 1, 2, 6)
+        } else {
+            a_few(154, 1, 1, 3)
+        });
+    }
     // Pumpking's expert-only extra: `rule.OnSuccess(ByCondition(IsExpert, 4444, 5))`
     // (`ItemDropDatabase.cs:351`), sitting under the same wave gate as its weapon pool, so the two
     // rolls multiply exactly as the Headless Horseman's medallion does just below.
