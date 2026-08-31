@@ -108,6 +108,12 @@ test-filter FILTER:
 soak SECONDS="60":
     ./tools/soak_ci.sh {{SECONDS}}
 
+# The README's comparison table, measured: startup, idle CPU, idle RAM and idle bandwidth against
+# the real TerrariaServer on one shared world. Needs the real server and a QUIET machine; it warns
+# and refuses to call its own output publishable if the load average says otherwise.
+compare SECONDS="300":
+    COMPARE_WINDOW={{SECONDS}} ./tools/compare_vanilla.sh
+
 # Play the game toward a player's goals and report the ones that could not be reached.
 # Owns the server's lifecycle, because two of the goals are about surviving a save and reload.
 playbot:
