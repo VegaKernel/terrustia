@@ -60,8 +60,11 @@ fn read_names(root: &Path) -> BTreeMap<i64, String> {
 ///
 /// The conditions in this chain are ORs of two term shapes, sometimes parenthesised:
 /// `type == N` and `type >= A && type <= B`. Anything else (`Main.getGoodWorld`,
-/// `Main.remixWorld`, `Main.infectedSeed`) is a world-seed switch this project does not model, and
-/// answering `None` for it is what keeps its body out: reading the Tombstones' and the Falling
+/// `Main.remixWorld`, `Main.infectedSeed`) is a world-seed switch whose *projectile* variations
+/// this table does not carry, and answering `None` for it is what keeps its body out. That is a
+/// narrowing of this table, not an absence of the seeds: the server detects and persists all of
+/// them (`worldgen/secret_seed.rs`) and really does act on them - remix switches town-NPC
+/// happiness off (`happiness.rs:362`). Reading the Tombstones' and the Falling
 /// Star's `if (Main.getGoodWorld) { hostile = true; }` unconditionally is what marked 45 harmless
 /// projectiles hostile.
 fn condition_holds(condition: &str, want: i64) -> Option<bool> {

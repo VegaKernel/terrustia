@@ -1456,7 +1456,8 @@ pub struct GateResult {
 /// another, which is why a logic gate in Terraria settles rather than oscillates.
 ///
 /// A *faulty* lamp turns the whole gate into a coin toss weighted by how many of its lamps are
-/// lit, which is the only source of randomness in the wire table.
+/// lit. It is the only randomness in the gate table; [`trap_shot`] has its own, the dart and
+/// geyser aim jitter at `:1628`.
 pub fn check_logic_gate(
     world: &mut impl WiredWorld,
     lamp_x: i32,

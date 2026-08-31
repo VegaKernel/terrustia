@@ -21,9 +21,24 @@
 //!
 //! The armour-lowering debuffs — ichor, broken armour, Betsy's curse — deliberately have no
 //! effect on this server's own damage arithmetic, and that is correct rather than missing. The
-//! client adds its armour penetration to the number it sends in the damage packet
-//! (`Player.cs:44765`), and the server applies plain defence to it. What the server owes the
-//! client is the *buff list*, so its penetration is computed against the truth.
+//! whole of their effect is `NPC.checkArmorPenetration` (`NPC.cs:81972-81990`, +15/+20/+40), and
+//! it has exactly three callers, all of which run on the hitting *client* and never on a server:
+//!
+//! * `Player.cs:44763`, item melee — the result is added to `num3` and then handed to
+//!   `StrikeNPC`, which sends `num3` on the wire (`NPC.cs:82046`, `SendData(28, ...)`) *before*
+//!   applying defence, so the penetration is already inside the damage the server receives.
+//! * `Projectile.cs:13686`, guarded by `ownedBySomeone && !hostile` and by
+//!   `Invariant.Assert(Main.netMode == 0 || owner == Main.myPlayer)` twelve lines below: a
+//!   projectile only ever deals its damage on the machine that owns it.
+//! * `Player.cs:20602`, `ApplyDamageToNPC`, reached only through a `whoAmI == Main.myPlayer`
+//!   guard (`Player.cs:20582`).
+//!
+//! So this server's two `damage_taken` sites are right to apply plain defence: the one fed by
+//! packet 28 (`dispatch.rs`) is handed a figure that already includes the client's penetration,
+//! exactly as vanilla's own `fromNet: true` path is, and the other (an enemy hitting a
+//! townsperson) has no player weapon in it at all. What the server owes the client is the *buff
+//! list*, so its penetration is computed against the truth. Re-verified against the decompiled
+//! tree on 2026-08-31.
 
 use terrustia_proto::buffs::{is_debuff, npc_is_immune};
 
@@ -131,19 +146,33 @@ pub struct Flags {
     pub on_frostburn2: bool,
     pub shadow_flame: bool,
     pub accelerate_poisons: bool,
-    /// Ichor. Lowers armour, which the client applies rather than the server — see the module
-    /// note. Kept because the client can only apply it if it is told.
+    /// Ichor, and below it broken armour and Betsy's curse. All three lower armour, and all three
+    /// do it on the hitting client rather than here — see the module note for the three
+    /// `checkArmorPenetration` call sites and why none of them can run on a server. Kept because
+    /// the client can only apply them if it is told they are on.
     pub ichor: bool,
     pub broken_armor: bool,
     pub betsys_curse: bool,
     pub midas: bool,
+    /// Confusion, which reverses the way an NPC faces at the tail of `SetTargetTrackingValues`
+    /// (`NPC.cs:78576-78579`). Read by [`crate::game::ai::face`].
     pub confused: bool,
     pub dripping: bool,
     pub dripping_slime: bool,
     pub dripping_sparkle_slime: bool,
     pub love_struck: bool,
+    /// Stinky. On the NPC side vanilla reads it for a colour tint (`NPC.cs:92208`), a gore burst
+    /// (`:92465`), a town resident starting to walk (`:54181`) and the town-NPC threat search
+    /// (`:54033-54084`), plus water washing the buff off in
+    /// `TryRemovingWaterPerishableEffects` (`:94433`, `if (!stinky || Main.netMode == 1) return;`).
+    /// This server models none of the last three: town residents do not treat a stinky NPC as a
+    /// threat and nothing here washes a perishable buff off in water, not even On Fire.
     pub stinky: bool,
     pub soul_drain: bool,
+    /// Dryad's Blessing. Raises armour by 20/15/10 on master/expert/classic
+    /// (`NPC.cs:53550-53561`), which `tick_town_casualties` applies. Vanilla's two other reads,
+    /// the thorns reflect in `BeHurtByOtherNPC` (`:93604`) and the +10 life regeneration in
+    /// `CheckLifeRegen` (`:93627`), are both in paths this server does not model for NPCs.
     pub dryad_ward: bool,
     pub dryad_bane: bool,
     pub javelined: bool,
@@ -156,6 +185,12 @@ pub struct Flags {
     pub marked_by_eel_whip: bool,
     pub blue_lightning: bool,
     pub red_lightning: bool,
+    /// Shimmering. Its two server-side reads in vanilla both need machinery this project does not
+    /// have: it gates `UpdateHomeTileState` for a town NPC standing still (`NPC.cs:53846`,
+    /// `:53913`), and this server never derives a home tile from where somebody is standing (they
+    /// come from housing), and it drives `shimmerTransparency` up to the `GetShimmered()`
+    /// transformation (`NPC.cs:92634-92640`), which no NPC here undergoes - `shimmered_town_npcs`
+    /// is read and written by the world file and by nothing else.
     pub shimmering: bool,
 }
 

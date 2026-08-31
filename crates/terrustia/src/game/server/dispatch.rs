@@ -4595,7 +4595,7 @@ impl GameServer {
         let Some(tier) = self.army_tier() else {
             return Ok(());
         };
-        self.army.start(tier, origin);
+        self.army.start(tier);
         self.army_arena = Some((left, right));
         // Three hundred ticks before the first wave, so the arena has a moment to settle.
         self.army.hold = 300;
@@ -4654,10 +4654,16 @@ impl GameServer {
         let _claimed = r.u8()?;
         let quests = r.i32()?;
         let golf = r.i32()?;
-        if let Some(player) = self.player_mut(slot) {
-            player.angler_quests = quests;
-            player.golf_score = golf;
-        }
+        let Some(player) = self.player_mut(slot) else {
+            return Ok(());
+        };
+        player.angler_quests = quests;
+        player.golf_score = golf;
+        // The rebroadcast is of the *stored* character state, not of the bytes just read:
+        // `NetMessage.cs:1156-1160`'s `case 76` writes `Main.player[number].anglerQuestsFinished`
+        // and `.golferScoreAccumulated`. Reading them back is what makes storing them mean
+        // something rather than being a copy nothing ever consults.
+        let (quests, golf) = (player.angler_quests, player.golf_score);
         let mut w = terrustia_proto::PacketWriter::new(id::QUESTS_COUNT_SYNC);
         w.u8(slot).i32(quests).i32(golf);
         let frame = w.finish()?;

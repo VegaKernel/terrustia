@@ -26,14 +26,22 @@ release matrix; the codegen port finished in Rust; town NPC happiness and shop p
 255-player qualification run per release candidate. A human fresh-character Moon Lord playthrough is
 a strongly-expected but waivable qualification step.
 
-**Town NPC happiness and shop pricing, added to the gates 2026-08-31.** The C3 audit established
-that the system does not exist anywhere in this repo: no happiness, no price multiplier, no
-`ShopHelper` equivalent, and no pylon happiness threshold. That is an absent subsystem rather than a
-bug, which is why no earlier pass reported it and why it had never been named here at all. Under a
-vanilla-identical bar an absent vanilla system is a gap like any other, so it is in scope and being
-built from `Terraria.GameContent.Personalities/` rather than deferred. Recording it explicitly
-because a system missing from both the code and the plan is invisible twice over, and this file is
-meant to be the honest contract.
+**Town NPC happiness and shop pricing, added to the gates 2026-08-31.** The C3 audit found no
+happiness, no price multiplier, no `ShopHelper` equivalent and no pylon happiness threshold
+anywhere in the repo: an absent subsystem rather than a bug, which is why no earlier pass reported
+it and why it had never been named here at all. Under a vanilla-identical bar an absent vanilla
+system is a gap like any other, so it went into scope and was built from
+`Terraria.GameContent.Personalities/` rather than deferred.
+
+**It has since landed, and this entry described the world before that.**
+`crates/terrustia-proto/src/happiness.rs` is 734 lines transcribing `ShopHelper.ProcessMood`
+(`ShopHelper.cs:99-178`) with its own test module, wired through `server/mod.rs:1424-1490` and
+reported by `/happy` (`console.rs:810-830`), with `examples/happiness_cost.rs` measuring what it
+costs. The multiplier is taken once per chat, on `SetTalkNPC` (`dispatch.rs:1685-1695`), the same
+moment vanilla takes it. Anything still outstanding under this gate needs naming from a fresh
+reading of the code, not from this paragraph. Left here rather than deleted because the gate's history is the point: a system missing
+from both the code and the plan is invisible twice over, and so is one this file still calls
+missing after it exists.
 
 ## Phase 0: preconditions (complete)
 
@@ -290,13 +298,23 @@ both generators to emit exactly what is committed rather than touching either ta
 
 ### Cross-cutting through Phase 1
 
-- **Dense-file splits**, paired with panic-clearing and idiomatic cleanup in the same visit:
-  `world/wiring.rs` (2,575), `panel/mod.rs` (1,746), `world/world.rs` (1,636), `world/wld.rs`
-  (1,511), `game/spawn.rs` (1,432), `world/worldgen/traps.rs` (1,404), `game/ai/mod.rs` (1,365),
-  `world/worldgen/mod.rs` (1,281), `world/wld_save.rs` (1,233), `world/worldgen/structures.rs`
-  (1,197), `game/npc.rs` (1,179), `game/npc_ai.rs` (1,164), `term.rs` (1,154), `game/ai/town.rs`
-  (1,150), `game/buffs.rs` (1,136), `game/ai/critter.rs` (1,123), `game/army.rs` (1,088). The
-  generated proto tables are excluded: codegen output, never hand-edited, size is fine.
+- **Dense-file splits**, paired with panic-clearing and idiomatic cleanup in the same visit.
+  Measured in **production lines**, with `#[cfg(test)]` bodies excluded (re-measured 2026-08-31;
+  the earlier list counted total lines and so listed ten files that were never dense):
+  `game/server/systems.rs` (6,573), `game/server/dispatch.rs` (4,943), `game/server/mod.rs`
+  (2,788), `panel/mod.rs` (2,139, no tests at all), `world/wiring.rs` (1,690 production against
+  1,627 test, not the 2,575 total this list used to quote), `game/spawn.rs` (1,644),
+  `world/wld.rs` (1,364), `game/ai/mod.rs` (1,237), `game/npc.rs` (1,186), `world/wld_save.rs`
+  (1,053). The generated proto tables are excluded: codegen output, never hand-edited, size is
+  fine. So are `crates/terrustia/tests/*.rs`, which carry no `#[cfg(test)]` and are test files
+  entire (`gameplay.rs` would otherwise rank first at 6,907 lines).
+
+  Off the list, all under 1,000 production lines: `world/worldgen/traps.rs` (989),
+  `world/worldgen/structures.rs` (950), `term.rs` (929), `world/world.rs` (916), `game/army.rs`
+  (847), `game/buffs.rs` (823), `world/worldgen/mod.rs` (670), `game/ai/town.rs` (654),
+  `game/ai/critter.rs` (654), `game/npc_ai.rs` (555). Note the three at the top of the new list
+  are the hot files the guardrail below sequences last, so the list is now ordered by size and
+  worked in roughly the opposite order.
 - **Feature-cohesive layout and a periodic hygiene scan** (requested 2026-08-31, explicitly lower
   priority than parity work and never allowed to derail it). The dense-file list above is organised
   by size; this is the layer above it, organised by subject. A reader who wants to know how Martian
@@ -322,12 +340,12 @@ both generators to emit exactly what is committed rather than touching either ta
   **The first scan already found four things worth acting on** (2026-08-31, full detail in
   `.scratch/audit-2026-08-30/HYGIENE.md`):
 
-  1. **The dense-file list above is measured on the wrong number.** It counts total lines including
-     `#[cfg(test)]` bodies. By production lines, **ten of its seventeen entries are already under
-     1,000** and should come off: `world/wiring.rs` is 1,690 production against 1,626 test, not
-     2,575. Meanwhile the two largest production files in the tree are absent from it entirely,
-     `game/server/systems.rs` (6,358) and `game/server/mod.rs` (2,642), the latter being the file
-     Lane A meant to leave thin.
+  1. **The dense-file list above was measured on the wrong number. Fixed 2026-08-31.** It counted
+     total lines including `#[cfg(test)]` bodies, so ten of its seventeen entries were never dense
+     (`world/wiring.rs` is 1,690 production against 1,627 test, not 2,575) while the three largest
+     production files in the tree were absent from it entirely, `game/server/systems.rs`,
+     `dispatch.rs` and `game/server/mod.rs`, the last being the file Lane A meant to leave thin.
+     The list above now counts production lines only.
   2. **Stale prose.** About 190 references to `game/server.rs` survive the Lane A split, across code
      comments, `docs/*.md` (one of them a link that 404s) and AGENTS.md. Many sit in files under
      active edit, so this is a single sweep to run once the parity lanes land, not piecemeal.
@@ -450,13 +468,20 @@ over effort; the first three are roughly a day each.
    against its own output proves nothing; that is the same tautology as asserting `BUFF_COUNT`
    against the array the same generator sized.
 
-3. **A dead-write lint.** `damage_bonus` was assigned in 13 production sites and read in none
-   outside `#[cfg(test)]`. So were `wet`, slime's `ai[3]`, `TreeOutcome::fleeing` and
-   `FairyOutcome::wants_treasure`: one class, five findings, two of them blockers, and the same
-   root cause (R4) as four blockers in the C2 wave. Rust's own `dead_code` misses it because a test
-   read counts as a read. About a hundred lines over `syn`: collect field assignments, collect
-   reads outside test modules, report the difference. The boss lane ran this sweep by hand and
-   found one the ledger did not have, so the yield is demonstrated rather than assumed.
+3. **A dead-write lint. Built; the open work is triage, not construction.** `damage_bonus` was
+   assigned in 13 production sites and read in none outside `#[cfg(test)]`. So were `wet`, slime's
+   `ai[3]`, `TreeOutcome::fleeing` and `FairyOutcome::wants_treasure`: one class, five findings,
+   two of them blockers, and the same root cause (R4) as four blockers in the C2 wave. Rust's own
+   `dead_code` misses it because a test read counts as a read.
+
+   This entry used to estimate "about a hundred lines over `syn`". It exists:
+   `crates/terrustia-codegen/src/bin/deadwrite.rs`, ~700 lines with its own tests, an `ALLOWED`
+   list carrying a written reason per excused field, and a `just check-dead-writes` recipe wired
+   into `just check-data`. It reached zero findings on 2026-08-31: of the 18 it was reporting,
+   `confused`, `dryad_ward` and `tipsy` were wired to real consumers, `ArmyState::stand`,
+   `ArmyState::champion_down` and `dungeon_side` were deleted as redundant state, `angler_quests`
+   and `golf_score` now feed the rebroadcast the way `NetMessage.cs:1156-1160` does, and the rest
+   went onto `ALLOWED` with a traced reason each. Keeping it at zero is the standing work.
 
 4. **Invariants in the soak, not just thresholds.** Liquid conservation is a property: the total in
    a sealed world does not change however many passes run. FIX-B found its blocker by measuring

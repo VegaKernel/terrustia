@@ -182,6 +182,13 @@ pub fn target_closest(npc: &Npc, targets: &[Target]) -> Option<Target> {
 ///
 /// The comparison is between hitbox midpoints computed with integer division, so an NPC of odd
 /// width faces the way the game's arithmetic says rather than the way real arithmetic would.
+///
+/// Confusion flips the horizontal axis and only that one, unconditionally, at the tail of that
+/// same method (`NPC.cs:78576-78579`) — so it lands here rather than in each routine, which is
+/// also where vanilla puts it: every `TargetClosest` call passes through it. The three routines
+/// with their own local `face` (`slime.rs:51`, `boss/fishron.rs:325`, `army/walker.rs:631`) do
+/// not go through this one and so are not confused; they turn on a bare X comparison rather than
+/// on `SetTargetTrackingValues`.
 pub fn face(npc: &mut Npc, t: Target) {
     let (bx, by) = target_box(t);
     let mid_x = bx as i32 + PLAYER_WIDTH / 2;
@@ -196,6 +203,9 @@ pub fn face(npc: &mut Npc, t: Target) {
     } else {
         1
     };
+    if npc.buffs.flags.confused {
+        npc.direction *= -1;
+    }
 }
 
 /// Accelerate one axis toward the way it is facing.
@@ -1440,6 +1450,39 @@ mod tests {
             missing_styles.len()
         );
         println!("styles left: {missing_styles:?}");
+    }
+
+    /// Confusion turns an NPC away from what it is facing, and only on the horizontal axis.
+    ///
+    /// `SetTargetTrackingValues` ends with an unconditional `if (confused) direction *= -1;`
+    /// (`NPC.cs:78576-78579`), with `directionY` untouched. Until 2026-08-31 the `confused` flag
+    /// was derived every tick (`buffs.rs:246`) and read by nothing at all, so a Confused enemy
+    /// walked straight at its target.
+    #[test]
+    fn confusion_reverses_the_way_an_npc_faces() {
+        const ZOMBIE: u16 = 3;
+        const CONFUSED: u16 = 31;
+        let target = Target {
+            slot: 0,
+            center: (3200.0, 11_100.0),
+            velocity: (0.0, 0.0),
+            alive: true,
+        };
+
+        let mut clear = Npc::new(ZOMBIE, (3000.0, 11_100.0), 1).expect("spawnable");
+        face(&mut clear, target);
+        assert_eq!(clear.direction, 1, "the target is to its right");
+
+        let mut dizzy = Npc::new(ZOMBIE, (3000.0, 11_100.0), 1).expect("spawnable");
+        assert!(dizzy.buffs.add(ZOMBIE, CONFUSED, 600), "zombies confuse");
+        dizzy.buffs.set_flags(ZOMBIE, 0.0);
+        assert!(dizzy.buffs.flags.confused);
+        face(&mut dizzy, target);
+        assert_eq!(dizzy.direction, -1, "confused, so it turns away");
+        assert_eq!(
+            dizzy.direction_y, clear.direction_y,
+            "vanilla flips `direction` only"
+        );
     }
 
     /// Prints how far the port has got, for the record.

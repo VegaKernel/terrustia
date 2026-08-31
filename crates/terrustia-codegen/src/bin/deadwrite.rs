@@ -29,8 +29,12 @@
 //!    ignores it. Cross-module dataflow is a different check.
 //!  * `npc.ai[3]` is a slot of a field, not a field. `ai` is read all over, so slot-level dead
 //!    writes (the slime that never un-sticks from a wall) do not surface here.
-//!  * A field mentioned anywhere inside a macro body counts as read, since macro tokens carry no
-//!    read/write distinction. Conservative on purpose.
+//!  * Inside a macro body only a **dotted** mention counts as a read: `scan_tokens` looks for an
+//!    ident directly after a `.`, because macro tokens carry no read/write distinction and
+//!    counting every ident would excuse any field whose name appears in a `format!`. The cost is
+//!    that a struct *pattern* inside a macro is invisible - `ConsoleLine { kind, level, text }`
+//!    in `panel/mod.rs`'s `tokio::select!` is a real read this lint cannot see, and is on the
+//!    `ALLOWED` list saying so. Outside a macro, `visit_field_pat` handles destructuring properly.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -122,6 +126,65 @@ const ALLOWED: &[(&str, &str)] = &[
         "Flags::red_lightning",
         "client-side dust only in the real game (NPC.cs:92286)",
     ),
+    // The three armour-shredding debuffs. Their entire NPC-side effect is
+    // `NPC.checkArmorPenetration` (`NPC.cs:81972-81990`), whose three callers -
+    // `Player.cs:44763`, `Player.cs:20602` (behind `whoAmI == Main.myPlayer`) and
+    // `Projectile.cs:13686` (behind `ownedBySomeone` and an
+    // `Invariant.Assert(netMode == 0 || owner == Main.myPlayer)`) - all run on the hitting client,
+    // which then sends the penetration already added into packet 28's damage. A server never runs
+    // any of them. Traced against the decompiled tree 2026-08-31; the full walk is in the
+    // `game/buffs.rs` module doc.
+    (
+        "Flags::ichor",
+        "armour penetration is computed and sent by the hitting client (NPC.cs:81972, all three \
+         callers client-owned)",
+    ),
+    (
+        "Flags::broken_armor",
+        "armour penetration is computed and sent by the hitting client (NPC.cs:81972, all three \
+         callers client-owned)",
+    ),
+    (
+        "Flags::betsys_curse",
+        "armour penetration is computed and sent by the hitting client (NPC.cs:81972, all three \
+         callers client-owned)",
+    ),
+    (
+        "Flags::stinky",
+        "colour and gore on the client (NPC.cs:92208, :92465); its three server-side reads are the \
+         town-NPC threat search (:54033-54084), a resident starting to walk (:54181) and \
+         TryRemovingWaterPerishableEffects (:94433), none of which this server models",
+    ),
+    (
+        "Flags::shimmering",
+        "gates UpdateHomeTileState (NPC.cs:53846, :53913) - this server takes home tiles from \
+         housing, never from where an NPC stands - and drives shimmerTransparency to GetShimmered \
+         (:92634), a transformation no NPC here undergoes",
+    ),
+    // Transcribed record fields whose only vanilla consumer is a branch this generator does not
+    // run, or whose consumer is legitimately the tests, the shape `Built::*` above already
+    // records.
+    (
+        "CaveCount::sand",
+        "countTiles' sandCount column (WorldGen.cs:9506, :9576); its one vanilla consumer is \
+         inside `if (remixWorldGen)` (:17929) and this generator has no remix worldgen",
+    ),
+    (
+        "LogScatterResult::last_log",
+        "vanilla's GenVars.logX/logY (WorldGen.cs:18775); its one consumer is inside \
+         `if (remixWorldGen)` in the Flowers pass (:20631) and this generator has no remix worldgen",
+    ),
+    (
+        "Outcome::ran_out",
+        "a stop reason for the mass-wire tests, which assert a run halts for want of materials; \
+         vanilla signals the same thing implicitly through MassWireOperationPay's amounts",
+    ),
+    (
+        "ConsoleLine::level",
+        "read by the panel's WebSocket feed (panel/mod.rs:819) in a `ConsoleLine { kind, level, \
+         text }` pattern inside a `tokio::select!`; macro bodies are only scanned for `.field` \
+         reads, so this is a limit of this lint rather than a dead write",
+    ),
     // `terrustia-proto` is the MIT wire-format library, published to crates.io. A transcribed
     // table column is part of its published shape whether or not this server happens to consume
     // it, so long as the column is really in the game's table.
@@ -136,6 +199,14 @@ const ALLOWED: &[(&str, &str)] = &[
     (
         "Offer::floor",
         "a published `terrustia-proto` table column (Chest.cs's own `minimumRarity` floor)",
+    ),
+    (
+        "NpcStats::lava_immune",
+        "a published `terrustia-proto` table column, `NPC.lavaImmune` (NPC.cs:6526) as \
+         SetDefaults sets it for 49 of the 691 types; its one consumer, \
+         Collision_LavaCollision's 50 damage and On Fire (NPC.cs:94468), needs per-NPC lava \
+         contact, which this server does not detect at all (`lava_wet` is hard-coded false at \
+         systems.rs:92)",
     ),
 ];
 

@@ -156,6 +156,10 @@ impl SlimeRainState {
 
     /// `Main.UpdateTime`'s own daily roll (`Main.cs:65906-65929`), checked every tick before noon.
     ///
+    /// `raining` is `Main.raining` (`Main.cs:1282`), the weather flag: `Main.cs:65906`'s gate is
+    /// `!raining && !NPC.BusyWithAnyInvasionOfSorts() && ...`, so real rain and a slime rain are
+    /// two separate blocks on the roll, not one.
+    ///
     /// `other_events_busy` is the rest of `NPC.BusyWithAnyInvasionOfSorts`'s own list — a blood
     /// moon, an eclipse, either moon event, an invasion, or the Old One's Army — computed by the
     /// caller, since none of those live in this module. `someone_ready_for_king_slime` is

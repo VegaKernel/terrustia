@@ -61,8 +61,6 @@ pub struct Layout {
     pub underworld: i32,
     pub spawn_x: i32,
     pub evil: Evil,
-    /// -1 for the left of the world, 1 for the right. The jungle sits opposite.
-    pub dungeon_side: i32,
     pub dungeon_x: i32,
     pub ocean_left: Band,
     pub ocean_right: Band,
@@ -110,6 +108,9 @@ impl Layout {
         } else {
             Evil::Crimson
         };
+        // -1 for the left of the world, 1 for the right. The jungle sits opposite. A local rather
+        // than a field of the record: the two passes that read it are both right here, and nothing
+        // downstream has ever asked which side the dungeon is on.
         let dungeon_side = if rand.next_bool() { -1 } else { 1 };
 
         // Never more than a fraction of the world each, so two oceans cannot meet in the middle.
@@ -208,7 +209,6 @@ impl Layout {
             underworld,
             spawn_x,
             evil,
-            dungeon_side,
             dungeon_x,
             ocean_left,
             ocean_right,
