@@ -67,6 +67,26 @@ const OUTBOUND_BASE: usize = 8192;
 /// the thing being synced) applied to `on_player_controls`'s broadcast instead of widening this
 /// queue further — but that is a change to `game/server.rs`'s broadcast logic, out of this file's
 /// scope, and left for whoever owns that file next.
+///
+/// **That fix now exists** (`GameServer::broadcast_near`, applied to player movement and client
+/// projectile syncs), and it was measured against this constant rather than assumed. Two 255-player
+/// runs at the old 256, differing only in whether the cull was wired up, at matched NPC load:
+///
+/// | | no cull | cull |
+/// |---|---|---|
+/// | `outbound queue full` drops | 14 | 0 |
+/// | clients held | 245/255 | 255/255 |
+/// | peak queue depth | 73,465 of 73,472 | 38,713 |
+///
+/// So the cull does what this comment predicted: without it the queue runs literally full at the
+/// pre-mitigation depth, and with it the peak halves and nothing is dropped.
+///
+/// **4,096 stays anyway.** A separate 255-player half-hour at this depth peaked at 578,447 queued
+/// frames, eight times what 256 can hold, because queue depth is what absorbs a contention spike on
+/// the test box: the game loop is descheduled, the backlog builds, and it drains again afterwards.
+/// Shrinking the queue would convert that recoverable backlog into dropped players. The cull
+/// removes the steady-state O(n²) term; the depth still covers the transient, and the two are not
+/// substitutes for each other.
 const OUTBOUND_PER_PLAYER: usize = 4096;
 
 /// The queue depth to give one connection on a server configured for `max_players`.
