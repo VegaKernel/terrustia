@@ -9,7 +9,9 @@
 //! * The **head** (46) rides on the body and spits fireballs on a fixed cycle.
 //! * The **fists** (47) hold stations either side, wind up, and punch — but only at a player on
 //!   their own side, so the left fist cannot reach you if you stay to the right.
-//! * Once the body dies the head comes **free** (48) and hovers three hundred pixels above you.
+//! * Kill the head and it comes back **free** (48), hovering three hundred pixels above you
+//!   (`NPC.cs:85913-85918`). The body is still alive at that point, and stays the thing every
+//!   threshold the free head has is measured against.
 //!
 //! And fighting it anywhere but the temple doubles every rate in it. That is not a difficulty
 //! setting; it is the game refusing to be dragged out of the fight it designed.
@@ -19,21 +21,22 @@ use terrustia_proto::npc_params::{
     GOLEM_FIREBALL_DAMAGE_UPGRADED, GOLEM_FIREBALL_SPEED, GOLEM_FIST_LEFT, GOLEM_FIST_OFFSET,
     GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN, GOLEM_FIST_RETURN_BODY_HURT,
     GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF, GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP,
-    GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL, GOLEM_FREE_FIREBALL_DAMAGE, GOLEM_FREE_LASER_DAMAGE,
-    GOLEM_FREE_LASER_DAMAGE_STEPS, GOLEM_FREE_LASER_INTERVAL, GOLEM_FREE_LASER_INTERVAL_STEPS,
-    GOLEM_FREE_LASER_NO_LOS_BONUS, GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT,
-    GOLEM_FREE_LASER_NO_LOS_SPEED_MULT, GOLEM_FREE_LASER_SPEED, GOLEM_FREE_SPEED,
-    GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET, GOLEM_HEAD_TETHER_SPEED, GOLEM_HOP_ACROSS,
-    GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT, GOLEM_HOP_BONUS_PART, GOLEM_HOP_BONUS_THIRD,
-    GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP, GOLEM_LASER_DAMAGE,
-    GOLEM_LASER_INTERVAL, GOLEM_LASER_NO_LOS_BONUS, GOLEM_LASER_SPEED, GOLEM_LASER_SPEED_OFFSIDE,
-    GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT, GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF,
-    GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_REACH, GOLEM_PUNCH_SPEED, GOLEM_SLAM,
+    GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL, GOLEM_FREE_FIREBALL_DAMAGE, GOLEM_FREE_FIREBALL_STEPS,
+    GOLEM_FREE_LASER_DAMAGE, GOLEM_FREE_LASER_DAMAGE_STEPS, GOLEM_FREE_LASER_INTERVAL,
+    GOLEM_FREE_LASER_INTERVAL_STEPS, GOLEM_FREE_LASER_NO_LOS_BONUS,
+    GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT, GOLEM_FREE_LASER_NO_LOS_SPEED_MULT,
+    GOLEM_FREE_LASER_SPEED, GOLEM_FREE_SPEED, GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET,
+    GOLEM_HEAD_TETHER_SPEED, GOLEM_HOP_ACROSS, GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT,
+    GOLEM_HOP_BONUS_PART, GOLEM_HOP_BONUS_THIRD, GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP,
+    GOLEM_HOP_UP_CAP, GOLEM_LASER_DAMAGE, GOLEM_LASER_INTERVAL, GOLEM_LASER_NO_LOS_BONUS,
+    GOLEM_LASER_SPEED, GOLEM_LASER_SPEED_OFFSIDE, GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY,
+    GOLEM_PUNCH_BODY_HURT, GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF, GOLEM_PUNCH_QUARTER,
+    GOLEM_PUNCH_REACH, GOLEM_PUNCH_SPEED, GOLEM_SLAM,
 };
 use terrustia_proto::projectile::ids::{GOLEM_FIREBALL, GOLEM_LASER};
 
 use super::skeletron::Parent;
-use crate::game::ai::{PLAYER_WIDTH, Shot, World, face};
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, Shot, World, face, sight, target_box};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -255,19 +258,36 @@ pub fn head(
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
-    // Past half health it hits harder with the fireball, and starts growing eye-lasers too
-    // (`NPC.cs:31480`, `31504-31564`).
+    // Past half health it hits harder with the fireball, and starts growing eye-lasers too. That
+    // is vanilla's `ai[0]`, set from health at the very end of the style each tick
+    // (`NPC.cs:31566-31573`, `if (life < lifeMax / 2) ai[0] = 1f;`).
     let health = npc.life as f32 / npc.life_max.max(1) as f32;
     let hurt = health < 0.5;
 
-    // The charge runs faster at the ends of its cycle, which is what gives the fireballs their
-    // uneven rhythm rather than a metronome.
     let pace = state.pace();
-    npc.ai[1] += if npc.ai[1] < 20.0 || npc.ai[1] > GOLEM_HEAD_CHARGE - 20.0 {
-        1.0 + 2.0 * (pace - 1.0) / 3.0
+    // GOL-M12: the two phases charge on different clocks, and only the first one has the rhythm.
+    //
+    // Phase zero runs faster at the ends of its cycle, which is what gives its fireballs their
+    // uneven beat rather than a metronome (`NPC.cs:31399-31411`). Phase one drops the rhythm
+    // entirely for a flat `(pace + 3) / 4` per tick, and then adds that step again under forty
+    // percent health and once more under twenty (`NPC.cs:31450-31459`) - so a nearly-dead head
+    // spits three times as often. The old code ran phase zero's rhythm in both phases and had no
+    // health steps at all, which left the second phase stuck at one 300-tick cycle throughout.
+    let step = (pace + 3.0) / 4.0;
+    if hurt {
+        npc.ai[1] += step;
+        for at in [0.4, 0.2] {
+            if health < at {
+                npc.ai[1] += step;
+            }
+        }
     } else {
-        1.0 * (pace - 1.0).max(0.0) / 2.0 + 1.0
-    };
+        npc.ai[1] += if npc.ai[1] < 20.0 || npc.ai[1] > GOLEM_HEAD_CHARGE - 20.0 {
+            1.0 + 2.0 * (pace - 1.0) / 3.0
+        } else {
+            1.0 * (pace - 1.0).max(0.0) / 2.0 + 1.0
+        };
+    }
     if npc.ai[1] >= GOLEM_HEAD_CHARGE {
         npc.ai[1] = 0.0;
         let from = (cx, cy + 10.0 * npc.scale);
@@ -289,10 +309,12 @@ pub fn head(
     }
 
     if hurt {
-        npc.ai[2] += pace;
-        for step in [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0] {
-            if health < step {
-                npc.ai[2] += pace;
+        // The laser charge is on the same phase-one clock as the fireball, not on the raw pace
+        // (`NPC.cs:31485-31501`, `ai[2] += num733`).
+        npc.ai[2] += step;
+        for at in [1.0 / 3.0, 1.0 / 4.0, 1.0 / 5.0] {
+            if health < at {
+                npc.ai[2] += step;
             }
         }
         if !crate::game::ai::can_see(world.tiles, npc, target) {
@@ -484,15 +506,32 @@ pub fn fist(
     out
 }
 
-/// Style 48: the head once the body is gone.
-pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcome {
+/// Style 48: the head once it has been knocked off the body.
+///
+/// GOL-M13: every threshold in this style keys on the **body**, not on the free head itself
+/// (`Main.npc[golemBoss]` throughout `NPC.cs:31645-31778`). The head comes off when the attached
+/// head dies (`NPC.cs:85913-85918`), which is well before the body does, so "how hurt is the
+/// Golem" is a question only the body can answer. Reading its own health instead meant the free
+/// head never accelerated at all: its fireball stayed on a flat 300-tick cycle where vanilla's
+/// reaches sixty, and its laser never picked up either.
+pub fn free_head(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    body: Option<Parent>,
+    state: GolemState,
+) -> GolemOutcome {
     let mut out = GolemOutcome::default();
     npc.dirty = true;
 
+    let Some(body) = body else {
+        // No body to key off: vanilla strikes the head for 9999 and returns (`NPC.cs:31599-31603`).
+        out.spent = true;
+        return out;
+    };
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
-    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+    let health = body.health;
     // It comes through terrain when it cannot see you, and becomes solid again once it can.
     let seen = crate::game::ai::can_see(world.tiles, npc, target);
     if !seen {
@@ -526,17 +565,30 @@ pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcom
         }
     }
 
-    // It keeps spitting fireballs, on the same cycle it used while attached — but harder
-    // (`NPC.cs:31684`).
-    npc.ai[1] += 1.0;
+    // It keeps spitting fireballs, harder than the attached head's (`NPC.cs:31674-31693`), on a
+    // cycle that steps up four times as the *body* is worn down (`NPC.cs:31644-31661`). And it
+    // will not fire through a wall: the charge is pinned at twenty for as long as it cannot see
+    // you, so the shot lands on the tick it comes back into view (`NPC.cs:31669-31672`).
+    let pace = state.pace();
+    let fireball_step = (pace + 4.0) / 5.0;
+    npc.ai[1] += fireball_step;
+    for at in GOLEM_FREE_FIREBALL_STEPS {
+        if health < at {
+            npc.ai[1] += fireball_step;
+        }
+    }
+    if !seen {
+        npc.ai[1] = 20.0;
+    }
     if npc.ai[1] >= GOLEM_HEAD_CHARGE {
         npc.ai[1] = 0.0;
+        let from = (cx, cy - 10.0 * npc.scale);
         out.shots.push(Shot {
             projectile: GOLEM_FIREBALL,
             damage: GOLEM_FREE_FIREBALL_DAMAGE,
-            position: (cx, cy + 10.0),
+            position: from,
             velocity: unit(
-                (target.center.0 - cx, target.center.1 - cy),
+                (target.center.0 - from.0, target.center.1 - from.1),
                 GOLEM_FIREBALL_SPEED,
             ),
             time_left: 600,
@@ -544,28 +596,37 @@ pub fn free_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> GolemOutcom
     }
 
     // Eye-lasers, always present on the free head: a slower cadence than the fireball's, one
-    // that quickens as it is hurt and while it cannot see you, and hits harder and faster once
-    // badly hurt (`NPC.cs:31697-31801`).
-    npc.ai[2] += 1.0;
-    for step in GOLEM_FREE_LASER_INTERVAL_STEPS {
-        if health < step {
-            npc.ai[2] += 1.0;
+    // that quickens as the body is worn down and while the *body* cannot see you, and hits
+    // harder and faster once the body is badly hurt (`NPC.cs:31694-31778`). The line of sight
+    // that matters here is `flag55`, cast from the body's centre (`NPC.cs:31726-31734`), not the
+    // head's own; they are different points, and only the head's decides tile collision above.
+    let body_blind = !sight::can_hit(
+        world.tiles,
+        body.position,
+        (body.size.0 as i32, body.size.1 as i32),
+        target_box(target),
+        (PLAYER_WIDTH, PLAYER_HEIGHT),
+    );
+    npc.ai[2] += pace;
+    for at in GOLEM_FREE_LASER_INTERVAL_STEPS {
+        if health < at {
+            npc.ai[2] += pace;
         }
     }
-    if !seen {
-        npc.ai[2] += GOLEM_FREE_LASER_NO_LOS_BONUS;
+    if body_blind {
+        npc.ai[2] += pace * GOLEM_FREE_LASER_NO_LOS_BONUS;
     }
     if npc.ai[2] >= GOLEM_FREE_LASER_INTERVAL {
         npc.ai[2] = 0.0;
         let mut damage = GOLEM_FREE_LASER_DAMAGE;
         let mut speed = GOLEM_FREE_LASER_SPEED;
-        for step in GOLEM_FREE_LASER_DAMAGE_STEPS {
-            if health < step {
+        for at in GOLEM_FREE_LASER_DAMAGE_STEPS {
+            if health < at {
                 damage += 1;
                 speed += 0.25;
             }
         }
-        if !seen {
+        if body_blind {
             damage = (damage as f32 * GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT) as i32;
             speed *= GOLEM_FREE_LASER_NO_LOS_SPEED_MULT;
         }
@@ -910,6 +971,91 @@ mod tests {
         );
     }
 
+    /// GOL-M12: the head's second phase charges on its own clock, and steps up twice more as it
+    /// dies (`num733 = (num720 + 3f) / 4f`, doubled under forty per cent and tripled under twenty,
+    /// `NPC.cs:31450-31459`).
+    ///
+    /// The old code ran phase zero's edge-of-cycle rhythm in both phases and had neither health
+    /// step, so a head at five per cent spat exactly as slowly as one at forty-five: a flat
+    /// 300-tick cycle where vanilla is down to a hundred.
+    #[test]
+    fn the_hurt_head_spits_faster_the_closer_it_is_to_dying() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let fireballs = |percent: i32| {
+            let mut h = piece(GOLEM_HEAD, 0, 25);
+            h.life = h.life_max * percent / 100;
+            (0..1200)
+                .flat_map(|_| head(&mut h, &w, Some(body_at((0.0, 400.0))), whole()).shots)
+                .filter(|s| s.projectile == GOLEM_FIREBALL)
+                .count()
+        };
+        // Both are in the second phase (under half health). At forty-five per cent the charge is
+        // one a tick, so three hundred ticks a cycle; under twenty it is three a tick, so a
+        // hundred.
+        assert_eq!(fireballs(45), 4, "four cycles in twelve hundred ticks");
+        assert_eq!(
+            fireballs(15),
+            12,
+            "and three times as many once nearly dead"
+        );
+    }
+
+    /// GOL-M13: every threshold the free head has is measured on the **body**
+    /// (`Main.npc[golemBoss]`, `NPC.cs:31645-31661`), and its charge is paced by `(pace + 4) / 5`
+    /// rather than advancing flat.
+    ///
+    /// Reading its own health with a flat `+= 1` left the free head on one 300-tick fireball cycle
+    /// for the whole fight, where vanilla's reaches sixty ticks once the body is nearly dead.
+    #[test]
+    fn the_free_heads_fireball_keys_on_the_bodys_health() {
+        let tiles = Temple(HashMap::new());
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let fireballs = |body_health: f32| {
+            // The head itself is untouched throughout: only the body's health may move this.
+            let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+            let mut body = body_at((0.0, 400.0));
+            body.health = body_health;
+            (0..1200)
+                .flat_map(|_| free_head(&mut h, &w, Some(body), whole()).shots)
+                .filter(|s| s.projectile == GOLEM_FIREBALL)
+                .count()
+        };
+        assert_eq!(
+            fireballs(1.0),
+            4,
+            "a whole body leaves it on a 300-tick cycle"
+        );
+        assert_eq!(fireballs(0.05), 20, "a body nearly dead brings it to sixty");
+    }
+
+    /// GOL-M13: and it does not fire through a wall. Vanilla pins the charge at twenty for every
+    /// tick it cannot see you (`NPC.cs:31669-31672`), so the shot lands when you come back into
+    /// view rather than arriving through the floor.
+    #[test]
+    fn the_free_head_will_not_fire_through_a_wall() {
+        let tiles = floor(30);
+        // Head below the floor, player above it.
+        let w = world(&tiles, Some((0.0, 20.0 * TILE)));
+        let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        let body = Some(body_at((0.0, 40.0 * TILE)));
+        let fireballs: usize = (0..1200)
+            .flat_map(|_| free_head(&mut h, &w, body, whole()).shots)
+            .filter(|s| s.projectile == GOLEM_FIREBALL)
+            .count();
+        assert_eq!(fireballs, 0, "the wall should hold its charge");
+        assert_eq!(h.ai[1], 20.0, "pinned at twenty, ready to fire on sight");
+    }
+
+    /// A free head with no body left to read is over (`NPC.cs:31599-31603`).
+    #[test]
+    fn the_free_head_dies_with_the_body() {
+        let tiles = floor(30);
+        let w = world(&tiles, Some((300.0, 400.0)));
+        let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        assert!(free_head(&mut h, &w, None, whole()).spent);
+    }
+
     /// B8: the free head fires eye-lasers of its own, on top of its fireball.
     #[test]
     fn the_free_head_fires_eye_lasers() {
@@ -917,9 +1063,10 @@ mod tests {
         let player = (0.0, 29.0 * TILE);
         let w = world(&tiles, Some(player));
         let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        let body = Some(body_at((0.0, 25.0 * TILE)));
         let mut lasers = 0;
         for _ in 0..3000 {
-            let out = free_head(&mut h, &w);
+            let out = free_head(&mut h, &w, body, whole());
             lasers += out
                 .shots
                 .iter()
@@ -1024,8 +1171,9 @@ mod tests {
         let player = (0.0, 29.0 * TILE);
         let w = world(&tiles, Some(player));
         let mut h = piece(GOLEM_HEAD_FREE, 0, 40);
+        let body = Some(body_at((0.0, 25.0 * TILE)));
         for _ in 0..2000 {
-            free_head(&mut h, &w);
+            free_head(&mut h, &w, body, whole());
             h.position.0 += h.velocity.0;
             h.position.1 += h.velocity.1;
         }

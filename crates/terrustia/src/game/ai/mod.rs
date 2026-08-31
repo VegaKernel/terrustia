@@ -746,6 +746,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 world.parent_state == boss::skeletron::HOVERING,
                 world.parent_state == boss::skeletron::LEAVING,
                 world.target,
+                world.conditions.expert,
             );
             effects.expired = outcome == boss::skeletron::HandOutcome::Orphaned;
         }
@@ -827,9 +828,14 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let out = boss::golem::fist(npc, world, world.parent, state);
             effects.expired = out.spent;
         }
-        48 => effects
-            .shots
-            .extend(boss::golem::free_head(npc, world).shots),
+        48 => {
+            // The free head reads the body, not itself, for every threshold it has (GOL-M13), so
+            // it needs the same parent link and the same pace the attached parts get.
+            let state = golem_state(npc, world);
+            let out = boss::golem::free_head(npc, world, world.parent, state);
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
+        }
         32 => {
             let out = boss::prime::prime_head(npc, world);
             effects.expired = out.leaving && npc.time_left <= 0;

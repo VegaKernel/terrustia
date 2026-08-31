@@ -25,8 +25,8 @@ use terrustia_proto::npc_params::{
     SKELETRON_ENRAGED_SPEED, SKELETRON_ENRAGED_STAT, SKELETRON_EXPERT_HAND_DEFENSE,
     SKELETRON_GIVE_UP, SKELETRON_HAND, SKELETRON_HOVER, SKELETRON_HOVER_ABOVE,
     SKELETRON_HOVER_TICKS, SKELETRON_SPIN_DEFENSE, SKELETRON_SPIN_RATE, SKELETRON_SPIN_SPEED,
-    SKELETRON_SPIN_SPEED_EXPERT, SKELETRON_SPIN_SPEED_EXPERT_RANGE,
-    SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR, SKELETRON_SPIN_TICKS,
+    SKELETRON_SPIN_SPEED_EXPERT, SKELETRON_SPIN_SPEED_EXPERT_NO_HANDS,
+    SKELETRON_SPIN_SPEED_EXPERT_ONE_HAND, SKELETRON_SPIN_SPEED_EXPERT_RANGE, SKELETRON_SPIN_TICKS,
 };
 use terrustia_proto::projectile::ids::SKELETRON_BARRAGE;
 
@@ -83,11 +83,17 @@ impl Parent {
 /// The Dungeon Guardian, which is Skeletron's routine with no off switch.
 const DUNGEON_GUARDIAN: u16 = 68;
 
+/// How hard a drift bleeds off velocity that is already pointing the wrong way. The head's hover
+/// uses 0.98 (`NPC.cs:22169`); a hand's docking uses 0.96 (`NPC.cs:22432`), which the shared
+/// helper here used to flatten to the head's value for both.
+const HOVER_DAMPING: f32 = 0.98;
+const DOCK_DAMPING: f32 = 0.96;
+
 /// Drive one axis toward a wanted position, easing off whatever it was doing the other way.
-fn drift(velocity: &mut f32, here: f32, wanted: f32, accel: f32, cap: f32) {
+fn drift(velocity: &mut f32, here: f32, wanted: f32, accel: f32, cap: f32, damping: f32) {
     if here > wanted {
         if *velocity > 0.0 {
-            *velocity *= 0.98;
+            *velocity *= damping;
         }
         *velocity -= accel;
         if *velocity > cap {
@@ -95,7 +101,7 @@ fn drift(velocity: &mut f32, here: f32, wanted: f32, accel: f32, cap: f32) {
         }
     } else if here < wanted {
         if *velocity < 0.0 {
-            *velocity *= 0.98;
+            *velocity *= damping;
         }
         *velocity += accel;
         if *velocity < -cap {
@@ -236,6 +242,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
             target.center.1 - crate::game::ai::PLAYER_HEIGHT as f32 / 2.0 - SKELETRON_HOVER_ABOVE,
             up_accel,
             up_cap,
+            HOVER_DAMPING,
         );
         drift(
             &mut npc.velocity.0,
@@ -243,6 +250,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
             target.center.0,
             across_accel,
             across_cap,
+            HOVER_DAMPING,
         );
     } else if npc.ai[1] == SPINNING {
         // The window: ten points off its defence while it grinds at you (`NPC.cs:22264`).
@@ -259,11 +267,22 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
         let mut spin_speed = SKELETRON_SPIN_SPEED;
         if world.conditions.expert {
             spin_speed = SKELETRON_SPIN_SPEED_EXPERT;
-            for threshold in SKELETRON_SPIN_SPEED_EXPERT_RANGE {
+            // SKEL-M5: the first threshold is 1.05 and the other nine are 1.1
+            // (`NPC.cs:22292-22332`). Applying 1.1 to all ten made the charge about five percent
+            // too fast at short range.
+            for (threshold, factor) in SKELETRON_SPIN_SPEED_EXPERT_RANGE {
                 if reach > threshold {
-                    spin_speed *= SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR;
+                    spin_speed *= factor;
                 }
             }
+            // And the term that was missing entirely: the fewer hands are left, the faster it
+            // comes at you (`NPC.cs:22333-22342`). Without it the fight lost its escalation, and
+            // a handless Skeletron charged at the same speed as a whole one.
+            spin_speed *= match living_hands {
+                0 => SKELETRON_SPIN_SPEED_EXPERT_NO_HANDS,
+                1 => SKELETRON_SPIN_SPEED_EXPERT_ONE_HAND,
+                _ => 1.0,
+            };
         }
         let k = spin_speed / reach;
         npc.velocity = (dx * k, dy * k);
@@ -311,6 +330,7 @@ pub fn hand(
     head_hovering: bool,
     head_leaving: bool,
     target: Option<crate::game::npc_ai::Target>,
+    expert: bool,
 ) -> HandOutcome {
     let Some(Parent {
         position: head_position,
@@ -347,11 +367,29 @@ pub fn hand(
                 // the low dock is where a hand winds up before it lunges (`NPC.cs:22428-22478`).
                 let at = dock(HAND_DOCK_LOW);
                 let (uy, cyv, ux, cxv) = HAND_DOCK_LOW_DRIVE;
-                drift(&mut npc.velocity.1, npc.position.1, at.1, uy, cyv);
-                let here = npc.position.0 + half_width;
-                drift(&mut npc.velocity.0, here, at.0, ux, cxv);
-                // Only from the low dock does it wind itself up.
+                // SKEL-M6: expert runs this whole steering block twice per tick, once inside
+                // `if (Main.expertMode)` (`NPC.cs:22496-22546`) and again unconditionally
+                // (`NPC.cs:22547-22592`) with identical numbers. Nothing moves between the two,
+                // so a second pass over the same target is exactly what vanilla does: the hand
+                // reaches its dock at twice the acceleration.
+                for _ in 0..if expert { 2 } else { 1 } {
+                    drift(
+                        &mut npc.velocity.1,
+                        npc.position.1,
+                        at.1,
+                        uy,
+                        cyv,
+                        DOCK_DAMPING,
+                    );
+                    let here = npc.position.0 + half_width;
+                    drift(&mut npc.velocity.0, here, at.0, ux, cxv, DOCK_DAMPING);
+                }
+                // Only from the low dock does it wind itself up, and expert winds it up half
+                // again as fast: 200 ticks to the lunge, not 300 (`NPC.cs:22479-22489`).
                 npc.ai[3] += 1.0;
+                if expert {
+                    npc.ai[3] += 0.5;
+                }
                 if npc.ai[3] >= HAND_WINDUP_AT {
                     npc.ai[2] += 1.0;
                     npc.ai[3] = 0.0;
@@ -362,9 +400,16 @@ pub fn hand(
                 // beside it instead of attacking.
                 let at = dock(HAND_DOCK_HIGH);
                 let (uy, cyv, ux, cxv) = HAND_DOCK_HIGH_DRIVE;
-                drift(&mut npc.velocity.1, npc.position.1, at.1, uy, cyv);
+                drift(
+                    &mut npc.velocity.1,
+                    npc.position.1,
+                    at.1,
+                    uy,
+                    cyv,
+                    DOCK_DAMPING,
+                );
                 let here = npc.position.0 + half_width;
-                drift(&mut npc.velocity.0, here, at.0, ux, cxv);
+                drift(&mut npc.velocity.0, here, at.0, ux, cxv, DOCK_DAMPING);
             }
             let at = dock(HAND_DOCK_LOW);
             npc.rotation = (at.1 - cy).atan2(at.0 - cx) + 1.57;
@@ -595,16 +640,129 @@ mod tests {
         assert!(s.time_left <= 50);
     }
 
+    /// SKEL-M5: two errors in one expert table.
+    ///
+    /// Vanilla opens the range ladder at 1.05 and only then repeats at 1.1
+    /// (`NPC.cs:22292-22332`), and it then multiplies by a hand-count term that was missing here
+    /// altogether (`switch (num173)`, `NPC.cs:22333-22342`). With 1.1 at all ten steps and no hand
+    /// term, a two-handed Skeletron charged about five percent too fast at short range and a
+    /// handless one about five percent too slow - and the fight lost the escalation it is built
+    /// around, where breaking a hand makes the head come at you harder.
+    #[test]
+    fn breaking_its_hands_makes_it_charge_harder() {
+        let tiles = Dungeon;
+        let charge = |hands: usize, reach: f32| {
+            let census = [(SKELETRON_HAND, hands)];
+            let mut s = skeletron();
+            let mut r = rng();
+            let (cx, cy) = s.center();
+            let mut w = world(&tiles, Some(player_at(cx + reach, cy)));
+            w.conditions.expert = true;
+            w.census = &census;
+            // Already spinning, which is the charge this table paces.
+            s.ai[0] = 1.0;
+            s.ai[1] = SPINNING;
+            head(&mut s, &w, &mut r);
+            s.velocity.0.hypot(s.velocity.1)
+        };
+        // Inside the first range threshold, so this is the hand term on its own.
+        let close = 140.0;
+        let base = SKELETRON_SPIN_SPEED_EXPERT;
+        for (hands, want) in [
+            (2, base),
+            (1, base * SKELETRON_SPIN_SPEED_EXPERT_ONE_HAND),
+            (0, base * SKELETRON_SPIN_SPEED_EXPERT_NO_HANDS),
+        ] {
+            let got = charge(hands, close);
+            assert!(
+                (got - want).abs() < 1e-3,
+                "with {hands} hands it should charge at {want}, got {got}"
+            );
+        }
+        // And past a hundred and fifty pixels it picks up 1.05, not another 1.1.
+        let got = charge(2, 180.0);
+        assert!(
+            (got - base * 1.05).abs() < 1e-3,
+            "the first range step is 1.05, got {got}"
+        );
+    }
+
     fn a_hand() -> Npc {
         let mut n = Npc::new(36, (10_000.0, 9_800.0), 1).expect("skeletron hand");
         n.ai[0] = 1.0;
         n
     }
 
+    /// SKEL-M6: expert winds a hand up half again as fast (`ai[3]++; ... if (Main.expertMode)
+    /// ai[3] += 0.5f;`, `NPC.cs:22479-22489`), so it lets go after two hundred ticks rather than
+    /// three hundred. The counter advanced flat, so expert hands attacked at classic pace.
+    #[test]
+    fn expert_hands_wind_up_half_again_as_fast() {
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
+        let t = Some(player_at(10_000.0, 10_400.0));
+        let let_go_by = |expert: bool, ticks: i32| {
+            let mut h = a_hand();
+            for _ in 0..ticks {
+                hand(&mut h, head_at, true, false, t, expert);
+            }
+            h.ai[2] != 0.0
+        };
+        assert!(!let_go_by(false, 200), "classic is still winding up at 200");
+        assert!(let_go_by(true, 200), "expert has let go by 200");
+        assert!(let_go_by(false, 300), "and classic lets go at 300");
+    }
+
+    /// SKEL-M6: expert runs the whole low-dock steering block twice a tick, once inside `if
+    /// (Main.expertMode)` (`NPC.cs:22496-22546`) and again unconditionally
+    /// (`NPC.cs:22547-22592`) with identical numbers, so a hand closes on its dock at twice the
+    /// acceleration. We ran it once.
+    #[test]
+    fn expert_hands_dock_at_twice_the_rate() {
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
+        let after_a_tick = |expert: bool| {
+            let mut h = a_hand();
+            hand(&mut h, head_at, true, false, None, expert);
+            h.velocity
+        };
+        let classic = after_a_tick(false);
+        let expert = after_a_tick(true);
+        assert!(
+            classic.0 != 0.0 && classic.1 != 0.0,
+            "it should be steering on both axes at all, got {classic:?}"
+        );
+        assert!(
+            (expert.0 - classic.0 * 2.0).abs() < 1e-6 && (expert.1 - classic.1 * 2.0).abs() < 1e-6,
+            "expert should be twice as far along: {expert:?} against {classic:?}"
+        );
+    }
+
+    /// A hand bleeds off a wrong-way drift at 0.96 (`NPC.cs:22432`), not the head's own 0.98
+    /// (`NPC.cs:22169`). One shared helper had flattened both to the head's figure.
+    #[test]
+    fn a_hand_damps_a_wrong_way_drift_at_its_own_rate() {
+        let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
+        let mut h = a_hand();
+        // Below its low dock and still falling, which is the case the damping is for.
+        h.position.1 = 10_400.0;
+        h.velocity.1 = 1.0;
+        hand(&mut h, head_at, true, false, None, false);
+        let (up_accel, ..) = HAND_DOCK_LOW_DRIVE;
+        // Vanilla's own figure, spelled out rather than read back off the constant under test.
+        let want = 1.0 * 0.96 - up_accel;
+        assert!(
+            (h.velocity.1 - want).abs() < 1e-6,
+            "should have damped to {want}, got {}",
+            h.velocity.1
+        );
+    }
+
     #[test]
     fn a_hand_without_a_head_is_finished() {
         let mut h = a_hand();
-        assert_eq!(hand(&mut h, None, true, false, None), HandOutcome::Orphaned);
+        assert_eq!(
+            hand(&mut h, None, true, false, None, false),
+            HandOutcome::Orphaned
+        );
     }
 
     #[test]
@@ -615,13 +773,13 @@ mod tests {
         // Docked low, because the head is hovering — the safe half, and the one the hands
         // attack from (`NPC.cs:22422-22478`).
         for _ in 0..(HAND_WINDUP_AT as i32 + 1) {
-            hand(&mut h, head_at, true, false, t);
+            hand(&mut h, head_at, true, false, t, false);
         }
         assert_eq!(h.ai[2], 1.0, "should be winding up");
 
         // It climbs, and once above the head it commits.
         for _ in 0..400 {
-            hand(&mut h, head_at, true, false, t);
+            hand(&mut h, head_at, true, false, t, false);
             h.position.1 += h.velocity.1;
             if h.ai[2] == 2.0 {
                 break;
@@ -642,7 +800,7 @@ mod tests {
         let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         let t = Some(player_at(10_000.0, 10_400.0));
         for _ in 0..2000 {
-            hand(&mut h, head_at, false, false, t);
+            hand(&mut h, head_at, false, false, t, false);
         }
         assert_eq!(
             h.ai[2], 0.0,
@@ -664,6 +822,7 @@ mod tests {
             false,
             false,
             Some(player_at(10_000.0, 10_400.0)),
+            false,
         );
         assert_eq!(h.ai[2], 3.0, "the lunge is over");
     }
@@ -681,9 +840,9 @@ mod tests {
         let mut spinning = a_hand();
         let head_at = Some(parent_at((10_000.0, 9_600.0), (100.0, 100.0)));
         for _ in 0..200 {
-            hand(&mut hovering, head_at, true, false, None);
+            hand(&mut hovering, head_at, true, false, None, false);
             hovering.position.1 += hovering.velocity.1;
-            hand(&mut spinning, head_at, false, false, None);
+            hand(&mut spinning, head_at, false, false, None, false);
             spinning.position.1 += spinning.velocity.1;
         }
         assert!(

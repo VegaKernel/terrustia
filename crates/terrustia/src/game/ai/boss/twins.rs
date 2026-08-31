@@ -404,7 +404,15 @@ fn spazmatism_second_form(
 
         _ => {
             // Running the dash out, then braking at Spazmatism's own faster rate.
+            //
+            // BS3-M7: expert winds this counter on half again as fast (`ai[2]++; if
+            // (Main.expertMode) ai[2] += 0.5f;`, `NPC.cs:27757-27762`), so the brake lands around
+            // tick 33 and the dash ends around 53, not 50 and 80. Six dashes are 320 ticks of
+            // expert fight, not 480; without this the whole second form ran at classic pace.
             npc.ai[2] += 1.0;
+            if expert {
+                npc.ai[2] += 0.5;
+            }
             if npc.ai[2] >= t.second_dash_brake_at {
                 npc.velocity.0 *= t.second_dash_decay;
                 npc.velocity.1 *= t.second_dash_decay;
@@ -830,6 +838,37 @@ mod tests {
         assert_eq!(
             dash_starts, 6,
             "Spazmatism's second form should run six dashes and loop back, got {dash_starts}"
+        );
+    }
+
+    /// BS3-M7: expert runs Spazmatism's second-form dash counter half again as fast (`ai[2]++; if
+    /// (Main.expertMode) ai[2] += 0.5f;`, `NPC.cs:27757-27762`), so the dash ends around tick 53
+    /// rather than 80 and six of them take 320 ticks instead of 480. The counter used to advance
+    /// flat, which left the whole second form running at classic pace in an expert world.
+    #[test]
+    fn spazmatism_dashes_half_again_as_fast_in_expert() {
+        let tiles = Sky(HashMap::new());
+        let dash_length = |expert: bool| {
+            let mut rng = SmallRng::seed_from_u64(16);
+            let mut e = eye(SPAZMATISM, 0.0, 0.0);
+            let mut w = night(&tiles, Some((1000.0, 1000.0)));
+            w.conditions.expert = expert;
+            // Already committed to a dash, so this measures exactly one run of it.
+            e.ai = [form::SECOND, 2.0, 0.0, 0.0];
+            for tick in 1..1000 {
+                twin(&mut e, &w, &mut rng);
+                if e.ai[1] != 2.0 {
+                    return tick;
+                }
+            }
+            0
+        };
+        assert_eq!(dash_length(false), 80, "classic runs the full eighty ticks");
+        // `ai[2]` reaches eighty on the fifty-fourth tick at 1.5 a tick (53 * 1.5 = 79.5).
+        assert_eq!(
+            dash_length(true),
+            54,
+            "expert gets there half again as fast"
         );
     }
 }
