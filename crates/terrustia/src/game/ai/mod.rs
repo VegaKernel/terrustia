@@ -184,7 +184,7 @@ pub fn target_closest(npc: &Npc, targets: &[Target]) -> Option<Target> {
 /// width faces the way the game's arithmetic says rather than the way real arithmetic would.
 ///
 /// Confusion flips the horizontal axis and only that one, unconditionally, at the tail of that
-/// same method (`NPC.cs:78576-78579`) — so it lands here rather than in each routine, which is
+/// same method (`NPC.cs:78576-78579`), so it lands here rather than in each routine, which is
 /// also where vanilla puts it: every `TargetClosest` call passes through it. The three routines
 /// with their own local `face` (`slime.rs:51`, `boss/fishron.rs:325`, `army/walker.rs:631`) do
 /// not go through this one and so are not confused; they turn on a bare X comparison rather than

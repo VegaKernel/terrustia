@@ -3366,7 +3366,7 @@ mod claim_token_and_login_throttle {
 /// Caught by a real CI soak run, not a unit test: `save_world_in_background`'s incremental path
 /// (`refresh_snapshot`) requires a buffer that already holds the world's state as of the moment
 /// change-tracking began, and there was no such buffer until the first save built one the
-/// expensive way. Measured on that run — 14,833 µs, 89% of a single tick's budget — against a
+/// expensive way. Measured on that run, 14,833 us, 89% of a single tick's budget, against a
 /// later save, which refreshes a buffer instead of rebuilding one. That later figure was written
 /// here as "150-200 µs" and is not: `save_world`'s own comment carries the re-measured table
 /// (2.0 to 12.8 ms, scaling with how much changed between saves). Refreshing is still much

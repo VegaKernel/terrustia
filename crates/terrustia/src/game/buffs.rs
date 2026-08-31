@@ -24,7 +24,7 @@
 //! whole of their effect is `NPC.checkArmorPenetration` (`NPC.cs:81972-81990`, +15/+20/+40), and
 //! it has exactly three callers, all of which run on the hitting *client* and never on a server:
 //!
-//! * `Player.cs:44763`, item melee — the result is added to `num3` and then handed to
+//! * `Player.cs:44763`, item melee: the result is added to `num3` and then handed to
 //!   `StrikeNPC`, which sends `num3` on the wire (`NPC.cs:82046`, `SendData(28, ...)`) *before*
 //!   applying defence, so the penetration is already inside the damage the server receives.
 //! * `Projectile.cs:13686`, guarded by `ownedBySomeone && !hostile` and by
@@ -147,7 +147,7 @@ pub struct Flags {
     pub shadow_flame: bool,
     pub accelerate_poisons: bool,
     /// Ichor, and below it broken armour and Betsy's curse. All three lower armour, and all three
-    /// do it on the hitting client rather than here — see the module note for the three
+    /// do it on the hitting client rather than here, see the module note for the three
     /// `checkArmorPenetration` call sites and why none of them can run on a server. Kept because
     /// the client can only apply them if it is told they are on.
     pub ichor: bool,
