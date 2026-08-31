@@ -5336,22 +5336,46 @@ impl GameServer {
     ///
     /// Invaders arrive at the invasion's column rather than around a player, which is what makes
     /// one feel like something marching toward you instead of something appearing on top of you.
+    ///
+    /// The rate and the cap are the game's own invasion override (`NPC.cs:782-786`):
+    /// ```csharp
+    /// if (invaders) {
+    ///     maxSpawns = (int)((double)defaultMaxSpawns * (2.0 + 0.3 * (double)numberOfActivePlayers));
+    ///     spawnRate = 20;
+    /// }
+    /// ```
+    /// applied through the same per-player gate every other spawn goes through
+    /// (`NPC.cs:312-317`: `nearbyActiveNPCs >= maxSpawns` first, then `rand.Next(spawnRate)`), and
+    /// with `SpawnNPC`'s own `break` so at most one arrives server-wide per tick
+    /// (`NPC.cs:293-303`).
+    ///
+    /// This was a hand-rolled fixed cadence with a world-global cap: one invader every 45 ticks
+    /// against `used_slots()`, so invasions arrived 2.25 times slower than the game sends them and
+    /// stalled outright whenever 13 NPCs existed anywhere in the world, however far away.
     fn spawn_invaders(&mut self, state: InvasionState) {
-        let active = self
+        let active: Vec<(f32, f32)> = self
             .players
             .iter()
             .flatten()
             .filter(|p| p.is_playing() && p.life > 0)
-            .count();
-        if active == 0 {
+            .map(|p| p.position)
+            .collect();
+        if active.is_empty() {
             return;
         }
-        // An invasion presses harder than ordinary spawning, and the cap scales with the party.
-        let cap = spawn::MAX_SPAWNS * 2.0 * (1.0 + 0.3 * active as f32);
-        if self.npcs.used_slots() >= cap {
+        let cap = spawn::MAX_SPAWNS * (2.0 + 0.3 * active.len() as f32);
+
+        // The first player who is both under their own near-player cap and wins the one-in-twenty
+        // roll takes the spawn, and the loop stops there.
+        let Some(at_player) = active.iter().find(|position| {
+            spawn::nearby_active_npcs(&self.npcs, **position) < cap
+                && rand::Rng::random_range(&mut self.rng, 0..INVASION_SPAWN_RATE) == 0
+        }) else {
             return;
-        }
-        if !self.ticks.is_multiple_of(INVASION_SPAWN_EVERY) {
+        };
+        // The army only arrives where its front has actually reached.
+        let toward = (at_player.0 / crate::game::npc::TILE) as i32;
+        if !state.reaches(toward) {
             return;
         }
 
@@ -5362,27 +5386,12 @@ impl GameServer {
             return;
         };
 
-        // They arrive around a player near the front rather than at the front itself, which is
-        // what puts an invasion in front of somebody instead of over the horizon.
-        let near_front: Vec<i32> = self
-            .players
-            .iter()
-            .flatten()
-            .filter(|p| p.is_playing() && p.life > 0)
-            .map(|p| (p.position.0 / crate::game::npc::TILE) as i32)
-            .filter(|x| state.reaches(*x))
-            .collect();
-        let column = match near_front.as_slice() {
-            // Nobody near the front: the army waits rather than spawning into an empty ocean.
-            [] => return,
-            columns => {
-                let at = columns[rand::Rng::random_range(&mut self.rng, 0..columns.len())];
-                let side = if state.from_x > state.toward_x { 1 } else { -1 };
-                // Just off screen on the side the army is coming from.
-                (at + side * rand::Rng::random_range(&mut self.rng, 40..80))
-                    .clamp(10, self.world.width() - 10)
-            }
-        };
+        // They arrive around the player rather than at the front itself, which is what puts an
+        // invasion in front of somebody instead of over the horizon.
+        let side = if state.from_x > state.toward_x { 1 } else { -1 };
+        // Just off screen on the side the army is coming from.
+        let column = (toward + side * rand::Rng::random_range(&mut self.rng, 40..80))
+            .clamp(10, self.world.width() - 10);
         let Some(ground) = spawn::find_ground(&self.world, column, i32::from(self.world.spawn_y))
         else {
             return;
@@ -6490,6 +6499,116 @@ mod stop_biome_spread_gate {
             drift_from_checkerboard(&server.world),
             0,
             "Stop Biome Spread must hold the infection completely still"
+        );
+    }
+}
+
+#[cfg(test)]
+mod invasion_spawn_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::game::event::{Invasion, InvasionState};
+
+    /// A server with a floor, one playing player standing on it, and a goblin army whose front has
+    /// already reached them.
+    fn under_siege() -> GameServer {
+        let mut world = crate::world::World::empty(600, 300, "invasion");
+        let floor = 150;
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+        }
+        world.spawn_x = 300;
+        world.spawn_y = floor as i16 - 1;
+
+        let mut server = GameServer::new(Config::default(), world);
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1024);
+        // Held open: a dropped receiver would make every broadcast fail, which is not what this
+        // test is measuring.
+        std::mem::forget(out_rx);
+        let mut player =
+            crate::game::player::Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.life = 100;
+        player.position = (
+            300.0 * crate::game::npc::TILE,
+            149.0 * crate::game::npc::TILE,
+        );
+        server.players[0] = Some(player);
+
+        server.invasion = Some(InvasionState {
+            kind: Invasion::Goblin,
+            remaining: 1000,
+            started_with: 1000,
+            from_x: 300,
+            toward_x: 300,
+        });
+        server
+    }
+
+    /// Run the invasion spawner for a while, clearing the field every tick so the near-player cap
+    /// never binds and the count measures the *rate* alone.
+    fn arrival_rate_over(server: &mut GameServer, ticks: u64) -> usize {
+        let state = server.invasion.expect("an invasion");
+        let mut total = 0;
+        for _ in 0..ticks {
+            server.spawn_invaders(state);
+            let arrived: Vec<u8> = server.npcs.iter().map(|(index, _)| index).collect();
+            total += arrived.len();
+            for index in arrived {
+                server.npcs.remove(index);
+            }
+            server.ticks += 1;
+        }
+        total
+    }
+
+    /// `NPC.cs:782-786`, `spawnRate = 20` during an invasion, rolled per player per tick against
+    /// the same one-in-`spawnRate` gate every other spawn goes through (`NPC.cs:316`).
+    ///
+    /// Fails before the fix, which sent one invader every 45 ticks flat: 2.25 times slower.
+    /// 3,000 ticks is about 150 arrivals at the game's pace and exactly 66 at the old fixed
+    /// cadence, so the bar sits well clear of both the old number and the new one's spread
+    /// (standard deviation about 12, so 100 is more than four below the mean).
+    #[test]
+    fn an_invasion_arrives_at_the_games_own_rate() {
+        let mut server = under_siege();
+        let arrived = arrival_rate_over(&mut server, 3_000);
+        assert!(
+            arrived > 100,
+            "3,000 ticks at a one-in-twenty roll should send about 150 invaders, got {arrived}",
+        );
+    }
+
+    /// The cap is `defaultMaxSpawns * (2 + 0.3 * players)` counted *per player against what is
+    /// near them* (`NPC.cs:312-313`, `:783`), not against every NPC in the world.
+    ///
+    /// Fails before the fix, which compared `used_slots()` against a world-global 13: an invasion
+    /// stalled outright whenever thirteen NPCs existed anywhere, however far away.
+    #[test]
+    fn monsters_on_the_far_side_of_the_world_do_not_stall_an_invasion() {
+        let mut server = under_siege();
+        // Twenty zombies at the other end of the map, well outside anyone's active box.
+        for _ in 0..20 {
+            server.npcs.spawn(
+                3,
+                (
+                    10.0 * crate::game::npc::TILE,
+                    149.0 * crate::game::npc::TILE,
+                ),
+            );
+        }
+        let before = server.npcs.iter().count();
+        assert!(before >= 20, "the distant crowd should exist: {before}");
+
+        let state = server.invasion.expect("an invasion");
+        for _ in 0..600 {
+            server.spawn_invaders(state);
+            server.ticks += 1;
+        }
+        let after = server.npcs.iter().count();
+        assert!(
+            after > before,
+            "an invasion should still arrive past a crowd on the far side: {before} -> {after}",
         );
     }
 }

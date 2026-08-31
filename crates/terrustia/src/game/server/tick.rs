@@ -476,6 +476,9 @@ impl GameServer {
                 .flatten()
                 .filter(|p| p.is_playing())
                 .count() as u32,
+            // `NPC.ScaleStats_ForExpertHardmode` (`NPC.cs:18183`, `:18581`) reads both of these.
+            hard_mode: self.world.progress.hard_mode,
+            downed_plant_boss: self.world.progress.downed_plantera,
         });
         // Hostile-shot damage is no longer pre-scaled at launch: the wire carries the base and the
         // difficulty multiplier (and the flat x2) is applied where the game applies it, at the

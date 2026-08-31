@@ -355,6 +355,32 @@ impl Npc {
         self.scaling = scaling;
         use terrustia_proto::difficulty;
 
+        // `NPC.cs:18180`, the eligibility gate the whole method sits inside:
+        //
+        // ```csharp
+        // if (NPCID.Sets.NeedsExpertScaling[type]
+        //     || (lifeMax > 5 && damage != 0 && !friendly && !townNPC)) { ... }
+        // ```
+        //
+        // There was no gate at all here, so town NPCs were scaled with everything else: the Guide
+        // had 500 HP on expert and 750 on master against vanilla's flat 250. `tick_town_casualties`
+        // reads those numbers, so townsfolk were surviving blood moons and invasions that should
+        // have killed them.
+        if !NEEDS_EXPERT_SCALING.contains(&self.npc_type)
+            && !(self.life_max > 5
+                && self.stats.damage != 0
+                && !self.stats.friendly
+                && !self.stats.town_npc)
+        {
+            return;
+        }
+
+        // `NPC.cs:18183-18184`: expert hardmode scaling runs *before* the difficulty curves, on the
+        // raw table values.
+        if scaling.difficulty >= EXPERT && scaling.hard_mode {
+            self.scale_stats_for_expert_hardmode(scaling.downed_plant_boss);
+        }
+
         let life = difficulty::life_multiplier(scaling.difficulty);
         let damage = difficulty::damage_multiplier(scaling.difficulty);
         let money = difficulty::money_multiplier(scaling.difficulty);
@@ -374,17 +400,74 @@ impl Npc {
         // Bosses, and only bosses, also scale with how many people are fighting them. The game
         // lists them out rather than deriving it from a `boss` flag, because several boss *parts*
         // scale and a few flagged types do not.
-        if BOSS_SCALES_WITH_PLAYERS
-            .iter()
-            .any(|range| range.contains(&self.npc_type))
+        //
+        // And only from expert upward: `NPC.cs:18186-18189` gates the whole
+        // `ScaleStats_ByPlayerCount` call on `difficulty >= GameDifficultyLevel.Expert`, so classic
+        // (1.0) and journey (0.5) never reach it. This was ungated, so a four-player classic world
+        // was fighting a 2.63x-HP Eye of Cthulhu that vanilla would have kept at its solo strength.
+        if scaling.difficulty >= EXPERT
+            && BOSS_SCALES_WITH_PLAYERS
+                .iter()
+                .any(|range| range.contains(&self.npc_type))
         {
             let balance = difficulty::balance(scaling.players);
             self.life_max = (f64::from(self.life_max) * f64::from(balance)).round() as i32;
         }
 
-        // The game's own floor, so nothing ends up unkillably cheap on journey.
-        self.life_max = self.life_max.max(6);
+        // The game's own floor, so nothing ends up unkillably cheap on journey. `NPC.cs:18191`
+        // exempts the `ProjectileNPC` types from it, which are the ones with a deliberately tiny
+        // life total because they are a shot rather than a creature.
+        if !PROJECTILE_NPC.contains(&self.npc_type) {
+            self.life_max = self.life_max.max(6);
+        }
         self.life = self.life_max;
+    }
+
+    /// `NPC.ScaleStats_ForExpertHardmode` (`NPC.cs:18545-18593`), which was never transcribed.
+    ///
+    /// It props up anything that was designed for pre-hardmode once the wall has fallen on an
+    /// expert or master world, so a Zombie on the hardmode surface is not free. Without it every
+    /// pre-hardmode leftover kept classic stats through the whole back half of the game.
+    ///
+    /// Two details that are easy to get wrong and are load-bearing:
+    ///
+    /// * `num2 / num` is **integer** division in the game (`int / int`, assigned to a `float`), so
+    ///   the factor is 80/57 = 1, not 1.4. It only starts biting where `num` is genuinely small.
+    /// * the `ProjectileNPC` types take the damage scaling and nothing else, because their life,
+    ///   defence and value are not what they are for.
+    ///
+    /// Not transcribed: the three `getGoodWorld` exemptions (`NPC.cs:18549-18563`, which turn the
+    /// scaling off for the Eater of Souls, Fire Imp and Dark Caster while their "for the worthy"
+    /// counterpart is alive), since this server does not field that seed's paired bosses.
+    fn scale_stats_for_expert_hardmode(&mut self, downed_plant_boss: bool) {
+        // `NPC.cs:18547`, `:18568`.
+        if DONT_DO_HARDMODE_SCALING.contains(&self.npc_type)
+            || self.stats.boss
+            || self.life_max >= 1000
+        {
+            return;
+        }
+        let projectile = PROJECTILE_NPC.contains(&self.npc_type);
+
+        // `NPC.cs:18575-18583`: a single "how tough is it already" number, against a bar that
+        // rises once Plantera is down.
+        let mut strength = self.stats.damage + self.defense + self.life_max / 4;
+        if strength == 0 {
+            strength = 1;
+        }
+        let bar = if downed_plant_boss { 100 } else { 80 };
+        if strength >= bar {
+            return;
+        }
+
+        // Integer division, exactly as the game does it before widening to a float.
+        let factor = (bar / strength) as f32;
+        self.stats.damage = (self.stats.damage as f32 * factor * 0.9) as i32;
+        if !projectile {
+            self.defense = (self.defense as f32 * factor) as i32;
+            self.life_max = ((self.life_max as f32 * factor) as f64 * 1.1) as i32;
+            self.stats.value = ((self.stats.value * factor) as f64 * 0.8) as f32;
+        }
     }
 
     pub fn is_alive(&self) -> bool {
@@ -757,6 +840,29 @@ fn collision_move_solar_sroller(npc: &mut Npc) {
     }
 }
 
+/// `Main.Difficulty` at expert, the threshold every `difficulty >= GameDifficultyLevel.Expert`
+/// test in `ScaleStats` compares against (`NPC.cs:18183`, `:18186`).
+const EXPERT: f32 = 2.0;
+
+/// `NPCID.Sets.NeedsExpertScaling` (`NPCID.cs:4803`): types that go through `ScaleStats` even
+/// though they fail the ordinary "has life, has damage, is not friendly" test. Mostly the
+/// projectile-shaped NPCs and the Moon Lord's parts.
+const NEEDS_EXPERT_SCALING: [u16; 15] = [
+    25, 30, 665, 33, 112, 666, 261, 265, 371, 516, 519, 397, 396, 398, 491,
+];
+
+/// `NPCID.Sets.ProjectileNPC` (`NPCID.cs:4805`): NPCs that are really a shot. Their life, defence
+/// and value are skipped by both the hardmode prop-up and the minimum-life floor, because those
+/// numbers are not what they are for.
+const PROJECTILE_NPC: [u16; 11] = [25, 30, 665, 33, 112, 666, 261, 265, 371, 516, 519];
+
+/// `NPCID.Sets.DontDoHardmodeScaling` (`NPCID.cs:4442`): types the expert-hardmode prop-up skips
+/// outright. The worm segments and the Wall of Flesh's parts are here because their head already
+/// carries the fight's difficulty.
+const DONT_DO_HARDMODE_SCALING: [u16; 17] = [
+    5, 13, 14, 15, 267, 113, 114, 115, 116, 117, 118, 119, 658, 659, 660, 400, 522,
+];
+
 /// The types whose life grows with the number of players, from `NPC.ScaleStats_ByPlayerCount`.
 ///
 /// Written as ranges because that is how the game writes it, and because the boss *parts* — the
@@ -819,6 +925,11 @@ pub struct Scaling {
     pub difficulty: f32,
     /// Players currently in the world, for the boss life curve.
     pub players: u32,
+    /// `Main.hardMode`, which with expert turns on `ScaleStats_ForExpertHardmode`
+    /// (`NPC.cs:18183`).
+    pub hard_mode: bool,
+    /// `NPC.downedPlantBoss`, which raises that prop-up's bar from 80 to 100 (`NPC.cs:18581`).
+    pub downed_plant_boss: bool,
 }
 
 impl Default for Scaling {
@@ -826,6 +937,8 @@ impl Default for Scaling {
         Self {
             difficulty: 1.0,
             players: 1,
+            hard_mode: false,
+            downed_plant_boss: false,
         }
     }
 }
@@ -984,7 +1097,7 @@ mod scaling_tests {
             let mut store = NpcStore::new();
             store.set_scaling(Scaling {
                 difficulty: terrustia_proto::difficulty::of_game_mode(game_mode),
-                players: 1,
+                ..Scaling::default()
             });
             let index = store.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
             store.get(index).expect("the zombie").life_max
@@ -1011,7 +1124,7 @@ mod scaling_tests {
         let mut store = NpcStore::new();
         store.set_scaling(Scaling {
             difficulty: 3.0, // master
-            players: 1,
+            ..Scaling::default()
         });
         let index = store.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
 
@@ -1028,31 +1141,155 @@ mod scaling_tests {
         );
     }
 
-    /// A boss grows with the crowd; an ordinary enemy does not.
+    /// A boss grows with the crowd, from expert upward; an ordinary enemy never does.
+    ///
+    /// `NPC.cs:18186-18189` gates `ScaleStats_ByPlayerCount` on
+    /// `difficulty >= GameDifficultyLevel.Expert`, so a four-player classic world fights the same
+    /// Eye of Cthulhu a lone player does. This was ungated, giving that world a 2.63x-HP boss.
     #[test]
-    fn only_bosses_scale_with_player_count() {
+    fn only_bosses_scale_with_player_count_and_only_from_expert_up() {
         const ZOMBIE: u16 = 3;
         const EYE_OF_CTHULHU: u16 = 4;
 
-        let life_at = |npc_type: u16, players: u32| {
+        let life_at = |npc_type: u16, players: u32, difficulty: f32| {
             let mut store = NpcStore::new();
             store.set_scaling(Scaling {
-                difficulty: 1.0,
+                difficulty,
                 players,
+                ..Scaling::default()
             });
             let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
             store.get(index).expect("the npc").life_max
         };
 
         assert_eq!(
-            life_at(ZOMBIE, 1),
-            life_at(ZOMBIE, 8),
+            life_at(ZOMBIE, 1, 2.0),
+            life_at(ZOMBIE, 8, 2.0),
             "a zombie is a zombie however many people are watching",
         );
         assert!(
-            life_at(EYE_OF_CTHULHU, 8) > life_at(EYE_OF_CTHULHU, 1),
-            "a boss has to grow, or a full server trivialises every fight",
+            life_at(EYE_OF_CTHULHU, 8, 2.0) > life_at(EYE_OF_CTHULHU, 1, 2.0),
+            "a boss has to grow on expert, or a full server trivialises every fight",
         );
+        assert_eq!(
+            life_at(EYE_OF_CTHULHU, 1, 1.0),
+            life_at(EYE_OF_CTHULHU, 4, 1.0),
+            "NPC.cs:18186: classic never calls ScaleStats_ByPlayerCount",
+        );
+        assert_eq!(
+            life_at(EYE_OF_CTHULHU, 1, 0.5),
+            life_at(EYE_OF_CTHULHU, 4, 0.5),
+            "and neither does journey",
+        );
+    }
+
+    /// Townsfolk and friendlies never go through `ScaleStats` at all (`NPC.cs:18180`).
+    ///
+    /// Fails before the fix, which had no eligibility gate: the Guide came out of an expert world
+    /// with 500 HP and a master world with 750 against vanilla's flat 250, so `tick_town_casualties`
+    /// let townsfolk walk out of blood moons and invasions that should have killed them.
+    #[test]
+    fn town_npcs_and_friendlies_are_not_scaled_by_difficulty() {
+        const GUIDE: u16 = 22;
+        const OLD_MAN: u16 = 37;
+
+        for npc_type in [GUIDE, OLD_MAN] {
+            let raw = terrustia_proto::npc_data::npc_stats(npc_type).expect("real type");
+            for difficulty in [1.0, 2.0, 3.0, 0.5] {
+                let mut store = NpcStore::new();
+                store.set_scaling(Scaling {
+                    difficulty,
+                    players: 4,
+                    ..Scaling::default()
+                });
+                let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+                let npc = store.get(index).expect("the npc");
+                assert_eq!(
+                    npc.life_max, raw.life_max,
+                    "{} at difficulty {difficulty} should keep its table life",
+                    raw.name,
+                );
+                assert_eq!(npc.stats.damage, raw.damage, "and its table damage");
+            }
+        }
+    }
+
+    /// `ScaleStats_ForExpertHardmode` (`NPC.cs:18545-18593`) props up pre-hardmode leftovers on an
+    /// expert hardmode world, and does nothing at all before hardmode or below expert.
+    ///
+    /// Fails before the fix: the routine was never transcribed, so a Zombie kept classic-derived
+    /// stats through the whole back half of an expert game.
+    #[test]
+    fn expert_hardmode_props_up_a_pre_hardmode_leftover() {
+        const ZOMBIE: u16 = 3;
+
+        let life_at = |difficulty: f32, hard_mode: bool, downed_plant_boss: bool| {
+            let mut store = NpcStore::new();
+            store.set_scaling(Scaling {
+                difficulty,
+                players: 1,
+                hard_mode,
+                downed_plant_boss,
+            });
+            let index = store.spawn(ZOMBIE, (0.0, 0.0)).expect("a slot");
+            let npc = store.get(index).expect("the zombie");
+            (npc.life_max, npc.stats.damage, npc.defense)
+        };
+
+        // A Zombie is damage 14, defence 6, life 45: `14 + 6 + 45/4 = 31`, under the bar of 80, so
+        // the integer factor is `80 / 31 = 2`.
+        let raw = terrustia_proto::npc_data::npc_stats(ZOMBIE).expect("zombie stats");
+        assert_eq!(raw.damage + raw.defense + raw.life_max / 4, 31);
+
+        let plain_expert = life_at(2.0, false, false);
+        let hardmode_expert = life_at(2.0, true, false);
+        assert!(
+            hardmode_expert.0 > plain_expert.0 && hardmode_expert.1 > plain_expert.1,
+            "hardmode expert should be tougher than pre-hardmode expert: {hardmode_expert:?} vs \
+             {plain_expert:?}",
+        );
+        // life: (45 * 2) * 1.1 = 99, then the expert x2 life curve.
+        assert_eq!(hardmode_expert.0, 99 * 2);
+        // damage: 14 * 2 * 0.9 = 25, then the expert x2 damage curve.
+        assert_eq!(hardmode_expert.1, 25 * 2);
+        assert_eq!(hardmode_expert.2, raw.defense * 2);
+
+        // Plantera raises the bar to 100, so the factor becomes `100 / 31 = 3`.
+        let after_plantera = life_at(2.0, true, true);
+        assert_eq!(after_plantera.2, raw.defense * 3, "NPC.cs:18581, +20 bar");
+
+        // Classic hardmode never reaches the routine at all.
+        assert_eq!(
+            life_at(1.0, true, false),
+            life_at(1.0, false, false),
+            "NPC.cs:18183 gates the whole routine on expert",
+        );
+    }
+
+    /// A boss and anything already tough are skipped by the hardmode prop-up
+    /// (`NPC.cs:18568`), and so is everything in `DontDoHardmodeScaling` (`NPCID.cs:4442`).
+    #[test]
+    fn the_hardmode_prop_up_skips_bosses_and_the_named_set() {
+        let life_at = |npc_type: u16, hard_mode: bool| {
+            let mut store = NpcStore::new();
+            store.set_scaling(Scaling {
+                difficulty: 2.0,
+                players: 1,
+                hard_mode,
+                downed_plant_boss: false,
+            });
+            let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+            store.get(index).expect("the npc").life_max
+        };
+
+        // 4 is the Eye of Cthulhu (a boss), 13 the Eater of Worlds' head (in the named set).
+        for npc_type in [4u16, 13] {
+            assert_eq!(
+                life_at(npc_type, true),
+                life_at(npc_type, false),
+                "{npc_type} should be exempt from the hardmode prop-up",
+            );
+        }
     }
 }
 

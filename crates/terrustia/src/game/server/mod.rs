@@ -132,8 +132,10 @@ const PYLON_RESIDENTS_NEEDED: usize = 2;
 const PYLON_SCAN_HALF_WIDTH: i32 = 84;
 const PYLON_SCAN_HALF_HEIGHT: i32 = 62;
 
-/// One invader every this many ticks. An invasion arrives steadily rather than all at once.
-const INVASION_SPAWN_EVERY: u64 = 45;
+/// `NPC.cs:785`, `spawnRate = 20` during an invasion: a one-in-twenty roll per player per tick,
+/// rather than a fixed cadence. An invasion arrives steadily rather than all at once, but it
+/// arrives at the game's own pace.
+const INVASION_SPAWN_RATE: u32 = 20;
 
 /// The chest tile. Placing one needs a container behind it, not just tiles.
 const CHEST_BLOCK: u16 = 21;

@@ -1301,7 +1301,7 @@ const ACTIVE_RANGE_Y: f32 = 1200.0 * 2.1;
 /// (`NPC.cs:313`, `player.nearbyActiveNPCs`, accumulated in `CheckActive` weighted by each NPC's
 /// own `npcSlots`). A statue-spawned monster does not count, as it does not in the game (it carries
 /// no spawn slots), which is what lets a statue farm keep working.
-fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
+pub fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
     npcs.iter()
         .filter(|(_, npc)| npc.is_alive() && !npc.stats.town_npc && !npc.from_statue)
         .filter(|(_, npc)| {
