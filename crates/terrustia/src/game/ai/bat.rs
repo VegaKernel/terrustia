@@ -33,6 +33,21 @@ pub const PATIENCE_LIMIT: f32 = 1000.0;
 /// Every projectile a flier throws lives for five seconds.
 pub const SHOT_LIFETIME: u16 = 300;
 
+/// Vampire Bat and the Vampire it becomes (`NPCID.VampireBat`, `NPCID.Vampire`).
+const VAMPIRE_BAT: u16 = 158;
+const VAMPIRE: u16 = 159;
+
+/// How close a Vampire Bat has to get before it drops the disguise (`NPC.cs:23459`).
+const UNMASK_RANGE: f32 = 200.0;
+
+/// What a tick of this style did beyond moving its NPC.
+#[derive(Debug, Default, PartialEq)]
+pub struct Outcome {
+    pub shot: Option<Shot>,
+    /// A type this one turned into: only the Vampire Bat, which becomes a Vampire.
+    pub became: Option<u16>,
+}
+
 /// Which way a velocity points, treating a standstill as positive the way the game does.
 fn course(v: f32) -> i8 {
     if v < 0.0 { -1 } else { 1 }
@@ -122,11 +137,7 @@ fn fire<T: TileView>(
 }
 
 /// Drive one flier for a tick, returning the projectile it threw if it threw one.
-pub fn update<T: TileView>(
-    npc: &mut Npc,
-    world: &World<'_, T>,
-    rng: &mut SmallRng,
-) -> Option<Shot> {
+pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> Outcome {
     npc.no_gravity = true;
     bounce(npc);
 
@@ -169,6 +180,23 @@ pub fn update<T: TileView>(
         steer(npc, extra);
     }
 
+    // `NPC.cs:23452-23462`. Close enough, above your feet and in plain sight, the bat stops being
+    // a bat. Without this a Vampire Bat was only ever a bat, and the Vampire never appeared.
+    let mut became = None;
+    if npc.npc_type == VAMPIRE_BAT
+        && let Some(t) = world.target
+    {
+        let (cx, cy) = npc.center();
+        let gap = ((t.center.0 - cx).powi(2) + (t.center.1 - cy).powi(2)).sqrt();
+        let feet = t.center.1 + super::PLAYER_HEIGHT as f32 / 2.0;
+        if gap < UNMASK_RANGE
+            && npc.position.1 + npc.height() < feet
+            && can_see(world.tiles, npc, t)
+        {
+            became = Some(VAMPIRE);
+        }
+    }
+
     npc.ai[1] += 1.0;
     if bat_flees_daylight(npc.npc_type) {
         // The vampire bat runs out of patience twice as fast as everything else.
@@ -199,7 +227,10 @@ pub fn update<T: TileView>(
             t.center,
         )
     });
-    fire(npc, world, rng, in_range)
+    Outcome {
+        shot: fire(npc, world, rng, in_range),
+        became,
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +368,44 @@ mod tests {
         );
     }
 
+    /// `NPC.cs:23452-23462`. Nothing in this crate had ever mentioned type 158 or 159, so a
+    /// Vampire Bat stayed a bat and the Vampire never appeared at all.
+    #[test]
+    fn a_vampire_bat_close_enough_drops_the_disguise() {
+        let tiles = open();
+        let mut b = bat(VAMPIRE_BAT);
+        let (cx, cy) = b.center();
+        // A hundred pixels away and level, so the bat's feet are above the player's.
+        let near = Some(player_at(cx + 100.0, cy + 60.0));
+        assert_eq!(
+            update(&mut b, &world(&tiles, near), &mut rng()).became,
+            Some(VAMPIRE)
+        );
+
+        // Too far.
+        let mut far_bat = bat(VAMPIRE_BAT);
+        let far = Some(player_at(cx + 400.0, cy + 60.0));
+        assert_eq!(
+            update(&mut far_bat, &world(&tiles, far), &mut rng()).became,
+            None
+        );
+
+        // Close, but the player is above it, so it keeps flying.
+        let mut below = bat(VAMPIRE_BAT);
+        let over = Some(player_at(cx + 40.0, cy - 60.0));
+        assert_eq!(
+            update(&mut below, &world(&tiles, over), &mut rng()).became,
+            None
+        );
+
+        // And nothing else in the style ever transforms.
+        let mut cave = bat(49);
+        assert_eq!(
+            update(&mut cave, &world(&tiles, near), &mut rng()).became,
+            None
+        );
+    }
+
     #[test]
     fn a_harpy_flies_through_water_but_still_swims_up() {
         assert!(bat_rises_in_water(48));
@@ -421,7 +490,7 @@ mod tests {
         let mut shots = Vec::new();
         for _ in 0..100 {
             h.ai[1] = 0.0;
-            if let Some(shot) = update(&mut h, &world(&tiles, t), &mut rng()) {
+            if let Some(shot) = update(&mut h, &world(&tiles, t), &mut rng()).shot {
                 shots.push((h.ai[0], shot));
             }
         }
@@ -458,7 +527,7 @@ mod tests {
             &world(&tiles, Some(player_at(cx + 300.0, cy))),
             &mut rng(),
         );
-        assert!(shot.is_none(), "a wall in the way stops the shot");
+        assert!(shot.shot.is_none(), "a wall in the way stops the shot");
         assert_eq!(h.ai[0], 30.0, "but the timer still runs");
     }
 

@@ -53,6 +53,7 @@ fn main() -> ExitCode {
         blood_moon: false,
         day: true,
         eclipse: false,
+        pumpkin_moon: false,
         raining: false,
         windy: false,
         wind: 0.0,

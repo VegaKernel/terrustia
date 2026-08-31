@@ -70,6 +70,8 @@ fn find_corner<T: TileView>(npc: &Npc, world: &World<'_, T>, target: Target) -> 
 pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, staggered: bool) {
     npc.no_gravity = true;
     npc.no_tile_collide = false;
+    // `NPC.cs:39014`: cleared every tick, and set again only by the stun.
+    npc.invulnerable = npc.stats.dont_take_damage;
 
     // A hard hit occasionally drops it out of the air entirely.
     if staggered {
@@ -88,7 +90,9 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, staggered: bool)
 
     match npc.ai[0] as i32 {
         -1 => {
-            // Stunned: it falls, and cannot be hurt while it is down.
+            // Stunned: it falls, and cannot be hurt while it is down (`NPC.cs:39024`, which the
+            // doc above has always claimed and nothing ever set).
+            npc.invulnerable = true;
             npc.no_gravity = false;
             npc.velocity.0 *= 0.98;
             npc.ai[1] += 1.0;

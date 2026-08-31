@@ -64,6 +64,9 @@ pub struct Conditions {
     pub blood_moon: bool,
     pub day: bool,
     pub eclipse: bool,
+    /// Whether a Pumpkin Moon is running. Its two style-26 walkers and the Poltergeist leave when
+    /// it is not (`NPC.cs:63232-63234`, `:24798-24802`).
+    pub pumpkin_moon: bool,
     /// Rain, which sends residents indoors just as nightfall does.
     pub raining: bool,
     /// Whether the day is windy enough for the things that need wind to do anything.
@@ -118,6 +121,7 @@ impl Default for Conditions {
             blood_moon: false,
             day: false,
             eclipse: false,
+            pumpkin_moon: false,
             raining: false,
             windy: false,
             crimson: false,
@@ -622,8 +626,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         5 => {
-            // No expert mode yet, so the eater of souls uses its classic acceleration.
-            if let Some(shot) = eater::update(npc, world, rng, false) {
+            if let Some(shot) = eater::update(npc, world, rng, world.conditions.expert) {
                 effects.shots.push(shot);
             }
         }
@@ -633,14 +636,19 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 effects.doors.push(action);
             }
         }
-        9 => orb::update(npc, target),
+        9 => effects.died = orb::update(npc, world, rng),
         19 => {
             if let Some(shot) = ambush::antlion(npc, world) {
                 effects.shots.push(shot);
             }
         }
         20 => track::spike_ball(npc, target, rand::Rng::random_range(rng, 0..15)),
-        13 => effects.died = rooted::plant(npc, world) == rooted::Outcome::Uprooted,
+        13 => {
+            let growth = rooted::plant(npc, world, rng);
+            effects.died = growth.uprooted;
+            effects.shots.extend(growth.shot);
+            effects.spawn.extend(growth.spawn);
+        }
         17 => rooted::vulture(npc, world),
         8 => {
             let cast = caster::update(npc, world, rng);
@@ -988,7 +996,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         // A tumbleweed in a sandstorm is carried by the wind rather than merely rolling.
         26 => {
             let carried = world.conditions.sandstorm && world.conditions.desert;
-            tumbleweed::update(npc, world, carried);
+            let out = tumbleweed::update(npc, world, carried, rng);
+            effects.shots.extend(out.shots);
+            effects.died = out.died;
         }
         113 | 125 => {
             if balloon::update(npc, world) == balloon::Outcome::Popped {
@@ -998,16 +1008,16 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         114 => dragonfly::update(npc, world, rng),
         65 => critter::butterfly(npc, world, rng),
-        // One hit in six knocks it down, but only when the hit was hard enough to register.
+        // One hit in six knocks it down, and only in expert (`NPC.cs:39016`).
         91 => granite::update(
             npc,
             world,
-            world.was_hurt && rand::Rng::random_ratio(rng, 1, 6),
+            world.was_hurt && world.conditions.expert && rand::Rng::random_ratio(rng, 1, 6),
         ),
         22 => {
             // The drift it picks when it has nothing else to go on: -1.5, 0 or 1.5.
             let drift = rand::Rng::random_range(rng, -1..2) as f32 * 1.5;
-            haunt::update(npc, world, drift);
+            effects.shots.extend(haunt::update(npc, world, drift, rng));
         }
         38 => {
             if let Some(shot) = frost::update(npc, world) {
@@ -1015,23 +1025,22 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         10 => {
-            if let Some(shot) = skull::update(npc, world) {
-                effects.shots.push(shot);
-            }
+            let bite = skull::update(npc, world, rng);
+            effects.shots.extend(bite.shot);
+            effects.spawn.extend(bite.spawn);
         }
         18 => swimmer::jellyfish(npc, world),
-        // Shoaling is the caller's business; nothing here can see the rest of the shoal.
-        44 => swimmer::flying_fish(npc, world, (0.0, 0.0)),
-        21 => track::wheel(npc),
+        44 => swimmer::flying_fish(npc, world),
+        21 => track::wheel(npc, target),
         115 => critter::ladybug(npc, world, rng),
         118 => critter::seahorse(npc, world, rng),
         119 => effects.shots.extend(critter::dandelion(npc, world, rng)),
         42 => effects.transform = ambush::lost_girl(npc, world),
         66 => effects.transform = grub::update(npc, world, rng),
         14 => {
-            if let Some(shot) = bat::update(npc, world, rng) {
-                effects.shots.push(shot);
-            }
+            let out = bat::update(npc, world, rng);
+            effects.shots.extend(out.shot);
+            effects.transform = out.became;
         }
         16 => fish::update(npc, target, world.wet, world.target_wet),
         24 => {
@@ -1039,15 +1048,20 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         50 => {
             let hit_something = npc.collide_x || npc.collide_y;
-            effects.died = spore::update(npc, target, hit_something) == spore::Outcome::Burst;
+            effects.died = spore::update(npc, target, hit_something, world.conditions.expert)
+                == spore::Outcome::Burst;
         }
         55 => {
             // The Brain's position is threaded in through ai[2..3] by the server, which knows
             // where every NPC is; a creeper with no Brain removes itself.
             let brain = (npc.ai[2] != 0.0 || npc.ai[3] != 0.0).then_some((npc.ai[2], npc.ai[3]));
-            let charging = rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE);
+            // `(Main.expertMode && Main.rand.Next(100) == 0) || Main.rand.Next(200) == 0`
+            // (`NPC.cs:32935`): expert doubles how often one breaks off to charge.
+            let charging = (world.conditions.expert
+                && rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE_EXPERT))
+                || rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE);
             effects.expired =
-                creeper::update(npc, brain, target, charging) == creeper::Outcome::BrainGone;
+                creeper::update(npc, world, brain, charging) == creeper::Outcome::BrainGone;
         }
         58 => {
             let out = boss::moon::pumpking(npc, world, rng);
