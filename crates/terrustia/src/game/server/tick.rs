@@ -26,6 +26,13 @@ const STATUS_EVERY: u64 = 60;
 /// How often the worst tick in the window is reported, when it is worth reporting.
 const TICK_REPORT_EVERY: u64 = 600;
 
+/// How often the outbound queues are sampled for their depth, ten times a second.
+///
+/// The sample walks every connection, so it is not free, and it does not need to be finer: a
+/// backlog deep enough to account for hundreds of megabytes lasts for seconds, not for a sixth of
+/// one. Reported per window as `queue_peak`.
+const QUEUE_SAMPLE_EVERY: u64 = 6;
+
 /// How often the tick looks for connections that took a slot and never finished joining.
 ///
 /// Once a second. The sweep is a walk over the slot table - at most 255 entries, most of them
@@ -251,6 +258,12 @@ impl GameServer {
     /// tick that took a long time without using the processor is the machine being busy elsewhere.
     /// The breakdown comes with the first one, because "a tick took 26 ms" is a mystery and "the
     /// spawn scan took 26 ms" is a bug report.
+    ///
+    /// The per-window `tick window` line is `debug`, so an ordinary server stays quiet; the release
+    /// qualification bar ("p99 tick under budget") needs it, so `tools/soak_scale.sh` turns it on
+    /// for this module alone with `TERRUSTIA_LOG=info,terrustia::game::server::tick=debug`. Every
+    /// line here names the worst tick's processor time `cpu_us`, so one field carries the
+    /// measurement whatever level it came out at.
     fn note_tick_cost(&mut self, cost: TickCost) {
         self.last_tick = cost;
         if self.ticks.is_multiple_of(STATUS_EVERY) {
@@ -260,11 +273,28 @@ impl GameServer {
             self.worst_tick = cost;
         }
         self.worst_stall = self.worst_stall.max(cost.wall.saturating_sub(cost.cpu));
+
+        // Sample how deep the outbound queues have got. Ten times a second rather than every tick:
+        // the walk is over every connection, and a burst deep enough to matter for memory lasts
+        // far longer than a sixth of a second, so a finer sample would cost more than it tells.
+        if self.ticks.is_multiple_of(QUEUE_SAMPLE_EVERY) {
+            let deepest = self
+                .players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing())
+                .map(|p| p.out.max_capacity().saturating_sub(p.out.capacity()))
+                .max()
+                .unwrap_or(0);
+            self.queue_high_water = self.queue_high_water.max(deepest);
+        }
+
         if !self.ticks.is_multiple_of(TICK_REPORT_EVERY) {
             return;
         }
         let worst = std::mem::take(&mut self.worst_tick);
         let stall = std::mem::take(&mut self.worst_stall);
+        let queue_peak = std::mem::take(&mut self.queue_high_water);
         debug!(
             cpu_us = worst.cpu.as_micros() as u64,
             wall_us = worst.wall.as_micros() as u64,
@@ -273,12 +303,28 @@ impl GameServer {
             npcs = self.npcs.len(),
             sync_full = SYNC_FULL.load(std::sync::atomic::Ordering::Relaxed),
             sync_stream = SYNC_STREAM.load(std::sync::atomic::Ordering::Relaxed),
+            // The shared skip ledger, for the same reason `sync_full` and `sync_stream` are here:
+            // it is a map keyed partly by projectile identity, which unlike an NPC index or a
+            // player slot is not drawn from a small fixed range, so it is the one structure on
+            // this path that could grow without bound. Naming its size in the window line is what
+            // turns "memory is climbing" into an answer instead of a hunt. Measured at 20k to 27k
+            // entries across a 255-player hold, which is the expected 255x255 plus the NPCs.
+            skips = self.skips.len(),
+            // The deepest single connection's backlog in this window, against a capacity of
+            // `outbound_queue(max_players)`. Memory under load is queued frames, so this is the
+            // number that says whether a high RSS is backlog or something else entirely.
+            queue_peak,
             "tick window"
         );
         if worst.cpu * 2 > TICK {
             let (phase, phase_cost) = worst.worst_phase();
             warn!(
-                worst_us = worst.cpu.as_micros() as u64,
+                // The same quantity the `tick window` line above reports, and deliberately under
+                // the same field name. It was `worst_us` here and `cpu_us` there, which meant
+                // anything reading the log for tick cost (tools/soak_scale.sh) matched the quiet
+                // line and missed this one: the only line that fires when a tick is genuinely
+                // over budget. One name for one measurement.
+                cpu_us = worst.cpu.as_micros() as u64,
                 budget_us = TICK.as_micros() as u64,
                 phase,
                 phase_us = phase_cost.as_micros() as u64,
@@ -389,6 +435,20 @@ impl GameServer {
             self.broadcast_world_data();
         }
         self.tick_party();
+
+        // Everything above this point is the world clock and whatever turning day or night sets
+        // off: the dawn and dusk rolls, the slime rain, the party, stopping the moon, and two
+        // `broadcast_world_data` calls. That is `World`'s own description ("the clock, tile
+        // entities, wiring timers, lunar events and the biome census"), and it was being charged
+        // to `Snapshot` instead, because this was the tick's *first* lap and a lap bills
+        // everything since the previous one.
+        //
+        // That made the phase say the opposite of what it was added to say. `Snapshot` was split
+        // out so an expensive save could not hide inside a bucket of systems; instead the bucket
+        // moved inside `Snapshot`, which then read as the most expensive phase in the tick on
+        // ticks where no save ran at all. A 255-player run reporting `phase=snapshot
+        // phase_us=23377` had taken a snapshot costing a fraction of that.
+        lap(&mut cost, Phase::World);
 
         if let Some(every) = self.autosave_ticks
             && self.ticks.is_multiple_of(every)

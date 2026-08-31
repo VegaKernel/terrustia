@@ -928,7 +928,27 @@ impl GameServer {
 
         // Relayed verbatim: the payload has optional trailing blocks the server does not model.
         let frame = packets::rewrite_owner(id::PLAYER_CONTROLS, payload, slot)?;
-        self.broadcast(frame, Some(slot));
+        // Culled by loaded section rather than sent to everybody.
+        //
+        // This is a deliberate departure from vanilla, which relays a player's movement to every
+        // other player (`NetMessage.SendData(13)` with only the sender excluded). It is the single
+        // worst thing a full server does: every player sends one of these a tick, and relaying each
+        // to all the others is `max_players - 1` channel sends per player per tick, which is what
+        // fills outbound queues and gets slow clients dropped under load.
+        //
+        // What a distant client loses is the fullscreen map marker moving smoothly; it cannot draw
+        // the player themselves at that range. [`MAX_PLAYER_SYNC_SKIPS`] is what keeps the marker
+        // from freezing outright, and coming within [`SECTION_REACH`] restores every-tick updates
+        // before they are on screen. The world still plays the same; the fan-out stops being
+        // quadratic.
+        let at = controls.position;
+        self.broadcast_near(
+            frame,
+            at,
+            Withheld::Player(slot),
+            MAX_PLAYER_SYNC_SKIPS,
+            Some(slot),
+        );
 
         // Checked every real control update while sitting, matching real vanilla's own cadence
         // (`PlayerSittingHelper.UpdateSitting`, called every frame a player sits) rather than a
@@ -3409,7 +3429,18 @@ impl GameServer {
             return Ok(());
         }
         let frame = sync.encode()?;
-        self.broadcast(frame, Some(slot));
+        // Culled the same way an NPC's own state is, and for the same reason: a projectile outside
+        // a client's loaded sections cannot be drawn by it. In combat this is the larger of the two
+        // per-tick fan-outs, because one player firing a repeating weapon syncs several projectiles
+        // a tick and each went to every other player.
+        let at = sync.position;
+        self.broadcast_near(
+            frame,
+            at,
+            Withheld::Projectile(sync.key.pack()),
+            MAX_NPC_SYNC_SKIPS,
+            Some(slot),
+        );
         Ok(())
     }
 
@@ -3424,7 +3455,14 @@ impl GameServer {
             return Ok(());
         }
         let frame = kill.encode()?;
-        self.broadcast(frame, Some(slot));
+        // A kill is culled on the same footing as the syncs that preceded it, so a client that was
+        // never told about a projectile is not told about its death either. The skip run is dropped
+        // afterwards because the identity is finished with: leaving it would hold a stale entry per
+        // player for every projectile that has ever died.
+        let at = kill.position;
+        let what = Withheld::Projectile(kill.key.pack());
+        self.broadcast_near(frame, at, what, MAX_NPC_SYNC_SKIPS, Some(slot));
+        self.forget_skips(what);
         Ok(())
     }
 

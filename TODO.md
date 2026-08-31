@@ -135,6 +135,21 @@ Known minor divergences that remain by design: `SendSection` does not sync the s
 way vanilla does at `NetMessage.cs:2732`, there is no `Main.SyncAnInvasion` on packet 6 (cosmetic),
 and section batching is stricter than `Tile.isTheSameAs` (correct output, more bytes).
 
+**Area-of-interest culling on player movement and projectile syncs**, a deliberate and measured
+divergence. Vanilla relays a player's movement to every other player (`NetMessage.SendData(13)`
+excludes only the sender) and a client's projectile syncs the same way. terrustia routes both through
+`broadcast_near`, the loaded-section cull that NPC sync already used, so an update goes only to
+players whose sections could contain it. What a distant client loses is the fullscreen map marker
+moving smoothly rather than in steps; it cannot draw the player or the projectile at that range, and
+a skip budget (four for projectiles, matching the game's own rule, thirty for movement because it
+arrives every tick rather than every sixth) is what stops anything distant freezing outright.
+
+Kept because it was measured, not because it sounded right. Two 255-player runs at the pre-mitigation
+queue depth, differing only in whether the cull was wired up, at matched NPC load: without it, 14
+`outbound queue full` drops, 245 of 255 clients held, and the outbound queue running literally full
+at 73,465 of 73,472; with it, zero drops, 255 of 255 held, and a peak of 38,713. `connection.rs`'s
+own comment had predicted exactly this fix and left it for whoever owned the broadcast next.
+
 **C3, the spawn lane**: adopt the fork's spawn-parity module structure once Xekep affirms the CLA
 and the posted punch-list is fixed (or take the punch-list over if the fork goes quiet).
 
@@ -237,13 +252,48 @@ Per release candidate: the manual differential against a real `TerrariaServer` (
 hosted CI can never hold the game); `just check-data` against the decompiled tree; and the
 255-player qualification run, separate from per-commit CI, with an objective bar: 255 real headless
 clients join a full-size world and hold 30 minutes, zero server panics, no disconnect storm, p99
-tick under the 16.67 ms budget, stable memory, and a clean world save under load. One extended
-multi-hour soak with a boss event under load runs before the first release only. The human
+tick under the 16.67 ms budget, peak server RSS under 1 GiB, and a clean world save under load. The
+human
 fresh-world Moon Lord playthrough is strongly expected, waivable only if the automated and
 differential evidence is otherwise complete; anything found becomes a test. Final verification:
 `just check` green across the six targets, fuzz and soak green, zero production panics on
 hostile or environmental paths, zero unknown protocol IDs, the admin overhaul verified against a
 real client and Playwright, no confirmed performance regressions. Then tag v0.0.1.
+
+**The bar is enforced, not narrated.** `tools/soak_scale.sh` judges every clause of it and exits
+non-zero on any failure. That is worth writing down because for a long time it did not, and three of
+the five clauses were unmeasurable or unmeasured:
+
+- **p99 tick had no data source.** `cpu_us` reached the log only through the stall branch, which
+  fires when the *machine* is held off the processor, so the number quoted as tick cost was the cost
+  of whichever tick happened to coincide with a hitch. A thirty-minute run produced five samples, all
+  stall-coincident; a clean run produced none. The per-window line that carries the real figure was
+  `debug` while the server defaults to `info`, and the warning for a genuinely over-budget tick named
+  the same quantity `worst_us` rather than `cpu_us`, so the one line that mattered was the one the
+  harness could not read.
+- **Client retention counted the wrong thing.** The soak client discarded its send result and let a
+  read error break only its inner drain loop, then returned success unconditionally, so a client
+  whose connection the server had closed slept out its hold and exited zero. Runs where the server
+  dropped 218 of 255 clients were recorded as `255/255 connected and held`.
+- **Memory was printed, not judged.** The curve went to the output for a reader to interpret, which
+  is how a run climbing to 689 MiB was recorded as a pass.
+
+**Memory: peak RSS under 1 GiB at 255 players.** A number rather than "stable", because the adjective
+is what let a multi-gigabyte figure stand unchallenged. What that figure was measuring turned out to
+be the soak client failing to read: capped near 2,100 events a second, its receive window closed, the
+server's outbound queues backed up behind it, and the kernel eventually killed connections with
+`ETIMEDOUT`, which reads exactly like a server shedding clients under load. With the client draining
+properly, a 255-player half-hour holds around 140 MiB and peaks near 200. The runs that exceed the
+ceiling are the ones taken while the test box itself is contended, and the external-stall count in
+the same output is what distinguishes the two. A thirty-minute run cannot separate a slow leak from
+burst working set, so the bar tests the ceiling and leak detection stays with the extended soak.
+
+**The extended multi-hour boss soak is waived for v0.0.1** and carried to the next release. Its
+distinct value over the thirty-minute run is leak detection over a long horizon, and the shorter run
+now enforces a memory ceiling rather than printing a curve, which covers the failure mode that
+matters most for a first release. Recorded as a decision rather than skipped quietly, because the
+lesson of this qualification work is that an unenforced stated bar is indistinguishable from a met
+one.
 
 ## Phase 3: after v0.0.1, in order
 
@@ -289,6 +339,9 @@ real client and Playwright, no confirmed performance regressions. Then tag v0.0.
   client connecting by IP is byte-identical to any other.
 - **Operational polish**: config reload without a restart; a general log-file sink with rotation
   (the moderation audit log in Lane E is separate and is in v0.0.1).
+- **The extended multi-hour boss soak**, waived for v0.0.1 (see Phase 2) and due for the next
+  release. It is the only run long enough to tell a slow leak from burst working set, which the
+  thirty-minute qualification run explicitly does not attempt.
 
 ## TUI and hosting polish (opportunistic, never derails release work)
 

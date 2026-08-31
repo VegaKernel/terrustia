@@ -205,6 +205,33 @@ fn stream_weight(distance: f32) -> u8 {
 /// lets four go by and then sends one anyway.
 const MAX_NPC_SYNC_SKIPS: u8 = 4;
 
+/// How many times in a row a distant player's own movement may be withheld from another player.
+///
+/// Deliberately far larger than [`MAX_NPC_SYNC_SKIPS`], because the two are not the same shape of
+/// problem. An NPC syncs once every [`NPC_SYNC_INTERVAL`] ticks, so letting four go by already
+/// spaces it out; player movement arrives *every tick*, so a budget of four would still relay one
+/// in five and leave the fan-out quadratic with a constant factor. At sixty ticks a second this
+/// budget is one update every half second for somebody nowhere near you.
+///
+/// What that costs is bounded and small: a player outside [`SECTION_REACH`] cannot be drawn, so the
+/// only thing reading their position is the fullscreen map marker, which no one reads at frame
+/// rate. The moment they come within reach the cull stops applying and they are back to every tick.
+const MAX_PLAYER_SYNC_SKIPS: u8 = 30;
+
+/// What a withheld update was about, so one ledger can serve every culled broadcast.
+///
+/// Keyed alongside the target slot in [`GameServer::skips`]. Three kinds share the mechanism
+/// because they share the question: does this player have the part of the world it happened in?
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Withheld {
+    /// An NPC's state, by its index.
+    Npc(u8),
+    /// A player's own movement, by the slot it came from.
+    Player(u8),
+    /// A projectile, by the packed identity the wire carries.
+    Projectile(i32),
+}
+
 // The projectiles whose debuffs are worth however many of them are stuck in the target. Each is
 // its own debuff — Daybreak, javelins, tentacle spikes, blood butcherer knives, stardust cells —
 // and the count is what decides the rate, so a single spear is a scratch and eight are lethal.
@@ -920,8 +947,23 @@ pub struct GameServer {
     /// (`TeleportPylonInfo.Equals`), so getting the type wrong there does not remove anything: the
     /// pylon stays on every travel map for the rest of the session.
     pylon_kinds: HashMap<(i16, i16), u8>,
-    /// How many syncs in a row each NPC has been withheld from each player.
-    npc_skips: HashMap<(u8, u8), u8>,
+    /// How many updates in a row each culled thing has been withheld from each player.
+    ///
+    /// One ledger for NPCs, player movement and projectiles: see [`Withheld`].
+    skips: HashMap<(Withheld, u8), u8>,
+    /// The deepest any connection's outbound queue has been seen since the last tick report.
+    ///
+    /// Memory under load is queued frames, not the world: a 255-player hold peaks around 1.5 GiB
+    /// against an idle 95 MiB, and `OUTBOUND_PER_PLAYER` was widened to 4096 precisely to let that
+    /// backlog build rather than drop clients. Sampling the depth is what turns "memory is high"
+    /// into a number attached to a cause, the same way `skips` did for the ledger.
+    queue_high_water: usize,
+    /// Scratch for [`GameServer::broadcast`]'s recipient list, reused across calls.
+    ///
+    /// The list has to be collected before sending because a send can remove a player and so
+    /// invalidate an in-flight iterator, but collecting it into a fresh `Vec` every call is an
+    /// allocation per broadcast, and under a full server that is hundreds a tick.
+    broadcast_targets: Vec<u8>,
     /// How much nearness each player has accumulated towards the next streamed update of each NPC.
     npc_stream: HashMap<(u8, u8), u8>,
     /// Whose turn it is to have the ground around them searched for a house.
@@ -1156,7 +1198,9 @@ impl GameServer {
             weather,
             census: crate::world::census::Census::new(terrustia_proto::tile_sets::TILE_COUNT),
             pylon_kinds: HashMap::new(),
-            npc_skips: HashMap::new(),
+            skips: HashMap::new(),
+            queue_high_water: 0,
+            broadcast_targets: Vec::new(),
             npc_stream: HashMap::new(),
             housing_turn: 0,
             running_timers,
@@ -2398,6 +2442,13 @@ impl GameServer {
         // A session is not state: whoever reuses this slot starts as nobody.
         self.admin.sign_out(slot);
 
+        // Neither is a run of withheld updates. Slots are reused, so leaving these behind would
+        // hand the next player to occupy this one a head start on the skip budget, and start them
+        // off missing updates they should have had. Both directions go: what this player was owed,
+        // and what was being withheld about them from everybody else.
+        self.skips
+            .retain(|&(what, target), _| target != slot && what != Withheld::Player(slot));
+
         // Whatever they had open is free again. Without this a mannequin somebody was looking at
         // when their connection dropped stays locked for the rest of the world's life.
         if self.tile_entity_anchors.remove(&slot).is_some()
@@ -2460,16 +2511,24 @@ impl GameServer {
     fn broadcast(&mut self, frame: Vec<u8>, except: Option<u8>) {
         let bytes = Bytes::from(frame);
         // Collect first: sending can remove a player, which would invalidate an in-flight iterator.
-        let targets: Vec<u8> = self
-            .players
-            .iter()
-            .flatten()
-            .filter(|p| p.is_playing() && Some(p.slot) != except)
-            .map(|p| p.slot)
-            .collect();
-        for slot in targets {
-            self.send_bytes(slot, bytes.clone());
+        // The buffer is taken from the server rather than allocated, so a broadcast under load does
+        // not also cost an allocation. Taking it (rather than borrowing) keeps `send_bytes`'s own
+        // `&mut self` free, and leaves re-entrant broadcasts (a send that removes a player, which
+        // announces the departure) correct: the inner call finds an empty buffer, allocates its
+        // own, and each level restores what it took.
+        let mut targets = std::mem::take(&mut self.broadcast_targets);
+        targets.clear();
+        targets.extend(
+            self.players
+                .iter()
+                .flatten()
+                .filter(|p| p.is_playing() && Some(p.slot) != except)
+                .map(|p| p.slot),
+        );
+        for slot in &targets {
+            self.send_bytes(*slot, bytes.clone());
         }
+        self.broadcast_targets = targets;
     }
 
     fn announce(&mut self, text: &str) {
