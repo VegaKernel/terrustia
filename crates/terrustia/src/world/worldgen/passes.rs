@@ -25,8 +25,6 @@ pub struct GenVars {
     pub rand: UnifiedRandom,
     /// The world being built.
     pub world: World,
-    /// Which side the dungeon is on: -1 for left, 1 for right. The jungle sits opposite it.
-    pub dungeon_side: i32,
 }
 
 impl GenVars {
@@ -34,7 +32,6 @@ impl GenVars {
         Self {
             rand: UnifiedRandom::new(seed),
             world,
-            dungeon_side: 0,
         }
     }
 }

@@ -599,8 +599,12 @@ fn convert_toward_jungle(block: u16) -> Option<Option<u16>> {
 /// Whether chlorophyte may grow at a tile, given how much chlorophyte ore already crowds it —
 /// `WorldGen.CanChlorophyteGrow` (`WorldGen.cs:70002-70053`). Too dense in either the inner or the
 /// outer radius and it refuses, which is what keeps a chlorophyte farm from filling a whole cavern.
-/// Above the rock layer the caps halve and the radii grow by half. The remix-world adjustments are
-/// not modelled (this project has no remix seed).
+/// Above the rock layer the caps halve and the radii grow by half. The remix-world adjustments to
+/// these caps are not modelled - which is a gap in *this* function, not an absence of the seed:
+/// `secret_seeds.remix` is detected (`worldgen/secret_seed.rs:148`), read from and written to the
+/// world file (`wld.rs:819`, `wld_save.rs:692`), advertised to clients as `F::RemixWorld`
+/// (`world.rs:788`), and consumed - it switches town-NPC happiness off entirely
+/// (`happiness.rs:362`, from `server/mod.rs:1482`, transcribed from `ShopHelper.cs:107`).
 fn can_chlorophyte_grow(world: &impl OreWorld, i: i32, j: i32, rock_layer: i32) -> bool {
     let (mut inner_cap, mut outer_cap, mut inner_r, mut outer_r) = (40, 130, 35, 85);
     if j < rock_layer {

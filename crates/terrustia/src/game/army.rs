@@ -143,10 +143,6 @@ pub struct ArmyState {
     pub kills: i32,
     /// Ticks left before the gates start letting enemies through again.
     pub hold: i32,
-    /// Where the crystal stands, in tiles, so gates and arena can be placed around it.
-    pub stand: (i32, i32),
-    /// Whether the champion of the current tier has been beaten this run.
-    pub champion_down: bool,
     /// Where goblins have died, for a Dark Mage to raise.
     ///
     /// Only the plain goblins leave anything worth raising — a javelinist or a drakin is gone for
@@ -164,14 +160,17 @@ impl ArmyState {
         self.hold != 0
     }
 
-    /// Start the event at a tier, around a crystal standing at these tile coordinates.
-    pub fn start(&mut self, tier: Tier, stand: (i32, i32)) {
+    /// Start the event at a tier.
+    ///
+    /// It used to also record the crystal's stand tile and a `champion_down` flag. Neither was
+    /// ever read: gates and arena are placed from the crystal entity and `army_arena`, which the
+    /// caller already holds, and the champion hold is done by [`Tier::kill_worth`]'s own `held`
+    /// arm (vanilla's `currentKillCount` clamp, `DD2Event.cs:994-996`), not by a flag.
+    pub fn start(&mut self, tier: Tier) {
         self.tier = Some(tier);
         self.wave = 1;
         self.kills = 0;
         self.hold = 0;
-        self.stand = stand;
-        self.champion_down = false;
     }
 
     pub fn stop(&mut self) {
@@ -208,7 +207,6 @@ impl ArmyState {
     pub fn note_kill(&mut self, npc_type: u16, expert: bool) -> Option<i32> {
         let tier = self.tier?;
         if npc_type == tier.champion() {
-            self.champion_down = true;
             // Tier three's final wave is not a kill count at all — it is Betsy's health
             // (`Difficulty_3_GetRequiredWaveKills`: progress = 100 - life/lifeMax*100, reaching 100
             // as she dies). Every gate enemy there is worth 0 and Betsy herself only 1, against a
@@ -856,7 +854,7 @@ mod tests {
     #[test]
     fn killing_betsy_wins_the_tier_three_finale() {
         let mut army = ArmyState::default();
-        army.start(Tier::Three, (0, 0));
+        army.start(Tier::Three);
         army.wave = Tier::Three.waves(); // the final wave
         army.kills = 0;
 
@@ -876,7 +874,7 @@ mod tests {
     #[test]
     fn the_tier_three_finale_reports_betsys_health_as_progress() {
         let mut army = ArmyState::default();
-        army.start(Tier::Three, (0, 0));
+        army.start(Tier::Three);
         army.wave = Tier::Three.waves(); // the Betsy wave
 
         assert_eq!(
@@ -1083,7 +1081,7 @@ mod tests {
     #[test]
     fn kills_advance_the_waves() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (100, 200));
+        army.start(Tier::One);
         for wave in 1..=5 {
             assert_eq!(army.wave, wave);
             let quota = Tier::One.required_kills(wave);
@@ -1104,7 +1102,7 @@ mod tests {
     #[test]
     fn a_passing_zombie_does_not_count() {
         let mut army = ArmyState::default();
-        army.start(Tier::Two, (100, 200));
+        army.start(Tier::Two);
         for _ in 0..500 {
             army.note_kill(3, false);
         }
@@ -1119,7 +1117,7 @@ mod tests {
     #[test]
     fn expert_counts_double_on_ordinary_waves() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         // Wave one asks for sixty. Twenty-nine doubles reach fifty-eight, none of them finishing.
         for _ in 0..29 {
             assert!(army.note_kill(ids::DD2_GOBLIN_T1, true).is_none());
@@ -1143,7 +1141,7 @@ mod tests {
     #[test]
     fn an_expert_double_cannot_skip_the_final_wave_champion() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         army.wave = Tier::One.waves(); // the final wave
         let required = Tier::One.required_kills(army.wave);
 
@@ -1236,7 +1234,7 @@ mod tests {
     #[test]
     fn corpses_are_spent_when_they_are_raised() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         let spot = (1000.0, 1000.0);
         assert!(!army.can_raise_at(spot), "an empty field raises nothing");
 
@@ -1254,7 +1252,7 @@ mod tests {
     #[test]
     fn a_javelinist_leaves_nothing_to_raise() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         for _ in 0..10 {
             army.note_corpse(ids::DD2_JAVELINST_T1, (1000.0, 1000.0));
             army.note_corpse(ids::DD2_WYVERN_T1, (1000.0, 1000.0));
@@ -1266,7 +1264,7 @@ mod tests {
     #[test]
     fn the_field_only_remembers_so_many() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         for i in 0..(CORPSES_REMEMBERED * 3) {
             army.note_corpse(ids::DD2_GOBLIN_T1, (i as f32, 0.0));
         }
@@ -1282,7 +1280,7 @@ mod tests {
     #[test]
     fn a_summoning_raises_at_most_eight() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         for i in 0..30 {
             army.note_corpse(ids::DD2_GOBLIN_T1, (1000.0 + i as f32 * 10.0, 1000.0));
         }
@@ -1293,7 +1291,7 @@ mod tests {
     #[test]
     fn the_gates_go_quiet_between_waves() {
         let mut army = ArmyState::default();
-        army.start(Tier::One, (0, 0));
+        army.start(Tier::One);
         assert!(!army.spawning_on_hold(), "not before the first wave");
         for _ in 0..60 {
             army.note_kill(ids::DD2_GOBLIN_T1, false);

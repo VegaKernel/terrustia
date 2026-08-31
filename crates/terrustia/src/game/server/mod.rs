@@ -954,7 +954,6 @@ pub struct GameServer {
     projectiles: crate::game::projectile::ProjectileStore,
     /// How many shots have been fired since the server started, for `/npcs`.
     shots_thrown: u64,
-    /// The longest tick seen in the current reporting window.
     /// The invasion under way, if any.
     invasion: Option<InvasionState>,
     /// The Old One's Army, which is a siege rather than an invasion and so keeps its own state.
@@ -1172,9 +1171,10 @@ impl GameServer {
         // A full snapshot now, while startup has no tick budget to blow, so the *first* real
         // autosave has a baseline to diff against instead of paying for a full copy inside a
         // counted tick. Measured on a real CI soak run before this existed: 14,833 µs — 89% of a
-        // single tick's 16,666 µs budget, on the very first save after the server came up. Every
-        // save after it was already 150–200 µs, because `refresh_snapshot` had something to
-        // compare against; this just moves that same first comparison off the clock entirely.
+        // single tick's 16,666 µs budget, on the very first save after the server came up. This
+        // moves that first full copy off the clock; what every save after it costs is a separate
+        // and much larger number than an earlier note here claimed, measured and tabulated in
+        // `save_world`'s own comment (2.0 to 12.8 ms, scaling with how much has changed).
         let spare_world = Some(world.snapshot());
         let slots = config.max_players;
         let save_path = config.save_target().map(Path::to_path_buf);
@@ -1749,11 +1749,10 @@ impl GameServer {
         // writes: measured on a 4200x1200 world, 2.600 ms against 0.989 ms for copying into a
         // buffer whose pages are already mapped. That is the difference between roughly a sixth
         // of the tick budget and a sixteenth, four times worse again on a large world, and it is
-        // the single most expensive thing an idle server does.
-        // Copying forty megabytes of tiles is the most expensive thing an idle server does, and on
-        // a world nobody is digging through, almost none of those tiles have changed since the last
-        // save. The buffer a finished save hands back already holds that state, so only the
-        // sections that have changed since need copying into it.
+        // the single most expensive thing an idle server does. On a world nobody is digging
+        // through, almost none of those tiles have changed since the last save, and the buffer a
+        // finished save hands back already holds that state, so only the sections that have
+        // changed since need copying into it.
         //
         // What this actually costs, measured on a fresh 4200x1200 world with nobody connected, is
         // more than an earlier note here claimed. It said every save after the first was "already
@@ -2089,10 +2088,6 @@ impl GameServer {
         refused
     }
 
-    /// Apply any password hashing that finished since the last tick.
-    ///
-    /// Polled rather than awaited, for the same reason the save report is: the tick is not async
-    /// and should not become so for this.
     /// Reclaim the snapshot buffer from a save that has finished with it.
     fn reclaim_snapshot_buffer(&mut self) {
         if let Ok(spare) = self.world_returns.1.try_recv() {
@@ -2100,6 +2095,10 @@ impl GameServer {
         }
     }
 
+    /// Apply any password hashing that finished since the last tick.
+    ///
+    /// Polled rather than awaited, for the same reason the save report is: the tick is not async
+    /// and should not become so for this.
     fn note_finished_auth(&mut self) {
         while let Ok(outcome) = self.auth_results.1.try_recv() {
             match outcome {
@@ -3238,8 +3237,11 @@ mod claim_token_and_login_throttle {
 /// Caught by a real CI soak run, not a unit test: `save_world_in_background`'s incremental path
 /// (`refresh_snapshot`) requires a buffer that already holds the world's state as of the moment
 /// change-tracking began, and there was no such buffer until the first save built one the
-/// expensive way. Measured on that run — 14,833 µs, 89% of a single tick's budget — against every
-/// later save's 150–200 µs once a buffer existed to refresh instead of rebuild.
+/// expensive way. Measured on that run — 14,833 µs, 89% of a single tick's budget — against a
+/// later save, which refreshes a buffer instead of rebuilding one. That later figure was written
+/// here as "150-200 µs" and is not: `save_world`'s own comment carries the re-measured table
+/// (2.0 to 12.8 ms, scaling with how much changed between saves). Refreshing is still much
+/// cheaper than rebuilding; it was never that cheap.
 #[cfg(test)]
 mod snapshot_baseline {
     use super::*;
@@ -3253,7 +3255,8 @@ mod snapshot_baseline {
         assert!(
             server.spare_world.is_some(),
             "the first autosave has nothing to refresh against, and pays for a full world copy \
-             inside a counted tick instead of the ~150µs an incremental refresh costs"
+             inside a counted tick instead of the incremental refresh `save_world`'s own comment \
+             measures"
         );
     }
 

@@ -1499,13 +1499,29 @@ impl GameServer {
             return;
         }
         let toughness = self.town_toughness();
+        // `AI_007_TownEntities` rebuilds `defense` from `defDefense` every tick, and two buffs sit
+        // on either side of the progression bonus: Dryad's Blessing raises the base by difficulty
+        // (`NPC.cs:53550-53561`), and Tipsy multiplies the finished figure (`NPC.cs:53699-53706`).
+        let ward = if self.is_master() {
+            20
+        } else if self.is_expert() {
+            15
+        } else {
+            10
+        };
 
         for index in residents {
             // Their armour is the type's plus everything the world has beaten.
             let Some(resident) = self.npcs.get_mut(index) else {
                 continue;
             };
-            resident.defense = resident.stats.defense + toughness.defense;
+            let flags = resident.buffs.flags;
+            let base = resident.stats.defense + if flags.dryad_ward { ward } else { 0 };
+            resident.defense = base + toughness.defense;
+            if flags.tipsy {
+                // `defense = (int)((double)defense * 1.1)`, truncating.
+                resident.defense = (f64::from(resident.defense) * 1.1) as i32;
+            }
             let (at, size) = (resident.position, (resident.width(), resident.height()));
 
             let attacker = self.npcs.iter().find(|(other, n)| {
@@ -3037,7 +3053,21 @@ impl GameServer {
         }
         if let Some(at) = pylon {
             // The remembered network, not one read off a tile that is already gone.
-            let kind = self.pylon_kinds.remove(&at).unwrap_or(0);
+            //
+            // A miss falls back to 0, Forest, which the client will not match against the pylon it
+            // actually has: the removal is silently ignored and the pylon stays on every travel
+            // map for the rest of the session (see `pylon_kinds`' own doc). Three hand-written
+            // insert sites uphold that invariant and nothing enforces it, so say so out loud
+            // rather than letting a permanent failure be a quiet `unwrap_or`.
+            let kind = self.pylon_kinds.remove(&at).unwrap_or_else(|| {
+                warn!(
+                    x = at.0,
+                    y = at.1,
+                    "no remembered network for a pylon being removed; announcing Forest, which \
+                     the client will not match"
+                );
+                0
+            });
             self.broadcast_pylon(
                 net_module::PylonMessage::Removed,
                 net_module::Pylon {
@@ -4136,7 +4166,12 @@ impl GameServer {
             .flatten()
             .any(|p| p.is_playing() && p.life_max > 140);
         self.slime_rain.roll(
-            self.slime_rain.is_active(),
+            // `Main.raining`, the weather flag (`Main.cs:1282`), which is what
+            // `Main.cs:65906`'s `!raining` reads. This passed `self.slime_rain.is_active()`
+            // until 2026-08-31: `busy()`, checked inside `roll`, is `timer != 0` and strictly
+            // subsumes `is_active()`'s `timer > 0`, so the argument could never change the
+            // outcome and the weather half of vanilla's gate was simply missing.
+            self.weather.raining,
             self.world.day_time,
             self.world.time < DAY_LENGTH / 2,
             rate,
@@ -5454,6 +5489,11 @@ impl GameServer {
                 .filter(|p| p.is_playing() && p.life > 0)
                 .count();
             for (bottom, left) in releases {
+                // Rebuilt per gate on purpose, and **not** hoistable out of this loop: the body
+                // spawns into `self.npcs`, and vanilla calls `NPC.CountNPCS` live at every one of
+                // `Difficulty_N_SpawnMonsterFromGate`'s cap checks (`DD2Event.cs:1041-1091` and
+                // its tier-2/3 twins), so the second gate to release on a tick must see what the
+                // first one just put out. Hoisting it would let two gates spend the same cap.
                 let census: Vec<(u16, usize)> = {
                     let mut counts: std::collections::HashMap<u16, usize> =
                         std::collections::HashMap::new();
@@ -6912,6 +6952,59 @@ mod combat_tests {
         // The sand ball does too; the eye laser does not.
         let laser = store.launch(83, (0.0, 0.0), (1.0, 0.0), 11, 60).unwrap();
         assert_eq!(store.get(laser).unwrap().penetrate, 3);
+    }
+}
+
+#[cfg(test)]
+mod town_buff_defense {
+    use super::*;
+    use crate::config::Config;
+
+    const GUIDE: u16 = 22;
+
+    /// A guide standing in an otherwise empty world, so the only thing moving his armour is the
+    /// buff under test: no boss is down, so `town_toughness().defense` is zero.
+    fn guide_with(mut set: impl FnMut(&mut crate::game::buffs::Flags)) -> i32 {
+        let mut server = GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "town buff probe"),
+        );
+        let index = server
+            .npcs
+            .spawn(GUIDE, (100.0, 100.0))
+            .expect("a slot for the guide");
+        set(&mut server
+            .npcs
+            .get_mut(index)
+            .expect("just spawned")
+            .buffs
+            .flags);
+        server.tick_town_casualties();
+        server.npcs.get(index).expect("still there").defense
+    }
+
+    /// Dryad's Blessing raises the base armour before the world's progression bonus is added:
+    /// `defense = (dryadWard ? (defDefense + 20/15/10) : defDefense)` by difficulty
+    /// (`NPC.cs:53550-53561`), inside `AI_007_TownEntities` so it reaches town NPCs and critters
+    /// and nothing else. Classic is the +10 arm.
+    ///
+    /// Before 2026-08-31 the `dryad_ward` flag was derived and read nowhere, so a blessed
+    /// townsperson was exactly as easy to kill as an unblessed one.
+    #[test]
+    fn dryads_blessing_is_worth_ten_armour_on_classic() {
+        let plain = guide_with(|_| {});
+        let blessed = guide_with(|f| f.dryad_ward = true);
+        assert_eq!(blessed, plain + 10, "classic's arm of NPC.cs:53560");
+    }
+
+    /// Tipsy multiplies the finished figure rather than the base, and truncates:
+    /// `defense = (int)((double)defense * 1.1)` (`NPC.cs:53701`), inside `isLikeATownNPC`.
+    #[test]
+    fn tipsy_multiplies_the_finished_armour_by_a_tenth() {
+        let plain = guide_with(|_| {});
+        let tipsy = guide_with(|f| f.tipsy = true);
+        assert_eq!(tipsy, (f64::from(plain) * 1.1) as i32);
+        assert!(tipsy > plain, "the guide has armour to multiply");
     }
 }
 
@@ -8416,12 +8509,12 @@ mod difficulty_slider {
         const A_PLAIN_ARMY_ENEMY: u16 = 552;
 
         let mut gentle = journey_at(0.0);
-        gentle.army.start(crate::game::army::Tier::One, (0, 0));
+        gentle.army.start(crate::game::army::Tier::One);
         gentle.note_army_kill(A_PLAIN_ARMY_ENEMY);
         assert_eq!(gentle.army.kills, 1, "not expert, so one plain kill");
 
         let mut fierce = journey_at(1.0);
-        fierce.army.start(crate::game::army::Tier::One, (0, 0));
+        fierce.army.start(crate::game::army::Tier::One);
         fierce.note_army_kill(A_PLAIN_ARMY_ENEMY);
         assert_eq!(fierce.army.kills, 2, "expert doubles a plain kill");
     }
@@ -8607,6 +8700,34 @@ mod slime_rain {
             }
         }
         panic!("a rain should have started at least once across 30 seeds");
+    }
+
+    /// Real rain blocks the roll outright: `Main.cs:65906`'s gate opens with `!raining`, where
+    /// `raining` is `Main.raining` (`Main.cs:1282`), the weather flag, and not anything to do
+    /// with a slime rain (that half is `NPC.BusyWithAnyInvasionOfSorts`'s `slimeRainTime == 0.0`,
+    /// `NPC.cs:7051`).
+    ///
+    /// Same setup as the roll test above, which fires within 50,000 ticks on every one of these
+    /// seeds. Before 2026-08-31 the call site passed `slime_rain.is_active()` here, which `roll`'s
+    /// own `busy()` already subsumed, so the weather gate did nothing and this failed on seed 0.
+    #[test]
+    fn weather_rain_blocks_the_daily_roll() {
+        for seed in 0..30u64 {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            server.rng = SmallRng::seed_from_u64(seed);
+            server.world.game_mode = 2; // expert
+            server.journey.time_rate_slider = 1.0;
+            server.world.day_time = true;
+            server.world.time = 0;
+            server.weather.raining = true;
+            for _ in 0..50_000 {
+                server.tick_slime_rain();
+                assert!(
+                    !server.slime_rain.is_active(),
+                    "seed {seed}: a rain started while it was already raining"
+                );
+            }
+        }
     }
 
     /// A hundred and fifty Blue Slime kills during a rain summons King Slime at the *closest*

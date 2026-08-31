@@ -45,9 +45,17 @@ use std::path::{Path, PathBuf};
 /// about a slice whose length starts at 1, went with it. The three `unreachable!` arms in
 /// `merge_result` are untouched.
 ///
+/// 12, up from 11 (2026-08-31): no site was added. `panic_sites` used to truncate each file at its
+/// first `#[cfg(test)]`, which hid every production line below one, and one real site was hiding
+/// there: `game/ai/mod.rs:1253`, `unreachable!("style {style} claims parity but has no routine
+/// here")`, in a file whose first test module opens at line 391. That arm is defended - the roster
+/// test at `ai/mod.rs:607-609` walks all 691 NPC types to prove no `ai_style` reaches it - but the
+/// budget is supposed to count defended sites, not omit them. The checker is now brace-aware and
+/// the number is the honest one; see `panic_sites` below for what the old truncation cost.
+///
 /// Lower this whenever a site genuinely goes away, in the same commit. Never raise it without a
 /// comment at the new site saying which invariant makes it safe.
-const ALLOWED: usize = 11;
+const ALLOWED: usize = 12;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -74,31 +82,72 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Count panic sites in one file, stopping at the first `#[cfg(test)]`.
+/// Count panic sites in one file, skipping each `#[cfg(test)]` item and resuming after it.
 ///
-/// Test modules are conventionally last in this codebase, so truncating there is enough and
-/// avoids needing to parse Rust to find where the module ends.
+/// This used to truncate the file at the first `#[cfg(test)]`, on the stated grounds that test
+/// modules are conventionally last here. 24 files do not follow that convention: `systems.rs`
+/// carries ~2,775 production lines after its first test module, `npc_params.rs` ~3,656,
+/// `server/mod.rs` ~2,045, `spawn.rs` ~1,983, `dispatch.rs` ~1,161, `ai/mod.rs` ~847. Roughly
+/// 20,000 production lines were never scanned, so an `.unwrap()` added below any of those points
+/// kept this test green, which is the exact opposite of what it exists to do.
+///
+/// Skipping needs no Rust parser, only the two shapes the attribute takes here: a braced item
+/// (`mod tests { … }`, a `#[cfg(test)] fn`, an enum variant, a multi-line match arm), or one that
+/// ends at a `;` or `,` with no brace at all (`mod liquid_faithful;`, a `const`, a single-line
+/// match arm - `console.rs:44`'s `__panic_probe` is one, and it contains a literal `panic!`).
+/// Track braces from the item's first `{` and resume once it closes; with no brace, resume after
+/// the terminator. Braces inside string literals are counted too, and are balanced in every
+/// literal in the tree today; if that ever stops being true the count moves and this test says so,
+/// which is the failure direction to have.
 fn panic_sites(path: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let body = text.split("#[cfg(test)]").next().unwrap_or_default();
-    body.lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with("//"))
-        .filter(|line| {
-            line.contains(".unwrap()")
-                || line.contains(".expect(")
-                || line.contains("panic!(")
-                || line.contains("unreachable!(")
-        })
-        .map(|line| {
-            format!(
+    // `#![cfg(test)]` makes the whole file test-only (`world/liquid_faithful.rs`).
+    if text.contains("#![cfg(test)]") {
+        return Vec::new();
+    }
+    let mut sites = Vec::new();
+    let mut skipping = false;
+    let mut depth = 0i32;
+    let mut opened = false;
+    for line in text.lines().map(str::trim) {
+        let item = match (skipping, line.split_once("#[cfg(test)]")) {
+            (true, _) => Some(line),
+            (false, Some((_, rest))) => {
+                skipping = true;
+                depth = 0;
+                opened = false;
+                Some(rest)
+            }
+            (false, None) => None,
+        };
+        if let Some(item) = item {
+            let opens = item.matches('{').count() as i32;
+            opened |= opens > 0;
+            depth += opens - item.matches('}').count() as i32;
+            skipping = if opened {
+                depth > 0
+            } else {
+                !item.ends_with(';') && !item.ends_with(',')
+            };
+            continue;
+        }
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.contains(".unwrap()")
+            || line.contains(".expect(")
+            || line.contains("panic!(")
+            || line.contains("unreachable!(")
+        {
+            sites.push(format!(
                 "{}: {line}",
                 path.file_name().unwrap_or_default().to_string_lossy()
-            )
-        })
-        .collect()
+            ));
+        }
+    }
+    sites
 }
 
 #[test]
