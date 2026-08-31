@@ -2470,6 +2470,18 @@ pub fn worm_body(head_type: u16) -> Option<(u16, u16, usize)> {
 /// paths sees — the tick-loop check this constant feeds (`game/server.rs`) catches every path
 /// uniformly, the same way real vanilla's own AI-driven self-growth does.
 pub const SOLAR_CRAWLTIPEDE_HEAD: u16 = 412;
+
+/// The Wyvern's head, and the fourteen parts that trail it.
+///
+/// Same mechanism as the Crawltipede and kept out of [`worm_body`] for the same reason: a Wyvern
+/// grows its own body on its own first AI tick (`NPC.cs:51700-51730`, `type == 87 && ai[0] == 0f`),
+/// so it has to work for a head that arrives from ambient sky spawning as well as from `/spawn`.
+///
+/// The order is the game's own loop: `num14 = 89` by default, `88` at `m == 1` and `m == 8`, then
+/// `90`, `91`, `92` at 11, 12 and 13. It is not a run of one body type and a tail, which is why it
+/// is a table rather than a count.
+pub const WYVERN_HEAD: u16 = 87;
+pub const WYVERN_SEGMENTS: [u16; 14] = [89, 88, 89, 89, 89, 89, 89, 89, 88, 89, 89, 90, 91, 92];
 pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
 pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
 pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
