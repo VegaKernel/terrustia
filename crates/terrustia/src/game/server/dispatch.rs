@@ -188,7 +188,7 @@ impl GameServer {
             // combat text (`:3239,3247`), an emote bubble (`:3408`), the two achievement
             // announcements (`:3573,3579`), a puff of smoke (`:3762`), revenge markers
             // (`:4066,4072`), NPC immunity tampering (`:4145`), an arbitrary legacy sound
-            // (`:4160`) — and the two with real teeth. `SMART_TEXT_MESSAGE` (`:3772`) is
+            // (`:4160`), and the two with real teeth. `SMART_TEXT_MESSAGE` (`:3772`) is
             // arbitrary coloured multiline text, indistinguishable from a server notice, and
             // `WIRED_CANNON_SHOT` (`:3781`) makes the *named* player's client fire a cannon with
             // attacker-chosen damage and knockback (`if (num77 == Main.myPlayer)
@@ -415,7 +415,7 @@ impl GameServer {
     ///
     /// The condition around it comes with it, and has to: without the rewrite there is nothing else
     /// stopping a client naming anybody it likes. Vanilla's is `whoAmI == num27 ||
-    /// (Main.player[num27].hostile && Main.player[whoAmI].hostile)` — hurt yourself, or hurt
+    /// (Main.player[num27].hostile && Main.player[whoAmI].hostile)`: hurt yourself, or hurt
     /// somebody when you are both in PvP.
     fn on_player_hurt(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
