@@ -9862,11 +9862,30 @@ mod section_streaming_as_players_move {
         n
     }
 
+    /// Tick until nothing is queued, or give up.
+    ///
+    /// `drain_section_streams` is bounded by wall clock (`SECTION_STREAM_BUDGET`) and guarantees
+    /// only one section a tick, so how many of a block go out on any single tick depends on how
+    /// busy the machine is. Anything that asserts on a *whole* block has to settle first or it is
+    /// a test that passes alone and fails under a loaded CI run.
+    fn settle(server: &mut GameServer) {
+        for _ in 0..200 {
+            server.tick();
+            if server
+                .player(0)
+                .is_some_and(|p| p.pending_sections.is_empty())
+            {
+                return;
+            }
+        }
+        panic!("a section queue never drained");
+    }
+
     /// The bug itself: walk past the join block and the world is still sent.
     #[test]
     fn walking_into_a_new_section_streams_the_block_around_it() {
         let (mut server, mut rx) = one_player_at(in_section(1, 1));
-        server.tick();
+        settle(&mut server);
         assert!(
             server.player(0).unwrap().sent_sections.contains(&(1, 1)),
             "a standing player should be sent the section they are standing in"
@@ -9875,9 +9894,7 @@ mod section_streaming_as_players_move {
 
         // Eight sections away: 1,600 tiles, far outside anything a join could have covered.
         server.player_mut(0).unwrap().position = in_section(9, 4);
-        for _ in 0..40 {
-            server.tick();
-        }
+        settle(&mut server);
 
         let sent = &server.player(0).unwrap().sent_sections;
         for sx in 8..=10 {
@@ -9903,9 +9920,7 @@ mod section_streaming_as_players_move {
     #[test]
     fn standing_still_queues_nothing_and_never_replays_the_join() {
         let (mut server, mut rx) = one_player_at(in_section(3, 2));
-        for _ in 0..30 {
-            server.tick();
-        }
+        settle(&mut server);
         let settled = server.player(0).unwrap().sent_sections.len();
         assert_eq!(settled, 9, "a settled player holds their own 3x3 block");
         let _ = count(&mut rx, id::TILE_SECTION);
@@ -9937,13 +9952,11 @@ mod section_streaming_as_players_move {
     #[test]
     fn a_teleport_streams_where_the_player_lands() {
         let (mut server, mut rx) = one_player_at(in_section(1, 1));
-        server.tick();
+        settle(&mut server);
         let _ = count(&mut rx, id::INITIAL_SPAWN);
 
         server.player_mut(0).unwrap().position = in_section(10, 1);
-        for _ in 0..40 {
-            server.tick();
-        }
+        settle(&mut server);
 
         assert!(
             server.player(0).unwrap().sent_sections.contains(&(10, 1)),
