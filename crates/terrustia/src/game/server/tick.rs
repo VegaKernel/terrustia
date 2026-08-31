@@ -264,6 +264,12 @@ impl GameServer {
     /// for this module alone with `TERRUSTIA_LOG=info,terrustia::game::server::tick=debug`. Every
     /// line here names the worst tick's processor time `cpu_us`, so one field carries the
     /// measurement whatever level it came out at.
+    ///
+    /// `tick window` is the *only* sample source, and the two lines below it are additions to the
+    /// same window rather than alternatives to it: a window that is both reported and over budget
+    /// emits two lines carrying the identical `cpu_us`. Anything measuring tick cost from a log
+    /// must therefore select the `tick window` line first, or it double-counts exactly the heavy
+    /// windows and skews its own tail. `tools/soak_scale.sh` does; it once did not.
     fn note_tick_cost(&mut self, cost: TickCost) {
         self.last_tick = cost;
         if self.ticks.is_multiple_of(STATUS_EVERY) {
@@ -319,11 +325,12 @@ impl GameServer {
         if worst.cpu * 2 > TICK {
             let (phase, phase_cost) = worst.worst_phase();
             warn!(
-                // The same quantity the `tick window` line above reports, and deliberately under
-                // the same field name. It was `worst_us` here and `cpu_us` there, which meant
-                // anything reading the log for tick cost (tools/soak_scale.sh) matched the quiet
-                // line and missed this one: the only line that fires when a tick is genuinely
-                // over budget. One name for one measurement.
+                // The same quantity the `tick window` line above reports, deliberately under the
+                // same field name: one name for one measurement, so a person reading the log does
+                // not have to know that `worst_us` here and `cpu_us` there meant the same thing.
+                // This line is a *repeat* of that window's number for an operator's attention, not
+                // a second measurement, so a tool sampling tick cost must read `tick window` and
+                // not this. See the doc comment above.
                 cpu_us = worst.cpu.as_micros() as u64,
                 budget_us = TICK.as_micros() as u64,
                 phase,

@@ -332,15 +332,51 @@ pub fn from_gate(
             wave, left_gate, kills, required, count, &scale, rng, &mut out,
         ),
         Tier::Two => tier_two(
-            wave, left_gate, kills, required, count, &scale, rng, &mut out,
+            wave, left_gate, kills, required, count, &scale, players, rng, &mut out,
         ),
-        Tier::Three => tier_three(wave, count, &scale, rng, &mut out),
+        Tier::Three => tier_three(wave, count, &scale, players, rng, &mut out),
     }
     out
 }
 
 type Cap<'a> = &'a dyn Fn(usize) -> usize;
 type Census<'a> = &'a dyn Fn(u16) -> usize;
+
+/// The kobold and drakin caps for a tier 2 or tier 3 gate, reproducing a Re-Logic bug.
+///
+/// **This is not a typo here. Do not "correct" the arithmetic.** Vanilla's multiplayer loop at
+/// `DD2Event.cs:1260-1266` (`Difficulty_2_SpawnMonsterFromGate`) and `DD2Event.cs:1570-1577`
+/// (`Difficulty_3_SpawnMonsterFromGate`) reads, once per player past the first:
+///
+/// ```text
+/// num  = (int)((double)num  * 1.3);   // goblins, from itself
+/// num2 = (int)((double)num2 * 1.3);   // javelin throwers, from itself
+/// num5 = (int)((double)num  * 1.3);   // kobolds, from num, not num5
+/// num6 = (int)((double)num  * 1.35);  // drakins, from num, not num6
+/// ```
+///
+/// The last two read the goblin cap instead of their own, so a multiplayer arena fields far more
+/// kobolds and drakins than the 8/12 and 3/5 (tier 2) or 12/18 and 4/6 (tier 3) bases suggest.
+/// The bar for v0.0.1 is vanilla-identical behaviour and this bug is harmless, so it is
+/// transcribed rather than fixed. Nothing downstream may be written to assume it.
+///
+/// Because both are overwritten wholesale every iteration, only the final pass survives: scaling
+/// the finished goblin cap once reproduces the loop exactly. With one player the loop never runs
+/// and the bases stand untouched, which is why solo play is identical either way.
+fn kobolds_and_drakins(
+    goblins: usize,
+    kobold_base: usize,
+    drakin_base: usize,
+    players: usize,
+) -> (usize, usize) {
+    if players <= 1 {
+        return (kobold_base, drakin_base);
+    }
+    (
+        (goblins as f64 * 1.3) as usize,
+        (goblins as f64 * 1.35) as usize,
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 fn tier_one(
@@ -431,6 +467,7 @@ fn tier_two(
     required: i32,
     count: Census<'_>,
     scale: Cap<'_>,
+    players: usize,
     rng: &mut SmallRng,
     out: &mut Vec<u16>,
 ) {
@@ -443,8 +480,14 @@ fn tier_two(
     });
     let wyverns = if wave > 4 { 7 } else { 5 };
     let withers = 2;
-    let kobolds = scale(if wave > 3 { 12 } else { 8 });
-    let drakins = scale(if wave > 5 { 5 } else { 3 });
+    // `DD2Event.cs:1260-1266`: the kobold and drakin caps scale off the *goblin* cap, not their
+    // own. See `kobolds_and_drakins`; that is vanilla's bug, transcribed on purpose.
+    let (kobolds, drakins) = kobolds_and_drakins(
+        goblins,
+        if wave > 3 { 12 } else { 8 },
+        if wave > 5 { 5 } else { 3 },
+        players,
+    );
     let footmen = count(ids::DD2_GOBLIN_T2) + count(ids::DD2_GOBLIN_BOMBER_T2);
     // A pass of "roll for the rare thing, else fall through" — the order is the game's, and it is
     // what makes the later waves feel like they are stacking rather than swapping.
@@ -569,6 +612,7 @@ fn tier_three(
     wave: i32,
     count: Census<'_>,
     scale: Cap<'_>,
+    players: usize,
     rng: &mut SmallRng,
     out: &mut Vec<u16>,
 ) {
@@ -581,8 +625,14 @@ fn tier_three(
     });
     let wyverns = if wave > 4 { 10 } else { 7 };
     let withers = if wave > 5 { 3 } else { 2 };
-    let kobolds = scale(if wave > 3 { 18 } else { 12 });
-    let drakins = scale(if wave > 5 { 6 } else { 4 });
+    // `DD2Event.cs:1570-1577`: the kobold and drakin caps scale off the *goblin* cap, not their
+    // own. See `kobolds_and_drakins`; that is vanilla's bug, transcribed on purpose.
+    let (kobolds, drakins) = kobolds_and_drakins(
+        goblins,
+        if wave > 3 { 18 } else { 12 },
+        if wave > 5 { 6 } else { 4 },
+        players,
+    );
     let bugs = scale(4);
     let footmen = count(ids::DD2_GOBLIN_T3) + count(ids::DD2_GOBLIN_BOMBER_T3);
     let goblin_and_bomber = |out: &mut Vec<u16>, bomber_in: u32, rng: &mut SmallRng| {
@@ -965,6 +1015,68 @@ mod tests {
             .sum();
         assert_eq!(solo, 0, "fifty-five goblins is over a solo cap of fifty");
         assert!(party > 0, "four players should raise it past fifty-five");
+    }
+
+    /// The kobold or drakin cap a gate is actually enforcing, read off its own behaviour.
+    ///
+    /// The census hands `probe` back for `subject` and a number nothing can be under for every
+    /// other type, so the only branch that can fire is the subject's, and it fires exactly while
+    /// `probe` is below the cap. Walk `probe` up until it stops firing and that boundary is the
+    /// cap. Two hundred seeds is plenty for the rarest of these rolls (one in thirteen).
+    fn observed_cap(tier: Tier, wave: i32, subject: u16, players: usize) -> usize {
+        let emits = |probe: usize| {
+            let census = |ty: u16| if ty == subject { probe } else { 10_000 };
+            (0..200u64).any(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                from_gate(tier, wave, true, 0, &census, players, &mut rng).contains(&subject)
+            })
+        };
+        let mut cap = 0;
+        while cap < 1_000 && emits(cap) {
+            cap += 1;
+        }
+        cap
+    }
+
+    /// Vanilla scales the kobold and drakin caps off the *goblin* cap rather than off their own,
+    /// which is a Re-Logic bug (`DD2Event.cs:1260-1266` and `:1570-1577`). It is transcribed on
+    /// purpose, so these numbers are the buggy ones and that is correct.
+    ///
+    /// This test exists to fail if someone "fixes" the arithmetic to scale each cap from its own
+    /// base. See `kobolds_and_drakins` for the ruling. Under the corrected arithmetic the tier 2
+    /// wave 2 kobold cap at two players would be 10, not 84.
+    #[test]
+    fn the_kobold_and_drakin_caps_reproduce_vanillas_bug() {
+        // Solo the loop never runs, so both sides of the argument agree: the bases stand.
+        assert_eq!(observed_cap(Tier::Two, 2, ids::DD2_KOBOLD_WALKER_T2, 1), 8);
+        assert_eq!(observed_cap(Tier::Two, 4, ids::DD2_DRAKIN_T2, 1), 3);
+        assert_eq!(
+            observed_cap(Tier::Three, 2, ids::DD2_KOBOLD_WALKER_T3, 1),
+            12
+        );
+        assert_eq!(observed_cap(Tier::Three, 3, ids::DD2_DRAKIN_T3, 1), 4);
+
+        // Tier 2: the goblin cap runs 50 -> 65 at two players and 50 -> 65 -> 84 -> 109 at four,
+        // and the kobolds take 1.3 of it while the drakins take 1.35 of it.
+        assert_eq!(observed_cap(Tier::Two, 2, ids::DD2_KOBOLD_WALKER_T2, 2), 84);
+        assert_eq!(observed_cap(Tier::Two, 4, ids::DD2_DRAKIN_T2, 2), 87);
+        assert_eq!(
+            observed_cap(Tier::Two, 2, ids::DD2_KOBOLD_WALKER_T2, 4),
+            141
+        );
+        assert_eq!(observed_cap(Tier::Two, 4, ids::DD2_DRAKIN_T2, 4), 147);
+
+        // Tier 3: the goblin cap runs 60 -> 78 at two players and 60 -> 78 -> 101 -> 131 at four.
+        assert_eq!(
+            observed_cap(Tier::Three, 2, ids::DD2_KOBOLD_WALKER_T3, 2),
+            101
+        );
+        assert_eq!(observed_cap(Tier::Three, 3, ids::DD2_DRAKIN_T3, 2), 105);
+        assert_eq!(
+            observed_cap(Tier::Three, 2, ids::DD2_KOBOLD_WALKER_T3, 4),
+            170
+        );
+        assert_eq!(observed_cap(Tier::Three, 3, ids::DD2_DRAKIN_T3, 4), 176);
     }
 
     /// Waves advance on kills, and the event is won when the last one is behind you.

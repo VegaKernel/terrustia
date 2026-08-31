@@ -283,16 +283,6 @@ impl Config {
         // start a server that would never admit a single player, silently. The upper bounds are a
         // typo guard rather than a technical ceiling (there is no protocol reason a bigger number
         // could not work), generous enough that no real deployment should ever reach them.
-        // These four all gate `net::listener::claim`/`connection::serve` directly, and each has a
-        // zero value that is not merely useless but refuses every connection outright (verified by
-        // reading the code that consumes them, not assumed): `claim` refuses once
-        // `guard.total >= max_total` (true immediately when `max_total` is 0) and once
-        // `*count >= max_per_address` (same, for 0), and `connection::serve` wraps every read in
-        // `timeout(idle_timeout.min(..), ..)`, so an `idle`/`handshake` duration of zero elapses
-        // before a real client can send a single byte. A config that passed this unbounded used to
-        // start a server that would never admit a single player, silently. The upper bounds are a
-        // typo guard rather than a technical ceiling (there is no protocol reason a bigger number
-        // could not work), generous enough that no real deployment should ever reach them.
         if self.max_connections == 0 || self.max_connections > 65_536 {
             return Err(ConfigError::Invalid(format!(
                 "max_connections must be between 1 and 65536, got {}",

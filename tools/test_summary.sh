@@ -12,9 +12,14 @@ set -uo pipefail
 out=$(cargo test --no-fail-fast "$@" 2>&1)
 status=$?
 
+# Both counts come off the `test result:` summary lines and nowhere else. `failed` used to be
+# grepped out of the raw combined output, so any test that printed text matching `N failed` (an
+# assertion message, a captured log line, a fixture) was counted as a real failure and the script
+# exited 1 on a green suite.
 passed=$(echo "$out" | grep -oE 'test result: (ok|FAILED)\. [0-9]+ passed' \
     | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | paste -sd+ - | bc)
-failed=$(echo "$out" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | paste -sd+ - | bc)
+failed=$(echo "$out" | grep -oE 'test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed' \
+    | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | paste -sd+ - | bc)
 targets=$(echo "$out" | grep -cE '^test result:')
 
 echo "targets  ${targets}"

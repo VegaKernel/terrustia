@@ -42,8 +42,10 @@ Recipes live in the `justfile`; each is a thin wrapper over `cargo`, so plain `c
 - `just build` builds the panel, then the whole release workspace.
 - `just test` runs the workspace test suite; `just test-filter NAME` narrows it and shows output.
 - `just check` runs exactly what CI runs: `cargo fmt --all --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo deny check`, and the web build. Run it before you call a
-  change done.
+  --all-targets -- -D warnings`, `cargo clippy -p terrustia --all-targets --no-default-features`
+  (the only pass that compiles the panel's disk-serving branch and its `..`-traversal guard),
+  `cargo deny check`, the web build, and `cargo test --workspace`. Run it before you call a change
+  done. `just check-rust` is the lint pass alone, without the web build or the tests.
 - `just soak [SECONDS]` runs a real server with three real clients (the CI soak).
 - `just fuzz [TARGET] [SECONDS]` fuzzes a decoder target (needs nightly + `cargo-fuzz`).
 - `just regen` regenerates every data table from a decompiled tree (dev-only; see below).
