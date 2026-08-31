@@ -620,6 +620,20 @@ ceiling are the ones taken while the test box itself is contended, and the exter
 the same output is what distinguishes the two. A thirty-minute run cannot separate a slow leak from
 burst working set, so the bar tests the ceiling and leak detection stays with the extended soak.
 
+**The p99 clause has one known cause and it is fixed but not yet re-measured.** The first 255-player
+run failed the gate at `p99 tick 23430 us`, and the largest single contributor was traced:
+`BiomeCache` bought one biome scan per player with no per-tick bound, so a join burst put 255 scans
+of ~78 us on one tick and their entries, sharing an `at`, then expired together sixty ticks later. A
+real run measured `phase=spawning phase_us=20763`, which is 266 scans in a single tick. `BUDGET = 8`
+now caps the scans one tick may buy, which spreads the next expiry across 32 ticks by construction
+and re-spreads after any resynchronising event, for a guaranteed 624 us/tick at any player count.
+
+Two things about that are worth keeping: the instrument said the cost was 345 us and was right about
+the wrong question. `examples/biome_scan_cost.rs` drove **one** slot for 60,000 ticks, and a per-tick
+mean over one player cannot see a per-tick maximum over 255. And the fix sat unmerged on a branch
+until a branch audit found it, so the gate has never been re-run against it. **Re-running the
+255-player soak on a quiet machine is the open item**, not finding the cause.
+
 **The extended multi-hour boss soak is waived for v0.0.1** and carried to the next release. Its
 distinct value over the thirty-minute run is leak detection over a long horizon, and the shorter run
 now enforces a memory ceiling rather than printing a curve, which covers the failure mode that
@@ -685,8 +699,14 @@ one.
   treating `TMUX` as unsupported; fall back image -> 256-colour `banner()` -> plain. No new
   dependencies: a ~15-line base64 encoder plus two emitters; explicitly not `viuer`. Gotcha:
   cursor advance after the image differs between iTerm2 and kitty.
-- **Hanging indent for wrapped log lines** (manual wrapping at the terminal width).
-- **Narrow-terminal awareness** for the boot block layout.
+Both of the other entries that were here are done and are recorded in git rather than left as
+open items: the hanging indent for wrapped log lines (`term::wrap_ansi`, with word-boundary
+breaking), and narrow-terminal awareness for the boot card (`term::info_block_at`, which wraps a
+value under its own column instead of falling back to column 0 below about 70 columns). Fixing the
+second turned up three arithmetic bugs underneath it, all now closed: `visible_len` counted every
+character as one column when CJK and emoji are two, `wrap_ansi` hardcoded `\r\n` where a piped log
+wants `\n`, and a word break carried its tail down without checking it fitted, which put a
+47-column row in a 46-column terminal.
 
 ## Dependency pruning (decided; the record stays visible)
 
