@@ -140,6 +140,14 @@ pub fn treasure_bag(npc_type: u16) -> Option<u16> {
         370 => 3330,       // Duke Fishron
         439 => 3331,       // Lunatic Cultist
         398 => 3332,       // Moon Lord
+        // The four 1.4-era bosses this table was missing entirely. Every one of them suppresses
+        // its classic loot in expert (`classic_only` returns `&[]` there, matching vanilla's own
+        // `Conditions.NotExpert` wrapper), so without a bag they dropped literally nothing in an
+        // expert or master world.
+        551 => 3860, // Betsy, `RegisterBoss_Betsy`, `ItemDropDatabase.cs:632-636`
+        636 => 4782, // Empress of Light, `RegisterBoss_HallowBoss`, `:321-323`
+        657 => 4957, // Queen Slime, `RegisterBoss_QueenSlime`, `:305-307`
+        668 => 5111, // Deerclops, `RegisterBoss_Deerclops`, `:524-526`
         _ => return None,
     })
 }
@@ -194,6 +202,21 @@ pub fn trophy(npc_type: u16) -> Option<u16> {
     })
 }
 
+/// The lunar fragment one of the four Lunar Towers drops, if it is one.
+///
+/// `RegisterBoss_LunarTowers` (`ItemDropDatabase.cs:626-629`). The pairing is the game's own and
+/// is not alphabetical: Solar (517) gives 3458, Vortex (422) gives 3456, Nebula (507) gives 3457,
+/// Stardust (493) gives 3459.
+pub fn lunar_fragment(npc_type: u16) -> Option<u16> {
+    Some(match npc_type {
+        517 => 3458,
+        422 => 3456,
+        507 => 3457,
+        493 => 3459,
+        _ => return None,
+    })
+}
+
 /// Everything that only drops under some condition.
 ///
 /// Returns an empty list for most types, which is the point: a condition that never applies costs
@@ -210,6 +233,40 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     }
     if let Some(trophy) = trophy(npc_type) {
         out.push(sometimes(trophy, 10));
+    }
+
+    // Master mode's own relics, pets and mounts. `ItemDropRule.MasterModeCommonDrop` and
+    // `MasterModeDropOnAllPlayers` are `Conditions.IsMasterMode` and nothing else
+    // (`ItemDropRule.cs:25-32`), which is flat enough to generate, so the table itself lives in
+    // [`crate::npc_drops::master_drops`] beside the unconditional half rather than being retyped
+    // here. This is the only thing that reaches it: without this call all 57 of those items are
+    // reachable from nowhere, which is exactly the state the audit found them in.
+    if at.master {
+        out.extend(
+            crate::npc_drops::master_drops(npc_type)
+                .iter()
+                .map(|d| Conditional {
+                    item: d.item,
+                    one_in: d.one_in,
+                    numerator: 1,
+                    min: d.min,
+                    max: d.max,
+                }),
+        );
+    }
+
+    // The four Lunar Towers, whose fragments are the whole of the lunar tier
+    // (`RegisterBoss_LunarTowers`, `ItemDropDatabase.cs:608-629`). Vanilla drops these with a
+    // `DropOneByOne`: twelve to twenty separate chunks, each one to three of the fragment in
+    // classic, and in expert a stack base scaled by 1.5 plus one more per player per chunk. The
+    // range used here is vanilla's own reported one (`DropOneByOne.ReportDroprates`):
+    // `MinimumItemDropsCount * (MinimumStackPerChunkBase + BonusMinDropsPerChunkPerPlayer)` to
+    // `MaximumItemDropsCount * (MaximumStackPerChunkBase + BonusMaxDropsPerChunkPerPlayer)`, so
+    // 12..=60 in classic and 24..=100 in expert-or-above. One roll of a flat range rather than
+    // twenty of a narrow one: the same total, a slightly different distribution inside it.
+    if let Some(fragment) = lunar_fragment(npc_type) {
+        let (min, max) = if at.expert { (24, 100) } else { (12, 60) };
+        out.push(a_few(fragment, 1, min, max));
     }
 
     // Skeletron's own RedHatSkeletron variant (the Clothier's repeatable, "Chippy" vanity
@@ -1222,7 +1279,11 @@ mod tests {
                 trophies.insert(trophy);
             }
         }
-        assert_eq!(bags.len(), 15, "fifteen bosses have bags: {bags:?}");
+        // Nineteen, not fifteen: Betsy, the Empress of Light, Queen Slime and Deerclops were
+        // absent, and all four suppress their classic loot in expert, so an expert kill of any of
+        // them used to yield nothing whatsoever. `ItemDropDatabase.cs` registers exactly these
+        // nineteen `BossBag`/`BossBagByCondition` items.
+        assert_eq!(bags.len(), 19, "nineteen bosses have bags: {bags:?}");
         // Moon Lord, Empress of Light and Deerclops added: their trophies (3595, 4783, 5108) were
         // simply absent from this table before, found by tools/check_drops.py against source.
         // Queen Slime's (4958) added later still: it was present only as a stray, wrongly

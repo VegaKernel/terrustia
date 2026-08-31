@@ -30,17 +30,25 @@ pub struct Drop {
 pub type DropChain = &'static [Drop];
 
 /// How many rules the table holds, across 303 NPC types.
-pub const RULES: usize = 801;
+pub const RULES: usize = 829;
 
 /// What a type drops.
 pub fn drops(npc_type: u16) -> &'static [DropChain] {
     match npc_type {
-        1 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
+        1 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
         2 => &[&[
             Drop {
                 item: 236,
@@ -137,6 +145,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 50,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -485,12 +499,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             min: 1,
             max: 1,
         }]],
-        53 => &[&[Drop {
-            item: 239,
-            one_in: 1,
-            min: 1,
-            max: 1,
-        }]],
+        53 => &[
+            &[Drop {
+                item: 4271,
+                one_in: 5,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 239,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            }],
+        ],
         54 => &[&[Drop {
             item: 260,
             one_in: 1,
@@ -782,6 +804,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 min: 1,
                 max: 1,
             }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 2,
+                max: 4,
+            }],
         ],
         82 => &[&[Drop {
             item: 889,
@@ -1039,12 +1067,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
         ],
-        122 => &[&[Drop {
-            item: 4017,
-            one_in: 75,
-            min: 1,
-            max: 1,
-        }]],
+        122 => &[
+            &[Drop {
+                item: 4017,
+                one_in: 75,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 5,
+                max: 10,
+            }],
+        ],
         124 => &[&[Drop {
             item: 4818,
             one_in: 8,
@@ -1125,6 +1161,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
             &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
                 item: 1309,
                 one_in: 10000,
                 min: 1,
@@ -1137,6 +1179,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 100,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -1169,6 +1217,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 150,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -1568,6 +1622,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 min: 1,
                 max: 1,
             }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 2,
+                max: 4,
+            }],
         ],
         184 => &[
             &[Drop {
@@ -1575,6 +1635,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 150,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -1624,6 +1690,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             }],
         ],
         187 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
             &[Drop {
                 item: 1309,
                 one_in: 10000,
@@ -1966,6 +2038,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             }],
         ],
         204 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
             &[Drop {
                 item: 1309,
                 one_in: 10000,
@@ -2955,12 +3033,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 4,
             }],
         ],
-        225 => &[&[Drop {
-            item: 1243,
-            one_in: 45,
-            min: 1,
-            max: 1,
-        }]],
+        225 => &[&[
+            Drop {
+                item: 1243,
+                one_in: 45,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 23,
+                one_in: 1,
+                min: 2,
+                max: 6,
+            },
+        ]],
         226 => &[
             &[Drop {
                 item: 1172,
@@ -3057,12 +3143,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
         ],
-        244 => &[&[Drop {
-            item: 662,
-            one_in: 1,
-            min: 30,
-            max: 60,
-        }]],
+        244 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 20,
+            }],
+            &[Drop {
+                item: 662,
+                one_in: 1,
+                min: 30,
+                max: 60,
+            }],
+        ],
         250 => &[&[Drop {
             item: 1244,
             one_in: 15,
@@ -3397,12 +3491,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             min: 1,
             max: 1,
         }]],
-        302 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
+        302 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
         317 => &[&[
             Drop {
                 item: 236,
@@ -3659,6 +3761,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
             &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
                 item: 1309,
                 one_in: 10000,
                 min: 1,
@@ -3671,6 +3779,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 20,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -3687,6 +3801,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
             &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
                 item: 1309,
                 one_in: 10000,
                 min: 1,
@@ -3699,6 +3819,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 one_in: 20,
                 min: 1,
                 max: 1,
+            }],
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
             }],
             &[Drop {
                 item: 1309,
@@ -4106,6 +4232,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             }],
         ],
         433 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
             &[Drop {
                 item: 1309,
                 one_in: 10000,
@@ -5327,13 +5459,27 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 },
             ],
         ],
-        535 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
+        535 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
         536 => &[
+            &[Drop {
+                item: 4271,
+                one_in: 5,
+                min: 1,
+                max: 1,
+            }],
             &[Drop {
                 item: 3478,
                 one_in: 1,
@@ -5347,12 +5493,20 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
         ],
-        537 => &[&[Drop {
-            item: 1309,
-            one_in: 8000,
-            min: 1,
-            max: 1,
-        }]],
+        537 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 2,
+                max: 3,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 8000,
+                min: 1,
+                max: 1,
+            }],
+        ],
         541 => &[&[Drop {
             item: 3783,
             one_in: 1,
@@ -5479,13 +5633,27 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 max: 1,
             }],
         ],
-        576 => &[&[Drop {
-            item: 3868,
-            one_in: 10,
-            min: 1,
-            max: 1,
-        }]],
+        576 => &[
+            &[Drop {
+                item: 3865,
+                one_in: 7,
+                min: 1,
+                max: 1,
+            }],
+            &[Drop {
+                item: 3868,
+                one_in: 10,
+                min: 1,
+                max: 1,
+            }],
+        ],
         577 => &[
+            &[Drop {
+                item: 3865,
+                one_in: 14,
+                min: 1,
+                max: 1,
+            }],
             &[Drop {
                 item: 3856,
                 one_in: 10,
@@ -5697,6 +5865,12 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
             min: 1,
             max: 2,
         }]],
+        629 => &[&[Drop {
+            item: 1312,
+            one_in: 20,
+            min: 1,
+            max: 1,
+        }]],
         630 => &[
             &[Drop {
                 item: 888,
@@ -5797,36 +5971,62 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
                 },
             ],
         ],
-        636 => &[&[Drop {
-            item: 5005,
-            one_in: 1,
-            min: 1,
-            max: 1,
-        }]],
-        658 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
-        659 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
-        660 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
-        676 => &[&[Drop {
-            item: 1309,
-            one_in: 10000,
-            min: 1,
-            max: 1,
-        }]],
+        658 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
+        659 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
+        660 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 1,
+                max: 2,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
+        676 => &[
+            &[Drop {
+                item: 23,
+                one_in: 1,
+                min: 2,
+                max: 5,
+            }],
+            &[Drop {
+                item: 1309,
+                one_in: 10000,
+                min: 1,
+                max: 1,
+            }],
+        ],
         692 => &[
             &[Drop {
                 item: 4035,
@@ -5893,6 +6093,472 @@ pub fn drops(npc_type: u16) -> &'static [DropChain] {
     }
 }
 
+/// What a type drops **only in master mode**.
+///
+/// `ItemDropRule.MasterModeCommonDrop(item)` (the relics) and
+/// `ItemDropRule.MasterModeDropOnAllPlayers(item, chance)` (the pets and mounts) are
+/// `Conditions.IsMasterMode` and nothing else (`ItemDropRule.cs:25-32`), so they are
+/// generated here rather than hand-written: there is no condition tree to flatten, and
+/// the 57 items between them were previously reachable from no table at all.
+///
+/// `MasterModeDropOnAllPlayers` really rolls once *per player present*, each winner
+/// getting their own copy. One roll is modelled, which is exact for a lone player.
+/// [`crate::conditional_drops::conditional`] is what reaches these, under `master`.
+pub const MASTER_RULES: usize = 64;
+
+/// The master-mode-only drops for a type, in registration order.
+pub fn master_drops(npc_type: u16) -> &'static [Drop] {
+    match npc_type {
+        4 => &[
+            Drop {
+                item: 4924,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 3763,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4798,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        13 => &[
+            Drop {
+                item: 4925,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4799,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        14 => &[
+            Drop {
+                item: 4925,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4799,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        15 => &[
+            Drop {
+                item: 4925,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4799,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        35 => &[
+            Drop {
+                item: 4927,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4801,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        50 => &[
+            Drop {
+                item: 4929,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4797,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        113 => &[
+            Drop {
+                item: 4930,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4795,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        125 => &[
+            Drop {
+                item: 4931,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4804,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        126 => &[
+            Drop {
+                item: 4931,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4804,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        127 => &[
+            Drop {
+                item: 4933,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4805,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        134 => &[
+            Drop {
+                item: 4932,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4803,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        222 => &[
+            Drop {
+                item: 4928,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4802,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        245 => &[
+            Drop {
+                item: 4935,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4807,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        262 => &[
+            Drop {
+                item: 4934,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4806,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        266 => &[
+            Drop {
+                item: 4926,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4800,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        325 => &[
+            Drop {
+                item: 4941,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4793,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        327 => &[
+            Drop {
+                item: 4942,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4812,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        344 => &[
+            Drop {
+                item: 4944,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4813,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        345 => &[
+            Drop {
+                item: 4943,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4814,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        346 => &[
+            Drop {
+                item: 4945,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4794,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        370 => &[
+            Drop {
+                item: 4936,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4808,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        395 => &[
+            Drop {
+                item: 4939,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4815,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        398 => &[
+            Drop {
+                item: 4938,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4810,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        439 => &[
+            Drop {
+                item: 4937,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4809,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        491 => &[
+            Drop {
+                item: 4940,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4792,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        551 => &[
+            Drop {
+                item: 4948,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4817,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        564 => &[Drop {
+            item: 4796,
+            one_in: 4,
+            min: 1,
+            max: 1,
+        }],
+        565 => &[
+            Drop {
+                item: 4946,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4796,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        577 => &[
+            Drop {
+                item: 4947,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4816,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        636 => &[
+            Drop {
+                item: 4949,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4811,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        657 => &[
+            Drop {
+                item: 4950,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 4960,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        668 => &[
+            Drop {
+                item: 5110,
+                one_in: 1,
+                min: 1,
+                max: 1,
+            },
+            Drop {
+                item: 5090,
+                one_in: 4,
+                min: 1,
+                max: 1,
+            },
+        ],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5900,8 +6566,13 @@ mod tests {
     /// The table is populated, and did not silently regenerate empty.
     #[test]
     fn the_table_is_populated() {
-        assert_eq!(RULES, 801);
+        assert_eq!(RULES, 829);
+        assert_eq!(MASTER_RULES, 64);
         assert!(!drops(3).is_empty(), "a zombie drops something");
+        assert!(
+            !master_drops(50).is_empty(),
+            "King Slime has a master-mode relic"
+        );
     }
 
     /// A chain is one roll after another, not several at once.
@@ -5921,11 +6592,13 @@ mod tests {
     #[test]
     fn every_chance_is_rollable() {
         for kind in 0..700u16 {
-            for chain in drops(kind) {
-                for rule in *chain {
-                    assert!(rule.one_in >= 1, "npc {kind} has an impossible chance");
-                    assert!(rule.max >= rule.min, "npc {kind} has a backwards stack");
-                }
+            for rule in drops(kind)
+                .iter()
+                .flat_map(|chain| chain.iter())
+                .chain(master_drops(kind))
+            {
+                assert!(rule.one_in >= 1, "npc {kind} has an impossible chance");
+                assert!(rule.max >= rule.min, "npc {kind} has a backwards stack");
             }
         }
     }
