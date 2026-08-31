@@ -170,6 +170,8 @@ pub struct AiOutput {
     pub teleport_to: Option<(f32, f32)>,
     /// Set on the tick the Cultists' tablet finishes breaking.
     pub ritual_complete: bool,
+    /// Set on the tick the Moon Lord's death drama clears the stage.
+    pub cleared_stage: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -299,6 +301,7 @@ pub fn update_with(
         out.aura = effects.aura;
         out.teleport_to = effects.teleport_to;
         out.ritual_complete = effects.ritual_complete;
+        out.cleared_stage = effects.cleared_stage;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         out.roared = effects.roared;

@@ -575,6 +575,10 @@ pub struct Effects {
     pub teleport_to: Option<(f32, f32)>,
     /// Set on the tick the Cultists' tablet finishes breaking, which is what raises their master.
     pub ritual_complete: bool,
+    /// Set on the one tick the Moon Lord's death drama clears the stage: every True Eye still
+    /// hunting is killed and every shot the fight left in the air is dropped
+    /// (`NPC.cs:41752-41764`).
+    pub cleared_stage: bool,
     /// A buff this NPC wants put straight onto a player, as (player slot, buff id, ticks) — a
     /// latched nebula headcrab riding a head applies `Obstructed` to its rider every tick it sits
     /// there (`NPC.cs:37508-37526`, `player22.AddBuff(163, 59)`).
@@ -809,7 +813,6 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         30 | 31 => {
             let out = boss::twins::twin(npc, world, rng);
             effects.shots.extend(out.shots);
-            effects.reflecting = out.reflecting;
             // MECH-1: as the Destroyer above. At dawn or with nobody left, both eyes climb away
             // and go. Left unconsumed the Twins hung in the sky for ever after daybreak.
             effects.expired = out.fleeing;
@@ -1097,6 +1100,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // of that drama is the kill. Routing it through `expired` removed it quietly: no
             // luminite, and `downed_moon_lord` never set, so the world did not record the win.
             effects.died = out.spent;
+            effects.cleared_stage = out.cleared_stage;
         }
         78 | 79 => {
             let out = boss::moon_lord::eye_socket(npc, world, world.parent);
@@ -1105,7 +1109,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         81 => {
-            boss::moon_lord::free_eye(npc, world);
+            let out = boss::moon_lord::free_eye(npc, world, world.parent);
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
         }
         82 => {
             let out = boss::moon_lord::leech(npc, world.parent);

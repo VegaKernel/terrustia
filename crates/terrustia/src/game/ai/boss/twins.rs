@@ -38,8 +38,6 @@ mod form {
 #[derive(Debug, Default)]
 pub struct TwinOutcome {
     pub shots: Vec<Shot>,
-    /// Set while it is transforming, when everything bounces off.
-    pub reflecting: bool,
     /// Set when daylight has sent it home.
     pub fleeing: bool,
 }
@@ -86,8 +84,14 @@ pub fn twin(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
         }
 
         f if f == form::SPINNING_UP || f == form::SPINNING_DOWN => {
-            // The transformation. It hangs still, spins up and then down, and nothing touches it.
-            out.reflecting = true;
+            // The transformation: it hangs still, spins up and then down, and comes out changed.
+            //
+            // BS3-M1: it stays perfectly hurtable throughout. This used to raise a `reflecting`
+            // flag the dispatch turned into 200 ticks of invulnerability per eye, which is two
+            // mistakes stacked. Vanilla raises `reflectsProjectiles` here only under
+            // `IsMechQueenUp` (`NPC.cs:26872-26876`), the Mechdusa fight this server does not
+            // model, and even then reflection is a projectile bounce (`Projectile.cs:12781-12790`,
+            // `ReflectProjectile`), not immunity to everything.
             if npc.ai[0] == form::SPINNING_UP {
                 npc.ai[2] = (npc.ai[2] + TWIN_SPIN_RATE).min(TWIN_SPIN_CAP);
             } else {
@@ -629,13 +633,18 @@ mod tests {
         twin(&mut e, &w, &mut rng);
         assert_eq!(e.ai[0], form::SPINNING_UP, "it should be changing");
 
-        let mut reflected = 0;
+        // BS3-M1: it is hurtable the whole way through. Vanilla only raises `reflectsProjectiles`
+        // during the change under `IsMechQueenUp` (`NPC.cs:26872-26876`), and this server has no
+        // Mechdusa. The dispatch used to read that flag as `invulnerable` (`npc_ai.rs`), so the
+        // change handed each eye a hundred spin-up plus a hundred spin-down ticks of free DPS.
+        // Restoring `out.reflecting = true` in the transform arm turns this red.
         for _ in 0..(TWIN_SPIN_TICKS as i32 * 2 + 4) {
-            if twin(&mut e, &w, &mut rng).reflecting {
-                reflected += 1;
-            }
+            let effects = crate::game::ai::run(&mut e, &w, &mut rng);
+            assert!(
+                !effects.reflecting,
+                "the change must not make it untouchable"
+            );
         }
-        assert!(reflected > 100, "it reflects throughout the change");
         assert_eq!(e.ai[0], form::SECOND, "and comes out as the second form");
         assert_eq!(e.damage_bonus, TWIN_SECOND_DAMAGE, "hitting harder");
         assert_eq!(

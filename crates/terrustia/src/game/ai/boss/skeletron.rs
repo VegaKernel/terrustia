@@ -57,6 +57,14 @@ pub struct Parent {
     pub time_left: i32,
     /// Which state the parent is in, from its own `ai[1]`.
     pub state: f32,
+    /// The parent's own `ai[0]`.
+    ///
+    /// Skeletron and the Golem keep their phase in `ai[1]`, which is what [`Self::state`] carries,
+    /// but the Moon Lord keeps its in `ai[0]` and uses `ai[1]` for the timer inside that phase. A
+    /// part that wanted to know its core had started dying was reading `ai[1] == 2`, which is true
+    /// for exactly one tick of the death drama's own counter: right answer, wrong reason, and it
+    /// would have gone wrong the moment either number moved.
+    pub phase: f32,
     /// How much of its health it has left, from zero to one.
     pub health: f32,
 }
@@ -419,6 +427,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state: HOVERING,
+            phase: 0.0,
             health: 1.0,
         }
     }

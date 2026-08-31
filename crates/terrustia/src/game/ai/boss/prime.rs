@@ -444,6 +444,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state,
+            phase: 0.0,
             health: 1.0,
         }
     }

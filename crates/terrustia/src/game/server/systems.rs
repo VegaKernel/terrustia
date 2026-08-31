@@ -263,6 +263,7 @@ impl GameServer {
         let mut screams = 0usize;
         let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
+        let mut clear_stage = false;
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
         // A buff a routine wants put straight onto one named player, as (slot, buff id, ticks) —
         // a latched nebula headcrab's Obstructed is currently the only source of these
@@ -477,6 +478,7 @@ impl GameServer {
                                 sprite_direction: n.sprite_direction,
                                 time_left: n.time_left,
                                 state: n.ai[1],
+                                phase: n.ai[0],
                                 health: n.life as f32 / n.life_max.max(1) as f32,
                             },
                         )
@@ -664,6 +666,8 @@ impl GameServer {
                 if std::mem::take(&mut ai_out.ritual_complete) {
                     rituals.push(npc.center());
                 }
+                // BS3-M5: a second into the Moon Lord's death drama the stage is cleared.
+                clear_stage |= std::mem::take(&mut ai_out.cleared_stage);
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
                 if std::mem::take(&mut ai_out.healed) > 0 {
@@ -971,6 +975,34 @@ impl GameServer {
         // A probe that got away with what it saw brings the Martians down on the world.
         if escaped_probe {
             self.start_invasion(Invasion::Martian);
+        }
+
+        // BS3-M5: a second into the Moon Lord's death drama, every True Eye still hunting is killed
+        // outright and every shot the fight left in the air is dropped (`NPC.cs:41752-41764`). The
+        // eyes go through `remove`, not `npc_died`: vanilla clears them with a bare
+        // `HitEffect(); active = false;`, which pays no loot and records no kill.
+        if clear_stage {
+            let eyes: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == terrustia_proto::npc_params::MOON_LORD_FREE_EYE)
+                .map(|(index, _)| index)
+                .collect();
+            for index in eyes {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+            }
+            let shots: Vec<u16> = self
+                .projectiles
+                .iter()
+                .filter(|(_, p)| {
+                    crate::game::ai::boss::moon_lord::MOON_LORD_SHOTS.contains(&p.projectile_type)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            for index in shots {
+                self.kill_projectile(index);
+            }
         }
 
         // Deaths first: `npc_died` drops the loot and records the kill, which is the difference

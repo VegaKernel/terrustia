@@ -560,6 +560,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state: 0.0,
+            phase: 0.0,
             health,
         }
     }

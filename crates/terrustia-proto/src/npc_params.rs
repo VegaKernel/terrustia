@@ -4209,12 +4209,58 @@ pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
 pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;
 /// The head's deathray sweeps across nine seconds.
 pub const MOON_LORD_RAY_SWEEP: f32 = 540.0;
+
+/// How an eye socket's eyelid works: the whole "you cannot hurt it while the eye is shut" mechanic.
+///
+/// Each attack step names an openness from 0 (wide open) to 3 (shut). A counter eases one step a
+/// tick toward `openness * STEP` and is clamped at `SHUT`; the part takes no damage while the
+/// counter is at the cap (`dontTakeDamage = frameCounter >= 21.0`, `NPC.cs:42023` for a hand;
+/// `dontTakeDamage = localAI[3] >= 15f`, `NPC.cs:42532` for the head). The ramp is what makes it a
+/// window rather than a switch: a hand is shut for about a seventh of its cycle, the head for well
+/// over a third of its own.
+pub const EYE_SOCKET_LID_STEP_HAND: f32 = 7.0;
+pub const EYE_SOCKET_LID_SHUT_HAND: f32 = 21.0;
+pub const EYE_SOCKET_LID_STEP_HEAD: f32 = 5.0;
+pub const EYE_SOCKET_LID_SHUT_HEAD: f32 = 15.0;
 /// A free eye, once its socket is broken, hunts on its own.
-pub const FREE_EYE_SPEED: f32 = 9.0;
-pub const FREE_EYE_ACCEL: f32 = 0.2;
+///
+/// Its own ten-step script, `MoonLordAttacksArray2` (`NPC.cs:7009-7033`): a rest of
+/// `(1200 - 935) / 5 = 53` ticks between every attack, and five attacks that fill the other 935.
+/// Attack 0 is the chase, 1 the three-bolt spread, 2 the six-sphere gather-and-launch, 3 the
+/// spinning eye-spray, 4 the charged deathray. It is the whole second half of the fight: an eye
+/// that only chases is an eye that can be ignored.
+pub const TRUE_EYE_REST: i32 = 53;
+pub const TRUE_EYE_SCRIPT: [(u8, i32); 10] = [
+    (0, TRUE_EYE_REST),
+    (1, 90),
+    (0, TRUE_EYE_REST),
+    (2, 135),
+    (0, TRUE_EYE_REST),
+    (3, 200),
+    (0, TRUE_EYE_REST),
+    (4, 375),
+    (0, TRUE_EYE_REST),
+    (2, 135),
+];
+/// The chase (`NPC.cs:42988-42996`): twenty-four pixels a tick toward a point two hundred pixels
+/// above the player, eased over thirty ticks so it swings rather than tracks.
+pub const FREE_EYE_SPEED: f32 = 24.0;
+pub const FREE_EYE_ABOVE: f32 = 200.0;
+pub const FREE_EYE_SMOOTH: f32 = 30.0;
+/// What a True Eye throws. Its own damage figures, all higher than the parts': the bolt spread
+/// (462, 35, `NPC.cs:43078`), the six spheres (454, 40, `NPC.cs:43132`), the eye-spray (452, 35,
+/// `NPC.cs:43236`) and its deathray (455, 50, `NPC.cs:43343`).
+pub const TRUE_EYE_BOLT_DAMAGE: i32 = 35;
+pub const TRUE_EYE_SPHERE_DAMAGE: i32 = 40;
+pub const TRUE_EYE_SPRAY_DAMAGE: i32 = 35;
+pub const TRUE_EYE_DEATHRAY_DAMAGE: i32 = 50;
 /// A leech ferries life back to whichever part is most hurt.
 pub const LEECH_TICKS: f32 = 90.0;
 pub const LEECH_HEAL: i32 = 1000;
+/// The head puts leeches out at three fixed marks in its leech step, not on a metronome
+/// (`NPC.cs:42741`, `num == 120f || num == 180f || num == 240f`), and they arrive on the *player*,
+/// not on the boss (`NewNPC(..., Main.player[target].Center, 401)`).
+pub const LEECH_MARKS: [f32; 3] = [120.0, 180.0, 240.0];
 
 /// The Old One's Army: the crystal, its lane portals and everything that comes out of them.
 ///
