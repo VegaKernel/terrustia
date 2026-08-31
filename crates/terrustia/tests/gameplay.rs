@@ -2861,6 +2861,42 @@ async fn a_solar_crawltipede_head_grows_its_own_body() {
     );
 }
 
+/// A Wyvern grows its own fourteen segments the same way (`NPC.cs:51700-51730`, `type == 87 &&
+/// ai[0] == 0f`), and it has to: the sky spawns the head alone, because `SpawnAnNPC` calls
+/// `SpawnNPC(x, y, 87)` with nothing behind it (`NPC.cs:1411`). Without this a hardmode sky would
+/// produce a flying face with no body, which is what it did the moment the sky started spawning
+/// anything at all.
+///
+/// Its parts are not one body type and a tail: legs at the second and ninth, three distinct tail
+/// pieces at the end, bodies between (`npc_params::WYVERN_SEGMENTS`), so all six ids are expected.
+#[tokio::test]
+async fn a_wyvern_head_grows_its_own_body() {
+    let addr = start().await;
+    let mut alice = join(addr, "wyvern-watcher").await;
+    alice.say("/spawn 87").await.unwrap();
+
+    let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, alice.next_event()).await {
+            Ok(Ok(Event::NpcSynced(n))) if matches!(n.npc_type(), 87..=92) => {
+                seen.insert(n.npc_type());
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        std::collections::HashSet::from([87, 88, 89, 90, 91, 92]),
+        "expected the Wyvern's head, legs, bodies and three tail pieces, only saw {seen:?}"
+    );
+}
+
 /// Hitting the Crawltipede's tail — its only directly-damageable segment — has to actually kill
 /// the chain, or growing a real body (the test above) does not itself close the gap: real
 /// vanilla's own `realLife` redirects every hit against the tail to the *head*'s shared life pool

@@ -1097,9 +1097,25 @@ impl NpcStore {
         segments: usize,
         position: (f32, f32),
     ) {
+        self.grow_worm_chain(
+            head_index,
+            (0..segments).map(|i| if i + 1 == segments { tail } else { body }),
+            position,
+        );
+    }
+
+    /// The same, for a worm whose parts are not one body type and a tail.
+    ///
+    /// The Wyvern's fourteen are legs, bodies and three distinct tail pieces in a fixed order
+    /// (`npc_params::WYVERN_SEGMENTS`), so it needs the list rather than a count.
+    pub fn grow_worm_chain(
+        &mut self,
+        head_index: u8,
+        parts: impl IntoIterator<Item = u16>,
+        position: (f32, f32),
+    ) {
         let mut previous = head_index;
-        for i in 0..segments {
-            let part = if i + 1 == segments { tail } else { body };
+        for part in parts {
             let Some(index) = self.spawn(part, position) else {
                 break;
             };

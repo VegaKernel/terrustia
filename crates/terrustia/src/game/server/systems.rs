@@ -291,6 +291,8 @@ impl GameServer {
         let mut carrying = Vec::new();
         // Solar Crawltipede heads that need their own body grown — see the loop below.
         let mut crawltipedes_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
+        // ...and Wyverns, which grow theirs the same way.
+        let mut wyverns_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
         {
             // What the timid critters flee from. Only two styles read it, so the list is only
@@ -562,6 +564,14 @@ impl GameServer {
                     npc.ai[0] = 1.0;
                     crawltipedes_to_grow.push((index, npc.position));
                 }
+                // A Wyvern does the same on its own first tick (`NPC.cs:51700-51730`,
+                // `type == 87 && ai[0] == 0f`), and it has to, because the sky spawns the head
+                // alone: `SpawnAnNPC` calls `SpawnNPC(x, y, 87)` with no segments
+                // (`NPC.cs:1411`). One that never grew would be a flying face.
+                if npc.npc_type == terrustia_proto::npc_params::WYVERN_HEAD && npc.ai[0] == 0.0 {
+                    npc.ai[0] = 1.0;
+                    wyverns_to_grow.push((index, npc.position));
+                }
                 // A part reads its parent through this; it cannot see the table itself.
                 let parent = npc
                     .follows_boss
@@ -774,6 +784,12 @@ impl GameServer {
                 SOLAR_CRAWLTIPEDE_SEGMENTS,
                 at,
             );
+        }
+
+        // ...and so did any Wyvern that arrived out of the sky this tick.
+        for (head_index, at) in wyverns_to_grow {
+            self.npcs
+                .grow_worm_chain(head_index, terrustia_proto::npc_params::WYVERN_SEGMENTS, at);
         }
 
         // Each load goes to the most hurt part still standing.
@@ -5813,6 +5829,13 @@ impl GameServer {
                 && progress.downed_mech3,
             // Three of an event's heavies at once is as many as it will put out.
             boss_cap: self.npcs.iter().filter(|(_, n)| n.stats.boss).count() >= 3,
+            // `NPC.AnyDanger()` (`NPC.cs:81063-81106`). The invasion half is already decided: this
+            // function returns above if one is running, so reaching here means there is none. The
+            // Moon Lord's countdown is not modelled as a countdown, but the fight itself is a live
+            // boss and so is caught by the same test that catches every other one.
+            any_danger: self.moon.running()
+                || self.army.ongoing()
+                || self.npcs.iter().any(|(_, n)| n.stats.boss && n.is_alive()),
             census: &count,
             cavern_monsters: self.cavern_monsters,
         };

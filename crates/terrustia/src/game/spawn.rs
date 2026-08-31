@@ -1352,6 +1352,17 @@ fn find_ground_within(world: &World, x: i32, from_y: i32, bottom: i32) -> Option
 /// roster could only appear on a shoreline strip) and shallow lava was accepted where the game
 /// refuses it at a single drop.
 fn has_room(world: &World, x: i32, y: i32) -> bool {
+    let floor = world.tile(x, y + 1);
+    open_space(world, x, y) && floor.is_active() && solid(floor.block)
+}
+
+/// The open-space half alone, which is all `HasTileSpawnSpace` (`NPC.cs:5406-5413`) ever asks for.
+///
+/// A flier chosen in the sky has nothing under it and never will, so the floor test in
+/// [`has_room`] is the one thing that must not apply to it. The game's own check is over a
+/// `(x - 1, y - 3, 2, 3)` rectangle and never mentions the ground: the ground requirement is
+/// implicit in the *other* branch, the one that walks down to it.
+fn open_space(world: &World, x: i32, y: i32) -> bool {
     for dy in 0..3 {
         let tile = world.tile(x, y - dy);
         if tile.is_active() && solid(tile.block) {
@@ -1363,8 +1374,7 @@ fn has_room(world: &World, x: i32, y: i32) -> bool {
             return false;
         }
     }
-    let floor = world.tile(x, y + 1);
-    floor.is_active() && solid(floor.block)
+    true
 }
 
 /// Whether a spawn point stands in water deep enough to draw the aquatic roster.
@@ -1413,6 +1423,109 @@ pub fn water_pool(depth: Depth, biome: Biome) -> &'static [u16] {
     }
 }
 
+/// The Harpy (48), which is the whole reason the sky is a place.
+pub const HARPY: u16 = 48;
+/// The Wyvern's head (87). Its fourteen trailing segments grow from its own first AI tick, the way
+/// the Solar Crawltipede's do (`NPC.cs:51700-51730`).
+pub const WYVERN_HEAD: u16 = 87;
+/// The Martian Probe (399), which is the only thing in the game that starts Martian Madness.
+pub const MARTIAN_PROBE: u16 = 399;
+
+/// Whether a candidate tile is high enough to be *sky*, in which case nothing walks down to ground.
+///
+/// `FindSpawnTile` (`NPC.cs:979-986`), the two branches that set `skyMob`:
+///
+/// ```csharp
+/// if (!invaders && (double)j < Main.worldSurface * 0.3499999940395355 && !spawnFriendly
+///     && ((double)num < (double)Main.maxTilesX * 0.45 || (double)num > (double)Main.maxTilesX * 0.55
+///         || Main.hardMode))
+///     skyMob = true;
+/// else if (!invaders && (double)j < Main.worldSurface * 0.44999998807907104 && !spawnFriendly
+///     && Main.hardMode && Main.rand.Next(10) == 0)
+///     skyMob = true;
+/// else { for (; j < Main.maxTilesY && j < spawnArea.Bottom && !solid; j++) {} ... }
+/// ```
+///
+/// So the sky is decided from the *spawn tile*, not from where the player stands: anyone whose
+/// spawn box reaches above `worldSurface * 0.35` draws it, which is why harpies find you on a
+/// mountain. Pre-hardmode the middle tenth of the map is excluded (`0.45 <= x/width <= 0.55`),
+/// which is what keeps them off a fresh spawn point; hardmode drops that exclusion and adds a
+/// second, lower band down to `worldSurface * 0.45` at one attempt in ten.
+///
+/// `!invaders` needs no test here: this server never reaches `try_spawn` while an invasion is
+/// running (the invasion path returns first, `systems.rs`), which is the same answer.
+/// `!spawnFriendly` is the caller's, since it owns that roll.
+fn sky_tile(world: &World, x: i32, y: i32, hard_mode: bool, rng: &mut SmallRng) -> bool {
+    let surface = f64::from(world.surface);
+    let (fx, fy) = (f64::from(x), f64::from(y));
+    let width = f64::from(world.width());
+    if fy < surface * 0.3499999940395355 && (fx < width * 0.45 || fx > width * 0.55 || hard_mode) {
+        return true;
+    }
+    fy < surface * 0.44999998807907104 && hard_mode && rng.random_range(0..10) == 0
+}
+
+/// `Main.wallLight` (`Main.cs:10717-10732`): the walls daylight comes through, no wall included.
+///
+/// Only the Martian Probe's own gate reads it, through `skyBehindPlayer`.
+const WALL_LIGHT: [u16; 16] = [
+    0, 21, 106, 107, 138, 139, 140, 141, 145, 150, 152, 168, 245, 315, 317, 318,
+];
+
+/// `skyBehindPlayer` (`NPC.cs:413`): `Main.wallLight[Main.tile[pX, pY].wall] || wall == 73`, read
+/// at the player's own tile. A probe scouts people standing under open sky, not people in a house.
+fn sky_behind_player(wall: u16) -> bool {
+    WALL_LIGHT.contains(&wall) || wall == 73
+}
+
+/// What the sky sends, once a tile up there has been chosen (`NPC.cs:1383-1424`).
+///
+/// An ordered chain, not a weighted draw, and its last arm is unconditional: the Harpy is what the
+/// sky is when nothing rarer wins. Transcribed with vanilla's own ordering and rolls.
+///
+/// Three of the game's arms are deliberately absent, each because the thing it needs does not
+/// exist here:
+///
+/// * `invaders && Main.invasionType == 4` -> Martian Drone (388). This server's invasion spawning
+///   is a separate path that never reaches the sky branch, so a drone is a Martian Madness member
+///   rather than a sky mob.
+/// * `!unlockedSlimePurpleSpawn && RollLuck(25) == 0` -> Bound Town Slime Purple (686). The bound
+///   town slimes are not among this server's rescues (`game/rescues.rs`), so there is nobody to
+///   free and nothing to become.
+/// * the two `ZoneWaterCandle` repeats at `:1409` and `:1418`, which are dead code in the game
+///   itself: each repeats the condition of the arm immediately above it, so the earlier arm has
+///   already answered whenever the later one could.
+///
+/// `probe_gate` is vanilla's `flag5`, resolved by the caller because it reads the player's tile.
+fn sky_pick(
+    hard_mode: bool,
+    probe_gate: bool,
+    world: &World,
+    no_worms: bool,
+    alive: &dyn Fn(u16) -> bool,
+    rng: &mut SmallRng,
+) -> u16 {
+    // `NPC.cs:1400-1404`. `maxValue2`/`maxValue3` are 8 and 30 (`:1384-1385`); the water-candle
+    // pair that narrows them to 3 and 10 is a player-carried item this server does not model.
+    // One probe at a time, and only ever after the Golem: it is the invitation to Martian Madness,
+    // so a second one while the first is still scouting would invite it twice.
+    if probe_gate
+        && hard_mode
+        && world.progress.downed_golem
+        && ((!world.progress.downed_martians && rng.random_range(0..8) == 0)
+            || rng.random_range(0..30) == 0)
+        && !alive(MARTIAN_PROBE)
+    {
+        return MARTIAN_PROBE;
+    }
+    // `NPC.cs:1412`: one in ten, one at a time, and not while a wall at the player's back keeps
+    // burrowers out. A Wyvern is a worm, and `noWorms` is about worms wherever they fly.
+    if hard_mode && !alive(WYVERN_HEAD) && !no_worms && rng.random_range(0..10) == 0 {
+        return WYVERN_HEAD;
+    }
+    HARPY
+}
+
 /// Pick spawns for this tick.
 ///
 /// Returns the types and pixel positions to create; the caller owns the NPC table, so this stays a
@@ -1430,6 +1543,14 @@ pub struct EventSpawns<'a> {
     pub downed_all_mechs: bool,
     /// Whether the field already holds as many event bosses as it will take.
     pub boss_cap: bool,
+    /// `NPC.AnyDanger()` (`NPC.cs:81063-81106`): a moon, an invasion, the Old One's Army, a live
+    /// boss, or the Moon Lord's countdown. Only the Martian Probe's gate reads it, and it reads it
+    /// as "not while something is already happening".
+    ///
+    /// Resolved by the caller because half of it is server state `try_spawn` cannot see. The
+    /// `DangerThatPreventsOtherDangers` set (the lunar pillars) is folded into the caller's boss
+    /// test rather than named separately.
+    pub any_danger: bool,
     /// Whether the wall has fallen, which is what opens the hardmode half of every pool.
     pub hard_mode: bool,
     /// ...and whether a mechanical boss is down, which is what opens the underworld's.
@@ -1858,26 +1979,48 @@ pub fn try_spawn(
                 continue;
             }
 
+            // High enough up, the tile is taken where it is and nothing walks down to ground
+            // (`NPC.cs:979-986`, and see [`sky_tile`]): the sky is a place, not a shortfall of
+            // ground, and a Harpy has no floor. Without this branch the descent below threw every
+            // sky candidate away, so nothing that lives up there could ever be chosen: the Harpy
+            // and the Wyvern were unreachable in this server outright.
+            //
+            // A friendly attempt is excluded by the game at the same point it decides this, so it
+            // is excluded here too: `!spawnFriendly` is part of both `skyMob` branches.
+            let sky = !spawn_friendly && sky_tile(world, x, from_y, events.hard_mode, rng);
+
             // Drop to whatever ground is under the chosen point, then stand on top of it. The
             // descent stops at the bottom of the spawn box, as `NPC.cs:990-993` does, rather than a
             // fixed 30 tiles: from the top of the box that is up to 94 tiles, which is the reach an
             // ocean needs.
-            let Some(ground) = find_ground_within(world, x, from_y, py + SPAWN_RANGE_Y) else {
-                continue;
+            let y = if sky {
+                from_y
+            } else {
+                let Some(ground) = find_ground_within(world, x, from_y, py + SPAWN_RANGE_Y) else {
+                    continue;
+                };
+                ground - 1
             };
-            let y = ground - 1;
 
             // Never spawn on top of somebody.
             if (x - px).abs() < SAFE_RANGE_X && (y - py).abs() < SAFE_RANGE_Y {
                 continue;
             }
-            if !has_room(world, x, y) {
+            // `HasTileSpawnSpace` asks only for open space; the floor half of [`has_room`] belongs
+            // to the descent, which a sky tile skipped.
+            if !(if sky {
+                open_space(world, x, y)
+            } else {
+                has_room(world, x, y)
+            }) {
                 continue;
             }
 
             let depth = depth_at(world, y);
-            // An event owns the surface while it runs, and nothing below it.
-            let event_type = if events.running() && depth == Depth::Surface {
+            // An event owns the surface while it runs, and nothing below it. Except the sky:
+            // vanilla's `skyMob` arm sits above every event arm in the same `else if` chain
+            // (`NPC.cs:1383`), so a pumpkin moon does not reach up there.
+            let event_type = if !sky && events.running() && depth == Depth::Surface {
                 match (events.moon, events.eclipse) {
                     (Some((moon, wave)), _) if !world.day_time => crate::game::moons::moon_spawn(
                         moon,
@@ -1916,6 +2059,21 @@ pub fn try_spawn(
 
             let npc_type = match event_type {
                 Some(npc_type) => npc_type,
+                // The sky answers for itself, ahead of every other branch, because vanilla's own
+                // `else if (skyMob)` sits ahead of them (`NPC.cs:1383`): above the sky line there
+                // is no biome to read, no water to stand in and no event to hold the surface.
+                None if sky => {
+                    // `flag5` (`NPC.cs:1387-1391`): a probe scouts the outer two thirds of the
+                    // map, at somebody standing under open sky, and not while anything else is
+                    // already going on.
+                    let half = world.width() / 2;
+                    let probe_gate = (x - half).abs() as f32 / half as f32 > 0.33
+                        && sky_behind_player(world.tile(px, py).wall)
+                        && !events.any_danger;
+                    let alive =
+                        |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
+                    sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
+                }
                 // A friendly attempt draws a harmless critter for this place; if there is no
                 // critter for it (the underworld), the attempt is dropped rather than turned into a
                 // monster the game would not have spawned here.
@@ -2017,6 +2175,143 @@ pub fn try_spawn(
 mod tests {
     use super::*;
 
+    /// Every NPC type this server can put into a world by itself, from every ambient producer it
+    /// has, with no console command and nobody summoning anything.
+    ///
+    /// Built by *calling* the producers rather than by reading them, so it cannot drift from what
+    /// they actually answer. It is the half of the reachability check that has to run here;
+    /// vanilla's half needs the decompiled tree and lives in `tools/check_spawn_reach.py`, which
+    /// runs this test to get this set. A type in vanilla's list and not in this one is an NPC
+    /// nobody playing here can ever meet, which is exactly how the Harpy and the Wyvern went
+    /// missing.
+    ///
+    /// Deliberately not counted as reachable, because none of them is ambient spawning: statues,
+    /// the admin `/spawn` command, boss summon items, the transformations one NPC undergoes on
+    /// another's death, and the segments a worm head grows behind itself.
+    fn ambient_roster() -> std::collections::BTreeSet<u16> {
+        use crate::game::{army, cavern_monsters, event::Invasion, lunar, moons, rescues};
+
+        let mut set = std::collections::BTreeSet::new();
+        const DEPTHS: [Depth; 4] = [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ];
+        const BIOMES: [Biome; 9] = [
+            Biome::Forest,
+            Biome::Corruption,
+            Biome::Crimson,
+            Biome::Jungle,
+            Biome::Snow,
+            Biome::Desert,
+            Biome::Ocean,
+            Biome::Dungeon,
+            Biome::Hallow,
+        ];
+        for depth in DEPTHS {
+            for biome in BIOMES {
+                for day in [true, false] {
+                    set.extend(pool(depth, biome, day));
+                    set.extend(hardmode_pool(depth, biome, day));
+                    set.extend(friendly_pool(depth, biome, day));
+                }
+                set.extend(water_pool(depth, biome));
+            }
+            for hard_mode in [true, false] {
+                set.extend(blood_moon_pool(depth, hard_mode));
+            }
+        }
+
+        // The sky, asked through its own chain rather than listed, so deleting an arm of it shows
+        // up here as a type that stopped being reachable.
+        let mut sky = World::empty(800, 600, "roster");
+        sky.progress.downed_golem = true;
+        for seed in 0..200u64 {
+            for hard_mode in [false, true] {
+                for probe_gate in [false, true] {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    set.insert(sky_pick(
+                        hard_mode,
+                        probe_gate,
+                        &sky,
+                        false,
+                        &|_| false,
+                        &mut rng,
+                    ));
+                }
+            }
+        }
+        // The dungeon's doorman, and the residents found tied up underground.
+        set.insert(DUNGEON_GUARDIAN);
+        set.extend(rescues::RESCUES.iter().map(|r| r.bound));
+        // The six a world happens to have are drawn from thirteen, so every world's own set counts.
+        for world_id in 0..200 {
+            set.extend(cavern_monsters::CavernMonsters::for_world(world_id).flat());
+        }
+        // King Slime arrives on his own during a slime rain, which nothing else summons.
+        set.insert(crate::game::slime_rain::KING_SLIME);
+
+        // The rosters that already carry a membership test are read through it, which is exact
+        // where sampling their spawn functions would only be likely.
+        for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
+            if moons::moon_points(npc_type) > 0
+                || army::belongs(npc_type)
+                || lunar::belongs_to(npc_type).is_some()
+                || [
+                    Invasion::Goblin,
+                    Invasion::FrostLegion,
+                    Invasion::Pirate,
+                    Invasion::Martian,
+                ]
+                .into_iter()
+                .any(|kind| belongs_to(kind, npc_type))
+            {
+                set.insert(npc_type);
+            }
+        }
+
+        // The eclipse has no membership table, so its own function is asked directly, enough times
+        // and under both progression states for every arm of it to have answered.
+        for seed in 0..4000u64 {
+            for (plantera, mechs) in [(false, false), (true, true)] {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.insert(crate::game::moons::eclipse_spawn(
+                    plantera,
+                    mechs,
+                    &|_| 0,
+                    &mut rng,
+                ));
+            }
+        }
+        set
+    }
+
+    /// The reachable set, printed for `tools/check_spawn_reach.py` and checked for the one thing
+    /// that needs no decompiled tree: that every producer names a type that exists and can be
+    /// spawned at somebody.
+    #[test]
+    fn every_ambient_producer_names_a_real_type() {
+        use terrustia_proto::npc_data::npc_stats;
+
+        let roster = ambient_roster();
+        assert!(roster.len() > 150, "only {} types reachable", roster.len());
+        for npc_type in &roster {
+            assert!(
+                npc_stats(*npc_type).is_some(),
+                "{npc_type} is reachable from a spawn producer but is not an NPC type",
+            );
+        }
+        println!(
+            "SPAWN-REACH {}",
+            roster
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
     /// Nothing running: what the ordinary world looks like to `try_spawn`.
     fn quiet() -> EventSpawns<'static> {
         EventSpawns {
@@ -2025,6 +2320,7 @@ mod tests {
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
+            any_danger: false,
             hard_mode: false,
             downed_mech_any: false,
             census: &|_| 0,
@@ -2435,6 +2731,132 @@ mod tests {
             biome_at(&world, cx, cy),
             Biome::Corruption,
             "the scan must reach past the old radius-20 box",
+        );
+    }
+
+    /// Run a stretch of spawn ticks for one player standing at a tile, and report what was drawn.
+    ///
+    /// The NPC store is deliberately left empty between ticks, as the other `try_spawn` tests
+    /// leave it: nothing accumulates, so the near-player cap never closes and a run of ticks is a
+    /// run of independent attempts.
+    fn spawns_at(world: &World, hard_mode: bool, px: i32, py: i32, ticks: u32) -> Vec<u16> {
+        let npcs = NpcStore::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        let players = vec![Some(player)];
+
+        let events = EventSpawns {
+            hard_mode,
+            ..quiet()
+        };
+        let mut rng = SmallRng::seed_from_u64(20260830);
+        let mut seen = Vec::new();
+        let mut biomes = BiomeCache::default();
+        for _ in 0..ticks {
+            seen.extend(
+                try_spawn(
+                    world,
+                    &npcs,
+                    &players,
+                    &events,
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                )
+                .into_iter()
+                .map(|(npc_type, _)| npc_type),
+            );
+        }
+        seen
+    }
+
+    /// A world whose surface line is at 200, so the sky line (`worldSurface * 0.35`) is row 70 and
+    /// everything above it is open air the generator never touched.
+    fn sky_world() -> World {
+        let mut world = test_world();
+        world.surface = 200;
+        world.rock_layer = 300;
+        world
+    }
+
+    /// A Harpy can be drawn at sky height, which is the whole bug: `Depth` had no sky band and
+    /// nothing walked the sky, so every candidate tile up there was thrown away by the descent to
+    /// ground and NPC 48 appeared in no pool at all.
+    ///
+    /// Neutralised by forcing `sky` to `false` in `try_spawn`'s candidate loop: no Harpy is drawn
+    /// in ten thousand ticks, and the assertion below fails.
+    #[test]
+    fn a_harpy_can_be_drawn_in_the_sky() {
+        let world = sky_world();
+        // Row 40 is well above the sky line; column 300 is outside the middle tenth of the map
+        // that `NPC.cs:981` excludes before hardmode (800 * 0.45 = 360).
+        let seen = spawns_at(&world, false, 300, 40, 10_000);
+        assert!(
+            seen.contains(&HARPY),
+            "nothing found a harpy in the sky: {} spawns, {:?}",
+            seen.len(),
+            seen.iter().collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    /// ...and a Wyvern once the wall is down, which is the hardmode half of the same branch
+    /// (`NPC.cs:1412`, one attempt in ten).
+    ///
+    /// Neutralised two ways, each failing this test: forcing `sky` to `false` as above, and
+    /// dropping the `hard_mode` term from `sky_pick`'s Wyvern arm so it can never be reached.
+    #[test]
+    fn a_wyvern_can_be_drawn_in_the_sky_in_hardmode() {
+        let world = sky_world();
+        let seen = spawns_at(&world, true, 300, 40, 10_000);
+        assert!(
+            seen.contains(&WYVERN_HEAD),
+            "hardmode sky produced no wyvern: {} spawns, {:?}",
+            seen.len(),
+            seen.iter().collect::<std::collections::BTreeSet<_>>(),
+        );
+        // The Harpy is still the sky's default, not something the Wyvern replaced.
+        assert!(seen.contains(&HARPY), "hardmode sky produced no harpy");
+    }
+
+    /// The two height bands and the middle-of-the-map exclusion, read off the tile the way
+    /// `FindSpawnTile` reads it (`NPC.cs:979-986`).
+    ///
+    /// Before hardmode the middle tenth of the map is not sky at all, which is what keeps harpies
+    /// off a fresh world's spawn point; hardmode drops that exclusion and adds the second band,
+    /// down to `worldSurface * 0.45`, at one attempt in ten.
+    #[test]
+    fn the_sky_starts_where_the_game_says_it_does() {
+        let world = sky_world(); // surface 200, width 800: sky line 70, deep line 90.
+        let mut rng = SmallRng::seed_from_u64(4);
+        let outside = 300; // < 800 * 0.45
+        let middle = 400; // inside 360..=440
+
+        assert!(sky_tile(&world, outside, 69, false, &mut rng));
+        assert!(!sky_tile(&world, outside, 70, false, &mut rng));
+        assert!(
+            !sky_tile(&world, middle, 40, false, &mut rng),
+            "the middle tenth is not sky before hardmode",
+        );
+        assert!(
+            sky_tile(&world, middle, 40, true, &mut rng),
+            "hardmode drops the middle-of-the-map exclusion",
+        );
+        // The second band only exists in hardmode, and only one attempt in ten.
+        assert!(!sky_tile(&world, outside, 80, false, &mut rng));
+        assert!(
+            (0..200).any(|_| sky_tile(&world, outside, 80, true, &mut rng)),
+            "hardmode's second band never fired",
+        );
+        assert!(
+            (0..200).any(|_| !sky_tile(&world, outside, 80, true, &mut rng)),
+            "the second band is a roll, not a certainty",
+        );
+        assert!(
+            !sky_tile(&world, outside, 90, true, &mut rng),
+            "and it stops at worldSurface * 0.45",
         );
     }
 

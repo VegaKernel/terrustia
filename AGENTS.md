@@ -61,6 +61,12 @@ Recipes live in the `justfile`; each is a thin wrapper over `cargo`, so plain `c
     `just parity-coverage` is the other half: what fraction of each vanilla file anything we wrote
     cites, and which large regions are cited by nothing. Rebuild the index with `just parity-update`
     and review the diff, exactly as with the generated tables.
+  - `check-spawn-reach` diffs every NPC vanilla's own `NPC.Spawner` can spawn ambiently against
+    every NPC this server can, and reports the ones nobody playing here could ever meet. An
+    unreachable NPC is silent: nothing errors and no test fails, which is how the whole sky roster
+    (the Harpy and the Wyvern) sat in no pool at all. Vanilla's side is read from the tree; ours is
+    read from the server by running the one test that prints it. The known gaps live in
+    `docs/spawn-gaps.tsv`, rebuilt with `just spawn-reach-update` and reviewed as a diff.
   - `check-dead-writes` reports struct fields written in production and read only by the tests.
     `rustc`'s `dead_code` cannot see these, because a read inside `#[cfg(test)]` counts as a read;
     that blind spot is how thirteen boss-enrage sites wrote `Npc::damage_bonus` that nothing read.
