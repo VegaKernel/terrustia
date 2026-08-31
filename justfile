@@ -108,6 +108,12 @@ test-filter FILTER:
 soak SECONDS="60":
     ./tools/soak_ci.sh {{SECONDS}}
 
+# Play the game toward a player's goals and report the ones that could not be reached.
+# Owns the server's lifecycle, because two of the goals are about surviving a save and reload.
+playbot:
+    cargo build --release -p terrustia -p terrustia-client --bins --examples
+    ./tools/playbot.sh
+
 # Fuzz a decoder target for a while (needs nightly + `cargo install cargo-fuzz`)
 fuzz TARGET="packet_decoders" SECONDS="60":
     cargo +nightly fuzz run {{TARGET}} -- -max_total_time={{SECONDS}}
