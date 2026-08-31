@@ -11,6 +11,15 @@
 //! * It **works at doors**: sixty ticks of pushing, then either opening one or breaking it down,
 //!   depending on the type and whether a blood moon is out.
 //! * It only refuses to walk off a ledge when it has no target. With a target, it walks off.
+//!
+//! Deliberately not modelled: `directionY`. Vanilla's `SetTargetTrackingValues` gives style 3 its
+//! own rule for it (`NPC.cs:78565-78572`: a fighter looks up only when the target's *feet* are
+//! above its own head, rather than the centre-to-centre test every other style uses), and one
+//! branch of `AI_003` reads it: a fighter whose target is above it launches off a ledge edge at
+//! -8 with 1.5x its horizontal speed instead of stepping down (`NPC.cs:60729-60734`). This port
+//! has neither the rule nor the branch, so nothing here reads `direction_y` and it stays at its
+//! default. The field is still synced (`systems.rs`'s packet 23), but a real client recomputes it
+//! from its own `TargetClosest` every tick, so what we send it is corrected immediately.
 
 use terrustia_proto::{
     npc_params::{
@@ -187,12 +196,18 @@ fn work_at_door(
     let is_opener = fighter_opens_doors(npc.npc_type);
     npc.velocity.0 = 0.5 * f32::from(-npc.direction);
 
-    // Vanilla `AI_003`'s `flag28`: a polite opener outside a blood moon (and outside a graveyard,
-    // which this server does not model) resets its progress every tick, so it stands and pushes at
-    // the door but never gets it open. That is the whole "a closed door keeps zombies out at night,
+    // Vanilla `AI_003`'s `flag28` (`NPC.cs:60601`): `((!bloodMoon || getGoodWorld) && !graveyard)
+    // & isOpener`. A polite opener resets its progress every tick, so it stands and pushes at the
+    // door but never gets it open. That is the whole "a closed door keeps zombies out at night,
     // except on a blood moon" mechanic — the previous code had it backwards, opening on a normal
     // night and destroying the door on a blood moon.
-    if is_opener && !conditions.blood_moon {
+    //
+    // `getGoodWorld` takes the blood moon back out of it: on a For-the-Worthy seed doors stay
+    // polite through one, which is not the harder-world direction it reads as but is what the
+    // expression says. Not modelled: the graveyard term, which this server has no biome for, and
+    // vanilla's `flag27` (a target standing inside unbreakable walls), which forces every fighter
+    // impolite regardless of type.
+    if is_opener && (!conditions.blood_moon || conditions.get_good_world) {
         npc.ai[1] = 0.0;
         return DoorState::Busy(Action::None);
     }
@@ -473,6 +488,31 @@ mod tests {
             }
         }
         assert!(opened, "on a blood moon a zombie forces the door open");
+    }
+
+    /// BA3-04, fail-then-pass: a For-the-Worthy world keeps doors shut through a blood moon.
+    ///
+    /// `flag28` is `((!Main.bloodMoon || Main.getGoodWorld) && !graveyard) & isOpener`
+    /// (`NPC.cs:60601`), and this port dropped the `getGoodWorld` term, so a zombie on such a seed
+    /// forced the door exactly as it does on any other world.
+    #[test]
+    fn a_for_the_worthy_seed_keeps_a_zombie_out_on_a_blood_moon() {
+        let terrain = door_terrain();
+        let mut z = zombie_at(105.0);
+        z.direction = 1;
+        let bloody_but_good = Conditions {
+            blood_moon: true,
+            get_good_world: true,
+            ..Conditions::default()
+        };
+
+        for _ in 0..400 {
+            let action = update(&mut z, &terrain, Some(player(130.0)), bloody_but_good);
+            assert!(
+                matches!(action, Action::None),
+                "getGoodWorld takes the blood moon back out of flag28, got {action:?}"
+            );
+        }
     }
 
     #[test]

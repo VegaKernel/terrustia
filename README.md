@@ -317,7 +317,8 @@ Traps World, is done). Both are v0.0.2 scope.
 | ✅ | A panic on the packet path saves the world and exits non-zero | So `Restart=on-failure` fires |
 | ✅ | A real `SIGTERM` stops the server with a shutdown save, even with the web panel running | Two related bugs found by hand; see [What the audits found](#what-the-audits-found) |
 | ✅ | Connection ceiling, per-address cap, handshake deadline | |
-| ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient` |
+| ✅ | Tile-edit spam limiter | Vanilla's own six numbers, transcribed from `RemoteClient`, behind vanilla's own opt-in: `spam_check` is `Netplay.SpamCheck`, off unless asked for, as `secure=1` is |
+| ✅ | Nothing but the handshake reaches the world until the handshake is finished | `MessageBuffer.GetData`'s own pre-dispatch state gate, transcribed |
 | ✅ | Server claim requires a console token | |
 | ✅ | `/world undo <player> <duration>` | Admin-only grief recovery, up to 72h back. In-memory and time-windowed on purpose; disclosed in `tile_log.rs` |
 | ✅ | `terrustia update`: check-and-notify on boot, signature-verified, manual apply | Shells out to real `cosign` against the same keyless signing chain `release.yml` signs with |

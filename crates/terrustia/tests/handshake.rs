@@ -377,19 +377,40 @@ async fn an_outdated_client_is_kicked_with_a_reason() {
     }
 }
 
+/// A connection that speaks before its hello is disconnected, and the server carries on.
+///
+/// This used to assert that such packets were merely *ignored*, which is more lenient than the
+/// game: `MessageBuffer.GetData` boots a client whose state is 0 for anything but packet 1
+/// (`MessageBuffer.cs:167-171`), and the state gate this server now runs before dispatch does the
+/// same. The half of the old test that still matters is the second half: whatever the stranger
+/// said must not reach the world, and the next client must be able to join normally.
 #[tokio::test]
-async fn packets_sent_before_the_handshake_are_ignored() {
+async fn packets_sent_before_the_handshake_are_refused() {
     let addr = start_server().await;
+    let mut early = FakeClient::connect(addr).await;
+
+    // Chat and movement before a hello.
+    early.say("hello?").await;
+    early.controls(0, 1.0, 2.0).await;
+
+    let kicked = early.try_recv(Duration::from_secs(5)).await;
+    assert_eq!(
+        kicked.map(|f| f.id),
+        Some(id::KICK),
+        "a connection that talks before it says hello is disconnected, as vanilla's own state \
+         gate does"
+    );
+
+    // ...and the server is still there, with the slot free again.
     let mut client = FakeClient::connect(addr).await;
-
-    // Chat and movement before a hello must not crash the server or be relayed.
-    client.say("hello?").await;
-    client.controls(0, 1.0, 2.0).await;
-
-    // The server should still complete a normal handshake afterwards.
     let slot = client.join("late").await;
     let frames = client.recv_until(id::FINISHED_CONNECTING_TO_SERVER).await;
     assert!(!frames.is_empty());
+    let chatter = frames.iter().any(|f| f.id == id::NET_MODULES);
+    assert!(
+        !chatter || frames.iter().all(|f| !f.payload.ends_with(b"hello?")),
+        "nothing the refused connection said may reach a player who joins afterwards"
+    );
     assert_eq!(slot, 0);
 }
 

@@ -34,8 +34,13 @@ multiplayer design, and diverging from them would change how the game plays:
   already read the world file.
 
 Where this server is *more* strict than vanilla, that strictness is a feature and regressions in
-it are in scope — for example, chest writes require the chest to be open, and tile-edit spam is
-rate-limited the way `RemoteClient` does it.
+it are in scope: chest writes, for example, require the chest to be open.
+
+Where it is exactly as strict as vanilla, that is deliberate too, and a *gap* against vanilla is a
+bug: a packet is refused before it is dispatched unless the connection's state allows it
+(`MessageBuffer.GetData`'s own three conditions), and the tile-edit spam ceilings are vanilla's
+numbers behind vanilla's own opt-in (`spam_check`, which is `Netplay.SpamCheck`, off by default
+exactly as it is in the game).
 
 ## The plaintext transport
 

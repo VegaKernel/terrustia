@@ -600,7 +600,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 || npc.life != npc.life_max
                 || npc.position.1 > world.conditions.surface_y
                 || world.conditions.slime_rain;
-            slime::update(npc, target, npc.on_ground, active);
+            slime::update(npc, target, npc.on_ground, active, world.wet);
         }
         // No graveyard biome yet, so nothing keeps the eyes out past dawn.
         2 => eye::update(npc, world, false),

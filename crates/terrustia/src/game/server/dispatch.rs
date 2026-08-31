@@ -4,7 +4,12 @@
 //! through; everything below it is one packet id's handler, plus the few helpers that exist only to
 //! serve them (the join handshake, the section stream, and the presence frames a new arrival needs).
 //! Nothing here is trusted: a handler validates first and gives up quietly rather than panicking,
-//! because the loop that calls it owns the world.
+//! because the loop that calls it owns the world. Before any of them runs, [`handshake_allows`]
+//! refuses whatever the connection's own state does not allow yet, which is where vanilla puts the
+//! same check (`MessageBuffer.GetData`) and is not something an individual handler can be relied on
+//! to do for itself.
+//!
+//! [`handshake_allows`]: GameServer::handshake_allows
 
 // The parent module's prelude, wholesale, rather than a copy of it. Sixty-odd packet handlers
 // between them name most of what `server/mod.rs` imports plus about twenty of its own private
@@ -15,7 +20,75 @@ use super::*;
 impl GameServer {
     // ---------------------------------------------------------------- packets
 
+    /// Vanilla's own pre-dispatch state gate, from `MessageBuffer.GetData`
+    /// (`MessageBuffer.cs:158-172`). `false` means the packet is not dispatched at all.
+    ///
+    /// Three rules, in vanilla's order:
+    ///
+    /// * `State == -1` (asked for a password, has not answered) accepts only packet 38.
+    /// * `State < 10` (mid-handshake) accepts only ids up to 12, plus 93/16/42/50/38/68/147/161.
+    /// * `State == 0` (nothing said yet) accepts only packet 1.
+    ///
+    /// Our `ConnState` maps onto those directly: `greeted` false is State 0, `greeted` with
+    /// `password_ok` false is State -1 (`on_hello` sends `REQUEST_PASSWORD` and leaves the
+    /// connection exactly there), and anything short of `Playing` is State < 10, which is set on
+    /// the same packet 12 vanilla sets State 10 on (`MessageBuffer.cs:925-928`).
+    ///
+    /// This is the guard the whole handshake rested on and did not have. Every handler was left to
+    /// check `is_playing` for itself and twelve did not, so a socket that had only said hello could
+    /// summon a boss (`on_summon`), make it rain for ever (`on_creative_power`, reached from
+    /// `on_net_module` before its own check), free the Mechanic (`on_talk_npc`'s rescue), spawn
+    /// projectiles, teleport, and open chests. With `password` set that is worse than untidy: the
+    /// password prompt is sent and the connection stays in State -1, so none of it was ever behind
+    /// the password at all.
+    ///
+    /// One deliberate difference: vanilla *boots* and then falls through into its own switch,
+    /// handling the packet it just rejected. We refuse it instead, which is what booting is for.
+    fn handshake_allows(&mut self, slot: u8, id: u8) -> bool {
+        /// The ids vanilla lets through mid-handshake on top of everything up to 12: a Steam
+        /// social handshake, life/mana, buffs, the password, the client UUID, a loadout, and the
+        /// host token.
+        const HANDSHAKE_EXTRAS: [u8; 8] = [
+            id::SOCIAL_HANDSHAKE,
+            id::PLAYER_LIFE_MANA,
+            id::PLAYER_MANA,
+            id::PLAYER_BUFFS,
+            id::SEND_PASSWORD,
+            id::CLIENT_UUID,
+            id::SYNC_LOADOUT,
+            id::HOST_TOKEN,
+        ];
+
+        let Some(player) = self.player(slot) else {
+            return false;
+        };
+        if player.is_playing() {
+            return true;
+        }
+        let (greeted, password_ok) = (player.greeted, player.password_ok);
+        let allowed = if !greeted {
+            id == id::HELLO
+        } else if !password_ok {
+            id == id::SEND_PASSWORD
+        } else {
+            id <= id::PLAYER_SPAWN || HANDSHAKE_EXTRAS.contains(&id)
+        };
+        if !allowed {
+            debug!(
+                slot,
+                id,
+                name = id::name(id),
+                "refusing a packet from a connection that has not finished joining"
+            );
+            self.kick(slot, "Your client sent that too early.");
+        }
+        allowed
+    }
+
     pub(super) fn handle_packet(&mut self, slot: u8, frame: Frame) {
+        if !self.handshake_allows(slot, frame.id) {
+            return;
+        }
         let payload = frame.payload;
         let result = match frame.id {
             id::HELLO => self.on_hello(slot, &payload),
@@ -37,9 +110,13 @@ impl GameServer {
             id::SYNC_PLAYER_ZONE => self.on_zone(slot, &payload),
             // Damage and death are not simulated; relaying keeps every client's view of another
             // player's health and death messages consistent with the client that took the hit.
-            id::PLAYER_HURT_V2 | id::PLAYER_DEATH_V2 | id::DEAD_PLAYER => {
-                self.relay_player_packet(slot, frame.id, &payload)
-            }
+            // Death names the sender and is rewritten (`MessageBuffer.cs:3910-3916`, `num13 =
+            // whoAmI`); damage names the *victim* and is not, which is why it has its own handler.
+            // Packet 135 is not in this list at all: it only ever travels server-to-client
+            // (`NetMessage.SyncOnePlayer`, `NetMessage.cs:2933-2936`), and vanilla's own case 135
+            // is `if (Main.netMode == 1)`, so a dedicated server reads it and drops it.
+            id::PLAYER_HURT_V2 => self.on_player_hurt(slot, &payload),
+            id::PLAYER_DEATH_V2 => self.relay_player_packet(slot, frame.id, &payload),
             // Everything a player does that only other clients need to be told about: a heal, a
             // mana burst, the angle of the item they are holding, a ninja dodge, their stealth, a
             // flute note, which NPC their minions are on, which tile they are mining, and which
@@ -69,36 +146,74 @@ impl GameServer {
             id::BUG_RELEASING => self.on_bug_released(slot, &payload),
             id::LIQUID_UPDATE => self.on_liquid(slot, &payload),
             // Social chatter and cosmetic effects: nothing to keep, but everyone else has to see
-            // it or the world looks different from each side.
-            id::SYNC_EMOTE_BUBBLE
-            | id::EMOJI
+            // it or the world looks different from each side. Only the ids a real dedicated server
+            // actually relays are here; see the read-and-drop arm below for the ones it does not.
+            id::EMOJI
             | id::TOGGLE_PARTY
-            | id::PING
-            | id::SPECIAL_F_X
             | id::ITEM_USE_SOUND
-            | id::MINION_REST_TARGET_UPDATE
             | id::SYNC_PROJECTILE_TRACKERS
             | id::UPDATE_PLAYER_LUCK_FACTORS
-            | id::SYNC_REVENGE_MARKER
-            | id::REMOVE_REVENGE_MARKER
-            | id::LAND_GOLF_BALL_IN_CUP
-            | id::COMBAT_TEXT_INT
-            // Effects nobody but the sender would otherwise see: a temporary animation, a puff
-            // of smoke, a legacy sound, a wired cannon firing, an NPC being interfered with, and
-            // the two achievement announcements.
-            | id::TEMPORARY_ANIMATION
-            | id::POOF_OF_SMOKE
-            | id::PLAY_LEGACY_SOUND
-            | id::WIRED_CANNON_SHOT
-            | id::TAMPER_WITH_N_P_C
-            | id::ACHIEVEMENT_MESSAGE_N_P_C_KILLED
-            | id::ACHIEVEMENT_MESSAGE_EVENT_HAPPENED
-            | id::COMBAT_TEXT_STRING => {
+            | id::LAND_GOLF_BALL_IN_CUP => {
                 if self.player(slot).is_some_and(Player::is_playing)
                     && let Ok(relayed) = packets::verbatim(frame.id, &payload)
                 {
                     self.broadcast(relayed, Some(slot));
                 }
+                Ok(())
+            }
+            // Where a player's minions idle. Vanilla stamps the sender over the owner byte before
+            // relaying (`MessageBuffer.cs:3585-3596`, `num166 = whoAmI`), so this belongs with the
+            // other owner-rewritten relays rather than in the verbatim group it used to sit in,
+            // where a client could aim somebody else's minions.
+            id::MINION_REST_TARGET_UPDATE => self.relay_player_packet(slot, frame.id, &payload),
+            // The latency ping. Vanilla echoes it to the sender *alone*
+            // (`MessageBuffer.cs:4445-4452`, `TrySendData(154, whoAmI)`), which is the whole
+            // mechanism: `Ping.Update` sends one every 250 ms and will not send another until this
+            // comes back (`Ping.cs`). Relaying it to everyone else instead, as this used to, left
+            // the sender waiting for ever with a `CurrentPing` that only ever climbed, and gave
+            // every other client four stray pings a second per peer.
+            id::PING => {
+                if self.player(slot).is_some_and(Player::is_playing)
+                    && let Ok(frame) = packets::empty(id::PING)
+                {
+                    self.send(slot, frame);
+                }
+                Ok(())
+            }
+            id::SPECIAL_F_X => self.on_special_fx(slot, &payload),
+            // Read and dropped, because that is exactly what a dedicated server does with them:
+            // every one of these sits inside an `if (Main.netMode == 1)` in `MessageBuffer`, so a
+            // real server never relays one and no honest client ever sends one. Relaying them
+            // verbatim turned each into a client-driven effect on everybody else's screen:
+            // combat text (`:3239,3247`), an emote bubble (`:3408`), the two achievement
+            // announcements (`:3573,3579`), a puff of smoke (`:3762`), revenge markers
+            // (`:4066,4072`), NPC immunity tampering (`:4145`), an arbitrary legacy sound
+            // (`:4160`) — and the two with real teeth. `SMART_TEXT_MESSAGE` (`:3772`) is
+            // arbitrary coloured multiline text, indistinguishable from a server notice, and
+            // `WIRED_CANNON_SHOT` (`:3781`) makes the *named* player's client fire a cannon with
+            // attacker-chosen damage and knockback (`if (num77 == Main.myPlayer)
+            // WorldGen.ShootFromCannon(..)`). `TEMPORARY_ANIMATION` (`:3189`) is not netMode-gated
+            // but is not relayed either: it only ever travels server-to-client
+            // (`NetMessage.SendTemporaryAnimation`).
+            id::COMBAT_TEXT_INT
+            | id::COMBAT_TEXT_STRING
+            | id::SYNC_EMOTE_BUBBLE
+            | id::ACHIEVEMENT_MESSAGE_N_P_C_KILLED
+            | id::ACHIEVEMENT_MESSAGE_EVENT_HAPPENED
+            | id::POOF_OF_SMOKE
+            | id::SMART_TEXT_MESSAGE
+            | id::WIRED_CANNON_SHOT
+            | id::SYNC_REVENGE_MARKER
+            | id::REMOVE_REVENGE_MARKER
+            | id::TAMPER_WITH_N_P_C
+            | id::PLAY_LEGACY_SOUND
+            | id::TEMPORARY_ANIMATION => {
+                debug!(
+                    slot,
+                    id = frame.id,
+                    name = id::name(frame.id),
+                    "dropping a client-only packet a server never relays"
+                );
                 Ok(())
             }
             id::PLACE_OBJECT => self.on_place_object(slot, &payload),
@@ -134,17 +249,6 @@ impl GameServer {
             id::FISH_OUT_N_P_C => self.on_fished_out_npc(slot, &payload),
             id::SET_MISC_EVENT_VALUES => self.on_misc_event_value(slot, &payload),
             id::REQUEST_LUCY_POPUP => self.on_lucy_popup(slot, &payload),
-            // Chat a client asks the server to put in front of everybody: a sign read aloud, a
-            // tombstone's epitaph. Relayed rather than modelled, but relayed *to everybody*,
-            // which is the part that was missing.
-            id::SMART_TEXT_MESSAGE => {
-                if self.player(slot).is_some_and(Player::is_playing)
-                    && let Ok(relayed) = packets::verbatim(frame.id, &payload)
-                {
-                    self.broadcast(relayed, Some(slot));
-                }
-                Ok(())
-            }
             id::RELEASE_ITEM_OWNERSHIP => self.on_release_item(slot, &payload),
             id::MURDER_SOMEONE_ELSES_PORTAL => self.on_close_portal(slot, &payload),
             id::TELEPORT_PLAYER_THROUGH_PORTAL => self.on_portal_teleport(slot, &payload),
@@ -159,12 +263,12 @@ impl GameServer {
             id::QUESTS_COUNT_SYNC => self.on_quest_count(slot, &payload),
             id::T_E_DISPLAY_DOLL_DATA_SYNC => self.on_display_doll_slot(slot, &payload),
             id::T_E_HAT_RACK_ITEM_SYNC => self.on_hat_rack_slot(slot, &payload),
-            id::REQUEST_TILE_ENTITY_INTERACTION => {
-                self.on_tile_entity_interaction(slot, &payload)
-            }
+            id::REQUEST_TILE_ENTITY_INTERACTION => self.on_tile_entity_interaction(slot, &payload),
             id::ADD_N_P_C_BUFF => self.on_add_npc_buff(slot, &payload),
             id::REQUEST_N_P_C_BUFF_REMOVAL => self.on_remove_npc_buff(slot, &payload),
-            id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST => self.on_town_npc_name_request(slot, &payload),
+            id::UNIQUE_TOWN_N_P_C_INFO_SYNC_REQUEST => {
+                self.on_town_npc_name_request(slot, &payload)
+            }
             other => {
                 debug!(slot, id = other, name = id::name(other), "ignoring packet");
                 Ok(())
@@ -275,6 +379,61 @@ impl GameServer {
             self.kick(slot, "Incorrect password.");
             Ok(())
         }
+    }
+
+    /// Packet 112: one of two unrelated effects, told apart by its first byte.
+    ///
+    /// `MessageBuffer.cs:3838-3862`. Sub-action 1 is a tree growing, and it is the only one a
+    /// server relays: `TrySendData(b, -1, -1, ..)` with no excluded client, so the sender sees it
+    /// too (its own tree has to pop as well). Sub-action 2 is a fairy's sparkle, handled locally
+    /// and never relayed. We relayed both, and excluded the sender from each.
+    fn on_special_fx(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        /// `WorldGen.TreeGrowFX`, the one sub-action a dedicated server passes on.
+        const TREE_GROW: u8 = 1;
+
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        if PacketReader::new(payload).u8()? != TREE_GROW {
+            return Ok(());
+        }
+        let frame = packets::verbatim(id::SPECIAL_F_X, payload)?;
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Packet 117: a player took damage. The first byte is the *victim*, not the sender.
+    ///
+    /// `NetMessage.SendPlayerHurt`'s first argument is `playerTargetIndex` (`NetMessage.cs:2633`),
+    /// and both callers pass the player being hurt (`Projectile.cs`/`Player.cs`, `SendPlayerHurt(i,
+    /// ..)` where `i` is the victim), so in a PvP hit the attacker's client sends a packet naming
+    /// somebody else. Vanilla relays that byte untouched (`MessageBuffer.cs:3890-3906`, which reads
+    /// `num27` and hands the same `num27` back to `SendPlayerHurt`) precisely because it is not the
+    /// sender. Ours went through `relay_player_packet`, which stamps the sender's slot over byte 0,
+    /// so every third-party client applied the damage to the attacker instead of the victim. Self
+    /// damage hid it: there the sender *is* the target, so the rewrite was a no-op.
+    ///
+    /// The condition around it comes with it, and has to: without the rewrite there is nothing else
+    /// stopping a client naming anybody it likes. Vanilla's is `whoAmI == num27 ||
+    /// (Main.player[num27].hostile && Main.player[whoAmI].hostile)` — hurt yourself, or hurt
+    /// somebody when you are both in PvP.
+    fn on_player_hurt(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let victim = PacketReader::new(payload).u8()?;
+        let both_hostile = self.player(slot).is_some_and(|p| p.pvp)
+            && self.player(victim).is_some_and(|p| p.pvp && p.is_playing());
+        if victim != slot && !both_hostile {
+            debug!(
+                slot,
+                victim, "refusing a hurt packet aimed at somebody else"
+            );
+            return Ok(());
+        }
+        let frame = packets::verbatim(id::PLAYER_HURT_V2, payload)?;
+        self.broadcast(frame, Some(slot));
+        Ok(())
     }
 
     /// Relay a packet that describes the sender, stamping our slot over whatever they claimed.
@@ -1951,7 +2110,17 @@ impl GameServer {
     /// Not having this at all was a regression *from* vanilla rather than a place where we simply
     /// match how trusting vanilla is — which is why it sits inside "match vanilla's trust model"
     /// rather than being the TShock-style validation that stays deferred.
+    ///
+    /// The ceilings only *apply* when `spam_check` is on, which is the other half of vanilla's own
+    /// mechanism and was missing here: `RemoteClient.SpamUpdate` (`RemoteClient.cs:70-80`) opens
+    /// `if (!Netplay.SpamCheck) { ...zero every counter...; return; }`, and `Netplay.SpamCheck`
+    /// (`Netplay.cs:65`) is `false` unless the server was started with `secure=1`
+    /// (`Main.cs:5200`) or `-secure` (`LaunchInitializer.cs:152`). A stock vanilla server never
+    /// boots anybody for tile spam, so neither does a stock terrustia one.
     fn note_tile_spam(&mut self, slot: u8, kind: TileAction) -> bool {
+        if !self.config.spam_check {
+            return false;
+        }
         let (counter, ceiling, why): (fn(&mut Player) -> &mut f32, f32, &str) = match kind {
             TileAction::KillTile | TileAction::KillTileNoItem | TileAction::KillWall => (
                 |p| &mut p.spam_break,
@@ -1980,7 +2149,13 @@ impl GameServer {
     }
 
     /// Let every player's spam budget recover, once a tick.
+    ///
+    /// Nothing counts up while `spam_check` is off, so there is nothing to decay: vanilla's own
+    /// `SpamUpdate` returns before its decay for the same reason (`RemoteClient.cs:70-80`).
     pub(super) fn tick_tile_spam(&mut self) {
+        if !self.config.spam_check {
+            return;
+        }
         for player in self.players.iter_mut().flatten() {
             player.spam_place = (player.spam_place - SPAM_PLACE_DECAY).max(0.0);
             player.spam_break = (player.spam_break - SPAM_BREAK_DECAY).max(0.0);
@@ -3612,7 +3787,14 @@ impl GameServer {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
-        let hit = DamageNpc::decode(payload)?;
+        let mut hit = DamageNpc::decode(payload)?;
+        // `MessageBuffer.cs:1785-1788`: the server floors the damage at zero before it does
+        // anything else with the packet, and it matters far more for the *relay* than for the
+        // arithmetic. A receiving client branches on the sign (`:1795-1803`): negative damage is
+        // not a small hit, it is `life = 0; HitEffect(); active = false`, so one packet 28 carrying
+        // -1 used to make an NPC vanish on every client except the sender's while this server kept
+        // simulating it. Every enemy could be turned into a ghost nobody but the attacker could see.
+        hit.damage = hit.damage.max(0);
 
         // Acknowledge first, as vanilla does, so the client stops resending the hit.
         self.send(slot, damage_ack()?);
@@ -4311,8 +4493,13 @@ impl GameServer {
             return Ok(());
         }
         // Vanilla's third spam counter, and the tightest of the three: 50 with 0.2 a tick back.
-        // Liquid is the cheapest thing to spam and the most expensive to simulate.
-        if let Some(player) = self.player_mut(slot) {
+        // Liquid is the cheapest thing to spam and the most expensive to simulate. Gated on
+        // `spam_check` because vanilla gates the counter itself, not just the boot:
+        // `MessageBuffer.cs:2415` reads `if (Main.netMode == 2 && Netplay.SpamCheck)` before it
+        // ever touches `SpamWater`.
+        if self.config.spam_check
+            && let Some(player) = self.player_mut(slot)
+        {
             player.spam_liquid += 1.0;
             if player.spam_liquid > SPAM_LIQUID_MAX {
                 info!(slot, "disconnecting a client for liquid spam");
@@ -4337,6 +4524,25 @@ impl GameServer {
         };
         self.world.set_tile(x, y, tile);
         self.liquids.disturb(x, y);
+        // An emptied tile is relayed at once, to everybody but the sender who already knows:
+        // `MessageBuffer.cs:2438-2442`'s `if (b2 == 0) NetMessage.SendData(48, -1, whoAmI, ..)`.
+        // Only the drain, because any other amount is left to the simulation, which tells clients
+        // as it moves the liquid on (`tick_liquids`). A drain has nothing left to move: the tile is
+        // already empty when `Liquids::settle` next reaches it, so it returns without reporting a
+        // change, and for an isolated pool (a sealed container, a decorative pond, the last bucket
+        // out of a farm) no neighbour ever refills it to correct the clients that missed it. They
+        // would render the liquid until the section was sent again.
+        if amount == 0 {
+            let change = net_module::LiquidChange {
+                x,
+                y,
+                amount,
+                kind: tile.liquid_kind.as_type_byte(),
+            };
+            if let Ok(frame) = net_module::liquid_changes(&[change]) {
+                self.broadcast(frame, Some(slot));
+            }
+        }
         Ok(())
     }
 
@@ -5183,9 +5389,88 @@ mod pvp_buff_spread {
 /// place where we are merely as trusting as it is. `RemoteClient` keeps a counter per kind, bumps
 /// it per edit packet, decays it each tick and boots past a ceiling. The numbers are transcribed
 /// rather than chosen, so a client vanilla tolerates is tolerated here and vice versa.
+///
+/// The numbers were the only half transcribed at first. Vanilla also refuses to *apply* them
+/// unless the server was started with `secure=1`/`-secure` (`Netplay.SpamCheck`, `Netplay.cs:65`,
+/// read by `RemoteClient.SpamUpdate` at `RemoteClient.cs:70-80` and by the liquid counter at
+/// `MessageBuffer.cs:2415`), and the tests below asserted the ceilings without ever modelling that
+/// axis, which is how a default-on kick passed review.
 #[cfg(test)]
 mod tile_spam {
     use super::*;
+    use crate::config::Config;
+
+    fn playing(server: &mut GameServer, slot: u8) -> mpsc::Receiver<Bytes> {
+        let (tx, rx) = mpsc::channel(64);
+        let mut player = Player::new(slot, "127.0.0.1:1".parse().expect("test address"), tx);
+        player.state = ConnState::Playing;
+        server.players[usize::from(slot)] = Some(player);
+        rx
+    }
+
+    fn server(spam_check: bool) -> GameServer {
+        GameServer::new(
+            Config {
+                spam_check,
+                ..Config::default()
+            },
+            crate::world::World::empty(200, 150, "tile spam probe"),
+        )
+    }
+
+    /// Fail-then-pass for the missing gate: a stock server must not boot anybody for edit spam,
+    /// because a stock vanilla server does not either (`RemoteClient.cs:70-80`, which zeroes all
+    /// four counters and returns when `Netplay.SpamCheck` is false).
+    ///
+    /// Six hundred breaks in one burst is not a hypothetical: a stick of dynamite clears a sphere
+    /// of tiles at once, and `spam_break`'s ceiling is 500 against a 5-a-tick decay, so ordinary
+    /// play used to disconnect the player who threw it.
+    #[test]
+    fn a_stock_server_never_kicks_for_edit_spam() {
+        let mut server = server(false);
+        let _rx = playing(&mut server, 0);
+
+        for edit in 0..600 {
+            assert!(
+                !server.note_tile_spam(0, TileAction::KillTile),
+                "edit {edit} was refused on a server with the spam check off"
+            );
+        }
+        assert!(
+            server.player(0).is_some(),
+            "a player mining hard must still be connected on a stock server"
+        );
+    }
+
+    /// ...and the mechanism is still there for an operator who asks for it, which is the other
+    /// half of the gate being a gate rather than a deletion.
+    #[test]
+    fn a_secure_server_still_kicks_for_edit_spam() {
+        let mut server = server(true);
+        let _rx = playing(&mut server, 0);
+
+        let tripped = (0..600).any(|_| server.note_tile_spam(0, TileAction::KillTile));
+        assert!(tripped, "600 breaks is over the 500 ceiling and must trip");
+        assert!(server.player(0).is_none(), "and the client is disconnected");
+    }
+
+    /// The liquid counter is gated at the increment rather than at the boot, because that is where
+    /// vanilla gates it (`MessageBuffer.cs:2415`).
+    #[test]
+    fn the_liquid_counter_only_counts_on_a_secure_server() {
+        for (spam_check, expected) in [(false, 0.0), (true, 3.0)] {
+            let mut server = server(spam_check);
+            let _rx = playing(&mut server, 0);
+            for _ in 0..3 {
+                server.on_liquid(0, &[10, 0, 10, 0, 255, 0]).unwrap();
+            }
+            assert_eq!(
+                server.player(0).map(|p| p.spam_liquid),
+                Some(expected),
+                "spam_check = {spam_check}"
+            );
+        }
+    }
 
     /// Placing is the tight one: 100, recovering 0.3 a tick.
     #[test]
@@ -5246,6 +5531,381 @@ mod tile_spam {
     /// A `const` block, so swapping the two by accident fails the build rather than a test run.
     const _: () = assert!(SPAM_BREAK_MAX > SPAM_PLACE_MAX);
     const _: () = assert!(SPAM_BREAK_DECAY > SPAM_PLACE_DECAY);
+}
+
+/// What a connection is allowed to say, and what a relay is allowed to carry.
+///
+/// Five findings from one audit of the sixty-six handlers, and they share a shape: the server was
+/// trusting a byte, or a connection, that vanilla does not.
+#[cfg(test)]
+mod untrusted_packets {
+    use super::*;
+    use crate::config::Config;
+
+    fn world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "untrusted packet probe")
+    }
+
+    fn frame(id: u8, payload: &[u8]) -> Frame {
+        Frame {
+            id,
+            payload: Bytes::copy_from_slice(payload),
+        }
+    }
+
+    /// A connection at `slot` in whatever state the caller asks for. Holding the receiver keeps it
+    /// looking alive: a closed channel is a dead connection to `send_bytes`.
+    fn connect(server: &mut GameServer, slot: u8, state: ConnState) -> mpsc::Receiver<Bytes> {
+        let (tx, rx) = mpsc::channel(64);
+        let mut player = Player::new(slot, "127.0.0.1:1".parse().expect("test address"), tx);
+        player.greeted = true;
+        player.password_ok = state != ConnState::Greeting;
+        player.state = state;
+        server.players[usize::from(slot)] = Some(player);
+        rx
+    }
+
+    fn frames(rx: &mut mpsc::Receiver<Bytes>) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            out.push(frame);
+        }
+        out
+    }
+
+    /// Every frame of one id, with the two-byte length prefix and the id stripped.
+    fn payloads(rx: &mut mpsc::Receiver<Bytes>, id: u8) -> Vec<Vec<u8>> {
+        frames(rx)
+            .into_iter()
+            .filter(|f| f.get(2) == Some(&id))
+            .map(|f| f[3..].to_vec())
+            .collect()
+    }
+
+    /// Packet 61's payload: the player the client claims, then what it wants summoned. -11 is
+    /// Advanced Combat Techniques, a permanent world unlock.
+    const COMBAT_BOOK: [u8; 4] = [0, 0, 0xF5, 0xFF];
+
+    /// B-01, fail-then-pass: a socket that has been asked for a password could still change the
+    /// world.
+    ///
+    /// `MessageBuffer.cs:158-172` gates every packet on the connection's state before the switch
+    /// ever runs; this server had no such gate and left each handler to check for itself, which
+    /// twelve of them did not. `on_summon` is one: with `password` set, `on_hello` sends the
+    /// prompt and returns, and this packet used to sail straight into a permanent world unlock
+    /// without the password ever being offered.
+    #[test]
+    fn a_connection_that_has_not_authenticated_cannot_change_the_world() {
+        let mut server = GameServer::new(
+            Config {
+                password: "hunter2".into(),
+                ..Config::default()
+            },
+            world(),
+        );
+        let _rx = connect(&mut server, 0, ConnState::Greeting);
+
+        server.handle_packet(
+            0,
+            frame(id::SPAWN_BOSS_USE_LICENSE_START_EVENT, &COMBAT_BOOK),
+        );
+
+        assert!(
+            !server.world.progress.combat_book,
+            "a connection still owing a password must not reach the world at all"
+        );
+        assert!(server.player(0).is_none(), "and is disconnected for trying");
+    }
+
+    /// The same gate mid-handshake: past the password, before the world, ids above 12 are refused.
+    #[test]
+    fn a_client_still_joining_cannot_edit_tiles() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _rx = connect(&mut server, 0, ConnState::SlotAssigned);
+
+        server.handle_packet(0, frame(id::TILE_MANIPULATION, &[0; 9]));
+
+        assert!(server.player(0).is_none(), "vanilla boots for this");
+    }
+
+    /// ...and the handshake's own packets still get through, or nobody could ever join.
+    #[test]
+    fn the_handshake_packets_are_still_allowed_through() {
+        let mut server = GameServer::new(Config::default(), world());
+        let mut rx = connect(&mut server, 0, ConnState::SlotAssigned);
+
+        server.handle_packet(0, frame(id::REQUEST_WORLD_DATA, &[]));
+
+        assert!(server.player(0).is_some(), "packet 6 is part of joining");
+        assert!(
+            frames(&mut rx)
+                .iter()
+                .any(|f| f.get(2) == Some(&id::WORLD_DATA)),
+            "and it is answered"
+        );
+    }
+
+    /// A player who has finished joining is not gated at all.
+    #[test]
+    fn a_playing_client_can_still_use_the_combat_book() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _rx = connect(&mut server, 0, ConnState::Playing);
+
+        server.handle_packet(
+            0,
+            frame(id::SPAWN_BOSS_USE_LICENSE_START_EVENT, &COMBAT_BOOK),
+        );
+
+        assert!(server.world.progress.combat_book);
+    }
+
+    /// M-02, fail-then-pass: packet 117 names its victim, and the relay used to overwrite that
+    /// byte with the sender's own slot, so every third-party client applied a PvP hit to the
+    /// attacker. `NetMessage.SendPlayerHurt`'s first argument is `playerTargetIndex`
+    /// (`NetMessage.cs:2633`), and vanilla hands the byte back untouched
+    /// (`MessageBuffer.cs:3890-3906`).
+    #[test]
+    fn a_pvp_hit_still_names_its_victim_when_it_is_relayed() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _attacker = connect(&mut server, 0, ConnState::Playing);
+        let mut victim = connect(&mut server, 1, ConnState::Playing);
+        let mut bystander = connect(&mut server, 2, ConnState::Playing);
+        for slot in 0..3 {
+            if let Some(p) = server.player_mut(slot) {
+                p.pvp = true;
+            }
+        }
+
+        // Victim 1, then whatever the rest of the packet holds; only the first byte matters here.
+        server.handle_packet(0, frame(id::PLAYER_HURT_V2, &[1, 0, 0, 5, 0, 1, 0, 0]));
+
+        for (who, rx) in [("the victim", &mut victim), ("a bystander", &mut bystander)] {
+            let hurt = payloads(rx, id::PLAYER_HURT_V2);
+            assert_eq!(hurt.len(), 1, "{who} should be told once");
+            assert_eq!(hurt[0][0], 1, "{who} was told the wrong player was hit");
+        }
+    }
+
+    /// ...and the gate that has to come with it: without the rewrite, nothing else stops a client
+    /// naming anybody at all. Vanilla's own condition is `whoAmI == num27 || (both hostile)`.
+    #[test]
+    fn hurting_somebody_who_is_not_in_pvp_is_refused() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _attacker = connect(&mut server, 0, ConnState::Playing);
+        let mut victim = connect(&mut server, 1, ConnState::Playing);
+        if let Some(p) = server.player_mut(0) {
+            p.pvp = true;
+        }
+
+        server.handle_packet(0, frame(id::PLAYER_HURT_V2, &[1, 0, 0, 5, 0, 1, 0, 0]));
+
+        assert!(
+            payloads(&mut victim, id::PLAYER_HURT_V2).is_empty(),
+            "a player who is not in PvP cannot be hurt by somebody else's packet"
+        );
+    }
+
+    /// M-05, fail-then-pass: negative damage is not a small hit, it is a delete.
+    ///
+    /// The server clamps at `MessageBuffer.cs:1785-1788` before relaying, because a receiving
+    /// client branches on the sign (`:1795-1803`): below zero means `life = 0; HitEffect();
+    /// active = false`. Relaying the client's own -1 made every other client drop the NPC while
+    /// this server kept simulating it.
+    #[test]
+    fn a_negative_hit_is_clamped_before_it_is_relayed() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _attacker = connect(&mut server, 0, ConnState::Playing);
+        let mut watcher = connect(&mut server, 1, ConnState::Playing);
+        let index = server.npcs.spawn(1, (100.0, 100.0)).expect("a slime");
+        let generation = server.npcs.get(index).expect("just spawned").generation;
+        let _ = frames(&mut watcher); // the spawn's own packet
+
+        let mut payload = vec![index, generation];
+        payload.extend_from_slice(&(-1i16).to_le_bytes());
+        payload.extend_from_slice(&0f32.to_le_bytes());
+        payload.push(2); // direction +1
+        payload.push(0); // not a crit
+        server.handle_packet(0, frame(id::DAMAGE_N_P_C, &payload));
+
+        let relayed = payloads(&mut watcher, id::DAMAGE_N_P_C);
+        assert_eq!(relayed.len(), 1, "the hit is still relayed");
+        assert_eq!(
+            i16::from_le_bytes([relayed[0][2], relayed[0][3]]),
+            0,
+            "but with the damage floored, or the NPC vanishes on every other client"
+        );
+        assert!(
+            server.npcs.get(index).is_some_and(|n| n.is_alive()),
+            "and it is still alive here"
+        );
+    }
+
+    /// M-07, fail-then-pass: the ping is an echo to the sender, not a broadcast to everybody else.
+    ///
+    /// `MessageBuffer.cs:4445-4452` is `TrySendData(154, whoAmI)`. The client sends one every
+    /// 250 ms and blocks on the answer (`Ping.cs`), so relaying it to the wrong people left the
+    /// sender's `CurrentPing` climbing for ever and gave everyone else four stray frames a second.
+    #[test]
+    fn a_ping_comes_back_to_the_sender_alone() {
+        let mut server = GameServer::new(Config::default(), world());
+        let mut sender = connect(&mut server, 0, ConnState::Playing);
+        let mut other = connect(&mut server, 1, ConnState::Playing);
+
+        server.handle_packet(0, frame(id::PING, &[]));
+
+        assert_eq!(payloads(&mut sender, id::PING).len(), 1, "echoed back");
+        assert!(
+            payloads(&mut other, id::PING).is_empty(),
+            "and nobody else hears it"
+        );
+    }
+
+    /// M-08, fail-then-pass: the ids a dedicated server reads and drops are not relayed.
+    ///
+    /// Each of these sits inside an `if (Main.netMode == 1)` in `MessageBuffer`, so vanilla's
+    /// server never passes one on. Relaying them gave any client a coloured server-looking notice
+    /// (107), a cannon fired from another player's client with attacker-chosen damage (108), and
+    /// eight more effects on everybody else's screen.
+    #[test]
+    fn client_only_packets_are_never_relayed() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _sender = connect(&mut server, 0, ConnState::Playing);
+        let mut other = connect(&mut server, 1, ConnState::Playing);
+
+        for id in [
+            id::SMART_TEXT_MESSAGE,
+            id::WIRED_CANNON_SHOT,
+            id::COMBAT_TEXT_INT,
+            id::COMBAT_TEXT_STRING,
+            id::SYNC_EMOTE_BUBBLE,
+            id::ACHIEVEMENT_MESSAGE_N_P_C_KILLED,
+            id::ACHIEVEMENT_MESSAGE_EVENT_HAPPENED,
+            id::POOF_OF_SMOKE,
+            id::SYNC_REVENGE_MARKER,
+            id::REMOVE_REVENGE_MARKER,
+            id::TAMPER_WITH_N_P_C,
+            id::PLAY_LEGACY_SOUND,
+            id::TEMPORARY_ANIMATION,
+        ] {
+            server.handle_packet(0, frame(id, &[0; 8]));
+            assert!(
+                payloads(&mut other, id).is_empty(),
+                "packet {id} ({}) must not reach another client",
+                id::name(id)
+            );
+        }
+    }
+
+    /// Packet 112 carries two unrelated effects. A server relays the tree one to *everybody*
+    /// (`MessageBuffer.cs:3848-3857`, `TrySendData(b, -1, -1, ..)`) and the fairy one to nobody.
+    #[test]
+    fn only_the_tree_half_of_the_special_effects_packet_is_relayed() {
+        let mut server = GameServer::new(Config::default(), world());
+        let mut sender = connect(&mut server, 0, ConnState::Playing);
+        let mut other = connect(&mut server, 1, ConnState::Playing);
+
+        let mut tree = vec![1];
+        tree.extend_from_slice(&[0; 11]);
+        server.handle_packet(0, frame(id::SPECIAL_F_X, &tree));
+        assert_eq!(payloads(&mut other, id::SPECIAL_F_X).len(), 1);
+        assert_eq!(
+            payloads(&mut sender, id::SPECIAL_F_X).len(),
+            1,
+            "the sender's own tree has to pop too, so it is not excluded"
+        );
+
+        let mut fairy = vec![2];
+        fairy.extend_from_slice(&[0; 11]);
+        server.handle_packet(0, frame(id::SPECIAL_F_X, &fairy));
+        assert!(payloads(&mut other, id::SPECIAL_F_X).is_empty());
+    }
+}
+
+/// Emptying a tile has to reach the other clients on its own.
+///
+/// `MessageBuffer.cs:2438-2442`: the server relays packet 48 to everyone but the sender the moment
+/// a client reports a tile drained to zero, and leaves every other amount to the simulation, which
+/// tells clients as it moves the liquid on. Ours took the amount and woke the tile, and nothing
+/// else: for an isolated pool there is no later flow to carry the news, so every client that was
+/// already in the section kept rendering liquid the server no longer had.
+#[cfg(test)]
+mod liquid_drain_relay {
+    use super::*;
+    use crate::config::Config;
+
+    fn two_players() -> (GameServer, Vec<mpsc::Receiver<Bytes>>) {
+        let mut server = GameServer::new(
+            Config::default(),
+            crate::world::World::empty(200, 150, "liquid relay probe"),
+        );
+        let mut rxs = Vec::new();
+        for slot in 0..2 {
+            let (tx, rx) = mpsc::channel(64);
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().expect("test address"), tx);
+            player.state = ConnState::Playing;
+            server.players[usize::from(slot)] = Some(player);
+            rxs.push(rx);
+        }
+        (server, rxs)
+    }
+
+    /// Every module-0 liquid change waiting on a channel.
+    fn liquid_frames(rx: &mut mpsc::Receiver<Bytes>) -> Vec<net_module::LiquidChange> {
+        let mut out = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if frame.get(2) != Some(&terrustia_proto::id::NET_MODULES) {
+                continue;
+            }
+            if let Ok(Some(changes)) = net_module::decode_liquid_changes(&frame[3..]) {
+                out.extend(changes);
+            }
+        }
+        out
+    }
+
+    /// `x`, `y`, amount, liquid type, as packet 48 carries them.
+    fn payload(x: i16, y: i16, amount: u8) -> Vec<u8> {
+        let mut p = x.to_le_bytes().to_vec();
+        p.extend_from_slice(&y.to_le_bytes());
+        p.push(amount);
+        p.push(0);
+        p
+    }
+
+    #[test]
+    fn draining_a_tile_reaches_the_other_clients() {
+        let (mut server, mut rxs) = two_players();
+        let mut tile = server.world.tile(60, 40);
+        tile.liquid = 255;
+        server.world.set_tile(60, 40, tile);
+
+        server.on_liquid(0, &payload(60, 40, 0)).unwrap();
+
+        let told = liquid_frames(&mut rxs[1]);
+        assert_eq!(
+            told,
+            vec![net_module::LiquidChange {
+                x: 60,
+                y: 40,
+                amount: 0,
+                kind: 0,
+            }],
+            "the other client has to be told the tile is empty"
+        );
+        assert!(
+            liquid_frames(&mut rxs[0]).is_empty(),
+            "the sender already emptied it locally; vanilla excludes it (`SendData(48, -1, whoAmI)`)"
+        );
+    }
+
+    /// A pour is not relayed: vanilla only sends for `b2 == 0`, leaving anything else to the
+    /// simulation, which broadcasts as the liquid actually moves.
+    #[test]
+    fn a_pour_is_left_to_the_simulation() {
+        let (mut server, mut rxs) = two_players();
+        server.on_liquid(0, &payload(60, 40, 255)).unwrap();
+        assert!(liquid_frames(&mut rxs[1]).is_empty());
+    }
 }
 
 /// Server MINOR (C1-b item 5): opening a chest now tells everyone else which chest this player
