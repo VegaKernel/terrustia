@@ -51,6 +51,7 @@ fn plain() -> Conditions {
         nearby_active_npcs: 1_000.0,
         below_dirt_midline: false,
         downed_boss3: true,
+        behind_a_house_wall: false,
         active_players: 1,
     }
 }

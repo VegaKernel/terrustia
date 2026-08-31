@@ -65,6 +65,12 @@ pub struct Conditions {
     pub below_dirt_midline: bool,
     /// `downedBoss3`, for the dungeon's pre-Skeletron flat rate (`NPC.cs:787-790`).
     pub downed_boss3: bool,
+    /// Whether the player is standing in front of a house wall.
+    ///
+    /// `NPC.cs:411`, `noWorms = WorldGen.InWorld(pX, pY) && Main.wallHouse[Main.tile[pX, pY].wall]`:
+    /// the other half of the "walls keep things out" rule, and the half that stops burrowers rather
+    /// than walkers.
+    pub behind_a_house_wall: bool,
     /// `numberOfActivePlayers` (`NPC.cs:266`), which the moon override's cap is a function of.
     pub active_players: u32,
 }
@@ -107,6 +113,9 @@ pub fn rate_depth_at(world: &World, y: i32) -> Depth {
 /// critter instead of a monster rather than being throttled by the rate at all — see the town
 /// suppression block below for where it comes from. `rng` is only ever consulted there; every
 /// other modifier in this function is a deterministic fact about the world.
+///
+/// The same block's other output, `noWorms`, is [`no_worms`] instead of a fourth element here,
+/// because for everything this server models it needs no roll.
 pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     let mut rate = SPAWN_RATE as f32;
     let mut max = MAX_SPAWNS;
@@ -297,6 +306,38 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     (rate as u32, max.max(1.0), spawn_friendly)
 }
 
+/// `noWorms`: whether burrowers are kept out of this attempt's draw.
+///
+/// Its own function rather than a fourth thing [`rates`] returns, because for everything this
+/// server models it is decided without a roll. Two sources:
+///
+/// * the wall at the player's own back (`NPC.cs:411`,
+///   `noWorms = WorldGen.InWorld(pX, pY) && Main.wallHouse[Main.tile[pX, pY].wall]`);
+/// * the town, which sets it unconditionally in all three headcount branches of the ordinary
+///   surface/underground fork (`NPC.cs:858`, `:883`, `:905`), behind the same event gate the rest of
+///   town suppression sits behind (`NPC.cs:800`).
+///
+/// Only the underworld's own fork rolls for it (`NPC.cs:810` one in two, `:827` three in four,
+/// `:843` nine in ten), and that fork is already disclosed in [`rates`] as not modelled.
+/// `ZoneShadowCandle` clearing it again (`NPC.cs:420-424`) is a player-carried effect, out of
+/// [`Conditions`]' scope like every other one.
+pub fn no_worms(at: Conditions) -> bool {
+    let event = at.blood_moon || at.eclipse || at.event_moon;
+    at.behind_a_house_wall || (!event && at.town_npcs >= 1)
+}
+
+/// The burrowers whose spawn branch vanilla gates on `noWorms`, out of the types this server fields.
+///
+/// `NPC.cs:3704-3713` is the Devourer / World Feeder branch, and it is the only one of the game's
+/// several `!noWorms` gates naming a type that appears in these pools. Deliberately *not* here: the
+/// underworld's Bone Serpent, which the game spawns with no such gate at all (`NPC.cs:4885`,
+/// `Main.rand.Next(40) == 0 && !AnyNPCs(39)`). The rest of the game's gates (`NPC.cs:1409` the
+/// Wyvern, `:3973`, `:4062`, `:1698`) name hardmode worms with no pool here.
+const NO_WORMS_GATES: [u16; 2] = [
+    7,  // DevourerHead
+    98, // SeekerHead, the World Feeder
+];
+
 #[cfg(test)]
 mod rate_tests {
     use super::*;
@@ -322,6 +363,7 @@ mod rate_tests {
             nearby_active_npcs: 1_000.0,
             below_dirt_midline: false,
             downed_boss3: true,
+            behind_a_house_wall: false,
             active_players: 1,
         }
     }
@@ -480,6 +522,61 @@ mod rate_tests {
         assert!(
             !blood_night.2,
             "and an event never forces a friendly spawn either"
+        );
+    }
+
+    /// `noWorms` keeps burrowers out when there is a town or a wall at your back, and an event
+    /// overrules the town half of that exactly as it overrules the rest of town suppression
+    /// (`NPC.cs:411`, `:800`, `:858`, `:883`, `:905`).
+    ///
+    /// Fails before the fix, when `noWorms` was not modelled at all: Devourers came straight
+    /// through a town and through a walled base's own walls.
+    #[test]
+    fn a_town_or_a_wall_keeps_the_burrowers_out() {
+        assert!(!no_worms(plain()), "an empty wilderness has worms in it");
+        for town in 1..5 {
+            assert!(
+                no_worms(Conditions {
+                    town_npcs: town,
+                    ..plain()
+                }),
+                "{town} residents should stop worms",
+            );
+        }
+        assert!(
+            no_worms(Conditions {
+                behind_a_house_wall: true,
+                ..plain()
+            }),
+            "so should a wall at your own back, with no town at all",
+        );
+        // An event overrules the town, but not the wall.
+        for town in 0..5 {
+            assert!(
+                !no_worms(Conditions {
+                    town_npcs: town,
+                    blood_moon: true,
+                    day_time: false,
+                    ..plain()
+                }),
+                "a blood moon brings worms to a town of {town}",
+            );
+        }
+        assert!(
+            no_worms(Conditions {
+                behind_a_house_wall: true,
+                blood_moon: true,
+                day_time: false,
+                ..plain()
+            }),
+            "the wall is not part of the town's event gate",
+        );
+
+        // The gated set is the Devourer branch and nothing else this server fields.
+        assert_eq!(NO_WORMS_GATES, [7, 98]);
+        assert!(
+            !NO_WORMS_GATES.contains(&39),
+            "the underworld's Bone Serpent has no such gate in the game (NPC.cs:4885)",
         );
     }
 
@@ -1521,27 +1618,26 @@ pub fn try_spawn(
 
         // The rate and cap are the player's own, not one number for the world: two people in the
         // same world can be standing in a quiet forest and a busy cavern at the same moment.
-        let (mut rate, band, spawn_friendly) = rates(
-            Conditions {
-                depth: rate_depth_at(world, py),
-                biome: player_biome,
-                hard_mode: world.progress.hard_mode,
-                day_time: world.day_time,
-                blood_moon: world.blood_moon,
-                eclipse: world.eclipse,
-                // `NPC.cs:543` and `:772` both carry the height half of this condition.
-                event_moon: (world.pumpkin_moon || world.snow_moon)
-                    && py < i32::from(world.surface),
-                town_npcs: town_npcs_near(npcs, player.position),
-                nearby_active_npcs: near,
-                // `NPC.cs:686`, `player.position.Y / 16 > (worldSurface + rockLayer) / 2`.
-                below_dirt_midline: py
-                    > (i32::from(world.surface) + i32::from(world.rock_layer)) / 2,
-                downed_boss3: world.progress.downed_boss3,
-                active_players,
-            },
-            rng,
-        );
+        let conditions = Conditions {
+            depth: rate_depth_at(world, py),
+            biome: player_biome,
+            hard_mode: world.progress.hard_mode,
+            day_time: world.day_time,
+            blood_moon: world.blood_moon,
+            eclipse: world.eclipse,
+            // `NPC.cs:543` and `:772` both carry the height half of this condition.
+            event_moon: (world.pumpkin_moon || world.snow_moon) && py < i32::from(world.surface),
+            town_npcs: town_npcs_near(npcs, player.position),
+            nearby_active_npcs: near,
+            // `NPC.cs:686`, `player.position.Y / 16 > (worldSurface + rockLayer) / 2`.
+            below_dirt_midline: py > (i32::from(world.surface) + i32::from(world.rock_layer)) / 2,
+            downed_boss3: world.progress.downed_boss3,
+            // `NPC.cs:411`, read at the player's own tile.
+            behind_a_house_wall: terrustia_proto::housing::wall_encloses(world.tile(px, py).wall),
+            active_players,
+        };
+        let (mut rate, band, spawn_friendly) = rates(conditions, rng);
+        let no_worms = no_worms(conditions);
         // This player's own near-player cap, checked before the rate roll, exactly as the game does
         // (`NPC.cs:312-317`: `nearbyActiveNPCs >= maxSpawns` first, then `rand.Next(spawnRate)`).
         if near >= band {
@@ -1705,6 +1801,13 @@ pub fn try_spawn(
                     candidates.extend_from_slice(bloody);
                     if world_specific {
                         candidates.push(CAVERN_SENTINEL);
+                    }
+                    // `noWorms` (`NPC.cs:3704`): a town, or a wall at the player's back, keeps
+                    // burrowers out. Dropping them from the draw rather than throwing the whole
+                    // attempt away is what the game's `else if` chain amounts to: the branch is
+                    // skipped and a later one answers instead.
+                    if no_worms {
+                        candidates.retain(|ty| !NO_WORMS_GATES.contains(ty));
                     }
                     let alive_count = |ty: u16| {
                         npcs.iter()
@@ -2627,6 +2730,70 @@ mod tests {
         far.spawn(MOON_LORD, ((tx + 500) as f32 * 16.0, ty as f32 * 16.0))
             .expect("a slot");
         assert!(count(&far, 4) > 0, "a distant Moon Lord is not this fight");
+    }
+
+    /// End to end: a wall at the player's back keeps Devourers out of the draw while the rest of
+    /// the corruption still spawns (`NPC.cs:411`, `:3704`).
+    ///
+    /// Fails before the fix, when `noWorms` was not modelled: a walled base in the corruption still
+    /// had Devourers coming through the floor.
+    #[test]
+    fn a_wall_at_your_back_keeps_devourers_out_of_a_corrupt_pool() {
+        const DEVOURER: u16 = 7;
+        let mut world = World::empty(800, 600, "corrupt");
+        world.surface = 100;
+        world.rock_layer = 200;
+        let floor = 90;
+        // A wide band of ebonstone, well past `EVIL_THRESHOLD`, with a floor to stand on.
+        for x in 250..550 {
+            for y in floor..floor + 30 {
+                world.set_tile(x, y, terrustia_proto::Tile::block(23));
+            }
+        }
+        let (px, py) = (400, floor - 1);
+        let npcs = NpcStore::new();
+        let players = player_at((px as f32 * 16.0, py as f32 * 16.0));
+
+        let run = |world: &World, seed: u64| {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..40_000 {
+                for (npc_type, _) in try_spawn(
+                    world,
+                    &npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
+                    &mut rng,
+                ) {
+                    seen.insert(npc_type);
+                }
+            }
+            seen
+        };
+
+        assert_eq!(biome_at(&world, px, py), Biome::Corruption);
+        let wild = run(&world, 12);
+        assert!(
+            wild.contains(&DEVOURER),
+            "an unwalled corruption should send Devourers: {wild:?}",
+        );
+
+        // Now put a house wall behind the player, and nothing else.
+        let mut walled = world.tile(px, py);
+        walled.wall = 4;
+        world.set_tile(px, py, walled);
+
+        let sheltered = run(&world, 12);
+        assert!(
+            !sheltered.contains(&DEVOURER),
+            "a wall at your back stops burrowers: {sheltered:?}",
+        );
+        assert!(
+            !sheltered.is_empty(),
+            "but not everything else, or this proves nothing",
+        );
     }
 
     /// Lava is refused at any depth and water is not refused at all (`NPC.cs:5431-5442`).
