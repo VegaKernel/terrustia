@@ -217,7 +217,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
         }
     }
     // Mid-teleport it cannot be hurt, which is the window the fight gives you to reposition.
-    npc.stats.dont_take_damage = gone;
+    npc.invulnerable = gone;
 
     if npc.velocity.1 == 0.0 {
         npc.velocity.0 *= 0.8;
@@ -580,11 +580,17 @@ mod tests {
         k.ai[1] = FADING_OUT;
         k.ai[0] = KING_SLIME_FADE_OUT - 1.0;
         update(&mut k, &world(&tiles, t), &mut rng());
-        assert!(k.stats.dont_take_damage, "untouchable as it goes");
+        assert!(k.invulnerable, "untouchable as it goes");
+        assert!(
+            !k.take_damage(500, 0.0, 1) && k.life == k.life_max,
+            "and a hit through `strike` is refused"
+        );
         // And vulnerable again once it is back.
         k.ai[1] = 0.0;
         update(&mut k, &world(&tiles, t), &mut rng());
-        assert!(!k.stats.dont_take_damage);
+        assert!(!k.invulnerable);
+        k.take_damage(500, 0.0, 1);
+        assert!(k.life < k.life_max, "and the hit lands again");
     }
 
     #[test]

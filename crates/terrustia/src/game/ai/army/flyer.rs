@@ -221,7 +221,7 @@ fn burst(npc: &mut Npc) {
         cy - DIVING_FLYER_EXPLOSION as f32 / 2.0,
     );
     npc.velocity = (0.0, 0.0);
-    npc.damage_bonus = DIVING_FLYER_EXPLOSION_DAMAGE as f32 / npc.stats.damage.max(1) as f32;
+    npc.set_contact_damage(DIVING_FLYER_EXPLOSION_DAMAGE);
 }
 
 #[cfg(test)]

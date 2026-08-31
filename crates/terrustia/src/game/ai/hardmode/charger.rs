@@ -211,7 +211,7 @@ pub fn charger(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallR
         // The blast *is* the hitbox: it swells, hits everything inside it, and is gone.
         npc.resize(DRONE_BLAST_SIZE, DRONE_BLAST_SIZE);
         npc.velocity = (0.0, 0.0);
-        npc.damage_bonus = DRONE_BLAST_DAMAGE as f32 / npc.stats.damage.max(1) as f32;
+        npc.set_contact_damage(DRONE_BLAST_DAMAGE);
         npc.alpha = 255;
         npc.ai[1] += 1.0;
         if npc.ai[1] >= DRONE_BLAST_TICKS {

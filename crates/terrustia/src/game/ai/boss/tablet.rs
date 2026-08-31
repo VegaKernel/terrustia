@@ -63,6 +63,10 @@ pub fn tablet(npc: &mut Npc, world: &World<'_, impl TileView>, attendants: usize
         if attendants > 0 {
             return out;
         }
+        // All three, as `NPC.cs:37183-37185` writes them. `ai[1]` is read by nothing on this
+        // server, but it is not a dead write: vanilla keeps its attendants' handles in `ai[0..2]`
+        // and clearing them is part of the same statement, and every `ai` slot is synced, so a
+        // client watching the tablet break sees the numbers the game would have sent.
         npc.ai[0] = -1.0;
         npc.ai[1] = 0.0;
         npc.ai[3] = 0.0;
@@ -162,6 +166,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state: 0.0,
+            phase: 0.0,
             health: 1.0,
         }
     }

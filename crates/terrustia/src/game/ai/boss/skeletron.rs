@@ -57,6 +57,14 @@ pub struct Parent {
     pub time_left: i32,
     /// Which state the parent is in, from its own `ai[1]`.
     pub state: f32,
+    /// The parent's own `ai[0]`.
+    ///
+    /// Skeletron and the Golem keep their phase in `ai[1]`, which is what [`Self::state`] carries,
+    /// but the Moon Lord keeps its in `ai[0]` and uses `ai[1]` for the timer inside that phase. A
+    /// part that wanted to know its core had started dying was reading `ai[1] == 2`, which is true
+    /// for exactly one tick of the death drama's own counter: right answer, wrong reason, and it
+    /// would have gone wrong the moment either number moved.
+    pub phase: f32,
     /// How much of its health it has left, from zero to one.
     pub health: f32,
 }
@@ -128,7 +136,17 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
         npc.dirty = true;
     }
 
-    npc.stats.defense = npc.stats.defense.max(0);
+    // Back to the type's armour, every tick, before this tick's modifiers go on
+    // (`NPC.cs:22019`, `defense = defDefense;` as the first statement of the whole style).
+    //
+    // This wrote `npc.stats.defense`, which nothing reads: combat takes `npc.defense`
+    // (`dispatch.rs`, "Live armour, not the type's"), and every other boss writes that. Worse, it
+    // was a clamp rather than a reset, so the modifiers below accumulated permanently instead of
+    // being rebuilt each tick and settled to zero after the first spin. All three of this fight's
+    // armour mechanics were inert: the expert per-hand bonus, the spin's ten-point window (the
+    // whole point of the fight), and the dawn enrage's 9999, which is what makes daylight a
+    // fail-state rather than a nuisance.
+    npc.defense = npc.stats.defense;
 
     // Expert mode: every living hand toughens the head, and once few enough are left (or it is
     // hurt enough) it starts throwing a skull barrage of its own (`NPC.cs:22059-22114`).
@@ -138,7 +156,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
         world.count(SKELETRON_HAND)
     };
     if world.conditions.expert {
-        npc.stats.defense += living_hands as i32 * SKELETRON_EXPERT_HAND_DEFENSE;
+        npc.defense += living_hands as i32 * SKELETRON_EXPERT_HAND_DEFENSE;
     }
 
     // Nobody within two thousand pixels on either axis, or nobody left alive.
@@ -226,8 +244,8 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
             across_cap,
         );
     } else if npc.ai[1] == SPINNING {
-        // The window: ten points off its defence while it grinds at you.
-        npc.stats.defense -= SKELETRON_SPIN_DEFENSE;
+        // The window: ten points off its defence while it grinds at you (`NPC.cs:22264`).
+        npc.defense -= SKELETRON_SPIN_DEFENSE;
         npc.ai[2] += 1.0;
         if npc.ai[2] >= SKELETRON_SPIN_TICKS {
             npc.ai[2] = 0.0;
@@ -249,9 +267,13 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
         let k = spin_speed / reach;
         npc.velocity = (dx * k, dy * k);
     } else if npc.ai[1] == ENRAGED {
-        // Untouchable and fatal.
-        npc.stats.damage = SKELETRON_ENRAGED_STAT;
-        npc.stats.defense = SKELETRON_ENRAGED_STAT;
+        // Untouchable and fatal (`NPC.cs:22357-22358`, `damage = 9999; defense = 9999;`). Both are
+        // the live numbers, so both are written where combat reads them: `defense` outright, and
+        // the damage as the multiplier over the type's own that `Npc::contact_damage` applies.
+        // Written to `stats` instead, the defence went nowhere at all and a ranged player killed
+        // the enraged boss in seconds, which is to say daylight was not a fail-state.
+        npc.damage_bonus = SKELETRON_ENRAGED_STAT as f32 / npc.stats.damage.max(1) as f32;
+        npc.defense = SKELETRON_ENRAGED_STAT;
         npc.rotation += f32::from(npc.direction) * SKELETRON_SPIN_RATE;
         let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
         let reach = (dx * dx + dy * dy).sqrt().max(0.01);
@@ -419,6 +441,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state: HOVERING,
+            phase: 0.0,
             health: 1.0,
         }
     }
@@ -481,7 +504,7 @@ mod tests {
         let raised = head(&mut g, &world(&tiles, t), &mut r).spawn;
         assert!(raised.is_empty());
         assert_eq!(g.ai[1], ENRAGED);
-        assert_eq!(g.stats.defense, SKELETRON_ENRAGED_STAT);
+        assert_eq!(g.defense, SKELETRON_ENRAGED_STAT);
     }
 
     #[test]
@@ -505,6 +528,12 @@ mod tests {
     }
 
     /// The whole fight in one number: the spin is when the head can actually be hurt.
+    ///
+    /// It has to be the *live* `defense`, which is what combat reads (`dispatch.rs`, "Live armour,
+    /// not the type's"). This asserted `stats.defense`, which nothing reads, and the routine wrote
+    /// only that, so the window this test is named after did not exist. It was also a permanent
+    /// subtraction rather than one rebuilt each tick from the type's armour: after four hundred
+    /// spin ticks the head sat at zero armour for the rest of the fight and never went back up.
     #[test]
     fn spinning_is_when_its_guard_drops() {
         let tiles = Dungeon;
@@ -512,10 +541,21 @@ mod tests {
         let mut r = rng();
         let t = Some(player_at(10_000.0, 10_000.0));
         head(&mut s, &world(&tiles, t), &mut r);
-        let guarded = s.stats.defense;
+        let guarded = s.defense;
+        assert_eq!(guarded, s.stats.defense, "hovering, it is the type's own");
         s.ai[1] = SPINNING;
         head(&mut s, &world(&tiles, t), &mut r);
-        assert_eq!(s.stats.defense, guarded - SKELETRON_SPIN_DEFENSE);
+        assert_eq!(s.defense, guarded - SKELETRON_SPIN_DEFENSE);
+
+        // A second spin tick takes the same ten off the same base, not another ten off the last
+        // answer: `NPC.cs:22019` resets to `defDefense` before every tick's modifiers.
+        head(&mut s, &world(&tiles, t), &mut r);
+        assert_eq!(s.defense, guarded - SKELETRON_SPIN_DEFENSE);
+
+        // And back up again when it stops.
+        s.ai[1] = HOVERING;
+        head(&mut s, &world(&tiles, t), &mut r);
+        assert_eq!(s.defense, guarded, "the guard comes back");
     }
 
     #[test]
@@ -529,7 +569,16 @@ mod tests {
         head(&mut s, &day, &mut r);
         head(&mut s, &day, &mut r);
         assert_eq!(s.ai[1], ENRAGED);
-        assert_eq!(s.stats.damage, SKELETRON_ENRAGED_STAT);
+        assert_eq!(
+            s.contact_damage(),
+            SKELETRON_ENRAGED_STAT,
+            "touching it at dawn is lethal (`NPC.cs:22357`)"
+        );
+        // And the other half of `NPC.cs:22357-22358`, which was written to a field nothing reads:
+        // 9999 armour, so `damage_taken`'s floor of one means about four and a half thousand hits.
+        // Without it the enraged boss kept its table armour of ten and a ranged player killed it in
+        // seconds, so the dawn fail-state did not fail.
+        assert_eq!(s.defense, SKELETRON_ENRAGED_STAT);
         assert!(s.time_left > 50, "it does not leave, it kills you");
     }
 
@@ -653,7 +702,7 @@ mod tests {
 
         let mut classic = skeletron();
         head(&mut classic, &world(&tiles, t), &mut r);
-        let classic_defense = classic.stats.defense;
+        let classic_defense = classic.defense;
 
         let mut expert = skeletron();
         let hands = [(SKELETRON_HAND, 2usize)];
@@ -663,7 +712,7 @@ mod tests {
         head(&mut expert, &w, &mut r);
 
         assert_eq!(
-            expert.stats.defense,
+            expert.defense,
             classic_defense + 2 * SKELETRON_EXPERT_HAND_DEFENSE,
             "two living hands should add fifty defence"
         );

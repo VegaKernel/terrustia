@@ -140,6 +140,11 @@ pub fn pumpking(
         if npc.velocity.1 < 0.0 {
             npc.velocity.1 *= 0.95;
         }
+        // And the horizontal brake, `velocity.X *= 0.95f` (`NPC.cs:33479`), which was missed. It is
+        // gentler than the daytime sink's 0.9 above, but it is there: without it a Pumpking that
+        // lost you kept the whole of its last hover speed sideways for ever and sailed off across
+        // the arena instead of settling and sinking.
+        npc.velocity.0 *= 0.95;
         npc.rotation = npc.velocity.0 * -0.02;
         npc.time_left = npc.time_left.min(500);
         return out;
@@ -714,6 +719,14 @@ mod tests {
             (p.velocity.1 - 0.1).abs() < 1e-4,
             "the gentle 0.1 leaving drift, not the 0.3 daytime sink, got {}",
             p.velocity.1
+        );
+        // And the horizontal brake, `velocity.X *= 0.95f` (`NPC.cs:33479`), which was missed
+        // entirely: without it a Pumpking that lost you kept its whole last hover speed sideways
+        // and sailed off across the arena instead of settling.
+        assert!(
+            (p.velocity.0 - 4.0 * 0.95).abs() < 1e-4,
+            "it brakes sideways too, got {}",
+            p.velocity.0
         );
         assert!(
             p.time_left <= 500,

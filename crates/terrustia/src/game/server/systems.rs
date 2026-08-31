@@ -27,6 +27,19 @@ fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
     occupants.iter().any(|&b| boxes_overlap(tile, b))
 }
 
+/// The facts about *this* dead NPC that its loot depends on, read off it before the table lets it
+/// go. Every one of these is a per-instance condition in `ItemDropDatabase`, not a fact about the
+/// type: two NPCs of the same type dying side by side can answer them differently.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeadNpc {
+    /// It came out of a statue, so a farm cannot grind the blood-moon-exclusive drops.
+    from_statue: bool,
+    /// It was the Clothier's repeatable vanity Skeletron rather than the ordinary boss.
+    red_hat_skeletron: bool,
+    /// This Empress's fight was begun in daylight, which is the Terraprisma's only gate.
+    empress_genuinely_enraged: bool,
+}
+
 impl GameServer {
     /// Advance every NPC and tell clients about the ones that changed.
     /// Run every NPC's buffs: count the timers down, work out what they cost, and tell clients.
@@ -86,9 +99,7 @@ impl GameServer {
             };
 
             let immortal = is_immortal(npc);
-            let toll = npc
-                .buffs
-                .dots(&around, immortal, npc.stats.dont_take_damage);
+            let toll = npc.buffs.dots(&around, immortal, npc.invulnerable);
             if toll.healed > 0 && npc.life < npc.life_max {
                 npc.life = (npc.life + toll.healed).min(npc.life_max);
                 npc.dirty = true;
@@ -263,6 +274,11 @@ impl GameServer {
         let mut screams = 0usize;
         let mut roars: Vec<(f32, f32)> = Vec::new();
         let mut rituals: Vec<(f32, f32)> = Vec::new();
+        let mut clear_stage = false;
+        // A boss that wants some of its own minions destroyed, as (its slot, their type, how many).
+        let mut culls: Vec<(u8, u16, usize)> = Vec::new();
+        // Slots of NPCs one of whose parts was just destroyed and that owe a penalty for it.
+        let mut punished: Vec<u8> = Vec::new();
         let mut auras: Vec<((f32, f32), f32)> = Vec::new();
         // A buff a routine wants put straight onto one named player, as (slot, buff id, ticks) —
         // a latched nebula headcrab's Obstructed is currently the only source of these
@@ -477,6 +493,7 @@ impl GameServer {
                                 sprite_direction: n.sprite_direction,
                                 time_left: n.time_left,
                                 state: n.ai[1],
+                                phase: n.ai[0],
                                 health: n.life as f32 / n.life_max.max(1) as f32,
                             },
                         )
@@ -663,6 +680,19 @@ impl GameServer {
                 // The tablet finished breaking: the Cultist rises where it stood.
                 if std::mem::take(&mut ai_out.ritual_complete) {
                     rituals.push(npc.center());
+                }
+                // BS3-M5: a second into the Moon Lord's death drama the stage is cleared.
+                clear_stage |= std::mem::take(&mut ai_out.cleared_stage);
+                // The Lunatic Cultist's ritual, both ways round. A right guess destroys some of
+                // its own decoys; a decoy destroyed by a wrong guess stuns whatever it was a copy
+                // of. Both reach past the NPC being ticked, so both are carried out below.
+                if let Some((npc_type, count)) = ai_out.cull_kin.take() {
+                    culls.push((index, npc_type, count));
+                }
+                if std::mem::take(&mut ai_out.punish_owner)
+                    && let Some(owner) = npc.follows_boss
+                {
+                    punished.push(owner);
                 }
                 // A leech that got home puts its load into whichever part is worst off, which is
                 // what makes ignoring them cost you work you have already done.
@@ -971,6 +1001,60 @@ impl GameServer {
         // A probe that got away with what it saw brings the Martians down on the world.
         if escaped_probe {
             self.start_invasion(Invasion::Martian);
+        }
+
+        // The Lunatic Cultist's right guess: up to N of its own decoys, destroyed outright. A bare
+        // kill (`NPC.cs:65243-65262` sets `life = 0; active = false;`), so no loot and no credit.
+        for (owner, npc_type, count) in culls {
+            let doomed: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == npc_type && n.follows_boss == Some(owner))
+                .map(|(index, _)| index)
+                .take(count)
+                .collect();
+            for index in doomed {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+            }
+        }
+
+        // And its wrong guess: the decoy that took the hit has gone, and whatever it was a copy of
+        // is stunned for two seconds.
+        for owner in punished {
+            if let Some(npc) = self.npcs.get_mut(owner)
+                && npc.npc_type == terrustia_proto::npc_params::CULTIST
+            {
+                crate::game::ai::boss::cultist::punish(npc);
+            }
+        }
+
+        // BS3-M5: a second into the Moon Lord's death drama, every True Eye still hunting is killed
+        // outright and every shot the fight left in the air is dropped (`NPC.cs:41752-41764`). The
+        // eyes go through `remove`, not `npc_died`: vanilla clears them with a bare
+        // `HitEffect(); active = false;`, which pays no loot and records no kill.
+        if clear_stage {
+            let eyes: Vec<u8> = self
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == terrustia_proto::npc_params::MOON_LORD_FREE_EYE)
+                .map(|(index, _)| index)
+                .collect();
+            for index in eyes {
+                self.npcs.remove(index);
+                self.broadcast_npc_death(index);
+            }
+            let shots: Vec<u16> = self
+                .projectiles
+                .iter()
+                .filter(|(_, p)| {
+                    crate::game::ai::boss::moon_lord::MOON_LORD_SHOTS.contains(&p.projectile_type)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            for index in shots {
+                self.kill_projectile(index);
+            }
         }
 
         // Deaths first: `npc_died` drops the loot and records the kill, which is the difference
@@ -1282,10 +1366,13 @@ impl GameServer {
             // the player's left edge, so contact knockback shoved the player the wrong way.
             let player_centre = box_at.0 + box_size.0 / 2.0;
 
-            // An enemy you are standing in.
+            // An enemy you are standing in. The skip is on the *live* damage, as vanilla's own
+            // `Main.npc[i].damage <= 0` is (`Player.cs:31564`), so a routine that has zeroed its
+            // damage for the phase it is in - a Big Mimic that has given up, say - is walked
+            // through rather than merely hit for the table's minimum of one.
             let hit = self.npcs.iter().find(|(_, npc)| {
                 !npc.stats.friendly
-                    && npc.stats.damage > 0
+                    && npc.contact_damage() > 0
                     && npc.is_alive()
                     && npc.position.0 < box_at.0 + box_size.0
                     && npc.position.0 + npc.width() > box_at.0
@@ -1293,11 +1380,15 @@ impl GameServer {
                     && npc.position.1 + npc.height() > box_at.1
             });
             if let Some((index, npc)) = hit {
-                // Contact damage is the NPC's own `damage`, which `ScaleStats` has already scaled by
-                // difficulty at spawn, so no further multiplier here (`Player.cs:31623`, which reads
+                // Contact damage is the NPC's *live* `damage` (`Player.cs:31623` reads
                 // `Main.npc[i].damage` straight, times a GetMeleeCollisionData multiplier we leave
-                // at one and a DamageVar the owning client rolls for itself).
-                let damage = npc.stats.damage;
+                // at one and a DamageVar the owning client rolls for itself). Vanilla's live number
+                // is the spawn-scaled `defDamage` as the routine currently has it, which is
+                // [`Npc::contact_damage`]: the difficulty scaling from `ScaleStats` plus whatever
+                // phase multiplier the AI is holding. Reading `stats.damage` here instead dropped
+                // every one of those phases on the floor, so a Prime spin hit like a hover and a
+                // Mothron chase hit twice as hard as it should.
+                let damage = npc.contact_damage();
                 let direction = if npc.center().0 < player_centre {
                     1
                 } else {
@@ -1400,7 +1491,7 @@ impl GameServer {
             let attacker = self.npcs.iter().find(|(other, n)| {
                 *other != index
                     && !n.stats.friendly
-                    && n.stats.damage > 0
+                    && n.contact_damage() > 0
                     && n.is_alive()
                     && n.position.0 < at.0 + size.0
                     && n.position.0 + n.width() > at.0
@@ -1410,7 +1501,9 @@ impl GameServer {
             let Some((_, enemy)) = attacker else {
                 continue;
             };
-            let (damage, from_x) = (enemy.stats.damage, enemy.center().0);
+            // The live number again, not the table's: a rolling tortoise that walks through a town
+            // hits the residents as hard as it hits a player.
+            let (damage, from_x) = (enemy.contact_damage(), enemy.center().0);
             let Some(resident) = self.npcs.get_mut(index) else {
                 continue;
             };
@@ -2024,6 +2117,8 @@ impl GameServer {
     /// a debuff can finish something off between two ticks, with no player credited, and every
     /// one of these still has to happen.
     pub(super) fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
+        // Named rather than three positional bools, because they are all `false` most of the time
+        // and swapping two of them would be silent.
         // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
         // *this* NPC came from a statue, not just whether one exists somewhere in the world, and
         // `RedHatSkeletronAdjustmentsEnabled` (`NPC.cs:67435-67446`) reads `ai[3]` off this exact
@@ -2033,6 +2128,13 @@ impl GameServer {
         let from_statue = removed.as_ref().is_some_and(|npc| npc.from_statue);
         let red_hat_skeletron =
             npc_type == 35 && removed.as_ref().is_some_and(|npc| npc.ai[3] == 1.0);
+        // The Terraprisma's only gate, and per-instance for the same reason:
+        // `AI_120_HallowBoss_IsGenuinelyEnraged` (`NPC.cs:46321-46328`) asks *this* Empress whether
+        // her fight was begun in daylight, which her own routine records in `ai[3]`.
+        let empress_genuinely_enraged = npc_type == 636
+            && removed
+                .as_ref()
+                .is_some_and(|npc| matches!(npc.ai[3] as i32, 2 | 3));
         // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
         let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
         self.broadcast_npc_death(index);
@@ -2048,7 +2150,15 @@ impl GameServer {
             value
         };
         self.drop_coins(value, center, midas);
-        self.drop_loot(npc_type, center, from_statue, red_hat_skeletron);
+        self.drop_loot(
+            npc_type,
+            center,
+            DeadNpc {
+                from_statue,
+                red_hat_skeletron,
+                empress_genuinely_enraged,
+            },
+        );
         self.note_invasion_kill(npc_type);
         self.army.note_corpse(npc_type, (center.0, center.1 + 16.0));
         self.note_army_kill(npc_type);
@@ -2103,13 +2213,12 @@ impl GameServer {
     /// On top of that come the drops that depend on the world rather than the thing that died: a
     /// treasure bag in expert, a trophy, and the hardmode materials that only exist once the wall
     /// has fallen.
-    fn drop_loot(
-        &mut self,
-        npc_type: u16,
-        center: (f32, f32),
-        from_statue: bool,
-        red_hat_skeletron: bool,
-    ) {
+    fn drop_loot(&mut self, npc_type: u16, center: (f32, f32), dead: DeadNpc) {
+        let DeadNpc {
+            from_statue,
+            red_hat_skeletron,
+            empress_genuinely_enraged,
+        } = dead;
         let (tx, ty) = (
             (center.0 / crate::game::npc::TILE) as i32,
             (center.1 / crate::game::npc::TILE) as i32,
@@ -2149,6 +2258,7 @@ impl GameServer {
             pumpkin_moon_wave: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin))
                 .then_some(self.moon.wave),
             red_hat_skeletron,
+            empress_genuinely_enraged,
         };
 
         // Pools that give exactly one of their options.
@@ -7693,6 +7803,84 @@ mod godmode {
         );
     }
 
+    /// BS3-B1: contact damage is the *live* number, so the phase multiplier a routine wrote
+    /// actually lands. `Player.cs:31623` reads `Main.npc[i].damage`, which is exactly the field
+    /// `NPC.cs:27938-27939` has just doubled for the Prime's spin, and Mothron's chase has just
+    /// halved (`NPC.cs:38387`). This server keeps the fixed half in `stats.damage` and the routine's
+    /// half in `damage_bonus`, and read only the first: every one of the thirteen production writes
+    /// of `damage_bonus` was discarded. Reverting `contact_damage()` to `npc.stats.damage` turns
+    /// both halves of this red - the doubled hit reads as a plain one, and the given-up Big Mimic
+    /// still hits for full.
+    #[test]
+    fn contact_damage_carries_the_routines_phase_multiplier() {
+        let (mut server, _rx) = with_one_player(GameServer::new(Config::default(), tiny_world()));
+        let pos = (1000.0, 1000.0);
+        server.players[0].as_mut().unwrap().position = pos;
+
+        // A Demon Eye sitting on the player, mid-way through some phase that hits twice as hard.
+        let index = server.npcs.spawn(2, pos).expect("a slot");
+        let base = {
+            let npc = server.npcs.get_mut(index).expect("just spawned");
+            npc.damage_bonus = 2.0;
+            npc.stats.damage
+        };
+        server.tick_contact_damage();
+        let after_double = server.players[0].as_ref().unwrap().life;
+        assert_eq!(
+            100 - after_double,
+            (base * 2) as i16,
+            "a doubled phase has to hit for double"
+        );
+
+        // And a routine that has given up hits for nothing at all, the way a Big Mimic that has
+        // stopped fighting does (`big_mimic.rs`, `damage_bonus = 0.0`).
+        {
+            let p = server.players[0].as_mut().unwrap();
+            p.life = 100;
+            p.immune_ticks = 0;
+        }
+        server
+            .npcs
+            .get_mut(index)
+            .expect("still there")
+            .damage_bonus = 0.0;
+        server.tick_contact_damage();
+        assert_eq!(
+            server.players[0].as_ref().unwrap().life,
+            100,
+            "a zeroed phase does no damage"
+        );
+    }
+
+    /// BS3-B1, the other half: a routine that names an absolute vanilla-normal figure is naming a
+    /// *pre-scaling* one, because vanilla writes those through `GetAttackDamage_ScaledByDifficulty`
+    /// (`NPC.cs:7063`), which applies the difficulty multiplier itself. Plantera's second form
+    /// "hits for 70" (`NPC.cs:32209`), so an expert one hits for 140. Measuring the bonus against
+    /// the already-scaled `stats.damage` instead of the table's raw damage cancels the world's
+    /// difficulty straight back out and leaves it at a classic 70.
+    #[test]
+    fn an_absolute_phase_damage_still_scales_with_the_worlds_difficulty() {
+        let mut classic = GameServer::new(Config::default(), tiny_world());
+        let mut expert = GameServer::new(Config::default(), tiny_world());
+        expert.world.game_mode = 1;
+        for server in [&mut classic, &mut expert] {
+            let difficulty = server.effective_difficulty();
+            server.npcs.set_scaling(crate::game::npc::Scaling {
+                difficulty,
+                players: 1,
+            });
+        }
+
+        let hits = |server: &mut GameServer| {
+            let index = server.npcs.spawn(262, (1000.0, 1000.0)).expect("Plantera");
+            let npc = server.npcs.get_mut(index).expect("just spawned");
+            npc.set_contact_damage(terrustia_proto::npc_params::PLANTERA_SECOND_DAMAGE);
+            npc.contact_damage()
+        };
+        assert_eq!(hits(&mut classic), 70, "classic: the plain figure");
+        assert_eq!(hits(&mut expert), 140, "expert: doubled by the difficulty");
+    }
+
     /// An expert boss hands every player its own bag over packet 90 and drops no loose coins (they
     /// ride inside the bag). The old path broadcast one shared bag as an ordinary item and paid the
     /// coins on top, so on a two-player server one player got the bag and the boss double-paid.
@@ -8115,7 +8303,7 @@ mod difficulty_slider {
         const TREASURE_BAG: i32 = 3318;
 
         let mut gentle = journey_at(0.0);
-        gentle.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
+        gentle.drop_loot(KING_SLIME, (0.0, 0.0), DeadNpc::default());
         assert!(
             !gentle
                 .items
@@ -8125,7 +8313,7 @@ mod difficulty_slider {
         );
 
         let mut fierce = journey_at(1.0);
-        fierce.drop_loot(KING_SLIME, (0.0, 0.0), false, false);
+        fierce.drop_loot(KING_SLIME, (0.0, 0.0), DeadNpc::default());
         assert!(
             fierce
                 .items
@@ -8873,7 +9061,7 @@ mod boss_drop_table_fixes {
     /// afterward belongs to that kill alone — no need to diff against a running total.
     fn kill_and_collect(server: &mut GameServer, npc_type: u16) -> Vec<(i32, i16)> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false, false);
+        server.drop_loot(npc_type, (0.0, 0.0), DeadNpc::default());
         let mut items: Vec<(i16, i32, i16)> = server
             .items
             .iter()
@@ -9126,6 +9314,42 @@ mod boss_drop_table_fixes {
         }
     }
 
+    /// The Terraprisma, driven through the real `npc_died` entry point.
+    ///
+    /// `RegisterBoss_HallowBoss` hangs item 5005 off a single gate,
+    /// `Conditions.EmpressOfLightIsGenuinelyEnraged` (`ItemDropDatabase.cs:333-334`), which asks
+    /// *this* Empress whether her fight was begun in daylight -
+    /// `AI_120_HallowBoss_IsGenuinelyEnraged` (`NPC.cs:46321-46328`), her own `ai[3]` being 2 or 3.
+    /// Her ai style already keeps that mark; the drop was simply absent from the tables, so the
+    /// hardest thing in the game could not be obtained at all. Dropping the `npc_type == 636` arm
+    /// in `conditional_drops` turns the first half of this red, and dropping the `ai[3]` read in
+    /// `npc_died` turns it red as well.
+    #[test]
+    fn a_daylight_empress_kill_drops_the_terraprisma_and_a_night_one_does_not() {
+        const EMPRESS: u16 = 636;
+        const TERRAPRISMA: i32 = 5005;
+
+        let dropped_with = |ai3: f32| {
+            let mut server = GameServer::new(Config::default(), tiny_world());
+            let index = server
+                .npcs
+                .spawn(EMPRESS, (0.0, 0.0))
+                .expect("a slot for the Empress");
+            server.npcs.get_mut(index).expect("just spawned").ai[3] = ai3;
+            server.items = ItemStore::new();
+            server.npc_died(index, EMPRESS, (0.0, 0.0), 0.0);
+            let ids: Vec<i32> = server.items.iter().map(|(_, it)| it.item.id).collect();
+            ids.contains(&TERRAPRISMA)
+        };
+
+        // 2 is "enraged from full health", 3 the same after she has turned into her second phase.
+        assert!(dropped_with(2.0), "a daylight kill earns it");
+        assert!(dropped_with(3.0), "and so does one after the turn");
+        // 0 is an ordinary night fight, 1 the same after the turn. Neither is the daylight fight.
+        assert!(!dropped_with(0.0), "a night fight does not");
+        assert!(!dropped_with(1.0), "nor a night fight past its turn");
+    }
+
     /// The control case: an ordinary Skeletron kill (`ai[3]` left at its default) must not carry
     /// the vanity set — otherwise every Skeletron kill would hand it out, which real vanilla never
     /// does outside the Clothier's own repeatable re-fight.
@@ -9179,7 +9403,7 @@ mod conditional_numerator_fixes {
     /// `boss_drop_table_fixes` for why resetting the store first makes this exact.
     fn kill_and_collect_ids(server: &mut GameServer, npc_type: u16) -> Vec<i32> {
         server.items = ItemStore::new();
-        server.drop_loot(npc_type, (0.0, 0.0), false, false);
+        server.drop_loot(npc_type, (0.0, 0.0), DeadNpc::default());
         let mut items: Vec<(i16, i32)> = server
             .items
             .iter()

@@ -162,12 +162,11 @@ pub fn plantera(
         } else {
             PLANTERA_DEFENSE
         };
-        npc.damage_bonus = (if enraged {
+        npc.set_contact_damage(if enraged {
             PLANTERA_DAMAGE * 2
         } else {
             PLANTERA_DAMAGE
-        }) as f32
-            / npc.stats.damage.max(1) as f32;
+        });
 
         // The charge fills faster at every threshold, and faster still out of the jungle.
         npc.local_ai[1] += 1.0;
@@ -242,12 +241,11 @@ pub fn plantera(
     } else {
         PLANTERA_SECOND_DEFENSE
     };
-    npc.damage_bonus = (if enraged {
+    npc.set_contact_damage(if enraged {
         PLANTERA_SECOND_DAMAGE * 2
     } else {
         PLANTERA_SECOND_DAMAGE
-    }) as f32
-        / npc.stats.damage.max(1) as f32;
+    });
 
     if npc.local_ai[0] == 1.0 {
         npc.local_ai[0] = 2.0;
@@ -562,6 +560,7 @@ mod tests {
             sprite_direction: 1,
             time_left: 3600,
             state: 0.0,
+            phase: 0.0,
             health,
         }
     }

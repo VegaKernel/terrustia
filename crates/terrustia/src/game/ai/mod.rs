@@ -555,8 +555,6 @@ pub struct Effects {
     pub detonated: bool,
     /// Life this one just carried back to whatever it belongs to.
     pub healed: i32,
-    /// Set while it is in a phase that bounces projectiles off rather than taking them.
-    pub reflecting: bool,
     /// How long the thing it just turned into should sit still before doing anything.
     pub rest_for: i32,
     /// Where this NPC wants whatever it is carrying to hang.
@@ -579,6 +577,16 @@ pub struct Effects {
     pub teleport_to: Option<(f32, f32)>,
     /// Set on the tick the Cultists' tablet finishes breaking, which is what raises their master.
     pub ritual_complete: bool,
+    /// Set on the one tick the Moon Lord's death drama clears the stage: every True Eye still
+    /// hunting is killed and every shot the fight left in the air is dropped
+    /// (`NPC.cs:41752-41764`).
+    pub cleared_stage: bool,
+    /// Minions of this NPC's own that it wants destroyed outright, as (type, how many at most).
+    /// The Lunatic Cultist's right-guess cull is the only source.
+    pub cull_kin: Option<(u16, usize)>,
+    /// Set by a part that wants whatever it hangs off punished for its destruction. A destroyed
+    /// Cultist decoy is the only source.
+    pub punish_owner: bool,
     /// A buff this NPC wants put straight onto a player, as (player slot, buff id, ticks) — a
     /// latched nebula headcrab riding a head applies `Obstructed` to its rider every tick it sits
     /// there (`NPC.cs:37508-37526`, `player22.AddBuff(163, 59)`).
@@ -817,7 +825,6 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         30 | 31 => {
             let out = boss::twins::twin(npc, world, rng);
             effects.shots.extend(out.shots);
-            effects.reflecting = out.reflecting;
             // MECH-1: as the Destroyer above. At dawn or with nobody left, both eyes climb away
             // and go. Left unconsumed the Twins hung in the sky for ever after daybreak.
             effects.expired = out.fleeing;
@@ -835,14 +842,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.died = out.died;
         }
         87 => {
-            let out = hardmode::big_mimic::big_mimic(npc, world, rng);
-            effects.reflecting = out.reflecting;
+            hardmode::big_mimic::big_mimic(npc, world, rng);
         }
         117 => {
             let helpers = world.count(terrustia_proto::npc_params::NAUTILUS_HELPER);
             let out = hardmode::nautilus::dreadnautilus(npc, world, helpers, rng);
             effects.shots.extend(out.base.shots);
-            effects.reflecting = out.reflecting;
             // Each helper arrives through a portal rather than simply appearing.
             for at in out.summons {
                 effects.shots.push(Shot {
@@ -934,6 +939,10 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let out = hardmode::invasion::dutchman(npc, world, rng, cannon);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
+            // A death, not a quiet despawn, exactly as the saucer above: losing the last cannon is
+            // `StrikeNPCNoInteraction(9999, 0f, 0)` in source (`NPC.cs:39275`), so it has to drop
+            // its loot and count toward the invasion.
+            effects.died = out.died;
         }
         72 => {
             // A pinned part is drawn on its parent, so it needs the parent's centre rather than
@@ -1111,6 +1120,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // of that drama is the kill. Routing it through `expired` removed it quietly: no
             // luminite, and `downed_moon_lord` never set, so the world did not record the win.
             effects.died = out.spent;
+            effects.cleared_stage = out.cleared_stage;
         }
         78 | 79 => {
             let out = boss::moon_lord::eye_socket(npc, world, world.parent);
@@ -1119,7 +1129,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         81 => {
-            boss::moon_lord::free_eye(npc, world);
+            let out = boss::moon_lord::free_eye(npc, world, world.parent);
+            effects.shots.extend(out.shots);
+            effects.expired = out.spent;
         }
         82 => {
             let out = boss::moon_lord::leech(npc, world.parent);
@@ -1154,6 +1166,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
             effects.teleport_to = out.move_to;
+            // The ritual's two consequences, both of which reach past this NPC: a right guess
+            // destroys some of the group, a wrong one stuns whatever the decoy was a copy of.
+            effects.cull_kin = out
+                .cull_clones
+                .map(|n| (terrustia_proto::npc_params::CULTIST_CLONE, n));
+            effects.punish_owner = out.punish_owner;
         }
         105 => {
             let out = army::crystal::crystal(npc, world.army.arena);

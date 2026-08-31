@@ -1946,7 +1946,14 @@ pub const EYE_SPIN_RAMP: f32 = 0.005;
 pub const EYE_SPIN_MAX: f32 = 0.5;
 
 /// Its damage and defence once it has split.
+///
+/// The damage is a pre-scaling figure that Expert Mode lerps *down* before the difficulty
+/// multiplier is applied (`NPC.cs:20447-20461`): 23 in classic, 18 in Expert and Master, and 20 in
+/// the `flag3` band where it is nearly dead. The multiplier is what makes an Expert one hit harder
+/// (18 x 2 = 36), not the base figure.
 pub const EYE_SECOND_FORM_DAMAGE: i32 = 23;
+pub const EYE_SECOND_FORM_DAMAGE_EXPERT: i32 = 18;
+pub const EYE_SECOND_FORM_DAMAGE_EXPERT_LOW: i32 = 20;
 pub const EYE_SECOND_FORM_DEFENSE: i32 = 0;
 /// Expert Mode strips even more armour once it is nearly dead (`flag2`/`flag3` in source, each
 /// overwriting the last since the lower threshold always implies the higher one).
@@ -2107,6 +2114,17 @@ pub const DEER_SHADOW_DAMAGE_PASSIVE: i32 = 10;
 pub const DEER_PASSIVE_SHADOW_SLOW: f32 = 80.0;
 pub const DEER_PASSIVE_SHADOW_FAST: f32 = 40.0;
 pub const DEER_PASSIVE_SHADOW_WAVES: f32 = 3.0;
+/// BS3-M4: a wave does not hit everybody. `Boss_CanShootExtraAt` (`NPC.cs:47474-47494`) takes each
+/// wave's index modulo three and only raises a hand for the players whose own slot matches, so any
+/// one player is picked by one wave in three: three waves are one hand each, not three. And it
+/// refuses outright past 1200 pixels from the boss, so running away from the fight really does stop
+/// the passive rain rather than merely spreading it out.
+pub const DEER_PASSIVE_SHADOW_ROTATION: u32 = 3;
+pub const DEER_PASSIVE_SHADOW_RANGE: f32 = 1200.0;
+/// How far from the player a hostile shadow hand comes up. `RandomizeInsanityShadowFor`'s own
+/// `num3 = isHostile ? 200f : 100f` (`Projectile.cs:43187`), used as the radius by all four of its
+/// placements. A wider ring gives the player room the game does not.
+pub const DEER_PASSIVE_SHADOW_RING: f32 = 200.0;
 
 /// Deerclops' states, as `ai[0]` records them.
 pub const DEER_STALKING: f32 = 0.0;
@@ -3437,6 +3455,9 @@ pub const TWIN_SPIN_RATE: f32 = 0.005;
 pub const TWIN_SPIN_CAP: f32 = 0.5;
 /// The second form hits half again as hard and soaks ten more.
 pub const TWIN_SECOND_DAMAGE: f32 = 1.5;
+/// For the worthy takes the second form's hover speed and acceleration up by a seventh
+/// (`NPC.cs:26944-26948`).
+pub const TWIN_GET_GOOD_GAIN: f32 = 1.15;
 pub const TWIN_SECOND_DEFENSE: i32 = 10;
 /// Its first-form shot only comes when it is above you and within this far.
 pub const TWIN_SHOT_RANGE: f32 = 400.0;
@@ -3479,7 +3500,13 @@ pub const DESTROYER_FLEE_SPEED: f32 = 32.0;
 pub const DESTROYER_FUSE_STEP: u32 = 4;
 pub const DESTROYER_FUSE: (u32, u32) = (1400, 26000);
 pub const DESTROYER_LASER: u16 = 100;
+/// `GetAttackDamage_ForProjectiles(22f, 18f)` (`NPC.cs:50399`): a launch-time lerp between a
+/// classic figure and a separate, lower expert one, which the impact-time
+/// `hostileDamageProjectileMultiplier` then doubles on top. `Remap` clamps outside classic..expert,
+/// so master reads the same 18 as expert. Using the classic 22 in every mode made an expert
+/// Destroyer's lasers 22% heavier than the game's.
 pub const DESTROYER_LASER_DAMAGE: i32 = 22;
+pub const DESTROYER_LASER_DAMAGE_EXPERT: i32 = 18;
 pub const DESTROYER_LASER_SPEED: f32 = 8.0;
 /// The aim is scattered twice: once in pixels before it is normalised, once in speed after.
 pub const DESTROYER_AIM_SPREAD: i32 = 20;
@@ -3523,15 +3550,26 @@ pub const PRIME_SPIN_SPEED: f32 = 2.0;
 pub const PRIME_SPIN_SPEED_EXPERT: f32 = 6.0;
 pub const PRIME_SPIN_RANGE_STEP: f32 = 50.0;
 pub const PRIME_SPIN_RANGE_FROM: f32 = 150.0;
+/// The first step is gentler than the rest: 1.05 past 150 pixels, then 1.1 at each of 200 through
+/// 600 (`NPC.cs:27968-28008`). Reading the first as 1.1 too made every expert spin past 150 pixels
+/// 4.76% fast, and the error compounded through every step above it.
+pub const PRIME_SPIN_RANGE_GAIN_FIRST: f32 = 1.05;
 pub const PRIME_SPIN_RANGE_GAIN: f32 = 1.1;
-/// Daylight enrages it: unkillable, and it runs you down.
+/// Daylight enrages it: `damage = 9999; defense = 9999;` (`NPC.cs:28034-28035`), and it runs you
+/// down. Both are live numbers, and neither is `dontTakeDamage`: the armour is what makes daylight
+/// a fail-state rather than a nuisance, and the damage is what makes touching it fatal.
+pub const PRIME_ENRAGED_STAT: i32 = 9999;
 pub const PRIME_ENRAGED_SPEED: f32 = 10.0;
 pub const PRIME_ENRAGED_GAIN: f32 = 100.0;
 pub const PRIME_ENRAGED_MIN: f32 = 8.0;
 pub const PRIME_ENRAGED_MAX: f32 = 32.0;
-/// Losing you entirely sends it down and away.
+/// Losing you entirely sends it down and away, with no terminal speed: vanilla's own 13-pixel clamp
+/// (`NPC.cs:28100-28103`) is inside the `IsMechQueenUp` half of that branch, and the ordinary fight
+/// simply accelerates (`NPC.cs:28105-28113`).
 pub const PRIME_LEAVE_SINK: f32 = 0.1;
-pub const PRIME_LEAVE_CAP: f32 = 13.0;
+/// How far into their attack timer the Vice and the Laser start, so the four arms do not switch in
+/// lockstep (`NPC.cs:27824`, `:27831`, `ai[3] = 150f`).
+pub const PRIME_ARM_HEAD_START: f32 = 150.0;
 pub const PRIME_LOSE_RANGE: f32 = 6000.0;
 
 /// One limb's numbers.
@@ -3644,6 +3682,8 @@ pub const GOLEM_HOP_UP_CAP: f32 = -19.1;
 pub const GOLEM_AIR_ACCEL: f32 = 0.2;
 pub const GOLEM_SLAM: f32 = 0.2;
 pub const GOLEM_AIR_SPEED: f32 = 3.0;
+/// For the worthy more than doubles it (`NPC.cs:46006-46010`, `num12 = 3f` becoming `7f`).
+pub const GOLEM_AIR_SPEED_GET_GOOD: f32 = 7.0;
 /// Past this it gives up entirely.
 pub const GOLEM_LEASH: f32 = 3000.0;
 
@@ -4298,12 +4338,28 @@ pub const CULTIST_ORBIT: (f32, f32) = (300.0, 200.0);
 pub const CULTIST_ORBIT_SPREAD: f32 = 0.4;
 pub const CULTIST_MOVE_STEP: f32 = 50.0;
 /// The ritual: it makes clones and only the real one flinches.
-pub const CULTIST_CLONES: usize = 4;
+///
+/// Not a fixed four. Each ritual tops the group up by at most two, and never past six in all
+/// (`NPC.cs:65808-65812`, `num28 = 6 - existing`, clamped to 2), so the first ritual is a choice
+/// between three and the last between seven. They are laid out on a circle of this radius around
+/// the boss, which then takes the slot furthest from the player (`NPC.cs:65798`, `:65826`).
+pub const CULTIST_CLONES_PER_RITUAL: usize = 2;
+pub const CULTIST_CLONES_MAX: usize = 6;
+pub const CULTIST_CLONE_RING: f32 = 180.0;
 pub const CULTIST_RITUAL_TICKS: f32 = 420.0;
 pub const CULTIST_RITUAL_WINDOW: (f32, f32) = (120.0, 420.0);
-/// Guessing wrong costs you: ten of its clones' lights survive, or three in expert.
-pub const CULTIST_WRONG_GUESS: i32 = 10;
-pub const CULTIST_WRONG_GUESS_EXPERT: i32 = 3;
+/// How many clones a *correct* guess destroys (`NPC.cs:65229-65232`, `num9`).
+///
+/// The name is vanilla's own framing: `num9` counts the ones that are culled, and the ten is more
+/// than can ever be out, so a classic guess clears the group outright. Expert's three is the real
+/// number: against a group grown past three, some always survive, and that asymmetry is the expert
+/// fight. This doc comment used to say the opposite - that these were the clones' *lights* that
+/// *survive* - which would have had anyone wiring it up implement the mechanic backwards.
+pub const CULTIST_RIGHT_GUESS_CULL: usize = 10;
+pub const CULTIST_RIGHT_GUESS_CULL_EXPERT: usize = 3;
+/// What a wrong guess costs: the decoy dies and the real one is stunned for two seconds
+/// (`NPC.cs:65203-65206` sets its owner to state 6, `NPC.cs:65936-65948` counts that state out).
+pub const CULTIST_STUN_TICKS: f32 = 120.0;
 
 /// The tablet the cultists gather at, and the devotes that kneel around it.
 pub const CULTIST_TABLET: u16 = 437;
@@ -4349,8 +4405,10 @@ pub const MOON_LORD_SCRIPTS: [[(u8, i32); 5]; 3] = [
 pub const MOON_LORD_BELOW: f32 = 130.0;
 pub const MOON_LORD_SPEED: f32 = 8.0;
 pub const MOON_LORD_ACCEL: f32 = 0.5;
-/// Its parts stand this far out from the core.
-pub const MOON_LORD_HAND_OUT: f32 = 400.0;
+/// Its parts stand this far out from the core: `Center + (350 * side, -100)` for a hand
+/// (`NPC.cs:42073`, `:42094`) and `Center + (0, -400)` for the head (`NPC.cs:42534`). The hands
+/// were fifty pixels too far out, which widens the whole arena the fight is fought in.
+pub const MOON_LORD_HAND_OUT: f32 = 350.0;
 pub const MOON_LORD_HAND_UP: f32 = 100.0;
 pub const MOON_LORD_HEAD_UP: f32 = 400.0;
 /// The opening and the death both take a second.
@@ -4378,12 +4436,58 @@ pub const MOON_LORD_BOLT_EVERY: f32 = 12.0;
 pub const MOON_LORD_BOLT_SPEED: f32 = 7.0;
 /// The head's deathray sweeps across nine seconds.
 pub const MOON_LORD_RAY_SWEEP: f32 = 540.0;
+
+/// How an eye socket's eyelid works: the whole "you cannot hurt it while the eye is shut" mechanic.
+///
+/// Each attack step names an openness from 0 (wide open) to 3 (shut). A counter eases one step a
+/// tick toward `openness * STEP` and is clamped at `SHUT`; the part takes no damage while the
+/// counter is at the cap (`dontTakeDamage = frameCounter >= 21.0`, `NPC.cs:42023` for a hand;
+/// `dontTakeDamage = localAI[3] >= 15f`, `NPC.cs:42532` for the head). The ramp is what makes it a
+/// window rather than a switch: a hand is shut for about a seventh of its cycle, the head for well
+/// over a third of its own.
+pub const EYE_SOCKET_LID_STEP_HAND: f32 = 7.0;
+pub const EYE_SOCKET_LID_SHUT_HAND: f32 = 21.0;
+pub const EYE_SOCKET_LID_STEP_HEAD: f32 = 5.0;
+pub const EYE_SOCKET_LID_SHUT_HEAD: f32 = 15.0;
 /// A free eye, once its socket is broken, hunts on its own.
-pub const FREE_EYE_SPEED: f32 = 9.0;
-pub const FREE_EYE_ACCEL: f32 = 0.2;
+///
+/// Its own ten-step script, `MoonLordAttacksArray2` (`NPC.cs:7009-7033`): a rest of
+/// `(1200 - 935) / 5 = 53` ticks between every attack, and five attacks that fill the other 935.
+/// Attack 0 is the chase, 1 the three-bolt spread, 2 the six-sphere gather-and-launch, 3 the
+/// spinning eye-spray, 4 the charged deathray. It is the whole second half of the fight: an eye
+/// that only chases is an eye that can be ignored.
+pub const TRUE_EYE_REST: i32 = 53;
+pub const TRUE_EYE_SCRIPT: [(u8, i32); 10] = [
+    (0, TRUE_EYE_REST),
+    (1, 90),
+    (0, TRUE_EYE_REST),
+    (2, 135),
+    (0, TRUE_EYE_REST),
+    (3, 200),
+    (0, TRUE_EYE_REST),
+    (4, 375),
+    (0, TRUE_EYE_REST),
+    (2, 135),
+];
+/// The chase (`NPC.cs:42988-42996`): twenty-four pixels a tick toward a point two hundred pixels
+/// above the player, eased over thirty ticks so it swings rather than tracks.
+pub const FREE_EYE_SPEED: f32 = 24.0;
+pub const FREE_EYE_ABOVE: f32 = 200.0;
+pub const FREE_EYE_SMOOTH: f32 = 30.0;
+/// What a True Eye throws. Its own damage figures, all higher than the parts': the bolt spread
+/// (462, 35, `NPC.cs:43078`), the six spheres (454, 40, `NPC.cs:43132`), the eye-spray (452, 35,
+/// `NPC.cs:43236`) and its deathray (455, 50, `NPC.cs:43343`).
+pub const TRUE_EYE_BOLT_DAMAGE: i32 = 35;
+pub const TRUE_EYE_SPHERE_DAMAGE: i32 = 40;
+pub const TRUE_EYE_SPRAY_DAMAGE: i32 = 35;
+pub const TRUE_EYE_DEATHRAY_DAMAGE: i32 = 50;
 /// A leech ferries life back to whichever part is most hurt.
 pub const LEECH_TICKS: f32 = 90.0;
 pub const LEECH_HEAL: i32 = 1000;
+/// The head puts leeches out at three fixed marks in its leech step, not on a metronome
+/// (`NPC.cs:42741`, `num == 120f || num == 180f || num == 240f`), and they arrive on the *player*,
+/// not on the boss (`NewNPC(..., Main.player[target].Center, 401)`).
+pub const LEECH_MARKS: [f32; 3] = [120.0, 180.0, 240.0];
 
 /// The Old One's Army: the crystal, its lane portals and everything that comes out of them.
 ///

@@ -170,6 +170,12 @@ pub struct AiOutput {
     pub teleport_to: Option<(f32, f32)>,
     /// Set on the tick the Cultists' tablet finishes breaking.
     pub ritual_complete: bool,
+    /// Set on the tick the Moon Lord's death drama clears the stage.
+    pub cleared_stage: bool,
+    /// Minions of the NPC just updated that it wants destroyed, as (type, how many at most).
+    pub cull_kin: Option<(u16, usize)>,
+    /// Set when the NPC just updated wants whatever it hangs off punished for its destruction.
+    pub punish_owner: bool,
     /// Set when what it just did calls in an invasion.
     pub called_invasion: bool,
     /// Doors a town NPC wants opened or shut.
@@ -296,13 +302,13 @@ pub fn update_with(
         out.aura = effects.aura;
         out.teleport_to = effects.teleport_to;
         out.ritual_complete = effects.ritual_complete;
+        out.cleared_stage = effects.cleared_stage;
+        out.cull_kin = effects.cull_kin;
+        out.punish_owner = effects.punish_owner;
         out.called_invasion = effects.called_invasion;
         out.carry = effects.carry;
         out.roared = effects.roared;
         out.player_buff = effects.player_buff;
-        // A routine that is bouncing projectiles this tick is one nothing should be able to hurt,
-        // and the flag has to survive out of the routine for the server to hold that line.
-        npc.invulnerable |= effects.reflecting;
         npc.was_hurt = false;
 
         step_physics(npc, tiles);
@@ -1085,7 +1091,7 @@ mod boss_tests {
             terrustia_proto::npc_params::BRAIN_CREEPERS,
             "it should put its whole guard up at once"
         );
-        assert!(brain.stats.dont_take_damage, "and hide behind them");
+        assert!(brain.invulnerable, "and hide behind them");
 
         // With them gone it exposes itself and charges.
         let start = distance(brain.center(), targets[0].center);
@@ -1105,7 +1111,7 @@ mod boss_tests {
                 },
             );
         }
-        assert!(!brain.stats.dont_take_damage, "now it can be hurt");
+        assert!(!brain.invulnerable, "now it can be hurt");
         assert!(
             distance(brain.center(), targets[0].center) < start,
             "and it comes at you"

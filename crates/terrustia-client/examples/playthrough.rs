@@ -234,6 +234,9 @@ fn in_the_tables(link: &Link) -> bool {
         hard_mode: true,
         other_twin_dead: true,
         red_hat_skeletron: false,
+        // The Terraprisma's gate. True here because this walks the tables looking for what a
+        // playthrough *can* reach, and a daylight Empress kill is a real, reachable fight.
+        empress_genuinely_enraged: true,
         downed_plantera: false,
         expert: false,
         master: false,

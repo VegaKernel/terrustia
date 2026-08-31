@@ -4,25 +4,30 @@
 //! is "move" — which is why it spends so much of the fight drifting into a new position above you.
 //! The sequence never varies, so the fight is memorisable, and that is deliberate.
 //!
-//! What makes it *this* fight is the ritual. Partway through the script it makes four clones of
-//! itself and they all move and cast in lockstep. Only the real one advances the fight when hit;
-//! hitting a clone kills that clone and leaves the rest of them casting. Guessing wrong is not free
-//! — ten of the lights they have put out survive it, or three in expert.
+//! What makes it *this* fight is the ritual, and the ritual is a guess. Partway through the script
+//! it stands two more copies of itself on a circle around it, up to six in all, and they move and
+//! cast in lockstep. Hit the real one inside the window and the ritual ends there and some of the
+//! group is destroyed with it: ten in classic, which is more than can ever be out, so the group is
+//! cleared; three in expert, so once the group has grown some always survive. That is the expert
+//! fight. Hit a copy and it dies and the real one is stunned for two seconds, which is the only
+//! thing in the whole fight that punishes you for guessing.
 //!
 //! A clone is the same routine reading its owner's state rather than deciding anything of its own,
 //! which is exactly why they are indistinguishable while the ritual runs.
 
 use rand::rngs::SmallRng;
 use terrustia_proto::npc_params::{
-    CULTIST_ANCIENT_LIGHT, CULTIST_ARRIVAL, CULTIST_CLONE, CULTIST_CLONES, CULTIST_FIRE,
-    CULTIST_FIRE_COUNT, CULTIST_FIRE_COUNT_EXPERT, CULTIST_FIRE_DAMAGE, CULTIST_FIRE_EVERY,
-    CULTIST_FIRE_EVERY_EXPERT, CULTIST_HALF_DEFENSE, CULTIST_ICE, CULTIST_ICE_DAMAGE,
-    CULTIST_ICE_EVERY, CULTIST_ICE_EVERY_EXPERT, CULTIST_LIGHTNING, CULTIST_LIGHTNING_DAMAGE,
-    CULTIST_LIGHTNING_EVERY, CULTIST_LIGHTNING_EVERY_EXPERT, CULTIST_MOVE_STEP, CULTIST_ORBIT,
-    CULTIST_ORBIT_SPREAD, CULTIST_PAUSE, CULTIST_RITUAL_TICKS, CULTIST_RITUAL_WINDOW,
-    CULTIST_SCRIPT_HEALTHY, CULTIST_SCRIPT_WOUNDED, CULTIST_SHADOWFLAME_ANGLE_STEP,
-    CULTIST_SHADOWFLAME_COUNT, CULTIST_SHADOWFLAME_EVERY, CULTIST_SHADOWFLAME_EVERY_EXPERT,
-    CULTIST_SHADOWFLAME_SPAWNS, CULTIST_SHADOWFLAME_SPEED,
+    CULTIST_ANCIENT_LIGHT, CULTIST_ARRIVAL, CULTIST_CLONE, CULTIST_CLONE_RING, CULTIST_CLONES_MAX,
+    CULTIST_CLONES_PER_RITUAL, CULTIST_FIRE, CULTIST_FIRE_COUNT, CULTIST_FIRE_COUNT_EXPERT,
+    CULTIST_FIRE_DAMAGE, CULTIST_FIRE_EVERY, CULTIST_FIRE_EVERY_EXPERT, CULTIST_HALF_DEFENSE,
+    CULTIST_ICE, CULTIST_ICE_DAMAGE, CULTIST_ICE_EVERY, CULTIST_ICE_EVERY_EXPERT,
+    CULTIST_LIGHTNING, CULTIST_LIGHTNING_DAMAGE, CULTIST_LIGHTNING_EVERY,
+    CULTIST_LIGHTNING_EVERY_EXPERT, CULTIST_MOVE_STEP, CULTIST_ORBIT, CULTIST_ORBIT_SPREAD,
+    CULTIST_PAUSE, CULTIST_RIGHT_GUESS_CULL, CULTIST_RIGHT_GUESS_CULL_EXPERT, CULTIST_RITUAL_TICKS,
+    CULTIST_RITUAL_WINDOW, CULTIST_SCRIPT_HEALTHY, CULTIST_SCRIPT_WOUNDED,
+    CULTIST_SHADOWFLAME_ANGLE_STEP, CULTIST_SHADOWFLAME_COUNT, CULTIST_SHADOWFLAME_EVERY,
+    CULTIST_SHADOWFLAME_EVERY_EXPERT, CULTIST_SHADOWFLAME_SPAWNS, CULTIST_SHADOWFLAME_SPEED,
+    CULTIST_STUN_TICKS,
 };
 
 use super::skeletron::Parent;
@@ -39,7 +44,14 @@ mod state {
     pub const ICE: f32 = 3.0;
     pub const LIGHTNING: f32 = 4.0;
     pub const RITUAL: f32 = 5.0;
-    pub const SHADOWFLAME: f32 = 6.0;
+    /// Stunned: what a wrong guess buys you, and what it costs. Two seconds of standing there
+    /// (`NPC.cs:65936-65948`).
+    ///
+    /// This numbering is `ai[0]`, which goes out on the wire, so it has to be vanilla's: a client
+    /// poses the Cultist from it. Shadowflame used to sit here at 6, which is the stun's number,
+    /// so every client watching a shadowflame cast drew the wrong animation.
+    pub const STUNNED: f32 = 6.0;
+    pub const SHADOWFLAME: f32 = 7.0;
 }
 
 /// What it did this tick.
@@ -51,6 +63,11 @@ pub struct CultistOutcome {
     pub spent: bool,
     /// Where it wants to move to, worked out once at the start of a reposition.
     pub move_to: Option<(f32, f32)>,
+    /// How many of its own clones a correct guess has just destroyed (`NPC.cs:65229-65256`).
+    pub cull_clones: Option<usize>,
+    /// Set by a decoy that has just been destroyed: its owner guessed at, and is stunned for it
+    /// (`NPC.cs:65194-65207`).
+    pub punish_owner: bool,
 }
 
 /// Style 84.
@@ -81,11 +98,40 @@ pub fn cultist(
             out.spent = true;
             return out;
         };
-        npc.ai[0] = owner.state;
+        // Both halves of the owner's state, which is what keeps the group in lockstep
+        // (`NPC.cs:65190-65191`, `ai[0] = owner.ai[0]; ai[1] = owner.ai[1];`). `Parent::state` is
+        // the parent's `ai[1]`, so reading the state out of it put the owner's *timer* into the
+        // clone's state slot and had the group flailing between attacks as that timer counted up.
+        npc.ai[0] = owner.phase;
+        npc.ai[1] = owner.state;
         // A clone cannot be hurt into advancing the fight; it simply dies.
         if npc.ai[0] != state::RITUAL {
             npc.invulnerable = true;
+        } else if world.was_hurt {
+            // The wrong guess. The decoy dies, and the real one is stunned for two seconds
+            // (`NPC.cs:65194-65207`): it is the only thing in the fight that punishes you, and it
+            // was not wired at all - a decoy took the hit, shrugged it off, and the fight carried
+            // on as though nothing had happened.
+            out.spent = true;
+            out.punish_owner = true;
+            return out;
         }
+    }
+
+    // The right guess: hitting the real one inside the ritual window ends the ritual early, counts
+    // as an attack, and destroys some of the group (`NPC.cs:65215-65262`). Ten in classic, which is
+    // more than can ever be out, so the whole group goes; three in expert, so against a grown group
+    // some always survive, which is the expert fight. Nothing consumed `is_a_guess` before this, so
+    // the ritual was a timer to wait out with neither a reward nor a penalty.
+    if real && is_a_guess(npc) && world.was_hurt {
+        npc.velocity = (0.0, 0.0);
+        finish(npc, true);
+        out.cull_clones = Some(if expert {
+            CULTIST_RIGHT_GUESS_CULL_EXPERT
+        } else {
+            CULTIST_RIGHT_GUESS_CULL
+        });
+        return out;
     }
 
     // The arrival: seven seconds of fading in, during which nothing touches it.
@@ -287,13 +333,42 @@ pub fn cultist(
             }
         }
 
+        state::STUNNED => {
+            // What a wrong guess buys you: two seconds of it standing there doing nothing, and
+            // then it picks up the script again (`NPC.cs:65936-65948`).
+            npc.velocity = (0.0, 0.0);
+            npc.ai[1] += 1.0;
+            if npc.ai[1] >= CULTIST_STUN_TICKS {
+                finish(npc, real);
+            }
+        }
+
         _ => {
-            // The ritual. It makes its clones once and then they all cast together.
-            if real && npc.ai[1] == 0.0 && clones == 0 {
-                for _ in 0..CULTIST_CLONES {
+            // The ritual. It tops its group up once, and then they all cast together.
+            //
+            // Not a flat four every time: vanilla adds at most two and never grows past six
+            // (`NPC.cs:65808-65812`), so the first ritual is a choice between three and a late one
+            // a choice between seven. And they stand on a 180-pixel circle around the boss
+            // (`NPC.cs:65798`, `spinningpoint = new Vector2(180f, 0f)` rotated per slot), rather
+            // than all four stacked on its centre where the choice would be no choice at all.
+            if real && npc.ai[1] == 0.0 {
+                let new_clones = CULTIST_CLONES_PER_RITUAL
+                    .min(CULTIST_CLONES_MAX - clones.min(CULTIST_CLONES_MAX));
+                let slots = clones + new_clones + 1;
+                let (cx, cy) = npc.center();
+                for slot in 0..new_clones {
+                    // The real one takes the slot furthest from the player, so the clones fill the
+                    // rest starting from the one nearest it. Which index that is depends on where
+                    // the player stands; the offset by one here keeps a new clone off the boss's
+                    // own slot without needing to know the whole ring's occupancy.
+                    let angle = (clones + slot + 1) as f32 * std::f32::consts::TAU / slots as f32
+                        - std::f32::consts::FRAC_PI_2;
                     out.spawn.push(Spawn {
                         npc_type: CULTIST_CLONE,
-                        position: npc.center(),
+                        position: (
+                            cx + angle.cos() * CULTIST_CLONE_RING,
+                            cy + angle.sin() * CULTIST_CLONE_RING,
+                        ),
                         velocity: (0.0, 0.0),
                         parent: Some(Spawn::OWN_PARENT),
                         ai: [None; 4],
@@ -361,6 +436,16 @@ fn finish(npc: &mut Npc, real: bool) {
     }
 }
 
+/// Stun the real Cultist because one of its decoys was destroyed (`NPC.cs:65203-65206`).
+///
+/// Applied by the caller rather than by the decoy, because a routine cannot reach another NPC. The
+/// decoy reports [`CultistOutcome::punish_owner`] and the server walks its parent link to here.
+pub fn punish(owner: &mut Npc) {
+    owner.ai[0] = state::STUNNED;
+    owner.ai[1] = 0.0;
+    owner.dirty = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,7 +475,9 @@ mod tests {
         )
     }
 
-    fn owner_in(state: f32) -> Parent {
+    /// The real Cultist as a clone sees it. Its state is its `ai[0]`, which is `Parent::phase`;
+    /// `Parent::state` is the parent's `ai[1]`, the timer running inside that state.
+    fn owner_in(phase: f32) -> Parent {
         Parent {
             position: (0.0, 0.0),
             size: (40.0, 60.0),
@@ -400,7 +487,8 @@ mod tests {
             direction: 1,
             sprite_direction: 1,
             time_left: 3600,
-            state,
+            state: 0.0,
+            phase,
             health: 1.0,
         }
     }
@@ -605,20 +693,87 @@ mod tests {
         assert!(cultist(&mut clone, &w, None, 0, &mut rng).spent);
     }
 
-    /// The ritual makes its clones, once.
+    /// Each ritual tops the group up by two, up to six, and stands them on a circle around it.
+    ///
+    /// Not a flat four every time and not all on the boss's own centre: `NPC.cs:65808-65812` adds
+    /// `min(2, 6 - existing)` and `NPC.cs:65798`/`:65826` lay the whole group out on a 180-pixel
+    /// ring. Spawning four stacked on one point made the choice no choice at all, and capped the
+    /// fight's difficulty at its first ritual.
     #[test]
-    fn the_ritual_makes_four_clones() {
+    fn each_ritual_adds_two_clones_on_a_ring_up_to_six() {
         let tiles = Sky(HashMap::new());
         let mut rng = SmallRng::seed_from_u64(5);
         let w = world(&tiles, Some((300.0, 0.0)));
         let mut c = caster(CULTIST);
         c.ai[0] = state::RITUAL;
+        let middle = c.center();
 
         let out = cultist(&mut c, &w, None, 0, &mut rng);
-        assert_eq!(out.spawn.len(), CULTIST_CLONES);
+        assert_eq!(out.spawn.len(), CULTIST_CLONES_PER_RITUAL, "two at a time");
         assert!(out.spawn.iter().all(|s| s.npc_type == CULTIST_CLONE));
-        // With clones already out it makes no more.
-        assert!(cultist(&mut c, &w, None, 4, &mut rng).spawn.is_empty());
+        for spawned in &out.spawn {
+            let reach = (spawned.position.0 - middle.0).hypot(spawned.position.1 - middle.1);
+            assert!(
+                (reach - CULTIST_CLONE_RING).abs() < 1.0,
+                "each stands on the ring, got {reach}"
+            );
+        }
+
+        // A later ritual tops the group up to six and then stops.
+        c.ai[1] = 0.0;
+        assert_eq!(cultist(&mut c, &w, None, 4, &mut rng).spawn.len(), 2);
+        c.ai[1] = 0.0;
+        assert!(cultist(&mut c, &w, None, 6, &mut rng).spawn.is_empty());
+    }
+
+    /// The whole point of the ritual, and it did nothing at all before this.
+    ///
+    /// Hitting the real one inside the window ends the ritual and destroys some of the group
+    /// (`NPC.cs:65215-65262`): ten in classic, more than can ever be out, so the group is cleared;
+    /// three in expert, so against a grown group some always survive. Hitting a decoy kills it and
+    /// stuns the real one for two seconds (`NPC.cs:65194-65207`). `is_a_guess` had no caller
+    /// outside its own test, so the illusion phase was a timer to wait out: no reward for guessing
+    /// right and no penalty for guessing wrong.
+    #[test]
+    fn the_guess_is_the_fight() {
+        let tiles = Sky(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(6);
+        let mut w = world(&tiles, Some((300.0, 0.0)));
+
+        // Right, in classic: the ritual ends and the whole group goes.
+        let mut c = caster(CULTIST);
+        c.ai[0] = state::RITUAL;
+        c.ai[1] = CULTIST_RITUAL_WINDOW.0 + 10.0;
+        w.was_hurt = true;
+        let out = cultist(&mut c, &w, None, 4, &mut rng);
+        assert_eq!(out.cull_clones, Some(CULTIST_RIGHT_GUESS_CULL));
+        assert_eq!(c.ai[0], state::DECIDING, "and the ritual is over");
+
+        // Right, in expert: only three of them, so a grown group outlives the guess.
+        let mut c = caster(CULTIST);
+        c.ai[0] = state::RITUAL;
+        c.ai[1] = CULTIST_RITUAL_WINDOW.0 + 10.0;
+        w.conditions.expert = true;
+        let out = cultist(&mut c, &w, None, 4, &mut rng);
+        assert_eq!(out.cull_clones, Some(CULTIST_RIGHT_GUESS_CULL_EXPERT));
+        w.conditions.expert = false;
+
+        // Wrong: the decoy dies and asks for its owner to pay for it.
+        let mut clone = caster(CULTIST_CLONE);
+        let out = cultist(&mut clone, &w, Some(owner_in(state::RITUAL)), 4, &mut rng);
+        assert!(out.spent, "the decoy dies");
+        assert!(out.punish_owner, "and the real one pays for the guess");
+
+        // Which the caller applies, and which really does stop it for two seconds.
+        let mut real = caster(CULTIST);
+        punish(&mut real);
+        assert_eq!(real.ai[0], state::STUNNED);
+        w.was_hurt = false;
+        for _ in 0..(CULTIST_STUN_TICKS as i32) {
+            assert_eq!(real.ai[0], state::STUNNED, "it stands there and takes it");
+            cultist(&mut real, &w, None, 0, &mut rng);
+        }
+        assert_eq!(real.ai[0], state::DECIDING, "and then picks the script up");
     }
 
     /// Hitting one only counts as a guess inside the ritual's window.

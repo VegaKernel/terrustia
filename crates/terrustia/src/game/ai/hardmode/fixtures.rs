@@ -237,6 +237,10 @@ pub fn pal(npc: &mut Npc, world: &World<'_, impl TileView>, escorts_alive: usize
             if let Some(target) = world.target.filter(|t| t.alive) {
                 let (cx, cy) = npc.center();
                 if (target.center.0 - cx).hypot(target.center.1 - cy) < PAL_APPROACH {
+                    // All three, as `NPC.cs:43426-43428` writes them. `ai[2]` is read by nothing
+                    // here, but it is not a dead write: vanilla packs its two escorts' handles
+                    // into `ai[1]` and `ai[2]` (`NPC.cs:43401`) and clears both when they are
+                    // done with, and every `ai` slot goes out on the wire.
                     npc.ai[0] = 2.0;
                     npc.ai[1] = 0.0;
                     npc.ai[2] = 0.0;

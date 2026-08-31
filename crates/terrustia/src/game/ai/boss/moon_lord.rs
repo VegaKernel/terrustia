@@ -20,12 +20,15 @@
 //! ignoring them undoes work you have already done.
 
 use terrustia_proto::npc_params::{
-    FREE_EYE_ACCEL, FREE_EYE_SPEED, LEECH_HEAL, LEECH_TICKS, MOON_LORD_ACCEL, MOON_LORD_BELOW,
-    MOON_LORD_CORE, MOON_LORD_DEATH_TICKS, MOON_LORD_FIGHTING_DISTANCE, MOON_LORD_FREE_EYE,
-    MOON_LORD_HAND, MOON_LORD_HAND_OUT, MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP,
-    MOON_LORD_LEECH, MOON_LORD_OPENING, MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED,
-    PHANTASMAL_BOLT, PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE,
-    PHANTASMAL_EYE, PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE,
+    EYE_SOCKET_LID_SHUT_HAND, EYE_SOCKET_LID_SHUT_HEAD, EYE_SOCKET_LID_STEP_HAND,
+    EYE_SOCKET_LID_STEP_HEAD, FREE_EYE_ABOVE, FREE_EYE_SMOOTH, FREE_EYE_SPEED, LEECH_HEAL,
+    LEECH_MARKS, LEECH_TICKS, MOON_LORD_ACCEL, MOON_LORD_BELOW, MOON_LORD_CORE,
+    MOON_LORD_DEATH_TICKS, MOON_LORD_FIGHTING_DISTANCE, MOON_LORD_FREE_EYE, MOON_LORD_HAND,
+    MOON_LORD_HAND_OUT, MOON_LORD_HAND_UP, MOON_LORD_HEAD, MOON_LORD_HEAD_UP, MOON_LORD_LEECH,
+    MOON_LORD_OPENING, MOON_LORD_RAY_SWEEP, MOON_LORD_SCRIPTS, MOON_LORD_SPEED, PHANTASMAL_BOLT,
+    PHANTASMAL_BOLT_DAMAGE, PHANTASMAL_DEATHRAY, PHANTASMAL_DEATHRAY_DAMAGE, PHANTASMAL_EYE,
+    PHANTASMAL_EYE_DAMAGE, PHANTASMAL_SPHERE, PHANTASMAL_SPHERE_DAMAGE, TRUE_EYE_BOLT_DAMAGE,
+    TRUE_EYE_DEATHRAY_DAMAGE, TRUE_EYE_SCRIPT, TRUE_EYE_SPHERE_DAMAGE, TRUE_EYE_SPRAY_DAMAGE,
 };
 
 use super::skeletron::Parent;
@@ -82,7 +85,23 @@ pub struct MoonLordOutcome {
     pub spent: bool,
     /// How much life this leech is carrying back, on the tick it arrives.
     pub healed: i32,
+    /// Set on the one tick the death drama clears the stage.
+    pub cleared_stage: bool,
 }
+
+/// The projectile types the death drama sweeps out of the air (`NPC.cs:41755-41758`): the eye
+/// stream, the sphere barrage, the deathray and the bolt spread. Vanilla's list also carries 456,
+/// the leech brand, which this server never puts up (the brand-then-blob plumbing is the narrowing
+/// [`run_head_attack`] already discloses), so there is nothing of that type to sweep.
+pub const MOON_LORD_SHOTS: [u16; 4] = [
+    PHANTASMAL_EYE,
+    PHANTASMAL_SPHERE,
+    PHANTASMAL_DEATHRAY,
+    PHANTASMAL_BOLT,
+];
+
+/// How far into the death drama the stage is cleared (`NPC.cs:41752`, `ai[1] == 60f`).
+const CLEAR_STAGE_AT: f32 = 60.0;
 
 /// Style 77: the core.
 ///
@@ -142,6 +161,15 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) 
         npc.velocity.0 += (0.0 - npc.velocity.0) * 0.98;
         npc.velocity.1 += (-0.5 - npc.velocity.1) * 0.98;
         npc.ai[1] += 1.0;
+        // BS3-M5: a second into the drama the stage is cleared - every True Eye still hunting is
+        // killed outright and every shot the fight left in the air is dropped (`NPC.cs:41752-41764`,
+        // `nPC.type == 400 -> active = false` and the five projectile types). Without it the eyes
+        // outlived their boss *and* were unkillable, because a freed eye carries `dont_take_damage`
+        // exactly as vanilla's type 400 does: killing the Moon Lord left the arena permanently
+        // occupied by three invincible eyes.
+        if npc.ai[1] == CLEAR_STAGE_AT {
+            out.cleared_stage = true;
+        }
         if npc.ai[1] >= MOON_LORD_DEATH_TICKS {
             out.spent = true;
         }
@@ -206,7 +234,7 @@ fn attack_row(npc: &Npc, head: bool) -> usize {
 /// the current attack so the wire carries it and a client plays the right animation. Transcribes
 /// the walk in `AI_078` (`NPC.cs:42027-42055`) and `AI_079` (`NPC.cs:42541-42566`): find the step
 /// whose cumulative end is past `ai[1]`, and wrap `ai[1]` back to zero once the last one is behind.
-fn step_timeline(npc: &mut Npc, row: &[(u8, i32); 5]) -> (u8, f32, i32) {
+fn step_timeline(npc: &mut Npc, row: &[(u8, i32)]) -> (u8, f32, i32) {
     npc.ai[1] += 1.0;
     let mut acc = 0i32;
     let mut idx = row.len();
@@ -251,15 +279,40 @@ pub fn eye_socket(
 
     // It rides its station on the core.
     let (bx, by) = core.center();
-    let station = if head {
-        (bx, by - MOON_LORD_HEAD_UP)
+    if head {
+        // The head does not travel to its station, it *is* its station: vanilla assigns the centre
+        // outright and zeroes the velocity every tick (`NPC.cs:42533-42534`). Easing toward it left
+        // the head trailing the core through every move, which is visible on a boss that follows
+        // the player about, and put the deathray's origin behind where it should have been.
+        npc.velocity = (0.0, 0.0);
+        let (w, h) = (npc.width(), npc.height());
+        npc.position = (bx - w / 2.0, by - MOON_LORD_HEAD_UP - h / 2.0);
     } else {
+        // A hand eases toward its own station. Vanilla flies it there with `SimpleFlyMovement`
+        // and lets each attack pull it off station on its own path (the sphere barrage's
+        // `SmoothStep` swing out to `400 * side, -60`, for one); those per-attack paths are not
+        // modelled here, so a hand holds its station throughout, which is the narrowing this
+        // module's projectile-gathering note already carries.
+        //
         // `ai[2]` is which hand this is.
         let side = if npc.ai[2] >= 1.0 { 1.0 } else { -1.0 };
-        (bx + side * MOON_LORD_HAND_OUT, by - MOON_LORD_HAND_UP)
+        let station = (bx + side * MOON_LORD_HAND_OUT, by - MOON_LORD_HAND_UP);
+        let (cx, cy) = npc.center();
+        npc.velocity = ((station.0 - cx) * 0.2, (station.1 - cy) * 0.2);
+    }
+
+    // BS3-M3: the eyelid. Vanilla decides a socket's damageability from the eye's own openness,
+    // read off *last* tick's lid counter before the attack runs (`dontTakeDamage = frameCounter >=
+    // 21.0`, `NPC.cs:42023`; `dontTakeDamage = localAI[3] >= 15f`, `NPC.cs:42532`), so the order
+    // here is vanilla's: settle the gate, run the attack, then ease the lid. Neither part was ever
+    // invulnerable before this, which meant the fight's defining "the eye is shut, you cannot hurt
+    // it" beat did not exist at all.
+    let (lid_step, lid_shut) = if head {
+        (EYE_SOCKET_LID_STEP_HEAD, EYE_SOCKET_LID_SHUT_HEAD)
+    } else {
+        (EYE_SOCKET_LID_STEP_HAND, EYE_SOCKET_LID_SHUT_HAND)
     };
-    let (cx, cy) = npc.center();
-    npc.velocity = ((station.0 - cx) * 0.2, (station.1 - cy) * 0.2);
+    npc.invulnerable = npc.local_ai[2] >= lid_shut;
 
     // Broken: the socket is empty and it does nothing but hang there.
     if npc.ai[0] == state::BROKEN {
@@ -267,20 +320,28 @@ pub fn eye_socket(
         // ML-2: on the tick it breaks, its eye comes out and hunts as a free True Eye of Cthulhu
         // (`NPC.cs:78873`, `MoonLord_SpawnTrueEyeOfCthulhu`). Vanilla spawns it from `checkDead`;
         // we free it here on the socket's next tick, where the spawn plumbing lives, latched by
-        // `local_ai[1]` so exactly one is freed per socket.
+        // `local_ai[1]` so exactly one is freed per socket. It is bound to the *core*, not to this
+        // socket, the way vanilla passes the socket's own `ai[3]` straight through as the new
+        // eye's (`NPC.cs:41584`): the socket is about to leave and the eye has to outlive it.
         if npc.local_ai[1] == 0.0 {
             npc.local_ai[1] = 1.0;
             out.spawn.push(Spawn {
                 npc_type: MOON_LORD_FREE_EYE,
                 position: npc.center(),
                 velocity: (0.0, 0.0),
-                parent: None,
+                parent: npc.follows_boss,
                 ai: [None; 4],
             });
         }
-        if core.state == state::DYING {
+        // The core's phase, not its timer: `Parent::state` is the parent's `ai[1]`, which for this
+        // boss is the death drama's own counter rather than the state it is in.
+        if core.phase == state::DYING {
             out.spent = true;
         }
+        // A broken socket is shut, and vanilla's own `-2` branch says so outright
+        // (`NPC.cs:42063`, `NPC.cs:42600`: `damage = 0; dontTakeDamage = true;` with an openness
+        // of nought, so the lid falls back open while the socket hangs there harmless).
+        ease_lid(npc, 0.0, lid_step, lid_shut);
         return out;
     }
 
@@ -297,7 +358,54 @@ pub fn eye_socket(
     } else {
         run_hand_attack(npc, &mut out, target.center, attack, within, dur);
     }
+    ease_lid(npc, openness(head, attack, within, dur), lid_step, lid_shut);
     out
+}
+
+/// How shut the eye is during this step, from 0 (wide open) to 3 (shut).
+///
+/// Vanilla's `num4`. The head shuts for its pause and for the whole of its leech attack, and for
+/// the last fifteen ticks of the deathray while the beam fades (`NPC.cs:42610`, `:42716`, `:42722`).
+/// A hand shuts for its pause and for the tail of its sphere barrage, and walks up through 1 and 2
+/// on the way (`NPC.cs:42088`, `:42173-42241`). Neither shuts during the bolt spread, which is why
+/// that is the window worth waiting for.
+fn openness(head: bool, attack: u8, within: f32, dur: i32) -> f32 {
+    let n = within as i32;
+    if head {
+        match attack {
+            0 | 2 => 3.0,
+            1 if n >= dur - 15 => 3.0,
+            _ => 0.0,
+        }
+    } else {
+        match attack {
+            0 => 3.0,
+            2 => match n {
+                n if n < 30 => 0.0,
+                n if n < 210 => 1.0,
+                n if n < 282 => 0.0,
+                n if n < 287 => 1.0,
+                n if n < 292 => 2.0,
+                _ => 3.0,
+            },
+            _ => 0.0,
+        }
+    }
+}
+
+/// Ease the lid one step a tick toward where this step wants it, and clamp it shut.
+///
+/// `NPC.cs:42301-42316` for a hand and `NPC.cs:42804-42818` for the head: an integer chase, never a
+/// jump, which is what turns a run of shut steps into one long window with a ramp at each end
+/// rather than a switch that flickers.
+fn ease_lid(npc: &mut Npc, openness: f32, step: f32, shut: f32) {
+    let wanted = openness * step;
+    if wanted > npc.local_ai[2] {
+        npc.local_ai[2] += 1.0;
+    } else if wanted < npc.local_ai[2] {
+        npc.local_ai[2] -= 1.0;
+    }
+    npc.local_ai[2] = npc.local_ai[2].clamp(0.0, shut);
 }
 
 /// A hand's attacks. Attack 1 is the eye stream, attack 2 the six-sphere barrage, attack 3 the
@@ -380,13 +488,20 @@ fn run_head_attack(
             }
         }
         2 => {
-            // The leech attack: the head puts out leeches that carry life back to the most-hurt
-            // part (`NPC.cs:42691-42730`, proj 456 branding players and spawning NPC 401). Narrowed
-            // to one leech every sixty ticks; the brand-then-blob plumbing is not modelled.
-            if within % 60.0 == 0.0 {
+            // BS3-M2: the leech attack. The head brands each player in range with proj 456 at the
+            // start of the step, and then at three fixed marks - 120, 180 and 240 - turns each live
+            // brand into a leech *on the branded player* (`NPC.cs:42718-42755`,
+            // `NewNPC(..., Main.player[target].Center, 401)`). Against one player that is three
+            // leeches a cycle. This fired one every sixty ticks over a 435-tick step, so eight came
+            // out per cycle instead of three - almost three times the healing throughput - and they
+            // were made at the boss, where nobody is standing to kill them.
+            //
+            // The brand-then-blob plumbing itself is not modelled: with no proj 456 and no buff 145
+            // there is nothing to filter on, so every mark produces its leech.
+            if LEECH_MARKS.contains(&within) {
                 out.spawn.push(Spawn {
                     npc_type: MOON_LORD_LEECH,
-                    position: npc.center(),
+                    position: target,
                     velocity: (0.0, 0.0),
                     parent: Some(Spawn::OWN_PARENT),
                     ai: [None; 4],
@@ -440,25 +555,128 @@ fn fire_fan(
 }
 
 /// Style 81: an eye that has come out of its broken socket.
-pub fn free_eye(npc: &mut Npc, world: &World<'_, impl TileView>) -> MoonLordOutcome {
-    let out = MoonLordOutcome::default();
+///
+/// BS3-M6: a True Eye is not an escort, it is half the fight. `AI_081_TrueEyeOfCthulhu`
+/// (`NPC.cs:42900-43370`) runs its own ten-step script - see [`TRUE_EYE_SCRIPT`] - with four
+/// attacks between the rests. This used to fly straight at the player at nine pixels a tick and
+/// never shoot, so once all three sockets were open the fight had nothing left applying pressure.
+///
+/// The narrowing is the same one the hands and the head already carry: this server's projectile
+/// layer has no gather-then-relaunch AI, so the sphere barrage and the eye-spray are fired as aimed
+/// fans at the tick vanilla launches them rather than orbited first.
+pub fn free_eye(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    core: Option<Parent>,
+) -> MoonLordOutcome {
+    let mut out = MoonLordOutcome::default();
     npc.dirty = true;
     npc.no_gravity = true;
     npc.no_tile_collide = true;
 
+    // `NPC.cs:42906-42911`: an eye whose core has gone dies with it.
+    if core.is_none() {
+        out.spent = true;
+        return out;
+    }
+
     let Some(target) = world.target.filter(|t| t.alive) else {
         return out;
     };
+    let (attack, within, dur) = step_timeline(npc, &TRUE_EYE_SCRIPT);
     let (cx, cy) = npc.center();
-    let aim = (target.center.0 - cx, target.center.1 - cy);
-    let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
-    let wanted = (
-        aim.0 / length * FREE_EYE_SPEED,
-        aim.1 / length * FREE_EYE_SPEED,
-    );
-    super::super::hardmode::drifters::simple_fly(npc, wanted, FREE_EYE_ACCEL);
+    let n = within as i32;
+
+    match attack {
+        1 => {
+            // The bolt spread, its own version of the parts' attack 3 and at five more damage
+            // (`NPC.cs:43072-43079`). `within` never reaches `dur` inside a step, so the third of
+            // the three marks never lands, exactly as in vanilla.
+            if n == dur - 14 || n == dur - 7 || n == dur {
+                out.shots.push(aimed(
+                    npc,
+                    target.center,
+                    PHANTASMAL_BOLT,
+                    TRUE_EYE_BOLT_DAMAGE,
+                    8.0,
+                ));
+            }
+            drag(npc, 0.95);
+        }
+        2 => {
+            // Six spheres gathered one every ten ticks from `within == 15`, then thrown together at
+            // `within == 105` (`NPC.cs:43125-43178`).
+            if n == 105 {
+                fire_fan(
+                    npc,
+                    &mut out,
+                    target.center,
+                    6,
+                    PHANTASMAL_SPHERE,
+                    TRUE_EYE_SPHERE_DAMAGE,
+                    12.0,
+                );
+            }
+            drag(npc, 0.9);
+        }
+        3 => {
+            // The spinning spray: it wheels around and spits a Phantasmal Eye every ten ticks from
+            // `within == 45` to `within == 185` (`NPC.cs:43196-43237`).
+            if (45..185).contains(&n) && (n - 45) % 10 == 0 {
+                out.shots.push(aimed(
+                    npc,
+                    target.center,
+                    PHANTASMAL_EYE,
+                    TRUE_EYE_SPRAY_DAMAGE,
+                    8.0,
+                ));
+            }
+        }
+        4 => {
+            // Its own deathray, a hundred and eighty ticks of wind-up and then the beam
+            // (`NPC.cs:43326-43345`), at two thirds of the head's damage.
+            if n == 180 {
+                let aim = (target.center.0 - cx, target.center.1 - cy);
+                let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+                out.shots.push(Shot {
+                    projectile: PHANTASMAL_DEATHRAY,
+                    damage: TRUE_EYE_DEATHRAY_DAMAGE,
+                    position: (cx, cy),
+                    velocity: (aim.0 / length, aim.1 / length),
+                    time_left: MOON_LORD_RAY_SWEEP as u16,
+                });
+            }
+            drag(npc, 0.95);
+        }
+        // The rest between attacks is the chase, and it is the only step that moves: twenty-four
+        // pixels a tick toward a point two hundred above the player, eased over thirty ticks
+        // (`NPC.cs:42988-42996`).
+        _ => {
+            let aim = (target.center.0 - cx, target.center.1 - FREE_EYE_ABOVE - cy);
+            let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+            let wanted = (
+                aim.0 / length * FREE_EYE_SPEED,
+                aim.1 / length * FREE_EYE_SPEED,
+            );
+            npc.velocity.0 =
+                (npc.velocity.0 * (FREE_EYE_SMOOTH - 1.0) + wanted.0) / FREE_EYE_SMOOTH;
+            npc.velocity.1 =
+                (npc.velocity.1 * (FREE_EYE_SMOOTH - 1.0) + wanted.1) / FREE_EYE_SMOOTH;
+        }
+    }
+
     npc.rotation = npc.velocity.1.atan2(npc.velocity.0) - std::f32::consts::FRAC_PI_2;
     out
+}
+
+/// Bleed speed off and stop dead once it is barely moving, the way every one of the True Eye's
+/// standing attacks does (`velocity *= x; if (velocity.Length() < 1f) velocity = Vector2.Zero;`).
+fn drag(npc: &mut Npc, keep: f32) {
+    npc.velocity.0 *= keep;
+    npc.velocity.1 *= keep;
+    if npc.velocity.0.hypot(npc.velocity.1) < 1.0 {
+        npc.velocity = (0.0, 0.0);
+    }
 }
 
 /// Style 82: a leech clot, carrying life back to the Moon Lord.
@@ -530,7 +748,9 @@ mod tests {
         )
     }
 
-    fn core_at(position: (f32, f32), state: f32) -> Parent {
+    /// The core as a part sees it. Its phase is its `ai[0]`, which is where this boss keeps it;
+    /// `state` (the parent's `ai[1]`) is the timer running inside that phase.
+    fn core_at(position: (f32, f32), phase: f32) -> Parent {
         Parent {
             position,
             size: (200.0, 200.0),
@@ -540,13 +760,108 @@ mod tests {
             direction: 1,
             sprite_direction: 1,
             time_left: 3600,
-            state,
+            state: 0.0,
+            phase,
             health: 1.0,
         }
     }
 
     fn piece(npc_type: u16) -> Npc {
         Npc::new(npc_type, (0.0, 0.0), 1).expect("a piece of the Moon Lord")
+    }
+
+    /// BS3-M2: the head puts out three leeches a cycle, on the *player*, not eight on itself.
+    ///
+    /// Vanilla brands each player at the start of the step and turns the live brands into leeches
+    /// at three fixed marks, 120, 180 and 240 (`NPC.cs:42741`), spawning each at
+    /// `Main.player[target].Center`. This fired one every sixty ticks over the head's 435-tick leech
+    /// step, so eight came out per cycle - almost three times the healing - and every one of them
+    /// appeared at the boss, where nobody is standing to kill it. Reverting to `within % 60.0 == 0.0`
+    /// with `position: npc.center()` turns both assertions red.
+    #[test]
+    fn the_head_puts_out_three_leeches_a_cycle_and_puts_them_on_the_player() {
+        let tiles = Sky(HashMap::new());
+        let player = (900.0, 900.0);
+        let w = world(&tiles, Some(player));
+        let core_part = core_at((0.0, 0.0), state::WAITING);
+        let mut head = piece(MOON_LORD_HEAD);
+
+        let mut leeches = Vec::new();
+        // One full loop of the head's row, which is 1200 ticks.
+        for _ in 0..1200 {
+            for spawn in eye_socket(&mut head, &w, Some(core_part)).spawn {
+                if spawn.npc_type == MOON_LORD_LEECH {
+                    leeches.push(spawn.position);
+                }
+            }
+        }
+        assert_eq!(leeches.len(), 3, "three a cycle, one per mark");
+        for at in leeches {
+            assert_eq!(at, player, "and each one arrives on the player");
+        }
+    }
+
+    /// BS3-M3: the eye shuts, and while it is shut the part cannot be hurt.
+    ///
+    /// `dontTakeDamage = frameCounter >= 21.0` for a hand (`NPC.cs:42023`) and
+    /// `localAI[3] >= 15f` for the head (`NPC.cs:42532`), both driven off the openness each attack
+    /// step names. Neither part was ever invulnerable before this, so the fight's defining "the eye
+    /// is closed, you cannot hurt it" beat was absent: deleting the `npc.invulnerable` write in
+    /// `eye_socket` turns both counts to zero. The head is shut for over a third of its cycle
+    /// (its pause plus its whole leech attack), a hand for about a seventh (its two pauses plus the
+    /// tail of its sphere barrage).
+    #[test]
+    fn a_socket_cannot_be_hurt_while_its_eye_is_shut() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((900.0, 900.0)));
+        let core_part = core_at((0.0, 0.0), state::WAITING);
+
+        let shut_share = |npc_type: u16, ticks: usize| {
+            let mut part = piece(npc_type);
+            let shut = (0..ticks)
+                .filter(|_| {
+                    eye_socket(&mut part, &w, Some(core_part));
+                    part.invulnerable
+                })
+                .count();
+            shut as f32 / ticks as f32
+        };
+
+        let head = shut_share(MOON_LORD_HEAD, 1200);
+        assert!(
+            (0.33..0.42).contains(&head),
+            "the head should be shut for over a third of its cycle, got {head}"
+        );
+        let hand = shut_share(MOON_LORD_HAND, 600);
+        assert!(
+            (0.10..0.20).contains(&hand),
+            "a hand for about a seventh of its own, got {hand}"
+        );
+        assert!(hand < head, "and the head is the one that hides most");
+    }
+
+    /// BS3-M5: a second into the death drama the stage is cleared.
+    ///
+    /// `NPC.cs:41752-41764` kills every NPC 400 and drops five projectile types at `ai[1] == 60`.
+    /// Without it, killing the Moon Lord left its True Eyes alive *and* unkillable - a freed eye
+    /// carries `dont_take_damage` exactly as vanilla's type 400 does - so the arena stayed occupied
+    /// for ever. Dropping the `cleared_stage` write turns this red.
+    #[test]
+    fn the_death_drama_clears_the_stage_after_one_second() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((900.0, 900.0)));
+        let mut core_npc = piece(MOON_LORD_CORE);
+        core_npc.local_ai[3] = 1.0;
+        core_npc.ai = [state::DYING, 0.0, 0.0, 0.0];
+
+        let cleared: Vec<usize> = (0..MOON_LORD_DEATH_TICKS as usize)
+            .filter(|_| core(&mut core_npc, &w, 3).cleared_stage)
+            .collect();
+        assert_eq!(
+            cleared,
+            vec![CLEAR_STAGE_AT as usize - 1],
+            "once, at tick 60"
+        );
     }
 
     /// It opens with two hands and a head, once.
@@ -626,6 +941,35 @@ mod tests {
         }
         core(&mut c, &w, 3);
         assert!(!c.invulnerable, "all three: now it is open");
+    }
+
+    /// The whole game hangs on this: the exposed core can be struck down, and the lethal blow is
+    /// what starts the death drama.
+    ///
+    /// The damage gate used to ask the type's `dont_take_damage` seed as well as the live flag, and
+    /// npc 398 carries that seed (`npc_data.rs`, as vanilla's `SetDefaults` does). So `strike`
+    /// refused every hit no matter what the routine said, `checkdead` was never reached, `ai[0]`
+    /// never became `DYING`, and the Moon Lord could not be killed by anything: the game could not
+    /// be finished. Going through `checkdead` directly, as the older tests did, walks straight past
+    /// the gate that was broken, which is exactly how it hid.
+    #[test]
+    fn the_exposed_core_can_actually_be_struck_down() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((0.0, 600.0)));
+        let mut c = piece(MOON_LORD_CORE);
+        c.local_ai[3] = 1.0;
+        c.ai[0] = state::WAITING;
+        assert!(
+            c.stats.dont_take_damage,
+            "the type's seed says untouchable, and that is only where it starts"
+        );
+
+        core(&mut c, &w, 3);
+        // The server's own path: the hit lands, and `checkdead` intercepts the lethal one.
+        let killed = c.strike(c.life_max, 0.0, 1, false);
+        assert!(killed, "the exposed core takes a lethal blow");
+        assert!(checkdead(&mut c), "which `checkdead` turns into the drama");
+        assert_eq!(c.ai[0], state::DYING, "and the drama is what kills it");
     }
 
     /// ML-1: the core is not removed the instant its last limb falls. In vanilla the sockets stay
@@ -911,16 +1255,61 @@ mod tests {
         assert_eq!(freed, 1, "one True Eye of Cthulhu, freed exactly once");
     }
 
-    /// A free eye hunts on its own.
+    /// A free eye hunts on its own, and dies with its core.
     #[test]
     fn a_free_eye_comes_after_you() {
         let tiles = Sky(HashMap::new());
         let w = world(&tiles, Some((2000.0, 0.0)));
+        let core_part = core_at((0.0, 0.0), state::FIGHTING);
         let mut e = piece(MOON_LORD_FREE_EYE);
         for _ in 0..200 {
-            free_eye(&mut e, &w);
+            free_eye(&mut e, &w, Some(core_part));
         }
         assert!(e.velocity.0 > 1.0, "it should be closing: {}", e.velocity.0);
+
+        let mut orphan = piece(MOON_LORD_FREE_EYE);
+        assert!(
+            free_eye(&mut orphan, &w, None).spent,
+            "an eye whose core has gone dies with it (`NPC.cs:42906-42911`)"
+        );
+    }
+
+    /// BS3-M6: a True Eye is the whole second half of the fight, not an escort. Its ten-step script
+    /// (`MoonLordAttacksArray2`, `NPC.cs:7009-7033`) puts out four different attacks between the
+    /// rests: the bolt spread, the six spheres, the eye-spray and its own deathray. It used to fly
+    /// straight in and never shoot, so once every socket was open nothing was applying pressure.
+    /// Reverting `free_eye` to the old chase-only body turns this red on the very first assertion.
+    #[test]
+    fn a_free_eye_runs_its_whole_attack_script() {
+        let tiles = Sky(HashMap::new());
+        let w = world(&tiles, Some((600.0, 600.0)));
+        let core_part = core_at((0.0, 0.0), state::FIGHTING);
+        let mut e = piece(MOON_LORD_FREE_EYE);
+
+        let mut seen: Vec<u16> = Vec::new();
+        // One full 1200-tick loop of the script, plus a little slack.
+        for _ in 0..1300 {
+            for shot in free_eye(&mut e, &w, Some(core_part)).shots {
+                if !seen.contains(&shot.projectile) {
+                    seen.push(shot.projectile);
+                }
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![
+                PHANTASMAL_EYE,
+                PHANTASMAL_SPHERE,
+                PHANTASMAL_DEATHRAY,
+                PHANTASMAL_BOLT
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+            "every one of its four attacks has to fire inside one loop"
+        );
     }
 
     /// A leech delivers its load and is gone; without an anchor it simply goes.

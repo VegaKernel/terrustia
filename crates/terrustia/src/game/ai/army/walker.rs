@@ -202,7 +202,7 @@ fn fuse(npc: &mut Npc, it: &mut Walker, out: &mut WalkerOutcome) -> bool {
         npc.size = Some((KOBOLD_BLAST, KOBOLD_BLAST));
         npc.position = (cx - KOBOLD_BLAST / 2.0, cy - KOBOLD_BLAST / 2.0);
         npc.velocity = (0.0, 0.0);
-        npc.damage_bonus = KOBOLD_BLAST_DAMAGE as f32 / npc.stats.damage.max(1) as f32;
+        npc.set_contact_damage(KOBOLD_BLAST_DAMAGE);
         npc.ai[0] += 1.0;
         if npc.ai[0] >= 3.0 {
             out.burst = true;

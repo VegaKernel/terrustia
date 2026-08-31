@@ -41,8 +41,6 @@ mod state {
 #[derive(Debug, Default)]
 pub struct NautilusOutcome {
     pub base: Outcome,
-    /// Set while it is winding up a charge, when shots bounce off it.
-    pub reflecting: bool,
     /// Places it wants a helper portal opened, if any.
     pub summons: Vec<(f32, f32)>,
 }
@@ -173,8 +171,15 @@ pub fn dreadnautilus(
         s if s == state::CHARGING => {
             npc.direction = if cx < target.center.0 { -1 } else { 1 };
             if npc.ai[1] < NAUTILUS_CHARGE_WINDUP {
-                // Winding up. Shots bounce off it for the whole wind-up, which is the tell.
-                out.reflecting = true;
+                // Winding up. Vanilla makes shots bounce off it for the whole wind-up
+                // (`NPC.cs:47987`, `reflectsProjectiles = flag`), which is the tell. Reflection
+                // itself is not modelled here and cannot be: it lives entirely in the
+                // projectile-versus-NPC path (`Projectile.cs:12781-12790`), and a player's shots
+                // are the client's to simulate on this server. What matters is that
+                // `AI_117_BloodNautilus` never touches `dontTakeDamage`, so the wind-up is a
+                // window to hit it in, not a window where it is untouchable. This used to raise a
+                // flag the dispatch read as invulnerability, costing melee builds ninety ticks per
+                // charge at exactly the moment it sits still and closest.
                 npc.velocity.0 *= 0.95;
                 npc.velocity.1 *= 0.95;
                 aim_at(npc, (-to_player.0, -to_player.1), 0.02);
@@ -435,9 +440,15 @@ mod tests {
         );
     }
 
-    /// The wind-up before a charge is when shots bounce off it.
+    /// It winds a charge up on the spot, and stays hurtable while it does.
+    ///
+    /// `AI_117_BloodNautilus` never touches `dontTakeDamage` (`NPC.cs:47640-48033`): the wind-up
+    /// raises `reflectsProjectiles` only (`NPC.cs:47987`), which bounces shots in the
+    /// projectile-versus-NPC path and leaves everything else landing normally. This used to raise a
+    /// flag the dispatch turned into full invulnerability for all ninety wind-up ticks, which is
+    /// most of the time it spends sitting still and close enough to reach.
     #[test]
-    fn a_charge_reflects_while_it_winds_up() {
+    fn a_charge_stays_hurtable_while_it_winds_up() {
         let tiles = Sea(HashMap::new());
         let mut rng = SmallRng::seed_from_u64(3);
         let mut n = nautilus(0.0, 0.0);
@@ -445,21 +456,10 @@ mod tests {
         n.ai[0] = state::CHARGING;
         let w = night(&tiles, Some((600.0, 0.0)));
 
-        let mut reflected = 0;
-        let mut then = 0;
-        for tick in 0..(NAUTILUS_CHARGE_WINDUP + NAUTILUS_CHARGE_TICKS) as i32 {
-            let out = dreadnautilus(&mut n, &w, 0, &mut rng);
-            if out.reflecting {
-                reflected += 1;
-            } else if tick > NAUTILUS_CHARGE_WINDUP as i32 {
-                then += 1;
-            }
+        for _ in 0..(NAUTILUS_CHARGE_WINDUP + NAUTILUS_CHARGE_TICKS) as i32 {
+            crate::game::ai::run(&mut n, &w, &mut rng);
+            assert!(!n.invulnerable, "nothing here makes it untouchable");
         }
-        assert_eq!(
-            reflected, NAUTILUS_CHARGE_WINDUP as i32,
-            "it reflects for exactly the wind-up"
-        );
-        assert!(then > 0, "and not once it is moving");
         let speed = n.velocity.0.hypot(n.velocity.1);
         assert!(speed > 10.0, "the charge should be fast, got {speed}");
     }

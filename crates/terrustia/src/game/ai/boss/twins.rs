@@ -18,9 +18,9 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    RETINAZER, RETINAZER_TWIN, SPAZMATISM, SPAZMATISM_TWIN, TWIN_FLEE_CLIMB, TWIN_SECOND_DAMAGE,
-    TWIN_SECOND_DEFENSE, TWIN_SHOT_LEAD, TWIN_SHOT_RANGE, TWIN_SHOT_SPREAD, TWIN_SPIN_CAP,
-    TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
+    RETINAZER, RETINAZER_TWIN, SPAZMATISM, SPAZMATISM_TWIN, TWIN_FLEE_CLIMB, TWIN_GET_GOOD_GAIN,
+    TWIN_SECOND_DAMAGE, TWIN_SECOND_DEFENSE, TWIN_SHOT_LEAD, TWIN_SHOT_RANGE, TWIN_SHOT_SPREAD,
+    TWIN_SPIN_CAP, TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
 };
 
 use crate::game::ai::{Shot, World, can_see};
@@ -38,8 +38,6 @@ mod form {
 #[derive(Debug, Default)]
 pub struct TwinOutcome {
     pub shots: Vec<Shot>,
-    /// Set while it is transforming, when everything bounces off.
-    pub reflecting: bool,
     /// Set when daylight has sent it home.
     pub fleeing: bool,
 }
@@ -86,8 +84,14 @@ pub fn twin(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
         }
 
         f if f == form::SPINNING_UP || f == form::SPINNING_DOWN => {
-            // The transformation. It hangs still, spins up and then down, and nothing touches it.
-            out.reflecting = true;
+            // The transformation: it hangs still, spins up and then down, and comes out changed.
+            //
+            // BS3-M1: it stays perfectly hurtable throughout. This used to raise a `reflecting`
+            // flag the dispatch turned into 200 ticks of invulnerability per eye, which is two
+            // mistakes stacked. Vanilla raises `reflectsProjectiles` here only under
+            // `IsMechQueenUp` (`NPC.cs:26872-26876`), the Mechdusa fight this server does not
+            // model, and even then reflection is a projectile bounce (`Projectile.cs:12781-12790`,
+            // `ReflectProjectile`), not immunity to everything.
             if npc.ai[0] == form::SPINNING_UP {
                 npc.ai[2] = (npc.ai[2] + TWIN_SPIN_RATE).min(TWIN_SPIN_CAP);
             } else {
@@ -251,11 +255,19 @@ fn second_form(
             player.0 + t.second_station.0 - cx,
             player.1 + t.second_station.1 - cy,
         );
-        let (speed, accel) = if expert {
+        let (mut speed, mut accel) = if expert {
             (t.second_speed_expert, t.second_accel_expert)
         } else {
             (t.second_speed, t.second_accel)
         };
+        // For the worthy takes both up by a seventh (`NPC.cs:26944-26948`, `num451 *= 1.15f;
+        // num452 *= 1.15f;`). `Conditions::get_good_world` was read by only two routines in the
+        // whole workspace, so every other seed-specific behaviour, this one included, was silently
+        // the ordinary one.
+        if world.conditions.get_good_world {
+            speed *= TWIN_GET_GOOD_GAIN;
+            accel *= TWIN_GET_GOOD_GAIN;
+        }
         steer(&mut npc.velocity, station, speed, accel);
 
         npc.ai[2] += 1.0;
@@ -629,19 +641,46 @@ mod tests {
         twin(&mut e, &w, &mut rng);
         assert_eq!(e.ai[0], form::SPINNING_UP, "it should be changing");
 
-        let mut reflected = 0;
+        // BS3-M1: it is hurtable the whole way through. Vanilla only raises `reflectsProjectiles`
+        // during the change under `IsMechQueenUp` (`NPC.cs:26872-26876`), and this server has no
+        // Mechdusa. Reflection was routed to `invulnerable` in the dispatch, so the change handed
+        // each eye a hundred spin-up plus a hundred spin-down ticks of free DPS.
         for _ in 0..(TWIN_SPIN_TICKS as i32 * 2 + 4) {
-            if twin(&mut e, &w, &mut rng).reflecting {
-                reflected += 1;
-            }
+            crate::game::ai::run(&mut e, &w, &mut rng);
+            assert!(!e.invulnerable, "the change must not make it untouchable");
         }
-        assert!(reflected > 100, "it reflects throughout the change");
         assert_eq!(e.ai[0], form::SECOND, "and comes out as the second form");
         assert_eq!(e.damage_bonus, TWIN_SECOND_DAMAGE, "hitting harder");
         assert_eq!(
             e.defense,
             e.stats.defense + TWIN_SECOND_DEFENSE,
             "and tougher"
+        );
+    }
+
+    /// For the worthy hovers a seventh faster (`NPC.cs:26944-26948`).
+    ///
+    /// `Conditions::get_good_world` was read by only two routines in the whole workspace, so this
+    /// seed's Twins were the ordinary ones. The speed and the acceleration both take the 1.15.
+    #[test]
+    fn for_the_worthy_hovers_faster() {
+        let tiles = Sky(HashMap::new());
+        let speed_after = |get_good: bool| {
+            let mut rng = SmallRng::seed_from_u64(31);
+            let mut e = eye(RETINAZER, 0.0, 0.0);
+            e.ai[0] = form::SECOND;
+            let mut w = night(&tiles, Some((900.0, 900.0)));
+            w.conditions.get_good_world = get_good;
+            for _ in 0..30 {
+                twin(&mut e, &w, &mut rng);
+            }
+            e.velocity.0.hypot(e.velocity.1)
+        };
+        let ordinary = speed_after(false);
+        let worthy = speed_after(true);
+        assert!(
+            worthy > ordinary * 1.05,
+            "for the worthy should close faster: {worthy} against {ordinary}"
         );
     }
 
