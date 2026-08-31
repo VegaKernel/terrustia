@@ -306,9 +306,6 @@ pub fn update_with(
         out.carry = effects.carry;
         out.roared = effects.roared;
         out.player_buff = effects.player_buff;
-        // A routine that is bouncing projectiles this tick is one nothing should be able to hurt,
-        // and the flag has to survive out of the routine for the server to hold that line.
-        npc.invulnerable |= effects.reflecting;
         npc.was_hurt = false;
 
         step_physics(npc, tiles);

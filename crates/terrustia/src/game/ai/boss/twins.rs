@@ -635,15 +635,11 @@ mod tests {
 
         // BS3-M1: it is hurtable the whole way through. Vanilla only raises `reflectsProjectiles`
         // during the change under `IsMechQueenUp` (`NPC.cs:26872-26876`), and this server has no
-        // Mechdusa. The dispatch used to read that flag as `invulnerable` (`npc_ai.rs`), so the
-        // change handed each eye a hundred spin-up plus a hundred spin-down ticks of free DPS.
-        // Restoring `out.reflecting = true` in the transform arm turns this red.
+        // Mechdusa. Reflection was routed to `invulnerable` in the dispatch, so the change handed
+        // each eye a hundred spin-up plus a hundred spin-down ticks of free DPS.
         for _ in 0..(TWIN_SPIN_TICKS as i32 * 2 + 4) {
-            let effects = crate::game::ai::run(&mut e, &w, &mut rng);
-            assert!(
-                !effects.reflecting,
-                "the change must not make it untouchable"
-            );
+            crate::game::ai::run(&mut e, &w, &mut rng);
+            assert!(!e.invulnerable, "the change must not make it untouchable");
         }
         assert_eq!(e.ai[0], form::SECOND, "and comes out as the second form");
         assert_eq!(e.damage_bonus, TWIN_SECOND_DAMAGE, "hitting harder");

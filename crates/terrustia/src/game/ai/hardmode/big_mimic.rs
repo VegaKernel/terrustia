@@ -56,8 +56,6 @@ const MIMIC_BIG_CRIMSON: u16 = 476;
 #[derive(Debug, Default)]
 pub struct MimicOutcome {
     pub base: Outcome,
-    /// Set while it is curled and batting projectiles back.
-    pub reflecting: bool,
 }
 
 /// Style 87.
@@ -66,7 +64,11 @@ pub fn big_mimic(
     world: &World<'_, impl TileView>,
     rng: &mut SmallRng,
 ) -> MimicOutcome {
-    let mut out = MimicOutcome::default();
+    // Nothing writes to this any more: the curl's invulnerability is set on the NPC directly, and
+    // the reflection flag that used to ride out of here modelled a projectile bounce this server
+    // cannot perform. `base` was never written either, so the whole outcome is now a formality the
+    // hardmode lane can drop when it next opens this file.
+    let out = MimicOutcome::default();
     npc.dirty = true;
     // Every state that wants otherwise sets these itself.
     npc.invulnerable = false;
@@ -180,10 +182,11 @@ pub fn big_mimic(
 
         s if s == state::CURLED => {
             npc.velocity.0 *= 0.85;
+            // `NPC.cs:37968`: the curl really is `dontTakeDamage = true`, in every mode. Expert
+            // adds `reflectsProjectiles` on top (`NPC.cs:37977-37980`), which this server does not
+            // model - a player's shots are the client's to simulate - and which would change
+            // nothing here anyway, since the curl is already untouchable.
             npc.invulnerable = true;
-            if world.conditions.expert {
-                out.reflecting = true;
-            }
             npc.ai[1] += 1.0;
             if npc.ai[1] >= MIMIC_CURL_TICKS {
                 npc.ai[0] = state::HOPPING;
@@ -515,19 +518,18 @@ mod tests {
         m.ai[0] = state::CURLED;
         let mut w = world(&tiles, Some((300.0, 400.0)));
 
-        let out = big_mimic(&mut m, &w, &mut rng);
+        big_mimic(&mut m, &w, &mut rng);
         assert!(m.invulnerable, "nothing gets through");
-        assert!(!out.reflecting, "but it only reflects in expert");
         assert!(!m.take_damage(50, 0.0, 1), "and a hit does nothing");
 
+        // `NPC.cs:37968` sets `dontTakeDamage` for the curl outright, so it holds in classic too.
+        // Expert only adds `reflectsProjectiles` on top, which this server does not model.
         w.conditions = Conditions {
             expert: true,
             ..Conditions::default()
         };
-        assert!(
-            big_mimic(&mut m, &w, &mut rng).reflecting,
-            "expert: it does"
-        );
+        big_mimic(&mut m, &w, &mut rng);
+        assert!(m.invulnerable, "expert changes nothing about that");
     }
 
     /// All three specials come round.

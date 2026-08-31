@@ -551,8 +551,6 @@ pub struct Effects {
     pub detonated: bool,
     /// Life this one just carried back to whatever it belongs to.
     pub healed: i32,
-    /// Set while it is in a phase that bounces projectiles off rather than taking them.
-    pub reflecting: bool,
     /// How long the thing it just turned into should sit still before doing anything.
     pub rest_for: i32,
     /// Where this NPC wants whatever it is carrying to hang.
@@ -830,14 +828,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.died = out.died;
         }
         87 => {
-            let out = hardmode::big_mimic::big_mimic(npc, world, rng);
-            effects.reflecting = out.reflecting;
+            hardmode::big_mimic::big_mimic(npc, world, rng);
         }
         117 => {
             let helpers = world.count(terrustia_proto::npc_params::NAUTILUS_HELPER);
             let out = hardmode::nautilus::dreadnautilus(npc, world, helpers, rng);
             effects.shots.extend(out.base.shots);
-            effects.reflecting = out.reflecting;
             // Each helper arrives through a portal rather than simply appearing.
             for at in out.summons {
                 effects.shots.push(Shot {
