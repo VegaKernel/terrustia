@@ -532,6 +532,50 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if npc_type == 75 && at.downed_mech_any {
         out.push(sometimes(5662, 200));
     }
+    // Two more on that same gate, both of which had no source anywhere in this project:
+    // `ItemDropDatabase.cs:787-788`.
+    if at.downed_mech_any {
+        match npc_type {
+            176 => out.push(sometimes(1521, 100)), // Pincushion Zombie
+            205 => out.push(sometimes(1611, 2)),   // Chaos Elemental
+            _ => {}
+        }
+    }
+    // `Conditions.IsHardmode` (`ItemDropDatabase.cs:743`), the Princess's own weapon.
+    if npc_type == 663 && at.hard_mode {
+        out.push(sometimes(5065, 8));
+    }
+    // Pumpking's expert-only extra: `rule.OnSuccess(ByCondition(IsExpert, 4444, 5))`
+    // (`ItemDropDatabase.cs:351`), sitting under the same wave gate as its weapon pool, so the two
+    // rolls multiply exactly as the Headless Horseman's medallion does just below.
+    if npc_type == 325
+        && at.expert
+        && let Some(wave) = at.pumpkin_moon_wave
+    {
+        let gate = pumpkin_moon_gate_denominator(wave, at.expert);
+        out.push(sometimes(4444, gate * 5));
+    }
+    // The Don't Starve crossover drops. Vanilla registers each of these twice, once behind
+    // `Conditions.DontStarveIsUp` and once behind `DontStarveIsNotUp`, and the second is
+    // `!Main.dontStarveWorld` (`Conditions.cs:1498-1503`), which is true in every ordinary world.
+    // This project does not model the Don't Starve seed, so the ordinary-world rate is the only
+    // one, and all five items had no source at all before. `ItemDropDatabase.cs:971-972`,
+    // `:1034-1035`, `:1130-1133`, `:1172-1173`.
+    match npc_type {
+        170 | 171 | 180 => out.push(sometimes(5096, 25)), // the three Pigrons: Ham Bat
+        49 | 51 | 60 | 93 | 137 | 150 | 151 | 152 | 634 => out.push(sometimes(5097, 300)), // bats
+        177 => out.push(sometimes(5089, 100)),            // Mimic (Corrupt)
+        _ => {}
+    }
+    if matches!(npc_type, 6 | 7 | 8 | 9 | 173 | 181 | 239 | 240) {
+        out.push(sometimes(5094, 525)); // Tentacle Spike
+    }
+    if matches!(
+        npc_type,
+        6 | 7 | 8 | 9 | 81 | 94 | 98 | 99 | 100 | 101 | 173 | 174 | 181..=183 | 239..=242 | 268
+    ) {
+        out.push(sometimes(5091, 1500)); // Pig Pet
+    }
     // `Conditions.IsBloodMoonAndNotFromStatue` (`ItemDropDatabase.cs:179-182`) — a statue farm must
     // not be able to grind these, which is the entire reason the game checks the NPC's own origin
     // rather than just the world's.
@@ -734,6 +778,10 @@ pub fn bundled_with(item: u16) -> Option<(u16, i16, i16)> {
         // Mourning Wood's own pool (`ItemDropDatabase.cs:354-357`): both weapons' own ammunition.
         1782 => Some((1783, 50, 100)), // CandyCornRifle -> CandyCorn
         1784 => Some((1785, 25, 50)),  // JackOLanternLauncher -> ExplosiveJackOLantern
+        // The Nail Gun's own ammunition, the same shape: `itemDropRule.OnSuccess(
+        // ItemDropRule.Common(3108, 1, 100, 200), hideLootReport: true)`
+        // (`ItemDropDatabase.cs:268-270`). Both items had no source anywhere before.
+        3107 => Some((3108, 100, 200)), // NailGun -> Nail
         _ => None,
     }
 }
@@ -806,6 +854,16 @@ pub fn chance_pools(npc_type: u16, at: Conditions) -> Vec<ChancePool> {
         42 | 43 | 231 | 232 | 233 | 234 | 235 => vec![pool(100, &[960, 961, 962])],
         // Zombie Elf trio, the Frost Moon's own (`ItemDropDatabase.cs:389`).
         338..=340 => vec![pool(200, &[1943, 1944, 1945])],
+        // Nailhead's Nail Gun, once Plantera is down (`ItemDropDatabase.cs:266-270`): a
+        // `LeadingConditionRule(DownedPlantera)` over a 1-in-25 `Common(3107)` whose own
+        // `OnSuccess` hands over 100-200 Nails. A one-option pool rather than an entry in
+        // `conditional`, because this is the only shape whose consumer also drops the companion
+        // item `bundled_with` names, and the ammunition is only granted when the gun lands.
+        //
+        // Expert really rerolls the 1-in-25 once (`WithRerolls(3107, 1, 25)`), which this project
+        // already flattens to the classic rate everywhere it appears; see `conditional`'s own
+        // `ExpertGetsRerolls` note.
+        463 if at.downed_plantera => vec![pool(25, &[3107])],
         // Corrupt/Crimson Penguin (`ItemDropDatabase.cs:1137`).
         168 | 470 => vec![pool(50, &[3757, 3758, 3759])],
         // Zombie Eskimo, armed or not (`ItemDropDatabase.cs:1005`).
