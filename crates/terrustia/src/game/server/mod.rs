@@ -3574,7 +3574,11 @@ mod happiness_wiring {
 
         let (out_tx, _out_rx) = mpsc::channel(1024);
         let mut player = Player::new(0, "127.0.0.1:1".parse().expect("test address"), out_tx);
-        player.state = ConnState::WorldSent;
+        // Playing, not WorldSent: talking to an NPC is a gameplay action, and the pre-dispatch
+        // handshake gate refuses packet 40 from a connection still mid-handshake. This helper
+        // predates that gate and set WorldSent, which is exactly the state the gate exists to
+        // refuse, so the test was driving a path a real client cannot reach.
+        player.state = ConnState::Playing;
         player.position = (
             player_tile.0 as f32 * crate::game::npc::TILE,
             player_tile.1 as f32 * crate::game::npc::TILE,
