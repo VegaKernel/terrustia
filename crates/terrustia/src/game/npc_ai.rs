@@ -397,7 +397,9 @@ pub enum Avoids {
 /// NPC table, so it is only built when something present actually reads it.
 pub fn avoidance(style: i32) -> Option<Avoids> {
     match style {
-        85 | 86 | 90 | 108 | 111 | 122 => Some(Avoids::OwnKind),
+        // 44 is here for the two lunar swarmers, the Stardust Spider Flying and the Flying Antlion
+        // (`NPC.cs:31191-31206`); the other two style-44 types read the list and ignore it.
+        44 | 85 | 86 | 90 | 108 | 111 | 122 => Some(Avoids::OwnKind),
         64 => Some(Avoids::AnythingAlive),
         _ => None,
     }

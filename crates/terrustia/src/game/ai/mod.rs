@@ -626,8 +626,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         5 => {
-            // No expert mode yet, so the eater of souls uses its classic acceleration.
-            if let Some(shot) = eater::update(npc, world, rng, false) {
+            if let Some(shot) = eater::update(npc, world, rng, world.conditions.expert) {
                 effects.shots.push(shot);
             }
         }
@@ -644,7 +643,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         20 => track::spike_ball(npc, target, rand::Rng::random_range(rng, 0..15)),
-        13 => effects.died = rooted::plant(npc, world) == rooted::Outcome::Uprooted,
+        13 => {
+            let growth = rooted::plant(npc, world, rng);
+            effects.died = growth.uprooted;
+            effects.shots.extend(growth.shot);
+            effects.spawn.extend(growth.spawn);
+        }
         17 => rooted::vulture(npc, world),
         8 => {
             let cast = caster::update(npc, world, rng);
@@ -1013,7 +1017,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         22 => {
             // The drift it picks when it has nothing else to go on: -1.5, 0 or 1.5.
             let drift = rand::Rng::random_range(rng, -1..2) as f32 * 1.5;
-            haunt::update(npc, world, drift);
+            effects.shots.extend(haunt::update(npc, world, drift, rng));
         }
         38 => {
             if let Some(shot) = frost::update(npc, world) {
@@ -1021,13 +1025,12 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         10 => {
-            if let Some(shot) = skull::update(npc, world) {
-                effects.shots.push(shot);
-            }
+            let bite = skull::update(npc, world, rng);
+            effects.shots.extend(bite.shot);
+            effects.spawn.extend(bite.spawn);
         }
         18 => swimmer::jellyfish(npc, world),
-        // Shoaling is the caller's business; nothing here can see the rest of the shoal.
-        44 => swimmer::flying_fish(npc, world, (0.0, 0.0)),
+        44 => swimmer::flying_fish(npc, world),
         21 => track::wheel(npc),
         115 => critter::ladybug(npc, world, rng),
         118 => critter::seahorse(npc, world, rng),
@@ -1035,9 +1038,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         42 => effects.transform = ambush::lost_girl(npc, world),
         66 => effects.transform = grub::update(npc, world, rng),
         14 => {
-            if let Some(shot) = bat::update(npc, world, rng) {
-                effects.shots.push(shot);
-            }
+            let out = bat::update(npc, world, rng);
+            effects.shots.extend(out.shot);
+            effects.transform = out.became;
         }
         16 => fish::update(npc, target, world.wet, world.target_wet),
         24 => {
@@ -1051,9 +1054,13 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // The Brain's position is threaded in through ai[2..3] by the server, which knows
             // where every NPC is; a creeper with no Brain removes itself.
             let brain = (npc.ai[2] != 0.0 || npc.ai[3] != 0.0).then_some((npc.ai[2], npc.ai[3]));
-            let charging = rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE);
+            // `(Main.expertMode && Main.rand.Next(100) == 0) || Main.rand.Next(200) == 0`
+            // (`NPC.cs:32935`): expert doubles how often one breaks off to charge.
+            let charging = (world.conditions.expert
+                && rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE_EXPERT))
+                || rand::Rng::random_ratio(rng, 1, creeper::CHARGE_CHANCE);
             effects.expired =
-                creeper::update(npc, brain, target, charging) == creeper::Outcome::BrainGone;
+                creeper::update(npc, world, brain, charging) == creeper::Outcome::BrainGone;
         }
         58 => {
             let out = boss::moon::pumpking(npc, world, rng);

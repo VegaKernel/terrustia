@@ -1161,14 +1161,16 @@ pub fn jelly(npc_type: u16) -> Jelly {
             trigger: 0.6,
             lunge: 9.0,
         },
-        // A squid barely slows at all and goes off at the slightest excuse.
+        // A squid goes off at the slightest excuse. `NPC.cs:24551-24567` applies `velocity *= 0.98f`
+        // to every type first and only then the per-type extra, so the drag here is the product of
+        // the two, not the extra on its own.
         221 => Jelly {
-            drag: 0.99,
+            drag: 0.98 * 0.99,
             trigger: 1.0,
             lunge: 7.0,
         },
         242 => Jelly {
-            drag: 0.995,
+            drag: 0.98 * 0.995,
             trigger: 3.0,
             lunge: 7.0,
         },
@@ -1298,15 +1300,32 @@ pub const fn dungeon_wall(wall: u16) -> bool {
     matches!(wall, 7 | 8 | 9 | 94..=99)
 }
 
+/// A projectile a caster throws, from the `ai[1] == num92` block at `NPC.cs:21249-21354`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thrown {
+    pub projectile: u16,
+    /// Damage in classic. `GetAttackDamage_ForProjectiles(n, n * 0.8f)` (`NPC.cs:21290`) means
+    /// expert and above take four fifths of it, because the difficulty scales it back up.
+    pub damage: i32,
+    /// How fast it leaves, in pixels a tick. Zero means the shot is placed rather than aimed.
+    pub speed: f32,
+    /// Random jitter added to each axis of the aim, in pixels, before it is normalised.
+    pub scatter: i32,
+    /// Ticks of the target's own velocity to lead by. Only the Necromancer bothers.
+    pub lead: f32,
+    /// Whether it leaves from the caster's middle rather than the top of its head.
+    pub from_center: bool,
+}
+
 /// What a caster conjures, and where.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Conjuring {
-    /// The NPC it summons. Every pre-hardmode caster summons an NPC rather than firing a
-    /// projectile — the fire imp's burning sphere and the dark caster's water sphere are NPCs with
-    /// one hit point and no gravity.
+    /// The NPC it summons. Every *pre-hardmode* caster summons an NPC rather than firing a
+    /// projectile - the fire imp's burning sphere and the dark caster's water sphere are NPCs with
+    /// one hit point and no gravity. The hardmode dungeon casters throw ordinary projectiles.
     pub summons: Option<u16>,
-    /// A projectile instead, for the one caster that throws rather than summons.
-    pub throws: Option<(u16, i32)>,
+    /// A projectile instead.
+    pub throws: Option<Thrown>,
     /// Offset from the caster's own position, in pixels. The x component is applied along its
     /// facing for the types that conjure to the side.
     pub offset: (f32, f32),
@@ -1315,12 +1334,26 @@ pub struct Conjuring {
     /// Tick of the wind-up at which it lets go.
     pub release_at: f32,
     /// How far from its target it will teleport, in tiles.
-    pub teleport_range: i32,
+    /// How long it is held in place after choosing somewhere to blink to: vanilla's `num91`
+    /// (`NPC.cs:21160-21164`), which is 20 for everything but the Fire Imp's 5. It is *not* a
+    /// search range: `AI_AttemptToFindTeleportSpot` is always called with its default 20-tile
+    /// `rangeFromTargetTile` (`NPC.cs:18973`, `:21173`).
+    pub blink: f32,
     /// Whether it will only teleport within the dungeon.
     pub dungeon_bound: bool,
+    /// Ticks of the cycle at which it starts a wind-up (`NPC.cs:21082-21155`). The dungeon casters
+    /// each get their own, faster, cadence.
+    pub cadence: &'static [f32],
+    /// A cycle that ends early, as (at or past this, jump the timer to that). Four types shorten
+    /// their 650-tick cycle this way and so teleport more often than they cast.
+    pub cycle_ends_at: Option<(f32, f32)>,
 }
 
 /// What a type in the caster style conjures.
+///
+/// Style 8 is thirteen types, not five: the four pre-hardmode summoners and the librarian, plus the
+/// Rune Wizard and the four two-variant hardmode dungeon casters, each with its own cadence and its
+/// own projectile.
 pub fn conjuring(npc_type: u16) -> Option<Conjuring> {
     let base = Conjuring {
         summons: None,
@@ -1328,8 +1361,20 @@ pub fn conjuring(npc_type: u16) -> Option<Conjuring> {
         offset: (0.0, -8.0),
         offset_follows_facing: false,
         release_at: 25.0,
-        teleport_range: 20,
+        blink: CASTER_BLINK,
         dungeon_bound: false,
+        cadence: &CASTER_CADENCE,
+        cycle_ends_at: None,
+    };
+    // The dungeon casters all fire from the top of their head, unscattered and unled, until they
+    // say otherwise.
+    let bolt = Thrown {
+        projectile: 0,
+        damage: 0,
+        speed: 0.0,
+        scatter: 0,
+        lead: 0.0,
+        from_center: false,
     };
     match npc_type {
         // Fire Imp: a burning sphere, thrown out to the side, and it barely moves to do it.
@@ -1338,7 +1383,7 @@ pub fn conjuring(npc_type: u16) -> Option<Conjuring> {
             offset: (8.0, 20.0),
             offset_follows_facing: true,
             release_at: 10.0,
-            teleport_range: 5,
+            blink: CASTER_BLINK_SHORT,
             ..base
         }),
         29 => Some(Conjuring {
@@ -1355,16 +1400,108 @@ pub fn conjuring(npc_type: u16) -> Option<Conjuring> {
             ..base
         }),
         693 => Some(Conjuring {
-            throws: Some((1092, 13)),
+            throws: Some(Thrown {
+                projectile: 1092,
+                damage: 13,
+                from_center: true,
+                ..bolt
+            }),
             dungeon_bound: true,
+            ..base
+        }),
+        // Rune Wizard: six casts a cycle, from the middle, with a small aim wobble
+        // (`NPC.cs:21095-21101`, `:21339-21352`).
+        172 => Some(Conjuring {
+            throws: Some(Thrown {
+                projectile: 129,
+                damage: 40,
+                speed: 10.0,
+                scatter: 10,
+                from_center: true,
+                ..bolt
+            }),
+            cadence: &[75.0, 150.0, 225.0, 300.0, 375.0, 450.0],
+            ..base
+        }),
+        // Ragged Caster: three bursts of three, and a cycle that ends at 540 (`:21112-21122`).
+        281 | 282 => Some(Conjuring {
+            throws: Some(Thrown {
+                projectile: 293,
+                damage: 40,
+                speed: 4.0,
+                ..bolt
+            }),
+            offset: (0.0, 0.0),
+            cadence: &[
+                100.0, 120.0, 140.0, 200.0, 220.0, 240.0, 300.0, 320.0, 340.0,
+            ],
+            cycle_ends_at: Some((540.0, 700.0)),
+            dungeon_bound: true,
+            ..base
+        }),
+        // Necromancer: five casts, scattered and led, and the shortest cycle of the four
+        // (`:21083-21093`, `:21275-21279`).
+        283 | 284 => Some(Conjuring {
+            throws: Some(Thrown {
+                projectile: 290,
+                damage: 30,
+                speed: 6.0,
+                scatter: 30,
+                lead: 10.0,
+                ..bolt
+            }),
+            offset: (0.0, 0.0),
+            cadence: &[100.0, 150.0, 200.0, 250.0, 300.0],
+            cycle_ends_at: Some((450.0, 700.0)),
+            dungeon_bound: true,
+            ..base
+        }),
+        // Diabolist: the ordinary cadence, but it leaves early (`:21146-21149`).
+        285 | 286 => Some(Conjuring {
+            throws: Some(Thrown {
+                projectile: 291,
+                damage: 40,
+                speed: 8.0,
+                ..bolt
+            }),
+            offset: (0.0, 0.0),
+            // `ai[0] > 400f`, and the timer only ever holds whole numbers.
+            cycle_ends_at: Some((401.0, 650.0)),
+            dungeon_bound: true,
+            ..base
+        }),
+        // Desert Djinn: one wind-up a cycle, six times as long as anyone else's, which drops five
+        // ghost lanterns around its target rather than throwing anything at it
+        // (`:21105-21109`, `:21150-21153`, `:21190-21237`).
+        533 => Some(Conjuring {
+            throws: Some(Thrown {
+                projectile: 596,
+                damage: 0,
+                ..bolt
+            }),
+            cadence: &[180.0],
+            cycle_ends_at: Some((360.0, 650.0)),
             ..base
         }),
         _ => None,
     }
 }
 
+/// The Desert Djinn's wind-up is 181 ticks rather than everyone else's 30 (`NPC.cs:21107`), and it
+/// drops a lantern on every thirtieth tick of it while the count is still under five, so five in
+/// all (`NPC.cs:21192`). Its `release_at` is therefore not a single tick and the routine handles it
+/// by type.
+pub const DJINN_WINDUP: f32 = 181.0;
+pub const DJINN_LANTERNS: f32 = 5.0;
+/// How far from the target, in tiles, a djinn's lanterns may land, and how far from itself they
+/// must (`NPC.cs:21200-21203`).
+pub const DJINN_SPREAD: i32 = 6;
+
 /// A caster's cycle: it casts at these points and teleports when the timer runs out.
 pub const CASTER_CADENCE: [f32; 3] = [100.0, 200.0, 300.0];
+/// How far from its target a caster looks for somewhere to land, in tiles. The same for all
+/// thirteen: `AI_AttemptToFindTeleportSpot`'s `rangeFromTargetTile` default (`NPC.cs:18973`).
+pub const CASTER_TELEPORT_RANGE: i32 = 20;
 pub const CASTER_CYCLE: f32 = 650.0;
 /// The wind-up a cast sets going.
 pub const CASTER_WINDUP: f32 = 30.0;
@@ -1549,6 +1686,7 @@ pub fn haunt(npc_type: u16) -> Haunt {
                 x: Steering::new(0.1, 0.1, 0.05, 3.0),
                 y: Steering::new(0.04, 0.05, 0.03, 1.5),
             },
+            // `num312`: 4 for the wraith-like 75, 10 for the ice elemental (`NPC.cs:25044`).
             feel: if npc_type == 75 { 4 } else { 10 },
             sink: 0.2,
             sink_cap: 2.0,
@@ -1560,7 +1698,10 @@ pub fn haunt(npc_type: u16) -> Haunt {
                 x: Steering::new(0.1, 0.1, 0.05, 2.0),
                 y: Steering::new(0.04, 0.05, 0.03, 1.5),
             },
-            feel: 3,
+            // A Gastropod feels eight tiles ahead (`NPC.cs:24953`), not three, which is why it
+            // floats over floors and doorways an ordinary ghost would sink into. The Ichor
+            // Sticker's depth changes with where its target is, so its routine sets it.
+            feel: if npc_type == 122 { 8 } else { 3 },
             sink: 0.1,
             sink_cap: 3.0,
             lift: 0.1,
@@ -1568,6 +1709,12 @@ pub fn haunt(npc_type: u16) -> Haunt {
         },
     }
 }
+
+/// How deep an Ichor Sticker feels ahead of itself (`NPC.cs:25066`).
+///
+/// The one type whose probe depth is not constant: it reaches twice as far when its target is above
+/// it, which is what lets it climb to you rather than losing you over a ledge.
+pub const ICHOR_STICKER_FEEL: (i32, i32) = (6, 12);
 
 /// Whether a type in the haunting style feels further ahead the further off its target is.
 pub fn haunt_feels_by_distance(npc_type: u16) -> bool {
@@ -1578,6 +1725,35 @@ pub fn haunt_feels_by_distance(npc_type: u16) -> bool {
 pub fn haunt_flees_daylight(npc_type: u16) -> bool {
     npc_type == 490
 }
+
+/// What a projectile-throwing haunting throws, as (projectile, damage, speed).
+///
+/// Three of the style's types shoot, and none of them did before: the Gastropod's laser is its
+/// entire threat (`NPC.cs:24937-24953`), the Ice Elemental's shard (`:25037-25043`) and the Ichor
+/// Sticker's glob (`:25084-25096`).
+pub fn haunt_shot(npc_type: u16) -> Option<(u16, i32, f32)> {
+    match npc_type {
+        122 => Some((84, 25, 7.0)),
+        169 => Some((128, 45, 5.0)),
+        268 => Some((288, 40, 10.0)),
+        _ => None,
+    }
+}
+
+/// The Gastropod's and the Ice Elemental's shared attack cycle (`NPC.cs:24954-24975`,
+/// `:25045-25060`): `localAI[1]` counts to 120, then `ai[3]` runs from 1 to 64 and the shot leaves
+/// partway through.
+pub const HAUNT_RELOAD: f32 = 120.0;
+pub const HAUNT_WINDUP: f32 = 64.0;
+/// Tick of that wind-up at which each of the two lets go.
+pub fn haunt_release_at(npc_type: u16) -> f32 {
+    if npc_type == 122 { 32.0 } else { 16.0 }
+}
+
+/// The Ichor Sticker fires on its own timer instead: 60 ticks plus a roll of up to 60 more, and a
+/// hit knocks it back to minus forty-five (`NPC.cs:25068-25081`).
+pub const STICKER_RELOAD: i32 = 60;
+pub const STICKER_HIT_PENALTY: f32 = -45.0;
 
 /// Whether a type gives up on a target who is dead or has got a long way away.
 pub fn haunt_gives_up_at_range(npc_type: u16) -> Option<f32> {
