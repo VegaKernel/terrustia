@@ -7,9 +7,10 @@
 //!
 //! The size is `80 + 40` per eligible player, where eligible means someone with two hundred
 //! maximum life or more; a world of characters who have not found a life crystal cannot be
-//! invaded at all. The Frost Legion is larger than that and the Martians larger still, and the
-//! Martians are the one invasion that arrives *at spawn* rather than from an edge, because the
-//! probe that called them in reported where you were.
+//! invaded at all. The Goblins and the Frost Legion share that base exactly, the Pirates are
+//! larger and the Martians larger still, and the Martians are the one invasion that arrives
+//! *at spawn* rather than from an edge, because the probe that called them in reported where
+//! you were.
 
 use rand::{Rng, rngs::SmallRng};
 
@@ -59,6 +60,13 @@ impl Invasion {
     ///
     /// A player qualifies at two hundred maximum life. With nobody qualifying there is no
     /// invasion at all, which is why an early world cannot be invaded by accident.
+    ///
+    /// `Main.cs:65435-65443` `StartInvasion`: the base is `80 + 40 * num` for everything, type 3
+    /// (`InvasionID.PirateInvasion`) adds `40 + 20 * num` on top, and type 4
+    /// (`InvasionID.MartianMadness`) replaces the base outright with `160 + 40 * num`. Type 2
+    /// (`InvasionID.SnowLegion`, the Frost Legion) gets no adjustment at all, so it is the same
+    /// size as a Goblin army. `Main.cs:65471-65486` `FakeLoadInvasionStart` agrees: it groups
+    /// `case 1:` and `case 2:` on one 80/40 arm and gives `case 3:` alone the 120/60 arm.
     pub fn size_for(self, qualifying_players: usize) -> i32 {
         if qualifying_players == 0 {
             return 0;
@@ -66,7 +74,7 @@ impl Invasion {
         let players = qualifying_players as i32;
         match self {
             Self::Martian => 160 + 40 * players,
-            Self::FrostLegion => 80 + 40 * players + 40 + 20 * players,
+            Self::Pirate => 80 + 40 * players + 40 + 20 * players,
             _ => 80 + 40 * players,
         }
     }
@@ -287,12 +295,26 @@ mod tests {
     }
 
     /// More players means a longer invasion, and the Martians are the longest of them.
+    ///
+    /// The exact numbers are `Main.cs:65435-65443` `StartInvasion`, cross-checked against
+    /// `Main.cs:65471-65486` `FakeLoadInvasionStart`, which reconstructs the same sizes from a
+    /// saved world and groups Goblin and Frost Legion on one arm. Only the Pirates take the
+    /// `40 + 20 * num` bonus; the Frost Legion is the same size as a Goblin army.
     #[test]
     fn the_size_grows_with_the_party() {
         assert_eq!(Invasion::Goblin.size_for(1), 120);
         assert_eq!(Invasion::Goblin.size_for(4), 240);
-        assert!(Invasion::FrostLegion.size_for(1) > Invasion::Goblin.size_for(1));
-        assert!(Invasion::Martian.size_for(1) > Invasion::FrostLegion.size_for(1));
+        assert_eq!(
+            Invasion::FrostLegion.size_for(1),
+            Invasion::Goblin.size_for(1),
+            "vanilla gives the Frost Legion no bonus over a Goblin army"
+        );
+        assert_eq!(Invasion::FrostLegion.size_for(4), 240);
+        assert_eq!(Invasion::Pirate.size_for(1), 180, "80 + 40 + 40 + 20");
+        assert_eq!(Invasion::Pirate.size_for(4), 360, "80 + 160 + 40 + 80");
+        assert_eq!(Invasion::Martian.size_for(1), 200);
+        assert_eq!(Invasion::Martian.size_for(4), 320);
+        assert!(Invasion::Martian.size_for(1) > Invasion::Pirate.size_for(1));
     }
 
     /// An invasion marches on the town, and arrives.

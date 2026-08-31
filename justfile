@@ -66,16 +66,21 @@ rust-build:
 # CHECKS — mirrors CI
 # ─────────────────────────────────────────
 
-# Everything CI runs: Rust format, clippy, supply-chain, tests, and the web build
-check: check-rust check-web
+# Everything CI runs: Rust format, clippy (both feature sets), supply-chain, the web build, tests
+check: check-rust check-web test
     @echo "All checks passed ✓"
 
-# Rust-only checks (faster)
+# Rust-only checks (faster). No tests: `just check` adds those, this is the lint pass on its own.
 check-rust:
     @echo "── Rust format ──"
     cargo fmt --all --check
     @echo "── Rust clippy (0 warnings) ──"
     cargo clippy --workspace --all-targets -- -D warnings
+    @# `embed-web` is default-on, so the pass above never compiles the panel's disk-serving branch
+    @# (`panel/mod.rs::load_static_asset`'s `#[cfg(not(feature = "embed-web"))]` arm) or the `..`
+    @# traversal guard inside it. CI lints it separately (ci.yml) and so does this.
+    @echo "── Rust clippy, embed-web off (the disk-serving panel branch) ──"
+    cargo clippy -p terrustia --all-targets --no-default-features -- -D warnings
     @echo "── Supply chain (cargo-deny) ──"
     cargo deny check
 

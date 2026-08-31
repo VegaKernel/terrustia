@@ -128,8 +128,18 @@ echo "--- server tick cost: its own cpu vs any external stall ---"
 # window (the loop maxes into `worst_tick` and takes it), so a percentile here is a percentile of
 # window maxima: a stricter reading than a true per-tick percentile, not a looser one. A 30-minute
 # hold yields about 180 samples.
+#
+# The `tick window` filter is load-bearing and not decoration. That debug line fires once per window
+# unconditionally, and the over-budget `warn!` and the stalled-window `info!` below it are
+# *additional* lines for the same window carrying the same `cpu_us` value, not alternatives to it.
+# Grepping the whole log for `cpu_us=` therefore counted every heavy or stalled window twice, and
+# those duplicates land precisely at the tail where p95 and p99 are read: a 30-minute run showed 179
+# `tick window` lines against 183 `cpu_us=` matches, the excess being exactly the four stall lines.
+# One window, one sample. The warn/info lines stay as operator signal; they are not the sample
+# source.
 BUDGET_US=16667
-grep -oE 'cpu_us=[0-9]+' "$WORK/server.log" | grep -oE '[0-9]+' | sort -n > "$WORK/cpu_us.txt"
+grep 'tick window' "$WORK/server.log" | grep -oE 'cpu_us=[0-9]+' | grep -oE '[0-9]+' \
+  | sort -n > "$WORK/cpu_us.txt"
 tick_samples=$(wc -l < "$WORK/cpu_us.txt" | tr -d ' ')
 tick_p99=""
 if [ "${tick_samples:-0}" -gt 0 ]; then
@@ -164,7 +174,10 @@ echo "=== VERDICT ==="
 fail=0
 panics=$(grep -icE "panic|thread .* panicked" "$WORK/server.log")
 [ "$panics" -eq 0 ] && echo "PASS  no panics" || { echo "FAIL  $panics panic line(s)"; fail=1; }
-if [ "$ok" -ge $(( PLAYERS * 9 / 10 )) ]; then echo "PASS  $ok/$PLAYERS clients connected and held"; else echo "FAIL  only $ok/$PLAYERS clients held"; fail=1; fi
+# Ninety percent, rounded up. Integer division truncates, which at 255 put the bar at 229 (89.8%)
+# and passed a run that missed the stated bar by half a client.
+required_ok=$(( (PLAYERS * 9 + 9) / 10 ))
+if [ "$ok" -ge "$required_ok" ]; then echo "PASS  $ok/$PLAYERS clients connected and held"; else echo "FAIL  only $ok/$PLAYERS clients held, need $required_ok"; fail=1; fi
 if [ "$saved_bytes" -gt 0 ]; then echo "PASS  world saved on shutdown ($saved_bytes bytes)"; else echo "FAIL  no world written on shutdown"; fail=1; fi
 # The release bar names p99 tick cost, so the run judges it rather than printing a number for a
 # person to eyeball. No samples is a failure and not a pass: an absent measurement used to be

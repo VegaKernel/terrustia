@@ -28,7 +28,8 @@ Each recipe and the raw `cargo` it wraps:
 |---|---|---|
 | `just run -- --world W.wld` | `cargo run --release -p terrustia -- ...` | Run the server |
 | `just build` | build the web panel, then `cargo build --release` | A release binary with the panel embedded |
-| `just check` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets`, the web checks | What CI runs |
+| `just check` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets`, `cargo clippy -p terrustia --all-targets --no-default-features`, `cargo deny check`, the web checks, `cargo test --workspace` | What CI runs |
+| `just check-rust` | the same, minus the web build and the tests | The lint pass on its own |
 | `just test` | `cargo test --workspace` | The whole test suite |
 | `just test-filter NAME` | `cargo test --workspace NAME` | One test or module |
 | `just fmt` | `cargo fmt --all` | Format everything |
