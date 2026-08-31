@@ -17,7 +17,7 @@ use super::*;
 /// already there" check entirely and tests only entities. `occupants` is
 /// [`GameServer::entity_hitboxes`]'s own list, built once per call site rather than once per tile
 /// tested.
-fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
+pub(super) fn tile_occupied(x: i32, y: i32, occupants: &[(f32, f32, f32, f32)]) -> bool {
     let tile = (
         (x * 16) as f32,
         (y * 16) as f32,
@@ -1944,7 +1944,7 @@ impl GameServer {
     /// Every playing player's and every active NPC's hitbox, in world pixels as `(left, top, right,
     /// bottom)` — the boxes vanilla's `Collision.EmptyTile` tests a tile against, so an unforced
     /// door close can tell whether something is standing in the column it would shut on.
-    fn entity_hitboxes(&self) -> Vec<(f32, f32, f32, f32)> {
+    pub(super) fn entity_hitboxes(&self) -> Vec<(f32, f32, f32, f32)> {
         let mut boxes = Vec::new();
         for player in self.players.iter().flatten() {
             if !player.is_playing() {
