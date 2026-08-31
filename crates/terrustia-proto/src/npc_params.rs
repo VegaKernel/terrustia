@@ -2117,16 +2117,30 @@ pub const SKELETRON_SPIN_TICKS: f32 = 400.0;
 pub const SKELETRON_HOVER_ABOVE: f32 = 250.0;
 /// Hover steering: (vertical accel, vertical cap, horizontal accel, horizontal cap).
 pub const SKELETRON_HOVER: (f32, f32, f32, f32) = (0.02, 2.0, 0.05, 8.0);
-/// How fast it charges while spinning, and how fast it spins. Expert mode raises the charge
-/// speed to 3.5 and then keeps adding 10% for every 50px of range beyond 150, up to 600
-/// (`NPC.cs:22284-22341`), which is what `SKELETRON_SPIN_SPEED_EXPERT_RANGE` encodes.
+/// How fast it charges while spinning, and how fast it spins. Expert mode raises the charge speed
+/// to 3.5 and then compounds two separate multipliers onto it: one per range threshold crossed
+/// (`NPC.cs:22292-22332`) and one for how many hands are still alive (`NPC.cs:22333-22342`).
 pub const SKELETRON_SPIN_SPEED: f32 = 1.5;
 pub const SKELETRON_SPIN_SPEED_EXPERT: f32 = 3.5;
-/// Range thresholds (in pixels) beyond which the expert charge speed picks up another 10%.
-pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE: [f32; 10] = [
-    150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 450.0, 500.0, 550.0, 600.0,
+/// Range thresholds (in pixels) and the factor each one compounds on. The first step is 1.05, not
+/// 1.1: vanilla opens with `if (num199 > 150f) num200 *= 1.05f;` and only then repeats at 1.1 for
+/// every fifty pixels up to six hundred (`NPC.cs:22292-22332`).
+pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE: [(f32, f32); 10] = [
+    (150.0, 1.05),
+    (200.0, 1.1),
+    (250.0, 1.1),
+    (300.0, 1.1),
+    (350.0, 1.1),
+    (400.0, 1.1),
+    (450.0, 1.1),
+    (500.0, 1.1),
+    (550.0, 1.1),
+    (600.0, 1.1),
 ];
-pub const SKELETRON_SPIN_SPEED_EXPERT_RANGE_FACTOR: f32 = 1.1;
+/// And then the escalation the fight is actually built around: breaking a hand makes the head
+/// charge faster (`switch (num173)`, `NPC.cs:22333-22342`). Two hands alive is the plain rate.
+pub const SKELETRON_SPIN_SPEED_EXPERT_NO_HANDS: f32 = 1.1;
+pub const SKELETRON_SPIN_SPEED_EXPERT_ONE_HAND: f32 = 1.05;
 pub const SKELETRON_SPIN_RATE: f32 = 0.3;
 /// How much of its defence it drops while spinning — the window the fight gives you.
 pub const SKELETRON_SPIN_DEFENSE: i32 = 10;
@@ -3828,6 +3842,10 @@ pub const GOLEM_FIREBALL_DAMAGE_UPGRADED: i32 = 24;
 /// The free head's own fireball hits harder still than the attached head's base one
 /// (`NPC.cs:31684`).
 pub const GOLEM_FREE_FIREBALL_DAMAGE: i32 = 20;
+/// Fractions of the **body's** health past which the free head's fireball charge picks up another
+/// `(pace + 4) / 5` per tick (`NPC.cs:31645-31661`). Four steps on top of the base take a 300-tick
+/// cycle down to sixty.
+pub const GOLEM_FREE_FIREBALL_STEPS: [f32; 4] = [0.8, 0.6, 0.2, 0.1];
 
 /// Eye-lasers. The attached head only grows these past half health, alongside its upgraded
 /// fireball (`NPC.cs:31504-31564`); the free head always has them (`NPC.cs:31736-31801`).
@@ -3848,7 +3866,8 @@ pub const GOLEM_LASER_NO_LOS_BONUS: f32 = 4.0;
 /// cannot see you, and hits harder and faster once badly hurt.
 pub const GOLEM_FREE_LASER_DAMAGE: i32 = 24;
 pub const GOLEM_FREE_LASER_SPEED: f32 = 11.0;
-/// Health fractions (of `life_max`) past which the interval speeds up by one more `pace`.
+/// Fractions of the **body's** health past which the interval speeds up by one more `pace`
+/// (`NPC.cs:31694-31725`; vanilla writes these as `lifeMax / 1.25` through `lifeMax / 6`).
 pub const GOLEM_FREE_LASER_INTERVAL_STEPS: [f32; 7] = [
     1.0 / 1.25,
     1.0 / 1.5,
@@ -3858,10 +3877,12 @@ pub const GOLEM_FREE_LASER_INTERVAL_STEPS: [f32; 7] = [
     1.0 / 5.0,
     1.0 / 6.0,
 ];
+/// Multiplied by the pace, not added flat: vanilla's `ai[2] += num770 * 10f` (`NPC.cs:31732`).
 pub const GOLEM_FREE_LASER_NO_LOS_BONUS: f32 = 10.0;
 /// `100 + 4800/2`.
 pub const GOLEM_FREE_LASER_INTERVAL: f32 = 2500.0;
-/// Health fractions past which each laser hits one harder and a quarter faster.
+/// Fractions of the **body's** health past which each laser hits one harder and a quarter faster
+/// (`NPC.cs:31755-31778`).
 pub const GOLEM_FREE_LASER_DAMAGE_STEPS: [f32; 5] = [0.5, 0.4, 0.3, 0.2, 0.1];
 /// Without line of sight, the volley is fired blind but hits much harder and faster.
 pub const GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT: f32 = 1.5;
