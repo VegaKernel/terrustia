@@ -47,6 +47,7 @@ fn plain() -> Conditions {
         blood_moon: false,
         eclipse: false,
         event_moon: false,
+        above_surface_line: true,
         town_npcs: 0,
         nearby_active_npcs: 1_000.0,
         below_dirt_midline: false,

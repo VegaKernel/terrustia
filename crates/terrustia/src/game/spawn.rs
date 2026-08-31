@@ -38,13 +38,19 @@ pub struct Conditions {
     pub day_time: bool,
     pub blood_moon: bool,
     pub eclipse: bool,
-    /// A pumpkin or frost moon, *and* the player above the surface line.
+    /// A pumpkin or frost moon: `Main.pumpkinMoon || Main.snowMoon`, with no height test.
     ///
-    /// Both of the game's moon branches carry the same `(pumpkinMoon || snowMoon) &&
-    /// player.position.Y < Main.worldSurface * 16.0` test (`NPC.cs:543` and `:772`), so the height
-    /// half lives in the caller rather than being re-derived here from a band that is offset by a
-    /// screen height and would not agree.
+    /// The height test belongs to the two *rate* branches rather than to the flag: both carry
+    /// `&& player.position.Y < Main.worldSurface * 16.0` (`NPC.cs:543` and `:772`), and the town
+    /// gate that also reads the moon (`NPC.cs:800`) carries no such test, so folding it in here
+    /// would quietly turn town suppression back on for anyone underground during a moon. See
+    /// [`Self::above_surface_line`].
     pub event_moon: bool,
+    /// `player.position.Y < Main.worldSurface * 16.0`: the height half of the two moon branches.
+    ///
+    /// Not derivable from [`Depth`], whose surface band sits a screen height lower
+    /// (see [`rate_depth_at`]).
+    pub above_surface_line: bool,
     /// Townsfolk living near the player.
     ///
     /// This is what makes a base safe, and it is the single most player-visible spawn rule in the
@@ -148,7 +154,8 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
                     rate *= 0.3;
                     max *= 1.8;
                 }
-                if at.event_moon {
+                // NPC.cs:543, with its own `position.Y < worldSurface * 16` half.
+                if at.event_moon && at.above_surface_line {
                     rate *= 0.2;
                     max *= 2.0;
                 }
@@ -235,7 +242,7 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     // `NPC.cs:772-776`, the moon override, absolute in both directions: it replaces the rate with a
     // flat 20 and the cap with a function of the party size, whatever the clamps just said. Reached
     // at 64 or 72 before this, against the game's 20.
-    if at.event_moon {
+    if at.event_moon && at.above_surface_line {
         max = MAX_SPAWNS * (2.0 + 0.3 * at.active_players as f32);
         rate = 20.0;
     }
@@ -257,9 +264,8 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     // sub-case inside each branch below, since this project has no notion of a graveyard zone at
     // all yet (the same reason `ZonePeaceCandle` and the rest of a player's own buffs are already
     // out of `Conditions`' scope, per this struct's own doc comment).
-    let event = at.blood_moon || at.eclipse || at.event_moon;
     let mut spawn_friendly = false;
-    if !event {
+    if town_suppression_applies(at) {
         match at.town_npcs {
             0 => {}
             // NPC.cs:870-878, the ordinary (non-graveyard) case: a one-in-three chance forces a
@@ -322,8 +328,31 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
 /// `ZoneShadowCandle` clearing it again (`NPC.cs:420-424`) is a player-carried effect, out of
 /// [`Conditions`]' scope like every other one.
 pub fn no_worms(at: Conditions) -> bool {
-    let event = at.blood_moon || at.eclipse || at.event_moon;
-    at.behind_a_house_wall || (!event && at.town_npcs >= 1)
+    at.behind_a_house_wall || (town_suppression_applies(at) && at.town_npcs >= 1)
+}
+
+/// The gate the whole town-suppression block sits behind, `NPC.cs:800`:
+///
+/// ```csharp
+/// if (!invaders && ((!Main.bloodMoon && !Main.pumpkinMoon && !Main.snowMoon) || Main.dayTime)
+///     && (!Main.eclipse || !Main.dayTime) && !flag && !ZoneCrimson && !ZoneMeteor
+///     && !ZoneOldOneArmy)
+/// ```
+///
+/// where `flag` is `ZoneCorrupt || ZoneCrimson`. So an event overrules the town, and so does simply
+/// standing in an evil: a corrupt base is never quiet, however many people live in it. That last
+/// clause could not be modelled until `Conditions` carried a biome at all.
+///
+/// Note the moon here is tested with **no** height condition, unlike the two rate branches: a
+/// player underground during a pumpkin moon still has town suppression switched off.
+///
+/// Three of the game's exclusions are dropped, each because the thing they test does not exist
+/// here: `invaders` (invasions do not route through this function), `ZoneMeteor` and
+/// `ZoneOldOneArmy`. `Main.infectedSeed`, which would clear `flag` again, is likewise unmodelled.
+fn town_suppression_applies(at: Conditions) -> bool {
+    ((!at.blood_moon && !at.event_moon) || at.day_time)
+        && (!at.eclipse || !at.day_time)
+        && !matches!(at.biome, Biome::Corruption | Biome::Crimson)
 }
 
 /// The burrowers whose spawn branch vanilla gates on `noWorms`, out of the types this server fields.
@@ -359,6 +388,7 @@ mod rate_tests {
             blood_moon: false,
             eclipse: false,
             event_moon: false,
+            above_surface_line: true,
             town_npcs: 0,
             nearby_active_npcs: 1_000.0,
             below_dirt_midline: false,
@@ -523,6 +553,60 @@ mod rate_tests {
             !blood_night.2,
             "and an event never forces a friendly spawn either"
         );
+    }
+
+    /// The gate the whole town-suppression block sits behind (`NPC.cs:800`), which has two clauses
+    /// worth their own pin.
+    ///
+    /// An evil is never quiet, however many people live in it: `!flag && !ZoneCrimson` where
+    /// `flag = ZoneCorrupt || ZoneCrimson`. That clause could not be modelled at all until
+    /// `Conditions` carried a biome.
+    ///
+    /// And the moon is tested there with no height condition, unlike the two rate branches, so a
+    /// player underground during a pumpkin moon still has town suppression switched off.
+    #[test]
+    fn an_evil_is_never_quieted_by_a_town_and_a_moon_switches_it_off_at_any_depth() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        for biome in [Biome::Corruption, Biome::Crimson] {
+            for _ in 0..50 {
+                let (_, cap, friendly) = rates(
+                    Conditions {
+                        biome,
+                        town_npcs: 5,
+                        ..plain()
+                    },
+                    &mut rng,
+                );
+                assert!(!friendly, "{biome:?} never draws a friendly for a town");
+                assert_eq!(cap, 5.0 * 1.3, "and its cap is the evil's, not a town's");
+            }
+        }
+        // A forest of the same headcount does get quieted, so the biome is what did it.
+        assert!(
+            rates(
+                Conditions {
+                    town_npcs: 5,
+                    ..plain()
+                },
+                &mut rng,
+            )
+            .2
+        );
+
+        // Underground, during a moon, with a full town: no suppression, because the gate's moon
+        // clause carries no height test.
+        let deep_moon = Conditions {
+            depth: Depth::Cavern,
+            above_surface_line: false,
+            event_moon: true,
+            day_time: false,
+            town_npcs: 5,
+            ..plain()
+        };
+        assert!(!rates(deep_moon, &mut rng).2, "a moon overrules the town");
+        assert!(!no_worms(deep_moon), "and its noWorms with it");
+        // ...but the moon's own rate override does not reach down here.
+        assert_ne!(rates(deep_moon, &mut rng).0, 20);
     }
 
     /// `noWorms` keeps burrowers out when there is a town or a wall at your back, and an event
@@ -1626,7 +1710,9 @@ pub fn try_spawn(
             blood_moon: world.blood_moon,
             eclipse: world.eclipse,
             // `NPC.cs:543` and `:772` both carry the height half of this condition.
-            event_moon: (world.pumpkin_moon || world.snow_moon) && py < i32::from(world.surface),
+            event_moon: world.pumpkin_moon || world.snow_moon,
+            // `NPC.cs:543` and `:772`, `player.position.Y < Main.worldSurface * 16.0`.
+            above_surface_line: py < i32::from(world.surface),
             town_npcs: town_npcs_near(npcs, player.position),
             nearby_active_npcs: near,
             // `NPC.cs:686`, `player.position.Y / 16 > (worldSurface + rockLayer) / 2`.
@@ -2301,10 +2387,19 @@ mod tests {
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
-        player.position = (
-            f32::from(world.spawn_x) * 16.0,
-            f32::from(world.spawn_y) * 16.0,
-        );
+        // A town cannot quiet an evil (`NPC.cs:800`'s `!flag` clause), and this world's own spawn
+        // point happens to sit in one, so find a plain forest column to build the town in instead.
+        let py = i32::from(world.spawn_y);
+        let px = (260..540)
+            .step_by(4)
+            .find(|&x| {
+                !matches!(
+                    biome_at(&world, x, py),
+                    Biome::Corruption | Biome::Crimson | Biome::Ocean
+                )
+            })
+            .expect("the test world has somewhere that is not an evil");
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
         // Three townsfolk standing right where the player is, well inside town_npcs_near's reach.
         for _ in 0..3 {
             npcs.spawn(GUIDE, player.position);
