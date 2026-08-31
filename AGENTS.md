@@ -47,6 +47,17 @@ Recipes live in the `justfile`; each is a thin wrapper over `cargo`, so plain `c
 - `just soak [SECONDS]` runs a real server with three real clients (the CI soak).
 - `just fuzz [TARGET] [SECONDS]` fuzzes a decoder target (needs nightly + `cargo-fuzz`).
 - `just regen` regenerates every data table from a decompiled tree (dev-only; see below).
+- `just check-data` is the qualification-time data pass, run locally and never in CI, because two of
+  its four parts need a decompiled tree that can never ship to a hosted runner. It is `just fuzz`'s
+  neighbour, not `just check`'s: run it before a release candidate.
+  - `check-drops` and `check-recipes` compare the committed tables against the game's own source.
+  - `check-dead-writes` reports struct fields written in production and read only by the tests.
+    `rustc`'s `dead_code` cannot see these, because a read inside `#[cfg(test)]` counts as a read;
+    that blind spot is how thirteen boss-enrage sites wrote `Npc::damage_bonus` that nothing read.
+    Needs no decompiled tree.
+  - `check-mutants` corrupts the committed tables one entry at a time and requires the checkers
+    above to fail. A mutant that survives is a checker blind spot by definition, which is how a
+    missing drop stays missing; `--rust` additionally measures the proto test suite, slowly.
 
 ## How to work here (non-negotiables)
 

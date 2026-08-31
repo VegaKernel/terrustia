@@ -1499,8 +1499,10 @@ dependencies = [
 name = "terrustia-codegen"
 version = "0.0.1"
 dependencies = [
+ "proc-macro2",
  "regex",
  "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]

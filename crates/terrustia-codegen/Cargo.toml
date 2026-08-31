@@ -21,8 +21,23 @@ publish = false
 name = "codegen"
 path = "src/main.rs"
 
+# The dead-write lint (`just check-dead-writes`). It lives here because this crate is already
+# outside the default build set, so its parser dependency costs an ordinary `cargo build` nothing;
+# putting it in the server crate would have added `syn` to every build of the server.
+[[bin]]
+name = "deadwrite"
+path = "src/bin/deadwrite.rs"
+
 [dependencies]
 regex = "1"
+# Only for the `deadwrite` lint. A field write and a field read have to be told apart *structurally*
+# (`npc.foo = 1` from `if npc.foo`), and the whole reason this lane exists is that a regex slice
+# over source text reads past what it thinks it is matching. `syn` is already in this workspace's
+# lockfile as a proc-macro dependency, and this crate never enters an ordinary build.
+syn = { version = "2", features = ["full", "visit"] }
+# `span-locations` is what turns a parsed node back into a `file:line` for the report; without it a
+# finding is a field name with nowhere to go and look.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 # Only for town_names: the localisation file is JSON with trailing commas (stripped before
 # parsing, same as the Python original). "preserve_order" keeps object keys in file order, since
 # a category's name list is read out as `.values()` in that order, not sorted.

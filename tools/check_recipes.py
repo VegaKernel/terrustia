@@ -6,7 +6,6 @@ made twice. Picks recipes at random, re-parses their chunk by hand, and compares
 """
 import re
 import sys
-import random
 import pathlib
 
 D = sys.argv[1]
@@ -71,6 +70,26 @@ def resolve_locals(text: str) -> str:
             ints[m.group(1)] = m.group(2)
             out.append(raw)
             continue
+        # `for (int l = 3309; l <= 3314; l++) { ... SetDefaults(l) ... }` writes six recipes for
+        # one result, and this file keeps the last decraftable recipe per result, so the surviving
+        # one is the final iteration's. Binding the counter to its *last* value reproduces exactly
+        # that recipe. Without this the loop counter was not a digit, the ingredient slot it fills
+        # never matched, and the recipe came out one ingredient short: item 5547 read as "makes 1
+        # from item 3306" when it takes 3306 *and* 3314. That was reported as the table being
+        # wrong; the table was right and this checker was blind. `SetupRecipes` has three loops of
+        # this counted shape (3665..=3704, 2114..=2118, 3309..=3314, 4327..=4332); the rest count
+        # over an array length and write no recipe of their own.
+        if m := re.match(r"for \(int (\w+) = ", line):
+            counted = re.fullmatch(r"for \(int (\w+) = (\d+); \1 <= (\d+); \1\+\+\)", line)
+            if counted:
+                ints[counted.group(1)] = counted.group(3)
+            else:
+                # A loop over an array length rebinds the same short name (`i`, `j`) to something
+                # this cannot resolve. Forgetting it is the point: leaving the previous counted
+                # loop's last value bound would substitute it into an unrelated line later.
+                ints.pop(m.group(1), None)
+            out.append(raw)
+            continue
         if m := re.fullmatch(r"int\[\] (\w+) = new int\[\d*\] \{([^}]*)\};", line):
             arrays[m.group(1)] = [int(n) for n in re.findall(r"-?\d+", m.group(2))]
             out.append(raw)
@@ -103,15 +122,51 @@ chunks = re.findall(
     r"currentRecipe\.createItem\.SetDefaults\((\d+)\);(.*?)AddRecipe\(\);", body, re.S
 )
 
+def literal(arg: str) -> int | None:
+    """A `SetDefaults(...)` argument as an integer, or `None` when it cannot be read here.
+
+    Two shapes beyond a plain number occur in `SetupRecipes`: `num5 - 4327 + 4334`, which is
+    arithmetic on a loop counter `resolve_locals` has already substituted, and
+    `ItemID.Sets.TextureCopyLoad[i]`, a lookup into a table that lives in another file.
+
+    Returning `None` for the second is the point. The old code's regex simply did not match it, so
+    the ingredient vanished and the recipe was compared *one slot short*: item 3704 was reported
+    as a table error when the table was right and this checker could not read the source. A
+    checker that cannot read something has to say so, not quietly compare the remainder.
+    """
+    arg = arg.strip()
+    if re.fullmatch(r"-?\d+", arg):
+        return int(arg)
+    if re.fullmatch(r"-?\d+(?:\s*[-+]\s*\d+)+", arg):
+        total, sign = 0, 1
+        for token in re.findall(r"[-+]|\d+", arg):
+            if token in "-+":
+                sign = -1 if token == "-" else 1
+            else:
+                total += sign * int(token)
+                sign = 1
+        return total
+    return None
+
+
 truth = {}
+unreadable = 0
 for result, text in chunks:
     result = int(result)
     if "notDecraftable = true" in text or "DisableDecraft()" in text:
         continue
     slots = {}
-    for m in re.finditer(r"requiredItem\[(\d+)\]\.SetDefaults\((\d+)\)", text):
-        if int(m.group(2)) > 0:
-            slots[int(m.group(1))] = [int(m.group(2)), 1]
+    skip = False
+    for m in re.finditer(r"requiredItem\[(\d+)\]\.SetDefaults\(([^()]*)\)", text):
+        value = literal(m.group(2))
+        if value is None:
+            skip = True
+            break
+        if value > 0:
+            slots[int(m.group(1))] = [value, 1]
+    if skip:
+        unreadable += 1
+        continue
     for m in re.finditer(r"requiredItem\[(\d+)\]\.stack = (\d+)", text):
         if int(m.group(1)) in slots:
             slots[int(m.group(1))][1] = int(m.group(2))
@@ -133,8 +188,15 @@ for result, text in chunks:
         makes = int(sm.group(1))
     truth[result] = (makes, [tuple(v) for _, v in sorted(slots.items())])
 
-random.seed(20260823)
-sample = random.sample(sorted(truth), min(300, len(truth)))
+# Every craftable item, not a sample of them.
+#
+# This used to be `random.seed(20260823); random.sample(sorted(truth), 300)`: 300 of the 2543
+# recipes the source defines, drawn against a *fixed* seed, so the same 88% of the table was never
+# compared with anything and never would be. `tools/mutate_tables.py` measured exactly that:
+# corrupting 40 random `result:` fields in `recipes.rs` was caught 3 times out of 40, and the three
+# were the ones that happened to fall inside the sample. The whole run costs a fraction of a second
+# either way, so the sampling bought nothing and hid nearly everything.
+sample = sorted(truth)
 bad = 0
 for item in sample:
     makes, wants = truth[item]
@@ -152,5 +214,6 @@ for item in sample:
 
 print(f"checked {len(sample)} recipes against the source independently")
 print(f"  {len(truth)} craftable items in the source, {len(crafted)} in the table")
+print(f"  {unreadable} recipe(s) skipped: an ingredient this checker cannot resolve to a number")
 print("  " + ("ALL MATCH" if bad == 0 else f"{bad} DISAGREEMENTS"))
 sys.exit(1 if bad else 0)
