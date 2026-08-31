@@ -44,7 +44,7 @@ pub fn swooper(npc: &mut Npc, world: &World<'_, impl TileView>) {
     // it cannot reach across the way vanilla's second write does — doubling its own push is what
     // makes up the difference and keeps the pair separating at the true, full rate.
     let (cx, cy) = npc.center();
-    for (kx, ky) in world.avoid {
+    for (kx, ky, _) in world.avoid {
         let (dx, dy) = (kx - cx, ky - cy);
         let gap = dx.hypot(dy);
         if gap < SWOOP_PERSONAL_SPACE {
@@ -280,7 +280,7 @@ mod tests {
     fn two_swoopers_shoulder_each_other_apart() {
         let tiles = Sky(HashMap::new());
         // Past the entrance shove, which would otherwise swamp a push this small.
-        let run = |neighbour: &[(f32, f32)]| {
+        let run = |neighbour: &[(f32, f32, f32)]| {
             let mut a = apparition(0.0, 0.0);
             a.local_ai[0] = SWOOP_ENTRANCE;
             let mut w = world(&tiles, Some((5000.0, 0.0)));
@@ -290,7 +290,7 @@ mod tests {
         };
         let (cx, cy) = apparition(0.0, 0.0).center();
         let alone = run(&[]);
-        let crowded = run(&[(cx + 10.0, cy)]);
+        let crowded = run(&[(cx + 10.0, cy, 0.0)]);
         assert!(
             crowded < alone,
             "a neighbour on the right should push it left: {crowded} vs {alone}"
@@ -307,7 +307,7 @@ mod tests {
         a.local_ai[0] = SWOOP_ENTRANCE;
         let mut w = world(&tiles, Some((5000.0, 0.0)));
         let (cx, cy) = a.center();
-        let neighbour = [(cx + 10.0, cy)];
+        let neighbour = [(cx + 10.0, cy, 0.0)];
         w.avoid = &neighbour;
 
         swooper(&mut a, &w);

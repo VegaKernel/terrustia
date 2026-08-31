@@ -119,7 +119,7 @@ pub fn fairy(
     }
 
     // Fairies stack vertically rather than piling up, so a cluster spreads into a column.
-    for &(_, ky) in world.avoid {
+    for &(_, ky, _) in world.avoid {
         if (npc.position.1 - ky).abs() < npc.width() * 1.5 {
             npc.velocity.1 += if npc.position.1 < ky { -0.05 } else { 0.05 };
         }

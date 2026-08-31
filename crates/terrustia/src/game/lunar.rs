@@ -11,18 +11,21 @@
 
 use rand::{Rng, rngs::SmallRng};
 
-/// The four pillars, in the game's own ids.
-pub const SOLAR: u16 = 517;
-pub const VORTEX: u16 = 422;
-pub const NEBULA: u16 = 507;
-pub const STARDUST: u16 = 493;
+/// The four pillars, in the game's own ids, and the shield each one carries.
+///
+/// One source, in the data crate: these were declared twice, here and in `npc_params`, with the
+/// copy here the only one anything read.
+pub use terrustia_proto::npc_params::{
+    TOWER_NEBULA as NEBULA, TOWER_SHIELD as SHIELD_STRENGTH, TOWER_SOLAR as SOLAR,
+    TOWER_STARDUST as STARDUST, TOWER_VORTEX as VORTEX,
+};
+
 pub const PILLARS: [u16; 4] = [SOLAR, VORTEX, NEBULA, STARDUST];
 
 /// The Moon Lord's core, which is what actually arrives.
 pub const MOON_LORD: u16 = 398;
 
-/// How many minions a pillar's shield is worth, and how long the sky takes afterwards.
-pub const SHIELD_STRENGTH: i32 = 100;
+/// How long the sky takes after the last pillar falls.
 pub const MOON_LORD_COUNTDOWN: i32 = 3600;
 
 /// Which pillar an NPC belongs to, if any.

@@ -46,9 +46,11 @@ const DIVE_CONE: f32 = 8.0;
 ///
 /// The game measures Manhattan distance against the NPC's own width and pushes a fixed step per
 /// neighbour, so a tight knot pushes itself apart faster than a loose one.
-pub(super) fn separate(npc: &mut Npc, kin: &[(f32, f32)], step: f32) {
+pub(super) fn separate(npc: &mut Npc, kin: &[(f32, f32, f32)], step: f32) {
     let (cx, cy) = npc.center();
-    for &(kx, ky) in kin {
+    // The third element is the reach a shimmerfly notices an entry at; this routine brings its own
+    // separation distance and ignores it (`World::avoid`).
+    for &(kx, ky, _) in kin {
         let (dx, dy) = (cx - kx, cy - ky);
         if (dx == 0.0 && dy == 0.0) || dx.abs() + dy.abs() >= npc.width() {
             continue;

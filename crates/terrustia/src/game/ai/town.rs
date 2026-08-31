@@ -28,8 +28,8 @@
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
     TOWN_FAR_FROM_HOME, TOWN_JUMP, TOWN_JUMP_LOW, TOWN_JUMP_TALL, TOWN_LEASH, TOWN_LEASH_HARD,
-    TOWN_STEP_HEIGHT, town_breathes_underwater, town_hops_in_water, town_is_critter, town_is_slime,
-    town_scurries, town_walk,
+    TOWN_STEP_HEIGHT, town_breathes_underwater, town_danger_range, town_hops_in_water,
+    town_is_critter, town_is_slime, town_scurries, town_walk,
 };
 use terrustia_proto::tile::TileFlags;
 use terrustia_proto::tile_solid::{solid, solid_top};
@@ -284,6 +284,27 @@ fn start_walking(npc: &mut Npc, rng: &mut SmallRng) {
     npc.dirty = true;
 }
 
+/// Whether this one's head is under, which is vanilla's `flag21` (`NPC.cs:54361`).
+///
+/// Not the same thing as `wet`. `wet` is the tile the NPC's *centre* is in; drowning is
+/// `Collision.DrownCollision(position, width, height, 1f, ...)`, whose box starts two pixels above
+/// the NPC's top edge (`Collision.cs:1387-1398`) and so needs water deep enough to cover it. A
+/// resident wading across a stream is wet and is not drowning, and conflating the two had every
+/// townsperson in ankle-deep water behaving as though it were going under: its walk timer froze and
+/// (once the danger override below existed) it broke into a run.
+///
+/// Lava and shimmer are excluded the way `DrownCollision` excludes them (`Collision.cs:1418`).
+fn drowning<T: TileView>(tiles: &T, npc: &Npc) -> bool {
+    let x = ((npc.position.0 + npc.width() / 2.0) / TILE) as i32;
+    let y = ((npc.position.1 - 2.0) / TILE) as i32;
+    let tile = tiles.tile(x, y);
+    tile.liquid > 0
+        && !matches!(
+            tile.liquid_kind,
+            terrustia_proto::tile::Liquid::Lava | terrustia_proto::tile::Liquid::Shimmer
+        )
+}
+
 /// The tile just ahead of the NPC's feet, which is what everything probes.
 fn probe_tile(npc: &Npc) -> (i32, i32) {
     (
@@ -316,7 +337,7 @@ fn walk<T: TileView>(
         return DoorAction::None;
     }
 
-    let drowning = world.wet && !town_breathes_underwater(npc.npc_type);
+    let drowning = drowning(world.tiles, npc) && !town_breathes_underwater(npc.npc_type);
     if !drowning {
         // Walking away from home, far out: the timer drains six times as fast.
         if let Some(h) = home
@@ -343,8 +364,19 @@ fn walk<T: TileView>(
         npc.dirty = true;
     }
 
-    // Accelerate, or shed speed if something else pushed it past its limit.
-    let speed = town_walk(npc.npc_type, world.wet);
+    // Accelerate, or shed speed if something else pushed it past its limit. A resident with
+    // something hostile inside its own detection range, or one that is drowning, drops the whole
+    // per-type table and hurries (`NPC.cs:54467-54473`).
+    let danger = world.hostile.is_some_and(|h| {
+        let (cx, cy) = npc.center();
+        h.alive && (h.center.0 - cx).hypot(h.center.1 - cy) < town_danger_range(npc.npc_type)
+    });
+    let speed = town_walk(
+        npc.npc_type,
+        world.wet,
+        npc.stats.friendly && (danger || drowning),
+        1.0 - npc.life as f32 / npc.life_max.max(1) as f32,
+    );
     if town_hops_in_water(npc.npc_type) && world.wet {
         // A frog kicks once and then coasts.
         if npc.velocity.0.abs() < 0.05 && npc.velocity.1.abs() < 0.05 {
@@ -386,6 +418,13 @@ fn walk<T: TileView>(
     {
         npc.ai[1] += 80.0;
         npc.ai[2] = f32::from(npc.direction);
+        // Vanilla remembers *which* door it opened in `doorX`/`doorY` alongside the `closeDoor`
+        // flag (`NPC.cs:54612-54614`), and the close check later compares its own position against
+        // those remembered tiles. Nothing here can be re-derived from the probe later: by the time
+        // the resident is two tiles clear the probe has moved with it. `local_ai` is server-side
+        // only, never sent, and the town routine uses nothing but slot 3.
+        npc.local_ai[0] = head.0 as f32;
+        npc.local_ai[1] = head.1 as f32;
         npc.dirty = true;
         return DoorAction::Open {
             x: head.0,
@@ -421,14 +460,18 @@ fn walk<T: TileView>(
         }
     }
 
-    // Pull the door shut once well past it.
+    // Pull the door shut once well past it (`NPC.cs:54393`), measured against the door it actually
+    // opened rather than against the tile in front of its feet: the probe is only fifteen pixels
+    // ahead of its own centre, so a comparison against that can never be more than one tile and
+    // the door would never be shut at all. Vanilla compares in fractional tiles, not whole ones.
     if npc.ai[2] != 0.0 {
-        let door = ((npc.position.0 + (npc.stats.width / 2) as f32) / TILE) as i32;
-        if (door - probe.0).abs() > 2 {
+        let here = (npc.position.0 + (npc.stats.width / 2) as f32) / TILE;
+        let (door_x, door_y) = (npc.local_ai[0], npc.local_ai[1]);
+        if here > door_x + 2.0 || here < door_x - 2.0 {
             npc.ai[2] = 0.0;
             return DoorAction::Close {
-                x: probe.0,
-                y: probe.1 - 2,
+                x: door_x as i32,
+                y: door_y as i32,
             };
         }
     }
@@ -983,9 +1026,94 @@ mod tests {
 
     #[test]
     fn a_turtle_is_slow_on_land_and_quick_in_water() {
-        assert_eq!(town_walk(616, false).max, 0.5);
-        assert_eq!(town_walk(616, true).max, 2.0);
-        assert_eq!(town_walk(625, true).max, 2.5, "a sea turtle more so");
+        assert_eq!(town_walk(616, false, false, 0.0).max, 0.5);
+        assert_eq!(town_walk(616, true, false, 0.0).max, 2.0);
+        assert_eq!(
+            town_walk(625, true, false, 0.0).max,
+            2.5,
+            "a sea turtle more so"
+        );
+    }
+
+    /// M5: the per-type table matched vanilla, but `NPC.cs:54467-54473` then overrides all of it
+    /// for any friendly NPC with a hostile inside its detection range or one that is drowning:
+    /// `num22 = 1.5 + (1 - life/lifeMax) * 0.9` and `num23 = 0.1`. Without it, residents ambled at
+    /// 1.0 through a Blood Moon and a drowning townsperson never hurried out.
+    #[test]
+    fn a_resident_in_danger_drops_the_table_and_hurries() {
+        let calm = town_walk(22, false, false, 0.0);
+        assert_eq!((calm.max, calm.accel), (1.0, 0.07), "the Guide's own speed");
+
+        let alarmed = town_walk(22, false, true, 0.0);
+        assert_eq!((alarmed.max, alarmed.accel), (1.5, 0.1));
+
+        // Wounded, it runs: at a sliver of health the term is worth the full 0.9.
+        let bleeding = town_walk(22, false, true, 1.0);
+        assert!((bleeding.max - 2.4).abs() < 1e-6, "got {}", bleeding.max);
+
+        // It beats even the fastest per-type entry, which is the point of the override.
+        assert!(alarmed.max > town_walk(22, false, false, 0.0).max);
+        let mouse_calm = town_walk(300, false, false, 0.0);
+        assert_eq!((mouse_calm.max, mouse_calm.accel), (2.0, 1.0));
+        assert_eq!(
+            town_walk(300, false, true, 0.0).max,
+            1.5,
+            "a frightened mouse takes the override, not its own sprint"
+        );
+
+        // A town slime in water is written after the override and wins outright
+        // (`NPC.cs:54473-54477`).
+        let slime = town_walk(670, true, true, 1.0);
+        assert_eq!((slime.max, slime.accel), (2.0, 0.2));
+    }
+
+    /// The other half of the override is drowning, and drowning is not the same as wet.
+    ///
+    /// Vanilla's `flag21` is `Collision.DrownCollision(position, width, height, 1f, ...)`
+    /// (`NPC.cs:54361`), whose box sits two pixels above the NPC's top edge
+    /// (`Collision.cs:1387-1398`), while `wet` is only the tile its centre is in. This port read
+    /// `world.wet` for both, so a resident standing in a puddle had its walk timer frozen and, once
+    /// the danger override existed, ran as though it were going under. A real server test caught it:
+    /// a merchant that fell through a water pocket kept the panic speed all the way down.
+    #[test]
+    fn wading_is_not_drowning() {
+        let mut tiles = flat(0, 400);
+        let merchant = stand_on(17, 208);
+        let (feet_x, feet_y) = (
+            ((merchant.position.0 + merchant.width() / 2.0) / TILE) as i32,
+            ((merchant.position.1 + merchant.height() - 1.0) / TILE) as i32,
+        );
+        let head_y = ((merchant.position.1 - 2.0) / TILE) as i32;
+
+        assert!(!drowning(&tiles, &merchant), "dry ground is not drowning");
+
+        // Ankle deep: the tile at its feet is wet, its head is not.
+        let mut wet = tiles.0.get(&(feet_x, feet_y)).copied().unwrap_or(Tile::AIR);
+        wet.liquid = 255;
+        tiles.0.insert((feet_x, feet_y), wet);
+        assert!(!drowning(&tiles, &merchant), "wading is not drowning");
+
+        // Under: the tile at its head is water too.
+        let mut over = Tile::AIR;
+        over.liquid = 255;
+        tiles.0.insert((feet_x, head_y), over);
+        assert!(drowning(&tiles, &merchant), "head under is");
+
+        // Lava and shimmer are excluded the way `Collision.cs:1418` excludes them.
+        let mut lava = over;
+        lava.liquid_kind = terrustia_proto::tile::Liquid::Lava;
+        tiles.0.insert((feet_x, head_y), lava);
+        assert!(!drowning(&tiles, &merchant), "lava is not drowning in");
+    }
+
+    /// The detection range is per type, not a flat 200 (`NPCID.cs:4841`).
+    #[test]
+    fn residents_notice_trouble_at_their_own_ranges() {
+        assert_eq!(town_danger_range(22), 700.0, "the Guide");
+        assert_eq!(town_danger_range(20), 1200.0, "the Dryad, furthest of all");
+        assert_eq!(town_danger_range(353), 60.0, "the Stylist barely looks up");
+        assert_eq!(town_danger_range(637), 250.0, "a town pet");
+        assert_eq!(town_danger_range(1), 200.0, "everything unnamed");
     }
 
     #[test]
@@ -1057,6 +1185,63 @@ mod tests {
             matches!(action.door, DoorAction::Open { .. }),
             "expected a door to be opened, got {action:?}"
         );
+    }
+
+    /// The other half of the door: vanilla remembers the tile it opened in `doorX`/`doorY` and
+    /// pulls it shut once its own centre is more than two tiles from that (`NPC.cs:54393-54406`,
+    /// set at `NPC.cs:54612-54614`).
+    ///
+    /// This port had collapsed both into `ai[2]`, which holds only the direction, and then
+    /// re-derived the door from the probe tile, which is fifteen pixels ahead of the NPC's own
+    /// centre, so the difference could never exceed one tile and `DoorAction::Close` was
+    /// unreachable. Doors stood open all night behind every resident, which is exactly what
+    /// vanilla's close-behind-you logic exists to prevent.
+    #[test]
+    fn a_resident_pulls_the_door_shut_behind_it() {
+        let mut guide = stand_on(22, 208);
+        guide.ai[0] = 1.0;
+        guide.ai[1] = 5000.0;
+        guide.direction = 1;
+        guide.velocity.0 = 1.0;
+        let probe = probe_tile(&guide);
+        let mut tiles = flat(0, 400);
+        for y in (probe.1 - 2)..=probe.1 {
+            tiles.0.insert((probe.0, y), Tile::framed(DOOR, 0, 0));
+        }
+        let mut w = day(&tiles);
+        w.conditions.day = false;
+        let home = Some(Home {
+            tile_x: 300,
+            floor_y: 100,
+        });
+
+        let opened = update(&mut guide, &w, home, &mut rng());
+        let DoorAction::Open { x, y, .. } = opened.door else {
+            panic!("expected the door to be opened first, got {opened:?}");
+        };
+        assert_ne!(guide.ai[2], 0.0, "it should remember it left one open");
+
+        // Still beside it: nothing to do yet. Vanilla's test is on the NPC's own centre, so this
+        // is the case the old probe-derived comparison could never tell apart from the next one.
+        tiles.0.clear();
+        let mut w = day(&tiles);
+        w.conditions.day = false;
+        let beside = update(&mut guide, &w, home, &mut rng());
+        assert_eq!(
+            beside.door,
+            DoorAction::None,
+            "two tiles is not yet past it"
+        );
+
+        // Three tiles on, and it shuts the door it actually opened rather than one under its feet.
+        guide.position.0 += 3.0 * TILE;
+        let past = update(&mut guide, &w, home, &mut rng());
+        assert_eq!(
+            past.door,
+            DoorAction::Close { x, y },
+            "it should shut the tile it opened"
+        );
+        assert_eq!(guide.ai[2], 0.0, "and stop remembering it");
     }
 
     #[test]

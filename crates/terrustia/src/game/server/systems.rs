@@ -314,8 +314,11 @@ impl GameServer {
             // Two styles jostle for space, and they want different lists: a pirate ghost keeps
             // away from other pirate ghosts, a shimmerfly from anything alive at all. Both lists
             // are a scan of the table, so neither is built unless something present reads it.
-            let avoid: Vec<(f32, f32)> = {
+            let avoid: Vec<(f32, f32, f32)> = {
                 use npc_ai::Avoids;
+                use terrustia_proto::npc_params::{
+                    SHIMMERFLY_SHY_OF_NPCS, SHIMMERFLY_SHY_OF_PLAYERS,
+                };
                 let wanted: Vec<(u16, Avoids)> = self
                     .npcs
                     .iter()
@@ -332,17 +335,34 @@ impl GameServer {
                         .map(|(ty, _)| *ty)
                         .collect();
                     let anything = wanted.iter().any(|(_, a)| *a == Avoids::AnythingAlive);
-                    let mut list: Vec<(f32, f32)> = self
+                    // The reach rides along with each entry because it belongs to the entry, not
+                    // to the reader: `NPC.cs:34446` counts a hostile within a hundred pixels and
+                    // `NPC.cs:34451` a player within a hundred and fifty. An entry that is only in
+                    // the list because some pirate ghost asked for its own kind is not something a
+                    // shimmerfly flees at all, so its reach is zero.
+                    let mut list: Vec<(f32, f32, f32)> = self
                         .npcs
                         .iter()
                         .filter(|(_, n)| {
                             own_kind.contains(&n.npc_type)
                                 || (anything && !n.stats.friendly && n.stats.damage > 0)
                         })
-                        .map(|(_, n)| n.center())
+                        .map(|(_, n)| {
+                            let (x, y) = n.center();
+                            let reach = if !n.stats.friendly && n.stats.damage > 0 {
+                                SHIMMERFLY_SHY_OF_NPCS
+                            } else {
+                                0.0
+                            };
+                            (x, y, reach)
+                        })
                         .collect();
                     if anything {
-                        list.extend(targets.iter().map(|t| t.center));
+                        list.extend(
+                            targets
+                                .iter()
+                                .map(|t| (t.center.0, t.center.1, SHIMMERFLY_SHY_OF_PLAYERS)),
+                        );
                     }
                     list
                 }

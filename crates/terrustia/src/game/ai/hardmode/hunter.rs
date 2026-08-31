@@ -207,7 +207,7 @@ pub fn pathfinder(npc: &mut Npc, world: &World<'_, impl TileView>, target_taken:
     // The cell and the headcrab shove their own kind apart rather than stacking into one blob.
     if cell || npc.npc_type == HEADCRAB {
         npc.rotation = if cell { 0.0 } else { npc.velocity.0 * 0.1 };
-        for (kx, ky) in world.avoid {
+        for (kx, ky, _) in world.avoid {
             if (npc.position.0 - kx).abs() + (npc.position.1 - ky).abs() < npc.width() {
                 npc.velocity.0 += if npc.position.0 < *kx {
                     -PATH_SHOVE
@@ -300,7 +300,7 @@ pub fn mothron_spawn(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome
     // While circling or crossing, they keep out of each other's way.
     if npc.ai[0] == 0.0 || npc.ai[0] == 1.0 {
         let (cx, cy) = npc.center();
-        for (kx, ky) in world.avoid {
+        for (kx, ky, _) in world.avoid {
             let (dx, dy) = (kx - cx, ky - cy);
             let gap = dx.hypot(dy);
             if gap > 0.0 && gap < npc.width() + npc.height() {

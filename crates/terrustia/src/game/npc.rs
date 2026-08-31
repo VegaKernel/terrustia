@@ -260,9 +260,28 @@ pub struct Npc {
     pub friendly_regen: i32,
 }
 
+/// Fold a type's scale into its hitbox, the way the tail of `SetDefaults` does.
+///
+/// `NPC.cs:17842-17843`: `width = (int)((float)width * scale); height = (int)((float)height *
+/// scale);`. The game has one width field, so every later reader (contact damage, worm segment
+/// spacing, line of sight) sees the scaled box. `npc_data.rs` stores the pre-multiply literal the
+/// game assigns in the type's own `SetDefaults` branch, so without this a Wall of Flesh is
+/// 100x100 on the server while the client, which runs its own `SetDefaults`, draws and collides
+/// against 120x120.
+///
+/// Applied once at construction rather than inside `width()`/`height()` so it costs nothing per
+/// tick, and so a routine that rebuilds its own hitbox from a base size (King Slime's `resize`)
+/// cannot scale an already-scaled number a second time.
+fn scaled(mut stats: NpcStats, scale: f32) -> NpcStats {
+    stats.width = (stats.width as f32 * scale) as i32;
+    stats.height = (stats.height as f32 * scale) as i32;
+    stats
+}
+
 impl Npc {
     pub fn new(npc_type: u16, position: (f32, f32), generation: u8) -> Option<Self> {
-        let stats = npc_stats(npc_type)?;
+        let scale = terrustia_proto::npc_params::npc_scale(npc_type);
+        let stats = scaled(npc_stats(npc_type)?, scale);
         Some(Self {
             npc_type,
             generation,
@@ -289,7 +308,7 @@ impl Npc {
             on_ground: false,
             collide_x: false,
             collide_y: false,
-            scale: terrustia_proto::npc_params::npc_scale(npc_type),
+            scale,
             old_position: position,
             rotation: 0.0,
             was_hurt: false,
@@ -350,6 +369,8 @@ impl Npc {
         let Some(stats) = npc_stats(npc_type) else {
             return;
         };
+        let scale = terrustia_proto::npc_params::npc_scale(npc_type);
+        let stats = scaled(stats, scale);
         self.npc_type = npc_type;
         self.stats = stats;
         self.life_max = stats.life_max;
@@ -362,7 +383,7 @@ impl Npc {
         self.size = None;
         self.invulnerable = stats.dont_take_damage;
         self.alpha = 0;
-        self.scale = terrustia_proto::npc_params::npc_scale(npc_type);
+        self.scale = scale;
         self.ai = [0.0; 4];
         self.local_ai = [0.0; 4];
         self.was_hurt = false;
@@ -1811,5 +1832,63 @@ mod tests {
         assert_eq!(store.used_slots(), 0.0);
         store.spawn(3, (0.0, 0.0)); // Zombie
         assert_eq!(store.used_slots(), 1.0);
+    }
+
+    /// B1: `SetDefaults` ends by folding the type's scale into its hitbox (`NPC.cs:17842-17843`),
+    /// and this server was storing the pre-multiply literal from `npc_data.rs` and never doing the
+    /// multiply. The client runs its own `SetDefaults`, so the box it draws and collides against
+    /// disagreed with the one the server charges contact damage from.
+    ///
+    /// The expected numbers are vanilla's own `width =`/`height =` assignments times the scale in
+    /// the same block: the Wall of Flesh 100x100 at 1.2 (`NPC.cs:10370-10387`), the Destroyer head
+    /// 38x38 at 1.25, the Dungeon Slime 36x24 at 1.25, the Spike Ball 34x34 at 1.5
+    /// (`NPC.cs:9708-9723`), and the Goblin Peon 18x38 at 0.90 (`NPC.cs:15672-15685`) the other
+    /// way. The multiply is a truncating `(int)` cast over `f32`, which is why 18 at 0.90 is 16
+    /// and not 17.
+    #[test]
+    fn a_types_scale_is_folded_into_its_hitbox() {
+        let box_of = |ty: u16| {
+            let n = Npc::new(ty, (0.0, 0.0), 1).expect("a known type");
+            (n.width(), n.height())
+        };
+        assert_eq!(box_of(113), (120.0, 120.0), "Wall of Flesh, scale 1.2");
+        assert_eq!(box_of(114), (120.0, 120.0), "its eye, scale 1.2");
+        assert_eq!(box_of(134), (47.0, 47.0), "Destroyer head, scale 1.25");
+        assert_eq!(box_of(71), (45.0, 30.0), "Dungeon Slime, scale 1.25");
+        assert_eq!(box_of(70), (51.0, 51.0), "Spike Ball, scale 1.5");
+        // Under one it goes the other way: these were hurting from further off than vanilla.
+        assert_eq!(box_of(26), (16.0, 34.0), "Goblin Peon, scale 0.90");
+        assert_eq!(box_of(112), (14.0, 14.0), "Vile Spit, scale 0.90");
+        // A type at scale one is untouched.
+        assert_eq!(
+            box_of(1),
+            (24.0, 18.0),
+            "a blue slime is what the table says"
+        );
+    }
+
+    /// King Slime is the one routine that rebuilds its own hitbox from a base size, so it is the
+    /// one that could end up scaled twice. Its own `resize` compares against `stats.width`, which
+    /// now already carries the 1.25, so it finds nothing to do and leaves the box alone.
+    #[test]
+    fn king_slime_is_not_scaled_twice() {
+        let ks = Npc::new(50, (0.0, 0.0), 1).expect("king slime");
+        assert_eq!(
+            (ks.width(), ks.height()),
+            (122.0, 115.0),
+            "98x92 at 1.25, which is what its AI rebuilds from"
+        );
+        assert_eq!(ks.scale, 1.25, "and it still knows its own scale");
+    }
+
+    /// `Transform` goes through `SetDefaults` in vanilla, so the new type's scale has to be folded
+    /// in again rather than the raw table value being left behind.
+    #[test]
+    fn becoming_another_type_rescales_the_hitbox() {
+        let mut n = Npc::new(1, (0.0, 0.0), 1).expect("blue slime");
+        n.become_type(71); // Dungeon Slime, scale 1.25
+        assert_eq!((n.width(), n.height()), (45.0, 30.0));
+        n.become_type(1);
+        assert_eq!((n.width(), n.height()), (24.0, 18.0), "and back down again");
     }
 }

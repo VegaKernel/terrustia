@@ -17,14 +17,14 @@
 //! commits — and dies on whatever it hits, terrain included.
 
 use terrustia_proto::npc_params::{
-    FISHRON_ABOVE, FISHRON_BESIDE, FISHRON_BUBBLE, FISHRON_BUBBLE_AT, FISHRON_BUBBLE_SPEED,
-    FISHRON_BUBBLE_TICKS, FISHRON_BURST_ACCEL, FISHRON_BURST_EVERY, FISHRON_BURST_LATER_CURVE,
-    FISHRON_BURST_LATER_DASH_SPEED, FISHRON_BURST_LATER_SPRAY_EVERY,
+    DETONATING_BUBBLE, FISHRON_ABOVE, FISHRON_BESIDE, FISHRON_BUBBLE, FISHRON_BUBBLE_AT,
+    FISHRON_BUBBLE_SPEED, FISHRON_BUBBLE_TICKS, FISHRON_BURST_ACCEL, FISHRON_BURST_EVERY,
+    FISHRON_BURST_LATER_CURVE, FISHRON_BURST_LATER_DASH_SPEED, FISHRON_BURST_LATER_SPRAY_EVERY,
     FISHRON_BURST_LATER_SPRAY_SPEED, FISHRON_BURST_LATER_TICKS, FISHRON_BURST_SPEED,
     FISHRON_BURST_TICKS, FISHRON_CYCLE_BUBBLES, FISHRON_CYCLE_BUBBLES_LATER,
     FISHRON_CYCLE_SHARKRONS, FISHRON_CYCLE_SHARKRONS_LATER, FISHRON_EXPERT_PACE, FISHRON_FIRST,
     FISHRON_SECOND, FISHRON_SECOND_AT, FISHRON_SHIFT_TICKS, FISHRON_THIRD, FISHRON_THIRD_AT,
-    FishronPhase, SHARKRON,
+    FishronPhase,
 };
 
 use crate::game::ai::{Shot, World};
@@ -163,7 +163,9 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
         }
 
         s if s == state::BURSTING && phase == 0 => {
-            // The first phase's burst: it keeps station and throws a sharkron every four ticks.
+            // The first phase's burst: it keeps station and throws a detonating bubble every four
+            // ticks. Vanilla spawns type 371 here (`NPC.cs:49768`), which on 1.4.5.8 is the
+            // bubble, not the sharkron the older numbering put at that id.
             if npc.ai[1] == 0.0 {
                 npc.ai[1] = FISHRON_BESIDE * (cx - target.center.0).signum();
             }
@@ -180,7 +182,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                 let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
                 let reach = (npc.width() + 20.0) / 2.0;
                 out.spawn.push(Spawn {
-                    npc_type: SHARKRON,
+                    npc_type: DETONATING_BUBBLE,
                     position: (
                         cx + aim.0 / length * reach,
                         cy + aim.1 / length * reach + 45.0,
@@ -200,8 +202,9 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
 
         s if s == state::BURSTING && phase >= 1 => {
             // The second and third phases' burst: a dash that curves through the air for its
-            // whole duration, spraying a sharkron out perpendicular to its own heading every
-            // four ticks instead of holding station (`NPC.cs:49916-50015`).
+            // whole duration, spraying a detonating bubble out perpendicular to its own heading
+            // every four ticks instead of holding station (`NPC.cs:49916-50015`, spawning 371 at
+            // `:49999`).
             if npc.ai[2] == 0.0 {
                 let aim = (target.center.0 - cx, target.center.1 - cy);
                 let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
@@ -221,7 +224,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                 let perp = (-heading.1 * side, heading.0 * side);
                 let reach = (npc.width() + 20.0) / 2.0;
                 out.spawn.push(Spawn {
-                    npc_type: SHARKRON,
+                    npc_type: DETONATING_BUBBLE,
                     position: (cx + heading.0 * reach, cy + heading.1 * reach + 45.0),
                     velocity: (
                         perp.0 * FISHRON_BURST_LATER_SPRAY_SPEED,
@@ -382,7 +385,7 @@ mod tests {
     use crate::game::ai::Conditions;
     use crate::game::npc_ai::Target;
     use std::collections::HashMap;
-    use terrustia_proto::npc_params::FISHRON;
+    use terrustia_proto::npc_params::{FISHRON, SHARKRON};
     use terrustia_proto::tile::Tile;
 
     struct Sky(HashMap<(i32, i32), Tile>);
@@ -542,10 +545,10 @@ mod tests {
             thrown.extend(fishron(&mut d, &w).spawn);
         }
         assert!(!thrown.is_empty(), "it should have thrown some");
-        assert!(thrown.iter().all(|s| s.npc_type == SHARKRON));
+        assert!(thrown.iter().all(|s| s.npc_type == DETONATING_BUBBLE));
     }
 
-    /// B11: the first phase's burst throws roughly twenty sharkrons over its eighty ticks — one
+    /// B11: the first phase's burst throws roughly twenty bubbles over its eighty ticks: one
     /// every four — not the roughly six the old 120-tick/20-tick numbers gave.
     #[test]
     fn the_first_phase_burst_throws_about_twenty_sharkrons() {
@@ -619,7 +622,7 @@ mod tests {
             thrown.extend(fishron(&mut d, &w).spawn);
         }
         assert!(!thrown.is_empty(), "it should have thrown some");
-        assert!(thrown.iter().all(|s| s.npc_type == SHARKRON));
+        assert!(thrown.iter().all(|s| s.npc_type == DETONATING_BUBBLE));
         for s in &thrown {
             let speed = s.velocity.0.hypot(s.velocity.1);
             assert!(
@@ -655,6 +658,8 @@ mod tests {
     #[test]
     fn a_sharkron_aims_once_and_commits() {
         let tiles = Sky(HashMap::new());
+        // Type 372, the sharkron itself: the only type that really runs style 71. This test used
+        // to drive the routine on 371, which is the detonating bubble and runs style 70.
         let mut s = Npc::new(SHARKRON, (0.0, 0.0), 1).expect("sharkron");
         let w = world(&tiles, Some((600.0, 0.0)));
 

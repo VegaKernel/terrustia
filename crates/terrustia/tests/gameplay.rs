@@ -2007,7 +2007,18 @@ async fn a_bound_townsperson_can_be_freed() {
 async fn a_town_npc_can_be_talked_to_and_it_is_visible_to_everyone() {
     const MERCHANT: u16 = 17;
 
-    let addr = start().await;
+    // `/spawn` puts the NPC where the player is, and a joining player starts at tile (4, -2) in
+    // this world: above the terrain, at the far left, over a three-thousand-pixel drop. Left to
+    // the generator, whether the merchant lands at all depends on how far it drifts sideways on
+    // the way down, and it was only landing because it happened to clip a ledge at tile x 2. Any
+    // change to a resident's walking speed moved it off that ledge, out through x = 0 and into
+    // open space, where nothing stops it: it fell past the bottom of the world still travelling.
+    // Give it a floor, the way `clear_with_floor` exists to do: this test is about packet 40,
+    // not about where the generator happens to leave a rock.
+    let addr = start_with(Config::default(), |world| {
+        clear_with_floor(world, 12, 3, 12, 3);
+    })
+    .await;
     let mut alice = join(addr, "alice").await;
     let mut bob = join(addr, "bob").await;
 

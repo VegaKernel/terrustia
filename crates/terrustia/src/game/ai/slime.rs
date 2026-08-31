@@ -117,7 +117,9 @@ pub fn update(npc: &mut Npc, target: Option<Target>, on_ground: bool, active: bo
     // Vanilla ticks the hop clock once a frame, and a second time when the slime is "active"
     // (`NPC.AI_001_Slimes`' own `flag3`) — so an active slime reaches its next hop in half the
     // frames, on top of whatever per-type bonus it carries.
-    npc.ai[0] += 1.0 + slime_timer_bonus(npc.npc_type) + f32::from(u8::from(active));
+    npc.ai[0] += 1.0
+        + slime_timer_bonus(npc.npc_type, npc.life < npc.life_max)
+        + f32::from(u8::from(active));
     let window = slime_hop_window(npc.npc_type);
     let kind = hop_kind(npc.ai[0], window);
     if kind == 0 {

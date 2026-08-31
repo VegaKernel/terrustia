@@ -4,7 +4,9 @@
 //! steer with a per-axis acceleration and bounce off anything they hit; out of water they simply
 //! fall and flop.
 
-use terrustia_proto::npc_params::{swim_speed, swimmer_is_passive};
+use terrustia_proto::npc_params::{
+    ARAPAIMA, ARAPAIMA_REVERSE_DAMPING, swim_speed, swimmer_is_passive,
+};
 
 use crate::game::npc::Npc;
 use crate::game::npc_ai::Target;
@@ -57,10 +59,30 @@ pub fn update(npc: &mut Npc, target: Option<Target>, wet: bool, target_is_wet: b
         npc.direction_y = if t.center.1 > cy { 1 } else { -1 };
     }
 
+    // An arapaima that is still carrying speed the wrong way sheds it before it accelerates
+    // (`NPC.cs:23886-23891`), which is why it turns as sharply as it does at seven pixels a tick.
+    if npc.npc_type == ARAPAIMA
+        && ((npc.velocity.0 > 0.0 && npc.direction < 0)
+            || (npc.velocity.0 < 0.0 && npc.direction > 0))
+    {
+        npc.velocity.0 *= ARAPAIMA_REVERSE_DAMPING;
+    }
+
     let s = swim_speed(npc.npc_type);
-    npc.velocity.0 = (npc.velocity.0 + f32::from(npc.direction) * s.accel).clamp(-s.max_x, s.max_x);
-    npc.velocity.1 =
-        (npc.velocity.1 + f32::from(npc.direction_y) * s.accel).clamp(-s.max_y, s.max_y);
+    npc.velocity.0 += f32::from(npc.direction) * s.accel.0;
+    npc.velocity.1 += f32::from(npc.direction_y) * s.accel.1;
+    // Vanilla tests and assigns two separate numbers per axis rather than clamping; they are equal
+    // for everything but the arapaima. See `SwimSpeed::max_x`.
+    if npc.velocity.0 > s.max_x.0 {
+        npc.velocity.0 = s.max_x.1;
+    } else if npc.velocity.0 < -s.max_x.0 {
+        npc.velocity.0 = -s.max_x.1;
+    }
+    if npc.velocity.1 > s.max_y.0 {
+        npc.velocity.1 = s.max_y.1;
+    } else if npc.velocity.1 < -s.max_y.0 {
+        npc.velocity.1 = -s.max_y.1;
+    }
     npc.sprite_direction = npc.direction;
     npc.dirty = true;
 }
@@ -155,5 +177,72 @@ mod tests {
         }
         assert_eq!(goldfish.velocity.0, 3.0);
         assert_eq!(goldfish.velocity.1, 2.0);
+    }
+
+    /// B2: `NPC.cs:23892-23919` gives the arapaima a branch ahead of the shark's, and this port
+    /// had neither, so the fastest swimmer in the game fell to the 0.1/3.0 default and was
+    /// trivially outswum. Its cap is also written differently from everything else: it is *tested*
+    /// against 8 and knocked back to 7, so it surges between the two rather than sitting on a
+    /// ceiling.
+    #[test]
+    fn an_arapaima_outswims_a_shark_and_surges_rather_than_riding_its_cap() {
+        let mut it = fish(ARAPAIMA);
+        it.direction = 1;
+        it.direction_y = 1;
+        let mut seen: Vec<f32> = Vec::new();
+        for _ in 0..400 {
+            update(&mut it, None, true, false);
+            seen.push(it.velocity.0);
+        }
+        // Settled behaviour, past the run-up.
+        let tail = &seen[seen.len() - 40..];
+        let top = tail.iter().copied().fold(f32::MIN, f32::max);
+        let low = tail.iter().copied().fold(f32::MAX, f32::min);
+        assert_eq!(top, 8.0, "it climbs to eight");
+        assert_eq!(low, 7.0, "and is knocked back to seven, not held at eight");
+
+        // A shark, by contrast, sits exactly on its cap because its two numbers are the same.
+        let mut shark = fish(65);
+        shark.direction = 1;
+        shark.direction_y = 1;
+        let mut shark_tail: Vec<f32> = Vec::new();
+        for _ in 0..400 {
+            update(&mut shark, None, true, false);
+            shark_tail.push(shark.velocity.0);
+        }
+        assert!(
+            shark_tail[shark_tail.len() - 40..]
+                .iter()
+                .all(|v| *v == 5.0),
+            "a shark rides a flat ceiling"
+        );
+        assert!(
+            low > shark.velocity.0,
+            "and the arapaima is faster even at its slowest"
+        );
+    }
+
+    /// The 0.95 shed on a reversal (`NPC.cs:23886-23891`) is the arapaima's alone, and it is what
+    /// lets something moving at seven pixels a tick turn at all.
+    #[test]
+    fn only_the_arapaima_sheds_speed_when_it_turns() {
+        let mut it = fish(ARAPAIMA);
+        it.velocity.0 = 8.0;
+        it.direction = -1;
+        it.direction_y = 0;
+        update(&mut it, None, true, false);
+        // 8 * 0.95 = 7.6, then the -1 facing takes 0.25 off.
+        assert!((it.velocity.0 - 7.35).abs() < 1e-4, "got {}", it.velocity.0);
+
+        let mut shark = fish(65);
+        shark.velocity.0 = 5.0;
+        shark.direction = -1;
+        shark.direction_y = 0;
+        update(&mut shark, None, true, false);
+        assert!(
+            (shark.velocity.0 - 4.85).abs() < 1e-4,
+            "a shark only decelerates, got {}",
+            shark.velocity.0
+        );
     }
 }
