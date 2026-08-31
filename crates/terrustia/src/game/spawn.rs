@@ -1524,6 +1524,22 @@ impl BiomeCache {
         self.now = ticks;
     }
 
+    /// The last answer taken for this player, however old, and never a fresh scan.
+    ///
+    /// For callers on a packet path rather than on the tick. A scan is 78 us and a client decides
+    /// how often it sends, so a handler must not be able to ask for one: interleaving a move with
+    /// whatever packet it is handling would invalidate the entry as fast as the handler refilled
+    /// it, and a hundred such pairs in a tick is 7.8 ms of a 16.67 ms budget bought with two
+    /// packets. The spawn pass already refreshes this every tick for every active player, so this
+    /// is the same answer [`Self::read`] would give in all but the first tick of a session.
+    pub fn last(&self, slot: usize) -> Option<Biome> {
+        self.entries
+            .get(slot)
+            .copied()
+            .flatten()
+            .map(|(_, _, _, biome)| biome)
+    }
+
     /// This player's zone, scanning only when the last answer has gone stale.
     pub fn read(&mut self, world: &World, slot: usize, x: i32, y: i32) -> Biome {
         if self.entries.len() <= slot {
