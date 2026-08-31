@@ -438,12 +438,21 @@ fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
         // the row where there is one, so a word carries over whole.
         if col >= cols {
             let broke_at_space = match last_space {
-                Some(at) if at > row_start => {
-                    // Everything after the break moves down a row. It holds no space of its own,
-                    // being the tail after the last one, so it needs no further break opportunity.
+                // Everything after the break moves down a row. It holds no space of its own, being
+                // the tail after the last one, so it needs no further break opportunity, and it
+                // has to fit on the row it is moving to with a column still to spare. Strictly
+                // less than `cols`, not at most: the character being wrapped is appended to that
+                // same row immediately below, so a tail that exactly fills the row overflows it by
+                // one. That is what put a 47-column row in a 46-column terminal. When the tail
+                // does not fit there is nothing to gain by carrying it, so fall through to the
+                // hard cut, which is bounded by construction.
+                Some(at)
+                    if at > row_start
+                        && indent + visible_len(out[at..].trim_start_matches(' ')) < cols =>
+                {
                     let carried = out.split_off(at);
                     let carried = carried.trim_start_matches(' ');
-                    out.push_str("\r\n");
+                    out.push_str(newline());
                     out.push_str(&pad);
                     row_start = out.len();
                     col = indent + visible_len(carried);
@@ -455,7 +464,7 @@ fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
                 _ => false,
             };
             if !broke_at_space {
-                out.push_str("\r\n");
+                out.push_str(newline());
                 out.push_str(&pad);
                 row_start = out.len();
                 col = indent;
@@ -467,8 +476,11 @@ fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
         }
         let char_len = utf8_len(bytes[i]);
         let end = (i + char_len).min(bytes.len());
+        // The same column arithmetic `visible_len` uses, so a wrapped row and a measured row agree
+        // about their width. Counting every character as one made a CJK line wrap at twice the
+        // terminal's real width.
+        col += line[i..end].chars().next().map_or(1, char_cols);
         out.push_str(&line[i..end]);
-        col += 1;
         i = end;
     }
     out
@@ -484,30 +496,65 @@ fn utf8_len(lead: u8) -> usize {
     }
 }
 
+/// Columns one character occupies on a terminal: 0, 1 or 2.
+///
+/// Not a full UAX #11 table, which is thousands of ranges and a dependency this workspace has no
+/// reason to take. It is the set that actually reaches a Terraria server's console: chat in
+/// Chinese, Japanese or Korean, emoji, and accented Latin typed as a base letter plus a combining
+/// mark. Everything outside these ranges is one column, which is what the old code assumed for
+/// everything.
+///
+/// The ranges are the wide and fullwidth blocks of UAX #11 (Hangul Jamo, the CJK blocks, Hiragana
+/// and Katakana, Yi, Hangul syllables, the compatibility and fullwidth forms, and the emoji and
+/// CJK extension planes), plus the zero-width ones: combining diacriticals, the zero-width
+/// space/joiner group, and variation selectors.
+fn char_cols(c: char) -> usize {
+    let c = c as u32;
+    match c {
+        0x0300..=0x036F | 0x200B..=0x200F | 0xFE00..=0xFE0F => 0,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
+
 /// How many visible columns a rendered line occupies, skipping ANSI CSI escapes (colour and cursor
-/// moves) and counting each UTF-8 character as one column. Good enough for the narrow content a
-/// prompt and status line hold; it is not a full character-width table.
+/// moves).
+///
+/// This used to count every character as one column, which is right for ASCII and wrong for every
+/// script that is not. A CJK or emoji character is two columns wide, so a line carrying them
+/// occupied more physical rows than this reported, [`Footer::rows`] under-counted, and `erase_seq`
+/// then moved the cursor up too few rows and left stale prompt rows on screen. That is exactly the
+/// corruption `drawn_rows` was added to stop, reachable with one `say` in Chinese.
 fn visible_len(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut i = 0;
     let mut cols = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            i += 1;
-            if i < bytes.len() && bytes[i] == b'[' {
-                i += 1;
-                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // A CSI escape: `ESC [` then parameters, ending at the first alphabetic byte. Anything
+            // else after ESC is a one-character sequence and is skipped with it.
+            if chars.next() == Some('[') {
+                for p in chars.by_ref() {
+                    if p.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
         } else {
-            if bytes[i] & 0xC0 != 0x80 {
-                cols += 1;
-            }
-            i += 1;
+            cols += char_cols(c);
         }
     }
     cols
@@ -908,21 +955,36 @@ pub fn ready_line(palette: Palette, elapsed: Duration) -> String {
 /// same rhythm as the ✓ stage lines above it rather than each row hugging its own width the way the
 /// old two boxes did.
 pub fn info_block(palette: Palette, rows: &[(&str, String)]) -> String {
+    info_block_at(palette, rows, terminal_cols())
+}
+
+/// The card, laid out for a terminal `cols` wide. Split from [`info_block`] so the wrapping can be
+/// tested at a width, rather than only at whatever the machine running the tests happens to have.
+///
+/// The card's rows are a fixed four-space margin, a key column, three spaces, then the value. On a
+/// terminal narrower than that plus the value (measured: the art is 55 columns, the tagline 69, and
+/// the `saves to` row 74 with a realistic world name) the value wrapped back to column 0 and the
+/// alignment the card exists for was gone. `wrap_ansi` already knows how to carry a value down
+/// under a hanging indent without breaking it mid-word, so the fix is to use it at the indent the
+/// value already starts at, not to invent a second layout.
+fn info_block_at(palette: Palette, rows: &[(&str, String)], cols: usize) -> String {
     let p = palette;
     let key_width = rows
         .iter()
         .map(|(k, _)| k.chars().count())
         .max()
         .unwrap_or(0);
+    // 4 for the left margin, the key column, then the 3 that separate key from value.
+    let indent = 4 + key_width + 3;
     let mut out = String::new();
     for (key, value) in rows {
-        let _ = writeln!(
-            out,
+        let line = format!(
             "    {}{key:<key_width$}{}   {}",
             p.on(sgr::DIM),
             p.off(),
             value
         );
+        let _ = writeln!(out, "{}", wrap_ansi(&line, cols, indent));
     }
     out
 }
@@ -1031,6 +1093,89 @@ mod tests {
         assert_eq!(visible_len("\x1b[92m✓\x1b[0m done"), 6);
         assert_eq!(visible_len("\x1b[2m00:00:01\x1b[0m"), 8);
         assert_eq!(visible_len(""), 0);
+    }
+
+    /// A CJK or emoji character takes two columns, not one. Counting them as one made the footer
+    /// think a line fitted in fewer rows than it did, so the erase that follows moved up too few
+    /// rows and left stale prompt rows on screen.
+    /// The boot card keeps its alignment on a narrow terminal instead of falling back to column 0.
+    #[test]
+    fn the_boot_card_wraps_a_long_value_under_its_own_column() {
+        let rows = [
+            (
+                "world",
+                "A Rather Long World Name · 8400 x 2400 · crimson".to_string(),
+            ),
+            (
+                "saves to",
+                "worlds/A_Rather_Long_World_Name.wld".to_string(),
+            ),
+        ];
+        // 8 is the widest key, so values start at 4 + 8 + 3 = 15.
+        let card = info_block_at(Palette::PLAIN, &rows, 46);
+        let lines: Vec<&str> = card.lines().collect();
+        assert!(
+            lines.len() > rows.len(),
+            "a value too wide for the terminal should have wrapped: {lines:?}"
+        );
+        assert!(
+            lines.iter().all(|l| visible_len(l) <= 46),
+            "no row may run past the terminal: {lines:?}"
+        );
+        for line in &lines {
+            // A continuation row is the one that does not begin with the four-space margin and a
+            // non-space, and it has to be indented to the value column rather than to 0.
+            if !line.starts_with("    world") && !line.starts_with("    saves to") {
+                assert!(
+                    line.starts_with(&" ".repeat(15)),
+                    "a continuation row must line up under the value column: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// And a wide terminal is left exactly as it was, so nothing changed for the ordinary case.
+    #[test]
+    fn the_boot_card_is_unchanged_when_it_fits() {
+        let rows = [("world", "Terrustia · 4200 x 1200 · corruption".to_string())];
+        let card = info_block_at(Palette::PLAIN, &rows, 120);
+        assert_eq!(card, "    world   Terrustia · 4200 x 1200 · corruption\n");
+    }
+
+    #[test]
+    fn a_wide_character_takes_two_columns() {
+        assert_eq!(
+            visible_len("你好"),
+            4,
+            "two CJK characters are four columns"
+        );
+        assert_eq!(visible_len("こんにちは"), 10);
+        assert_eq!(visible_len("한글"), 4);
+        assert_eq!(visible_len("🙂"), 2);
+        assert_eq!(visible_len("ab你好cd"), 8, "mixed with ASCII");
+        // Still one column each, so nothing ordinary regressed.
+        assert_eq!(visible_len("café"), 4);
+        assert_eq!(visible_len("❯ "), 2);
+        assert_eq!(visible_len("✓ ready"), 7);
+    }
+
+    /// A combining mark occupies no column of its own: it draws on the character before it.
+    #[test]
+    fn a_combining_mark_takes_no_column() {
+        assert_eq!(visible_len("e\u{0301}"), 1, "e plus combining acute is one");
+        assert_eq!(visible_len("a\u{200b}b"), 2, "zero-width space");
+    }
+
+    /// The reason any of this matters: the footer has to know how many physical rows it drew, or
+    /// it cannot erase them. A chat line in Chinese wraps twice as early as its character count
+    /// suggests.
+    #[test]
+    fn a_wide_line_wraps_at_half_the_characters() {
+        // 40 CJK characters are 80 columns, which is exactly two rows at 40 wide, where 40 ASCII
+        // characters would have been one.
+        let wide: String = std::iter::repeat_n('你', 40).collect();
+        assert_eq!(line_rows(&wide, 40), 2);
+        assert_eq!(line_rows(&"x".repeat(40), 40), 1);
     }
 
     /// A line wider than the terminal wraps onto more than one physical row, and the footer counts
@@ -1170,7 +1315,7 @@ mod tests {
         // 20 visible columns, indent 4, at a width of 10: rows are "aaaaaaaaaa", then
         // "    aaaaaa", "    aaaa" (indent 4 + 6 message cols per continuation).
         let wrapped = wrap_ansi(&"a".repeat(20), 10, 4);
-        let rows: Vec<&str> = wrapped.split("\r\n").collect();
+        let rows: Vec<&str> = wrapped.split(newline()).collect();
         assert_eq!(rows[0], "a".repeat(10), "the first row is full width");
         assert!(
             rows[1..].iter().all(|r| r.starts_with("    ")),
@@ -1214,7 +1359,7 @@ mod tests {
     fn wrap_ansi_breaks_between_words_not_through_them() {
         let line = "claim it with: /register <name> <password> w6y2c8kwqcdr";
         let wrapped = wrap_ansi(line, 30, 4);
-        let rows: Vec<&str> = wrapped.split("\r\n").collect();
+        let rows: Vec<&str> = wrapped.split(newline()).collect();
 
         assert!(rows.len() > 1, "it should have wrapped at all: {rows:?}");
         assert!(
@@ -1233,12 +1378,20 @@ mod tests {
         // A word longer than the row still has to be cut, or it would run off the edge.
         let long = wrap_ansi(&"z".repeat(40), 10, 4);
         assert!(
-            long.split("\r\n").all(|r| visible_len(r) <= 10),
+            long.split(newline()).all(|r| visible_len(r) <= 10),
             "an unbreakable word is still cut to the width: {long:?}"
         );
 
         // A short plain line is returned unchanged.
         assert_eq!(wrap_ansi("short", 80, 38), "short");
+
+        // The row break goes through `newline()` like every other writer here, rather than being
+        // a hardcoded `\r\n`. Outside raw mode, which is where a piped log and the boot card both
+        // live, a bare `\n` is correct and the `\r` was litter in the captured file.
+        assert!(
+            !wrap_ansi(&"z".repeat(40), 10, 4).contains('\r'),
+            "a wrapped line must not carry carriage returns when nothing is in raw mode"
+        );
     }
 
     /// The pure filter behind L6-02's fix: C0 controls other than tab, `DEL`, and the C1 range are
