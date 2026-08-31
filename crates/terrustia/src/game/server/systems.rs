@@ -4821,6 +4821,7 @@ impl GameServer {
             blood_moon: self.world.blood_moon,
             day: self.world.day_time,
             eclipse: self.world.eclipse,
+            pumpkin_moon: matches!(self.moon.moon, Some(crate::game::moons::Moon::Pumpkin)),
             raining: self.world.raining,
             windy: self.weather.windy(),
             crimson: self.world.crimson,

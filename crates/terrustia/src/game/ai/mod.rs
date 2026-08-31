@@ -64,6 +64,9 @@ pub struct Conditions {
     pub blood_moon: bool,
     pub day: bool,
     pub eclipse: bool,
+    /// Whether a Pumpkin Moon is running. Its two style-26 walkers and the Poltergeist leave when
+    /// it is not (`NPC.cs:63232-63234`, `:24798-24802`).
+    pub pumpkin_moon: bool,
     /// Rain, which sends residents indoors just as nightfall does.
     pub raining: bool,
     /// Whether the day is windy enough for the things that need wind to do anything.
@@ -118,6 +121,7 @@ impl Default for Conditions {
             blood_moon: false,
             day: false,
             eclipse: false,
+            pumpkin_moon: false,
             raining: false,
             windy: false,
             crimson: false,
@@ -988,7 +992,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         // A tumbleweed in a sandstorm is carried by the wind rather than merely rolling.
         26 => {
             let carried = world.conditions.sandstorm && world.conditions.desert;
-            tumbleweed::update(npc, world, carried);
+            let out = tumbleweed::update(npc, world, carried, rng);
+            effects.shots.extend(out.shots);
+            effects.died = out.died;
         }
         113 | 125 => {
             if balloon::update(npc, world) == balloon::Outcome::Popped {
