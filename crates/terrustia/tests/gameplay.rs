@@ -6018,7 +6018,15 @@ async fn a_pylon_with_a_town_around_it_carries_a_player() {
     let style = r.u8().unwrap();
 
     assert_eq!(who, i16::from(client.slot()));
-    assert_eq!((x / 16.0, y / 16.0), (300.0, 300.0), "landed on the pylon");
+    // `info.PositionInTiles.ToWorldCoordinates()` (`TeleportPylonsSystem.cs:186`), and
+    // `ToWorldCoordinates` (`Utils.cs:1857`) is `p.ToVector2() * 16f + new Vector2(autoAddX,
+    // autoAddY)` with both defaulting to 8. This used to assert whole tiles, which hid the
+    // missing half-tile: the landing spot was 8px up and to the left of vanilla's.
+    assert_eq!(
+        (x, y),
+        (300.0 * 16.0 + 8.0, 300.0 * 16.0 + 8.0),
+        "landed on the pylon, at the pixel vanilla lands on"
+    );
     assert_eq!(style, 9, "style 9 is the pylon's own animation");
     assert_eq!(flags & 0x08, 0x08, "the network id should follow");
     assert_eq!(

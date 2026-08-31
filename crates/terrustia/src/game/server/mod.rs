@@ -433,7 +433,13 @@ const MAX_WIRE_DRAG: i32 = 512;
 ///
 /// Whether it is locked lives in the frame rather than in a flag: the lower band of the sheet is
 /// the locked form, so toggling one is a matter of moving all nine of its cells between bands.
-const GEM_LOCK: u16 = 442;
+///
+/// `TileID.GemLocks = 440` (`TileID.cs:1317`). This constant read 442 - `TileID
+/// .ProjectilePressurePad` (`TileID.cs:1321`) - which is a different tile of a different size, so
+/// `on_gem_lock` rejected every real gem lock and the feature was dead over the wire. The rest of
+/// this server already had it right: `world/wiring.rs`'s own trigger table and its 3x3 footprint
+/// both name 440.
+const GEM_LOCK: u16 = 440;
 const GEM_LOCK_FRAME_HEIGHT: i16 = 54;
 
 /// How much of one item a player is carrying, across every slot.

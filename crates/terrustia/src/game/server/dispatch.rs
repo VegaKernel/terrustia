@@ -17,6 +17,22 @@
 // with the first. The smaller siblings (`console`, `panel`, `tick`) each name what they use.
 use super::*;
 
+/// A dresser is a chest by another name, three tiles wide instead of two.
+const DRESSER_BLOCK: u16 = 88;
+
+/// Whether a tile is one this server keeps a [`crate::world::Chest`] record behind.
+///
+/// `Main.tileContainer` (`Main.cs:10215-10219`) also names the display doll (470) and the hat rack
+/// (475). Those are tile *entities* rather than chests, and unlike a chest their placement hook
+/// does send the tiles: `TEDisplayDoll.Hook_AfterPlacement` sends a tile square and packet 87, so
+/// they arrive through `on_tile_square` and `on_tile_entity_placed` rather than through packet 34.
+fn is_container(block: u16) -> bool {
+    matches!(
+        block,
+        CHEST_BLOCK | DRESSER_BLOCK | terrustia_proto::locks::CHEST_2
+    )
+}
+
 impl GameServer {
     // ---------------------------------------------------------------- packets
 
@@ -141,6 +157,8 @@ impl GameServer {
             id::CHEST_UPDATES => self.on_chest_update(slot, &payload),
             id::TILE_ENTITY_PLACEMENT => self.on_tile_entity_placed(slot, &payload),
             id::HIT_SWITCH => self.on_hit_switch(slot, &payload),
+            id::TOGGLE_PARTY => self.on_toggle_party(slot),
+            id::EMOJI => self.on_emote(slot, &payload),
             id::NPC_HOME => self.on_npc_home(slot, &payload),
             id::BUG_CATCHING => self.on_bug_caught(slot, &payload),
             id::BUG_RELEASING => self.on_bug_released(slot, &payload),
@@ -148,9 +166,7 @@ impl GameServer {
             // Social chatter and cosmetic effects: nothing to keep, but everyone else has to see
             // it or the world looks different from each side. Only the ids a real dedicated server
             // actually relays are here; see the read-and-drop arm below for the ones it does not.
-            id::EMOJI
-            | id::TOGGLE_PARTY
-            | id::ITEM_USE_SOUND
+            id::ITEM_USE_SOUND
             | id::SYNC_PROJECTILE_TRACKERS
             | id::UPDATE_PLAYER_LUCK_FACTORS
             | id::LAND_GOLF_BALL_IN_CUP => {
@@ -1808,13 +1824,14 @@ impl GameServer {
             }
         }
 
-        // A chest is not only tiles: it needs somewhere to keep what is put in it.
-        if block == CHEST_BLOCK {
-            let anchor = (left as i16, top as i16);
-            if self.world.chest_at(anchor.0, anchor.1).is_none() {
-                self.world
-                    .add_chest(crate::world::Chest::empty_at(anchor.0, anchor.1));
-            }
+        // A container is not only tiles: it needs somewhere to keep what is put in it. A real
+        // client never reaches this handler for one - `Main.tileContainer` keeps chests, dressers
+        // and Containers2 out of `SendObjectPlacement` entirely (`Player.cs:40461`), which is what
+        // `on_chest_update` exists for - so this only covers a client that placed one the long way
+        // round. Kept anyway, because a chest tile with no record behind it is a chest nobody can
+        // open, and it is one call.
+        if is_container(block) {
+            self.register_chest(left, top);
         }
 
         // Nor is an item frame, a mannequin, a hat rack or a food platter. These are never asked
@@ -1832,6 +1849,21 @@ impl GameServer {
         );
         debug!(slot, block, x, y, "object placed");
         Ok(())
+    }
+
+    /// Give a container standing at `(left, top)` somewhere to keep what is put in it.
+    ///
+    /// `Chest.CreateChest` (`Chest.cs:583-600`) keys a chest on the object's own top-left tile,
+    /// and a dresser is a chest by another name. Returns the id, which is what the wire calls the
+    /// container from now on, or `None` when the world is already holding its 8000th chest.
+    fn register_chest(&mut self, left: i32, top: i32) -> Option<i16> {
+        let anchor = (left as i16, top as i16);
+        match self.world.chest_at(anchor.0, anchor.1) {
+            Some((id, _)) => Some(id),
+            None => self
+                .world
+                .add_chest(crate::world::Chest::empty_at(anchor.0, anchor.1)),
+        }
     }
 
     /// `World::world_data`, with the ambient events that live on `GameServer` rather than `World`
@@ -2370,20 +2402,79 @@ impl GameServer {
         Ok(())
     }
 
-    /// Packet 19: a door opening or closing.
+    /// Packet 19: a door, trapdoor or tall gate opening or closing.
     ///
-    /// The tile change itself is not modelled — a door swings between a 1x3 closed tile and a 2x3
-    /// open one with recomputed frames, which is placement logic this server does not implement.
-    /// Relaying keeps every client in agreement with the one that acted; the server's own copy of
-    /// those tiles stays as it was until a client pushes a tile square over them.
+    /// Applied server-side, not only relayed. The old comment here claimed the tiles would catch
+    /// up "until a client pushes a tile square over them", and that never happens: a client that
+    /// works a door sends packet 19 and nothing else (`Player.cs:33093-33098`). So every door a
+    /// player ever touched stayed as the server had first loaded it - reverting on save, arriving
+    /// wrong for a joining player, and read wrong by housing and by collision. Vanilla's own
+    /// server does the work here before relaying (`MessageBuffer.cs:1299-1332`), which is the
+    /// same thing this server already does for a *wired* door (`fire_wired_door` and its
+    /// neighbours); this handler had simply never been joined up to it.
     fn on_door(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        use crate::world::trapdoors::{TRAPDOOR_CLOSED, TRAPDOOR_OPEN};
+
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
         let door = DoorToggle::decode(payload)?;
-        if !self.world.in_bounds(i32::from(door.x), i32::from(door.y)) {
+        let (x, y) = (i32::from(door.x), i32::from(door.y));
+        // `WorldGen.InWorld(num46, num47, 3)` (`MessageBuffer.cs:1304`): three tiles clear of the
+        // edge, because a door is three tall and two wide and the whole of it has to fit.
+        if x < 3 || y < 3 || x >= self.world.width() - 3 || y >= self.world.height() - 3 {
             return Ok(());
         }
+        // `int num48 = ((reader.ReadByte() != 0) ? 1 : (-1))` (`MessageBuffer.cs:1306`).
+        let direction: i8 = if door.direction != 0 { 1 } else { -1 };
+
+        match door.action {
+            0 => {
+                crate::world::doors::open(&mut self.world, x, y, direction);
+            }
+            // `forced: true`: a player pulling a door shut is allowed to shut it on somebody, and
+            // vanilla's packet path passes the flag that skips `Collision.EmptyTile`.
+            1 => {
+                crate::world::doors::close(&mut self.world, x, y);
+            }
+            // `onlyCloseOrOpen`, the fourth argument of `WorldGen.ShiftTrapdoor` (`WorldGen.cs:
+            // 51905`): 1 for action 2 permits only the close, 0 for action 3 only the open. This
+            // project's own `shift_trapdoor` dispatches on the live tile instead, so the
+            // restriction becomes a type check on the way in - without which a stale or crafted
+            // packet 19 flips a trapdoor the way it was not asked to.
+            2 | 3 => {
+                let wanted = if door.action == 2 {
+                    TRAPDOOR_OPEN
+                } else {
+                    TRAPDOOR_CLOSED
+                };
+                if self.world.tile(x, y).block == wanted {
+                    let occupants = self.entity_hitboxes();
+                    crate::world::trapdoors::shift_trapdoor(
+                        &mut self.world,
+                        x,
+                        y,
+                        direction == 1,
+                        |tx, ty| crate::game::server::systems::tile_occupied(tx, ty, &occupants),
+                    );
+                }
+            }
+            // `closing: false` for 4 and `true` for 5, both `forced: true`.
+            4 | 5 => {
+                crate::world::trapdoors::shift_tall_gate(
+                    &mut self.world,
+                    x,
+                    y,
+                    door.action == 5,
+                    true,
+                    |_, _| false,
+                );
+            }
+            _ => {}
+        }
+
+        // Relayed whether or not anything moved: vanilla's own `TrySendData` sits outside the
+        // switch, inside the `InWorld` check (`MessageBuffer.cs:1328-1331`).
         self.broadcast(door.encode()?, Some(slot));
         Ok(())
     }
@@ -3006,6 +3097,12 @@ impl GameServer {
     /// A tile toggle rather than a wiring one, but the effect is a circuit's: a locked gem lock
     /// is what a Chlorophyte Extractinator run is wired to.
     fn on_gem_lock(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        /// The gem each gem-lock style holds, indexed by `frameX / 54`.
+        ///
+        /// `WorldGen.ToggleGemLock`'s own `switch (num2)` (`WorldGen.cs:46893-46915`): amethyst,
+        /// topaz, sapphire, emerald, ruby, diamond, amber.
+        const GEM_LOCK_GEMS: [i32; 7] = [1526, 1524, 1525, 1523, 1522, 1527, 3643];
+
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
@@ -3049,8 +3146,32 @@ impl GameServer {
                 self.world.set_tile(tx, ty, cell);
             }
         }
-        // Two tiles of reach covers the whole three-by-three from its centre.
+        // Two tiles of reach covers the whole three-by-three from its centre. Vanilla's own
+        // `NetMessage.SendTileSquare(-1, i - num3, j - num4, 3, 3)` (`WorldGen.cs:46929`); case 105
+        // is never relayed, so this square is the only thing that tells the other clients.
         self.push_region(ox + 1, oy + 1, 2);
+
+        // The gem comes back out when the lock opens. `WorldGen.ToggleGemLock`'s own
+        // `if ((num != -1) & flag) Item.NewItem(..., i * 16, j * 16, 32, 32, num)`
+        // (`WorldGen.cs:46925-46928`), with `flag` set when the lock was standing locked - which,
+        // given the state-change guard above, is exactly the unlocking direction. Without it,
+        // unlocking a gem lock destroyed the gem that was in it.
+        if !lock
+            && let Some(&gem) = GEM_LOCK_GEMS.get(usize::try_from(tile.frame_x / 54).unwrap_or(7))
+        {
+            let at = (x as f32 * 16.0 + 16.0, y as f32 * 16.0 + 16.0);
+            self.spawn_item(terrustia_proto::ItemStack::new(gem, 1, 0), at);
+        }
+
+        // And the whole point of a gem lock: it is a switch. `WorldGen.cs:46930-46931` ends with
+        // `Wiring.HitSwitch(i - num3, j - num4)` and `NetMessage.SendData(59, -1, -1, null, i -
+        // num3, j - num4)`, both against the object's own corner rather than the clicked tile.
+        self.fire_switch(ox, oy);
+        let mut w = terrustia_proto::PacketWriter::new(id::HIT_SWITCH);
+        w.i16(ox as i16).i16(oy as i16);
+        let frame = w.finish()?;
+        // To everybody: no client sent this one, the packet-105 click did.
+        self.broadcast(frame, None);
         Ok(())
     }
 
@@ -3083,12 +3204,46 @@ impl GameServer {
         Ok(())
     }
 
-    /// Packet 33: a client reporting which chest it has open, including closing one.
+    /// Packet 33: a client reporting which chest it has open, including closing one, and the one
+    /// place a chest is ever renamed.
+    ///
+    /// The name field was decoded and thrown away. It is not decoration: `MessageBuffer.cs:
+    /// 3162-3169`'s own `else` branch (the `netMode == 2` half) is the *only* write path for a
+    /// chest's name in the whole game. Packet 69's server branch (`:3082-3095`) is a read request
+    /// and nothing else - which `on_chest_name_request` already implements correctly - so with
+    /// this half missing a chest could never be named at all and packet 69 was never broadcast.
+    ///
+    /// Vanilla names the chest the sender had open *before* this packet (`Main.player[whoAmI]
+    /// .chest`, read before the assignment below it), not the one it names, which is what makes
+    /// "type a name, then close the chest" work.
     fn on_player_chest(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         let sync = SyncPlayerChest::decode(payload)?;
+        let was_open = self.player(slot).map_or(-1, |p| p.open_chest);
+        if let Some(name) = sync.name
+            && let Some(chest) = self.world.chest_mut(was_open)
+        {
+            let (x, y) = (chest.x, chest.y);
+            chest.name = name.clone();
+            // `NetMessage.TrySendData(69, -1, whoAmI, null, chest3, chest4.x, chest4.y)`
+            // (`MessageBuffer.cs:3166`): everyone else is told the new name.
+            let mut w = terrustia_proto::PacketWriter::new(id::CHEST_NAME);
+            w.i16(was_open).i16(x).i16(y).string(&name);
+            let frame = w.finish()?;
+            self.broadcast(frame, Some(slot));
+        }
         if let Some(player) = self.player_mut(slot) {
             player.open_chest = sync.chest;
         }
+        // `NetMessage.TrySendData(80, -1, whoAmI, null, whoAmI, num21)` (`MessageBuffer.cs:3168`):
+        // the other clients need to be told when this player *stops* having a chest open, not only
+        // when they start (which `on_chest_open` already sends). Without it a chest stays shown as
+        // in use on every other screen for the rest of the session.
+        let frame = terrustia_proto::objects::SyncPlayerChestIndex {
+            player: slot,
+            chest: sync.chest,
+        }
+        .encode()?;
+        self.broadcast(frame, Some(slot));
         Ok(())
     }
 
@@ -3508,10 +3663,15 @@ impl GameServer {
             return Ok(());
         }
 
-        // Land on the pylon's own tile, as the game does.
+        // Land on the pylon's own tile, as the game does. `info.PositionInTiles
+        // .ToWorldCoordinates()` (`TeleportPylonsSystem.cs:186`), and `ToWorldCoordinates`
+        // (`Utils.cs:1857`) is `p.ToVector2() * 16f + new Vector2(autoAddX, autoAddY)` with both
+        // defaulting to 8 - a half tile, on both axes, which this was dropping. Vanilla's own
+        // `- new Vector2(0f, player.HeightOffsetBoost)` is not transcribed: this server has no
+        // height-offset model, and the boost is zero for an ordinary player.
         let to = (
-            f32::from(destination.x) * 16.0,
-            f32::from(destination.y) * 16.0,
+            f32::from(destination.x) * 16.0 + 8.0,
+            f32::from(destination.y) * 16.0 + 8.0,
         );
         if let Some(player) = self.player_mut(slot) {
             player.position = to;
@@ -4264,31 +4424,49 @@ impl GameServer {
         Ok(())
     }
 
-    /// Packet 34: a chest or dresser was placed or broken.
+    /// Packet 34: a chest, dresser or Containers2 chest was placed or broken.
     ///
-    /// This is where a chest stops existing. Without it the tile goes but the chest stays
-    /// registered — a ghost that still answers when somebody clicks the empty space it used to
-    /// occupy, and that goes into the save with no tile to belong to.
+    /// It is the *only* wire notification either way, which is what makes this handler own the
+    /// tiles and not just the record. A client never sends packet 79 or a tile square for a
+    /// container: `Main.tileContainer[21|88|467|470|475] = true` (`Main.cs:10215-10219`) and
+    /// `Player.cs:40461` skips `SendObjectPlacement` for anything in that table, so
+    /// `Chest.AfterPlacement_Hook`'s own `NetMessage.SendData(34, ...)` (`Chest.cs:565-579`) is the
+    /// whole of it. Breaking one sends packet 17 with the *fail* flag set (`Player.cs:54419-54432`,
+    /// `SendData(17, ..., 0, x, y, 1f)`), which is a hit effect and not a break, and then this.
+    /// Vanilla's server does the real work in both directions at `MessageBuffer.cs:1996-2116`:
+    /// `WorldGen.PlaceChest` places the tiles *and* allocates the chest, and `WorldGen.KillTile`
+    /// clears them again.
+    ///
+    /// The placing half here wrote nothing at all and relayed the payload verbatim, on the
+    /// strength of a comment claiming placement arrived as a tile square. It does not, and the
+    /// cost was a chest that existed on every client and on no server: invisible to the save, to a
+    /// `.wld` round-trip, to housing and to any client that re-received the section, with anything
+    /// put in it lost. The relay was worse: a client-sent packet 34 always writes `(short)0` in
+    /// the id field (`NetMessage.cs:916-930`), so forwarding it verbatim made every *receiver* run
+    /// `WorldGen.PlaceChestDirect(..., 0)` into `Chest.CreateWorldChest(0, ...)` (`Chest.cs:
+    /// 583-600`) and overwrite their own chest 0. Vanilla replaces that field with the id the
+    /// server allocated, which is what the broadcasts below now carry.
+    ///
+    /// One thing is deliberately not transcribed. `MessageBuffer.cs:2124-2157`'s trailing
+    /// `switch (b4)` sits *outside* the `netMode == 2` block, so vanilla's own server also runs
+    /// the receiver's `PlaceChestDirect`/`DestroyChestDirect` with the id it forced to zero at
+    /// `:1993`, on top of the work it just did - which re-creates the chest it has already
+    /// allocated at index 0. A server is not a receiver of its own broadcast, so only the
+    /// `netMode == 2` branch is transcribed here.
     pub(super) fn on_chest_update(
         &mut self,
         slot: u8,
         payload: &[u8],
     ) -> terrustia_proto::Result<()> {
-        /// A dresser is a chest by another name, three tiles wide instead of two.
-        const DRESSER_BLOCK: u16 = 88;
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
         }
         let mut r = PacketReader::new(payload);
         let action = r.u8()?;
         let (x, y) = (r.i16()?, r.i16()?);
-        let _style = r.i16()?;
-        if !self.world.in_bounds(i32::from(x), i32::from(y)) {
-            return Ok(());
-        }
+        let style = r.i16()?;
 
-        // Odd actions break; even ones place. Placement arrives as a tile square from the client,
-        // which the ordinary handler already applies, so only the registration is done here.
+        // Odd actions break; even ones place.
         let breaking = action % 2 == 1;
         let block = match action {
             0 | 1 => CHEST_BLOCK,
@@ -4296,26 +4474,154 @@ impl GameServer {
             4 | 5 => terrustia_proto::locks::CHEST_2,
             _ => return Ok(()),
         };
+        let (ix, iy) = (i32::from(x), i32::from(y));
+        if !self.world.in_bounds(ix, iy) {
+            return Ok(());
+        }
+        let Some(object) = terrustia_proto::tile_object::tile_object(block) else {
+            return Ok(());
+        };
+
         if breaking {
-            // The client reports whichever corner was clicked; the chest is anchored at the
+            // `if (Main.tile[num32, num33].type == 21)` and its two siblings: a break naming a tile
+            // that is not the container it claims does nothing.
+            let tile = self.world.tile(ix, iy);
+            if !tile.is_active() || tile.block != block {
+                debug!(slot, x, y, block, "nothing of that kind there to break");
+                return Ok(());
+            }
+            // The client reports whichever cell was clicked; the chest is anchored at the
             // top-left, so walk back to it before looking the chest up.
-            let tile = self.world.tile(i32::from(x), i32::from(y));
             let wide = if block == DRESSER_BLOCK { 54 } else { 36 };
             let anchor = (
                 x - (tile.frame_x % wide) / 18,
                 y - i16::from(tile.frame_y % 36 != 0),
             );
-            if let Some((id, chest)) = self.world.chest_at(anchor.0, anchor.1) {
-                // A chest with anything in it is not breakable, the same rule the game uses.
-                if chest.items.iter().any(|item| item.stack > 0) {
-                    debug!(slot, x, y, "refusing to break a chest with things in it");
-                    return Ok(());
+            let id = match self.world.chest_at(anchor.0, anchor.1) {
+                Some((id, chest)) => {
+                    // A chest with anything in it is not breakable (`Chest.CanDestroyChest`).
+                    if chest.items.iter().any(|item| item.stack > 0) {
+                        debug!(slot, x, y, "refusing to break a chest with things in it");
+                        return Ok(());
+                    }
+                    self.world.remove_chest(id);
+                    id
                 }
-                self.world.remove_chest(id);
-                debug!(slot, x = anchor.0, y = anchor.1, id, "chest removed");
+                // `Chest.FindChest` returning -1: the tiles are there with no record behind them,
+                // which is still a legal break. Receivers skip `DestroyChestDirect` on a negative
+                // id and kill the tiles anyway.
+                None => -1,
+            };
+            // `WorldGen.KillTile(num32, num33)` (`MessageBuffer.cs:2032`). Packet 17 arrived with
+            // its fail flag set and so cleared nothing, which left this server keeping the tiles
+            // of every chest anyone ever broke, and giving nothing back for them.
+            let (left, top) = (i32::from(anchor.0), i32::from(anchor.1));
+            for dx in 0..object.width {
+                for dy in 0..object.height {
+                    let mut cell = self.world.tile(left + dx, top + dy);
+                    if !cell.is_active() || cell.block != block {
+                        continue;
+                    }
+                    cell.flags.set(TileFlags::ACTIVE, false);
+                    cell.block = 0;
+                    cell.frame_x = -1;
+                    cell.frame_y = -1;
+                    cell.slope = 0;
+                    cell.flags.set(TileFlags::HALF_BRICK, false);
+                    self.world.set_tile(left + dx, top + dy, cell);
+                    self.liquids.disturb(left + dx, top + dy);
+                }
+            }
+            self.spawn_tile_drop(block, tile.frame_x, tile.frame_y, ix, iy);
+            debug!(slot, x = anchor.0, y = anchor.1, id, "container broken");
+
+            // `TrySendData(34, -1, -1, null, b4, num32, num33, 0f, number)`: the *anchor*, style
+            // zeroed, the real id, and to everybody including the breaker (whose own client only
+            // played a hit effect and is still drawing the chest).
+            let mut w = terrustia_proto::PacketWriter::new(id::CHEST_UPDATES);
+            w.u8(action).i16(anchor.0).i16(anchor.1).i16(0).i16(id);
+            let frame = w.finish()?;
+            self.broadcast(frame, None);
+            return Ok(());
+        }
+
+        // Ten tiles clear of the world's edge, the same margin `on_place_object` transcribes for
+        // the placement both go through (`TileObject.CanPlace`).
+        if ix < 10 || iy < 10 || ix >= self.world.width() - 10 || iy >= self.world.height() - 10 {
+            return Ok(());
+        }
+        // A deliberate narrowing: vanilla hands the wire's style straight to
+        // `WorldGen.PlaceChest` with no range check at all, so a crafted packet 34 writes a
+        // negative or wrapped `frameX` into a real tile and that corrupt frame goes into the save.
+        // The bound is exactly what fits: the rightmost cell's frame has to survive the `i16` the
+        // tile stores it in.
+        let base = i32::from(style) * if block == DRESSER_BLOCK { 54 } else { 36 };
+        if style < 0 || i16::try_from(base + (object.width - 1) * 18).is_err() {
+            debug!(slot, style, block, "that container has no such style");
+            return Ok(());
+        }
+        // The cursor sits on the object's lower-left cell, so its corner is one row up and, for a
+        // dresser, one column left (`TileObjectData`'s `Origin` for each, which is what this
+        // project's own `tile_object` table records).
+        let (left, top) = (ix - object.origin.0, iy - object.origin.1);
+        // `TileObject.CanPlace`: the whole footprint or nothing.
+        let clear = (0..object.width).all(|dx| {
+            (0..object.height).all(|dy| !self.world.tile(left + dx, top + dy).is_active())
+        });
+        let placed = clear.then(|| self.register_chest(left, top)).flatten();
+        if let Some(id) = placed {
+            // Frames straight from `WorldGen.PlaceChestDirect` and `PlaceDresserDirect`
+            // (`WorldGen.cs:58337-58405`): `36 * style` for a chest or a Containers2 and `54 *
+            // style` for a dresser, plus 18 per cell across, with `frameY` 0 then 18.
+            //
+            // Deliberately not routed through `tile_object::frame_of`, which `on_place_object`
+            // uses. That table gives 21/88/467 a style multiplier of 2 and a wrap of 2, and the
+            // real `TileObjectData` for all three inherits `StyleWrapLimit = 0, StyleMultiplier =
+            // 1` from `_baseObject` (`TileObjectData.cs:1799-1801`) - so `frame_of` agrees with
+            // vanilla only at style 0 and disagrees at every other. `36 * style` is also what this
+            // project's own worldgen writes (`worldgen/structures.rs`'s `add_chest_styled`) and
+            // what `on_lock` reads back with `frame_x / 36`. The table entry is wrong and is not
+            // this change's to fix: it is shared with `drop_of` and `on_place_object`.
+            debug!(slot, x, y, block, id, "container placed");
+            for dx in 0..object.width {
+                for dy in 0..object.height {
+                    let was = self.world.tile(left + dx, top + dy);
+                    let tile = terrustia_proto::tile::Tile::framed(
+                        block,
+                        (base + dx * 18) as i16,
+                        (dy * 18) as i16,
+                    )
+                    .with_wall(was.wall);
+                    self.world.set_tile(left + dx, top + dy, tile);
+                    self.liquids.disturb(left + dx, top + dy);
+                }
             }
         }
-        self.broadcast(packets::verbatim(id::CHEST_UPDATES, payload)?, Some(slot));
+
+        let mut w = terrustia_proto::PacketWriter::new(id::CHEST_UPDATES);
+        w.u8(action)
+            .i16(x)
+            .i16(y)
+            .i16(style)
+            .i16(placed.unwrap_or(-1));
+        let frame = w.finish()?;
+        match placed {
+            // To everybody including the placer: their own `AfterPlacement_Hook` returned -1 in
+            // netMode 1 without creating anything, so this broadcast is what builds the chest on
+            // their screen too, with the server's id on it.
+            Some(id) => {
+                debug!(slot, x, y, block, id, "container placed");
+                self.broadcast(frame, None);
+            }
+            // `TrySendData(34, whoAmI, -1, ...)` with -1: to the placer alone, whose client then
+            // runs `WorldGen.KillTile` and takes the chest back off its own screen. Vanilla also
+            // drops the container as an item here; this server does not, and the case only arises
+            // with the world's 8000th chest or a footprint that was not clear.
+            None => {
+                debug!(slot, x, y, block, "no room for another container");
+                self.send(slot, frame);
+            }
+        }
         Ok(())
     }
 
@@ -4341,9 +4647,40 @@ impl GameServer {
         let anchor = self.world.tile(x, y);
         let moved = match action {
             LockAction::UnlockDoor => {
-                // A door has no frame arithmetic to do here — the client reframes it and pushes a
-                // tile square. Relaying is what keeps the other clients in step.
-                anchor.is_active() && anchor.block == locks::DOOR_CLOSED
+                // The client reframes its own copy and sends nothing but this packet
+                // (`Player.cs:33064-33070`, which consumes the Golden Key and then only
+                // `SendData(52, ..., 2f, ...)`), so a server that merely relays keeps the door
+                // locked: it re-locks on the next section send and it saves locked, with the key
+                // already spent. `WorldGen.UnlockDoor` (`WorldGen.cs:37988-38017`) is the work.
+                //
+                // The frame test is `WorldGen.IsLockedDoor` (`WorldGen.cs:69725-69732`), which is
+                // what the client itself checks before sending. Testing only `block ==
+                // DOOR_CLOSED`, as this used to, relayed a crafted action-2 packet aimed at any
+                // ordinary door in the world.
+                if !anchor.is_active()
+                    || anchor.block != locks::DOOR_CLOSED
+                    || !(594..=646).contains(&anchor.frame_y)
+                    || anchor.frame_x >= 54
+                {
+                    debug!(slot, x, y, "that is not a locked door");
+                    return Ok(());
+                }
+                // Walk up to the door's top row, which is the one framed at exactly 594. Vanilla
+                // decrements first and tests the tile it lands on, bailing the moment the frame
+                // drops below 594 or the walk reaches the top of the world.
+                let mut top = y;
+                while self.world.tile(x, top).frame_y != 594 {
+                    top -= 1;
+                    if top <= 0 || self.world.tile(x, top).frame_y < 594 {
+                        return Ok(());
+                    }
+                }
+                for row in top..=top + 2 {
+                    let mut tile = self.world.tile(x, row);
+                    tile.frame_y += 54;
+                    self.world.set_tile(x, row, tile);
+                }
+                true
             }
             LockAction::UnlockChest | LockAction::LockChest => {
                 let style = i32::from(anchor.frame_x) / 36;
@@ -4404,6 +4741,88 @@ impl GameServer {
             return Ok(());
         }
 
+        self.fire_switch(x, y);
+        self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
+        Ok(())
+    }
+
+    /// Packet 111: somebody clicked a Party Center.
+    ///
+    /// Relaying this did nothing at all: no client acts on a received 111 - vanilla's own case is
+    /// `if (Main.netMode == 2) BirthdayParty.ToggleManualParty()` and nothing else
+    /// (`MessageBuffer.cs:3832-3836`), so the button was simply dead. The wire-triggered Party
+    /// Monolith already went through `fire_switch`; only the direct click was missing.
+    ///
+    /// `BirthdayParty.ToggleManualParty` resyncs world data only when `PartyIsUp` actually
+    /// changed, which is why `toggle_manual`'s return value is tested rather than ignored: a
+    /// genuine Party Girl party already running is not interrupted by a click, and clicking during
+    /// one changes nothing anybody can see.
+    fn on_toggle_party(&mut self, slot: u8) -> terrustia_proto::Result<()> {
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let was_up = self.party.is_up();
+        if self.party.toggle_manual() != was_up {
+            self.broadcast_world_data();
+        }
+        Ok(())
+    }
+
+    /// Packet 120: a player used an emote.
+    ///
+    /// Never relayed by a real server. Vanilla runs `EmoteBubble.NewBubble` (`MessageBuffer.cs:
+    /// 3855-3866`), which broadcasts packet **91** instead (`EmoteBubble.cs`'s own `NetMessage
+    /// .SendData(91, -1, -1, null, ID, anchorType, anchorMeta, time, emoticon)`). Relaying 120, as
+    /// this server used to, sends every receiver a packet whose own handler is `netMode == 2`-only:
+    /// it is read and discarded, so emotes were invisible to everybody but their sender.
+    fn on_emote(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
+        /// `EmoteID.Count` (`EmoteID.cs:9`). Vanilla bounds-checks the emote before making a
+        /// bubble of it (`num260 >= 0 && num260 < EmoteID.Count`); this server checked nothing.
+        const EMOTE_COUNT: u8 = 151;
+        /// `EmoteBubble.NewBubble`'s own `time` for a player emote (`MessageBuffer.cs:3861`).
+        const BUBBLE_TICKS: u16 = 360;
+        /// `EmoteBubble.SerializeNetAnchor`: 0 is an NPC, 1 a player, 2 a projectile.
+        const ANCHOR_PLAYER: u8 = 1;
+
+        if !self.player(slot).is_some_and(Player::is_playing) {
+            return Ok(());
+        }
+        let mut r = PacketReader::new(payload);
+        let _claimed = r.u8()?;
+        let emote = r.u8()?;
+        if emote >= EMOTE_COUNT {
+            debug!(slot, emote, "no such emote");
+            return Ok(());
+        }
+
+        // `EmoteBubble.AssignNewID` is `NextID++` against a server-wide store this project does
+        // not keep: a bubble is display-only, expires on its own after `BUBBLE_TICKS`, and is
+        // never updated or removed by id. All the id has to do is separate the bubbles alive at
+        // one time, and one player can raise at most one per tick, so the tick and the slot are
+        // already that. Wrapping is harmless - a reused id lands on a bubble six seconds dead.
+        let bubble = (self.ticks as i32)
+            .wrapping_mul(256)
+            .wrapping_add(i32::from(slot));
+        let mut w = terrustia_proto::PacketWriter::new(id::SYNC_EMOTE_BUBBLE);
+        w.i32(bubble)
+            .u8(ANCHOR_PLAYER)
+            .u16(u16::from(slot))
+            .u16(BUBBLE_TICKS)
+            .u8(emote);
+        let frame = w.finish()?;
+        // To everybody: vanilla's own `SendData(91, -1, -1, ...)` excludes nobody, and the sender's
+        // own client does not raise the bubble for itself.
+        self.broadcast(frame, None);
+        Ok(())
+    }
+
+    /// Run the circuit a trigger at `(x, y)` starts: `Wiring.HitSwitch`.
+    ///
+    /// Shared by the direct click (packet 59, above) and by `WorldGen.ToggleGemLock`'s own tail
+    /// (`WorldGen.cs:46930`), which fires the same `Wiring.HitSwitch` at the lock's corner. The
+    /// caller owns the wire notification, because the two differ: a click is relayed to everyone
+    /// but its sender, a gem lock's is sent to everyone.
+    fn fire_switch(&mut self, x: i32, y: i32) {
         // The circuit is run here rather than only relayed. An actuator changes what the world
         // *is* — whether a block is solid — so a server that leaves it to the clients has a world
         // where players walk through walls the server thinks are there.
@@ -4414,8 +4833,6 @@ impl GameServer {
         let party_monolith = fired.party_monolith;
         self.apply_circuit(fired, (x, y));
 
-        self.broadcast(packets::verbatim(id::HIT_SWITCH, payload)?, Some(slot));
-
         // `BirthdayParty::ToggleManualParty` — a direct click or a wire signal reaching a Party
         // Monolith (`wiring.rs`'s own `PARTY_MONOLITH`). Real vanilla has no chat message for
         // this at all, unlike a natural party starting or any party ending at night — only the
@@ -4424,7 +4841,6 @@ impl GameServer {
             self.party.toggle_manual();
             self.broadcast_world_data();
         }
-        Ok(())
     }
 
     /// Packet 70: a critter was caught in a net, and is now an item.
@@ -6582,5 +6998,431 @@ mod heal_on_touch {
             with_two_players(GameServer::new(Config::default(), tiny_world()));
 
         assert!(server.on_heal_player(0, &heal_payload(200, 30)).is_ok());
+    }
+}
+
+/// The handlers that were relaying a client's word for something instead of doing it.
+///
+/// Every test here fails against the code as it stood: each names a packet whose whole effect was
+/// a broadcast, with the server's own world left as it was. The common thread is a wrong belief
+/// about what else the client sends - a tile square, a packet 79, a packet 17 that destroys - and
+/// in each case the client sends nothing of the sort.
+#[cfg(test)]
+mod server_side_effects {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::tile::Tile;
+
+    fn world() -> crate::world::World {
+        crate::world::World::empty(400, 300, "server-side effect probe")
+    }
+
+    fn frame(id: u8, payload: &[u8]) -> Frame {
+        Frame {
+            id,
+            payload: Bytes::copy_from_slice(payload),
+        }
+    }
+
+    fn connect(server: &mut GameServer, slot: u8) -> mpsc::Receiver<Bytes> {
+        let (tx, rx) = mpsc::channel(64);
+        let mut player = Player::new(slot, "127.0.0.1:1".parse().expect("test address"), tx);
+        player.greeted = true;
+        player.password_ok = true;
+        player.state = ConnState::Playing;
+        server.players[usize::from(slot)] = Some(player);
+        rx
+    }
+
+    /// Everything waiting on a connection, as `(id, payload)`. Drained once per test, because
+    /// several of these tests care about two different ids in the same batch.
+    fn drain(rx: &mut mpsc::Receiver<Bytes>) -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(f) = rx.try_recv() {
+            if let Some(&id) = f.get(2) {
+                out.push((id, f[3..].to_vec()));
+            }
+        }
+        out
+    }
+
+    fn of(frames: &[(u8, Vec<u8>)], id: u8) -> Vec<&[u8]> {
+        frames
+            .iter()
+            .filter(|(i, _)| *i == id)
+            .map(|(_, p)| p.as_slice())
+            .collect()
+    }
+
+    /// Packet 34's payload, as a client writes it: the id field is always zero from a client
+    /// (`NetMessage.cs:916-930`'s `else writer.Write((short)0)`).
+    fn chest_packet(action: u8, x: i16, y: i16, style: i16) -> Vec<u8> {
+        let mut payload = vec![action];
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&y.to_le_bytes());
+        payload.extend_from_slice(&style.to_le_bytes());
+        payload.extend_from_slice(&0i16.to_le_bytes());
+        payload
+    }
+
+    /// A shut wooden door, three tiles tall, with its top row at `top`.
+    fn shut_door(server: &mut GameServer, x: i32, top: i32) {
+        for dy in 0..3i32 {
+            server.world.set_tile(
+                x,
+                top + dy,
+                Tile::framed(crate::world::doors::DOOR_CLOSED, 0, (dy as i16) * 18),
+            );
+        }
+    }
+
+    /// B-03, fail-then-pass: placing a chest wrote nothing server-side.
+    ///
+    /// A client never sends packet 79 or a tile square for a container - `Main.tileContainer[21]`
+    /// (`Main.cs:10215`) keeps it out of `SendObjectPlacement` (`Player.cs:40461`), so
+    /// `Chest.AfterPlacement_Hook`'s packet 34 (`Chest.cs:565-579`) is the only notification.
+    /// Vanilla's server answers it with `WorldGen.PlaceChest`, which places the tiles *and*
+    /// allocates the chest (`MessageBuffer.cs:1999-2015`).
+    #[test]
+    fn a_placed_chest_becomes_real_tiles_and_a_real_chest() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _placer = connect(&mut server, 0);
+
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(0, 50, 50, 0)));
+
+        // `TileObjectData` for tile 21 puts the cursor on the object's lower-left cell, so the
+        // corner is one row up (`Chest.AfterPlacement_Hook`'s `OriginToTopLeft`).
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = server.world.tile(50 + dx, 49 + dy);
+            assert!(tile.is_active(), "the chest's tiles have to be written");
+            assert_eq!(tile.block, CHEST_BLOCK);
+        }
+        assert!(
+            server.world.chest_at(50, 49).is_some(),
+            "and the chest record has to exist, or anything put in it is lost"
+        );
+    }
+
+    /// B-03's other half: the relay carried the client's zero, so every *receiver* rebuilt its own
+    /// chest 0 on top of the new one (`WorldGen.PlaceChestDirect(..., 0)` into
+    /// `Chest.CreateWorldChest(0, ...)`, `Chest.cs:583-600`). Vanilla broadcasts the id the server
+    /// allocated instead (`MessageBuffer.cs:2014`).
+    #[test]
+    fn the_broadcast_carries_the_servers_own_chest_id() {
+        let mut server = GameServer::new(Config::default(), world());
+        // An existing chest, so the newly placed one cannot coincidentally be id 0.
+        let existing = server
+            .world
+            .add_chest(crate::world::Chest::empty_at(10, 10))
+            .expect("a chest slot");
+        assert_eq!(existing, 0);
+        let _placer = connect(&mut server, 0);
+        let mut watcher = connect(&mut server, 1);
+
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(0, 50, 50, 0)));
+
+        let seen = drain(&mut watcher);
+        let sent = of(&seen, id::CHEST_UPDATES);
+        assert_eq!(sent.len(), 1, "the placement is still announced");
+        let id = i16::from_le_bytes([sent[0][7], sent[0][8]]);
+        assert_eq!(id, 1, "the server's own id, not the client's zero");
+        assert_eq!(
+            server.world.chest(0).map(|c| (c.x, c.y)),
+            Some((10, 10)),
+            "and the world's first chest is untouched"
+        );
+    }
+
+    /// B-03: a chest's style lives entirely in `frameX`, at `36 * style`
+    /// (`WorldGen.PlaceChestDirect`, `WorldGen.cs:58339-58370`) - which is what `on_lock` reads
+    /// back with `frame_x / 36` and what worldgen's own `add_chest_styled` writes. Placing a
+    /// styled chest through `tile_object::frame_of` instead would have framed a Gold Chest at
+    /// `frameX 0, frameY 72`, which is a plain wooden chest two rows down the sheet.
+    #[test]
+    fn a_styled_chest_is_framed_the_way_the_rest_of_this_server_reads_it() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _placer = connect(&mut server, 0);
+
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(0, 50, 50, 1)));
+
+        assert_eq!(server.world.tile(50, 49).frame_x, 36);
+        assert_eq!(server.world.tile(51, 49).frame_x, 54);
+        assert_eq!(server.world.tile(50, 50).frame_y, 18);
+        assert_eq!(
+            i32::from(server.world.tile(50, 49).frame_x) / 36,
+            1,
+            "and `on_lock` reads style 1 back out of it"
+        );
+    }
+
+    /// A style the frame cannot hold writes a corrupt tile that goes into the save. Vanilla passes
+    /// the wire's style straight to `WorldGen.PlaceChest` with no check; this is a disclosed
+    /// narrowing at a trust boundary, not a transcription.
+    #[test]
+    fn a_container_style_that_does_not_fit_the_frame_is_refused() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _placer = connect(&mut server, 0);
+
+        for style in [-1i16, 30000] {
+            server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(0, 50, 50, style)));
+            assert!(
+                !server.world.tile(50, 49).is_active(),
+                "style {style} must not reach a real tile"
+            );
+            assert!(server.world.chest_at(50, 49).is_none());
+        }
+    }
+
+    /// B-03: a dresser is a container too, and used to be storage-free. Vanilla's case 2 is
+    /// `WorldGen.PlaceChest(x, y, 88, ...)` (`MessageBuffer.cs:2045`).
+    #[test]
+    fn a_dresser_gets_storage_as_well() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _placer = connect(&mut server, 0);
+
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(2, 50, 50, 0)));
+
+        // Three wide, cursor on the middle of the lower row: corner at (x - 1, y - 1).
+        assert_eq!(server.world.tile(49, 49).block, DRESSER_BLOCK);
+        assert_eq!(server.world.tile(51, 50).block, DRESSER_BLOCK);
+        assert!(server.world.chest_at(49, 49).is_some(), "a dresser stores");
+    }
+
+    /// B-03's breaking half: packet 17 arrives with its fail flag set (`Player.cs:54419-54424`,
+    /// `SendData(17, ..., 0, x, y, 1f)`), which is a hit effect and clears nothing, so the tiles
+    /// were left standing on the server and the chest item was never given back. Vanilla clears
+    /// them from case 34 itself (`MessageBuffer.cs:2032`, `WorldGen.KillTile`).
+    #[test]
+    fn breaking_a_chest_clears_its_tiles_and_gives_it_back() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _breaker = connect(&mut server, 0);
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(0, 50, 50, 0)));
+        assert!(server.world.chest_at(50, 49).is_some());
+
+        // Break it by clicking its lower-right cell, which is not the anchor.
+        server.handle_packet(0, frame(id::CHEST_UPDATES, &chest_packet(1, 51, 50, 0)));
+
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            assert!(
+                !server.world.tile(50 + dx, 49 + dy).is_active(),
+                "every cell of a broken chest goes"
+            );
+        }
+        assert!(server.world.chest_at(50, 49).is_none(), "and the record");
+        assert_eq!(
+            server.items.iter().count(),
+            1,
+            "a broken chest is an item again"
+        );
+    }
+
+    /// M-01, fail-then-pass: `GEM_LOCK` named tile 442, which is
+    /// `TileID.ProjectilePressurePad` (`TileID.cs:1321`). `TileID.GemLocks` is 440
+    /// (`TileID.cs:1317`), so every real gem lock was rejected. The gem itself is
+    /// `WorldGen.ToggleGemLock`'s own `Item.NewItem` on the way out (`WorldGen.cs:46925-46928`);
+    /// without it unlocking destroyed the gem.
+    #[test]
+    fn a_gem_lock_is_tile_440_and_hands_the_gem_back() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _player = connect(&mut server, 0);
+        // A locked amethyst lock (style 0, so `frameX / 54 == 0`), three by three, lower band.
+        for dx in 0..3i32 {
+            for dy in 0..3i32 {
+                server.world.set_tile(
+                    100 + dx,
+                    100 + dy,
+                    Tile::framed(GEM_LOCK, (dx as i16) * 18, 54 + (dy as i16) * 18),
+                );
+            }
+        }
+
+        let mut payload = 100i16.to_le_bytes().to_vec();
+        payload.extend_from_slice(&100i16.to_le_bytes());
+        payload.push(0); // unlock
+        server.handle_packet(0, frame(id::GEM_LOCK_TOGGLE, &payload));
+
+        assert_eq!(
+            server.world.tile(100, 100).frame_y,
+            0,
+            "an unlocked gem lock sits in the upper band"
+        );
+        assert_eq!(
+            server.items.iter().next().map(|(_, i)| i.item.id),
+            Some(1526),
+            "and the amethyst comes back out"
+        );
+    }
+
+    /// M-03, fail-then-pass: doors were cosmetic. The client sends packet 19 and nothing else
+    /// (`Player.cs:33093-33098`), so the old comment's "until a client pushes a tile square over
+    /// them" never happened and the server's door never moved. Vanilla applies it before relaying
+    /// (`MessageBuffer.cs:1307-1327`).
+    #[test]
+    fn a_door_swings_in_the_servers_own_world() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _player = connect(&mut server, 0);
+        shut_door(&mut server, 100, 50);
+
+        // Action 0, opening rightwards.
+        server.handle_packet(0, frame(id::TOGGLE_DOOR_STATE, &[0, 100, 0, 50, 0, 1]));
+        assert_eq!(
+            server.world.tile(100, 50).block,
+            crate::world::doors::DOOR_OPEN,
+            "the door has to open here, not only on the wire"
+        );
+
+        server.handle_packet(0, frame(id::TOGGLE_DOOR_STATE, &[1, 100, 0, 50, 0, 1]));
+        assert_eq!(
+            server.world.tile(100, 50).block,
+            crate::world::doors::DOOR_CLOSED,
+            "and shut again"
+        );
+    }
+
+    /// M-04, fail-then-pass: the Golden Key was consumed and the door stayed locked here, so it
+    /// re-locked on the next section send and saved locked. `WorldGen.UnlockDoor`
+    /// (`WorldGen.cs:37988-38017`) walks up to the row framed at 594 and adds 54 to three tiles;
+    /// the client only ever sends packet 52 (`Player.cs:33064-33070`).
+    #[test]
+    fn a_dungeon_door_really_unlocks() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _player = connect(&mut server, 0);
+        for dy in 0..3i32 {
+            server.world.set_tile(
+                100,
+                50 + dy,
+                Tile::framed(crate::world::doors::DOOR_CLOSED, 0, 594 + (dy as i16) * 18),
+            );
+        }
+
+        // Action 2 clicked on the middle row, which is not the row framed at 594.
+        let mut payload = vec![2];
+        payload.extend_from_slice(&100i16.to_le_bytes());
+        payload.extend_from_slice(&51i16.to_le_bytes());
+        server.handle_packet(0, frame(id::LOCK_AND_UNLOCK, &payload));
+
+        for dy in 0..3i16 {
+            assert_eq!(
+                server.world.tile(100, 50 + i32::from(dy)).frame_y,
+                648 + dy * 18,
+                "every row of the door moves out of the locked band"
+            );
+        }
+    }
+
+    /// M-04's other half: the check was `block == DOOR_CLOSED` and nothing more, so a crafted
+    /// action-2 packet aimed at an ordinary door was relayed as an unlock.
+    ///
+    /// `WorldGen.IsLockedDoor` (`WorldGen.cs:69725-69732`) is `frameY >= 594 && frameY <= 646 &&
+    /// frameX < 54`.
+    #[test]
+    fn an_ordinary_door_cannot_be_unlocked() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _player = connect(&mut server, 0);
+        let mut watcher = connect(&mut server, 1);
+        shut_door(&mut server, 100, 50);
+
+        let mut payload = vec![2];
+        payload.extend_from_slice(&100i16.to_le_bytes());
+        payload.extend_from_slice(&50i16.to_le_bytes());
+        server.handle_packet(0, frame(id::LOCK_AND_UNLOCK, &payload));
+
+        assert_eq!(server.world.tile(100, 50).frame_y, 0, "nothing moved");
+        assert!(
+            of(&drain(&mut watcher), id::LOCK_AND_UNLOCK).is_empty(),
+            "and nothing was relayed"
+        );
+    }
+
+    /// M-06, fail-then-pass: packet 33's name field was decoded and dropped, and it is the only
+    /// write path for a chest's name in the game (`MessageBuffer.cs:3162-3169`). Packet 69's own
+    /// server branch (`:3082-3095`) is a read request, so nothing else could ever set one.
+    #[test]
+    fn a_chest_can_be_named() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _namer = connect(&mut server, 0);
+        let mut watcher = connect(&mut server, 1);
+        server
+            .world
+            .add_chest(crate::world::Chest::empty_at(10, 10))
+            .expect("a chest slot");
+        if let Some(player) = server.player_mut(0) {
+            player.open_chest = 0;
+        }
+
+        // Closing the chest and naming it in the same packet, which is how a client sends it.
+        let mut payload = (-1i16).to_le_bytes().to_vec();
+        payload.extend_from_slice(&0i16.to_le_bytes());
+        payload.extend_from_slice(&0i16.to_le_bytes());
+        payload.push(4); // the length marker vanilla tests against 20
+        payload.push(4); // the string's own 7-bit length prefix
+        payload.extend_from_slice(b"loot");
+        server.handle_packet(0, frame(id::SYNC_PLAYER_CHEST, &payload));
+
+        assert_eq!(
+            server.world.chest(0).map(|c| c.name.as_str()),
+            Some("loot"),
+            "the name has to be kept, or it can never be set at all"
+        );
+        let seen = drain(&mut watcher);
+        assert_eq!(
+            of(&seen, id::CHEST_NAME).len(),
+            1,
+            "and broadcast, which packet 69 never was"
+        );
+        assert_eq!(
+            of(&seen, id::SYNC_PLAYER_CHEST_INDEX).len(),
+            1,
+            "along with the close itself (`MessageBuffer.cs:3168`)"
+        );
+    }
+
+    /// M-09, fail-then-pass: relaying packet 111 did nothing, because no client acts on a received
+    /// one. Vanilla's whole case is `BirthdayParty.ToggleManualParty()` on the server
+    /// (`MessageBuffer.cs:3832-3836`), so the Party Center button was dead.
+    #[test]
+    fn the_party_centre_starts_a_party() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _player = connect(&mut server, 0);
+        assert!(!server.party.is_up());
+
+        server.handle_packet(0, frame(id::TOGGLE_PARTY, &[]));
+
+        assert!(server.party.is_up(), "a click on a Party Center is a party");
+    }
+
+    /// M-09's other half: emotes were invisible. Vanilla never relays packet 120; it makes a
+    /// bubble and broadcasts packet **91** (`MessageBuffer.cs:3855-3866` into
+    /// `EmoteBubble.NewBubble`). A relayed 120 is read and dropped by every receiver, whose own
+    /// case is `netMode == 2`-only.
+    #[test]
+    fn an_emote_goes_out_as_a_bubble_not_a_relay() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _sender = connect(&mut server, 0);
+        let mut watcher = connect(&mut server, 1);
+
+        server.handle_packet(0, frame(id::EMOJI, &[0, 3]));
+
+        let seen = drain(&mut watcher);
+        assert!(of(&seen, id::EMOJI).is_empty(), "120 is never relayed");
+        let bubbles = of(&seen, id::SYNC_EMOTE_BUBBLE);
+        assert_eq!(bubbles.len(), 1, "91 is what a receiver understands");
+        // i32 id, u8 anchor type, u16 anchor, u16 lifetime, u8 emote.
+        assert_eq!(bubbles[0][4], 1, "anchored to a player");
+        assert_eq!(u16::from_le_bytes([bubbles[0][5], bubbles[0][6]]), 0);
+        assert_eq!(u16::from_le_bytes([bubbles[0][7], bubbles[0][8]]), 360);
+        assert_eq!(bubbles[0][9], 3, "and it is the emote that was asked for");
+    }
+
+    /// M-09: `num260 < EmoteID.Count` (`MessageBuffer.cs:3859`), which this had no equivalent of.
+    #[test]
+    fn an_emote_out_of_range_makes_no_bubble() {
+        let mut server = GameServer::new(Config::default(), world());
+        let _sender = connect(&mut server, 0);
+        let mut watcher = connect(&mut server, 1);
+
+        server.handle_packet(0, frame(id::EMOJI, &[0, 200]));
+
+        assert!(of(&drain(&mut watcher), id::SYNC_EMOTE_BUBBLE).is_empty());
     }
 }
