@@ -152,6 +152,36 @@ Known minor divergences that remain by design: `SendSection` does not sync the s
 way vanilla does at `NetMessage.cs:2732`, there is no `Main.SyncAnInvasion` on packet 6 (cosmetic),
 and section batching is stricter than `Tile.isTheSameAs` (correct output, more bytes).
 
+**The item slot table**, four disclosed seams around `ItemStore::pick_slot`'s transcription of
+`Item.PickAnItemSlotToSpawnItemOn` (`Item.cs:49779-49845`). None of them changes whether a drop
+lands; each changes which slot it lands in, or how a removal is worded on the wire.
+
+- `EmergencyStacking` (`Terraria.GameContent/EmergencyStacking.cs`, 450 lines, a pending-transfer
+  queue of its own that `Item.NewItem` also has to clear) is not built. Vanilla tries it between
+  the picker's second and third tiers; this behaves exactly as vanilla does when it returns false.
+- `Main.timeItemSlotCannotBeReusedFor` is not modelled. Its one writer is `WorldItem.MakeInstanced`
+  (`WorldItem.cs:326-341`), where vanilla gives each player their own treasure bag over packet `90`
+  and then holds the slot empty for 54000 ticks; `drop_instanced_bag` keeps the bag as a real
+  occupied slot instead, so no slot here is ever free-looking-but-not, and every branch reading the
+  timer degenerates (including vanilla's fourth loop, which becomes its third exactly).
+- `ItemID.Sets.OverflowProtectionTimeOffset` (`ItemID.cs:96`) is not applied. Vanilla seeds a new
+  item's age with 50 to 200 ticks for two dozen common junk types, so those are evicted first. Our
+  `WorldItem::age` doubles as the despawn clock, which vanilla has no equivalent of, so seeding it
+  would silently shorten those items' lifetime; the offset only reorders eviction among junk in the
+  deepest fallback.
+- A Terraria world item never expires with age (`WorldItem.cs:646-714`'s self-destructs are all
+  per-type). `DESPAWN_TICKS` is this project's own ten-minute cleanup, and it is the reason a client
+  sees a `151` from this server that a real one would not have sent. Vanilla words every other
+  server-side item destruction as a `21` carrying a zero stack (`WorldItem.TurnToAirAndSync`,
+  `WorldItem.cs:623`) rather than a `151`; the shimmer, decraft and voodoo-doll sites here use a
+  `151`, which clears the item on a client the same way but is not the packet vanilla would send.
+
+Found while transcribing the picker and left open, because it cannot be transcribed faithfully yet:
+`WorldItem.TryCombiningIntoNearbyItems` (`WorldItem.cs:157-186`) merges two stacks of the same item
+lying within 30 pixels of each other and syncs both, which is the ordinary relief valve the picker's
+recycling is the emergency version of. It needs a per-type `maxStack`, and no table in
+`terrustia-proto` carries one.
+
 **Area-of-interest culling on player movement and projectile syncs**, a deliberate and measured
 divergence. Vanilla relays a player's movement to every other player (`NetMessage.SendData(13)`
 excludes only the sender) and a client's projectile syncs the same way. terrustia routes both through
