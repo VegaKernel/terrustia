@@ -462,6 +462,9 @@ impl GameServer {
         {
             self.save_world_in_background("autosave");
         }
+        // An armed save copies a few sections a tick until the buffer has caught up, then fires.
+        // Does nothing at all when no save is waiting, so an ordinary tick pays nothing for it.
+        self.tick_snapshot_drain();
         // Its own phase because it is the single most expensive thing the tick does, and it was
         // hidden inside a bucket of thirteen systems.
         lap(&mut cost, Phase::Snapshot);
@@ -1156,6 +1159,160 @@ mod failing_saves {
             !path.with_extension("wld.tmp").exists(),
             "and the failed attempts must not have left scratch files behind"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// An autosave must not copy the whole changed world inside one tick.
+///
+/// A real 1h49m run spiked `phase=snapshot` to 24,808 us against a 16,666 us budget, on a world
+/// with two NPCs and nobody connected, where a normal tick was 103 us. The copy is now drained a
+/// few sections a tick and the save fires only on a tick where nothing is left marked, which is
+/// also the tick on which the buffer is bit-identical to the live world.
+#[cfg(test)]
+mod deferred_snapshot {
+    use super::*;
+    use crate::config::Config;
+    use crate::game::server::SNAPSHOT_DRAIN_PER_TICK;
+
+    /// Ten sections across by four down. Big enough that a drain of eight a tick cannot finish in
+    /// the tick that armed the save, which is the whole point.
+    fn wide_world() -> crate::world::World {
+        crate::world::World::empty(2000, 600, "deferred snapshot probe")
+    }
+
+    #[tokio::test]
+    async fn a_save_waits_for_the_snapshot_buffer_and_still_lands_whole() {
+        let dir = crate::safe_write::tests::temp_dir("deferred-snapshot");
+        let path = dir.join("world.wld");
+        let mut server = GameServer::new(
+            Config {
+                save_file: Some(path.clone()),
+                ..Config::default()
+            },
+            wide_world(),
+        );
+
+        // One edit in every section, so the drain has real work and every section has a witness
+        // tile whose absence from the file on disk would be a torn save.
+        let (across, down) = (server.world.sections_x(), server.world.sections_y());
+        let sections = (across * down) as usize;
+        assert!(
+            sections > SNAPSHOT_DRAIN_PER_TICK,
+            "the probe world has to be wider than one tick's drain"
+        );
+        for sy in 0..down {
+            for sx in 0..across {
+                server
+                    .world
+                    .set_tile(sx * 200, sy * 150, terrustia_proto::Tile::block(1));
+            }
+        }
+        assert_eq!(server.world.snapshot_pending(), sections);
+
+        server.save_world_in_background("autosave");
+        assert!(
+            server.saving.is_none(),
+            "asking for a save must not copy {sections} sections inside the tick that asked"
+        );
+        assert_eq!(
+            server.pending_save,
+            Some("autosave"),
+            "it must be armed, not dropped"
+        );
+
+        let mut ticks = 0;
+        while server.saving.is_none() {
+            server.tick();
+            ticks += 1;
+            assert!(ticks < 100, "the drain never fired the save");
+        }
+        assert_eq!(
+            ticks,
+            sections.div_ceil(SNAPSHOT_DRAIN_PER_TICK),
+            "the drain should take exactly as many ticks as the cap says"
+        );
+        assert_eq!(
+            server.world.snapshot_pending(),
+            0,
+            "and it must fire on a tick where the buffer had caught up, not before"
+        );
+
+        server
+            .saving
+            .take()
+            .expect("a save was started")
+            .await
+            .expect("the writer thread must not panic");
+
+        let saved = crate::world::wld::load(&path).expect("the save must be loadable");
+        for sy in 0..down {
+            for sx in 0..across {
+                assert_eq!(
+                    saved.tile(sx * 200, sy * 150).block,
+                    1,
+                    "section {sx},{sy} was not in the file: the save tore"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A world that dirties faster than the drain clears it must still get saved.
+    ///
+    /// Without the deadline this postpones for ever, which risks more than a stutter does.
+    #[tokio::test]
+    async fn a_world_that_never_settles_saves_anyway_once_the_deadline_passes() {
+        use crate::game::server::SNAPSHOT_DRAIN_DEADLINE;
+
+        let dir = crate::safe_write::tests::temp_dir("deferred-snapshot-livelock");
+        let path = dir.join("world.wld");
+        let mut server = GameServer::new(
+            Config {
+                save_file: Some(path.clone()),
+                ..Config::default()
+            },
+            wide_world(),
+        );
+
+        let (across, down) = (server.world.sections_x(), server.world.sections_y());
+        let dirty_everything = |server: &mut GameServer| {
+            for sy in 0..down {
+                for sx in 0..across {
+                    server
+                        .world
+                        .set_tile(sx * 200, sy * 150, terrustia_proto::Tile::block(1));
+                }
+            }
+        };
+
+        dirty_everything(&mut server);
+        server.save_world_in_background("autosave");
+
+        let mut ticks = 0;
+        while server.saving.is_none() {
+            dirty_everything(&mut server);
+            server.tick();
+            ticks += 1;
+            assert!(
+                ticks <= SNAPSHOT_DRAIN_DEADLINE + 1,
+                "the deadline must have forced the save through by now"
+            );
+        }
+        assert_eq!(
+            ticks, SNAPSHOT_DRAIN_DEADLINE,
+            "and it must wait the full deadline first, not give up early"
+        );
+
+        server
+            .saving
+            .take()
+            .expect("a save was started")
+            .await
+            .expect("the writer thread must not panic");
+        crate::world::wld::load(&path).expect("the forced save must still be a real world");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -395,11 +395,74 @@ both generators to emit exactly what is committed rather than touching either ta
   because a comment in `save_world_in_background` claimed every save after the first was "already
   150-200 us" and was never re-measured. That comment now carries the real table.
 
-  The fix is to stop taking it in one go: refresh the spare buffer a few sections per tick as they
-  change, so a save finds almost nothing left to copy, trading a 13 ms spike for tens of microseconds
-  of steady work. The tracking it needs (`changed_since_snapshot`) already exists. What it needs
-  first is a ruling on whether a buffer assembled across several ticks is an acceptable
-  point-in-time view of a world, given that a save is not transactional in vanilla either.
+  **Half done.** The spike is off the tick: a save is now armed rather than taken, the tile copying
+  is drained three sections a tick by `tick_snapshot_drain`, and the save fires from
+  `try_fire_pending_save` only on a tick where `World::snapshot_pending()` is zero. The
+  point-in-time question answered itself: `set_tile` re-marks every section it touches, so a
+  section copied early and then edited goes back on the list and is copied again, and a buffer whose
+  pending count reaches zero is bit-identical to the live world at that instant. Assembled across
+  ticks, delivered at one. `record_town_npcs`/`record_lunar_pillars`/`record_journey_powers` run on
+  the firing tick and never the arming one, or the object tables would be newer than the tiles,
+  which is the tear this exists to avoid. A 600-tick deadline bounds the wait, `drain_ticks` on the
+  `world snapshot taken` line makes a deferral visible, and the escape logs a `warn!`.
+
+  Measured by running both builds against the owner's own 4200x1200 world for 185 s each, autosaving
+  every 20 s with nobody connected, nine saves apiece:
+
+  ```text
+                        before                          after
+    snapshot_us   454 2116 3548 2632 213 750 413    295 308 757 124 194 121 335 224 36
+                  871 378                           (max 757, was 3,548)
+    sections      6 6 11 9 5 10 9 5 7               0 0 0 0 0 0 0 0 0
+    drain_ticks   -                                 1 2 1 2 2 2 2 3 2
+    worst tick    3,826 us                          2,218 us
+  ```
+
+  `sections_copied` is zero on every save: the firing tick copies no tiles at all, only the 20 us of
+  side and object tables. What is left on the worst tick is a *drain* tick, and the per-section cost
+  it pays turns out to vary 17x with page residency (213 us for 5 sections, 3,548 for 11), which is
+  why the cap is three and not the eight a warm benchmark suggested.
+
+  **What that leaves on the table, and it is the bigger half.** The drain spreads the work; it does
+  not remove it. The unit of "changed" is 30,000 times bigger than the change: instrumenting
+  `set_tile` on an idle fresh 4200x1200 world over six consecutive 20-second autosaves found 150 to
+  260 tiles actually changing per window, and that marked 24 to 37 sections, an amplification of
+  about 5,000x. Roughly 200 real edits drag about 990,000 tiles into the copy.
+
+  So the follow-up is to track changed **tiles** rather than the sections they sit in, with a cap
+  and a fall back to the section bitset (still maintained in parallel) once it overflows, for the
+  bulk cases: an explosion, a Clentaminator sweep, hardmode generation, a mass-wire operation.
+  Worldgen is already exempt, because `track_dirty` is false during it. Measured on the owner's real
+  4200x1200 world with `examples/snapcost`, scattered so no two picks share a cache line and through
+  the dearer public `tile`/`set_tile` pair, so an upper bound:
+
+  ```text
+      200 loose tiles      1 us     what an idle window actually changes
+      4,000 loose tiles   30 us
+      one section         16 us     warm; about 90 to 100 us cold on a live server
+      all 168 sections  2,710 us
+      a refresh with nothing dirty  21 us  (side tables + object tables, the floor)
+  ```
+
+  About 7.5 ns a loose tile against 16 us a section, so one section is worth about 2,100 loose
+  tiles and an idle window changes about 7 tiles per marked section: three to four orders of
+  magnitude of headroom. An idle save's tile copying would fall from 480 us (30 warm sections) to
+  1 us, and the floor would become the 21 us fixed cost.
+
+  A `Vec<u32>` of tile indices beats the per-tile bitset that was the alternative. Capped at 65,536
+  entries it is 256 KB of reserve and about 800 bytes in use, against 630 KB of bitset that is
+  always resident and has to be scanned end to end on every save: at the 28 GB/s this machine
+  copies tiles at, that scan alone is about 22 us, more than copying the 200 tiles it would find.
+  Duplicates in the list (one tile written repeatedly) cost 7.5 ns each and are bounded by the cap.
+
+  The two compose rather than compete: with a tile list the pending count reaches zero on the
+  arming tick in the idle case, so the save fires at once and the drain costs nothing, and the drain
+  stays as the safety net for exactly the bulk case that overflows the list back to sections.
+
+  **Ruled out, so nobody re-derives it:** an equality check in `set_tile` to skip rewrites of a
+  tile's existing value. The same instrumentation counted `noop_writes=0` on every one of the six
+  windows. Every gameplay write is a real change, so the check would cost a `TileStore::get` per
+  write and save nothing.
 
 - **Performance discipline**: maintain the benchmarks, measure meaningful changes, reject confirmed
   regressions on CPU, memory, latency, startup, saves and joins, and keep the instrumentation. The

@@ -96,6 +96,34 @@ pub const SAVE_FAILURES_BEFORE_ALARM: u32 = 3;
 /// nothing went wrong is how a log stops being read at all.
 pub const SLOW_SAVE_MS: u64 = 1_000;
 
+/// Sections copied into the snapshot buffer per tick while a save waits to fire.
+///
+/// A section is a 200x150 rectangle of a row-major array, so copying one is 150 short strided
+/// memcpys rather than one long one, and the pages it reads have not been touched since the last
+/// save. In a benchmark loop, where every run finds the previous run's pages warm, that is about
+/// 16 us a section (`examples/snapcost`). On a real server it is not: two 185-second runs on the
+/// owner's own 4200x1200 world, autosaving every 20 s with nobody connected, logged anything from
+/// 213 us for 5 sections to 3,548 us for 11. **Call it 250 to 700 us a section cold**, and treat
+/// the warm figure as the one that misleads.
+///
+/// Eight was tried first, off the warm figure, and left a 2.6 ms drain tick. Three measured a
+/// worst drain tick of 2,218 us against a 16,666 us budget, with the worst *save* tick falling
+/// from 3,548 us to 757 us and `sections_copied` reaching zero on every one of nine saves. It
+/// clears a whole 168-section world in 56 ticks, well inside [`SNAPSHOT_DRAIN_DEADLINE`].
+///
+// ponytail: a fixed section count against a per-section cost that varies 17x. If a drain tick ever
+// needs to be tighter than this, the upgrade is a microsecond budget in the shape of
+// SECTION_STREAM_BUDGET below rather than a smaller number here. Not done speculatively: 2.2 ms is
+// 13% of a frame, and the tile-granular tracking in TODO.md would leave this almost nothing to do.
+const SNAPSHOT_DRAIN_PER_TICK: usize = 3;
+
+/// How long a pending save waits for the drain before copying the remainder in one go.
+///
+/// Ten seconds. If the world dirties faster than the drain clears it the save would otherwise be
+/// postponed indefinitely, which risks more than a stutter does; this bounds it back to today's
+/// spike under load that is already pathological. An idle world marks about 0.009 sections a tick.
+const SNAPSHOT_DRAIN_DEADLINE: u64 = 600;
+
 /// How far a player can be from an item and still have it reserved for them, in pixels.
 ///
 /// Generous on purpose: the reservation only grants the right to pick the item up, and a client
@@ -1016,6 +1044,11 @@ pub struct GameServer {
     ///
     /// Kept so that shutdown can wait for it and so that two never run at once.
     saving: Option<tokio::task::JoinHandle<()>>,
+    /// A save that has been asked for and is waiting for the snapshot buffer to catch up with the
+    /// world. See [`GameServer::try_fire_pending_save`]. Carries the reason the arming call gave.
+    pending_save: Option<&'static str>,
+    /// The tick a pending save was armed on: the drain's deadline, and what `drain_ticks` reports.
+    pending_save_armed: u64,
     /// Why the save in flight was started, so the right thing is said when it finishes.
     save_reason: &'static str,
     /// How a finished background save reports back to the game task.
@@ -1245,6 +1278,8 @@ impl GameServer {
             detonator_resets: HashMap::new(),
             tile_entity_anchors: HashMap::new(),
             saving: None,
+            pending_save: None,
+            pending_save_armed: 0,
             save_reason: "",
             save_results: std::sync::mpsc::channel(),
             save_failures: 0,
@@ -1726,20 +1761,127 @@ impl GameServer {
     /// than queued: two saves racing for the same path is worse than a missed autosave, and a
     /// server whose disk cannot keep up with its autosave interval should not build a backlog of
     /// sixty-megabyte snapshots waiting for it.
+    ///
+    /// This half only *arms* the save. The copy itself is spread over the next few ticks by
+    /// [`Self::tick_snapshot_drain`] and fires from [`Self::try_fire_pending_save`] once the
+    /// buffer has caught up - see those two for why.
     fn save_world_in_background(&mut self, reason: &'static str) {
-        let Some(path) = self.save_path.clone() else {
+        if self.save_path.is_none() {
             return;
-        };
+        }
         if let Some(running) = &self.saving
             && !running.is_finished()
         {
             warn!(reason, "a save is still running; skipping this one");
             return;
         }
+        // A second request arriving while one is still waiting for the buffer takes over the
+        // reason but keeps the original deadline, so a stream of them cannot postpone the save
+        // past [`SNAPSHOT_DRAIN_DEADLINE`] one reset at a time.
+        if self.pending_save.is_none() {
+            self.pending_save_armed = self.ticks;
+        }
+        self.pending_save = Some(reason);
+        // Nothing to drain (an idle world, or one still being generated) means this fires here and
+        // now, exactly as it always did.
+        self.try_fire_pending_save();
+    }
+
+    /// Copy a few of the changed sections into the snapshot buffer, while a save waits to fire.
+    ///
+    /// Demand-driven, not a continuous trickle: this does nothing at all unless a save is armed,
+    /// so an idle tick pays nothing and a section a player is digging through is not copied
+    /// repeatedly only to be copied again at save time anyway. It copies exactly the sections the
+    /// one-shot path copied, spread over as many ticks as it takes.
+    fn tick_snapshot_drain(&mut self) {
+        if self.pending_save.is_none() {
+            return;
+        }
+        if let Some(spare) = self.spare_world.as_mut()
+            && self.world.snapshot_is_incremental()
+        {
+            self.world
+                .pre_copy_snapshot_tiles(spare, SNAPSHOT_DRAIN_PER_TICK);
+        }
+        self.try_fire_pending_save();
+    }
+
+    /// Take a copy of the world and let another thread write it out, once the copy is ready.
+    ///
+    /// **Why this waits.** Copying forty megabytes of tiles is the most expensive thing an idle
+    /// server does, and on a world nobody is digging through almost none of those tiles have
+    /// changed since the last save. The buffer a finished save hands back already holds that
+    /// state, so only the sections changed since need copying into it - but even that is not
+    /// cheap. Measured on a fresh 4200x1200 world with nobody connected:
+    ///
+    /// ```text
+    ///     autosave every  15s   30 to 36 sections    2.0 to 3.1 ms
+    ///     autosave every 300s   68 sections          6.3 ms
+    ///     a loaded world with a town, every 300s    12.8 ms
+    /// ```
+    ///
+    /// A real 1h49m run on a loaded world spiked to 24.8 ms, 149% of a tick's 16,666 us budget,
+    /// with two NPCs and nobody connected, against a normal tick of 103 us. That is not a
+    /// regression - an older build copies 36 sections in 3,059 us, slightly worse - it is simply
+    /// what a whole-world diff has always cost.
+    ///
+    /// So the tile copying is drained a few sections a tick by [`Self::tick_snapshot_drain`] and
+    /// the save fires only on a tick where nothing is left marked. **At that instant the buffer is
+    /// bit-identical to the live world**: `World::set_tile` re-marks every section it touches, so
+    /// a section copied early and then edited goes back on the list and is copied again. The
+    /// buffer is assembled across ticks but delivered at one instant, which keeps the guarantee
+    /// `World::snapshot` claims ("a torn save is much worse than a slow one") rather than trading
+    /// it away. An autosave landing at 300.05 s instead of 300.00 s is not observable.
+    ///
+    /// The final refresh below still pays a fixed cost whatever the drain left: the side tables
+    /// and the object tables are copied wholesale. Measured on the owner's real 4200x1200 world
+    /// with 180 chests, that is **20 us**, so it is not worth being clever about.
+    ///
+    /// Serialising the copy costs about fifty-five milliseconds against the same budget, which is
+    /// why it goes to another thread at all (`examples/savecost.rs`; the cost is in run-detection
+    /// and encoding rather than in reading the tiles, which is why making the reads
+    /// cache-friendlier did nothing).
+    fn try_fire_pending_save(&mut self) {
+        let Some(reason) = self.pending_save else {
+            return;
+        };
+        let waited = self.ticks.saturating_sub(self.pending_save_armed);
+        // A drain that never finishes would postpone the save for ever, which risks more than a
+        // stutter does. Ten seconds of not converging and the whole remainder is copied here, back
+        // to the old spike - but only under a dirty rate no real server produces. An idle world
+        // marks about 0.009 sections a tick against a drain rate of eight.
+        let overdue = waited >= SNAPSHOT_DRAIN_DEADLINE;
+        let left = self.world.snapshot_pending();
+        if left > 0
+            && !overdue
+            && self.spare_world.is_some()
+            && self.world.snapshot_is_incremental()
+        {
+            return;
+        }
+        if left > 0 && overdue {
+            warn!(
+                reason,
+                sections_left = left,
+                waited_ticks = waited,
+                "the snapshot buffer never caught up with the world; copying the rest in one tick"
+            );
+        }
+        self.pending_save = None;
+
+        let Some(path) = self.save_path.clone() else {
+            return;
+        };
 
         // The roster has to reach the world before the snapshot is taken, or the copy that goes to
         // disk holds whoever lived here when it was loaded rather than who lives here now - and
         // the same goes for the Lunar Pillars, or a save mid-Lunar-Apocalypse drops them outright.
+        //
+        // These run on the *firing* tick and never on the arming one. They write tables that
+        // `copy_everything_but_tiles_from` copies wholesale, so running them early would leave the
+        // object tables newer than the tiles, which is precisely the tear the drain exists to
+        // avoid. None of them touches a tile, so they cannot dirty a section after the drain has
+        // finished.
         self.record_town_npcs();
         self.record_lunar_pillars();
         self.record_journey_powers();
@@ -1747,33 +1889,16 @@ impl GameServer {
         // Copy into a buffer we already own where we have one. A fresh `snapshot()` asks the
         // allocator for a new forty-megabyte mapping and then faults in every page of it as it
         // writes: measured on a 4200x1200 world, 2.600 ms against 0.989 ms for copying into a
-        // buffer whose pages are already mapped. That is the difference between roughly a sixth
-        // of the tick budget and a sixteenth, four times worse again on a large world, and it is
-        // the single most expensive thing an idle server does. On a world nobody is digging
-        // through, almost none of those tiles have changed since the last save, and the buffer a
-        // finished save hands back already holds that state, so only the sections that have
-        // changed since need copying into it.
+        // buffer whose pages are already mapped.
         //
-        // What this actually costs, measured on a fresh 4200x1200 world with nobody connected, is
-        // more than an earlier note here claimed. It said every save after the first was "already
-        // 150-200 us"; it is not, and the figure scales with how long the world has been left to
-        // change between saves rather than with the tick:
-        //
-        //     autosave every  15s   30 to 36 sections    2.0 to 3.1 ms
-        //     autosave every 300s   68 sections          6.3 ms
-        //     a loaded world with a town, every 300s     12.8 ms
-        //
-        // The last of those is 77% of a tick's 16,666 us budget, on a server with two NPCs and no
-        // players, and it is what the `phase=snapshot` warning reports. It is not a regression:
-        // the same run on an older build copies 36 sections in 3,059 us, slightly worse. It is
-        // simply what this has always cost, previously hidden because the phase timer was billing
-        // the work to the wrong bucket and because the note above was never re-measured.
-        //
-        // The real fix is to stop doing it in one go: refresh the spare buffer a few sections per
-        // tick as they change, so a save finds almost nothing left to copy. That trades a 13 ms
-        // spike for tens of microseconds of steady work, and it needs a decision about whether a
-        // buffer assembled across ticks is an acceptable point-in-time view of the world, which is
-        // why it is written up in TODO.md rather than done here.
+        // Kept as the record of why the drain above exists, because a note here once claimed every
+        // save after the first was "already 150-200 us" and was never re-measured. It was not, and
+        // the cost scaled with how long the world had been left to change rather than with the
+        // tick: 30 to 36 sections and 2.0 to 3.1 ms at a 15-second autosave, 68 sections and 6.3 ms
+        // at the default 300, and on a real server run for two hours, seventeen of twenty-two
+        // autosaves between 8,647 and 24,808 us with two NPCs and nobody connected, against a
+        // normal tick of 103 us. It was never a regression, only invisible: the phase timer used to
+        // bill the work elsewhere, and the note above said it was free.
         let began = Instant::now();
         let (mut snapshot, sections) = match self.spare_world.take() {
             Some(mut spare) if self.world.snapshot_is_incremental() => {
@@ -1832,6 +1957,10 @@ impl GameServer {
             // `None` means the whole world was copied. A number suddenly equal to every section in
             // the world means the incremental path has quietly stopped working.
             sections_copied = sections,
+            // How many ticks the drain took. Zero is an idle world with nothing to copy; a number
+            // near SNAPSHOT_DRAIN_DEADLINE means it barely converged, and the warning above says
+            // if it did not.
+            drain_ticks = waited,
             "world snapshot taken; saving in the background"
         );
     }
