@@ -144,10 +144,30 @@ check-drops:
 check-recipes:
     python3 tools/check_recipes.py {{DECOMPILED}} crates/terrustia-proto/src/recipes.rs
 
-# Both data cross-checks in one go. Part of release-candidate qualification, run locally against
-# the decompiled tree: CI can never hold decompiled game source, so these deliberately never run
-# there.
-check-data: check-drops check-recipes
+# `dead_code` cannot see these, because a read inside `#[cfg(test)]` counts as a read: a field the
+# tests assert on and production ignores is invisible to it. Needs no decompiled tree; it is here
+# because it belongs to the same qualification pass, not because it needs the game.
+#
+# Report struct fields written in production and read only by the tests
+check-dead-writes:
+    cargo run -q -p terrustia-codegen --bin deadwrite
+
+# A surviving mutant is a blind spot in a checker, which is how a missing drop stays missing. Pass
+# `--rust` to also measure the proto test suite, at a rebuild per mutant.
+#
+# Corrupt the generated tables and prove the checkers above actually fail
+check-mutants *ARGS:
+    python3 tools/mutate_tables.py {{DECOMPILED}} {{ARGS}}
+
+# Part of release-candidate qualification, run locally against the decompiled tree: CI can never
+# hold decompiled game source, so these deliberately never run there.
+#
+# `check-dead-writes` runs last on purpose: it is the one that currently fails (21 fields written in
+# production and read by nothing), and `just` stops a chain at the first failure. Putting it at the
+# end means the three that pass still report before it does.
+#
+# Every data cross-check in one go: the tables, the dead writes, and the checkers themselves
+check-data: check-drops check-recipes check-mutants check-dead-writes
 
 # Regenerate every transcribed data table from a decompiled tree, then format
 regen:

@@ -97,6 +97,18 @@ DEFERRED: dict[int | tuple[int, int], str] = {
         (44, item): "a OneFromOptions pool mid-chain, which neither table's shape can express"
         for item in (166, 410, 411)
     },
+    # The Ice Mimic's weapon pool. `RegisterIceMimic` (`ItemDropDatabase.cs:232-243`) hangs four
+    # `OneFromOptions` pools off `Common(1312, 20).OnFailedRoll(...)`, one per remix/hardmode
+    # branch, two of them behind a helper method that builds the pool at runtime. That is the same
+    # mid-chain-pool shape as npc 44's, and `conditional_drops.rs` says so at its own `629` arm.
+    # It only became visible here once `parse_game` learned to follow a rule variable that is
+    # declared before it is registered, which is how the whole of this NPC's loot was missing from
+    # the game side of this comparison rather than reported.
+    **{
+        (629, item): "a OneFromOptions pool mid-chain (RegisterIceMimic), same shape as npc 44's"
+        for item in (676, 725, 1264, 6172)
+    },
+    (629, 1319): "Remix seed only (Conditions.RemixSeedHardmode)",
 }
 
 
@@ -266,6 +278,20 @@ def parse_game(root: Path) -> dict[int, set[int]]:
     # could not represent, so those two lines fell through to whatever `rule` had last meant.
     rule_vars: dict[str, set[int]] = {}
     arrays: dict[str, set[int]] = {}
+    # Items chained onto a rule variable *before* anything registered it, and the child rules a
+    # parent rule carries. Both are flushed by `bind` the moment the name gains an npc.
+    pending: dict[str, set[int]] = {}
+    aliases: dict[str, set[str]] = {}
+
+    def bind(name: str, targets: set[int]) -> None:
+        """Give a rule variable its npcs, and hand them on to whatever was waiting on it."""
+        rule_vars[name] = set(targets)
+        for item in pending.pop(name, set()):
+            for npc in targets:
+                drops.setdefault(npc, set()).add(item)
+        for child in aliases.pop(name, set()):
+            if child != name:
+                bind(child, targets)
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -279,6 +305,11 @@ def parse_game(root: Path) -> dict[int, set[int]]:
             type_vars.clear()
             rule_vars.clear()
             arrays.clear()
+            # A rule chained onto a name that this method never registers is dead in the source
+            # too; dropping it at the boundary keeps one method's `leadingConditionRule` from
+            # picking up the next method's items.
+            pending.clear()
+            aliases.clear()
             continue
 
         if m := re.match(r"short (\w+) = (\d+);", line):
@@ -288,12 +319,59 @@ def parse_game(root: Path) -> dict[int, set[int]]:
             arrays[m.group(1)] = {int(n) for n in NUM.findall(m.group(2)) if int(n) >= 0}
             continue
 
+        # A rule built on its own line and registered on a later one:
+        #
+        #     IItemDropRule itemDropRule = ItemDropRule.Common(1312, 20);
+        #     ... four `itemDropRule.OnFailedRoll(...)` lines ...
+        #     RegisterToNPC(629, itemDropRule);
+        #
+        # The item is on the *declaration*, and nothing on the register line names it, so the Ice
+        # Mimic's own Toy Sled read as ours-only rather than as a drop the game registers. Held
+        # against the name and flushed by `bind`, exactly like a chained one. A declaration that
+        # builds no rule (`Conditions.NotExpert condition = new Conditions.NotExpert();`) names no
+        # item and contributes nothing.
+        if (
+            "RegisterToNPC(" not in line
+            and "RegisterToMultipleNPCs(" not in line
+            and (m := re.match(r"[\w.<>\[\]]+\s+(\w+)\s*=\s*(?:new\s|ItemDropRule\.)", line))
+        ):
+            if items := _items_in(line):
+                pending.setdefault(m.group(1), set()).update(items)
+            continue
+
         # A rule-chain continuation line has neither call in it — it is `ruleVar.OnSuccess(...)`
-        # or `ruleVar.OnFailedRoll(...)`, referring back to a rule a *previous* line registered.
+        # or `ruleVar.OnFailedRoll(...)`, referring back to a rule a previous line registered, or
+        # a *later* one will.
         chain_target: set[int] | None = None
         if "RegisterToNPC(" not in line and "RegisterToMultipleNPCs(" not in line:
             if m := re.match(r"(\w+)\.(?:OnSuccess|OnFailedRoll)\(", line):
-                chain_target = rule_vars.get(m.group(1))
+                name = m.group(1)
+                chain_target = rule_vars.get(name)
+                if chain_target is None:
+                    # Not bound *yet*. `RegisterBoss_Twins` builds its whole tree before it
+                    # registers anything:
+                    #
+                    #     LeadingConditionRule leadingConditionRule = new (Conditions.MissingTwin);
+                    #     LeadingConditionRule leadingConditionRule2 = new (Conditions.NotExpert);
+                    #     leadingConditionRule.OnSuccess(ItemDropRule.BossBag(3326));
+                    #     leadingConditionRule.OnSuccess(leadingConditionRule2);
+                    #     leadingConditionRule2.OnSuccess(ItemDropRule.Common(2106, 7));
+                    #     ... three more
+                    #     RegisterToMultipleNPCs(leadingConditionRule, 126, 125);
+                    #
+                    # A strictly forward scan drops every one of those lines on the floor, which
+                    # is why the Twins' entire non-expert table (Souls of Sight, Hallowed Bars,
+                    # the treasure bag, both master-mode drops) was invisible on the game side.
+                    # Hold the items against the name instead, and flush them when the name is
+                    # bound below. `parent.OnSuccess(child)` with a bare identifier is an alias,
+                    # so binding the parent binds the child too.
+                    if inner := re.fullmatch(
+                        r"\w+\.(?:OnSuccess|OnFailedRoll)\(\s*([A-Za-z_]\w*)\s*\);?", line
+                    ):
+                        aliases.setdefault(name, set()).add(inner.group(1))
+                    else:
+                        pending.setdefault(name, set()).update(_items_in(line))
+                    continue
             if chain_target is None:
                 continue
 
@@ -336,7 +414,43 @@ def parse_game(root: Path) -> dict[int, set[int]]:
         if m := re.match(
             r"(?:[\w.<>\[\]]+\s+)?(\w+)\s*=\s*RegisterTo(?:NPC|MultipleNPCs)\(", line
         ):
-            rule_vars[m.group(1)] = set(targets)
+            bind(m.group(1), targets)
+        # The other half of the same shape, and the one that was missing. `RegisterBoss_KingSlime`
+        # declares the rule on its own line and then *passes* it in, rather than assigning the
+        # register call's result:
+        #
+        #     LeadingConditionRule leadingConditionRule = new LeadingConditionRule(...);
+        #     RegisterToNPC(type, leadingConditionRule);
+        #     leadingConditionRule.OnSuccess(ItemDropRule.Common(2430, 4));
+        #     ... five more OnSuccess lines
+        #
+        # The binding above needs an `=` on the register line and there is none here, so the name
+        # was never bound and every one of those `OnSuccess` lines resolved to no npc at all. King
+        # Slime, Queen Slime, the Empress, Plantera and the two mechanical bosses each register
+        # their whole non-expert loot table this way: 69 items across 21 NPCs were invisible on the
+        # game side of this comparison, so the checker could not have reported any of them missing.
+        # Found by `tools/mutate_tables.py`, which noticed that corrupting those rows in our own
+        # table changed nothing.
+        if m := re.search(r"RegisterToNPC\(\s*\w+\s*,\s*([A-Za-z_]\w*)\s*\)", line):
+            bind(m.group(1), targets)
+        elif m := re.search(r"RegisterToMultipleNPCs\(\s*([A-Za-z_]\w*)\s*,", line):
+            bind(m.group(1), targets)
+        # ...and any rule variable this line merely *mentions*, wherever in the expression it sits.
+        # The Ice Golem's is nested two deep:
+        #
+        #     IItemDropRule itemDropRule = ItemDropRule.Common(3107, 25);
+        #     IItemDropRule itemDropRule2 = ItemDropRule.WithRerolls(3107, 1, 25);
+        #     itemDropRule.OnSuccess(ItemDropRule.Common(3108, 1, 100, 200), ...);
+        #     RegisterToNPC(463, new LeadingConditionRule(c)).OnSuccess(
+        #         new DropBasedOnExpertMode(itemDropRule, itemDropRule2));
+        #
+        # Neither name is the register call's own argument, so neither pattern above reaches them
+        # and npc 463 had *no* loot at all on the game side of this comparison. Only names already
+        # holding pending items are considered, and `pending` is cleared at every method boundary,
+        # so this cannot reach across functions.
+        for name in list(pending):
+            if re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", line):
+                bind(name, targets)
 
         items = _items_in(line)
 
@@ -488,6 +602,24 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
             for npc in _expand_npcs(label):
                 ours.setdefault(npc, set()).update(items)
     # The bag, trophy and mask maps, and the one-from pools.
+    # The bag, trophy, mask and lunar-fragment maps, and the one-from pools.
+    #
+    # Scoped to the functions that actually hold a npc-to-item map, not to the whole file. A bare
+    # `N => M,` at eight spaces of indent is a *shape*, not a meaning: this file also contains
+    # `pumpkin_moon_trophy_gate_denominator`, whose `match wave { 15 | 16 => 4, 17 | 18 => 3, .. }`
+    # maps a moon wave to a chance denominator. Read as a drop map it gave NPCs 15, 16, 17 and 18
+    # items 4 and 3 that nothing anywhere gives them, and (worse than the noise) anything the
+    # game really does register as item 3 or 4 on those four NPCs would have been masked by it.
+    # The reverse-direction report added below is what surfaced it.
+    map_bodies = "".join(
+        m.group(0)
+        for m in re.finditer(
+            r"^pub fn (?:treasure_bag|trophy|mask|lunar_fragment|one_from|moon_lord_weapons)\("
+            r".*?^\}$",
+            cond,
+            re.S | re.M,
+        )
+    )
     for pattern in (
         r"^        (\d+(?:\.\.=\d+)?(?:\s*\|\s*\d+)*) => (\d+),",
         # `one_from` pools, which may be one list or several on a line — or, once `rustfmt` wraps a
@@ -495,7 +627,7 @@ def parse_ours(root: Path) -> dict[int, set[int]]:
         # place of a literal space covers that; `re.S` lets `.` span the newlines within.
         r"^        (\d+) => &\[((?:&\[[\d,\s]+\],?\s*)+)\],",
     ):
-        for m in re.finditer(pattern, cond, re.M):
+        for m in re.finditer(pattern, map_bodies, re.M):
             npcs = _expand_npcs(m.group(1))
             items = {int(n) for n in re.findall(r"\d+", m.group(2))}
             for npc in npcs:
@@ -542,6 +674,23 @@ def main() -> int:
         line = f"  npc {npc}: missing {sorted(missing)}"
         (boss_gaps if npc in BOSSES else other_gaps).append(line)
 
+    # The other direction: what we hand out that the game's own database does not register.
+    #
+    # This half did not exist. The comparison ran one way only, so a drop invented here, or copied
+    # onto the wrong NPC, was not merely unreported - it was unreportable, and mutating one of
+    # those rows in `conditional_drops.rs` changed nothing a checker could see (measured by
+    # `tools/mutate_tables.py`; three of its surviving mutants were exactly this).
+    #
+    # Printed rather than gated. An entry here is not automatically a bug: some of it is loot
+    # vanilla registers outside `ItemDropDatabase` (the legacy `NPC.NPCLoot` path), and each one
+    # needs its own trace through the game before it can be called wrong or excused. The list is
+    # the backlog; a count would be the thing this file already refuses to print elsewhere.
+    extras = {
+        npc: sorted(items - game.get(npc, set()))
+        for npc, items in sorted(ours.items())
+        if items - game.get(npc, set())
+    }
+
     print(f"game registers drops for {len(game)} NPC types; we have {len(ours)}")
     print(f"deferred drops seen and excused: {len(deferred_seen)} of {len(DEFERRED)}")
     # An excuse nothing needs any more is an excuse that will one day cover a real gap. Naming
@@ -558,6 +707,15 @@ def main() -> int:
         print("\n".join(other_gaps[:MAX_LISTED]))
         if len(other_gaps) > MAX_LISTED:
             print(f"  ... and {len(other_gaps) - MAX_LISTED} more")
+        print()
+    if extras:
+        total = sum(len(v) for v in extras.values())
+        print(f"WE DROP WHAT THE DATABASE DOES NOT REGISTER ({total} items, {len(extras)} NPCs):")
+        for npc, items in extras.items():
+            print(f"  npc {npc}: extra {items}")
+        print("  Each needs a trace through the game before it is called a bug or excused: it is")
+        print("  either loot registered outside ItemDropDatabase, loot on the wrong NPC, or loot")
+        print("  invented here. Not gated yet, deliberately - see this section's comment.")
         print()
     if boss_gaps or other_gaps:
         print("Every gap above is either a bug or a decision. If it is a decision, put the item")
