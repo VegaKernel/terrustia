@@ -29,8 +29,6 @@ use crate::game::npc_ai::Target;
 #[derive(Debug, Default)]
 pub struct TreeOutcome {
     pub shots: Vec<Shot>,
-    /// Set when daylight has sent it away.
-    pub fleeing: bool,
 }
 
 /// Which attack a state number means, for this type.
@@ -73,7 +71,14 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
         // Daylight ends it. They walk away rather than fighting. C7-05: vanilla forces the despawn
         // hard here (`NPC.cs:33044`, `EncourageDespawn(10)`), so it is gone within ten ticks of
         // leaving the area, not the six hundred the old cap allowed.
-        out.fleeing = true;
+        //
+        // This used to also raise a `fleeing` flag, which no caller read. It is deleted rather than
+        // wired, because wiring it would be *stronger* than vanilla: neither of these is a boss, so
+        // both go through the ordinary despawn countdown, and vanilla's own `CheckActive`
+        // (`NPC.cs:78735-78738`) resets `timeLeft` and clears `despawnEncouraged` outright for a
+        // player standing nearby. Routing the flag to `expired` would zero the timer instead, and
+        // one of these vanishing out of a lit arena is not what the game does. The clamp below is
+        // the whole mechanism, and it is applied where vanilla applies it.
         walk = TREE_FLEE;
         npc.time_left = npc.time_left.min(DESPAWN_ENCOURAGED_TICKS);
     } else {
@@ -114,7 +119,17 @@ pub fn tree(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallRng)
                         && (attack.warmup == 0.0 || npc.ai[1] < attack.ticks - 60.0)
                         && npc.ai[1] % attack.every == 0.0;
                     if due {
-                        out.shots.push(throw(npc, target.center, &attack, rng));
+                        // Aimed at the player's *top*, not their middle. Vanilla takes the X centre
+                        // and the raw `position.Y` (`NPC.cs:33087-33088`,
+                        // `player.position.X + width * 0.5f` against `player.position.Y`), which is
+                        // half a player-height higher than the centre and tilts every one of these
+                        // volleys upward. Both of these fight on the ground, so a shot aimed at your
+                        // feet rather than your head is a different attack.
+                        let aim = (
+                            target.center.0,
+                            target.center.1 - PLAYER_HEIGHT as f32 / 2.0,
+                        );
+                        out.shots.push(throw(npc, aim, &attack, rng));
                     }
                     if npc.ai[1] >= attack.ticks {
                         npc.ai[1] = 0.0;
@@ -293,6 +308,38 @@ mod tests {
 
     fn boss(npc_type: u16, x: f32, y: f32) -> Npc {
         Npc::new(npc_type, (x, y), 1).expect("a moon boss")
+    }
+
+    /// It throws at the player's head, not their middle.
+    ///
+    /// Vanilla aims at the X centre and the raw `position.Y` (`NPC.cs:33087-33088`), which is half
+    /// a player-height above the centre this used. Both of these fight on the ground, so a volley
+    /// aimed at your feet rather than your head is a different attack. The aim carries a `+/-50`
+    /// jitter and a downward tilt with range, so this puts the boss level with the player and
+    /// checks the whole volley averages above the centre rather than pinning one shot.
+    #[test]
+    fn it_aims_at_the_players_top_not_their_middle() {
+        let tiles = Night(HashMap::new());
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut t = boss(MOURNING_WOOD, 0.0, 0.0);
+        let (cx, cy) = t.center();
+        // Level with it and close, so the aim's own range tilt does not swamp the offset.
+        let w = night(&tiles, Some((cx + 200.0, cy)));
+
+        let mut rise = Vec::new();
+        for _ in 0..2000 {
+            let out = tree(&mut t, &w, &mut rng);
+            // Hold it still: this is about where it throws, not where it walks.
+            t.position = (0.0, 0.0);
+            t.velocity = (0.0, 0.0);
+            rise.extend(out.shots.into_iter().map(|s| s.velocity.1));
+        }
+        assert!(!rise.is_empty(), "it should have thrown something");
+        let mean = rise.iter().sum::<f32>() / rise.len() as f32;
+        assert!(
+            mean < 0.0,
+            "aimed at a player level with it, the volley should rise, got {mean}"
+        );
     }
 
     /// It waits, then throws, and the wait shortens as it is worn down.
@@ -486,8 +533,11 @@ mod tests {
         w.conditions.day = true;
 
         let out = tree(&mut t, &w, &mut rng);
-        assert!(out.fleeing);
         assert!(out.shots.is_empty(), "it stops fighting");
+        assert_eq!(
+            t.time_left, DESPAWN_ENCOURAGED_TICKS,
+            "and is on its way out (`NPC.cs:33044`, `EncourageDespawn(10)`)"
+        );
         for _ in 0..200 {
             tree(&mut t, &w, &mut rng);
         }

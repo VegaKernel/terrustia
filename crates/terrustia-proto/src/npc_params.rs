@@ -3279,6 +3279,9 @@ pub const TWIN_SPIN_RATE: f32 = 0.005;
 pub const TWIN_SPIN_CAP: f32 = 0.5;
 /// The second form hits half again as hard and soaks ten more.
 pub const TWIN_SECOND_DAMAGE: f32 = 1.5;
+/// For the worthy takes the second form's hover speed and acceleration up by a seventh
+/// (`NPC.cs:26944-26948`).
+pub const TWIN_GET_GOOD_GAIN: f32 = 1.15;
 pub const TWIN_SECOND_DEFENSE: i32 = 10;
 /// Its first-form shot only comes when it is above you and within this far.
 pub const TWIN_SHOT_RANGE: f32 = 400.0;
@@ -3497,6 +3500,8 @@ pub const GOLEM_HOP_UP_CAP: f32 = -19.1;
 pub const GOLEM_AIR_ACCEL: f32 = 0.2;
 pub const GOLEM_SLAM: f32 = 0.2;
 pub const GOLEM_AIR_SPEED: f32 = 3.0;
+/// For the worthy more than doubles it (`NPC.cs:46006-46010`, `num12 = 3f` becoming `7f`).
+pub const GOLEM_AIR_SPEED_GET_GOOD: f32 = 7.0;
 /// Past this it gives up entirely.
 pub const GOLEM_LEASH: f32 = 3000.0;
 

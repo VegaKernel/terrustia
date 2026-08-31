@@ -15,21 +15,21 @@
 //! setting; it is the game refusing to be dragged out of the fight it designed.
 
 use terrustia_proto::npc_params::{
-    GOLEM_AIR_ACCEL, GOLEM_AIR_SPEED, GOLEM_FIREBALL, GOLEM_FIREBALL_DAMAGE,
-    GOLEM_FIREBALL_DAMAGE_UPGRADED, GOLEM_FIREBALL_SPEED, GOLEM_FIST_LEFT, GOLEM_FIST_OFFSET,
-    GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN, GOLEM_FIST_RETURN_BODY_HURT,
-    GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF, GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP,
-    GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL, GOLEM_FREE_FIREBALL_DAMAGE, GOLEM_FREE_LASER_DAMAGE,
-    GOLEM_FREE_LASER_DAMAGE_STEPS, GOLEM_FREE_LASER_INTERVAL, GOLEM_FREE_LASER_INTERVAL_STEPS,
-    GOLEM_FREE_LASER_NO_LOS_BONUS, GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT,
-    GOLEM_FREE_LASER_NO_LOS_SPEED_MULT, GOLEM_FREE_LASER_SPEED, GOLEM_FREE_SPEED,
-    GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET, GOLEM_HEAD_TETHER_SPEED, GOLEM_HOP_ACROSS,
-    GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT, GOLEM_HOP_BONUS_PART, GOLEM_HOP_BONUS_THIRD,
-    GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP, GOLEM_HOP_UP_CAP, GOLEM_LASER,
-    GOLEM_LASER_DAMAGE, GOLEM_LASER_INTERVAL, GOLEM_LASER_NO_LOS_BONUS, GOLEM_LASER_SPEED,
-    GOLEM_LASER_SPEED_OFFSIDE, GOLEM_LEASH, GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT,
-    GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF, GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_REACH, GOLEM_PUNCH_SPEED,
-    GOLEM_SLAM,
+    GOLEM_AIR_ACCEL, GOLEM_AIR_SPEED, GOLEM_AIR_SPEED_GET_GOOD, GOLEM_FIREBALL,
+    GOLEM_FIREBALL_DAMAGE, GOLEM_FIREBALL_DAMAGE_UPGRADED, GOLEM_FIREBALL_SPEED, GOLEM_FIST_LEFT,
+    GOLEM_FIST_OFFSET, GOLEM_FIST_REACH, GOLEM_FIST_READY, GOLEM_FIST_RETURN,
+    GOLEM_FIST_RETURN_BODY_HURT, GOLEM_FIST_RETURN_CAP, GOLEM_FIST_RETURN_HALF,
+    GOLEM_FIST_RETURN_QUARTER, GOLEM_FIST_WINDUP, GOLEM_FREE_ABOVE, GOLEM_FREE_ACCEL,
+    GOLEM_FREE_FIREBALL_DAMAGE, GOLEM_FREE_LASER_DAMAGE, GOLEM_FREE_LASER_DAMAGE_STEPS,
+    GOLEM_FREE_LASER_INTERVAL, GOLEM_FREE_LASER_INTERVAL_STEPS, GOLEM_FREE_LASER_NO_LOS_BONUS,
+    GOLEM_FREE_LASER_NO_LOS_DAMAGE_MULT, GOLEM_FREE_LASER_NO_LOS_SPEED_MULT,
+    GOLEM_FREE_LASER_SPEED, GOLEM_FREE_SPEED, GOLEM_HEAD_CHARGE, GOLEM_HEAD_OFFSET,
+    GOLEM_HEAD_TETHER_SPEED, GOLEM_HOP_ACROSS, GOLEM_HOP_BONUS_HALF, GOLEM_HOP_BONUS_HURT,
+    GOLEM_HOP_BONUS_PART, GOLEM_HOP_BONUS_THIRD, GOLEM_HOP_PAUSE, GOLEM_HOP_READY, GOLEM_HOP_UP,
+    GOLEM_HOP_UP_CAP, GOLEM_LASER, GOLEM_LASER_DAMAGE, GOLEM_LASER_INTERVAL,
+    GOLEM_LASER_NO_LOS_BONUS, GOLEM_LASER_SPEED, GOLEM_LASER_SPEED_OFFSIDE, GOLEM_LEASH,
+    GOLEM_OUTSIDE_PENALTY, GOLEM_PUNCH_BODY_HURT, GOLEM_PUNCH_CAP, GOLEM_PUNCH_HALF,
+    GOLEM_PUNCH_QUARTER, GOLEM_PUNCH_REACH, GOLEM_PUNCH_SPEED, GOLEM_SLAM,
 };
 
 use super::skeletron::Parent;
@@ -196,7 +196,14 @@ pub fn body(npc: &mut Npc, world: &World<'_, impl TileView>, state: GolemState) 
         }
     } else {
         npc.velocity.0 += GOLEM_AIR_ACCEL * f32::from(npc.direction);
-        let mut cap = GOLEM_AIR_SPEED;
+        // For the worthy more than doubles the airborne cap (`NPC.cs:46006-46010`).
+        // `Conditions::get_good_world` was read by only two routines in the whole workspace, so
+        // every other seed-specific behaviour, this one included, was silently the ordinary one.
+        let mut cap = if world.conditions.get_good_world {
+            GOLEM_AIR_SPEED_GET_GOOD
+        } else {
+            GOLEM_AIR_SPEED
+        };
         if npc.life < npc.life_max {
             cap += 1.0;
         }
@@ -702,6 +709,37 @@ mod tests {
         };
         body(&mut g, &w, headless);
         assert!(!g.invulnerable, "head off, body open");
+    }
+
+    /// For the worthy more than doubles its airborne speed cap (`NPC.cs:46006-46010`).
+    ///
+    /// `Conditions::get_good_world` was read by only two routines in the whole workspace, so this
+    /// seed's Golem chased at the ordinary three pixels a tick.
+    #[test]
+    fn for_the_worthy_chases_far_faster_in_the_air() {
+        let tiles = floor(30);
+        // The same fixture the hop test uses: on the floor, charging, with the player far enough
+        // off that it hops after them rather than standing still.
+        let top_speed = |get_good: bool| {
+            let mut g = piece(GOLEM_BODY, 0, 25);
+            g.local_ai[0] = 1.0;
+            g.ai[1] = 1.0;
+            let mut w = world(&tiles, Some((2000.0, 29.0 * TILE)));
+            w.conditions.get_good_world = get_good;
+            let mut fastest: f32 = 0.0;
+            for _ in 0..3000 {
+                body(&mut g, &w, whole());
+                fastest = fastest.max(g.velocity.0.abs());
+                crate::game::npc::step_physics(&mut g, &tiles);
+            }
+            fastest
+        };
+        let ordinary = top_speed(false);
+        let worthy = top_speed(true);
+        assert!(
+            worthy > ordinary * 1.5,
+            "for the worthy should run it down far harder: {worthy} against {ordinary}"
+        );
     }
 
     /// Every part destroyed makes it hop sooner. That is the whole shape of the fight.

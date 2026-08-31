@@ -18,9 +18,9 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    RETINAZER, RETINAZER_TWIN, SPAZMATISM, SPAZMATISM_TWIN, TWIN_FLEE_CLIMB, TWIN_SECOND_DAMAGE,
-    TWIN_SECOND_DEFENSE, TWIN_SHOT_LEAD, TWIN_SHOT_RANGE, TWIN_SHOT_SPREAD, TWIN_SPIN_CAP,
-    TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
+    RETINAZER, RETINAZER_TWIN, SPAZMATISM, SPAZMATISM_TWIN, TWIN_FLEE_CLIMB, TWIN_GET_GOOD_GAIN,
+    TWIN_SECOND_DAMAGE, TWIN_SECOND_DEFENSE, TWIN_SHOT_LEAD, TWIN_SHOT_RANGE, TWIN_SHOT_SPREAD,
+    TWIN_SPIN_CAP, TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
 };
 
 use crate::game::ai::{Shot, World, can_see};
@@ -255,11 +255,19 @@ fn second_form(
             player.0 + t.second_station.0 - cx,
             player.1 + t.second_station.1 - cy,
         );
-        let (speed, accel) = if expert {
+        let (mut speed, mut accel) = if expert {
             (t.second_speed_expert, t.second_accel_expert)
         } else {
             (t.second_speed, t.second_accel)
         };
+        // For the worthy takes both up by a seventh (`NPC.cs:26944-26948`, `num451 *= 1.15f;
+        // num452 *= 1.15f;`). `Conditions::get_good_world` was read by only two routines in the
+        // whole workspace, so every other seed-specific behaviour, this one included, was silently
+        // the ordinary one.
+        if world.conditions.get_good_world {
+            speed *= TWIN_GET_GOOD_GAIN;
+            accel *= TWIN_GET_GOOD_GAIN;
+        }
         steer(&mut npc.velocity, station, speed, accel);
 
         npc.ai[2] += 1.0;
@@ -647,6 +655,32 @@ mod tests {
             e.defense,
             e.stats.defense + TWIN_SECOND_DEFENSE,
             "and tougher"
+        );
+    }
+
+    /// For the worthy hovers a seventh faster (`NPC.cs:26944-26948`).
+    ///
+    /// `Conditions::get_good_world` was read by only two routines in the whole workspace, so this
+    /// seed's Twins were the ordinary ones. The speed and the acceleration both take the 1.15.
+    #[test]
+    fn for_the_worthy_hovers_faster() {
+        let tiles = Sky(HashMap::new());
+        let speed_after = |get_good: bool| {
+            let mut rng = SmallRng::seed_from_u64(31);
+            let mut e = eye(RETINAZER, 0.0, 0.0);
+            e.ai[0] = form::SECOND;
+            let mut w = night(&tiles, Some((900.0, 900.0)));
+            w.conditions.get_good_world = get_good;
+            for _ in 0..30 {
+                twin(&mut e, &w, &mut rng);
+            }
+            e.velocity.0.hypot(e.velocity.1)
+        };
+        let ordinary = speed_after(false);
+        let worthy = speed_after(true);
+        assert!(
+            worthy > ordinary * 1.05,
+            "for the worthy should close faster: {worthy} against {ordinary}"
         );
     }
 
