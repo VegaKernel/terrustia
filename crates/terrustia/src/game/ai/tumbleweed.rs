@@ -31,7 +31,10 @@ const LEAP_SPEED: f32 = 3.0;
 /// How long a projectile this style throws stays alive, matching the other ported routines.
 const SHOT_LIFETIME: u16 = 300;
 
-/// The types, by the `NPCID` names the game gives them.
+/// The types, by the `NPCID` names the game gives them. The Unicorn (86) appears in none of the
+/// game's per-type branches, so it takes every default and is named only where the tests walk the
+/// whole roster.
+#[cfg(test)]
 const UNICORN: u16 = 86;
 const WOLF: u16 = 155;
 const HEADLESS_HORSEMAN: u16 = 315;
@@ -258,24 +261,15 @@ pub fn update<T: TileView>(
                 }
             }
         }
-        WOLF | HELLHOUND => {
-            // `NPC.cs:63206-63212`: a pounce, but only from close range.
+        // `NPC.cs:63206-63218`: a pounce. The wolf and the hellhound need to be close for it; the
+        // tumbleweed hops at any range.
+        WOLF | HELLHOUND | TUMBLEWEED
             if npc.velocity.1 == 0.0
-                && gap < 100.0
+                && (kind == TUMBLEWEED || gap < 100.0)
                 && npc.velocity.0.abs() > LEAP_SPEED
-                && world.target.is_some_and(|t| closing(npc, t.center.0))
-            {
-                npc.velocity.1 -= 4.0;
-            }
-        }
-        TUMBLEWEED => {
-            // `NPC.cs:63214-63218`: the same hop, at any range.
-            if npc.velocity.1 == 0.0
-                && npc.velocity.0.abs() > LEAP_SPEED
-                && world.target.is_some_and(|t| closing(npc, t.center.0))
-            {
-                npc.velocity.1 -= 4.0;
-            }
+                && world.target.is_some_and(|t| closing(npc, t.center.0)) =>
+        {
+            npc.velocity.1 -= 4.0;
         }
         _ => {}
     }

@@ -88,8 +88,14 @@ pub fn spike_ball(npc: &mut Npc, target: Option<Target>, roll: u32) {
 ///
 /// `ai[1]` says which surface it is running along — a wall or a floor — and `ai[0]` remembers
 /// whether it is currently touching it. Losing contact is what turns the corner.
-pub fn wheel(npc: &mut Npc) {
+pub fn wheel(npc: &mut Npc, target: Option<Target>) {
     if npc.ai[0] == 0.0 {
+        // `TargetClosest()` (`NPC.cs:24743`), which is the whole of the wheel's aiming: it picks a
+        // side once, on its first tick, and never looks again. Without it every wheel in the world
+        // set off rightward regardless of where anyone was.
+        if let Some(t) = target {
+            npc.direction = if t.center.0 > npc.center().0 { 1 } else { -1 };
+        }
         npc.direction_y = 1;
         npc.ai[0] = 1.0;
     }
@@ -193,7 +199,7 @@ mod tests {
     fn a_blazing_wheel_runs_flat_out() {
         let mut w = blazing();
         w.direction = 1;
-        wheel(&mut w);
+        wheel(&mut w, None);
         assert_eq!(w.velocity.0, WHEEL_SPEED);
         assert_eq!(w.velocity.1, WHEEL_SPEED, "and dives to find a surface");
     }
@@ -205,13 +211,45 @@ mod tests {
         w.direction_y = 1;
         // Riding a floor...
         w.collide_y = true;
-        wheel(&mut w);
+        wheel(&mut w, None);
         assert_eq!(w.ai[0], 2.0, "should have registered the surface");
         // ...which then ends.
         w.collide_y = false;
-        wheel(&mut w);
+        wheel(&mut w, None);
         assert_eq!(w.direction, -1, "should turn");
         assert_eq!(w.ai[1], 1.0, "and start following the wall instead");
+    }
+
+    /// `NPC.cs:24743`: a wheel picks its side once, on its first tick, and never looks again.
+    #[test]
+    fn a_blazing_wheel_sets_off_toward_whoever_is_there() {
+        let sample = blazing();
+        let (cx, cy) = sample.center();
+        for (dx, want) in [(400.0f32, 1i8), (-400.0, -1)] {
+            let mut w = blazing();
+            w.direction = 1;
+            wheel(
+                &mut w,
+                Some(Target {
+                    slot: 0,
+                    center: (cx + dx, cy),
+                    velocity: (0.0, 0.0),
+                    alive: true,
+                }),
+            );
+            assert_eq!(w.direction, want, "should have set off toward {dx}");
+            // ...and does not change its mind afterwards.
+            wheel(
+                &mut w,
+                Some(Target {
+                    slot: 0,
+                    center: (cx - dx, cy),
+                    velocity: (0.0, 0.0),
+                    alive: true,
+                }),
+            );
+            assert_eq!(w.direction, want, "and never looks again");
+        }
     }
 
     #[test]
@@ -220,7 +258,7 @@ mod tests {
         w.direction = 1;
         w.direction_y = 1;
         let before = w.rotation;
-        wheel(&mut w);
+        wheel(&mut w, None);
         assert!((w.rotation - before).abs() > 0.0, "should be turning");
     }
 }

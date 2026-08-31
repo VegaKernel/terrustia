@@ -1008,11 +1008,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         114 => dragonfly::update(npc, world, rng),
         65 => critter::butterfly(npc, world, rng),
-        // One hit in six knocks it down, but only when the hit was hard enough to register.
+        // One hit in six knocks it down, and only in expert (`NPC.cs:39016`).
         91 => granite::update(
             npc,
             world,
-            world.was_hurt && rand::Rng::random_ratio(rng, 1, 6),
+            world.was_hurt && world.conditions.expert && rand::Rng::random_ratio(rng, 1, 6),
         ),
         22 => {
             // The drift it picks when it has nothing else to go on: -1.5, 0 or 1.5.
@@ -1031,7 +1031,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         18 => swimmer::jellyfish(npc, world),
         44 => swimmer::flying_fish(npc, world),
-        21 => track::wheel(npc),
+        21 => track::wheel(npc, target),
         115 => critter::ladybug(npc, world, rng),
         118 => critter::seahorse(npc, world, rng),
         119 => effects.shots.extend(critter::dandelion(npc, world, rng)),
@@ -1048,7 +1048,8 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         50 => {
             let hit_something = npc.collide_x || npc.collide_y;
-            effects.died = spore::update(npc, target, hit_something) == spore::Outcome::Burst;
+            effects.died = spore::update(npc, target, hit_something, world.conditions.expert)
+                == spore::Outcome::Burst;
         }
         55 => {
             // The Brain's position is threaded in through ai[2..3] by the server, which knows

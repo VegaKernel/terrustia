@@ -17,7 +17,7 @@
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    CASTER_BLINK, CASTER_BLINK_SHORT, CASTER_CYCLE, CASTER_TELEFRAG_GUARD, CASTER_TELEPORT_LIMIT,
+    CASTER_BLINK, CASTER_CYCLE, CASTER_TELEFRAG_GUARD, CASTER_TELEPORT_LIMIT,
     CASTER_TELEPORT_RANGE, CASTER_WINDUP, Conjuring, DJINN_LANTERNS, DJINN_SPREAD, DJINN_WINDUP,
     Thrown, conjuring, dungeon_wall,
 };
@@ -589,7 +589,10 @@ mod tests {
     /// so an imp could never find anywhere to go and never blinked at all.
     #[test]
     fn a_fire_imps_five_is_its_blink_delay_and_not_its_reach() {
-        assert_eq!(conjuring(24).unwrap().blink, CASTER_BLINK_SHORT);
+        assert_eq!(
+            conjuring(24).unwrap().blink,
+            terrustia_proto::npc_params::CASTER_BLINK_SHORT
+        );
         assert_eq!(conjuring(29).unwrap().blink, CASTER_BLINK);
 
         let tiles = cavern(false);
