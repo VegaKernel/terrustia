@@ -1,7 +1,7 @@
 //! Which item a placed object gives back when it is mined.
 //!
 //! Extracted, by hand, with no generator: see the note at the end of this comment. A framed
-//! object — a chair, a chest, a statue, a door — does not name its item
+//! object (a chair, a chest, a statue, a door) does not name its item
 //! anywhere in the world. All the world stores is a frame, and the frame names a *style*; what
 //! that style is worth is a separate table for every kind of object.
 //!
