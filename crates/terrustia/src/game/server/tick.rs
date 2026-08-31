@@ -506,6 +506,9 @@ impl GameServer {
         lap(&mut cost, Phase::World);
 
         self.flush_dirty_sections();
+        // Vanilla's own per-tick section push (`Main.cs:65601`), queueing into the same drain the
+        // join stream uses so both share one bounded budget.
+        self.check_player_sections();
         self.drain_section_streams();
         lap(&mut cost, Phase::Sections);
         self.tick_items();

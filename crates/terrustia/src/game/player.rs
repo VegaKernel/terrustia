@@ -130,12 +130,24 @@ pub struct Player {
     ///
     /// Vanilla refuses to open a chest another player is already in, so the server has to know.
     pub open_chest: i16,
-    /// Sections already streamed to this client.
+    /// Sections already streamed to this client (`RemoteClient.TileSections`,
+    /// `RemoteClient.cs:31`).
     ///
-    /// Since 1.4.5 the client pulls sections with packet 159 as it moves, rather than the server
-    /// pushing them from player positions. It re-asks freely, so this is what stops a walk back
-    /// and forth from resending megabytes of tiles.
+    /// The server pushes sections from player positions every tick (`Main.cs:65601` ->
+    /// `RemoteClient.CheckSection`); packet 159 is only a client's own miss-repair request. Both
+    /// paths run through `send_section`, which consults this, so a walk back and forth never
+    /// resends megabytes of tiles.
     pub sent_sections: HashSet<(i32, i32)>,
+    /// Which section this client was last checked against, so the per-tick stream
+    /// (`check_player_sections`) does no work at all for a player who has not crossed a section
+    /// boundary since the last tick.
+    ///
+    /// Vanilla has no equivalent: `CheckSection_ForClient` re-walks its 3x3 block every tick for
+    /// every player. That is nine array reads there and nine hash lookups here, and at 255 players
+    /// this server has a 16.67ms tick to protect, so the boundary is remembered instead. It also
+    /// stops a section that is queued but not yet drained from being queued again on every tick in
+    /// between.
+    pub last_section: Option<(i32, i32)>,
     /// Sections still owed to this client from its initial world stream, drained a few at a time
     /// off the tick by `drain_section_streams` rather than sent in one synchronous burst inside the
     /// `SpawnTileData` packet handler — a first join can want up to ~39 of them, and sending them
@@ -212,6 +224,7 @@ impl Player {
             zone: None,
             open_chest: -1,
             sent_sections: HashSet::new(),
+            last_section: None,
             pending_sections: VecDeque::new(),
             connected_at: std::time::Instant::now(),
             last_chat: None,
