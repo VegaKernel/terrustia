@@ -413,6 +413,10 @@ fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
     let mut out = String::with_capacity(line.len() + line.len() / cols.max(1) + indent);
     let mut col = 0usize;
     let mut i = 0usize;
+    // Where the current row's text starts in `out`, and the last point in it we may break without
+    // splitting a word. Breaking anywhere is what produced `<pa` / `ssword>` in a real log line.
+    let mut row_start = 0usize;
+    let mut last_space: Option<usize> = None;
     while i < bytes.len() {
         if bytes[i] == 0x1b {
             // Copy a CSI escape verbatim; it takes no visible columns.
@@ -430,11 +434,36 @@ fn wrap_ansi(line: &str, cols: usize, indent: usize) -> String {
             out.push_str(&line[start..i]);
             continue;
         }
-        // The start of a UTF-8 character. Wrap before it if the row is full.
+        // The start of a UTF-8 character. Wrap before it if the row is full, at the last space on
+        // the row where there is one, so a word carries over whole.
         if col >= cols {
-            out.push_str("\r\n");
-            out.push_str(&pad);
-            col = indent;
+            let broke_at_space = match last_space {
+                Some(at) if at > row_start => {
+                    // Everything after the break moves down a row. It holds no space of its own,
+                    // being the tail after the last one, so it needs no further break opportunity.
+                    let carried = out.split_off(at);
+                    let carried = carried.trim_start_matches(' ');
+                    out.push_str("\r\n");
+                    out.push_str(&pad);
+                    row_start = out.len();
+                    col = indent + visible_len(carried);
+                    out.push_str(carried);
+                    true
+                }
+                // No space to break at: a single word longer than the row. Cut it, which is what
+                // any terminal does, rather than run off the edge.
+                _ => false,
+            };
+            if !broke_at_space {
+                out.push_str("\r\n");
+                out.push_str(&pad);
+                row_start = out.len();
+                col = indent;
+            }
+            last_space = None;
+        }
+        if bytes[i] == b' ' {
+            last_space = Some(out.len());
         }
         let char_len = utf8_len(bytes[i]);
         let end = (i + char_len).min(bytes.len());
@@ -1173,6 +1202,39 @@ mod tests {
             wrap_ansi(&coloured, 10, 4),
             coloured,
             "8 visible chars fit in 10 columns even wrapped in escapes"
+        );
+    }
+
+    /// A row is broken between words, not through one.
+    ///
+    /// The claim-token warning is the line that showed this up in a real terminal: it wrapped
+    /// mid-word and printed `<pa` at the end of one row and `ssword>` at the start of the next,
+    /// which is unreadable exactly where a reader is being asked to copy a command.
+    #[test]
+    fn wrap_ansi_breaks_between_words_not_through_them() {
+        let line = "claim it with: /register <name> <password> w6y2c8kwqcdr";
+        let wrapped = wrap_ansi(line, 30, 4);
+        let rows: Vec<&str> = wrapped.split("\r\n").collect();
+
+        assert!(rows.len() > 1, "it should have wrapped at all: {rows:?}");
+        assert!(
+            rows.iter().all(|r| visible_len(r) <= 30),
+            "no row is wider than the terminal: {rows:?}"
+        );
+
+        // Every word of the original survives whole on some row. Splitting one is the bug.
+        for word in line.split_whitespace() {
+            assert!(
+                rows.iter().any(|r| r.contains(word)),
+                "{word:?} was split across rows: {rows:?}"
+            );
+        }
+
+        // A word longer than the row still has to be cut, or it would run off the edge.
+        let long = wrap_ansi(&"z".repeat(40), 10, 4);
+        assert!(
+            long.split("\r\n").all(|r| visible_len(r) <= 10),
+            "an unbreakable word is still cut to the width: {long:?}"
         );
 
         // A short plain line is returned unchanged.
