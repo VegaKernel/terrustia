@@ -363,6 +363,26 @@ both generators to emit exactly what is committed rather than touching either ta
   `game/spawn.rs`, and all of `game/ai/`.
   Scheduled in-campaign but not a release gate; its worst failure is a boot convenience that
   already falls back to a logged manual-port-forward message.
+- **The autosave snapshot is the most expensive thing an idle server does, and it is on the tick
+  thread** (found by the owner running a real server, 2026-08-31). A `phase=snapshot phase_us=12833`
+  warning on a world with **two NPCs and no players**: 77% of a tick's budget spent copying the
+  world for a save.
+
+  Measured on a fresh 4200x1200 world before writing anything down. It scales with how much the
+  world has changed since the last save, not with the tick: 30 to 36 sections and 2.0 to 3.1 ms at a
+  15-second autosave, 68 sections and 6.3 ms at the default 300, and 12.8 ms on a loaded world with
+  a town. **Not a regression**, which was the first hypothesis and the wrong one: the same probe on
+  the pre-wave build copies 36 sections in 3,059 us, slightly worse than now. It has always cost
+  this. It was invisible because the phase timer used to bill the work to the wrong bucket, and
+  because a comment in `save_world_in_background` claimed every save after the first was "already
+  150-200 us" and was never re-measured. That comment now carries the real table.
+
+  The fix is to stop taking it in one go: refresh the spare buffer a few sections per tick as they
+  change, so a save finds almost nothing left to copy, trading a 13 ms spike for tens of microseconds
+  of steady work. The tracking it needs (`changed_since_snapshot`) already exists. What it needs
+  first is a ruling on whether a buffer assembled across several ticks is an acceptable
+  point-in-time view of a world, given that a save is not transactional in vanilla either.
+
 - **Performance discipline**: maintain the benchmarks, measure meaningful changes, reject confirmed
   regressions on CPU, memory, latency, startup, saves and joins, and keep the instrumentation. The
   deep optimisation campaign comes after the feature waves, not now.

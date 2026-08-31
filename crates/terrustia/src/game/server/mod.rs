@@ -1738,6 +1738,27 @@ impl GameServer {
         // a world nobody is digging through, almost none of those tiles have changed since the last
         // save. The buffer a finished save hands back already holds that state, so only the
         // sections that have changed since need copying into it.
+        //
+        // What this actually costs, measured on a fresh 4200x1200 world with nobody connected, is
+        // more than an earlier note here claimed. It said every save after the first was "already
+        // 150-200 us"; it is not, and the figure scales with how long the world has been left to
+        // change between saves rather than with the tick:
+        //
+        //     autosave every  15s   30 to 36 sections    2.0 to 3.1 ms
+        //     autosave every 300s   68 sections          6.3 ms
+        //     a loaded world with a town, every 300s     12.8 ms
+        //
+        // The last of those is 77% of a tick's 16,666 us budget, on a server with two NPCs and no
+        // players, and it is what the `phase=snapshot` warning reports. It is not a regression:
+        // the same run on an older build copies 36 sections in 3,059 us, slightly worse. It is
+        // simply what this has always cost, previously hidden because the phase timer was billing
+        // the work to the wrong bucket and because the note above was never re-measured.
+        //
+        // The real fix is to stop doing it in one go: refresh the spare buffer a few sections per
+        // tick as they change, so a save finds almost nothing left to copy. That trades a 13 ms
+        // spike for tens of microseconds of steady work, and it needs a decision about whether a
+        // buffer assembled across ticks is an acceptable point-in-time view of the world, which is
+        // why it is written up in TODO.md rather than done here.
         let began = Instant::now();
         let (mut snapshot, sections) = match self.spare_world.take() {
             Some(mut spare) if self.world.snapshot_is_incremental() => {
