@@ -61,6 +61,29 @@ impl SectionFlags {
         out
     }
 
+    /// The same walk, stopping once `cap` sections have been cleared.
+    ///
+    /// For spreading a snapshot refresh over several ticks instead of paying for it in one. The
+    /// order is whatever the flat array happens to be in, which is fine: the caller cares only
+    /// that every marked section is eventually handed over, not which comes first.
+    fn drain_upto(&mut self, cap: usize) -> Vec<(i32, i32)> {
+        let want = cap.min(self.marked);
+        let mut out = Vec::with_capacity(want);
+        if want > 0 {
+            for (at, flag) in self.flags.iter_mut().enumerate() {
+                if *flag {
+                    *flag = false;
+                    out.push(((at % self.wide) as i32, (at / self.wide) as i32));
+                    if out.len() == want {
+                        break;
+                    }
+                }
+            }
+            self.marked -= out.len();
+        }
+        out
+    }
+
     fn clear(&mut self) {
         if self.marked > 0 {
             self.flags.fill(false);
@@ -494,7 +517,45 @@ impl World {
     /// it, so the two cannot drift apart.
     pub fn refresh_snapshot(&mut self, buffer: &mut Self) -> usize {
         let sections = self.changed_since_snapshot.drain();
-        for &(sx, sy) in &sections {
+        self.copy_sections_into(buffer, &sections);
+        buffer.tiles.copy_side_tables_from(&self.tiles);
+        buffer.copy_everything_but_tiles_from(self);
+        sections.len()
+    }
+
+    /// Copy up to `cap` changed sections' **tiles** into a snapshot buffer, and nothing else.
+    ///
+    /// The half of [`Self::refresh_snapshot`] that scales with how much the world has changed,
+    /// exposed so a save can pay for it a few sections at a time across several ticks rather than
+    /// all at once. Measured on a real 4200x1200 world, a section costs about fourteen
+    /// microseconds warm and closer to a hundred cold, against a fixed refresh cost - the side and
+    /// object tables, below - of twenty microseconds however many sections changed. So the fixed
+    /// part is worth paying once at the end, and only this part is worth spreading.
+    ///
+    /// Deliberately does **not** touch the side or object tables. Those are copied wholesale from
+    /// the live world by the final `refresh_snapshot`, so copying them here would be work thrown
+    /// away, and doing it *instead* of there would leave the buffer's objects newer than its
+    /// tiles, which is exactly the torn save this is meant to avoid.
+    ///
+    /// Tearing is not a risk the other way either: [`Self::set_tile`] re-marks any section it
+    /// touches, so a section copied here and then edited is simply copied again. A buffer whose
+    /// [`Self::snapshot_pending`] has reached zero is bit-identical to the live world at that
+    /// instant, however many ticks it took to assemble.
+    ///
+    /// Returns how many sections it copied.
+    pub fn pre_copy_snapshot_tiles(&mut self, buffer: &mut Self, cap: usize) -> usize {
+        let sections = self.changed_since_snapshot.drain_upto(cap);
+        self.copy_sections_into(buffer, &sections);
+        sections.len()
+    }
+
+    /// How many sections a snapshot refresh would have to copy if it ran right now.
+    pub fn snapshot_pending(&self) -> usize {
+        self.changed_since_snapshot.marked
+    }
+
+    fn copy_sections_into(&self, buffer: &mut Self, sections: &[(i32, i32)]) {
+        for &(sx, sy) in sections {
             let x0 = sx * SECTION_WIDTH;
             let y0 = sy * SECTION_HEIGHT;
             buffer.tiles.copy_rect_from(
@@ -505,9 +566,6 @@ impl World {
                 y0 + SECTION_HEIGHT,
             );
         }
-        buffer.tiles.copy_side_tables_from(&self.tiles);
-        buffer.copy_everything_but_tiles_from(self);
-        sections.len()
     }
 
     /// Whether a buffer can be refreshed rather than rebuilt.
@@ -636,6 +694,17 @@ impl World {
     }
 
     /// Replace a tile. Returns false when the position lies outside the world.
+    ///
+    /// Deliberately does **not** check whether the tile is already what it is being set to. That
+    /// looks like free savings on the marking below and is not: instrumenting this on an idle
+    /// fresh 4200x1200 world over six consecutive 20-second autosaves counted 150 to 260 real tile
+    /// changes per window and **zero** rewrites of an existing value. Every gameplay write is a
+    /// real change, so the check would cost a `TileStore::get` per write and save nothing.
+    ///
+    /// What those same six windows did show is that 150 to 260 changed tiles mark 24 to 37
+    /// sections, and a section is 200x150 = 30,000 tiles: an amplification of about 5,000x, which
+    /// is the whole reason a save on an idle world is expensive. Tracking changed tiles rather
+    /// than the sections they sit in is in `TODO.md`, with the measurements.
     pub fn set_tile(&mut self, x: i32, y: i32, tile: Tile) -> bool {
         if !self.in_bounds(x, y) {
             return false;
@@ -1693,5 +1762,77 @@ mod incremental_snapshot {
         assert_eq!(buffer.tile(50, 205).color, 12, "paint");
         assert_eq!(buffer.tile(300, 205).frame_x, 36, "frames");
         assert_eq!(buffer.tile(300, 205).color, 3);
+    }
+
+    /// A refresh paid for a few sections at a time comes out where the one-shot one does.
+    ///
+    /// The cap has to hold, the count left has to fall by exactly what was taken, and once it
+    /// reaches zero the buffer must already hold every edit - so the `refresh_snapshot` that
+    /// follows finds nothing left to copy.
+    #[test]
+    fn a_capped_pre_copy_gets_there_a_few_sections_at_a_time() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+        world.refresh_snapshot(&mut buffer);
+
+        // One edit in every section of the world: 3 across by 3 down.
+        let all = (world.sections_x() * world.sections_y()) as usize;
+        for sy in 0..world.sections_y() {
+            for sx in 0..world.sections_x() {
+                world.set_tile(sx * SECTION_WIDTH, sy * SECTION_HEIGHT, Tile::block(25));
+            }
+        }
+        assert_eq!(world.snapshot_pending(), all);
+
+        assert_eq!(
+            world.pre_copy_snapshot_tiles(&mut buffer, 2),
+            2,
+            "the cap has to be honoured"
+        );
+        assert_eq!(world.snapshot_pending(), all - 2);
+
+        let mut rounds = 1;
+        while world.snapshot_pending() > 0 {
+            world.pre_copy_snapshot_tiles(&mut buffer, 2);
+            rounds += 1;
+        }
+        assert_eq!(rounds, all.div_ceil(2), "and nothing may be skipped");
+
+        assert_eq!(
+            world.refresh_snapshot(&mut buffer),
+            0,
+            "a drained world leaves the firing tick no tiles to copy"
+        );
+        for sy in 0..world.sections_y() {
+            for sx in 0..world.sections_x() {
+                assert_eq!(
+                    buffer.tile(sx * SECTION_WIDTH, sy * SECTION_HEIGHT).block,
+                    25,
+                    "section {sx},{sy} never made it across"
+                );
+            }
+        }
+    }
+
+    /// A section edited after it was pre-copied is copied again, which is what makes the buffer
+    /// a point-in-time image of the tick the drain finished rather than a smear across ticks.
+    #[test]
+    fn an_edit_after_a_pre_copy_re_marks_the_section() {
+        let mut world = world_with_some_terrain();
+        let mut buffer = world.snapshot();
+        world.refresh_snapshot(&mut buffer);
+
+        world.set_tile(10, 10, Tile::block(40));
+        assert_eq!(world.pre_copy_snapshot_tiles(&mut buffer, 8), 1);
+        assert_eq!(world.snapshot_pending(), 0);
+
+        world.set_tile(10, 10, Tile::block(41));
+        assert_eq!(
+            world.snapshot_pending(),
+            1,
+            "the section has to go back on the list"
+        );
+        world.refresh_snapshot(&mut buffer);
+        assert_eq!(buffer.tile(10, 10).block, 41, "and the later edit must win");
     }
 }
