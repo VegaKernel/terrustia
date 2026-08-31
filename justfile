@@ -108,9 +108,9 @@ test-filter FILTER:
 soak SECONDS="60":
     ./tools/soak_ci.sh {{SECONDS}}
 
-# The README's comparison table, measured: startup, idle CPU, idle RAM and idle bandwidth against
-# the real TerrariaServer on one shared world. Needs the real server and a QUIET machine; it warns
-# and refuses to call its own output publishable if the load average says otherwise.
+# Needs the real TerrariaServer and a QUIET machine: the script refuses to call its own output
+# publishable when the load average says the box was contended.
+# The README's comparison table, measured: startup, idle CPU, RAM and bandwidth vs the real server
 compare SECONDS="300":
     COMPARE_WINDOW={{SECONDS}} ./tools/compare_vanilla.sh
 
