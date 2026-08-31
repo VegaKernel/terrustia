@@ -44,6 +44,64 @@ struct Entry {
     inline_guard: bool,
 }
 
+/// The rest of an `if (` condition that opened before `from`, plus the offset just past its
+/// closing parenthesis. `None` if the parentheses never balance.
+fn balanced_tail(body: &str, from: usize) -> Option<(&str, usize)> {
+    let mut depth = 1;
+    for (offset, ch) in body[from..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&body[from..from + offset], from + offset + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `{ ... }` block starting at or just after `from`, without its braces.
+fn braced_block(body: &str, from: usize) -> Option<&str> {
+    let open = from + body[from..].find('{')?;
+    let mut depth = 0;
+    for (offset, ch) in body[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&body[open + 1..open + offset]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `Needs::` flags a C# condition asks for.
+///
+/// [`crate::travel_shop`]'s `Needs` is an AND of flags (`met_by` is a subset test), so a
+/// disjunction cannot be expressed in it. Exactly one candidate uses one: the Zapinators' `(...
+/// || ... || Main.hardMode)` (`Chest.cs:1168`), an "any early boss, or hardmode" gate. Reading
+/// its named flags as an AND would demand *all* of them, which is far stricter than the game and
+/// would keep the item out of almost every world, so a disjunction contributes no flags at all
+/// instead. That errs the other way: those offers are reachable slightly earlier than in vanilla,
+/// which is the narrowing this project already accepts elsewhere over an unreachable item.
+fn flags_of(condition: &str) -> Vec<&'static str> {
+    if condition.contains("||") {
+        return Vec::new();
+    }
+    CONDITIONS
+        .iter()
+        .filter(|(src, _)| condition.contains(src))
+        .map(|&(_, flag)| flag)
+        .collect()
+}
+
 pub fn generate(root: &Path) -> String {
     let chest_cs = read_lossy(&root.join("Terraria/Chest.cs"));
 
@@ -65,10 +123,19 @@ pub fn generate(root: &Path) -> String {
     // high `minimumRarity` climbs. The optional leading group captures that inline floor
     // directly; every other candidate leaves it unmatched and keeps falling back to the
     // checkpoint-derived floor below.
+    // Only the *head* is matched by regex. The condition's tail is read by counting parentheses
+    // instead: one candidate (the Zapinators, `Chest.cs:1168-1175`) guards on a parenthesised
+    // disjunction, and a `[^)]*` tail cannot span it, so that whole candidate was silently
+    // dropped and neither Zapinator was ever offered.
     let pattern = Regex::new(
-        r"if \((?:minimumRarity <= (\d+) && )?playerWithHighestLuck\.RollLuck\(rarity\[(\d+)\]\) == 0([^)]*)\)\s*\{\s*it = (\d+);",
+        r"if \((?:minimumRarity <= (\d+) && )?playerWithHighestLuck\.RollLuck\(rarity\[(\d+)\]\) == 0",
     )
     .unwrap();
+    let assign_re = Regex::new(r"^\s*\{\s*it = (\d+);").unwrap();
+    // A candidate whose body narrows its own choice further: `it = 4347; if (Main.hardMode) { it
+    // = 4348; }`. Emitted as a follow-on offer carrying that inner condition on top of the outer
+    // one, which the chain's later-wins rule then resolves the same way source's reassignment does.
+    let nested_re = Regex::new(r"if \(([^)]*)\)\s*\{\s*it = (\d+);").unwrap();
     // The `minimumRarity` guards partition the chain; track the floor in force at each match.
     let floor_re = Regex::new(r"if \(minimumRarity > (\d+)\)").unwrap();
     let floors: Vec<(usize, i64)> = floor_re
@@ -81,18 +148,21 @@ pub fn generate(root: &Path) -> String {
         let whole = m.get(0).unwrap();
         let inline_floor = m.get(1);
         let tier: i64 = m[2].parse().unwrap();
-        let tail = &m[3];
-        let item: i64 = m[4].parse().unwrap();
+
+        // The rest of the `if (...)`, however many nested parentheses it takes.
+        let Some((tail, after)) = balanced_tail(body, whole.end()) else {
+            continue;
+        };
         // A nested RollLuck in the tail means a compound roll this table cannot express; skip it
         // and say so rather than emitting something that looks right.
         if tail.contains("RollLuck") {
             continue;
         }
-        let needs: Vec<&'static str> = CONDITIONS
-            .iter()
-            .filter(|(src, _)| tail.contains(src))
-            .map(|&(_, flag)| flag)
-            .collect();
+        let Some(caps) = assign_re.captures(&body[after..]) else {
+            continue;
+        };
+        let item: i64 = caps[1].parse().unwrap();
+        let needs = flags_of(tail);
         let floor = if let Some(f) = inline_floor {
             f.as_str().parse().unwrap()
         } else {
@@ -107,10 +177,30 @@ pub fn generate(root: &Path) -> String {
         entries.push(Entry {
             tier,
             item,
-            needs,
+            needs: needs.clone(),
             floor,
             inline_guard: inline_floor.is_some(),
         });
+
+        // Anything the candidate's own body reassigns `it` to under a further condition.
+        let Some(block) = braced_block(body, after) else {
+            continue;
+        };
+        for inner in nested_re.captures_iter(block) {
+            let mut needs = needs.clone();
+            for flag in flags_of(&inner[1]) {
+                if !needs.contains(&flag) {
+                    needs.push(flag);
+                }
+            }
+            entries.push(Entry {
+                tier,
+                item: inner[2].parse().unwrap(),
+                needs,
+                floor,
+                inline_guard: inline_floor.is_some(),
+            });
+        }
     }
     assert!(
         entries.len() >= 30,

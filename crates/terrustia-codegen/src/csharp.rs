@@ -13,6 +13,37 @@ pub fn read_lossy(path: &Path) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Substitute every known local in `line` for the text it was declared with, matching whole
+/// identifiers so `entry` never matches inside `entry2` and a member access (`x.stack`) is never
+/// mistaken for the local of the same name.
+///
+/// Decompiled C# hoists constants into locals all over the place, and a parser that only reads
+/// digits reads `SetIngredients(num, 10)` as no ingredient at all and `obj7` as ingredient 7.
+/// Both drop and recipe extraction want the same fix, so it lives here.
+pub fn resolve_locals(line: &str, vars: &BTreeMap<String, String>) -> String {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(line.len());
+    let mut word = String::new();
+    for ch in line.chars() {
+        if is_ident(ch) {
+            word.push(ch);
+            continue;
+        }
+        let member = out.ends_with('.');
+        match vars.get(&word) {
+            Some(text) if !word.is_empty() && !member => out.push_str(text),
+            _ => out.push_str(&word),
+        }
+        word.clear();
+        out.push(ch);
+    }
+    match vars.get(&word) {
+        Some(text) if !word.is_empty() && !out.ends_with('.') => out.push_str(text),
+        _ => out.push_str(&word),
+    }
+    out
+}
+
 /// The members of a `Factory.CreateBoolSet(a, b, c, …)` — the tile/entity ids the game flips to
 /// `true`. Panics if the set is missing, or if it opens with a `true`/`false` default this reader
 /// does not model (none of the sets it is used on do).

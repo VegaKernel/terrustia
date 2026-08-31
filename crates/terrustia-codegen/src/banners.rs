@@ -58,6 +58,77 @@ fn parse_npc_to_banner(root: &Path) -> BTreeMap<i64, i64> {
     out
 }
 
+/// One rung of `BannerSystem.BannerToItem`'s ladder, in source order.
+#[derive(Debug, Clone, Copy)]
+enum Rung {
+    /// `if (banner == n) return item;`
+    Exact { banner: i64, item: i64 },
+    /// `if (banner >= from) return base + banner - from;`
+    Run { from: i64, base: i64 },
+    /// The method's closing `return base + banner - from;`, with no condition above it.
+    Fallback { from: i64, base: i64 },
+}
+
+/// `BannerSystem.BannerToItem`, read out of source rather than remembered.
+///
+/// This ladder used to be a Rust string literal in `emit` below, and it had silently fallen four
+/// rungs behind the game: 1.4.5's `banner == 290`, `banner == 289` and `banner >= 276` were all
+/// missing, so fifteen banner indices fell through to the `>= 274` run and handed over the wrong
+/// item (fifty Orca kills paid out a Quad Barrel Shotgun). Parsing it means the next block of
+/// banner items lands on its own.
+fn parse_banner_to_item(root: &Path) -> Vec<Rung> {
+    let text = read_lossy(&root.join("Terraria.GameContent/BannerSystem.cs"));
+    let start = text
+        .find("public static int BannerToItem")
+        .expect("no BannerToItem");
+    let body_from = &text[start..];
+    let end_rel = body_from[10..]
+        .find("\n\tpublic ")
+        .expect("no method boundary after BannerToItem")
+        + 10;
+    let body = &body_from[..end_rel];
+
+    let eq_re = Regex::new(r"^if \(banner == (\d+)\)$").unwrap();
+    let ge_re = Regex::new(r"^if \(banner >= (\d+)\)$").unwrap();
+    let const_re = Regex::new(r"^return (\d+);$").unwrap();
+    let run_re = Regex::new(r"^return (\d+) \+ banner - (\d+);$").unwrap();
+
+    let mut rungs = Vec::new();
+    // The condition seen but not yet consumed by its `return`: `(is_a_range, value)`.
+    let mut pending: Option<(bool, i64)> = None;
+    for raw in body.lines() {
+        let line = raw.trim();
+        if let Some(c) = eq_re.captures(line) {
+            pending = Some((false, c[1].parse().unwrap()));
+        } else if let Some(c) = ge_re.captures(line) {
+            pending = Some((true, c[1].parse().unwrap()));
+        } else if let Some(c) = const_re.captures(line) {
+            let item: i64 = c[1].parse().unwrap();
+            let (is_range, banner) = pending
+                .take()
+                .unwrap_or_else(|| panic!("bare `return {item};` in BannerToItem"));
+            assert!(!is_range, "a range rung returning a single item");
+            rungs.push(Rung::Exact { banner, item });
+        } else if let Some(c) = run_re.captures(line) {
+            let base: i64 = c[1].parse().unwrap();
+            let from: i64 = c[2].parse().unwrap();
+            match pending.take() {
+                Some((true, at)) => {
+                    assert_eq!(at, from, "a run that does not start where it is tested");
+                    rungs.push(Rung::Run { from, base });
+                }
+                None => rungs.push(Rung::Fallback { from, base }),
+                Some((false, at)) => panic!("`banner == {at}` returning a run"),
+            }
+        }
+    }
+    assert!(
+        matches!(rungs.last(), Some(Rung::Fallback { .. })),
+        "BannerToItem's ladder has no closing fallback"
+    );
+    rungs
+}
+
 /// The default threshold and the per-item overrides.
 fn parse_kills(root: &Path) -> (i64, BTreeMap<i64, i64>) {
     let text = read_lossy(&root.join("Terraria.ID/ItemID.cs"));
@@ -93,7 +164,12 @@ fn parse_kills(root: &Path) -> (i64, BTreeMap<i64, i64>) {
     (default, overrides)
 }
 
-fn emit(npc_banner: &BTreeMap<i64, i64>, default: i64, overrides: &BTreeMap<i64, i64>) -> String {
+fn emit(
+    npc_banner: &BTreeMap<i64, i64>,
+    ladder: &[Rung],
+    default: i64,
+    overrides: &BTreeMap<i64, i64>,
+) -> String {
     let rows: Vec<(i64, i64)> = npc_banner.iter().map(|(&k, &v)| (k, v)).collect();
     let mut lines: Vec<String> = vec![
         "//! Which enemies have a banner, and how many of them it takes to earn one.".into(),
@@ -133,18 +209,18 @@ fn emit(npc_banner: &BTreeMap<i64, i64>, default: i64, overrides: &BTreeMap<i64,
             "/// it — the banner items are laid out in runs across several id blocks.",
             "pub fn banner_item(banner: u16) -> u16 {",
             "    match banner {",
-            "        292 => 5673,",
-            "        291 => 5672,",
-            "        b if b >= 274 => 4687 + b - 274,",
-            "        273 => 4602,",
-            "        b if b >= 267 => 4541 + b - 267,",
-            "        b if b >= 257 => 3837 + b - 257,",
-            "        b if b >= 252 => 3789 + b - 252,",
-            "        251 => 3780,",
-            "        b if b >= 249 => 3593 + b - 249,",
-            "        b if b >= 186 => 3390 + b - 186,",
-            "        b if b >= 88 => 2897 + b - 88,",
-            "        b => 1615 + b - 1,",
+        ]
+        .map(String::from),
+    );
+    for rung in ladder {
+        lines.push(match *rung {
+            Rung::Exact { banner, item } => format!("        {banner} => {item},"),
+            Rung::Run { from, base } => format!("        b if b >= {from} => {base} + b - {from},"),
+            Rung::Fallback { from, base } => format!("        b => {base} + b - {from},"),
+        });
+    }
+    lines.extend(
+        [
             "    }",
             "}",
             "",
@@ -217,11 +293,17 @@ fn emit(npc_banner: &BTreeMap<i64, i64>, default: i64, overrides: &BTreeMap<i64,
 
 pub fn generate(root: &Path) -> String {
     let npc_banner = parse_npc_to_banner(root);
+    let ladder = parse_banner_to_item(root);
     let (default, overrides) = parse_kills(root);
     assert!(
         npc_banner.len() >= 100,
         "only parsed {} banners; the parser is wrong",
         npc_banner.len()
     );
-    emit(&npc_banner, default, &overrides)
+    assert!(
+        ladder.len() >= 10,
+        "only parsed {} BannerToItem rungs; the parser is wrong",
+        ladder.len()
+    );
+    emit(&npc_banner, &ladder, default, &overrides)
 }

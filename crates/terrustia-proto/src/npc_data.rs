@@ -2,6 +2,19 @@
 //!
 //! The game assigns these in a long `if (type == N)` chain; this table is generated from it, so
 //! the numbers are the game's own rather than remembered ones.
+//!
+//! Five of the 691 entries deliberately do *not* match `SetDefaults`, and each one is flagged at
+//! its own entry with what source really says and what depends on the difference. Both are
+//! standing in for a vanilla predicate this project does not have yet:
+//!
+//! * `NPC.DoesntDespawnToInactivity()` (`NPC.cs:78592-78696`), which lists the four Lunar Towers
+//!   alongside every worm segment and event NPC. They carry `boss: true` here only because
+//!   `npc_ai::tick_life` has nothing else to ask.
+//! * `NPC.isLikeATownNPC` (`NPC.cs:6880-6890`), a property that exists purely because the
+//!   Skeleton Merchant is *not* `townNPC` and still needs the town-NPC behaviours.
+//!
+//! Checked against source in full: `boss`, `town_npc` and `friendly` were compared for all 691
+//! types against a walk of `SetDefaults`' own if-chain, and these five are the only differences.
 
 /// Number of NPC types in this build (`NPCID.Count`).
 pub const NPC_COUNT: u16 = 697;
@@ -7955,6 +7968,20 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_tile_collide: true,
             friendly: false,
             town_npc: false,
+            // Deliberately not what `SetDefaults` says, and the same story for all four Lunar
+            // Towers (422, 493, 507, 517). Their arms (`NPC.cs:15277-15292` and its three
+            // siblings) never assign `boss` at all, so vanilla's own value is `false`: that is
+            // why a lantern night *can* start during a pillar fight, since
+            // `LanternNight.BossIsActive` (`LanternNight.cs:68-79`) tests `nPC.boss` and nothing
+            // else.
+            //
+            // What the towers really have is an entry in `NPC.DoesntDespawnToInactivity()`
+            // (`NPC.cs:78592-78696`, cases 422/493/507/517), which `NPC.CheckActive` consults
+            // before anything else. This project has no transcription of that list, and
+            // `npc_ai::tick_life` exempts only `town_npc || boss`, so clearing this flag without
+            // adding one would let the four pillars despawn the moment a player walked away and
+            // break the lunar event outright. The faithful fix is that predicate, in
+            // `crates/terrustia`, not a different value here.
             boss: true,
             lava_immune: false,
             dont_take_damage: false,
@@ -8543,12 +8570,24 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_gravity: false,
             no_tile_collide: false,
             friendly: true,
-            // A real pre-existing bug, found verifying this session's town-combat work: vanilla's
-            // own `NPCID.Sets.AttackType` only ever assigns a value to town NPCs (`NPCID.cs:4855`
-            // sets `453 -> 0`, the same set Merchant/Nurse/etc. share) — a non-town NPC has no
-            // town-combat branch to reach in the first place, so this could never have been `false`
-            // in vanilla. He is a real settleable town NPC (moves in after being freed as a
-            // cursed prisoner in the dungeon).
+            // Deliberately not what `SetDefaults` says, and the note that used to sit here had
+            // the reason wrong, so here is the real one.
+            //
+            // `NPC.SetDefaults`' own arm for 453 (`NPC.cs:14427-14441`) sets `friendly = true` and
+            // does *not* set `townNPC`. The proof is that vanilla needs a whole separate property
+            // for him: `NPC.isLikeATownNPC` (`NPC.cs:6880-6890`) is literally
+            // `if (type == 453) return true; return townNPC;`, and it is what the town-NPC AI,
+            // the pylons and the shop code ask instead. He is not settleable and never takes a
+            // house; `NPCID.Sets.AttackType[453] = 0` and `ShimmerTownTransform` group him with
+            // town NPCs for those two behaviours only.
+            //
+            // It stays `true` because three call sites outside this crate have nothing else to
+            // ask, and flipping it without them would be a regression rather than a fix:
+            // `dispatch.rs`'s catch/release test treats `friendly && !town_npc && !boss` as "is a
+            // critter", so a crafted net packet could delete him; `npc_ai::tick_life` would let
+            // him despawn to inactivity; and town combat would stop reaching him. The faithful
+            // fix is an `is_like_a_town_npc` predicate at those three call sites, which is a
+            // change to `crates/terrustia`, not to this table.
             town_npc: true,
             boss: false,
             lava_immune: false,
@@ -9310,6 +9349,7 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_tile_collide: true,
             friendly: false,
             town_npc: false,
+            // Not what `SetDefaults` says; see npc 422's own note for the whole reason.
             boss: true,
             lava_immune: false,
             dont_take_damage: false,
@@ -9576,6 +9616,7 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_tile_collide: true,
             friendly: false,
             town_npc: false,
+            // Not what `SetDefaults` says; see npc 422's own note for the whole reason.
             boss: true,
             lava_immune: false,
             dont_take_damage: false,
@@ -9766,6 +9807,7 @@ pub fn npc_stats(npc_type: u16) -> Option<NpcStats> {
             no_tile_collide: true,
             friendly: false,
             town_npc: false,
+            // Not what `SetDefaults` says; see npc 422's own note for the whole reason.
             boss: true,
             lava_immune: false,
             dont_take_damage: false,

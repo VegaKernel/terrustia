@@ -46,6 +46,59 @@ if not crafted:
 
 # Re-parse the source independently: last decraftable recipe per result wins.
 body = src[src.index("public static void SetupRecipes()") :]
+
+
+def resolve_locals(text: str) -> str:
+    """Substitute the integer locals and ingredient arrays `SetupRecipes` hoists its materials
+    into, so a recipe whose material is a variable is not read as no material at all.
+
+    `Recipe.cs` declares exactly three that matter (`int num = 5; int stack = 2;` for the sofas,
+    `int type = 3234;` for the crystal furniture, `int num = 3955;` for the Lesion furniture) and
+    passes several of the Lesion ones through an `int[] objN = new int[K] { 0, ... }; objN[0] =
+    num;` array. Reading only digits made a sofa give back 1+1 instead of 5+2 and turned the Lesion
+    Bed's two ingredients into "one of item 7", the array variable's own trailing digit.
+
+    A member access is never substituted: `requiredItem[0].stack = stack;` has one `stack` that is
+    a field and one that is the local, and only the second is a value.
+    """
+    ints: dict[str, str] = {}
+    arrays: dict[str, list[int]] = {}
+    out: list[str] = []
+    ident = re.compile(r"(?<![\w.])(\w+)")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if m := re.fullmatch(r"int (\w+) = (\d+);", line):
+            ints[m.group(1)] = m.group(2)
+            out.append(raw)
+            continue
+        if m := re.fullmatch(r"int\[\] (\w+) = new int\[\d*\] \{([^}]*)\};", line):
+            arrays[m.group(1)] = [int(n) for n in re.findall(r"-?\d+", m.group(2))]
+            out.append(raw)
+            continue
+        if re.match(r"(?:currentRecipe\.|\w+\.SetIngredients\(|\w+\[\d+\] = )", line):
+            line = ident.sub(lambda m: ints.get(m.group(1), m.group(1)), line)
+        # `objN[0] = 3955;` patches the placeholder its declaration left behind.
+        if (m := re.fullmatch(r"(\w+)\[(\d+)\] = (-?\d+);", line)) and m.group(1) in arrays:
+            values = arrays[m.group(1)]
+            if int(m.group(2)) < len(values):
+                values[int(m.group(2))] = int(m.group(3))
+        # `recipeN.SetIngredients(objN);` becomes the numbers themselves.
+        if (m := re.fullmatch(r"(\w+\.SetIngredients\()(\w+)(\);)", line)) and m.group(
+            2
+        ) in arrays:
+            line = m.group(1) + ", ".join(map(str, arrays[m.group(2)])) + m.group(3)
+        # The one arithmetic stack in the whole file (`Recipe.cs:6374`); a C# `(int)` cast of a
+        # positive float truncates.
+        line = re.sub(
+            r"\(int\)\(\(float\)(\d+) \* ([\d.]+)f\)",
+            lambda m: str(int(float(m.group(1)) * float(m.group(2)))),
+            line,
+        )
+        out.append(line)
+    return "\n".join(out)
+
+
+body = resolve_locals(body)
 chunks = re.findall(
     r"currentRecipe\.createItem\.SetDefaults\((\d+)\);(.*?)AddRecipe\(\);", body, re.S
 )

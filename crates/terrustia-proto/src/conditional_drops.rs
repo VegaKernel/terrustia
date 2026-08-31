@@ -140,6 +140,14 @@ pub fn treasure_bag(npc_type: u16) -> Option<u16> {
         370 => 3330,       // Duke Fishron
         439 => 3331,       // Lunatic Cultist
         398 => 3332,       // Moon Lord
+        // The four 1.4-era bosses this table was missing entirely. Every one of them suppresses
+        // its classic loot in expert (`classic_only` returns `&[]` there, matching vanilla's own
+        // `Conditions.NotExpert` wrapper), so without a bag they dropped literally nothing in an
+        // expert or master world.
+        551 => 3860, // Betsy, `RegisterBoss_Betsy`, `ItemDropDatabase.cs:632-636`
+        636 => 4782, // Empress of Light, `RegisterBoss_HallowBoss`, `:321-323`
+        657 => 4957, // Queen Slime, `RegisterBoss_QueenSlime`, `:305-307`
+        668 => 5111, // Deerclops, `RegisterBoss_Deerclops`, `:524-526`
         _ => return None,
     })
 }
@@ -194,6 +202,21 @@ pub fn trophy(npc_type: u16) -> Option<u16> {
     })
 }
 
+/// The lunar fragment one of the four Lunar Towers drops, if it is one.
+///
+/// `RegisterBoss_LunarTowers` (`ItemDropDatabase.cs:626-629`). The pairing is the game's own and
+/// is not alphabetical: Solar (517) gives 3458, Vortex (422) gives 3456, Nebula (507) gives 3457,
+/// Stardust (493) gives 3459.
+pub fn lunar_fragment(npc_type: u16) -> Option<u16> {
+    Some(match npc_type {
+        517 => 3458,
+        422 => 3456,
+        507 => 3457,
+        493 => 3459,
+        _ => return None,
+    })
+}
+
 /// Everything that only drops under some condition.
 ///
 /// Returns an empty list for most types, which is the point: a condition that never applies costs
@@ -210,6 +233,40 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     }
     if let Some(trophy) = trophy(npc_type) {
         out.push(sometimes(trophy, 10));
+    }
+
+    // Master mode's own relics, pets and mounts. `ItemDropRule.MasterModeCommonDrop` and
+    // `MasterModeDropOnAllPlayers` are `Conditions.IsMasterMode` and nothing else
+    // (`ItemDropRule.cs:25-32`), which is flat enough to generate, so the table itself lives in
+    // [`crate::npc_drops::master_drops`] beside the unconditional half rather than being retyped
+    // here. This is the only thing that reaches it: without this call all 57 of those items are
+    // reachable from nowhere, which is exactly the state the audit found them in.
+    if at.master {
+        out.extend(
+            crate::npc_drops::master_drops(npc_type)
+                .iter()
+                .map(|d| Conditional {
+                    item: d.item,
+                    one_in: d.one_in,
+                    numerator: 1,
+                    min: d.min,
+                    max: d.max,
+                }),
+        );
+    }
+
+    // The four Lunar Towers, whose fragments are the whole of the lunar tier
+    // (`RegisterBoss_LunarTowers`, `ItemDropDatabase.cs:608-629`). Vanilla drops these with a
+    // `DropOneByOne`: twelve to twenty separate chunks, each one to three of the fragment in
+    // classic, and in expert a stack base scaled by 1.5 plus one more per player per chunk. The
+    // range used here is vanilla's own reported one (`DropOneByOne.ReportDroprates`):
+    // `MinimumItemDropsCount * (MinimumStackPerChunkBase + BonusMinDropsPerChunkPerPlayer)` to
+    // `MaximumItemDropsCount * (MaximumStackPerChunkBase + BonusMaxDropsPerChunkPerPlayer)`, so
+    // 12..=60 in classic and 24..=100 in expert-or-above. One roll of a flat range rather than
+    // twenty of a narrow one: the same total, a slightly different distribution inside it.
+    if let Some(fragment) = lunar_fragment(npc_type) {
+        let (min, max) = if at.expert { (24, 100) } else { (12, 60) };
+        out.push(a_few(fragment, 1, min, max));
     }
 
     // Skeletron's own RedHatSkeletron variant (the Clothier's repeatable, "Chippy" vanity
@@ -475,6 +532,67 @@ pub fn conditional(npc_type: u16, at: Conditions) -> Vec<Conditional> {
     if npc_type == 75 && at.downed_mech_any {
         out.push(sometimes(5662, 200));
     }
+    // Two more on that same gate, both of which had no source anywhere in this project:
+    // `ItemDropDatabase.cs:787-788`.
+    if at.downed_mech_any {
+        match npc_type {
+            176 => out.push(sometimes(1521, 100)), // Pincushion Zombie
+            205 => out.push(sometimes(1611, 2)),   // Chaos Elemental
+            _ => {}
+        }
+    }
+    // `Conditions.IsHardmode` (`ItemDropDatabase.cs:743`), the Princess's own weapon.
+    if npc_type == 663 && at.hard_mode {
+        out.push(sometimes(5065, 8));
+    }
+    // Bone, from the Angry Bones family (`npcNetIds20`, `ItemDropDatabase.cs:1162-1164`). These
+    // two lines are the *only* place in the whole drop database that gives out item 154, and both
+    // are `ByCondition`, so the flat generator correctly left them alone and nothing else picked
+    // them up: Bone was unobtainable, which also makes every Bone recipe uncraftable.
+    //
+    // The classic branch is the tail of a failed-roll chain whose first three links
+    // (932, 3095, 327) already live in [`crate::npc_drops`] as an ordinary chain, so it is rolled
+    // independently here rather than as that chain's fourth link. The difference is that about
+    // 3.4% of kills give both a weapon and the bones where vanilla gives only the weapon: a
+    // documented over-give, and the alternative is no Bone in the world at all.
+    if matches!(npc_type, 31 | 32 | 34 | 294 | 295 | 296 | 693) {
+        out.push(if at.expert {
+            a_few(154, 1, 2, 6)
+        } else {
+            a_few(154, 1, 1, 3)
+        });
+    }
+    // Pumpking's expert-only extra: `rule.OnSuccess(ByCondition(IsExpert, 4444, 5))`
+    // (`ItemDropDatabase.cs:351`), sitting under the same wave gate as its weapon pool, so the two
+    // rolls multiply exactly as the Headless Horseman's medallion does just below.
+    if npc_type == 325
+        && at.expert
+        && let Some(wave) = at.pumpkin_moon_wave
+    {
+        let gate = pumpkin_moon_gate_denominator(wave, at.expert);
+        out.push(sometimes(4444, gate * 5));
+    }
+    // The Don't Starve crossover drops. Vanilla registers each of these twice, once behind
+    // `Conditions.DontStarveIsUp` and once behind `DontStarveIsNotUp`, and the second is
+    // `!Main.dontStarveWorld` (`Conditions.cs:1498-1503`), which is true in every ordinary world.
+    // This project does not model the Don't Starve seed, so the ordinary-world rate is the only
+    // one, and all five items had no source at all before. `ItemDropDatabase.cs:971-972`,
+    // `:1034-1035`, `:1130-1133`, `:1172-1173`.
+    match npc_type {
+        170 | 171 | 180 => out.push(sometimes(5096, 25)), // the three Pigrons: Ham Bat
+        49 | 51 | 60 | 93 | 137 | 150 | 151 | 152 | 634 => out.push(sometimes(5097, 300)), // bats
+        177 => out.push(sometimes(5089, 100)),            // Mimic (Corrupt)
+        _ => {}
+    }
+    if matches!(npc_type, 6 | 7 | 8 | 9 | 173 | 181 | 239 | 240) {
+        out.push(sometimes(5094, 525)); // Tentacle Spike
+    }
+    if matches!(
+        npc_type,
+        6 | 7 | 8 | 9 | 81 | 94 | 98 | 99 | 100 | 101 | 173 | 174 | 181..=183 | 239..=242 | 268
+    ) {
+        out.push(sometimes(5091, 1500)); // Pig Pet
+    }
     // `Conditions.IsBloodMoonAndNotFromStatue` (`ItemDropDatabase.cs:179-182`) — a statue farm must
     // not be able to grind these, which is the entire reason the game checks the NPC's own origin
     // rather than just the world's.
@@ -677,6 +795,10 @@ pub fn bundled_with(item: u16) -> Option<(u16, i16, i16)> {
         // Mourning Wood's own pool (`ItemDropDatabase.cs:354-357`): both weapons' own ammunition.
         1782 => Some((1783, 50, 100)), // CandyCornRifle -> CandyCorn
         1784 => Some((1785, 25, 50)),  // JackOLanternLauncher -> ExplosiveJackOLantern
+        // The Nail Gun's own ammunition, the same shape: `itemDropRule.OnSuccess(
+        // ItemDropRule.Common(3108, 1, 100, 200), hideLootReport: true)`
+        // (`ItemDropDatabase.cs:268-270`). Both items had no source anywhere before.
+        3107 => Some((3108, 100, 200)), // NailGun -> Nail
         _ => None,
     }
 }
@@ -749,6 +871,16 @@ pub fn chance_pools(npc_type: u16, at: Conditions) -> Vec<ChancePool> {
         42 | 43 | 231 | 232 | 233 | 234 | 235 => vec![pool(100, &[960, 961, 962])],
         // Zombie Elf trio, the Frost Moon's own (`ItemDropDatabase.cs:389`).
         338..=340 => vec![pool(200, &[1943, 1944, 1945])],
+        // Nailhead's Nail Gun, once Plantera is down (`ItemDropDatabase.cs:266-270`): a
+        // `LeadingConditionRule(DownedPlantera)` over a 1-in-25 `Common(3107)` whose own
+        // `OnSuccess` hands over 100-200 Nails. A one-option pool rather than an entry in
+        // `conditional`, because this is the only shape whose consumer also drops the companion
+        // item `bundled_with` names, and the ammunition is only granted when the gun lands.
+        //
+        // Expert really rerolls the 1-in-25 once (`WithRerolls(3107, 1, 25)`), which this project
+        // already flattens to the classic rate everywhere it appears; see `conditional`'s own
+        // `ExpertGetsRerolls` note.
+        463 if at.downed_plantera => vec![pool(25, &[3107])],
         // Corrupt/Crimson Penguin (`ItemDropDatabase.cs:1137`).
         168 | 470 => vec![pool(50, &[3757, 3758, 3759])],
         // Zombie Eskimo, armed or not (`ItemDropDatabase.cs:1005`).
@@ -1222,7 +1354,11 @@ mod tests {
                 trophies.insert(trophy);
             }
         }
-        assert_eq!(bags.len(), 15, "fifteen bosses have bags: {bags:?}");
+        // Nineteen, not fifteen: Betsy, the Empress of Light, Queen Slime and Deerclops were
+        // absent, and all four suppress their classic loot in expert, so an expert kill of any of
+        // them used to yield nothing whatsoever. `ItemDropDatabase.cs` registers exactly these
+        // nineteen `BossBag`/`BossBagByCondition` items.
+        assert_eq!(bags.len(), 19, "nineteen bosses have bags: {bags:?}");
         // Moon Lord, Empress of Light and Deerclops added: their trophies (3595, 4783, 5108) were
         // simply absent from this table before, found by tools/check_drops.py against source.
         // Queen Slime's (4958) added later still: it was present only as a stray, wrongly
