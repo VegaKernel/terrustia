@@ -159,7 +159,9 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
             cooldown: 84,
         },
         // Merchant. NPC.cs:54969-54977: projectile 48, speed 9, damage 12, knockback 1.5.
-        // AttackTime[17]=40, AttackAverageChance[17]=30, DangerDetectRange[17]=320.
+        // AttackTime[17]=34, AttackAverageChance[17]=30, DangerDetectRange[17]=320
+        // (`NPCID.cs:4851,4853,4841`). The `AttackTime` here read 40 and the cooldown 70; the
+        // table's own pair for 17 is 34, so the Merchant was about nine percent slow.
         17 => TownCombat {
             state: 10.0,
             kind: AttackKind::Ranged {
@@ -169,7 +171,7 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
                 knockback: 1.5,
             },
             range: 320.0,
-            cooldown: 70,
+            cooldown: 64,
         },
         // Angler. NPC.cs state-10 block, `type == 369`: projectile 520, damage 10, speed 12,
         // knockback 3. AttackTime[369]=34, AttackAverageChance[369]=50,
@@ -385,7 +387,10 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
             cooldown: 90,
         },
         // Wizard. NPC.cs:55428-55438: projectile 15, speed 6, damage 18, knockback 3.
-        // AttackTime[108]=60, AttackAverageChance[108]=30, DangerDetectRange[108]=700.
+        // AttackTime[108]=30, AttackAverageChance[108]=30, DangerDetectRange[108]=700
+        // (`NPCID.cs:4851,4853,4841`). The `AttackTime` here read 60 and the cooldown 90, which is
+        // the Clothier's pair one entry up rather than the Wizard's own: a Wizard defending a town
+        // fired half as often as vanilla's.
         108 => TownCombat {
             state: 14.0,
             kind: AttackKind::Ranged {
@@ -395,7 +400,7 @@ pub fn town_combat(npc_type: u16) -> Option<TownCombat> {
                 knockback: 3.0,
             },
             range: 700.0,
-            cooldown: 90,
+            cooldown: 60,
         },
         // Truffle. NPC.cs state-14 block, `type == 160` — spawns near the target rather than being
         // thrown, see module doc: projectile 590, damage 40, speed approximated at 6 (vanilla has
@@ -582,6 +587,59 @@ mod tests {
         // attack-cooldown roll. An earlier transcription used the cooldown's 15 as the damage.
         let combat = town_combat(353).unwrap();
         assert!(matches!(combat.kind, AttackKind::Melee { damage: 10, .. }));
+    }
+
+    /// BA3-03, fail-then-pass: every ranged cooldown is its own `AttackTime + AttackAverageChance`.
+    ///
+    /// The pairs below are transcribed from `NPCID.cs:4851` (`AttackTime`), `:4853`
+    /// (`AttackAverageChance`) and `:4841` (`DangerDetectRange`) rather than restated from the
+    /// entries they check, which is the whole point: the Merchant's cooldown was 70 (from an
+    /// `AttackTime` of 40, where the table says 34) and the Wizard's was 90 (from 60, where the
+    /// table says 30, and 60/90 is the Clothier's pair one entry above it in this file).
+    ///
+    /// Melee is deliberately not checked here. Vanilla's melee cadence is not this formula at all:
+    /// state 15 holds `ai[1]` for `AttackTime` ticks and then rests for `num80 + rand(maxValue4)`
+    /// (`NPC.cs:55581-55609,55641-55686`), so the three melee entries approximate something with a
+    /// different shape and are covered by the module doc's disclosure instead.
+    #[test]
+    fn every_ranged_cooldown_is_its_own_attack_time_plus_average_chance() {
+        // (type, AttackTime, AttackAverageChance, DangerDetectRange)
+        const RANGED: [(u16, i32, i32, f32); 25] = [
+            (38, 34, 40, 300.0),
+            (17, 34, 30, 320.0),
+            (107, 60, 60, 300.0),
+            (19, 40, 30, 900.0),
+            (22, 30, 30, 700.0),
+            (124, 34, 30, 800.0),
+            (228, 40, 50, 800.0),
+            (178, 24, 50, 900.0),
+            (18, 34, 60, 300.0),
+            (229, 60, 40, 1000.0),
+            (209, 60, 30, 1000.0),
+            (54, 60, 30, 700.0),
+            (108, 30, 30, 700.0),
+            (160, 60, 60, 700.0),
+            (20, 600, 60, 1200.0),
+            (369, 34, 50, 300.0),
+            (453, 34, 30, 300.0),
+            (368, 60, 40, 900.0),
+            (227, 60, 30, 800.0),
+            (208, 34, 50, 400.0),
+            (142, 34, 50, 500.0),
+            (633, 12, 1, 100.0),
+            (550, 34, 40, 120.0),
+            (588, 20, 20, 120.0),
+            (663, 60, 1, 700.0),
+        ];
+        for (npc_type, attack_time, average_chance, detect_range) in RANGED {
+            let combat = town_combat(npc_type).unwrap_or_else(|| panic!("npc {npc_type}"));
+            assert_eq!(
+                combat.cooldown,
+                attack_time + average_chance,
+                "npc {npc_type}'s cooldown"
+            );
+            assert_eq!(combat.range, detect_range, "npc {npc_type}'s detect range");
+        }
     }
 
     #[test]

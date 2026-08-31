@@ -17,6 +17,19 @@ pub const GRAVITY: f32 = 0.3;
 /// Terminal speed, from `UpdateNPC_UpdateGravity`.
 pub const MAX_FALL_SPEED: f32 = 10.0;
 
+/// The same two in liquid, from `UpdateNPC_UpdateGravity` (`NPC.cs:92054-92071`).
+///
+/// Being in a liquid replaces both outright rather than scaling them, and which liquid decides
+/// which pair: shimmer 0.15/5.5, honey 0.1/4, anything else (water and lava alike, since vanilla's
+/// `wet` covers both) 0.2/7. Without them every land NPC fell through water at 1.5 times vanilla's
+/// gravity to 1.43 times its terminal speed, and sank through honey at three times the pull.
+pub const WET_GRAVITY: f32 = 0.2;
+pub const WET_MAX_FALL_SPEED: f32 = 7.0;
+pub const HONEY_GRAVITY: f32 = 0.1;
+pub const HONEY_MAX_FALL_SPEED: f32 = 4.0;
+pub const SHIMMER_GRAVITY: f32 = 0.15;
+pub const SHIMMER_MAX_FALL_SPEED: f32 = 5.5;
+
 /// One world tile in pixels.
 pub const TILE: f32 = 16.0;
 
@@ -695,6 +708,22 @@ fn move_vertical(npc: &mut Npc, tiles: &impl TileView) {
     npc.velocity.1 = 0.0;
 }
 
+/// Which liquid an NPC is standing in, if any.
+///
+/// The centre tile, which is the same approximation of vanilla's `Collision.WetCollision` over the
+/// whole hitbox that [`super::npc_ai`] already hands the AI routines as `World::wet` — read here
+/// too so a routine and the physics under it never disagree about being in water.
+pub fn liquid_at(
+    tiles: &impl TileView,
+    point: (f32, f32),
+) -> Option<terrustia_proto::tile::Liquid> {
+    let tile = tiles.tile(
+        (point.0 / TILE).floor() as i32,
+        (point.1 / TILE).floor() as i32,
+    );
+    (tile.liquid > 0).then_some(tile.liquid_kind)
+}
+
 /// Advance an NPC's position by one tick, applying gravity and collision.
 pub fn step_physics(npc: &mut Npc, tiles: &impl TileView) {
     npc.old_position = npc.position;
@@ -702,7 +731,19 @@ pub fn step_physics(npc: &mut Npc, tiles: &impl TileView) {
     npc.collide_x = false;
     npc.collide_y = false;
     if !npc.no_gravity {
-        npc.velocity.1 = (npc.velocity.1 + GRAVITY).min(MAX_FALL_SPEED);
+        // `UpdateNPC_UpdateGravity` runs before the routine every tick and decides both numbers
+        // from what the NPC is standing in (`NPC.cs:92054-92071`); the pair is then applied as
+        // `velocity.Y += gravity; if (velocity.Y > maxFallSpeed) velocity.Y = maxFallSpeed;`
+        // (`NPC.cs:91581-91586`), which is this line.
+        let (gravity, max_fall) = match liquid_at(tiles, npc.center()) {
+            None => (GRAVITY, MAX_FALL_SPEED),
+            Some(terrustia_proto::tile::Liquid::Shimmer) => {
+                (SHIMMER_GRAVITY, SHIMMER_MAX_FALL_SPEED)
+            }
+            Some(terrustia_proto::tile::Liquid::Honey) => (HONEY_GRAVITY, HONEY_MAX_FALL_SPEED),
+            Some(_) => (WET_GRAVITY, WET_MAX_FALL_SPEED),
+        };
+        npc.velocity.1 = (npc.velocity.1 + gravity).min(max_fall);
     }
 
     if npc.no_tile_collide {
@@ -1190,6 +1231,45 @@ mod tests {
             step_physics(&mut npc, &empty);
         }
         assert_eq!(npc.velocity.1, MAX_FALL_SPEED);
+    }
+
+    /// BA3-01, fail-then-pass: an NPC in a liquid falls by that liquid's rules.
+    ///
+    /// `UpdateNPC_UpdateGravity` (`NPC.cs:92054-92071`) overwrites both numbers outright when
+    /// `wet` is set, and `wet` covers water and lava alike. Until this, `step_physics` took no
+    /// liquid at all and used 0.3/10 everywhere: every enemy that walked into a lake fell at one
+    /// and a half times vanilla's gravity to 1.43 times its terminal speed, and honey barely
+    /// slowed anything down at all.
+    #[test]
+    fn a_liquid_replaces_gravity_and_terminal_speed() {
+        use terrustia_proto::tile::Liquid;
+
+        /// A world that is nothing but one liquid, with no solid tile anywhere to land on.
+        struct Pool(Liquid);
+        impl TileView for Pool {
+            fn tile(&self, _x: i32, _y: i32) -> Tile {
+                let mut tile = Tile::AIR;
+                tile.liquid = 255;
+                tile.liquid_kind = self.0;
+                tile
+            }
+        }
+
+        for (kind, gravity, terminal) in [
+            (Liquid::Water, WET_GRAVITY, WET_MAX_FALL_SPEED),
+            (Liquid::Lava, WET_GRAVITY, WET_MAX_FALL_SPEED),
+            (Liquid::Honey, HONEY_GRAVITY, HONEY_MAX_FALL_SPEED),
+            (Liquid::Shimmer, SHIMMER_GRAVITY, SHIMMER_MAX_FALL_SPEED),
+        ] {
+            let pool = Pool(kind);
+            let mut npc = zombie_at(32.0, 0.0);
+            step_physics(&mut npc, &pool);
+            assert_eq!(npc.velocity.1, gravity, "{kind:?}: one tick of gravity");
+            for _ in 0..500 {
+                step_physics(&mut npc, &pool);
+            }
+            assert_eq!(npc.velocity.1, terminal, "{kind:?}: terminal speed");
+        }
     }
 
     #[test]

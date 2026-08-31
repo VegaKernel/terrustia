@@ -10,7 +10,7 @@
 
 use rand::{Rng, rngs::SmallRng};
 
-use super::npc::{Npc, TILE, TileView, step_physics};
+use super::npc::{Npc, TileView, step_physics};
 
 /// An NPC a routine wants brought into the world.
 ///
@@ -232,12 +232,9 @@ pub fn update_with(
     npc.target = target.map_or(255, |t| u16::from(t.slot));
 
     if super::ai::is_ported(npc.stats.ai_style) {
-        let liquid_at = |p: (f32, f32)| {
-            tiles
-                .tile((p.0 / TILE).floor() as i32, (p.1 / TILE).floor() as i32)
-                .liquid
-                > 0
-        };
+        // The same read the physics does for its own gravity pair, so a routine and the step under
+        // it never disagree about standing in water.
+        let liquid_at = |p: (f32, f32)| super::npc::liquid_at(tiles, p).is_some();
         let world = super::ai::World {
             tiles,
             target,

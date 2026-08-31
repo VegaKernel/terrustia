@@ -89,6 +89,19 @@ pub struct Config {
     /// by default (`0`). When set, a line sent before the cooldown has elapsed since the account's
     /// last one is dropped rather than broadcast.
     pub chat_cooldown_ms: u64,
+    /// Kick a client that edits tiles or moves liquid faster than the game's own ceilings allow.
+    ///
+    /// `Netplay.SpamCheck` (`Netplay.cs:65`), which vanilla declares `false` and turns on only for
+    /// a server started with `secure=1` (`Main.cs:5200`) or `-secure`
+    /// (`LaunchInitializer.cs:152`). With it off, `RemoteClient.SpamUpdate` zeroes all four
+    /// counters every tick and returns before any of them can reach a ceiling
+    /// (`RemoteClient.cs:70-80`), and the liquid counter is not even incremented
+    /// (`MessageBuffer.cs:2415`) — so a stock server never boots anybody for spam.
+    ///
+    /// Off by default for the same reason it is off in vanilla: the ceilings are tight enough that
+    /// ordinary play reaches them. A stick of dynamite clears hundreds of tiles in one burst, which
+    /// is over `spam_break`'s 500 long before the 5-a-tick decay catches up.
+    pub spam_check: bool,
 }
 
 impl Default for Config {
@@ -129,6 +142,7 @@ impl Default for Config {
             mute_escalation_secs: 300,
             mute_escalation_max_secs: 3600,
             chat_cooldown_ms: 0,
+            spam_check: false,
         }
     }
 }
@@ -257,6 +271,9 @@ impl Config {
         }
         if let Some(v) = get("TERRUSTIA_CHAT_COOLDOWN_MS") {
             self.chat_cooldown_ms = parsed("TERRUSTIA_CHAT_COOLDOWN_MS", &v)?;
+        }
+        if let Some(v) = get("TERRUSTIA_SPAM_CHECK") {
+            self.spam_check = parsed("TERRUSTIA_SPAM_CHECK", &v)?;
         }
         Ok(())
     }
