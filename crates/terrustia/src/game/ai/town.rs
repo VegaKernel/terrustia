@@ -712,6 +712,8 @@ mod tests {
             avoid: &[],
             target_taken: false,
             hooks: None,
+            hook_anchors: &[],
+            body_tentacles: 0,
             kin_moving: false,
             sockets_open: 0,
             army: crate::game::ai::ArmyView::default(),

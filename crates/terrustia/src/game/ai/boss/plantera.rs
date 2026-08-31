@@ -8,25 +8,32 @@
 //! The two halves are different creatures. Above half health it is armoured and shoots seeds, with
 //! thorn balls and spiky seeds mixed in below eighty per cent — each of which costs it a pause, so
 //! the heavier shots buy you time. Below half it sheds most of that armour, hits half again as
-//! hard, and grows eight tentacles that orbit it at a radius which *widens* as it dies.
+//! hard, and grows eight tentacles that orbit it at a radius which *widens* as it dies. In expert
+//! it grows nine more on top of those, three per hook, and those orbit the hook rather than the
+//! body: seventeen in all, spread over four moving centres instead of one. Kill the body's own and
+//! it slowly replaces them.
 //!
-//! Dragged out of the jungle it becomes far faster and hits twice as hard. Like the Golem, it
-//! refuses to be fought anywhere but home.
+//! Dragged out of the jungle it becomes far faster and hits twice as hard. That speed is mostly
+//! its hooks: out of the jungle they drain their re-anchor timer eleven a tick instead of one and
+//! then travel to the new anchor at twice the speed, so the body is dragged after them. Like the
+//! Golem, it refuses to be fought anywhere but home.
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    HOOK_HURRY_ENRAGED, HOOK_HURRY_HALF, HOOK_HURRY_QUARTER, HOOK_REST, HOOK_SEARCH,
-    HOOK_SEARCH_WIDEN, HOOK_SPEED, HOOK_SPEED_HALF, HOOK_SPEED_QUARTER, HOOK_STAGGER,
-    PLANTERA_ACCEL, PLANTERA_ACCEL_HALF, PLANTERA_CHARGE, PLANTERA_DAMAGE, PLANTERA_DEFENSE,
+    HOOK_HURRY_ENRAGED, HOOK_HURRY_ENRAGED_EARLY, HOOK_HURRY_HALF, HOOK_HURRY_QUARTER, HOOK_REST,
+    HOOK_SEARCH, HOOK_SEARCH_WIDEN, HOOK_SPEED, HOOK_SPEED_EXPERT, HOOK_SPEED_HALF,
+    HOOK_SPEED_HURRIED, HOOK_SPEED_QUARTER, HOOK_STAGGER, HOOK_WALL_SNAP_ODDS, PLANTERA_ACCEL,
+    PLANTERA_ACCEL_HALF, PLANTERA_CHARGE, PLANTERA_DAMAGE, PLANTERA_DEFENSE,
     PLANTERA_ENRAGED_ACCEL, PLANTERA_ENRAGED_LEASH, PLANTERA_ENRAGED_SPEED, PLANTERA_HOOK,
     PLANTERA_HOOKS, PLANTERA_LEASH, PLANTERA_LEASH_EXPERT, PLANTERA_MIX_AT, PLANTERA_SECOND_DAMAGE,
     PLANTERA_SECOND_DEFENSE, PLANTERA_SEED_DAMAGE, PLANTERA_SEED_SPEED, PLANTERA_SEED_SPEED_EXPERT,
     PLANTERA_SPEED, PLANTERA_SPEED_HALF, PLANTERA_SPEED_QUARTER, PLANTERA_SPIKY_DAMAGE,
     PLANTERA_SPIKY_REST, PLANTERA_SPORE, PLANTERA_SPORE_AT, PLANTERA_SPORE_HEALTH_STEPS,
-    PLANTERA_SPORE_JITTER, PLANTERA_SPORE_SPEED, PLANTERA_TENTACLE, PLANTERA_TENTACLES,
+    PLANTERA_SPORE_JITTER, PLANTERA_SPORE_SPEED, PLANTERA_TENTACLE, PLANTERA_TENTACLE_REGROW_ODDS,
+    PLANTERA_TENTACLE_REGROW_PER_ALIVE, PLANTERA_TENTACLES, PLANTERA_TENTACLES_GET_GOOD,
     PLANTERA_THORN_BALL_DAMAGE, PLANTERA_THORN_BALL_REST, TENTACLE_ACCEL, TENTACLE_ACCEL_EXPERT,
     TENTACLE_CAP, TENTACLE_DRIFT, TENTACLE_EXPERT_RADIUS, TENTACLE_RADIUS, TENTACLE_RADIUS_QUARTER,
-    TENTACLE_RADIUS_TENTH, TENTACLE_SPREAD,
+    TENTACLE_RADIUS_TENTH, TENTACLE_SPREAD, plantera_tentacles_per_hook,
 };
 use terrustia_proto::projectile::ids::{PLANTERA_SEED, PLANTERA_SPIKY, PLANTERA_THORN_BALL};
 
@@ -248,17 +255,43 @@ pub fn plantera(
         PLANTERA_SECOND_DAMAGE
     });
 
+    let tentacle_at = |hook: Option<usize>| Spawn {
+        npc_type: PLANTERA_TENTACLE,
+        position: (cx, cy),
+        velocity: (0.0, 0.0),
+        parent: Some(Spawn::OWN_PARENT),
+        // A tentacle names the hook it belongs to in `ai[3]`, one-based, and zero means the body
+        // (`NPC.cs:32244`, read back at `:32505-32508`).
+        ai: [None, None, None, hook.map(|h| h as f32 + 1.0)],
+    };
     if npc.local_ai[0] == 1.0 {
         npc.local_ai[0] = 2.0;
-        let at = npc.center();
-        for _ in 0..PLANTERA_TENTACLES {
-            out.spawn.push(Spawn {
-                npc_type: PLANTERA_TENTACLE,
-                position: at,
-                velocity: (0.0, 0.0),
-                parent: Some(Spawn::OWN_PARENT),
-                ai: [None; 4],
-            });
+        let body = if world.conditions.get_good_world {
+            PLANTERA_TENTACLES + PLANTERA_TENTACLES_GET_GOOD
+        } else {
+            PLANTERA_TENTACLES
+        };
+        out.spawn
+            .extend(std::iter::repeat_with(|| tentacle_at(None)).take(body));
+        // In expert each hook grows its own set as well, which orbit that hook rather than the
+        // body (`NPC.cs:32235-32248`). Three hooks at three apiece is nine more, so an expert
+        // Plantera fights with seventeen tentacles; it used to have eight of them.
+        if expert {
+            for hook in 0..world.hook_anchors.len() {
+                out.spawn.extend(
+                    std::iter::repeat_with(|| tentacle_at(Some(hook)))
+                        .take(plantera_tentacles_per_hook(body)),
+                );
+            }
+        }
+    } else if expert && rng.random_range(0..PLANTERA_TENTACLE_REGROW_ODDS) == 0 {
+        // A killed body tentacle grows back, but only in expert, only up to the eight it started
+        // with, and only against a roll that lengthens with every one still standing
+        // (`NPC.cs:32250-32264`). A hook's own tentacles are neither counted nor replaced.
+        let alive = world.body_tentacles;
+        let odds = (alive as u32 + 1) * PLANTERA_TENTACLE_REGROW_PER_ALIVE;
+        if alive < PLANTERA_TENTACLES && rng.random_range(0..odds) <= 1 {
+            out.spawn.push(tentacle_at(None));
         }
     }
 
@@ -318,6 +351,14 @@ pub fn hook(
     let enraged = world.conditions.jungle && target.center.1 > world.conditions.surface_y;
     let enraged = !enraged;
 
+    // Enraged, the timer is drained twice over. This half comes before the "never bitten" reset
+    // and is therefore thrown away by it, exactly as vanilla's is (`NPC.cs:32331-32335`); the
+    // other half is below. Between them an out-of-jungle hook re-anchors at eleven a tick against
+    // an ordinary one's one, and only the six was here.
+    if enraged {
+        npc.local_ai[0] -= HOOK_HURRY_ENRAGED_EARLY;
+    }
+
     // The timer runs down faster the weaker Plantera is.
     if npc.ai[0] == 0.0 || npc.ai[1] == 0.0 {
         npc.local_ai[0] = 0.0;
@@ -352,7 +393,7 @@ pub fn hook(
         } else {
             target.center
         };
-        if let Some((tx, ty)) = bite(world, around, body.health < 0.5, rng) {
+        if let Some((tx, ty)) = bite(world, around, target.center, body.health < 0.5, rng) {
             npc.ai[0] = tx as f32;
             npc.ai[1] = ty as f32;
         }
@@ -368,6 +409,23 @@ pub fn hook(
     }
     if body.health < 0.25 {
         speed = HOOK_SPEED_QUARTER;
+    }
+    // Expert adds one, and another below half health: 7/10/12 rather than 6/8/10
+    // (`NPC.cs:32440-32447`).
+    if world.conditions.expert {
+        speed += HOOK_SPEED_EXPERT;
+        if body.health < 0.5 {
+            speed += HOOK_SPEED_EXPERT;
+        }
+    }
+    // ...and then an enraged hook, or one with nobody left to chase, travels at twice whatever
+    // that came to (`NPC.cs:32448-32455`). This doubling was missing entirely, which is most of
+    // what the header claims about a Plantera dragged out of the jungle.
+    if enraged {
+        speed *= HOOK_SPEED_HURRIED;
+    }
+    if dead {
+        speed *= HOOK_SPEED_HURRIED;
     }
     let anchor = (npc.ai[0] * TILE + 8.0, npc.ai[1] * TILE + 8.0);
     let (cx, cy) = npc.center();
@@ -389,6 +447,7 @@ pub fn hook(
 fn bite(
     world: &World<'_, impl TileView>,
     around: (f32, f32),
+    player: (f32, f32),
     wounded: bool,
     rng: &mut SmallRng,
 ) -> Option<(i32, i32)> {
@@ -396,8 +455,18 @@ fn bite(
     for attempt in 0..1000 {
         // The search widens the longer it goes unanswered.
         let spread = HOOK_SEARCH + (HOOK_SEARCH_WIDEN * (attempt as f32 / 1000.0)) as i32;
-        let x = ax + rng.random_range(-spread..=spread);
-        let y = ay + rng.random_range(-spread..=spread);
+        let mut x = ax + rng.random_range(-spread..=spread);
+        let mut y = ay + rng.random_range(-spread..=spread);
+        // Past half health one attempt in six is spent on the player's own tile instead, if that
+        // tile is walled (`NPC.cs:32400-32410`), which is how a hook bites the room you are
+        // standing in rather than only the one it was already near.
+        if wounded && rng.random_range(0..HOOK_WALL_SNAP_ODDS) == 0 {
+            let (px, py) = ((player.0 / TILE) as i32, (player.1 / TILE) as i32);
+            if world.tiles.tile(px, py).wall > 0 {
+                x = px;
+                y = py;
+            }
+        }
         let tile = world.tiles.tile(x, y);
         let solid = tile.is_active() && terrustia_proto::tile_solid::solid(tile.block);
         let walled = tile.wall > 0 && (attempt > 500 || wounded);
@@ -449,7 +518,20 @@ pub fn tentacle(
         accel += TENTACLE_ACCEL_EXPERT;
     }
 
-    let (bx, by) = body.center();
+    // What it orbits: the body, or the hook it was grown for. Everything above is still keyed to
+    // Plantera's own health, as vanilla's is: only the anchor changes (`NPC.cs:32504-32508`,
+    // spent at `:32546-32547`). A tentacle whose hook is gone goes with it (`:32541-32545`).
+    let (bx, by) = if npc.ai[3] > 0.0 {
+        match world.hook_anchors.get(npc.ai[3] as usize - 1) {
+            Some(&at) => at,
+            None => {
+                out.spent = true;
+                return out;
+            }
+        }
+    } else {
+        body.center()
+    };
     // The offset it drifts around, normalised to the orbit's radius.
     let offset = (npc.ai[0], npc.ai[1]);
     let length = offset.0.hypot(offset.1).max(f32::MIN_POSITIVE);
@@ -458,10 +540,11 @@ pub fn tentacle(
         by + offset.1 / length * radius,
     );
 
-    let (cx, cy) = npc.center();
+    // Vanilla steers its top-left corner at that point, not its middle (`NPC.cs:32557`), so the
+    // orbit sits half a tentacle off from where centring it would put it.
     for (v, here, wanted) in [
-        (&mut npc.velocity.0, cx, station.0),
-        (&mut npc.velocity.1, cy, station.1),
+        (&mut npc.velocity.0, npc.position.0, station.0),
+        (&mut npc.velocity.1, npc.position.1, station.1),
     ] {
         if here > wanted {
             if *v > 0.0 {
@@ -476,11 +559,15 @@ pub fn tentacle(
         }
         *v = v.clamp(-TENTACLE_CAP, TENTACLE_CAP);
     }
-    let (dx, dy) = (station.0 - cx, station.1 - cy);
-    npc.rotation = dy.atan2(dx);
-    npc.sprite_direction = if dx > 0.0 { 1 } else { -1 };
-    if dx < 0.0 {
-        npc.rotation += std::f32::consts::PI;
+    // It points the way out from its anchor, not the way to its station: vanilla's rotation is off
+    // the offset itself (`num848`/`num849`, `NPC.cs:32605-32614`).
+    let (dx, dy) = (station.0 - bx, station.1 - by);
+    if dx > 0.0 {
+        npc.sprite_direction = 1;
+        npc.rotation = dy.atan2(dx);
+    } else if dx < 0.0 {
+        npc.sprite_direction = -1;
+        npc.rotation = dy.atan2(dx) + std::f32::consts::PI;
     }
     out
 }
@@ -746,6 +833,186 @@ mod tests {
         assert!(hook(&mut h, &w, None, false, &mut rng).spent);
         let mut t = Npc::new(PLANTERA_TENTACLE, (0.0, 0.0), 1).unwrap();
         assert!(tentacle(&mut t, &w, None, &mut rng).spent);
+    }
+
+    /// P9: in expert every hook grows its own set of tentacles on top of the body's eight, three
+    /// apiece (`num810 / 2 - 1`), tagged with the hook they belong to in `ai[3]`
+    /// (`NPC.cs:32235-32248`). Expert Plantera was fighting with eight of its seventeen.
+    #[test]
+    fn expert_grows_a_set_of_tentacles_per_hook() {
+        let tiles = cavern();
+        let anchors = [(-800.0, 0.0), (0.0, -800.0), (800.0, 0.0)];
+        let mut w = world(&tiles, Some((200.0, 0.0)));
+        w.conditions.expert = true;
+        w.hook_anchors = &anchors;
+
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut p = plant(0.0, 0.0);
+        p.local_ai[0] = 1.0;
+        p.life = p.life_max / 4;
+        let out = plantera(&mut p, &w, home(Some((0.0, 0.0))), &mut rng);
+
+        let grown: Vec<_> = out
+            .spawn
+            .iter()
+            .filter(|s| s.npc_type == PLANTERA_TENTACLE)
+            .collect();
+        let per_hook = plantera_tentacles_per_hook(PLANTERA_TENTACLES);
+        assert_eq!(
+            grown.len(),
+            PLANTERA_TENTACLES + anchors.len() * per_hook,
+            "seventeen tentacles, not eight"
+        );
+        assert_eq!(
+            grown.iter().filter(|s| s.ai[3].is_none()).count(),
+            PLANTERA_TENTACLES,
+            "eight of them the body's own"
+        );
+        for hook in 1..=anchors.len() {
+            assert_eq!(
+                grown
+                    .iter()
+                    .filter(|s| s.ai[3] == Some(hook as f32))
+                    .count(),
+                per_hook,
+                "three apiece for hook {hook}"
+            );
+        }
+    }
+
+    /// P9b: a hook's tentacles orbit that hook, not the body (`NPC.cs:32504-32508`), and go with
+    /// it when it does (`:32541-32545`).
+    #[test]
+    fn a_hook_borne_tentacle_orbits_its_hook() {
+        let tiles = cavern();
+        let anchors = [(2000.0, 0.0)];
+        let mut w = world(&tiles, Some((0.0, 0.0)));
+        w.hook_anchors = &anchors;
+
+        let mut rng = SmallRng::seed_from_u64(14);
+        let mut t = Npc::new(PLANTERA_TENTACLE, (0.0, 0.0), 1).unwrap();
+        t.ai[3] = 1.0;
+        let body = body_at((0.0, 0.0), 1.0);
+        for _ in 0..1200 {
+            tentacle(&mut t, &w, Some(body), &mut rng);
+            t.position.0 += t.velocity.0;
+            t.position.1 += t.velocity.1;
+        }
+        assert!(
+            t.position.0 > 1000.0,
+            "it should be out at its hook, not on the body: {:?}",
+            t.position
+        );
+
+        w.hook_anchors = &[];
+        assert!(
+            tentacle(&mut t, &w, Some(body), &mut rng).spent,
+            "and it does not outlive the hook it belongs to"
+        );
+    }
+
+    /// P10: a killed body tentacle grows back, in expert only, and never past the eight it started
+    /// with (`NPC.cs:32250-32264`). Nothing regrew at all.
+    #[test]
+    fn expert_regrows_the_body_tentacles_you_kill() {
+        let tiles = cavern();
+        let regrown = |expert: bool, alive: usize| {
+            let mut rng = SmallRng::seed_from_u64(12);
+            let mut w = world(&tiles, Some((200.0, 0.0)));
+            w.conditions.expert = expert;
+            w.body_tentacles = alive;
+            let mut p = plant(0.0, 0.0);
+            // Its tentacles are already out, so this is the regrow branch and not the first one.
+            p.local_ai[0] = 2.0;
+            p.life = p.life_max / 4;
+            (0..6000)
+                .map(|_| {
+                    plantera(&mut p, &w, home(Some((0.0, 0.0))), &mut rng)
+                        .spawn
+                        .iter()
+                        .filter(|s| s.npc_type == PLANTERA_TENTACLE)
+                        .count()
+                })
+                .sum::<usize>()
+        };
+        assert!(regrown(true, 4) > 0, "expert replaces what you kill");
+        assert_eq!(regrown(false, 4), 0, "classic does not");
+        assert_eq!(
+            regrown(true, PLANTERA_TENTACLES),
+            0,
+            "and never more than the eight it started with"
+        );
+    }
+
+    /// P11: an enraged hook drains its re-anchor timer at eleven a tick rather than seven (the
+    /// `-4` at `NPC.cs:32333` on top of the `-6` at `:32364`) and travels at twice the speed
+    /// (`:32448-32455`); expert adds one to that speed before the doubling (`:32440-32447`).
+    /// Together these are most of what "dragged out of the jungle it becomes far faster" meant,
+    /// and only the `-6` was here.
+    #[test]
+    fn an_enraged_hook_lets_go_sooner_and_travels_twice_as_fast() {
+        let tiles = cavern();
+        let travel = |enraged: bool, expert: bool| {
+            let mut rng = SmallRng::seed_from_u64(13);
+            let mut w = world(&tiles, Some((0.0, 0.0)));
+            w.conditions.expert = expert;
+            w.conditions.jungle = !enraged;
+            let mut h = Npc::new(PLANTERA_HOOK, (0.0, 0.0), 1).unwrap();
+            // Already bitten, and a long way from its anchor, so it is travelling at its speed.
+            h.ai = [200.0, 200.0, 0.0, 0.0];
+            h.local_ai[0] = 600.0;
+            hook(&mut h, &w, Some(body_at((0.0, 0.0), 1.0)), false, &mut rng);
+            (h.velocity.0.hypot(h.velocity.1), h.local_ai[0])
+        };
+        let (calm, calm_timer) = travel(false, false);
+        let (angry, angry_timer) = travel(true, false);
+        let (expert, _) = travel(false, true);
+        assert!(
+            (calm - HOOK_SPEED).abs() < 0.01,
+            "six a tick at home: {calm}"
+        );
+        assert!(
+            (angry - HOOK_SPEED * HOOK_SPEED_HURRIED).abs() < 0.01,
+            "twice that out of the jungle: {angry}"
+        );
+        assert!(
+            (expert - (HOOK_SPEED + HOOK_SPEED_EXPERT)).abs() < 0.01,
+            "seven in expert, not six: {expert}"
+        );
+        assert_eq!(calm_timer, 599.0, "one a tick at home");
+        assert_eq!(angry_timer, 589.0, "eleven a tick out of it");
+    }
+
+    /// P11b: past half health a hook will settle for the walled tile you are standing on, which is
+    /// a one-in-six roll per attempt (`NPC.cs:32400-32410`) and was missing.
+    #[test]
+    fn a_wounded_hook_bites_the_room_you_are_standing_in() {
+        // Nothing anywhere but one walled tile under the player, and the player far enough from
+        // where the hook is searching that only the snap can reach it.
+        let tiles = Jungle(HashMap::from([((500, 500), Tile::AIR.with_wall(2))]));
+        let anchor = |health: f32| {
+            let mut rng = SmallRng::seed_from_u64(15);
+            let w = world(&tiles, Some((8000.0, 8000.0)));
+            let mut h = Npc::new(PLANTERA_HOOK, (0.0, 0.0), 1).unwrap();
+            hook(
+                &mut h,
+                &w,
+                Some(body_at((0.0, 0.0), health)),
+                false,
+                &mut rng,
+            );
+            (h.ai[0], h.ai[1])
+        };
+        assert_eq!(
+            anchor(0.25),
+            (500.0, 500.0),
+            "past half health it bites your own walled tile"
+        );
+        assert_eq!(
+            anchor(1.0),
+            (0.0, 0.0),
+            "before that there is nothing out here for it"
+        );
     }
 
     /// The tentacles' orbit widens as Plantera dies, so the fight closes in on you rather than

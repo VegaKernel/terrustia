@@ -100,6 +100,8 @@ fn main() -> ExitCode {
                     target_taken: false,
                     hostile: None,
                     hooks: None,
+                    hook_anchors: &[],
+                    body_tentacles: 0,
                     kin_moving: false,
                     census: &[],
                     parent: None,

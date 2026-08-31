@@ -3896,9 +3896,22 @@ pub const GOLEM_FREE_ACCEL: f32 = 0.05;
 pub const PLANTERA: u16 = 262;
 pub const PLANTERA_HOOK: u16 = 263;
 pub const PLANTERA_TENTACLE: u16 = 264;
-/// It starts with three hooks and, in its second form, eight tentacles.
+/// It starts with three hooks and, in its second form, eight tentacles on the body
+/// (`NPC.cs:32226-32234`), six more of those in a for-the-worthy world.
 pub const PLANTERA_HOOKS: usize = 3;
 pub const PLANTERA_TENTACLES: usize = 8;
+pub const PLANTERA_TENTACLES_GET_GOOD: usize = 6;
+/// In expert each hook grows its own set as well, `body / 2 - 1` apiece, and those orbit the hook
+/// rather than the body (`NPC.cs:32235-32248`, `:32505-32508`). Three hooks makes nine more, so
+/// an expert Plantera fights with seventeen tentacles rather than eight.
+pub const fn plantera_tentacles_per_hook(body: usize) -> usize {
+    body / 2 - 1
+}
+/// A killed body tentacle grows back, in expert only: a one-in-sixty roll each tick, and then a
+/// second roll that gets longer the more of the eight are already standing (`NPC.cs:32250-32264`).
+/// Only tentacles with no hook of their own are counted or replaced.
+pub const PLANTERA_TENTACLE_REGROW_ODDS: u32 = 60;
+pub const PLANTERA_TENTACLE_REGROW_PER_ALIVE: u32 = 10;
 
 /// How fast it swings, and how hard it accelerates, at each health threshold.
 pub const PLANTERA_SPEED: f32 = 2.5;
@@ -3947,13 +3960,25 @@ pub const HOOK_REST: (u32, u32) = (300, 600);
 pub const HOOK_STAGGER: (u32, u32) = (60, 300);
 pub const HOOK_HURRY_HALF: f32 = 2.0;
 pub const HOOK_HURRY_QUARTER: f32 = 2.0;
+/// Out of the jungle the timer is drained twice over, once before the "never bitten" reset
+/// (`NPC.cs:32333`) and once after it (`:32364`), for eleven a tick against the ordinary one.
+pub const HOOK_HURRY_ENRAGED_EARLY: f32 = 4.0;
 pub const HOOK_HURRY_ENRAGED: f32 = 6.0;
 /// How far from its anchor point it looks for somewhere to bite.
 pub const HOOK_SEARCH: i32 = 20;
 pub const HOOK_SEARCH_WIDEN: f32 = 100.0;
+/// Past half health one attempt in six is spent on the player's own tile instead, if it is walled
+/// (`NPC.cs:32400-32410`), which is what lets a hook bite the room you are standing in.
+pub const HOOK_WALL_SNAP_ODDS: u32 = 6;
 pub const HOOK_SPEED: f32 = 6.0;
 pub const HOOK_SPEED_HALF: f32 = 8.0;
 pub const HOOK_SPEED_QUARTER: f32 = 10.0;
+/// Expert adds one, and another below half health, before any doubling (`NPC.cs:32440-32447`).
+pub const HOOK_SPEED_EXPERT: f32 = 1.0;
+/// Then an enraged hook, or one with nobody left to chase, travels at twice whatever that came to
+/// (`NPC.cs:32448-32455`). This is most of why a Plantera dragged out of the jungle crosses ground
+/// the way it does.
+pub const HOOK_SPEED_HURRIED: f32 = 2.0;
 
 /// A tentacle orbits Plantera at a radius that grows as Plantera weakens.
 pub const TENTACLE_RADIUS: f32 = 200.0;
@@ -4025,8 +4050,12 @@ pub const DETONATING_BUBBLE: u16 = 371;
 /// really runs it.
 pub const SHARKRON: u16 = 372;
 
-/// One phase of the fight. Fishron runs the same skeleton three times over with different numbers,
-/// which is why they are a table rather than a stack of branches.
+/// How Fishron moves. It runs the same skeleton three times over with different numbers, which is
+/// why they are a table rather than a stack of branches.
+///
+/// Movement only: the damage and armour multipliers are [`FISHRON_DAMAGE`]/[`FISHRON_DEFENSE`],
+/// because vanilla picks those off the phase alone while every number here also turns on the half
+/// of the attack cycle it is in and on expert (`NPC.cs:49320-49353`).
 #[derive(Debug, Clone, Copy)]
 pub struct FishronPhase {
     /// How long it holds station before choosing an attack.
@@ -4036,46 +4065,100 @@ pub struct FishronPhase {
     /// The charge: how long it lasts and how fast it goes.
     pub charge_ticks: f32,
     pub charge_speed: f32,
-    /// How hard it hits and how much it soaks, relative to its type.
-    pub damage: f32,
-    pub defense: f32,
 }
 
-/// The first phase: measured, and it still has its armour.
+/// The first phase: measured, and it still has its armour. Also the fallback row the second phase
+/// drops back to for the half of its cycle that is winding up to a burst or a bubble
+/// (`NPC.cs:49320-49322`, `:49339-49340`, which is where `num3`..`num7` are seeded before any
+/// branch touches them).
 pub const FISHRON_FIRST: FishronPhase = FishronPhase {
     hover_ticks: 60.0,
     hover_accel: 0.45,
     hover_speed: 7.5,
     charge_ticks: 30.0,
     charge_speed: 16.0,
-    damage: 1.0,
-    defense: 1.0,
 };
 
-/// The second, below half health: faster, harder, and thinner-skinned.
+/// The same row in expert, which vanilla writes inline on every one of those five numbers.
+pub const FISHRON_FIRST_EXPERT: FishronPhase = FishronPhase {
+    hover_ticks: 40.0,
+    hover_accel: 0.55,
+    hover_speed: 8.5,
+    charge_ticks: 28.0,
+    charge_speed: 17.0,
+};
+
+/// The second, below half health: faster, harder, and thinner-skinned. Only for the charging half
+/// of its cycle (`flag3 & flag5`, `NPC.cs:49329-49334` and `:49346-49353`).
 pub const FISHRON_SECOND: FishronPhase = FishronPhase {
     hover_ticks: 20.0,
     hover_accel: 0.5,
     hover_speed: 8.0,
     charge_ticks: 30.0,
     charge_speed: 16.0,
-    damage: 1.2,
-    defense: 0.8,
 };
 
-/// The third, in expert below fifteen per cent: no armour at all, and very fast.
+/// The same, in expert. Note the hover goes *up* to forty rather than down to twenty: expert
+/// Fishron holds station longer here and charges harder for it.
+pub const FISHRON_SECOND_EXPERT: FishronPhase = FishronPhase {
+    hover_ticks: 40.0,
+    hover_accel: 0.6,
+    hover_speed: 10.0,
+    charge_ticks: 27.0,
+    charge_speed: 21.0,
+};
+
+/// The third, in expert below fifteen per cent: no armour at all, and very fast. The one row with
+/// no expert variant, because it only exists in expert (`NPC.cs:49323-49328`, `:49341-49345`).
 pub const FISHRON_THIRD: FishronPhase = FishronPhase {
     hover_ticks: 30.0,
     hover_accel: 0.7,
     hover_speed: 12.0,
     charge_ticks: 25.0,
     charge_speed: 27.0,
-    damage: 1.1,
-    defense: 0.0,
 };
+
+/// The hover in the first phase's charging half, which is the one number that half changes
+/// (`NPC.cs:49335-49338`) and the same in expert as out of it.
+pub const FISHRON_FIRST_HOVER_CHARGING: f32 = 30.0;
+
+/// How far into the attack cycle counts as its charging half: `flag5 = ai[3] < num2 * 2`, with
+/// `num2` five in the first phase and three after (`NPC.cs:49303-49304`).
+///
+/// `ai[3]` only reaches `num2 * 2` on the two hovers that decide the burst and the bubble, so the
+/// effect is a longer wind-up before each of those and a short one before every charge.
+pub const FISHRON_HALF_CYCLE: i32 = 10;
+pub const FISHRON_HALF_CYCLE_LATER: i32 = 6;
+
+/// How hard it hits and how much it soaks, per phase (`NPC.cs:49307-49318`). The first phase is
+/// flat `defDamage` with no expert multiplier at all; only the later two take
+/// [`FISHRON_EXPERT_PACE`].
+pub const FISHRON_DAMAGE: [f32; 3] = [1.0, 1.2, 1.1];
+pub const FISHRON_DEFENSE: [f32; 3] = [1.0, 0.8, 0.0];
 
 /// Expert makes everything a fifth faster again.
 pub const FISHRON_EXPERT_PACE: f32 = 1.2;
+
+/// Fought anywhere but over the ocean it enrages: hovering at a tenth the interval, hitting and
+/// soaking double, charging six pixels a tick faster, and trading its sharkron burst for a bubble
+/// (`NPC.cs:49390-49397`, and the two swaps at `:49647` and `:49684`).
+///
+/// The three ways to be out of bounds are: above the sky line, below the surface, or further than
+/// [`FISHRON_ENRAGE_FROM_EDGE`] from both edges of the world, which is to say inland.
+pub const FISHRON_ENRAGE_ABOVE: f32 = 800.0;
+pub const FISHRON_ENRAGE_FROM_EDGE: f32 = 6400.0;
+pub const FISHRON_ENRAGED_HOVER_TICKS: f32 = 10.0;
+pub const FISHRON_ENRAGED_CHARGE_BONUS: f32 = 6.0;
+pub const FISHRON_ENRAGED_DAMAGE: f32 = 2.0;
+pub const FISHRON_ENRAGED_DEFENSE: f32 = 2.0;
+
+/// It arrives faded out and holds still for seventy-five ticks (`ai[0] = -1`,
+/// `NPC.cs:49399-49409` and `:49517-49566`, `num21` at `:49367`), rising after the first twenty
+/// (`NPC.cs:49518-49535`). It cannot be hurt for any of it.
+pub const FISHRON_ARRIVAL_TICKS: f32 = 75.0;
+pub const FISHRON_ARRIVAL_RISE_AT: f32 = 20.0;
+pub const FISHRON_ARRIVAL_RISE: f32 = -2.0;
+pub const FISHRON_ARRIVAL_FADE: i32 = 5;
 /// Where it holds station: three hundred pixels to one side, two hundred above.
 pub const FISHRON_BESIDE: f32 = 300.0;
 pub const FISHRON_ABOVE: f32 = 200.0;
@@ -4105,12 +4188,16 @@ pub const FISHRON_BURST_LATER_SPRAY_EVERY: f32 = 4.0;
 pub const FISHRON_BURST_LATER_SPRAY_SPEED: f32 = 6.0;
 /// How far it turns each tick: a full half-circle spread over the whole burst.
 pub const FISHRON_BURST_LATER_CURVE: f32 = std::f32::consts::TAU / 60.0;
-/// The bubbles: two, thrown from its mouth partway through the wind-up.
+/// The bubbles: two, thrown from its mouth partway through the wind-up (`NPC.cs:49801`).
 pub const FISHRON_BUBBLE_TICKS: f32 = 90.0;
 pub const FISHRON_BUBBLE_AT: f32 = 30.0;
 pub const FISHRON_BUBBLE_SPEED: (f32, f32) = (2.0, 8.0);
-/// The pause between phases, during which it does nothing at all.
-pub const FISHRON_SHIFT_TICKS: f32 = 120.0;
+/// Enraged, it starts the wind-up forty ticks from the end instead of ninety, so the bubble is out
+/// almost at once (`NPC.cs:49684`).
+pub const FISHRON_BUBBLE_ENRAGED_AT: f32 = 40.0;
+/// The pause between phases, during which it does nothing at all and cannot be hurt (`num13` and
+/// `num14`, `NPC.cs:49359-49360`, spent at `:49823` and `:50075`).
+pub const FISHRON_SHIFT_TICKS: f32 = 180.0;
 /// Half health starts the second phase; in expert, fifteen per cent starts the third.
 pub const FISHRON_SECOND_AT: f32 = 0.5;
 pub const FISHRON_THIRD_AT: f32 = 0.15;
