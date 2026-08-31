@@ -38,9 +38,16 @@ use std::path::{Path, PathBuf};
 /// rather than restating it. Nothing else in that lane's scope had a site to remove; `record.rs`'s
 /// two and `reader.rs`'s one are in files it did not own.
 ///
+/// 11, down from 12 (Fix lane B, liquid and world runtime): `liquid.rs`'s
+/// `levels.iter().max().unwrap() - levels.iter().min().unwrap()` is gone with the "flat to within
+/// a drop, leave it alone" tolerance it computed. That tolerance was standing in for a spare-unit
+/// tie-break that `level` now does directly, so the whole expression, and its invariant claim
+/// about a slice whose length starts at 1, went with it. The three `unreachable!` arms in
+/// `merge_result` are untouched.
+///
 /// Lower this whenever a site genuinely goes away, in the same commit. Never raise it without a
 /// comment at the new site saying which invariant makes it safe.
-const ALLOWED: usize = 12;
+const ALLOWED: usize = 11;
 
 fn crate_roots() -> Vec<PathBuf> {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

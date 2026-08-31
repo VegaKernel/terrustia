@@ -18,8 +18,11 @@
 //!   grass, sand, ice and the flower variant of grass — plus every hallow, corrupt and crimson
 //!   tile. Ore, wood and brick are not in it at all.
 //!
-//! One column is counted per tick, as the game does. A full sweep of a small world therefore takes
-//! about a minute of play, which is the same freshness the real game offers.
+//! One column is counted every thirtieth tick, as the game does (see [`Census::tick`]). A full
+//! sweep of a 4,200-wide world therefore takes about 35 minutes of play, not the minute this doc
+//! used to claim from a column-per-tick it never actually did: the code has always been right and
+//! only the prose was wrong. Half an hour is the freshness the real game offers, which is why the
+//! Dryad's numbers lag a fresh infection rather than tracking it.
 
 use super::World;
 
