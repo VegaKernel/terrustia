@@ -3720,7 +3720,11 @@ impl GameServer {
         let sync = SyncItem::decode(payload)?;
 
         if sync.is_new() {
-            let Some(index) = self.items.spawn(sync.item, sync.position) else {
+            // Through `take_item_slot` rather than the store directly: a client asking for a slot
+            // gets one the same way a server-side drop does, recycled item and its `151` included.
+            // Vanilla routes this branch back through `Item.NewItem` itself for that very reason
+            // (`MessageBuffer.cs:1501-1505`, case 21).
+            let Some(index) = self.take_item_slot(sync.item, sync.position) else {
                 return Ok(());
             };
             if let Some(item) = self.items.get_mut(index) {

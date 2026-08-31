@@ -3,9 +3,21 @@
 //! Terraria addresses these by slot index, and the index travels on the wire, so a removed item
 //! leaves a hole rather than shifting its neighbours.
 
-use terrustia_proto::{ItemStack, items::MAX_ITEMS};
+use terrustia_proto::{
+    ItemStack,
+    items::{MAX_ITEMS, PICKUP_REPLACEMENT_TIME, SLOTS_RESERVED_BEFORE_RECYCLING},
+};
 
 /// How long an unclaimed item survives before it is cleaned up, in ticks at 60 Hz.
+///
+/// This server's own, not vanilla's: a Terraria world item never expires with age at all.
+/// `WorldItem.UpdateItem`'s only self-destructs are per-type (a Fallen Star at sunrise, a Mana
+/// Cloak star after 300 ticks, a Defender Medal outside the Old One's Army) plus lava and falling
+/// out of the world (`WorldItem.cs:646-714`). What keeps the 400-slot table from filling in the
+/// real game is [`ItemStore::pick_slot`]'s recycling, which is transcribed. This timer stays
+/// because a long-running server with nobody logged in has no reason to hold a decade of dropped
+/// dirt, but it is a divergence, and it is the reason a client sees a `151` from this server that
+/// a real one would not have sent.
 pub const DESPAWN_TICKS: u32 = 60 * 60 * 10;
 
 /// How long a reservation lasts before the item is offered to somebody else.
@@ -218,11 +230,100 @@ impl ItemStore {
         }
     }
 
-    /// Place an item in the lowest free slot, or return None when the world is full of them.
-    pub fn spawn(&mut self, item: ItemStack, position: (f32, f32)) -> Option<i16> {
-        let index = self.slots.iter().position(Option::is_none)?;
+    /// Place an item in the slot [`ItemStore::pick_slot`] chooses.
+    ///
+    /// Returns that slot and whether taking it destroyed a live item. A caller that talks to
+    /// clients owes them a `151` for the destroyed one *before* it announces the new one, because
+    /// the wire addresses both by the same index and a client that only ever heard the `21` would
+    /// quietly swap the old item for the new one on its own screen without the pickup ever
+    /// happening. That is `Item.NewItem`'s own order (`Item.cs:49725-49730`).
+    pub fn spawn(&mut self, item: ItemStack, position: (f32, f32)) -> Option<(i16, bool)> {
+        let index = self.pick_slot()?;
+        let recycled = self.slots[index].is_some();
         self.slots[index] = Some(WorldItem::new(item, position));
-        i16::try_from(index).ok()
+        Some((i16::try_from(index).ok()?, recycled))
+    }
+
+    /// Which slot a new item should go in, destroying whatever is in it if it comes to that.
+    ///
+    /// `Item.PickAnItemSlotToSpawnItemOn` (`Item.cs:49779-49845`), transcribed with its branch
+    /// order intact. Terraria's world items never expire on their own, so the 400-slot table is
+    /// kept clear by *recycling*: a busy server throws away the least valuable item it can find
+    /// rather than refusing to drop the new one. Three tiers, in the game's own order:
+    ///
+    /// 1. The first free slot below the reserve line, if there is one.
+    /// 2. Otherwise the oldest "pickup" (a heart or a mana star) that has been lying around for
+    ///    more than [`PICKUP_REPLACEMENT_TIME`] ticks. Note this only considers slots *before* the
+    ///    first free one, because vanilla's scan breaks there, and it is preferred even when a free
+    ///    slot exists, as long as that free slot is at or past the reserve line.
+    /// 3. Otherwise, with the table completely full, the oldest item of any kind.
+    ///
+    /// Two disclosed narrowings, both of which only ever make this pick a *different* slot, never a
+    /// wrong one:
+    ///
+    /// - Between tiers 2 and 3 vanilla tries `EmergencyStacking.EmergencyStackItemsToMakeSpace`
+    ///   (`Item.cs:49807-49810`), which walks the whole table looking for pairs of partial stacks
+    ///   of the same type close enough together to merge, ranked by an on-screen/age/distance
+    ///   ordering, and frees the slot it emptied. That is a 450-line subsystem of its own
+    ///   (`Terraria.GameContent/EmergencyStacking.cs`) with a pending-transfer queue that
+    ///   `Item.NewItem` also has to clear (`Item.cs:49731`). It is not built here, so this behaves
+    ///   exactly as vanilla does when that call returns false: it falls through to tier 3.
+    /// - Vanilla also skips any slot whose `Main.timeItemSlotCannotBeReusedFor` is still counting
+    ///   down. That timer is set in exactly one place, `WorldItem.MakeInstanced`
+    ///   (`WorldItem.cs:326-341`), where the server hands each player their own private copy of a
+    ///   treasure bag over packet `90` and then turns its *own* copy to air, holding the slot empty
+    ///   for 54000 ticks so nothing else claims an index the clients still have an item in. This
+    ///   server does not do that: `drop_instanced_bag` keeps the bag as a real occupied slot owned
+    ///   by its one player (see its own doc comment). There is therefore no such thing here as a
+    ///   slot that looks free but is not, the timer would be zero everywhere, and every branch that
+    ///   reads it degenerates. That includes vanilla's fourth loop (`Item.cs:49830-49838`), which
+    ///   is tier 3's comparison with the timer subtracted from both sides: with the timer always
+    ///   zero it is tier 3 exactly, so it is left out rather than transcribed as a dead duplicate.
+    fn pick_slot(&self) -> Option<usize> {
+        // Vanilla's `num`: the first free slot, or 400 for "there is not one".
+        let mut free = MAX_ITEMS;
+        // ...its `num2`/`num3`: the oldest pickup worth throwing away, and how old that is.
+        let mut recyclable = None;
+        let mut oldest_pickup = PICKUP_REPLACEMENT_TIME;
+        for (index, slot) in self.slots.iter().enumerate() {
+            let Some(item) = slot else {
+                free = index;
+                break;
+            };
+            if terrustia_proto::items::is_a_pickup(item.item.id) && item.age > oldest_pickup {
+                oldest_pickup = item.age;
+                recyclable = Some(index);
+            }
+        }
+
+        // A server keeps the tail of the table in hand, so the last slots stay available for
+        // whatever cannot be recycled. Reaching into it, or finding no free slot at all, is what
+        // makes recycling preferable to allocating.
+        if free >= MAX_ITEMS - SLOTS_RESERVED_BEFORE_RECYCLING
+            && let Some(index) = recyclable
+        {
+            return Some(index);
+        }
+        if free != MAX_ITEMS {
+            return Some(free);
+        }
+
+        // Nothing free and no stale pickup: destroy the oldest item in the world. `> oldest`
+        // rather than `>=` keeps vanilla's own first-index-wins tie-break.
+        let mut oldest = 0;
+        let mut pick = None;
+        for (index, slot) in self.slots.iter().enumerate() {
+            let age = slot.map_or(0, |item| item.age);
+            if age > oldest {
+                oldest = age;
+                pick = Some(index);
+            }
+        }
+        // Vanilla returns slot 400 here, the scratch entry `Main.item` carries past the 400 real
+        // ones, which is its way of throwing the drop away: nothing is broadcast for it and the
+        // next spawn overwrites it. Only reachable when all 400 slots hold an item that has not
+        // been ticked even once, so it is this server's `None` and the same discarded drop.
+        pick
     }
 
     pub fn get(&self, index: i16) -> Option<&WorldItem> {
@@ -318,15 +419,33 @@ mod tests {
         ItemStack::new(3, 1, 0)
     }
 
+    /// A heart, one of the ten types in `ItemID.Sets.IsAPickup`.
+    fn a_pickup() -> ItemStack {
+        ItemStack::new(58, 1, 0)
+    }
+
+    /// The lowest slot a server holds in reserve: 400 - 40 = 360.
+    const FIRST_RESERVED_SLOT: i16 = (MAX_ITEMS - SLOTS_RESERVED_BEFORE_RECYCLING) as i16;
+
+    /// Fill every slot, and age each item so the picker has something to order them by.
+    fn full_store(item: ItemStack, age: u32) -> ItemStore {
+        let mut store = ItemStore::new();
+        for _ in 0..MAX_ITEMS {
+            let (index, _) = store.spawn(item, (0.0, 0.0)).expect("a slot");
+            store.get_mut(index).expect("the item").age = age;
+        }
+        store
+    }
+
     #[test]
     fn spawning_uses_the_lowest_free_slot() {
         let mut store = ItemStore::new();
-        assert_eq!(store.spawn(stack(), (0.0, 0.0)), Some(0));
-        assert_eq!(store.spawn(stack(), (0.0, 0.0)), Some(1));
+        assert_eq!(store.spawn(stack(), (0.0, 0.0)), Some((0, false)));
+        assert_eq!(store.spawn(stack(), (0.0, 0.0)), Some((1, false)));
         store.remove(0);
         assert_eq!(
             store.spawn(stack(), (0.0, 0.0)),
-            Some(0),
+            Some((0, false)),
             "the hole is reused"
         );
     }
@@ -335,7 +454,7 @@ mod tests {
     fn removing_leaves_a_hole_rather_than_renumbering() {
         let mut store = ItemStore::new();
         store.spawn(stack(), (0.0, 0.0));
-        let second = store.spawn(ItemStack::new(9, 5, 0), (1.0, 1.0)).unwrap();
+        let (second, _) = store.spawn(ItemStack::new(9, 5, 0), (1.0, 1.0)).unwrap();
         store.remove(0);
         assert_eq!(
             store.get(second).unwrap().item.id,
@@ -344,20 +463,112 @@ mod tests {
         );
     }
 
+    /// The gap this whole picker exists to close: a Terraria world item never expires, so a real
+    /// server keeps its 400 slots clear by destroying the least valuable thing in them. Refusing
+    /// the drop instead is how loot silently vanished on a busy world.
     #[test]
-    fn a_full_store_refuses_more() {
-        let mut store = ItemStore::new();
-        for _ in 0..MAX_ITEMS {
-            assert!(store.spawn(stack(), (0.0, 0.0)).is_some());
+    fn a_full_store_recycles_rather_than_dropping_the_loot() {
+        let mut store = full_store(stack(), 5_000);
+
+        let (index, recycled) = store
+            .spawn(ItemStack::new(9, 1, 0), (0.0, 0.0))
+            .expect("a full store should still find a slot by recycling one");
+
+        assert!(recycled, "the slot it picked was holding a live item");
+        assert_eq!(store.len(), MAX_ITEMS, "still exactly full, not overfull");
+        assert_eq!(
+            store.get(index).unwrap().item.id,
+            9,
+            "the new item is the one in that slot now"
+        );
+    }
+
+    /// With nothing free and no stale pickup, vanilla's third tier takes the oldest item of any
+    /// kind (`Item.cs:49818-49827`).
+    #[test]
+    fn a_full_store_recycles_the_oldest_item() {
+        let mut store = full_store(stack(), 5_000);
+        store.get_mut(37).unwrap().age = 9_000;
+
+        let (index, _) = store.spawn(ItemStack::new(9, 1, 0), (0.0, 0.0)).unwrap();
+
+        assert_eq!(index, 37);
+    }
+
+    /// Tier 2: once the free slots have run down into the reserve, a stale heart is thrown away in
+    /// preference to claiming one of them (`Item.cs:49790-49806`). The heart here sits below the
+    /// first free slot, because vanilla's scan stops looking the moment it finds one.
+    #[test]
+    fn a_stale_pickup_is_recycled_before_the_reserve_is_eaten_into() {
+        let mut store = full_store(stack(), 0);
+        for index in MAX_ITEMS - SLOTS_RESERVED_BEFORE_RECYCLING..MAX_ITEMS {
+            store.remove(index as i16);
         }
-        assert_eq!(store.spawn(stack(), (0.0, 0.0)), None);
-        assert_eq!(store.len(), MAX_ITEMS);
+        store.get_mut(11).unwrap().item = a_pickup();
+        store.get_mut(11).unwrap().age = PICKUP_REPLACEMENT_TIME + 1;
+
+        let (index, recycled) = store.spawn(ItemStack::new(9, 1, 0), (0.0, 0.0)).unwrap();
+
+        assert_eq!(index, 11, "the stale heart's slot, not the free one at 360");
+        assert!(recycled);
+    }
+
+    /// ...but only once the table is that far gone. With room to spare the heart is left alone.
+    #[test]
+    fn a_stale_pickup_survives_while_there_are_slots_to_spare() {
+        let mut store = ItemStore::new();
+        let (index, _) = store.spawn(a_pickup(), (0.0, 0.0)).unwrap();
+        store.get_mut(index).unwrap().age = PICKUP_REPLACEMENT_TIME + 1;
+
+        assert_eq!(store.spawn(stack(), (0.0, 0.0)), Some((1, false)));
+    }
+
+    /// A young heart is not stale enough to be worth destroying, so the picker falls through to
+    /// the reserve rather than taking it.
+    #[test]
+    fn a_fresh_pickup_is_not_recycled() {
+        let mut store = full_store(a_pickup(), PICKUP_REPLACEMENT_TIME);
+        for index in MAX_ITEMS - SLOTS_RESERVED_BEFORE_RECYCLING..MAX_ITEMS {
+            store.remove(index as i16);
+        }
+
+        let (index, recycled) = store.spawn(ItemStack::new(9, 1, 0), (0.0, 0.0)).unwrap();
+
+        assert_eq!(index, FIRST_RESERVED_SLOT);
+        assert!(!recycled);
+    }
+
+    /// Only an ordinary item is protected from the pickup tier: a table full of stale hearts is
+    /// exactly what it is meant to clear out.
+    #[test]
+    fn only_pickups_are_recycled_early() {
+        let mut store = full_store(stack(), PICKUP_REPLACEMENT_TIME * 10);
+        for index in MAX_ITEMS - SLOTS_RESERVED_BEFORE_RECYCLING..MAX_ITEMS {
+            store.remove(index as i16);
+        }
+
+        let (index, recycled) = store.spawn(ItemStack::new(9, 1, 0), (0.0, 0.0)).unwrap();
+
+        assert_eq!(
+            index, FIRST_RESERVED_SLOT,
+            "ancient swords are not pickups; the reserve is what gets used"
+        );
+        assert!(!recycled);
+    }
+
+    /// Vanilla's own last resort is slot 400, the scratch entry past the 400 real ones, which
+    /// throws the drop away. Only reachable when every slot holds something that has not been
+    /// ticked once, which is this server's `None` and the same discarded drop.
+    #[test]
+    fn a_store_of_brand_new_items_has_nothing_left_to_recycle() {
+        let mut store = full_store(stack(), 0);
+        assert_eq!(store.spawn(ItemStack::new(9, 1, 0), (0.0, 0.0)), None);
     }
 
     #[test]
     fn reservations_lapse_so_an_item_is_not_locked_forever() {
         let mut store = ItemStore::new();
-        let index = store.spawn(stack(), (0.0, 0.0)).unwrap();
+        let (index, _) = store.spawn(stack(), (0.0, 0.0)).unwrap();
         {
             let item = store.get_mut(index).unwrap();
             item.owner = 3;
@@ -412,7 +623,7 @@ mod tests {
     #[test]
     fn items_expire_and_are_reported_once() {
         let mut store = ItemStore::new();
-        let index = store.spawn(stack(), (0.0, 0.0)).unwrap();
+        let (index, _) = store.spawn(stack(), (0.0, 0.0)).unwrap();
         store.get_mut(index).unwrap().age = DESPAWN_TICKS - 1;
 
         assert_eq!(store.tick(), vec![index]);

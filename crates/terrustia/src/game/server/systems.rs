@@ -2355,12 +2355,7 @@ impl GameServer {
         // Pools that give exactly one of their options.
         for pool in terrustia_proto::conditional_drops::one_from(npc_type, at) {
             let pick = pool[rand::Rng::random_range(&mut self.rng, 0..pool.len())];
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(i32::from(pick), 1, 0), center)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(i32::from(pick), 1, 0), center);
             // Some picks bring a companion item along automatically — Golem's Stynger with its
             // own ammunition (`ItemDropDatabase.cs:654-656`). Unconditional once the pick lands:
             // real vanilla's own nested `OnSuccess` has no further gate of its own.
@@ -2379,12 +2374,7 @@ impl GameServer {
                 second += 1;
             }
             for &item in &[moon_lord_pool[first], moon_lord_pool[second]] {
-                if let Some(index) = self
-                    .items
-                    .spawn(ItemStack::new(i32::from(item), 1, 0), center)
-                {
-                    self.broadcast_item(index);
-                }
+                self.spawn_item(ItemStack::new(i32::from(item), 1, 0), center);
             }
         }
         // Chance-gated pools: roll the gate first, and only on success pick which option.
@@ -2393,12 +2383,7 @@ impl GameServer {
                 continue;
             }
             let pick = pool.options[rand::Rng::random_range(&mut self.rng, 0..pool.options.len())];
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(i32::from(pick), 1, 0), center)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(i32::from(pick), 1, 0), center);
             // Pumpking's Stake Launcher and Mourning Wood's own two weapons each bring their own
             // ammunition the same way Golem's Stynger does above — `bundled_with` is shared rather
             // than re-checked only from `one_from`'s own loop.
@@ -2427,12 +2412,7 @@ impl GameServer {
             } else {
                 rule.min
             };
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(i32::from(rule.item), stack, 0), center);
         }
         // Fallback chains among the classic-only rolls (Queen Bee's Hive Wand/Bee-armor,
         // Skeletron's three weapons, King Slime's Slime Hook/Slime Gun): stop at the first link
@@ -2451,12 +2431,7 @@ impl GameServer {
                 } else {
                     rule.min
                 };
-                if let Some(index) = self
-                    .items
-                    .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
-                {
-                    self.broadcast_item(index);
-                }
+                self.spawn_item(ItemStack::new(i32::from(rule.item), stack, 0), center);
                 break;
             }
         }
@@ -2476,12 +2451,7 @@ impl GameServer {
             } else {
                 min
             };
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(i32::from(companion), stack, 0), center)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(i32::from(companion), stack, 0), center);
         }
     }
 
@@ -2497,12 +2467,7 @@ impl GameServer {
                 } else {
                     rule.min
                 };
-                if let Some(index) = self
-                    .items
-                    .spawn(ItemStack::new(i32::from(rule.item), stack, 0), center)
-                {
-                    self.broadcast_item(index);
-                }
+                self.spawn_item(ItemStack::new(i32::from(rule.item), stack, 0), center);
                 break;
             }
         }
@@ -2577,9 +2542,7 @@ impl GameServer {
             while left > 0 {
                 let stack = left.min(999).min(i64::from(i16::MAX)) as i16;
                 left -= i64::from(stack);
-                if let Some(index) = self.items.spawn(ItemStack::new(item, stack, 0), center) {
-                    self.broadcast_item(index);
-                }
+                self.spawn_item(ItemStack::new(item, stack, 0), center);
             }
         }
     }
@@ -3539,9 +3502,7 @@ impl GameServer {
                 if crowded {
                     return;
                 }
-                if let Some(index) = self.items.spawn(ItemStack::new(item, 1, 0), at) {
-                    self.broadcast_item(index);
-                }
+                self.spawn_item(ItemStack::new(item, 1, 0), at);
             }
             Statue::Lure { types } => {
                 self.mech_cooldown.insert((x, y), what.cooldown());
@@ -4603,9 +4564,7 @@ impl GameServer {
 
         let name = terrustia_proto::npc_data::npc_stats(npc_type).map_or("them", |s| s.name);
         self.announce(&format!("{total} {name} defeated!"));
-        if let Some(index) = self.items.spawn(ItemStack::new(i32::from(item), 1, 0), at) {
-            self.broadcast_item(index);
-        }
+        self.spawn_item(ItemStack::new(i32::from(item), 1, 0), at);
     }
 
     /// Record a boss's death against the world's history, and — real vanilla's own
@@ -5385,12 +5344,7 @@ impl GameServer {
         let roll = self.rng.random_range(0..5);
         let at = (x as f32 * 16.0, y as f32 * 16.0);
         for reward in orbs::reward(frame_x, already, roll) {
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(reward.item, reward.stack, 0), at)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(reward.item, reward.stack, 0), at);
         }
 
         let p = &mut self.world.progress;
@@ -5899,11 +5853,6 @@ impl GameServer {
         }
     }
 
-    /// Write the world to disk, announcing the outcome in chat.
-    ///
-    /// Serialisation runs on the game task because it needs exclusive access to the world; it takes
-    /// a fraction of a second even for a full-size world, which is why it is not worth the cost of
-    /// snapshotting eighty megabytes of tiles to move it off-thread.
     /// Age items, settle falling ones, and hand nearby ones to a player who can pick them up.
     pub(super) fn tick_items(&mut self) {
         for index in self.items.tick() {
@@ -6024,14 +5973,13 @@ impl GameServer {
             .map(|p| p.slot)
             .collect();
         if owners.is_empty() {
-            if let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(item_id, 1, 0), center);
             return;
         }
         for slot in owners {
-            let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), center) else {
-                debug!("item slots are full; a treasure bag was discarded");
+            // Not `spawn_item`: this bag is announced to its one owner below, never broadcast.
+            // The slot still has to be taken the same way, so whatever it recycled is announced.
+            let Some(index) = self.take_item_slot(ItemStack::new(item_id, 1, 0), center) else {
                 break;
             };
             // Instance the bag to this one player: vanilla's `WorldItem.MakeInstanced`
@@ -6072,11 +6020,7 @@ impl GameServer {
             return;
         };
         let position = (x as f32 * 16.0, y as f32 * 16.0);
-        let Some(index) = self.items.spawn(ItemStack::new(item_id, 1, 0), position) else {
-            debug!("item slots are full; the drop was discarded");
-            return;
-        };
-        self.broadcast_item(index);
+        self.spawn_item(ItemStack::new(item_id, 1, 0), position);
     }
 
     /// A tree tile's own drop: kept apart from [`drop_of`]'s static table because vanilla's real
@@ -6119,19 +6063,10 @@ impl GameServer {
             if rand::Rng::random_range(&mut self.rng, 0..3) == 0 {
                 stack += 1;
             }
-            if let Some(index) = self
-                .items
-                .spawn(ItemStack::new(item_id, stack, 0), position)
-            {
-                self.broadcast_item(index);
-            }
+            self.spawn_item(ItemStack::new(item_id, stack, 0), position);
         }
-        if let Some(secondary_id) = secondary
-            && let Some(index) = self
-                .items
-                .spawn(ItemStack::new(secondary_id, 1, 0), position)
-        {
-            self.broadcast_item(index);
+        if let Some(secondary_id) = secondary {
+            self.spawn_item(ItemStack::new(secondary_id, 1, 0), position);
         }
     }
 
@@ -6494,7 +6429,6 @@ impl GameServer {
         }
     }
 
-    /// Put an item into the world at a place, as a thing that can be picked up.
     /// Drop into the world every pickup a mass-wire run reported — one wire or actuator at each
     /// tile a cut cleared, at that tile's own pixel centre. Vanilla's `KillWire`/`KillActuator`
     /// spawn these the instant they clear a flag; this is the same, batched by the caller. Without
@@ -6506,15 +6440,37 @@ impl GameServer {
         }
     }
 
-    pub(super) fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) {
-        if item.is_empty() {
-            return;
-        }
-        let Some(index) = self.items.spawn(item, position) else {
+    /// Take an item slot for something new, telling everyone about the item it destroyed.
+    ///
+    /// The single door every drop on this server goes through, because the `151` that has to
+    /// precede the new item's own packet belongs to the act of taking the slot, not to any one
+    /// caller. Vanilla sends it from inside `Item.NewItem` for exactly the same reason
+    /// (`Item.cs:49725-49730`): the recycled item is gone from the world whether the new one is
+    /// broadcast (an ordinary drop), sent to one player (an instanced treasure bag), or relayed
+    /// from the client that asked for the slot.
+    ///
+    /// Returns the slot, or `None` when [`crate::world::items::ItemStore::pick_slot`] could not
+    /// find one at all - which now takes 400 items that have not lived a single tick, rather than
+    /// merely 400 items.
+    pub(super) fn take_item_slot(&mut self, item: ItemStack, position: (f32, f32)) -> Option<i16> {
+        let Some((index, recycled)) = self.items.spawn(item, position) else {
             debug!("item slots are full; the drop was discarded");
-            return;
+            return None;
         };
+        if recycled && let Ok(frame) = terrustia_proto::items::item_despawn(index) {
+            self.broadcast(frame, None);
+        }
+        Some(index)
+    }
+
+    /// Put an item into the world at a place, as a thing that can be picked up.
+    pub(super) fn spawn_item(&mut self, item: ItemStack, position: (f32, f32)) -> Option<i16> {
+        if item.is_empty() {
+            return None;
+        }
+        let index = self.take_item_slot(item, position)?;
         self.broadcast_item(index);
+        Some(index)
     }
 }
 
@@ -9171,7 +9127,7 @@ mod wall_of_flesh_trigger {
     fn nothing_happens_without_a_guide_alive() {
         let mut server = GameServer::new(Config::default(), underworld_world());
         let (x, y) = put_lava_in_the_underworld(&mut server);
-        let index = server
+        let (index, _) = server
             .items
             .spawn(
                 ItemStack::new(GUIDE_VOODOO_DOLL, 1, 0),
@@ -9789,7 +9745,7 @@ mod far_placement_range {
         server.journey.set_far_placement_range(0, true);
         // Within the boosted range (400 + 240 = 640) but outside the ordinary one — the only
         // distance this test is actually about.
-        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+        let (index, _) = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
 
         server.tick_items();
 
@@ -9806,7 +9762,7 @@ mod far_placement_range {
         let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
         // far_placement_range left off — the control case, so the test above is proving
         // something rather than passing regardless of whether the extension exists at all.
-        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+        let (index, _) = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
 
         server.tick_items();
 
@@ -9824,7 +9780,7 @@ mod far_placement_range {
         let server = GameServer::new(Config::default(), tiny_world()); // game_mode 0: ordinary
         let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
         server.journey.set_far_placement_range(0, true);
-        let index = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
+        let (index, _) = server.items.spawn(a_coin(), (500.0, 0.0)).unwrap();
 
         server.tick_items();
 
@@ -9840,11 +9796,111 @@ mod far_placement_range {
         server.world.game_mode = 3;
         let (mut server, _rx) = with_one_player_at(server, (0.0, 0.0));
         server.journey.set_far_placement_range(0, true);
-        let index = server.items.spawn(a_coin(), (700.0, 0.0)).unwrap(); // past 400 + 240
+        let (index, _) = server.items.spawn(a_coin(), (700.0, 0.0)).unwrap(); // past 400 + 240
 
         server.tick_items();
 
         assert!(!server.items.get(index).unwrap().is_reserved());
+    }
+}
+
+/// The wire half of item-slot recycling. Vanilla's `Item.NewItem` sends a `151` for a slot it is
+/// about to overwrite before it sends the `21` for what is going in it (`Item.cs:49725-49730`),
+/// because both packets address the slot by the same index: a client told only about the new item
+/// would silently swap one item for another on its own screen, with no pickup ever having happened
+/// and the old item's disappearance never explained.
+#[cfg(test)]
+mod item_slot_recycling {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::items::MAX_ITEMS;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "item recycling probe")
+    }
+
+    /// Same shape as `far_placement_range`'s own helper: the receiver has to outlive the call,
+    /// because `broadcast` removes a player whose send fails.
+    fn with_one_player(mut server: GameServer) -> (GameServer, mpsc::Receiver<Bytes>) {
+        let (out_tx, out_rx) = mpsc::channel(16);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = ConnState::Playing;
+        server.players[0] = Some(player);
+        (server, out_rx)
+    }
+
+    /// Every slot taken, all the same age but for one older one the picker should settle on.
+    fn a_full_world(server: &mut GameServer, oldest: i16) {
+        for _ in 0..MAX_ITEMS {
+            let (index, _) = server
+                .items
+                .spawn(ItemStack::new(3, 1, 0), (0.0, 0.0))
+                .expect("a slot");
+            server.items.get_mut(index).expect("the item").age = 5_000;
+        }
+        server.items.get_mut(oldest).expect("the item").age = 9_000;
+    }
+
+    /// The packet ids the one connected player was sent, in order.
+    fn frames(rx: &mut mpsc::Receiver<Bytes>) -> Vec<Bytes> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_recycled_slot_is_announced_as_despawned_before_the_new_item_arrives_in_it() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        a_full_world(&mut server, 7);
+        let (mut server, mut rx) = with_one_player(server);
+
+        let index = server
+            .spawn_item(ItemStack::new(9, 1, 0), (16.0, 16.0))
+            .expect("a full world should still find a slot by recycling one");
+        assert_eq!(index, 7, "the oldest item's slot");
+
+        let sent = frames(&mut rx);
+        assert_eq!(
+            sent.iter().map(|f| f[2]).collect::<Vec<_>>(),
+            vec![id::SYNC_ITEM_DESPAWN, id::SYNC_ITEM],
+            "the despawn has to come first, or a client swaps one item for the other in silence"
+        );
+        assert_eq!(
+            terrustia_proto::items::decode_item_despawn(&sent[0][3..]).unwrap(),
+            7,
+            "and it has to name the slot being reused"
+        );
+        let spawned = SyncItem::decode(&sent[1][3..]).unwrap();
+        assert_eq!((spawned.index, spawned.item.id), (7, 9));
+    }
+
+    /// The control: an ordinary drop into a world with room still sends exactly one packet, so the
+    /// test above is proving the recycle path rather than a `151` on every single drop.
+    #[test]
+    fn an_ordinary_drop_into_a_free_slot_sends_no_despawn() {
+        let server = GameServer::new(Config::default(), tiny_world());
+        let (mut server, mut rx) = with_one_player(server);
+
+        server.spawn_item(ItemStack::new(9, 1, 0), (16.0, 16.0));
+
+        assert_eq!(
+            frames(&mut rx).iter().map(|f| f[2]).collect::<Vec<_>>(),
+            vec![id::SYNC_ITEM]
+        );
+    }
+
+    /// A treasure bag goes to one player over `90` rather than being broadcast, but it takes a
+    /// slot the same way, so the item it destroys is still owed to everybody.
+    #[test]
+    fn an_instanced_bag_announces_the_item_it_recycled_too() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        a_full_world(&mut server, 7);
+        let (mut server, mut rx) = with_one_player(server);
+
+        server.drop_instanced_bag(3318, (16.0, 16.0)); // Eye of Cthulhu's Treasure Bag
+
+        assert_eq!(
+            frames(&mut rx).iter().map(|f| f[2]).collect::<Vec<_>>(),
+            vec![id::SYNC_ITEM_DESPAWN, id::SPAWN_INSTANCED_ITEM]
+        );
     }
 }
 
