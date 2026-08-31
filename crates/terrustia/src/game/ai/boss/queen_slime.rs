@@ -8,6 +8,10 @@
 //! or get more than three hundred and twenty pixels above it, and a counter builds; at five seconds
 //! it fades out and reappears next to you. Standing on a platform out of its reach does not work,
 //! and that is deliberate.
+//!
+//! Underneath both halves it sheds minions: one or two of three slime types every time it loses a
+//! fixed slice of its maximum life, so the arena fills as a function of how fast you are hurting it
+//! rather than of how long the fight has run.
 
 use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
@@ -24,6 +28,7 @@ use terrustia_proto::projectile::ids::{QUEEN_SLIME_DIVE_SHOT, QUEEN_SLIME_RING_S
 
 use crate::game::ai::{Shot, World, can_see, face};
 use crate::game::npc::{Npc, TILE, TileView};
+use crate::game::npc_ai::Spawn;
 
 /// The states, as `ai[0]` numbers them.
 mod state {
@@ -41,10 +46,27 @@ pub struct QueenSlimeOutcome {
     /// Where it wants to reappear, once it has finished fading out.
     pub teleport_to: Option<(f32, f32)>,
     pub shots: Vec<Shot>,
+    /// The minions she sheds as she is worn down.
+    pub spawn: Vec<Spawn>,
 }
 
 /// Style 121.
+///
+/// The movement is one routine and the shedding another, because vanilla runs the shedding at the
+/// bottom of `AI_121_QueenSlime` after the state switch, whatever the state did
+/// (`NPC.cs:46251-46309`).
 pub fn queen_slime(
+    npc: &mut Npc,
+    world: &World<'_, impl TileView>,
+    rng: &mut SmallRng,
+) -> QueenSlimeOutcome {
+    let mut out = movement(npc, world, rng);
+    shed_minions(npc, rng, &mut out);
+    out
+}
+
+/// The state machine: everything above the shedding.
+fn movement(
     npc: &mut Npc,
     world: &World<'_, impl TileView>,
     rng: &mut SmallRng,
@@ -52,9 +74,11 @@ pub fn queen_slime(
     let mut out = QueenSlimeOutcome::default();
     npc.dirty = true;
 
-    // On its first tick it holds still for a moment before it starts.
+    // On its first tick it holds still for a moment before it starts. QS-1: `localAI[0]` is not a
+    // flag, it is the life watermark the minion shedding measures against, seeded with `lifeMax`
+    // (`NPC.cs:45703-45708`). Writing a bare 1.0 here left the whole mechanic with nothing to read.
     if npc.local_ai[0] == 0.0 {
-        npc.local_ai[0] = 1.0;
+        npc.local_ai[0] = npc.life_max as f32;
         npc.ai[1] = -100.0;
     }
 
@@ -299,6 +323,77 @@ pub fn queen_slime(
     out
 }
 
+/// QS-1: the minions she sheds as she is worn down (`NPC.cs:46251-46309`), which nothing here ever
+/// did.
+///
+/// `local_ai[0]` is a watermark: seeded with `life_max` on her first tick and dragged down to her
+/// current life every time she sheds. Once she has lost another slice of her maximum since the last
+/// one, one or two more arrive, placed at random inside her body. Crossing half health resets both
+/// the watermark and her state, which is the phase change; nothing is shed on that tick, because
+/// the reset moves the watermark to her life first.
+fn shed_minions(npc: &mut Npc, rng: &mut SmallRng, out: &mut QueenSlimeOutcome) {
+    use terrustia_proto::npc_params::{
+        QUEEN_SLIME_ADD_DELAY, QUEEN_SLIME_ADD_DELAY_STEPS, QUEEN_SLIME_ADD_STEP,
+        QUEEN_SLIME_ADD_STEP_FLYING, QUEEN_SLIME_ADDS,
+    };
+    if npc.life <= 0 {
+        return;
+    }
+    // Vanilla's `life <= lifeMax / 2` is an integer halving, and so is this.
+    let half = npc.life_max / 2;
+    let flying = npc.life <= half;
+    if npc.local_ai[0] >= half as f32 && npc.life < half {
+        // Crossing into the flying half wipes the state and re-anchors the watermark
+        // (`NPC.cs:46263-46270`).
+        npc.local_ai[0] = npc.life as f32;
+        npc.ai[0] = state::WAITING;
+        npc.ai[1] = 0.0;
+        npc.ai[2] = 0.0;
+        return;
+    }
+    let step = if flying {
+        QUEEN_SLIME_ADD_STEP_FLYING
+    } else {
+        QUEEN_SLIME_ADD_STEP
+    };
+    let slice = (npc.life_max as f32 * step) as i32;
+    if (npc.life + slice) as f32 >= npc.local_ai[0] {
+        return;
+    }
+    npc.local_ai[0] = npc.life as f32;
+    for _ in 0..rng.random_range(1..3) {
+        let npc_type = QUEEN_SLIME_ADDS[rng.random_range(0..QUEEN_SLIME_ADDS.len())];
+        // Vanilla rolls a point inside her body and hands it to `NewNPC`, which reads an x,y as a
+        // bottom-centre; ours is a top-left, so the minion's own size comes back off it.
+        let (w, h) = terrustia_proto::npc_data::npc_stats(npc_type)
+            .map_or((0.0, 0.0), |s| (s.width as f32, s.height as f32));
+        let spread =
+            |rng: &mut SmallRng, size: f32| rng.random_range(0..(size as i32 - 32).max(1)) as f32;
+        let at = (
+            npc.position.0 + spread(rng, npc.width()) - w / 2.0,
+            npc.position.1 + spread(rng, npc.height()) - h,
+        );
+        out.spawn.push(Spawn {
+            npc_type,
+            position: at,
+            velocity: (
+                rng.random_range(-15..=15) as f32 * 0.1,
+                rng.random_range(-30..=0) as f32 * 0.1,
+            ),
+            parent: None,
+            // Dazed on arrival: a negative slime hop timer it has to count back up through.
+            ai: [
+                Some(
+                    QUEEN_SLIME_ADD_DELAY * rng.random_range(0..QUEEN_SLIME_ADD_DELAY_STEPS) as f32,
+                ),
+                Some(0.0),
+                None,
+                None,
+            ],
+        });
+    }
+}
+
 /// The flying phase's idle: it holds station above the player.
 fn fly(npc: &mut Npc, player: (f32, f32)) {
     let (cx, cy) = npc.center();
@@ -505,10 +600,12 @@ mod tests {
         let ring = |flying: bool| {
             let mut rng = SmallRng::seed_from_u64(12);
             let mut q = queen(0.0, 0.0);
-            q.local_ai[0] = 1.0; // past the first-tick reset, so ai[1] starts at 0
             if flying {
                 q.life = q.life_max / 4;
             }
+            // Past the first-tick reset, so ai[1] starts at 0, with the shedding watermark parked
+            // at its current life so nothing is shed and the half-health reset has already run.
+            q.local_ai[0] = q.life as f32;
             q.ai[0] = state::SWOOPING;
             q.ai[2] = 1.0; // already committed
             let w = world(&tiles, Some((300.0, 0.0)));
@@ -530,6 +627,89 @@ mod tests {
                 .iter()
                 .all(|s| s.projectile == QUEEN_SLIME_RING_SHOT
                     && s.damage == QUEEN_SLIME_RING_DAMAGE)
+        );
+    }
+
+    /// QS-1: `local_ai[0]` is the shedding watermark, seeded with `life_max` on the first tick
+    /// (`NPC.cs:45703-45708`), not a first-tick boolean. Writing a bare 1.0 left the mechanic with
+    /// nothing to measure against and no adds ever arrived.
+    #[test]
+    fn its_first_tick_seeds_the_shedding_watermark() {
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(657);
+        let mut q = queen(0.0, 0.0);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        queen_slime(&mut q, &w, &mut rng);
+        assert_eq!(q.local_ai[0], q.life_max as f32);
+    }
+
+    /// QS-1: two percent of its maximum life lost brings one or two minions
+    /// (`NPC.cs:46271-46309`), and they are the three types that exist for it and nothing else.
+    #[test]
+    fn losing_a_slice_of_its_life_sheds_minions() {
+        use terrustia_proto::npc_params::QUEEN_SLIME_ADDS;
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(657);
+        let mut q = queen(0.0, 0.0);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        // First tick seeds the watermark.
+        assert!(queen_slime(&mut q, &w, &mut rng).spawn.is_empty());
+        // Untouched, it sheds nothing however long it runs.
+        for _ in 0..200 {
+            assert!(queen_slime(&mut q, &w, &mut rng).spawn.is_empty());
+        }
+        // Now hurt it past the slice.
+        q.life -= (q.life_max as f32 * 0.03) as i32;
+        let shed = queen_slime(&mut q, &w, &mut rng).spawn;
+        assert!(
+            (1..=2).contains(&shed.len()),
+            "one or two minions, got {}",
+            shed.len()
+        );
+        assert!(shed.iter().all(|s| QUEEN_SLIME_ADDS.contains(&s.npc_type)));
+        assert_eq!(q.local_ai[0], q.life as f32, "the watermark moves down");
+        // ...and not again until it loses another slice.
+        assert!(queen_slime(&mut q, &w, &mut rng).spawn.is_empty());
+    }
+
+    /// QS-1: crossing half health re-anchors the watermark and wipes the state, which is the phase
+    /// change itself (`NPC.cs:46263-46270`), and sheds nothing on that tick.
+    #[test]
+    fn crossing_half_health_resets_its_state() {
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(657);
+        let mut q = queen(0.0, 0.0);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        queen_slime(&mut q, &w, &mut rng);
+        q.ai[0] = state::SWOOPING;
+        q.ai[1] = 40.0;
+        q.ai[2] = 1.0;
+        q.life = q.life_max / 2 - 1;
+        let out = queen_slime(&mut q, &w, &mut rng);
+        assert_eq!(q.ai[0], state::WAITING, "the state is wiped");
+        assert_eq!(q.ai[1], 0.0);
+        assert_eq!(q.ai[2], 0.0);
+        assert_eq!(q.local_ai[0], q.life as f32);
+        assert!(out.spawn.is_empty(), "nothing is shed on the reset tick");
+    }
+
+    /// QS-1: and the adds have to reach the server, or the whole mechanic is invisible.
+    #[test]
+    fn its_minions_reach_the_dispatch() {
+        use terrustia_proto::npc_params::QUEEN_SLIME_ADDS;
+        let tiles = open();
+        let mut rng = SmallRng::seed_from_u64(657);
+        let mut q = queen(0.0, 0.0);
+        let w = world(&tiles, Some((300.0, 0.0)));
+        crate::game::ai::run(&mut q, &w, &mut rng);
+        q.life -= (q.life_max as f32 * 0.05) as i32;
+        let effects = crate::game::ai::run(&mut q, &w, &mut rng);
+        assert!(!effects.spawn.is_empty(), "the adds must reach the server");
+        assert!(
+            effects
+                .spawn
+                .iter()
+                .all(|s| QUEEN_SLIME_ADDS.contains(&s.npc_type))
         );
     }
 }

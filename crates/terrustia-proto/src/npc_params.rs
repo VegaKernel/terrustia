@@ -2060,16 +2060,36 @@ pub const EYE_HOVER_TICKS_FIRST: f32 = 600.0;
 pub const EYE_HOVER_TICKS_FIRST_EXPERT: f32 = 210.0;
 pub const EYE_HOVER_TICKS_SECOND: f32 = 200.0;
 
-/// Dash speed in each form.
+/// Expert Mode's own hover for the second form, which gains speed and acceleration the further off
+/// you are (`NPC.cs:20476-20490`): one more pixel a tick and 0.05 more acceleration at each of four
+/// hundred, six hundred and eight hundred pixels, cumulative. Classic has no such term, which is why
+/// running away from a classic second form works and running from an Expert one does not.
+pub const EYE_HOVER_SECOND_EXPERT_STEPS: [f32; 3] = [400.0, 600.0, 800.0];
+pub const EYE_HOVER_SECOND_EXPERT_SPEED_STEP: f32 = 1.0;
+pub const EYE_HOVER_SECOND_EXPERT_ACCEL_STEP: f32 = 0.05;
+
+/// Dash speed in each form, and Expert Mode's faster first-form one (`NPC.cs:20252-20256`).
 pub const EYE_DASH_FIRST: f32 = 6.0;
+pub const EYE_DASH_FIRST_EXPERT: f32 = 7.0;
 pub const EYE_DASH_SECOND: f32 = 6.8;
-/// How long a dash runs before it starts bleeding off, and how long the whole dash lasts.
+/// The second form's dash gets faster within a set in Expert: the second of the three is 15% up and
+/// the third 30% (`NPC.cs:20558-20565`, keyed on `ai[3]`). Classic runs all three flat.
+pub const EYE_DASH_SECOND_EXPERT_STEPS: [f32; 2] = [1.15, 1.3];
+/// How long a dash runs before it starts bleeding off, and how long the whole dash lasts. The
+/// second form drives 25% longer before braking in Expert (`NPC.cs:20582-20587`) and then ends the
+/// dash far sooner (`:20608-20612`), so an Expert dash is shorter *and* commits harder.
 pub const EYE_DASH_DRIVE: f32 = 40.0;
+pub const EYE_DASH_DRIVE_SECOND_EXPERT: f32 = 50.0;
 pub const EYE_DASH_TICKS_FIRST: f32 = 150.0;
+pub const EYE_DASH_TICKS_FIRST_EXPERT: f32 = 100.0;
 pub const EYE_DASH_TICKS_SECOND: f32 = 130.0;
-/// Friction once a dash is spent, in each form.
+pub const EYE_DASH_TICKS_SECOND_EXPERT: f32 = 90.0;
+/// Friction once a dash is spent, in each form. Expert applies a second multiplier on top of the
+/// first rather than replacing it (`NPC.cs:20276-20280`, `:20590-20594`).
 pub const EYE_DASH_DRAG_FIRST: f32 = 0.98;
+pub const EYE_DASH_DRAG_FIRST_EXPERT: f32 = 0.985;
 pub const EYE_DASH_DRAG_SECOND: f32 = 0.97;
+pub const EYE_DASH_DRAG_SECOND_EXPERT: f32 = 0.98;
 /// Dashes per set.
 pub const EYE_DASHES: f32 = 3.0;
 
@@ -2089,6 +2109,14 @@ pub const EYE_SPLIT_TICKS: f32 = 100.0;
 /// How fast the spin builds during it, and where it tops out.
 pub const EYE_SPIN_RAMP: f32 = 0.005;
 pub const EYE_SPIN_MAX: f32 = 0.5;
+/// EYE-4: an Expert split is not a free two hundred ticks. Every twentieth tick of the spin throws
+/// out a servant on a random bearing (`NPC.cs:20363-20400`), ten across the whole transformation.
+/// The bearing is `rand(-200, 200)` on each axis normalised to five, thrown ten bearings ahead of
+/// its own centre exactly as the first form's aimed servant is.
+pub const EYE_SPLIT_SERVANT_EVERY: f32 = 20.0;
+pub const EYE_SPLIT_SERVANT_SPEED: f32 = 5.0;
+pub const EYE_SPLIT_SERVANT_SPREAD: i32 = 200;
+pub const EYE_SERVANT_THROW: f32 = 10.0;
 
 /// Its damage and defence once it has split.
 ///
@@ -2106,6 +2134,71 @@ pub const EYE_SECOND_FORM_DEFENSE_LOW: i32 = -15;
 pub const EYE_SECOND_FORM_DEFENSE_LOW_AT: f32 = 0.12;
 pub const EYE_SECOND_FORM_DEFENSE_VERY_LOW: i32 = -30;
 pub const EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT: f32 = 0.04;
+
+/// EYE-7: the second form's Expert-only endgame, `ai[1]` states 3, 4 and 5
+/// (`NPC.cs:20636-20857`), which was absent in full.
+///
+/// Below half health an Expert second form stops running dash *sets* and starts lunging: it aims
+/// once at twenty pixels a tick, leading your own velocity, holds the line for twenty ticks and
+/// then brakes, five times over before it goes back to hovering. Below 12% it opens each cycle by
+/// backing six hundred pixels *underneath* you first, and below 4% the aim is scattered twice more
+/// and the hold halves, which is the fight's last, wildest phase. None of it happened here: our
+/// second form ran the classic hover-and-three-dashes at any health.
+///
+/// The three health gates. [`EYE_LUNGE_AT`] is checked at the end of a dash set, [`EYE_LUNGE_AT_HOVER`]
+/// at the end of a hover, and the two lower ones are vanilla's `flag2`/`flag3`, which are also what
+/// [`EYE_SECOND_FORM_DEFENSE_LOW_AT`] and its `VERY_LOW` neighbour read.
+pub const EYE_LUNGE_AT: f32 = 0.5;
+pub const EYE_LUNGE_AT_HOVER: f32 = 0.35;
+/// How many lunges before it returns to hovering (`NPC.cs:20780`), and the `rand(1, 4)` head start
+/// on that count a lunge entered from a dash set carries (`:20626`), which shortens the run.
+pub const EYE_LUNGES: f32 = 5.0;
+pub const EYE_LUNGE_HEAD_START: std::ops::Range<i32> = 1..4;
+/// The lunge itself: twenty pixels a tick, held for twenty ticks and then braked over thirteen more
+/// (`NPC.cs:20649`, `:20752-20775`). Nearly dead it halves the hold, so the lunges come twice as
+/// fast (`:20022-20026`).
+pub const EYE_LUNGE_SPEED: f32 = 20.0;
+pub const EYE_LUNGE_HOLD: f32 = 20.0;
+pub const EYE_LUNGE_HOLD_DESPERATE: f32 = 10.0;
+pub const EYE_LUNGE_RECOVER: f32 = 13.0;
+pub const EYE_LUNGE_DRAG: f32 = 0.95;
+/// Inside this it will not start braking, so a close lunge runs on rather than stalling on top of
+/// you (`NPC.cs:20754-20757`).
+pub const EYE_LUNGE_STALL_RANGE: f32 = 200.0;
+/// How far ahead of you it aims.
+///
+/// Vanilla computes a lead from your own speed and then throws it away on the very next line
+/// (`num53 += 10f - num53`, `NPC.cs:20653-20654`), so the figure is always ten and the 5..15 clamp
+/// below it can never bite. Transcribed as the constant it actually is, with the dead arithmetic
+/// left out and named here instead. A lunge entered straight off the back-off leads four times as
+/// far and travels 30% faster (`:20663-20667`); nearly dead it leads twice as far instead
+/// (`:20668-20671`).
+pub const EYE_LUNGE_LEAD: f32 = 10.0;
+pub const EYE_LUNGE_LEAD_FROM_BELOW: f32 = 4.0;
+pub const EYE_LUNGE_SPEED_FROM_BELOW: f32 = 1.3;
+pub const EYE_LUNGE_LEAD_DESPERATE: f32 = 2.0;
+/// The aim is scattered in three passes: a per-axis stretch before it is normalised, a flat nudge
+/// after, and, nearly dead, both again at a wider figure (`NPC.cs:20674-20707`).
+pub const EYE_LUNGE_STRETCH: i32 = 10;
+pub const EYE_LUNGE_NUDGE: i32 = 20;
+pub const EYE_LUNGE_NUDGE_DESPERATE: i32 = 50;
+/// Under this, an aimed lunge is turned ninety degrees rather than fired straight at you, so a
+/// point-blank lunge sweeps past instead of landing (`NPC.cs:20709-20726`); above it, the same swap
+/// runs on the averaged component instead (`:20727-20741`).
+pub const EYE_LUNGE_SWAP_RANGE: f32 = 100.0;
+/// The back-off: nearly dead it drops six hundred pixels *below* you at nine pixels a tick for
+/// seventy ticks, then lunges up (`NPC.cs:20800-20852`). `ai[2] = -1` on the way out is what marks
+/// the next lunge as the fast one.
+pub const EYE_BACKOFF_BELOW: f32 = 600.0;
+pub const EYE_BACKOFF_SPEED: f32 = 9.0;
+pub const EYE_BACKOFF_ACCEL: f32 = 0.3;
+pub const EYE_BACKOFF_TICKS: f32 = 70.0;
+/// How many lunges the cycle after a back-off gets: `rand(-3, 1)` in `ai[3]` (`NPC.cs:20850`), so
+/// between five and eight rather than five.
+pub const EYE_BACKOFF_LUNGE_BONUS: std::ops::RangeInclusive<i32> = -3..=0;
+/// The one escape from the lunge cycle: on the fifth of them, in the `flag2` band, with the Eye
+/// below you, it breaks off and hovers again (`NPC.cs:20638-20645`).
+pub const EYE_LUNGE_BREAK_AT: f32 = 4.0;
 
 /// Skeletron's hand.
 pub const SKELETRON_HAND: u16 = 36;
@@ -3646,9 +3739,28 @@ pub const DESTROYER_SEGMENTS_GOOD: usize = 101;
 /// It burrows faster than anything else in the game, and turns no more sharply for it.
 pub const DESTROYER_SPEED: f32 = 16.0;
 pub const DESTROYER_TURN: f32 = 0.1;
+/// The second, sharper trim it alone gets, on top of [`DESTROYER_TURN`] rather than instead of it
+/// (`NPC.cs:50509-50510`, `num19`/`num20`). See [`worm_hard_turn`].
 pub const DESTROYER_TURN_HARD: f32 = 0.15;
+/// A get-fixed-boi world sharpens both of its turn rates by a fifth (`NPC.cs:50511-50515`).
+pub const DESTROYER_TURN_GET_GOOD: f32 = 1.2;
 /// Fleeing at daybreak it dives at twice that.
 pub const DESTROYER_FLEE_SPEED: f32 = 32.0;
+
+/// The extra turn rate a worm applies *before* [`WormMotion::turn`], and only while it is already
+/// heading the right way on **both** axes.
+///
+/// Style 6's shared burrow (`NPC.cs:52660-52747`) has a single rate, `num47`. The Destroyer's own
+/// style-37 copy (`NPC.cs:50633-50651`) opens with a second pass at `num20 = 0.15` and then runs
+/// the ordinary `num19 = 0.1` one over the result, so a Destroyer already on course closes on its
+/// wanted velocity at 0.25 a tick rather than 0.1. Zero for every other worm, which is what makes
+/// the extra pass a no-op for them.
+pub fn worm_hard_turn(npc_type: u16) -> f32 {
+    match npc_type {
+        DESTROYER_HEAD | DESTROYER_BODY | DESTROYER_TAIL => DESTROYER_TURN_HARD,
+        _ => 0.0,
+    }
+}
 
 /// Every body segment carries a probe that fires on a long random fuse.
 ///
@@ -4423,10 +4535,7 @@ pub const QUEEN_PACE: [(f32, f32, f32); 4] = [
 ];
 
 /// Mode 0's forward mist: fired while above the player and either close or already mid-volley
-/// (`NPC.cs:33751-33796`). The interval already carries vanilla's `+1`; the tick counter here
-/// advances by a flat one a tick rather than vanilla's `rand(1..4)`, since this routine has no
-/// source of randomness available to it without threading one in from outside its lane — the
-/// mode-switch thresholds below inherit the same simplification.
+/// (`NPC.cs:33751-33796`). The interval already carries vanilla's `+1`.
 pub const ICE_QUEEN_MIST_DAMAGE: i32 = 42;
 pub const ICE_QUEEN_MIST_INTERVAL: [(f32, f32); 4] =
     [(1.0, 14.0), (0.75, 13.0), (0.5, 12.0), (0.25, 11.0)];
@@ -4435,11 +4544,12 @@ pub const ICE_QUEEN_MIST_SPEED: [(f32, f32); 4] =
 pub const ICE_QUEEN_MIST_RANGE: f32 = 500.0;
 
 /// Mode 1: a gentler pursuit that drops ice shards straight down instead of sweeping and firing
-/// forward (`NPC.cs:33811-33919`). Vanilla has a third mode (a random scatter shot) reached the
-/// same way; not implemented here; see `ice_queen`'s doc comment.
+/// forward (`NPC.cs:33811-33919`).
 pub const ICE_QUEEN_SHARD_DAMAGE: i32 = 37;
-/// (accel, cap) — already carrying vanilla's flat `-0.05`/`-1` adjustments.
-pub const ICE_QUEEN_MODE2_PACE: [(f32, f32, f32); 4] = [
+/// (accel, cap) for mode 1's chase — already carrying vanilla's flat `-0.05`/`-1` adjustments
+/// (`NPC.cs:33823-33843`). ICEQ-1: this was called `ICE_QUEEN_MODE2_PACE` while holding the
+/// *second* mode's numbers, one short of the mode-2 that actually exists.
+pub const ICE_QUEEN_CHASE_PACE: [(f32, f32, f32); 4] = [
     (1.0, 0.10, 6.0),
     (0.75, 0.12, 7.0),
     (0.5, 0.15, 8.0),
@@ -4454,9 +4564,41 @@ pub const ICE_QUEEN_SHARD_INTERVAL: [(f32, f32); 5] = [
     (0.1, 11.0),
 ];
 
-/// How long each mode runs before switching to the other (`NPC.cs:33804-33805`, `33913-33917`).
+/// Mode 2: it stops dead, spins, and sprays shards on random bearings (`NPC.cs:33903-33959`).
+///
+/// The bearing is `rand(-1000, 1001)` on each axis normalised to [`ICE_QUEEN_SPIN_SPEED`], and the
+/// muzzle is that bearing times four out from a point twenty pixels above its centre, so the shards
+/// appear away from the body rather than inside it.
+pub const ICE_QUEEN_SPIN_DAMAGE: i32 = 35;
+pub const ICE_QUEEN_SPIN_SPEED: f32 = 15.0;
+pub const ICE_QUEEN_SPIN_MUZZLE: f32 = 4.0;
+pub const ICE_QUEEN_SPIN_ABOVE: f32 = 20.0;
+pub const ICE_QUEEN_SPIN_DRAG: f32 = 0.95;
+pub const ICE_QUEEN_SPIN_ROTATION: f32 = 0.2;
+/// Vanilla's decrements are cumulative (`num977--`, then `-= 2`, `-= 3`, `-= 4`), so the last two
+/// bands are one shot every other tick and then one every tick. Resolved here rather than summed at
+/// runtime; the counter fires on `ai[3] > interval`, so the period is one more than the value.
+pub const ICE_QUEEN_SPIN_INTERVAL: [(f32, f32); 5] = [
+    (1.0, 7.0),
+    (0.75, 6.0),
+    (0.5, 4.0),
+    (0.25, 1.0),
+    (0.1, -3.0),
+];
+
+/// How long each mode runs before handing back to the picker (`NPC.cs:33804-33805`, `:33913-33917`,
+/// `:33955-33959`). Each mode's counter advances by `rand(1, 4)` a tick, not by one, so the mean
+/// life of a mode is half the threshold.
 pub const ICE_QUEEN_MODE0_AT: f32 = 800.0;
 pub const ICE_QUEEN_MODE1_AT: f32 = 600.0;
+pub const ICE_QUEEN_MODE2_AT: f32 = 500.0;
+pub const ICE_QUEEN_MODE_STEP: std::ops::Range<i32> = 1..4;
+/// Mode 0 only ends while the player is inside this (`NPC.cs:33803`); further off it keeps sweeping.
+pub const ICE_QUEEN_MODE0_EXIT_RANGE: f32 = 600.0;
+/// The picker (`NPC.cs:33961-33978`): one of the three at random, but forced back to the sweep when
+/// the player is further off than this, which is what stops it spinning at nothing.
+pub const ICE_QUEEN_MODES: u32 = 3;
+pub const ICE_QUEEN_MODE_PICK_RANGE: f32 = 1000.0;
 
 /// Santa-NK1 walks and shoots, faster at every quarter of its health.
 pub const SANTA_WALK: [(f32, f32); 4] = [(1.0, 2.0), (0.75, 3.0), (0.5, 4.0), (0.25, 5.0)];
@@ -4469,7 +4611,62 @@ pub const SANTA_FIRE_RATE: [(f32, f32); 4] = [(1.0, 16.0), (0.75, 14.0), (0.5, 1
 pub const SANTA_BULLET_DAMAGE: i32 = 36;
 pub const SANTA_BULLET_SPEED: f32 = 15.0;
 pub const SANTA_MUZZLE: f32 = 50.0;
+/// Its 2D range (`NPC.cs:33992`, `Distance(player.Center) <= 2000f`), which gates the gun and the
+/// rockets only. SNK-2: this was measured horizontally here, so a player directly overhead was
+/// treated as in range from any height.
 pub const SANTA_LEASH: f32 = 2000.0;
+/// It plants rather than driving on once you are this close (`NPC.cs:34165-34168`).
+pub const SANTA_PLANT_RANGE: f32 = 50.0;
+
+/// SNK-1: the three weapons besides the machine gun, each on its own random fuse
+/// (`NPC.cs:34073-34163`). All three fire from a hardpoint behind and above the cab,
+/// `Center - (direction * 24, 64)`; none of them is gated on the firing state, so they go off while
+/// it is driving.
+pub const SANTA_HARDPOINT: (f32, f32) = (24.0, 64.0);
+/// The odds, as a one-in-N a tick, of each weapon starting. Shortened as it is worn down, at every
+/// quarter (`NPC.cs:34078-34095`): nine tenths, three quarters, then a half.
+pub const SANTA_PRESENT_ODDS: u32 = 600;
+pub const SANTA_ROCKET_ODDS: u32 = 1200;
+pub const SANTA_MISSILE_ODDS: u32 = 2700;
+pub const SANTA_ODDS_STEPS: [(f32, f32); 4] = [(1.0, 1.0), (0.75, 0.9), (0.5, 0.75), (0.25, 0.5)];
+/// The present bomb: one lobbed nearly flat in the direction it faces, at a single pixel a tick, so
+/// it falls short and sits (`NPC.cs:34098-34106`).
+pub const SANTA_PRESENT_DAMAGE: i32 = 80;
+pub const SANTA_PRESENT_SPEED: f32 = 1.0;
+/// The rocket volley: once started it runs a hundred ticks, firing every twelfth, aimed at you with
+/// fifty pixels of scatter (`NPC.cs:34112-34135`).
+pub const SANTA_ROCKET_DAMAGE: i32 = 42;
+pub const SANTA_ROCKET_SPEED: f32 = 12.5;
+pub const SANTA_ROCKET_EVERY: f32 = 12.0;
+pub const SANTA_ROCKET_SPREAD: i32 = 50;
+/// The missile volley: the same hundred ticks, every ninth, fired near-vertically and unaimed
+/// (`NPC.cs:34141-34158`).
+pub const SANTA_MISSILE_DAMAGE: i32 = 50;
+pub const SANTA_MISSILE_SPEED: f32 = 11.0;
+pub const SANTA_MISSILE_EVERY: f32 = 9.0;
+pub const SANTA_MISSILE_LEAN: i32 = 100;
+pub const SANTA_MISSILE_RISE: f32 = -300.0;
+/// How long either volley runs once started.
+pub const SANTA_VOLLEY_TICKS: f32 = 100.0;
+/// The missile volley's counter starts at two rather than one, so its first shot lands on the
+/// seventh tick rather than the ninth (`NPC.cs:34139`).
+pub const SANTA_MISSILE_START: f32 = 2.0;
+
+/// SNK-3: its vertical routine, which was absent entirely (`NPC.cs:34188-34237`).
+///
+/// It probes an 80x20 box under its treads: on solid ground it climbs, in open air it falls, and a
+/// player standing directly underneath makes it drop hard.
+pub const SANTA_PROBE: (i32, i32) = (80, 20);
+pub const SANTA_CLIMB_CREEP: f32 = 0.025;
+pub const SANTA_CLIMB: f32 = 0.2;
+pub const SANTA_CLIMB_CAP: f32 = -4.0;
+pub const SANTA_FALL: f32 = 0.5;
+pub const SANTA_FALL_CAP: f32 = 10.0;
+/// The band the falling creep applies in (`NPC.cs:34225`). The climbing one uses [`SANTA_CLIMB`]
+/// itself as its threshold (`NPC.cs:34206`), so the two are not symmetric.
+pub const SANTA_CREEP_BAND: f32 = 0.1;
+/// How far above the player's feet its own have to be before the drop counts (`NPC.cs:34193`).
+pub const SANTA_DROP_CLEARANCE: f32 = 16.0;
 
 // --- Queen Slime ----------------------------------------------------------------------------------
 
@@ -4527,6 +4724,22 @@ pub const QUEEN_SLIME_RING_COUNT_FLYING: usize = 10;
 /// How long it hangs before firing the ring: fifty ticks of windup, then ten more once committed.
 pub const QUEEN_SLIME_SWOOP_WINDUP: f32 = 50.0;
 pub const QUEEN_SLIME_SWOOP_COMMIT: f32 = 10.0;
+
+/// The three minions she sheds as she is worn down (`NPC.cs:46286-46298`).
+///
+/// One or two of these, picked evenly, every time she loses a fixed slice of her maximum life. The
+/// slice is measured against `localAI[0]`, a watermark she seeds with `lifeMax` on her first tick
+/// (`NPC.cs:45703-45708`) and moves down to her current life each time she sheds, so the count is
+/// damage-driven rather than timed: burst her and the adds arrive in a wave.
+pub const QUEEN_SLIME_ADDS: [u16; 3] = [658, 659, 660];
+/// Two percent of her maximum life on the ground, and a shorter one and a half in the air
+/// (`NPC.cs:46271-46275`), so the flying half sheds them faster for the same damage.
+pub const QUEEN_SLIME_ADD_STEP: f32 = 0.02;
+pub const QUEEN_SLIME_ADD_STEP_FLYING: f32 = 0.015;
+/// Each one arrives dazed: `ai[0] = -500 * rand(3)` (`NPC.cs:46303`), so roughly two in three sit
+/// out several seconds of their slime hop timer before they start moving.
+pub const QUEEN_SLIME_ADD_DELAY: f32 = -500.0;
+pub const QUEEN_SLIME_ADD_DELAY_STEPS: u32 = 3;
 
 // --- The Lunatic Cultist ---------------------------------------------------------------------------
 

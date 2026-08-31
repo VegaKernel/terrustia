@@ -1115,7 +1115,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.expired = out.spent;
         }
         60 => {
-            let out = boss::moon::ice_queen(npc, world);
+            let out = boss::moon::ice_queen(npc, world, rng);
             effects.shots.extend(out.shots);
             effects.spawn.extend(out.spawn);
             effects.expired = out.spent;
@@ -1274,6 +1274,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let out = boss::queen_slime::queen_slime(npc, world, rng);
             effects.shots.extend(out.shots);
             effects.teleport_to = out.teleport_to;
+            // QS-1: the minions she sheds as she is worn down. Produced but never consumed, the
+            // whole mechanic would be invisible.
+            effects.spawn.extend(out.spawn);
         }
         style => unreachable!("style {style} claims parity but has no routine here"),
     }

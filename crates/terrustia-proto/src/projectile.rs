@@ -284,8 +284,13 @@ pub mod ids {
     pub const ICE_QUEEN_MIST: u16 = 348;
     pub const ICE_QUEEN_SHARD: u16 = 349;
 
-    /// The Santa-NK1's bullet.
+    /// The Santa-NK1's four weapons: the machine gun (`NPC.cs:34048-34065`), the present bomb
+    /// (`:34096-34107`), the rocket volley (`:34112-34135`) and the missile volley
+    /// (`:34141-34158`).
     pub const SANTA_BULLET: u16 = 180;
+    pub const SANTA_ROCKET: u16 = 350;
+    pub const SANTA_MISSILE: u16 = 351;
+    pub const SANTA_PRESENT: u16 = 352;
 
     /// Queen Slime's dive burst (`NPC.cs:46024-46118`) and the ring her swoop fires
     /// (`NPC.cs:46159-46236`).
