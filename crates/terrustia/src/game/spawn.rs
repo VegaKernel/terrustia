@@ -16,15 +16,41 @@ use crate::world::World;
 /// The player-carried modifiers — water and peace candles, battle and calming potions, invisibility,
 /// the sunflower, the angler set — are deliberately absent: the server does not model a player's
 /// inventory or buffs, so it cannot know them. Everything here is world state the server owns.
+///
+/// Also absent, and for the same reason (the server has no notion of the thing they test):
+/// `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`, `cloudAlpha`'s snow-in-a-storm bonus, the
+/// dual-dungeon seeds, `getGoodWorld`, and the Wall of Flesh's underworld suppression
+/// (`NPC.cs:662-666`). Journey mode's slider is real and is applied by the caller, where the power
+/// lives, rather than threaded through here.
 #[derive(Debug, Clone, Copy)]
 pub struct Conditions {
+    /// Which rate band the *player* is in, from [`rate_depth_at`] rather than [`depth_at`]: the
+    /// game's rate bands carry a screen-height offset its pool tests do not.
     pub depth: Depth,
+    /// The biome the player is standing in.
+    ///
+    /// `SetSpawnFlags` (`NPC.cs:382-397`) copies the player's own `Zone*` flags across, and
+    /// `GetSpawnRate` reads them for a whole block of rate and cap modifiers (`NPC.cs:591-660`).
+    /// This was missing entirely, so the underground desert was five times too quiet, the jungle
+    /// two and a half times, and the corruption one and a half.
+    pub biome: Biome,
     pub hard_mode: bool,
     pub day_time: bool,
     pub blood_moon: bool,
     pub eclipse: bool,
-    /// A pumpkin or frost moon, which only matters above ground.
+    /// A pumpkin or frost moon: `Main.pumpkinMoon || Main.snowMoon`, with no height test.
+    ///
+    /// The height test belongs to the two *rate* branches rather than to the flag: both carry
+    /// `&& player.position.Y < Main.worldSurface * 16.0` (`NPC.cs:543` and `:772`), and the town
+    /// gate that also reads the moon (`NPC.cs:800`) carries no such test, so folding it in here
+    /// would quietly turn town suppression back on for anyone underground during a moon. See
+    /// [`Self::above_surface_line`].
     pub event_moon: bool,
+    /// `player.position.Y < Main.worldSurface * 16.0`: the height half of the two moon branches.
+    ///
+    /// Not derivable from [`Depth`], whose surface band sits a screen height lower
+    /// (see [`rate_depth_at`]).
+    pub above_surface_line: bool,
     /// Townsfolk living near the player.
     ///
     /// This is what makes a base safe, and it is the single most player-visible spawn rule in the
@@ -33,6 +59,52 @@ pub struct Conditions {
     /// eclipse or a moon all overrule it, because an event that a town could turn off would not be
     /// much of an event.
     pub town_npcs: u32,
+    /// `player.nearbyActiveNPCs`: the spawn weight already close to this player.
+    ///
+    /// This was read only as a hard cap gate. The game *also* ramps the rate down as the area
+    /// empties (`NPC.cs:668-698`, two stacked ladders), so a cleared cave refills faster than a
+    /// crowded one: up to 2.38x faster than we were managing.
+    pub nearby_active_npcs: f32,
+    /// Whether the player is below `(worldSurface + rockLayer) / 2`, which is the second emptiness
+    /// ladder's own gate (`NPC.cs:686`). Not derivable from [`Depth`]: it is a midline between two
+    /// of its boundaries.
+    pub below_dirt_midline: bool,
+    /// `downedBoss3`, for the dungeon's pre-Skeletron flat rate (`NPC.cs:787-790`).
+    pub downed_boss3: bool,
+    /// Whether the player is standing in front of a house wall.
+    ///
+    /// `NPC.cs:411`, `noWorms = WorldGen.InWorld(pX, pY) && Main.wallHouse[Main.tile[pX, pY].wall]`:
+    /// the other half of the "walls keep things out" rule, and the half that stops burrowers rather
+    /// than walkers.
+    pub behind_a_house_wall: bool,
+    /// `numberOfActivePlayers` (`NPC.cs:266`), which the moon override's cap is a function of.
+    pub active_players: u32,
+}
+
+/// Which rate band a *player* is in, which is not the same question [`depth_at`] answers.
+///
+/// `GetSpawnRate`'s boundaries carry a screen height on top of the layer they name
+/// (`NPC.cs:487`: `position.Y > Main.rockLayer * 16.0 + sHeight`; `:508` the same for
+/// `worldSurface`), where `sHeight => 1200` px (`NPC.cs:6793`), which is 75 tiles. The *pool*
+/// tests do not: `underGround` and `deeperThanRockLayer` (`NPC.cs:1144`, `:1204`) compare the
+/// chosen tile against the bare layer. So the two need different functions, and sharing one put
+/// every rate band 75 tiles too shallow, roughly doubling the rate through the dirt-layer band.
+///
+/// The underworld boundary has no offset in the game either (`NPC.cs:485`,
+/// `position.Y > Main.UnderworldLayer * 16`), so it is the same on both sides.
+pub fn rate_depth_at(world: &World, y: i32) -> Depth {
+    /// `NPC.sHeight` (1200 px) in tiles.
+    const SCREEN_TILES: i32 = 75;
+
+    if y >= world.height() - UNDERWORLD_DEPTH {
+        Depth::Underworld
+    } else if y > i32::from(world.rock_layer) + SCREEN_TILES {
+        Depth::Cavern
+    } else if y > i32::from(world.surface) + SCREEN_TILES {
+        Depth::Underground
+    } else {
+        Depth::Surface
+    }
 }
 
 /// The spawn rate and cap for a set of conditions, after `NPC.GetSpawnRate`.
@@ -47,6 +119,9 @@ pub struct Conditions {
 /// critter instead of a monster rather than being throttled by the rate at all — see the town
 /// suppression block below for where it comes from. `rng` is only ever consulted there; every
 /// other modifier in this function is a deterministic fact about the world.
+///
+/// The same block's other output, `noWorms`, is [`no_worms`] instead of a fourth element here,
+/// because for everything this server models it needs no roll.
 pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     let mut rate = SPAWN_RATE as f32;
     let mut max = MAX_SPAWNS;
@@ -79,7 +154,8 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
                     rate *= 0.3;
                     max *= 1.8;
                 }
-                if at.event_moon {
+                // NPC.cs:543, with its own `position.Y < worldSurface * 16` half.
+                if at.event_moon && at.above_surface_line {
                     rate *= 0.2;
                     max *= 2.0;
                 }
@@ -88,6 +164,94 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
                 max *= 1.9;
             }
         }
+    }
+
+    // The biome block, `NPC.cs:591-660`. It is one `if`/`else if` chain in the game, so a dungeon
+    // takes its own modifier and none of the others; only the hallow's is a separate `if`. Five
+    // branches of that chain are absent here because this server has no notion of the zone they
+    // test: `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`, `inDualDungeon` and
+    // `tresspassingDualDungeon`. `ZoneUndergroundDesert` is real vanilla's
+    // "desert + below the surface + a sandstone or hardened-sand wall that is not a house wall"
+    // (`SceneMetrics.cs:699`), narrowed here to the first two, since the server does not track
+    // which wall a player is standing in front of.
+    match at.biome {
+        // NPC.cs:591-595.
+        Biome::Dungeon => {
+            rate *= 0.3;
+            max *= 1.8;
+        }
+        // NPC.cs:603-607.
+        Biome::Desert if at.depth != Depth::Surface => {
+            rate *= 0.2;
+            max *= 3.0;
+        }
+        // NPC.cs:609-635: the jungle thins out as a town fills up, on its own ladder rather than
+        // the general town suppression further down (which it does not replace: both apply).
+        Biome::Jungle => {
+            let (r, m) = match at.town_npcs {
+                0 => (0.4, 1.5),
+                1 => (0.55, 1.4),
+                2 => (0.7, 1.3),
+                _ => (0.85, 1.2),
+            };
+            rate *= r;
+            max *= m;
+        }
+        // NPC.cs:637-641.
+        Biome::Corruption | Biome::Crimson => {
+            rate *= 0.65;
+            max *= 1.3;
+        }
+        _ => {}
+    }
+    // NPC.cs:656-660, a separate `if`: the hallow is busier only below the rock layer.
+    if at.biome == Biome::Hallow && matches!(at.depth, Depth::Cavern | Depth::Underworld) {
+        rate *= 0.65;
+        max *= 1.3;
+    }
+
+    // The emptiness ramp, `NPC.cs:668-698`. Two stacked ladders: everywhere, then again below the
+    // dirt-layer midline or in either evil. An area that has been cleared refills faster than one
+    // that is still full, which is what stops a farmed cave going quiet for minutes at a time.
+    // Both read the *running* `maxSpawns`, before its own ceiling is applied, as the game does.
+    let near = at.nearby_active_npcs;
+    if near < max * 0.2 {
+        rate *= 0.6;
+    } else if near < max * 0.4 {
+        rate *= 0.7;
+    } else if near < max * 0.6 {
+        rate *= 0.8;
+    } else if near < max * 0.8 {
+        rate *= 0.9;
+    }
+    if at.below_dirt_midline || matches!(at.biome, Biome::Corruption | Biome::Crimson) {
+        if near < max * 0.2 {
+            rate *= 0.7;
+        } else if near < max * 0.4 {
+            rate *= 0.9;
+        }
+    }
+
+    // The game's own floor and ceiling, which stop a stack of modifiers running away
+    // (`NPC.cs:738-745`). Everything below this point is an *override*: the game assigns rather
+    // than multiplies, so a clamp placed after them would undo them. Putting the clamps last is
+    // what made a pumpkin moon three and a half times too slow.
+    rate = rate.max(SPAWN_RATE as f32 * 0.1);
+    max = max.min(MAX_SPAWNS * 3.0);
+
+    // `NPC.cs:772-776`, the moon override, absolute in both directions: it replaces the rate with a
+    // flat 20 and the cap with a function of the party size, whatever the clamps just said. Reached
+    // at 64 or 72 before this, against the game's 20.
+    if at.event_moon && at.above_surface_line {
+        max = MAX_SPAWNS * (2.0 + 0.3 * at.active_players as f32);
+        rate = 20.0;
+    }
+
+    // `NPC.cs:787-790`: below the dungeon before Skeletron falls, the rate is a flat 10, which is
+    // the pressure that makes early-dungeon farming impractical. The Dungeon Guardian this pairs
+    // with landed in PR #32; the rate did not, so it arrived every 240 to 600 ticks instead.
+    if at.biome == Biome::Dungeon && !at.downed_boss3 {
+        rate = 10.0;
     }
 
     // Townsfolk quiet the place down, but only when nothing else is happening: an event overrules
@@ -100,9 +264,8 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     // sub-case inside each branch below, since this project has no notion of a graveyard zone at
     // all yet (the same reason `ZonePeaceCandle` and the rest of a player's own buffs are already
     // out of `Conditions`' scope, per this struct's own doc comment).
-    let event = at.blood_moon || at.eclipse || at.event_moon;
     let mut spawn_friendly = false;
-    if !event {
+    if town_suppression_applies(at) {
         match at.town_npcs {
             0 => {}
             // NPC.cs:870-878, the ordinary (non-graveyard) case: a one-in-three chance forces a
@@ -140,26 +303,98 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
         }
     }
 
-    // The game's own floor and ceiling, which stop a stack of modifiers running away.
-    rate = rate.max(SPAWN_RATE as f32 * 0.1);
-    max = max.min(MAX_SPAWNS * 3.0);
+    // `NPC.cs:925-929` ends the function with a `RollOnlyBadLuckExtreme(50) == 0` bonus of
+    // `rate * 0.85` and `cap * 1.15`. It is deliberately not transcribed, because it can never
+    // fire here: `Luck.RollOnlyBadLuckExtreme` (`Terraria.GameContent/Luck.cs:53-60`) returns -1
+    // unless `luck < 0`, and this server does not model player luck at all, so its players are at
+    // luck 0 exactly as a vanilla player with no luck effects is. Vanilla skips it for them too.
+
     (rate as u32, max.max(1.0), spawn_friendly)
 }
+
+/// `noWorms`: whether burrowers are kept out of this attempt's draw.
+///
+/// Its own function rather than a fourth thing [`rates`] returns, because for everything this
+/// server models it is decided without a roll. Two sources:
+///
+/// * the wall at the player's own back (`NPC.cs:411`,
+///   `noWorms = WorldGen.InWorld(pX, pY) && Main.wallHouse[Main.tile[pX, pY].wall]`);
+/// * the town, which sets it unconditionally in all three headcount branches of the ordinary
+///   surface/underground fork (`NPC.cs:858`, `:883`, `:905`), behind the same event gate the rest of
+///   town suppression sits behind (`NPC.cs:800`).
+///
+/// Only the underworld's own fork rolls for it (`NPC.cs:810` one in two, `:827` three in four,
+/// `:843` nine in ten), and that fork is already disclosed in [`rates`] as not modelled.
+/// `ZoneShadowCandle` clearing it again (`NPC.cs:420-424`) is a player-carried effect, out of
+/// [`Conditions`]' scope like every other one.
+pub fn no_worms(at: Conditions) -> bool {
+    at.behind_a_house_wall || (town_suppression_applies(at) && at.town_npcs >= 1)
+}
+
+/// The gate the whole town-suppression block sits behind, `NPC.cs:800`:
+///
+/// ```csharp
+/// if (!invaders && ((!Main.bloodMoon && !Main.pumpkinMoon && !Main.snowMoon) || Main.dayTime)
+///     && (!Main.eclipse || !Main.dayTime) && !flag && !ZoneCrimson && !ZoneMeteor
+///     && !ZoneOldOneArmy)
+/// ```
+///
+/// where `flag` is `ZoneCorrupt || ZoneCrimson`. So an event overrules the town, and so does simply
+/// standing in an evil: a corrupt base is never quiet, however many people live in it. That last
+/// clause could not be modelled until `Conditions` carried a biome at all.
+///
+/// Note the moon here is tested with **no** height condition, unlike the two rate branches: a
+/// player underground during a pumpkin moon still has town suppression switched off.
+///
+/// Three of the game's exclusions are dropped, each because the thing they test does not exist
+/// here: `invaders` (invasions do not route through this function), `ZoneMeteor` and
+/// `ZoneOldOneArmy`. `Main.infectedSeed`, which would clear `flag` again, is likewise unmodelled.
+fn town_suppression_applies(at: Conditions) -> bool {
+    ((!at.blood_moon && !at.event_moon) || at.day_time)
+        && (!at.eclipse || !at.day_time)
+        && !matches!(at.biome, Biome::Corruption | Biome::Crimson)
+}
+
+/// The burrowers whose spawn branch vanilla gates on `noWorms`, out of the types this server fields.
+///
+/// `NPC.cs:3704-3713` is the Devourer / World Feeder branch, and it is the only one of the game's
+/// several `!noWorms` gates naming a type that appears in these pools. Deliberately *not* here: the
+/// underworld's Bone Serpent, which the game spawns with no such gate at all (`NPC.cs:4885`,
+/// `Main.rand.Next(40) == 0 && !AnyNPCs(39)`). The rest of the game's gates (`NPC.cs:1409` the
+/// Wyvern, `:3973`, `:4062`, `:1698`) name hardmode worms with no pool here.
+const NO_WORMS_GATES: [u16; 2] = [
+    7,  // DevourerHead
+    98, // SeekerHead, the World Feeder
+];
 
 #[cfg(test)]
 mod rate_tests {
     use super::*;
     use rand::SeedableRng;
 
+    /// A neutral world: plain forest surface, daytime, nothing running, nobody about.
+    ///
+    /// `nearby_active_npcs` is deliberately *not* zero. An empty area is the game's fastest case,
+    /// not its neutral one (`NPC.cs:668`, rate x0.6), so pinning a modifier against an empty
+    /// baseline would fold that ramp into every number here. This is far above the ramp's top rung
+    /// (`maxSpawns * 0.8`) for any cap the modifiers can build, so it leaves the ramp off entirely
+    /// and each pin measures the one modifier it names.
     fn plain() -> Conditions {
         Conditions {
             depth: Depth::Surface,
+            biome: Biome::Forest,
             hard_mode: false,
             day_time: true,
             blood_moon: false,
             eclipse: false,
             event_moon: false,
+            above_surface_line: true,
             town_npcs: 0,
+            nearby_active_npcs: 1_000.0,
+            below_dirt_midline: false,
+            downed_boss3: true,
+            behind_a_house_wall: false,
+            active_players: 1,
         }
     }
 
@@ -320,18 +555,130 @@ mod rate_tests {
         );
     }
 
+    /// The gate the whole town-suppression block sits behind (`NPC.cs:800`), which has two clauses
+    /// worth their own pin.
+    ///
+    /// An evil is never quiet, however many people live in it: `!flag && !ZoneCrimson` where
+    /// `flag = ZoneCorrupt || ZoneCrimson`. That clause could not be modelled at all until
+    /// `Conditions` carried a biome.
+    ///
+    /// And the moon is tested there with no height condition, unlike the two rate branches, so a
+    /// player underground during a pumpkin moon still has town suppression switched off.
+    #[test]
+    fn an_evil_is_never_quieted_by_a_town_and_a_moon_switches_it_off_at_any_depth() {
+        let mut rng = SmallRng::seed_from_u64(3);
+        for biome in [Biome::Corruption, Biome::Crimson] {
+            for _ in 0..50 {
+                let (_, cap, friendly) = rates(
+                    Conditions {
+                        biome,
+                        town_npcs: 5,
+                        ..plain()
+                    },
+                    &mut rng,
+                );
+                assert!(!friendly, "{biome:?} never draws a friendly for a town");
+                assert_eq!(cap, 5.0 * 1.3, "and its cap is the evil's, not a town's");
+            }
+        }
+        // A forest of the same headcount does get quieted, so the biome is what did it.
+        assert!(
+            rates(
+                Conditions {
+                    town_npcs: 5,
+                    ..plain()
+                },
+                &mut rng,
+            )
+            .2
+        );
+
+        // Underground, during a moon, with a full town: no suppression, because the gate's moon
+        // clause carries no height test.
+        let deep_moon = Conditions {
+            depth: Depth::Cavern,
+            above_surface_line: false,
+            event_moon: true,
+            day_time: false,
+            town_npcs: 5,
+            ..plain()
+        };
+        assert!(!rates(deep_moon, &mut rng).2, "a moon overrules the town");
+        assert!(!no_worms(deep_moon), "and its noWorms with it");
+        // ...but the moon's own rate override does not reach down here.
+        assert_ne!(rates(deep_moon, &mut rng).0, 20);
+    }
+
+    /// `noWorms` keeps burrowers out when there is a town or a wall at your back, and an event
+    /// overrules the town half of that exactly as it overrules the rest of town suppression
+    /// (`NPC.cs:411`, `:800`, `:858`, `:883`, `:905`).
+    ///
+    /// Fails before the fix, when `noWorms` was not modelled at all: Devourers came straight
+    /// through a town and through a walled base's own walls.
+    #[test]
+    fn a_town_or_a_wall_keeps_the_burrowers_out() {
+        assert!(!no_worms(plain()), "an empty wilderness has worms in it");
+        for town in 1..5 {
+            assert!(
+                no_worms(Conditions {
+                    town_npcs: town,
+                    ..plain()
+                }),
+                "{town} residents should stop worms",
+            );
+        }
+        assert!(
+            no_worms(Conditions {
+                behind_a_house_wall: true,
+                ..plain()
+            }),
+            "so should a wall at your own back, with no town at all",
+        );
+        // An event overrules the town, but not the wall.
+        for town in 0..5 {
+            assert!(
+                !no_worms(Conditions {
+                    town_npcs: town,
+                    blood_moon: true,
+                    day_time: false,
+                    ..plain()
+                }),
+                "a blood moon brings worms to a town of {town}",
+            );
+        }
+        assert!(
+            no_worms(Conditions {
+                behind_a_house_wall: true,
+                blood_moon: true,
+                day_time: false,
+                ..plain()
+            }),
+            "the wall is not part of the town's event gate",
+        );
+
+        // The gated set is the Devourer branch and nothing else this server fields.
+        assert_eq!(NO_WORMS_GATES, [7, 98]);
+        assert!(
+            !NO_WORMS_GATES.contains(&39),
+            "the underworld's Bone Serpent has no such gate in the game (NPC.cs:4885)",
+        );
+    }
+
     /// However the modifiers stack, they stay inside the game's own floor and ceiling.
     #[test]
     fn the_rate_is_bounded() {
+        // No moon here: the moon override (`NPC.cs:772-776`) is *outside* the clamps by design and
+        // sets a flat 20, so including it would be asking the clamps to bound something the game
+        // deliberately puts beyond them. It has its own pin below.
         let worst = rates(
             Conditions {
                 depth: Depth::Underworld,
                 hard_mode: true,
                 day_time: false,
                 blood_moon: true,
-                eclipse: false,
-                event_moon: true,
-                town_npcs: 0,
+                nearby_active_npcs: 0.0,
+                below_dirt_midline: true,
+                ..plain()
             },
             &mut any_rng(),
         );
@@ -695,13 +1042,11 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             34, // CursedSkull
             71, // DungeonSlime
         ],
-        (_, Ocean) => &[
-            67,  // Crab
-            63,  // BlueJellyfish
-            64,  // PinkJellyfish
-            65,  // Shark
-            221, // Squid
-        ],
+        // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
+        // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
+        // A dry beach tile falls through to the ordinary surface pool the same way vanilla's does,
+        // which is why standing on the shore at night still brings zombies.
+        (depth, Ocean) => pool(depth, Forest, day),
         (Surface, Corruption) => &[
             6,  // EaterofSouls
             7,  // DevourerHead
@@ -980,25 +1325,92 @@ pub const GROUND_SCAN: i32 = 30;
 /// column there is usually one standable row in a 90-tile band, so picking blind would almost
 /// never find it.
 pub fn find_ground(world: &World, x: i32, from_y: i32) -> Option<i32> {
-    (from_y..from_y + GROUND_SCAN).find(|&y| {
+    find_ground_within(world, x, from_y, from_y + GROUND_SCAN)
+}
+
+/// The same descent, stopped at an explicit row rather than a fixed distance.
+///
+/// `FindSpawnTile` (`NPC.cs:990-993`) walks `for (; j < maxTilesY && j < spawnArea.Bottom && !solid;
+/// j++)`, so its budget is "however far it is to the bottom of the spawn box", not a constant. From
+/// the top of the box that is a full `2 * SPAWN_RANGE_Y` (94 tiles) rather than [`GROUND_SCAN`]'s
+/// 30, which is the difference between reaching an ocean floor and giving up in the water above it.
+fn find_ground_within(world: &World, x: i32, from_y: i32, bottom: i32) -> Option<i32> {
+    (from_y..bottom.min(world.height())).find(|&y| {
         let tile = world.tile(x, y);
         tile.is_active() && solid(tile.block)
     })
 }
 
 /// Whether an NPC can stand at this tile: open space with something solid underneath.
+///
+/// The open-space half is `NPC.CanSpawnInTile` (`NPC.cs:5431-5442`), which rejects exactly two
+/// things: an active solid tile, and lava at *any* depth. Water is explicitly allowed, which is
+/// what lets a shark exist.
+///
+/// This used to be `tile.liquid > 200`, a test blind to which liquid it was looking at, so it had
+/// both halves backwards at once: deep water was refused where the game permits it (the whole ocean
+/// roster could only appear on a shoreline strip) and shallow lava was accepted where the game
+/// refuses it at a single drop.
 fn has_room(world: &World, x: i32, y: i32) -> bool {
     for dy in 0..3 {
         let tile = world.tile(x, y - dy);
         if tile.is_active() && solid(tile.block) {
             return false;
         }
-        if tile.liquid > 200 {
-            return false; // deep water is not a walking spot
+        // `Tile.anyLava()`: the kind, not the depth. `liquid_kind` is only meaningful when there is
+        // some liquid there, hence the amount test first.
+        if tile.liquid > 0 && tile.liquid_kind == terrustia_proto::tile::Liquid::Lava {
+            return false;
         }
     }
     let floor = world.tile(x, y + 1);
     floor.is_active() && solid(floor.block)
+}
+
+/// Whether a spawn point stands in water deep enough to draw the aquatic roster.
+///
+/// `NPC.SetSpawnFlagsForChosenTile` (`NPC.cs:1058`): `waterTile = tile[x, y-1].liquid > 0 &&
+/// tile[x, y-2].liquid > 0 && tile[x, y-1].liquidType() == 0`, where its `y` is the solid ground
+/// row. Ours is one above that (the row the NPC's feet occupy), so the two tiles to test are `y`
+/// and `y - 1`. Both must be wet, so a single puddle underfoot is not the sea.
+fn water_tile(world: &World, x: i32, y: i32) -> bool {
+    let feet = world.tile(x, y);
+    feet.liquid > 0
+        && world.tile(x, y - 1).liquid > 0
+        && feet.liquid_kind == terrustia_proto::tile::Liquid::Water
+}
+
+/// What a tile of water draws instead of the land pool.
+///
+/// Vanilla keeps the water rosters in their own `waterTile` branches ahead of every land branch
+/// (`NPC.cs:1766-2000`), which is why a shark is never on the sand and a zombie is never in the sea.
+/// Two of those branches are transcribed here, being the two whose types this server already
+/// fields:
+///
+/// * the ocean, `waterTile && isOcean` (`NPC.cs:1798-1920`): Shark, Squid, Crab, Pink Jellyfish;
+/// * water below the surface line, `waterTile && spawnTileY > worldSurface` (`NPC.cs:1988-1997`):
+///   Blue Jellyfish.
+///
+/// Deliberately not transcribed, because each would need an NPC this server has no AI for: the
+/// hardmode jungle's Arapaima (157), the hardmode crimson's water pair, the Piranha/Angler Fish
+/// branch at `NPC.cs:1932`, the corrupt and crimson goldfish at `:1999`, and the ocean's own Sea
+/// Snail (220) and Orca (692). An empty slice here means "no water roster for this place", and the
+/// caller falls back to the land pool rather than inventing one.
+pub fn water_pool(depth: Depth, biome: Biome) -> &'static [u16] {
+    match (depth, biome) {
+        (_, Biome::Ocean) => &[
+            65,  // Shark
+            221, // Squid
+            67,  // Crab
+            64,  // PinkJellyfish
+        ],
+        // `spawnTileY > Main.worldSurface`: anything below the surface line, which is every band
+        // this enum has except the surface itself.
+        (Depth::Surface, _) => &[],
+        (_, _) => &[
+            63, // BlueJellyfish
+        ],
+    }
 }
 
 /// Pick spawns for this tick.
@@ -1070,7 +1482,7 @@ const ACTIVE_RANGE_Y: f32 = 1200.0 * 2.1;
 /// (`NPC.cs:313`, `player.nearbyActiveNPCs`, accumulated in `CheckActive` weighted by each NPC's
 /// own `npcSlots`). A statue-spawned monster does not count, as it does not in the game (it carries
 /// no spawn slots), which is what lets a statue farm keep working.
-fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
+pub fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
     npcs.iter()
         .filter(|(_, npc)| npc.is_alive() && !npc.stats.town_npc && !npc.from_statue)
         .filter(|(_, npc)| {
@@ -1079,6 +1491,55 @@ fn nearby_active_npcs(npcs: &NpcStore, at: (f32, f32)) -> f32 {
         })
         .map(|(_, npc)| npc.stats.npc_slots)
         .sum()
+}
+
+/// Each player's last biome scan, so the rate can read a zone without paying for one every tick.
+///
+/// `biome_at` walks a 169-by-124 tile box, measured at 78 us on a full-size world. The rate needs
+/// it on every attempt, not only the roughly one in six hundred that places something
+/// (`NPC.cs:591-660`), and 78 us per player per tick is 19.8 ms at this server's 255-player bar,
+/// which is the whole 16.67 ms tick budget and then some. Vanilla has no equivalent cost: a real
+/// dedicated server never scans at all, because the *client* runs `SceneMetrics` and sends its
+/// zones up in packet 36.
+///
+/// So the scan is reused until it is either a second old or the player has walked far enough for it
+/// to be stale. Both bounds are conservative against the box being scanned: 16 tiles is a fifth of
+/// its half-width, so a cached answer is still one taken from well inside the same neighbourhood.
+#[derive(Debug, Default)]
+pub struct BiomeCache {
+    /// What tick it is, set by [`Self::advance`] before each spawn pass.
+    now: u64,
+    /// Indexed by player slot: the tick it was taken, where, and what it said.
+    entries: Vec<Option<(u64, i32, i32, Biome)>>,
+}
+
+impl BiomeCache {
+    /// Ticks a scan stays good for when the player has not moved far.
+    const REFRESH: u64 = 60;
+    /// ...and how far they may move before it is taken again anyway, in tiles.
+    const DRIFT: i32 = 16;
+
+    /// Tell the cache what tick it is. Called once, before the spawn pass.
+    pub fn advance(&mut self, ticks: u64) {
+        self.now = ticks;
+    }
+
+    /// This player's zone, scanning only when the last answer has gone stale.
+    pub fn read(&mut self, world: &World, slot: usize, x: i32, y: i32) -> Biome {
+        if self.entries.len() <= slot {
+            self.entries.resize(slot + 1, None);
+        }
+        if let Some((at, sx, sy, biome)) = self.entries[slot]
+            && self.now.saturating_sub(at) < Self::REFRESH
+            && (x - sx).abs() <= Self::DRIFT
+            && (y - sy).abs() <= Self::DRIFT
+        {
+            return biome;
+        }
+        let biome = biome_at(world, x, y);
+        self.entries[slot] = Some((self.now, x, y, biome));
+        biome
+    }
 }
 
 /// One spawn attempt in this many considers a bound townsperson instead of an enemy.
@@ -1162,8 +1623,8 @@ pub fn try_spawn(
     players: &[Option<Player>],
     events: &EventSpawns<'_>,
     journey: &JourneyPowers,
+    biomes: &mut BiomeCache,
     rng: &mut SmallRng,
-    _ticks: u64,
 ) -> Vec<(u16, (f32, f32))> {
     let active: Vec<&Player> = players
         .iter()
@@ -1180,11 +1641,35 @@ pub fn try_spawn(
     // second player raises the world's monster count only because they carry their own near-player
     // budget where they stand, which is what the game does and what a single global cap could not.
     let mut out = Vec::new();
+    // `NPC.cs:266`, `numberOfActivePlayers`: read once, before the loop consumes the list.
+    let active_players = active.len() as u32;
     for player in active {
         let (px, py) = (
             (player.position.0 / 16.0) as i32,
             (player.position.1 / 16.0) as i32,
         );
+
+        // `CanSpawnEnemiesNear` (`NPC.cs:358-362`): nothing spawns anywhere near a live Moon Lord,
+        // `player.isNearNPC(398, MoonLordFightingDistance)` with that distance being 4500 px
+        // (`NPC.cs:6036`). The fight is meant to be the Moon Lord and its parts, not the Moon Lord
+        // plus whatever the surface would ordinarily have sent.
+        const MOON_LORD: u16 = 398;
+        const MOON_LORD_FIGHTING_DISTANCE: f32 = 4500.0;
+        let player_centre = (
+            player.position.0 + crate::game::ai::PLAYER_WIDTH as f32 / 2.0,
+            player.position.1 + crate::game::ai::PLAYER_HEIGHT as f32 / 2.0,
+        );
+        if npcs.iter().any(|(_, n)| {
+            n.npc_type == MOON_LORD && n.is_alive() && {
+                let (dx, dy) = (
+                    n.center().0 - player_centre.0,
+                    n.center().1 - player_centre.1,
+                );
+                dx.hypot(dy) < MOON_LORD_FIGHTING_DISTANCE
+            }
+        }) {
+            continue;
+        }
 
         // Journey mode's `SpawnRate`, gated on the world's own difficulty being literally
         // Journey (`Main.IsJourneyMode` — every one of its five real vanilla call sites checks
@@ -1200,23 +1685,48 @@ pub fn try_spawn(
             continue;
         }
 
+        // The biome is the *player's* zone, worked out once from where they stand, not re-read at
+        // each candidate tile. The game classifies the zone on the player (`SceneMetrics` scans
+        // around the player's centre and `SetSpawnFlags` copies `player.Zone*` straight across,
+        // `NPC.cs:382-397`); reading it at the far edge of the spawn box instead let a player in
+        // the middle of a biome draw the wrong pool whenever a candidate happened to land just
+        // outside it.
+        //
+        // It is read here, before the rate roll rather than after, because `GetSpawnRate` itself
+        // reads it: a whole block of rate and cap modifiers keys on the zone (`NPC.cs:591-660`).
+        // That is why it now goes through [`BiomeCache`] rather than scanning outright: paying for
+        // the scan on every attempt rather than only a successful one is 78 us per player per tick,
+        // which does not fit in a tick at this server's player bar.
+        let player_biome = biomes.read(world, usize::from(player.slot), px, py);
+        let near = nearby_active_npcs(npcs, player.position);
+
         // The rate and cap are the player's own, not one number for the world: two people in the
         // same world can be standing in a quiet forest and a busy cavern at the same moment.
-        let (mut rate, band, spawn_friendly) = rates(
-            Conditions {
-                depth: depth_at(world, py),
-                hard_mode: world.progress.hard_mode,
-                day_time: world.day_time,
-                blood_moon: world.blood_moon,
-                eclipse: world.eclipse,
-                event_moon: world.pumpkin_moon || world.snow_moon,
-                town_npcs: town_npcs_near(npcs, player.position),
-            },
-            rng,
-        );
+        let conditions = Conditions {
+            depth: rate_depth_at(world, py),
+            biome: player_biome,
+            hard_mode: world.progress.hard_mode,
+            day_time: world.day_time,
+            blood_moon: world.blood_moon,
+            eclipse: world.eclipse,
+            // `NPC.cs:543` and `:772` both carry the height half of this condition.
+            event_moon: world.pumpkin_moon || world.snow_moon,
+            // `NPC.cs:543` and `:772`, `player.position.Y < Main.worldSurface * 16.0`.
+            above_surface_line: py < i32::from(world.surface),
+            town_npcs: town_npcs_near(npcs, player.position),
+            nearby_active_npcs: near,
+            // `NPC.cs:686`, `player.position.Y / 16 > (worldSurface + rockLayer) / 2`.
+            below_dirt_midline: py > (i32::from(world.surface) + i32::from(world.rock_layer)) / 2,
+            downed_boss3: world.progress.downed_boss3,
+            // `NPC.cs:411`, read at the player's own tile.
+            behind_a_house_wall: terrustia_proto::housing::wall_encloses(world.tile(px, py).wall),
+            active_players,
+        };
+        let (mut rate, band, spawn_friendly) = rates(conditions, rng);
+        let no_worms = no_worms(conditions);
         // This player's own near-player cap, checked before the rate roll, exactly as the game does
         // (`NPC.cs:312-317`: `nearbyActiveNPCs >= maxSpawns` first, then `rand.Next(spawnRate)`).
-        if nearby_active_npcs(npcs, player.position) >= band {
+        if near >= band {
             continue;
         }
         if journey_world {
@@ -1231,15 +1741,6 @@ pub fn try_spawn(
         // being thrown away. It is carried down into the candidate loop below, where the same
         // ground and safe-zone checks apply, and resolved against `friendly_pool`'s critter table.
 
-        // The biome is the *player's* zone, worked out once from where they stand, not re-read at
-        // each candidate tile. The game classifies the zone on the player (`SceneMetrics` scans
-        // around the player's centre and `SetSpawnFlags` copies `player.Zone*` straight across,
-        // `NPC.cs:382-397`); reading it at the far edge of the spawn box instead let a player in
-        // the middle of a biome draw the wrong pool whenever a candidate happened to land just
-        // outside it. Computed here, after the rate roll, so the 169x124 scan is paid for only on
-        // the roughly one attempt in six hundred that will actually try to place something.
-        let player_biome = biome_at(world, px, py);
-
         // Try a handful of candidate tiles rather than scanning the whole area.
         for _ in 0..20 {
             let x = px + rng.random_range(-SPAWN_RANGE_X..=SPAWN_RANGE_X);
@@ -1248,8 +1749,33 @@ pub fn try_spawn(
                 continue;
             }
 
-            // Drop to whatever ground is under the chosen point, then stand on top of it.
-            let Some(ground) = find_ground(world, x, from_y) else {
+            // A house wall is the reason a walled base is safe, and it is tested on the *chosen*
+            // tile before the descent to ground, not on where the descent lands (`NPC.cs:977`):
+            //
+            // ```csharp
+            // if ((Main.tile[num, j].nactive() && Main.tileSolid[Main.tile[num, j].type])
+            //     || (!ignoreSafeWalls && Main.wallHouse[Main.tile[num, j].wall])) continue;
+            // ```
+            //
+            // `wall_encloses` is `Main.wallHouse` exactly (all 279 ids, `Main.cs:9880-10745`), which
+            // is why housing and spawn suppression agree about what a wall is: the same set decides
+            // both, in the game and here. `ignoreSafeWalls` is set only inside a lunar pillar's zone
+            // (`NPC.cs:404-409`), an event this server does not field, so it is left out rather than
+            // threaded through as a constant `false`.
+            //
+            // Without this test, a fully walled and fully lit base spawned zombies inside itself.
+            let chosen = world.tile(x, from_y);
+            if (chosen.is_active() && solid(chosen.block))
+                || terrustia_proto::housing::wall_encloses(chosen.wall)
+            {
+                continue;
+            }
+
+            // Drop to whatever ground is under the chosen point, then stand on top of it. The
+            // descent stops at the bottom of the spawn box, as `NPC.cs:990-993` does, rather than a
+            // fixed 30 tiles: from the top of the box that is up to 94 tiles, which is the reach an
+            // ocean needs.
+            let Some(ground) = find_ground_within(world, x, from_y, py + SPAWN_RANGE_Y) else {
                 continue;
             };
             let y = ground - 1;
@@ -1321,6 +1847,13 @@ pub fn try_spawn(
                 None if player_biome == Biome::Dungeon && !world.progress.downed_boss3 => {
                     DUNGEON_GUARDIAN
                 }
+                // Standing in water draws the aquatic roster instead of the land one, which is how
+                // vanilla orders it: every `waterTile` branch (`NPC.cs:1766-2000`) sits ahead of
+                // every land branch, so the sea gets sharks and the beach gets zombies.
+                None if water_tile(world, x, y) && !water_pool(depth, player_biome).is_empty() => {
+                    let wet = water_pool(depth, player_biome);
+                    wet[rng.random_range(0..wet.len())]
+                }
                 None => {
                     let biome = player_biome;
                     let ordinary = pool(depth, biome, world.day_time);
@@ -1355,6 +1888,13 @@ pub fn try_spawn(
                     if world_specific {
                         candidates.push(CAVERN_SENTINEL);
                     }
+                    // `noWorms` (`NPC.cs:3704`): a town, or a wall at the player's back, keeps
+                    // burrowers out. Dropping them from the draw rather than throwing the whole
+                    // attempt away is what the game's `else if` chain amounts to: the branch is
+                    // skipped and a later one answers instead.
+                    if no_worms {
+                        candidates.retain(|ty| !NO_WORMS_GATES.contains(ty));
+                    }
                     let alive_count = |ty: u16| {
                         npcs.iter()
                             .filter(|(_, n)| n.npc_type == ty && n.is_alive())
@@ -1373,6 +1913,13 @@ pub fn try_spawn(
 
             // Position is the NPC's top-left, so it stands on the tile below.
             out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+            break;
+        }
+        // `SpawnNPC` (`NPC.cs:291-306`) walks the player list and `break`s the moment
+        // `TrySpawnAnNPC` returns true, so at most one NPC is spawned server-wide per tick however
+        // many people are playing. Without this each player got their own draw, so a busy server
+        // spawned monsters N times as fast as the game does.
+        if !out.is_empty() {
             break;
         }
     }
@@ -1413,6 +1960,36 @@ mod tests {
         assert_eq!(depth_at(&world, 250), Depth::Underground);
         assert_eq!(depth_at(&world, 350), Depth::Cavern);
         assert_eq!(depth_at(&world, 599 - 1), Depth::Underworld);
+    }
+
+    /// The rate bands sit a screen height (75 tiles) below the layers the pool bands use
+    /// (`NPC.cs:487`, `:508`, `sHeight => 1200` at `:6793`).
+    ///
+    /// Fails before the fix, when both questions were answered by `depth_at`: every rate band was
+    /// 75 tiles too shallow, roughly doubling the spawn rate through the dirt-layer band.
+    #[test]
+    fn the_rate_bands_sit_a_screen_height_below_the_pool_bands() {
+        let mut world = test_world();
+        world.surface = 200;
+        world.rock_layer = 300;
+
+        // Just below the surface line is still the surface for rate purposes, and already
+        // underground for pool purposes.
+        assert_eq!(depth_at(&world, 210), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 210), Depth::Surface);
+        assert_eq!(rate_depth_at(&world, 275), Depth::Surface);
+        assert_eq!(rate_depth_at(&world, 276), Depth::Underground);
+
+        // The same 75 tiles again at the rock layer.
+        assert_eq!(depth_at(&world, 310), Depth::Cavern);
+        assert_eq!(rate_depth_at(&world, 310), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 375), Depth::Underground);
+        assert_eq!(rate_depth_at(&world, 376), Depth::Cavern);
+
+        // The underworld boundary carries no offset in the game either, so the two agree there.
+        let underworld = world.height() - UNDERWORLD_DEPTH;
+        assert_eq!(rate_depth_at(&world, underworld), Depth::Underworld);
+        assert_eq!(depth_at(&world, underworld), Depth::Underworld);
     }
 
     /// Every hardmode pool names real, hostile types, and each biome's are its own.
@@ -1786,8 +2363,8 @@ mod tests {
                 &[],
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0
             )
             .is_empty()
         );
@@ -1810,10 +2387,19 @@ mod tests {
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
-        player.position = (
-            f32::from(world.spawn_x) * 16.0,
-            f32::from(world.spawn_y) * 16.0,
-        );
+        // A town cannot quiet an evil (`NPC.cs:800`'s `!flag` clause), and this world's own spawn
+        // point happens to sit in one, so find a plain forest column to build the town in instead.
+        let py = i32::from(world.spawn_y);
+        let px = (260..540)
+            .step_by(4)
+            .find(|&x| {
+                !matches!(
+                    biome_at(&world, x, py),
+                    Biome::Corruption | Biome::Crimson | Biome::Ocean
+                )
+            })
+            .expect("the test world has somewhere that is not an evil");
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
         // Three townsfolk standing right where the player is, well inside town_npcs_near's reach.
         for _ in 0..3 {
             npcs.spawn(GUIDE, player.position);
@@ -1829,8 +2415,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 spawned += 1;
                 let stats = npc_stats(npc_type).expect("a real type");
@@ -1905,8 +2491,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 assert_eq!(
                     npc_type, DUNGEON_GUARDIAN,
@@ -1931,13 +2517,20 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 assert_ne!(
                     npc_type, DUNGEON_GUARDIAN,
                     "the Guardian should be gone once Skeletron is down"
                 );
+                // The bound Mechanic's own gate is exactly "the dungeon, after Skeletron"
+                // (`NPC.cs:2656`), so she is a correct find here rather than a stray draw from the
+                // pool. Rescues are not what this test is about.
+                let stats = terrustia_proto::npc_data::npc_stats(npc_type).expect("a real type");
+                if stats.friendly {
+                    continue;
+                }
                 assert!(
                     pool(depth_at(&world, cy), Biome::Dungeon, world.day_time).contains(&npc_type),
                     "post-Skeletron dungeon spawned {npc_type}, not a dungeon regular",
@@ -1975,8 +2568,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             ) {
                 seen += 1;
                 assert!(
@@ -2017,6 +2610,401 @@ mod tests {
         assert_eq!(find_ground(&world, world.width() / 2, 0), None);
     }
 
+    /// One playing player standing where the test world's spawn point is, for the whole-loop tests
+    /// below.
+    fn player_at(position: (f32, f32)) -> Vec<Option<Player>> {
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = position;
+        vec![Some(player)]
+    }
+
+    /// A walled base suppresses spawns inside itself (`NPC.cs:977`).
+    ///
+    /// Fails before the fix: the candidate loop had no wall test at all, so a fully walled, fully
+    /// lit base spawned zombies in its own living room. Built as a flat hall with stone walls behind
+    /// every open tile and a stone floor, wide enough that the whole spawn box is inside it.
+    #[test]
+    fn a_walled_base_suppresses_spawns_inside_itself() {
+        let mut world = World::empty(800, 600, "walled");
+        let floor = 300;
+        // A wide, tall hall: solid floor, and every open tile above it backed by a stone wall.
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+            for y in (floor - 120)..floor {
+                let mut walled = terrustia_proto::Tile::AIR;
+                walled.wall = 4; // stone wall, one of `Main.wallHouse`
+                world.set_tile(x, y, walled);
+            }
+        }
+        world.surface = 100;
+        world.rock_layer = 200;
+
+        let npcs = NpcStore::new();
+        let players = player_at(((world.width() / 2) as f32 * 16.0, (floor - 1) as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(11);
+        let mut seen = 0;
+        for _ in 0..60_000 {
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
+        }
+        assert_eq!(seen, 0, "{seen} spawns inside a fully walled base");
+
+        // The same hall with the walls stripped out is not safe, so the test is measuring the wall
+        // and not some other reason nothing could spawn there.
+        for x in 0..world.width() {
+            for y in (floor - 120)..floor {
+                world.set_tile(x, y, terrustia_proto::Tile::AIR);
+            }
+        }
+        let mut open = 0;
+        for _ in 0..60_000 {
+            open += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
+        }
+        assert!(open > 0, "an unwalled hall of the same shape should spawn");
+    }
+
+    /// `SpawnNPC` (`NPC.cs:291-306`) stops at the first player who spawns something, so a tick
+    /// produces at most one NPC however many people are playing.
+    ///
+    /// Fails before the fix, which gave every player their own draw: a busy server spawned
+    /// monsters N times as fast as the game does. Driven hard with journey mode's slider at the top
+    /// so the rate is fast enough for two players to collide on the same tick often.
+    #[test]
+    fn a_tick_spawns_at_most_one_npc_however_many_players_there_are() {
+        let mut world = test_world();
+        world.game_mode = 3;
+        let npcs = NpcStore::new();
+        let (tx, ty) = (world.spawn_x as i32, world.spawn_y as i32);
+
+        let mut players = Vec::new();
+        for (slot, offset) in [(0u8, 0), (1, 400)] {
+            let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+            drop(out_rx);
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), out_tx);
+            player.state = crate::game::ConnState::Playing;
+            player.position = ((tx + offset) as f32 * 16.0, ty as f32 * 16.0);
+            players.push(Some(player));
+        }
+
+        let mut boosted = JourneyPowers::default();
+        boosted.set_spawn_rate_slider(0, 1.0);
+        boosted.set_spawn_rate_slider(1, 1.0);
+
+        let mut rng = SmallRng::seed_from_u64(31);
+        let mut cache = BiomeCache::default();
+        let mut total = 0;
+        for tick in 0..40_000u64 {
+            cache.advance(tick);
+            let batch = try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &boosted,
+                &mut cache,
+                &mut rng,
+            );
+            assert!(
+                batch.len() <= 1,
+                "a tick spawned {} NPCs: {batch:?}",
+                batch.len()
+            );
+            total += batch.len();
+        }
+        assert!(total > 100, "the run has to actually spawn things: {total}");
+    }
+
+    /// The biome cache answers with the scan it would have run, and takes a fresh one once it is a
+    /// second old or the player has walked out of its neighbourhood.
+    ///
+    /// It exists because `biome_at` is 78 us on a full-size world and the rate needs it on every
+    /// attempt: uncached, that is 19.8 ms per tick at 255 players, over the whole tick budget.
+    #[test]
+    fn the_biome_cache_agrees_with_a_fresh_scan_and_refreshes_on_time() {
+        let mut world = test_world();
+        let (x, y) = (world.width() / 2, i32::from(world.surface) + 10);
+        let mut cache = BiomeCache::default();
+
+        let fresh = biome_at(&world, x, y);
+        assert_eq!(cache.read(&world, 0, x, y), fresh, "a first read scans");
+
+        // Walking beyond the drift bound takes a new scan: the outer columns read as ocean by
+        // position, which is a different answer from the forest just cached.
+        assert_ne!(fresh, Biome::Ocean);
+        cache.advance(30);
+        assert_eq!(cache.read(&world, 0, x + 8, y), fresh, "still fresh");
+        assert_eq!(cache.read(&world, 0, 10, y), Biome::Ocean, "and drifted");
+        // A slot of its own is not the same slot.
+        assert_eq!(cache.read(&world, 1, x, y), fresh);
+
+        // Age alone is only observable when the world underneath changes, so paint enough
+        // ebonstone into the scan box to cross `EVIL_THRESHOLD` and watch the answer follow.
+        let mut aged = BiomeCache::default();
+        aged.advance(100);
+        assert_eq!(aged.read(&world, 0, x, y), fresh);
+        for dx in -20..20 {
+            for dy in -20..20 {
+                world.set_tile(x + dx, y + dy, terrustia_proto::Tile::block(23));
+            }
+        }
+        assert_eq!(biome_at(&world, x, y), Biome::Corruption, "a real evil now");
+        aged.advance(100 + BiomeCache::REFRESH - 1);
+        assert_eq!(
+            aged.read(&world, 0, x, y),
+            fresh,
+            "a scan under a second old is still used",
+        );
+        aged.advance(100 + BiomeCache::REFRESH);
+        assert_eq!(
+            aged.read(&world, 0, x, y),
+            Biome::Corruption,
+            "and a second later it is taken again",
+        );
+    }
+
+    /// Nothing spawns while a Moon Lord is on the field near you (`NPC.cs:358-362`,
+    /// `MoonLordFightingDistance = 4500` at `NPC.cs:6036`).
+    ///
+    /// Fails before the fix, which had no suppression at all: the fight came with whatever the
+    /// surface would ordinarily have sent, on top of the Moon Lord and its parts.
+    #[test]
+    fn a_moon_lord_on_the_field_stops_everything_else_spawning() {
+        const MOON_LORD: u16 = 398;
+        let world = test_world();
+        let (tx, ty) = (world.spawn_x as i32, world.spawn_y as i32);
+        let players = player_at((tx as f32 * 16.0, ty as f32 * 16.0));
+
+        let count = |npcs: &NpcStore, seed: u64| {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut seen = 0;
+            for _ in 0..20_000 {
+                seen += try_spawn(
+                    &world,
+                    npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
+                    &mut rng,
+                )
+                .len();
+            }
+            seen
+        };
+
+        assert!(count(&NpcStore::new(), 4) > 0, "the world spawns normally");
+
+        // A Moon Lord standing on the player.
+        let mut npcs = NpcStore::new();
+        npcs.spawn(MOON_LORD, (tx as f32 * 16.0, ty as f32 * 16.0))
+            .expect("a slot");
+        assert_eq!(count(&npcs, 4), 0, "not while the Moon Lord is here");
+
+        // ...and one 500 tiles away is well past the 4500 px reach, so it suppresses nothing.
+        let mut far = NpcStore::new();
+        far.spawn(MOON_LORD, ((tx + 500) as f32 * 16.0, ty as f32 * 16.0))
+            .expect("a slot");
+        assert!(count(&far, 4) > 0, "a distant Moon Lord is not this fight");
+    }
+
+    /// End to end: a wall at the player's back keeps Devourers out of the draw while the rest of
+    /// the corruption still spawns (`NPC.cs:411`, `:3704`).
+    ///
+    /// Fails before the fix, when `noWorms` was not modelled: a walled base in the corruption still
+    /// had Devourers coming through the floor.
+    #[test]
+    fn a_wall_at_your_back_keeps_devourers_out_of_a_corrupt_pool() {
+        const DEVOURER: u16 = 7;
+        let mut world = World::empty(800, 600, "corrupt");
+        world.surface = 100;
+        world.rock_layer = 200;
+        let floor = 90;
+        // A wide band of ebonstone, well past `EVIL_THRESHOLD`, with a floor to stand on.
+        for x in 250..550 {
+            for y in floor..floor + 30 {
+                world.set_tile(x, y, terrustia_proto::Tile::block(23));
+            }
+        }
+        let (px, py) = (400, floor - 1);
+        let npcs = NpcStore::new();
+        let players = player_at((px as f32 * 16.0, py as f32 * 16.0));
+
+        let run = |world: &World, seed: u64| {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..40_000 {
+                for (npc_type, _) in try_spawn(
+                    world,
+                    &npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
+                    &mut rng,
+                ) {
+                    seen.insert(npc_type);
+                }
+            }
+            seen
+        };
+
+        assert_eq!(biome_at(&world, px, py), Biome::Corruption);
+        let wild = run(&world, 12);
+        assert!(
+            wild.contains(&DEVOURER),
+            "an unwalled corruption should send Devourers: {wild:?}",
+        );
+
+        // Now put a house wall behind the player, and nothing else.
+        let mut walled = world.tile(px, py);
+        walled.wall = 4;
+        world.set_tile(px, py, walled);
+
+        let sheltered = run(&world, 12);
+        assert!(
+            !sheltered.contains(&DEVOURER),
+            "a wall at your back stops burrowers: {sheltered:?}",
+        );
+        assert!(
+            !sheltered.is_empty(),
+            "but not everything else, or this proves nothing",
+        );
+    }
+
+    /// Lava is refused at any depth and water is not refused at all (`NPC.cs:5431-5442`).
+    ///
+    /// Fails before the fix, which tested `liquid > 200` without looking at the kind: it rejected
+    /// deep water the game permits and accepted shallow lava the game forbids.
+    #[test]
+    fn lava_is_refused_at_any_depth_and_water_is_not_refused_at_all() {
+        use terrustia_proto::tile::Liquid;
+        let mut world = World::empty(200, 200, "liquids");
+        let floor = 100;
+        for x in 90..110 {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+        }
+
+        // Dry: room to stand.
+        assert!(has_room(&world, 100, floor - 1));
+
+        // Filled to the brim with water: still room, because a shark lives there.
+        for dy in 1..=3 {
+            world.set_tile(
+                100,
+                floor - dy,
+                terrustia_proto::Tile::AIR.with_liquid(Liquid::Water, 255),
+            );
+        }
+        assert!(
+            has_room(&world, 100, floor - 1),
+            "deep water is where the ocean roster lives",
+        );
+
+        // A single drop of lava, far short of the old 200 threshold, is refused.
+        world.set_tile(
+            100,
+            floor - 1,
+            terrustia_proto::Tile::AIR.with_liquid(Liquid::Lava, 1),
+        );
+        assert!(
+            !has_room(&world, 100, floor - 1),
+            "`anyLava()` is about the kind, not the depth",
+        );
+    }
+
+    /// Water draws the aquatic roster and dry land does not (`NPC.cs:1798`, `:1988`).
+    ///
+    /// Fails before the fix twice over: the ocean roster was in the *land* pool, so sharks appeared
+    /// on dry sand, and `has_room` refused the water they should actually have come from.
+    #[test]
+    fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand() {
+        let ocean_water = water_pool(Depth::Surface, Biome::Ocean);
+        assert!(
+            ocean_water.contains(&65) && ocean_water.contains(&221),
+            "the shark and the squid are the ocean's water roster: {ocean_water:?}",
+        );
+        for &wet in ocean_water {
+            assert!(
+                !pool(Depth::Surface, Biome::Ocean, true).contains(&wet)
+                    && !pool(Depth::Surface, Biome::Ocean, false).contains(&wet),
+                "{wet} is aquatic and must not be drawable from dry ocean sand",
+            );
+        }
+        // Below the surface, still water, a different roster.
+        assert_eq!(water_pool(Depth::Cavern, Biome::Forest), &[63]);
+        assert!(water_pool(Depth::Surface, Biome::Forest).is_empty());
+
+        // And end to end: a player floating in a walled-off sea gets the water roster.
+        let mut world = World::empty(800, 600, "sea");
+        world.surface = 100;
+        world.rock_layer = 200;
+        let floor = 150;
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+            for y in (floor - 60)..floor {
+                world.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Water, 255),
+                );
+            }
+        }
+        // `biome_at` calls the outer 250 columns ocean, so stand there.
+        let npcs = NpcStore::new();
+        let players = player_at((100.0 * 16.0, (floor - 30) as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(5);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..60_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            ) {
+                seen.insert(npc_type);
+            }
+        }
+        assert!(!seen.is_empty(), "nothing spawned in the sea at all");
+        for npc_type in &seen {
+            // A bound resident is a rescue rather than a spawn from any roster, and vanilla's own
+            // ocean branch is where the Angler is found (`NPC.cs:1800`), so they are not the
+            // subject here.
+            let stats = terrustia_proto::npc_data::npc_stats(*npc_type).expect("a real type");
+            if stats.friendly {
+                continue;
+            }
+            assert!(
+                ocean_water.contains(npc_type),
+                "the sea drew {npc_type} ({}), which is not in its water roster",
+                stats.name,
+            );
+        }
+    }
+
     #[test]
     fn spawning_is_frequent_enough_to_matter() {
         // Picking a blind point and demanding it be the surface almost never works; scanning down
@@ -2042,8 +3030,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
         }
@@ -2078,8 +3066,8 @@ mod tests {
                     &players,
                     &quiet(),
                     &JourneyPowers::default(),
+                    &mut BiomeCache::default(),
                     &mut rng,
-                    0
                 )
                 .is_empty(),
                 "spawned past the cap"
@@ -2129,8 +3117,8 @@ mod tests {
                 &players,
                 &quiet(),
                 &JourneyPowers::default(),
+                &mut BiomeCache::default(),
                 &mut rng,
-                0,
             )
             .len();
             if seen > 0 {
@@ -2171,7 +3159,16 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut seen = 0;
         for _ in 0..20_000 {
-            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &journey,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert_eq!(seen, 0, "spawns should be disabled outright at the floor");
     }
@@ -2192,7 +3189,16 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(11);
         let mut seen = 0;
         for _ in 0..20_000 {
-            seen += try_spawn(&world, &npcs, &players, &quiet(), &journey, &mut rng, 0).len();
+            seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &journey,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert!(
             seen > 0,
@@ -2218,14 +3224,30 @@ mod tests {
         let mut ordinary_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            ordinary_seen +=
-                try_spawn(&world, &npcs, &players, &quiet(), &ordinary, &mut rng, 0).len();
+            ordinary_seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &ordinary,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         let mut boosted_seen = 0;
         let mut rng = SmallRng::seed_from_u64(21);
         for _ in 0..TICKS {
-            boosted_seen +=
-                try_spawn(&world, &npcs, &players, &quiet(), &boosted, &mut rng, 0).len();
+            boosted_seen += try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &boosted,
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .len();
         }
         assert!(
             boosted_seen > ordinary_seen * 5,

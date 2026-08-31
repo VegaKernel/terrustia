@@ -132,8 +132,10 @@ const PYLON_RESIDENTS_NEEDED: usize = 2;
 const PYLON_SCAN_HALF_WIDTH: i32 = 84;
 const PYLON_SCAN_HALF_HEIGHT: i32 = 62;
 
-/// One invader every this many ticks. An invasion arrives steadily rather than all at once.
-const INVASION_SPAWN_EVERY: u64 = 45;
+/// `NPC.cs:785`, `spawnRate = 20` during an invasion: a one-in-twenty roll per player per tick,
+/// rather than a fixed cadence. An invasion arrives steadily rather than all at once, but it
+/// arrives at the game's own pace.
+const INVASION_SPAWN_RATE: u32 = 20;
 
 /// The chest tile. Placing one needs a container behind it, not just tiles.
 const CHEST_BLOCK: u16 = 21;
@@ -1040,6 +1042,9 @@ pub struct GameServer {
     /// Drawn from the world's id rather than from the run's generator, so the same world always
     /// has the same six. Worked out once when the world is opened.
     cavern_monsters: crate::game::cavern_monsters::CavernMonsters,
+    /// Each player's last biome scan, reused by the spawn rate rather than re-scanned every tick.
+    /// See [`crate::game::spawn::BiomeCache`] for why it has to be cached at all.
+    player_biomes: crate::game::spawn::BiomeCache,
     /// The last pillar shields, invasion progress and Moon Lord countdown that went out.
     ///
     /// All three are recomputed every tick and almost never move, so they are compared before
@@ -1219,6 +1224,7 @@ impl GameServer {
             spare_world,
             world_returns: std::sync::mpsc::channel(),
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(world_id),
+            player_biomes: crate::game::spawn::BiomeCache::default(),
             // Deliberately impossible starting values, so the first tick of each always sends.
             last_sent_shields: [-1; 4],
             last_sent_countdown: -1,

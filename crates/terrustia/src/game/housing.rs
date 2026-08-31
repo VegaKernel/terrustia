@@ -69,8 +69,17 @@ fn blocks(world: &World, x: i32, y: i32) -> bool {
     if !tile.is_active() {
         return false;
     }
-    // A solid block stops the flood, except a solid-top platform you can walk up onto.
-    if solid(tile.block) && !terrustia_proto::tile_solid::solid_top(tile.block) {
+    // Any solid block stops the flood. `WorldGen.CheckRoom` (`WorldGen.cs:6104-6109`) tests
+    // `Main.tileSolid[type]` alone and nothing else, and `Main.cs:8032` sets `tileSolid[19] = true`,
+    // so a platform blocks here exactly like a wooden plank does. It stays a valid *door*
+    // (`counts_as_door(19)`), which is the whole point of the standard platform doorway: the room
+    // check records the furniture on a tile before it is asked whether the tile blocks.
+    //
+    // This used to carry a `&& !solid_top(...)` exemption, which was false for every platform
+    // (tile 19 is in both sets), so the flood walked straight through a platform floor, ceiling or
+    // doorway into the outside. The far side then failed `enclosed_at` and the house was reported
+    // "not enclosed", and two storeys joined by a platform merged into one oversized room.
+    if solid(tile.block) {
         return true;
     }
     // An OPEN door, trapdoor or tall gate is a barrier the room check does not pass through, even
@@ -330,6 +339,68 @@ mod tests {
             check_room(&world, x, y),
             Err(RoomError::NotEnclosed),
             "a real hole, unlike an open door, does leave the room unsealed",
+        );
+    }
+
+    /// A platform is a wall to the room check and a door to the furnishing check at the same time,
+    /// which is what makes the standard platform doorway work (`WorldGen.cs:6104-6109` stops on
+    /// `Main.tileSolid[type]`; `Main.cs:8032` sets `tileSolid[19] = true`; `counts_as_door(19)`).
+    ///
+    /// Fails before the fix: `blocks` exempted solid-top tiles, so the flood escaped through the
+    /// platform into the open air outside and `enclosed_at` failed two tiles out.
+    #[test]
+    fn a_platform_doorway_seals_the_room_and_still_counts_as_a_door() {
+        let (mut world, x, y) = house(12, 9, false);
+        // Furnish it with everything but a door, so the platform is the only one.
+        world.set_tile(52, 57, Tile::framed(15, 0, 0)); // chair
+        world.set_tile(54, 57, Tile::framed(14, 0, 0)); // table
+        world.set_tile(56, 57, Tile::framed(4, 0, 0)); // torch
+        assert_eq!(
+            check_room(&world, x, y),
+            Err(RoomError::NoDoor),
+            "no way in yet"
+        );
+
+        // Cut a platform doorway through the left wall (x0 = 50) and open the sky beyond it, so a
+        // flood that walked through the platform would immediately find unsealed air.
+        world.set_tile(50, 55, Tile::framed(19, 0, 0));
+        for dy in 51..58 {
+            let mut outside = Tile::AIR;
+            outside.wall = 0;
+            world.set_tile(49, dy, outside);
+            world.set_tile(48, dy, outside);
+        }
+        assert!(
+            check_room(&world, x, y).is_ok(),
+            "a platform blocks the flood and furnishes the door at the same time",
+        );
+    }
+
+    /// Two rooms stacked with a platform floor between them are two houses, not one. Before the
+    /// fix the flood ran through the platform and merged them, so the pair reported as a single
+    /// oversized room and one of the two residents had nowhere to live.
+    #[test]
+    fn a_platform_floor_separates_two_storeys() {
+        let (mut world, x, y) = house(12, 17, true);
+        // A platform floor across the middle, at the row the lower storey's ceiling would occupy.
+        for tx in 51..61 {
+            world.set_tile(tx, 58, Tile::framed(19, 0, 0));
+        }
+        // Furnish the upper storey too, so both halves stand on their own.
+        world.set_tile(52, 57, Tile::framed(15, 0, 0)); // chair
+        world.set_tile(54, 57, Tile::framed(14, 0, 0)); // table
+        world.set_tile(56, 57, Tile::framed(4, 0, 0)); // torch
+        world.set_tile(58, 57, Tile::framed(10, 0, 0)); // door
+
+        let upper = check_room(&world, x, y).expect("the upper storey is a house");
+        assert!(
+            upper.bottom < 58,
+            "the flood stopped at the platform rather than falling through it: {upper:?}",
+        );
+        let lower = check_room(&world, x, 62).expect("the lower storey is its own house");
+        assert!(
+            lower.top > 58,
+            "and the lower storey does not reach back up through it: {lower:?}",
         );
     }
 
