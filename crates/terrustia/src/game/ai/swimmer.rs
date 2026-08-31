@@ -207,21 +207,24 @@ pub fn flying_fish<T: TileView>(npc: &mut Npc, world: &World<'_, T>) {
     }
 
     // Attention, `NPC.cs:31155-31164`. The timer is refreshed by everything *except* a live target
-    // it cannot reach: no target at all, a target in the water (which only the Zombie Merman will
-    // follow), a dead one, or one it can hit all reset it to ninety. It counts down only while
-    // there is somebody alive, out of the water, and out of reach.
+    // it cannot reach: no target at all, a target in the water (which only type 587 will follow), a
+    // dead one, or one it can hit all reset it to ninety. It counts down only while there is
+    // somebody alive, out of the water, and out of reach. Both arms re-target, and a fish whose
+    // attention has already run out does neither, so it keeps whatever heading it had.
     let hopeless = world.target.is_some_and(|t| {
         !(npc.npc_type != EYEBALL_FISH && world.target_wet)
             && t.alive
             && !can_see(world.tiles, npc, t)
     });
-    if !hopeless {
-        npc.ai[0] = HOVER_ATTENTION;
-    } else if npc.ai[0] > 0.0 {
-        npc.ai[0] -= 1.0;
-    }
-    if let Some(t) = world.target {
-        face(npc, t);
+    if !hopeless || npc.ai[0] > 0.0 {
+        if hopeless {
+            npc.ai[0] -= 1.0;
+        } else {
+            npc.ai[0] = HOVER_ATTENTION;
+        }
+        if let Some(t) = world.target {
+            face(npc, t);
+        }
     }
 
     let mut params = hover(npc.npc_type);
