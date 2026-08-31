@@ -2834,6 +2834,72 @@ impl GameServer {
     }
 
     /// Send to every player who is in the world, optionally skipping one.
+    /// Broadcast a tile square to the clients that actually hold the ground it covers.
+    ///
+    /// Vanilla gates packet 20 and nothing else this way (`NetMessage.cs:1721-1731`): its case 20
+    /// loop adds `Netplay.Clients[i].SectionRange((int)Math.Max(number3, number4), number,
+    /// (int)number2)` to the usual connected-and-broadcasting test, so a square only reaches a
+    /// client one of whose sections it touches. `RemoteClient.SectionRange`
+    /// (`RemoteClient.cs:192-215`) tests the square's four corners and returns true on the first
+    /// one whose section that client has been sent.
+    ///
+    /// We were sending every square to every player. On a full server that is the same rectangle
+    /// of tiles delivered to people who cannot see it and, worse, who have never been sent the
+    /// section it patches, so the packet describes ground their client does not have. Grass
+    /// spreading in one corner of the world was costing bandwidth in every other.
+    ///
+    /// `sent_sections` is our mirror of `TileSections`, already maintained by `send_section`.
+    fn broadcast_tile_square(&mut self, square: &TileSquare, except: Option<u8>) {
+        let Ok(frame) = square.encode() else {
+            return;
+        };
+        let (x, y) = (i32::from(square.x), i32::from(square.y));
+        // `Math.Max(number3, number4)` at the call site, where those are the square's width and
+        // height. One size for both axes, which is what `SectionRange` expects.
+        let size = i32::from(square.width.max(square.height));
+        let bytes = Bytes::from(frame);
+        let mut targets = std::mem::take(&mut self.broadcast_targets);
+        targets.clear();
+        targets.extend(
+            self.players
+                .iter()
+                .flatten()
+                .filter(|p| {
+                    p.is_playing()
+                        && Some(p.slot) != except
+                        && self.square_in_section_range(p, x, y, size)
+                })
+                .map(|p| p.slot),
+        );
+        for slot in &targets {
+            self.send_bytes(*slot, bytes.clone());
+        }
+        self.broadcast_targets = targets;
+    }
+
+    /// `RemoteClient.SectionRange`, `RemoteClient.cs:192-215`: the four corners of a `size`-square
+    /// at `(x, y)`, true as soon as one of them lands in a section this client already holds.
+    ///
+    /// Vanilla passes one `size` for both axes (`Math.Max(width, height)` at the call site), so
+    /// the corners it tests are `(x, y)`, `(x + size, y)`, `(x, y + size)` and `(x + size,
+    /// y + size)`. Transcribed with that same single size rather than the square's real width and
+    /// height, because the whole point of this check is to match who vanilla sends to.
+    fn square_in_section_range(
+        &self,
+        player: &crate::game::player::Player,
+        x: i32,
+        y: i32,
+        size: i32,
+    ) -> bool {
+        [(x, y), (x + size, y), (x, y + size), (x + size, y + size)]
+            .into_iter()
+            .any(|(cx, cy)| {
+                player
+                    .sent_sections
+                    .contains(&self.world.section_of(cx, cy))
+            })
+    }
+
     fn broadcast(&mut self, frame: Vec<u8>, except: Option<u8>) {
         let bytes = Bytes::from(frame);
         // Collect first: sending can remove a player, which would invalidate an in-flight iterator.

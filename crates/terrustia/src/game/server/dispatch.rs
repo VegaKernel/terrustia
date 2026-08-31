@@ -2413,7 +2413,10 @@ impl GameServer {
             }
         }
 
-        self.broadcast(square.encode()?, Some(slot));
+        // Section-gated like every other packet-20 send, and still excluding the client that sent
+        // it: vanilla's case 20 loop tests `num23 != ignoreClient` and `SectionRange` together
+        // (`NetMessage.cs:1725`), not one or the other.
+        self.broadcast_tile_square(&square, Some(slot));
         Ok(())
     }
 

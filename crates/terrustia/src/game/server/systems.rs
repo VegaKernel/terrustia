@@ -3322,9 +3322,7 @@ impl GameServer {
             change_type: 0,
             tiles: vec![tile],
         };
-        if let Ok(frame) = square.encode() {
-            self.broadcast(frame, None);
-        }
+        self.broadcast_tile_square(&square, None);
     }
 
     /// Fire every running timer whose turn it is.
@@ -3540,9 +3538,7 @@ impl GameServer {
                         .map(|i| self.world.tile(x + i % 2, y + i / 2))
                         .collect(),
                 };
-                if let Ok(frame) = square.encode() {
-                    self.broadcast(frame, None);
-                }
+                self.broadcast_tile_square(&square, None);
             }
         }
     }
@@ -3660,9 +3656,7 @@ impl GameServer {
                 change_type: 0,
                 tiles: vec![tile],
             };
-            if let Ok(frame) = square.encode() {
-                self.broadcast(frame, None);
-            }
+            self.broadcast_tile_square(&square, None);
         }
     }
 
@@ -4373,9 +4367,7 @@ impl GameServer {
                         .map(|(dx, dy)| self.world.tile(at_x + dx, at_y + dy))
                         .collect(),
                 };
-                if let Ok(frame) = square.encode() {
-                    self.broadcast(frame, None);
-                }
+                self.broadcast_tile_square(&square, None);
                 at_y += height;
             }
             at_x += width;
@@ -4885,9 +4877,7 @@ impl GameServer {
                 change_type: 0,
                 tiles: vec![tile],
             };
-            if let Ok(frame) = square.encode() {
-                self.broadcast(frame, None);
-            }
+            self.broadcast_tile_square(&square, None);
         }
     }
 
@@ -5163,9 +5153,7 @@ impl GameServer {
                 .map(|i| self.world.tile(x + i % 2, y - 1 + i / 2))
                 .collect(),
         };
-        if let Ok(frame) = square.encode() {
-            self.broadcast(frame, None);
-        }
+        self.broadcast_tile_square(&square, None);
         debug!(x, y, "a plantera's bulb grew");
     }
 
@@ -10371,5 +10359,122 @@ mod section_streaming_as_players_move {
             0,
             "a walker's section stream replayed the join tail and respawned the client"
         );
+    }
+}
+
+/// Packet 20 goes to the clients that hold the ground it patches, and to nobody else.
+///
+/// Vanilla gates this one packet that way and no other (`NetMessage.cs:1721-1731`): its case 20
+/// loop adds `Netplay.Clients[i].SectionRange(Math.Max(width, height), x, y)` to the ordinary
+/// connected-and-broadcasting test. We were sending every square to every player, so grass
+/// spreading in one corner of a full world cost bandwidth in every other, and the square described
+/// ground the receiving client had never been sent.
+#[cfg(test)]
+mod tile_squares_only_reach_who_can_see_them {
+    use super::*;
+
+    fn server_with_two_players() -> (GameServer, mpsc::Receiver<Bytes>, mpsc::Receiver<Bytes>) {
+        let mut server = GameServer::new(
+            Config::default(),
+            crate::world::World::empty(2400, 900, "tile square fanout probe"),
+        );
+        let (tx0, rx0) = mpsc::channel(100_000);
+        let (tx1, rx1) = mpsc::channel(100_000);
+        for (slot, tx) in [(0u8, tx0), (1u8, tx1)] {
+            let mut player = Player::new(slot, "127.0.0.1:1".parse().unwrap(), tx);
+            player.state = ConnState::Playing;
+            server.players[slot as usize] = Some(player);
+        }
+        (server, rx0, rx1)
+    }
+
+    fn squares(rx: &mut mpsc::Receiver<Bytes>) -> usize {
+        let mut n = 0;
+        while let Ok(frame) = rx.try_recv() {
+            if frame.get(2) == Some(&terrustia_proto::id::AREA_TILE_CHANGE) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Slot 0 holds the section the square is in; slot 1 holds one far away.
+    #[test]
+    fn a_square_reaches_only_the_client_holding_its_section() {
+        let (mut server, mut rx0, mut rx1) = server_with_two_players();
+        server.player_mut(0).unwrap().sent_sections.insert((0, 0));
+        server.player_mut(1).unwrap().sent_sections.insert((9, 4));
+
+        let square = TileSquare {
+            x: 10,
+            y: 10,
+            width: 1,
+            height: 1,
+            change_type: 0,
+            tiles: vec![server.world.tile(10, 10)],
+        };
+        server.broadcast_tile_square(&square, None);
+
+        assert_eq!(
+            squares(&mut rx0),
+            1,
+            "the client holding that section must receive it"
+        );
+        assert_eq!(
+            squares(&mut rx1),
+            0,
+            "a client eight sections away must not: it has never been sent the ground this \
+             patches, so the packet describes tiles its client does not have"
+        );
+    }
+
+    /// `SectionRange` tests four corners, so a square straddling a boundary reaches a client that
+    /// holds either side. `RemoteClient.cs:192-215`.
+    #[test]
+    fn a_square_straddling_a_boundary_reaches_both_sides() {
+        let (mut server, mut rx0, mut rx1) = server_with_two_players();
+        // Section 0 spans x 0..199, so a square at 195 wide enough to cross touches section 1 too.
+        server.player_mut(0).unwrap().sent_sections.insert((0, 0));
+        server.player_mut(1).unwrap().sent_sections.insert((1, 0));
+
+        let square = TileSquare {
+            x: 195,
+            y: 10,
+            width: 10,
+            height: 1,
+            change_type: 0,
+            tiles: (0..10).map(|i| server.world.tile(195 + i, 10)).collect(),
+        };
+        server.broadcast_tile_square(&square, None);
+
+        assert_eq!(squares(&mut rx0), 1, "the section it starts in");
+        assert_eq!(squares(&mut rx1), 1, "and the one it runs into");
+    }
+
+    /// The sender is still excluded, because vanilla tests `num23 != ignoreClient` and
+    /// `SectionRange` together rather than one instead of the other.
+    #[test]
+    fn the_sending_client_is_still_excluded() {
+        let (mut server, mut rx0, mut rx1) = server_with_two_players();
+        for slot in [0u8, 1u8] {
+            server
+                .player_mut(slot)
+                .unwrap()
+                .sent_sections
+                .insert((0, 0));
+        }
+
+        let square = TileSquare {
+            x: 10,
+            y: 10,
+            width: 1,
+            height: 1,
+            change_type: 0,
+            tiles: vec![server.world.tile(10, 10)],
+        };
+        server.broadcast_tile_square(&square, Some(0));
+
+        assert_eq!(squares(&mut rx0), 0, "not echoed back to whoever sent it");
+        assert_eq!(squares(&mut rx1), 1, "but it does reach the other client");
     }
 }
