@@ -204,9 +204,10 @@ fn work_at_door(
     //
     // `getGoodWorld` takes the blood moon back out of it: on a For-the-Worthy seed doors stay
     // polite through one, which is not the harder-world direction it reads as but is what the
-    // expression says. Not modelled: the graveyard term, which this server has no biome for, and
-    // vanilla's `flag27` (a target standing inside unbreakable walls), which forces every fighter
-    // impolite regardless of type.
+    // expression says. Not modelled: the graveyard term, which the server can now answer
+    // (`Player::in_graveyard`) but which [`Conditions`] does not yet carry, since `flag28` reads
+    // this NPC's own *target* rather than the nearest player; and vanilla's `flag27` (a target
+    // standing inside unbreakable walls), which forces every fighter impolite regardless of type.
     if is_opener && (!conditions.blood_moon || conditions.get_good_world) {
         npc.ai[1] = 0.0;
         return DoorState::Busy(Action::None);

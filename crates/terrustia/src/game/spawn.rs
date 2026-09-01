@@ -5333,6 +5333,74 @@ mod tests {
     /// does): 1.0 ns with no apocalypse running, which is almost always, 1.4 ns with all four
     /// standing and no zone matched, 1.0 ns standing inside one. At the 255-player bar the worst
     /// case is 0.4 us of a 16.67 ms tick, which is 0.002% of it.
+    /// What the graveyard and the seasonal chain cost the tick, which is the thing to be careful
+    /// about here: vanilla works `ZoneGraveyard` out by counting tombstones in a 169-by-124 tile box
+    /// (`SceneMetrics.cs:16`, `:356`, `:622`), and doing *that* per player per tick would be about
+    /// twenty-one thousand tile reads a head, which does not fit. It is not done. The client already
+    /// counts them and sends the answer up in packet 36, exactly as it does for every other zone, so
+    /// the server's whole graveyard test is one byte and one mask.
+    ///
+    /// Measured on an M-series laptop, arguments behind a `black_box` so nothing is hoisted:
+    ///
+    /// * `Player::in_graveyard`: 0.4 ns with no zone packet yet, 0.6 ns with one. That is one
+    ///   `Option` test, one bounds-checked byte and a mask. It runs once per player per attempt, so
+    ///   at the 255-player bar it is 0.15 us of a 16.67 ms tick: 0.001% of it. A tile scan for the
+    ///   same answer would be twenty-one thousand tile reads a head and could not be afforded.
+    /// * `seasonal_night_pick` on an ordinary night, the case that runs almost always: 4.2 ns. It
+    ///   is reached at most once per tick server-wide, well after the rate roll has let an attempt
+    ///   through and `try_spawn` has settled on a tile, so it is nanoseconds per *tick*, not per
+    ///   player.
+    /// * The same in a graveyard at Halloween with every arm live: 15.3 ns, which is the chain
+    ///   actually rolling its dice rather than falling out of the first condition.
+    #[test]
+    #[ignore]
+    fn measure_the_graveyard_and_the_seasonal_chain() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut bare = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx.clone());
+        let mut haunted = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        haunted.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+
+        for (name, player) in [
+            ("no zone packet yet", &mut bare),
+            ("graveyard", &mut haunted),
+        ] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(std::hint::black_box(&*player).in_graveyard());
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("in_graveyard, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        for (name, at) in [
+            ("ordinary night", Seasonal::default()),
+            (
+                "graveyard at Halloween",
+                Seasonal {
+                    halloween: true,
+                    graveyard: true,
+                    hard_mode: true,
+                    blood_moon: true,
+                    moon_phase: 4,
+                    ..Seasonal::default()
+                },
+            ),
+        ] {
+            let n = 10_000_000;
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink +=
+                    u32::from(seasonal_night_pick(std::hint::black_box(at), &mut rng).unwrap_or(0));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("seasonal_night_pick, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {

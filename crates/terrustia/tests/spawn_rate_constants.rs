@@ -609,7 +609,9 @@ fn an_empty_area_refills_faster_than_a_crowded_one() {
 /// // NPC.cs:903-923, the townNPCs >= 3 branch, ordinary (non-graveyard) case:
 /// else if (townNPCs >= 3) {
 ///     noWorms = true;
-///     if (ZoneGraveyard && ...) { /* not modelled here: a graveyard-specific sub-case */ }
+///     if (ZoneGraveyard && ...) { /* the graveyard sub-case, which `rates` also models; it is
+///                                    `plain()`'s `graveyard: false` that keeps this pin on the
+///                                    ordinary branch */ }
 ///     else {
 ///         if (!Main.expertMode || Main.rand.Next(30) != 0) {
 ///             spawnFriendly = true;
