@@ -691,6 +691,31 @@ matters most for a first release. Recorded as a decision rather than skipped qui
 lesson of this qualification work is that an unenforced stated bar is indistinguishable from a met
 one.
 
+**Three more silent gaps found 2026-09-01, in flight.** The 255-player soak was deprioritised in
+favour of parity: confirmation matters less than discovery. Found by reading `docs/spawn-gaps.tsv`'s
+41-entry over-reach list (all 41 checked and cleared: King Slime via boss-summon, NutcrackerSpinning
+and the Crawdad/Shelly/Salamander family already documented checker false-positives, the DD2 roster
+via its own real spawner) and then reading the unreachable list for anything gating real content
+rather than cosmetic variety.
+
+- **NIGHTZOMBIE**: the whole Halloween/Graveyard/full-moon night roster is unwired
+  (`NPC.cs:4530-4650`) - Halloween zombie variants (317-337, 190-194), Ghost, HoppinJack, TheGroom,
+  TheBride, and the full-moon Werewolf (104). Neither real-date Halloween detection nor graveyard-zone
+  detection exist anywhere in the codebase; `spawn.rs` says so itself ("this project has no notion of
+  a graveyard zone"). `progress.rs`'s `downed_halloween_king`/`_tree` are Frost Moon boss flags, not
+  calendar tracking, and must not be confused with this.
+- **DESERT**: the entire hardmode Underground Desert roster is missing - DesertGhoul x4 (including the
+  corruption/crimson/hallow-tainted variants), DesertLamia x2, SandShark x4, SandElemental,
+  DesertDjinn, the giant antlions, TombCrawlerHead. Our desert pool only has Vulture/SandSlime/Antlion.
+- **TAXCOLLECTOR**: two town NPCs can never be recruited because the mob each comes from never
+  spawns. The Tax Collector needs a Tortured Soul (534, underworld, hardmode, `NPC.cs:4877`) hit with
+  Purification Powder; already disclosed in `rescues.rs:26-28` ("needs an item the server does not
+  track") and `party.rs:24-28`. The Skeleton Merchant (453, hardmode dungeon, `NPC.cs:5007-5010`) is a
+  timed wandering-shop encounter, not a bind-and-free rescue. Smallest of the three and the most
+  likely to reveal it needs real new infrastructure (a general item-vs-live-NPC interaction, which
+  nothing in this server currently has) rather than a narrow wire-up; the lane was told to disclose
+  that honestly rather than force a bad implementation.
+
 ## Phase 3: after v0.0.1, in order
 
 1. **v0.0.2, the worldgen release**: the seven remaining secret seeds' generation content (Not the
