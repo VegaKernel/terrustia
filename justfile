@@ -55,8 +55,23 @@ build: web-build
     @echo "Done → target/release/terrustia"
 
 # Build the web panel assets only (→ crates/terrustia/web-panel/dist)
+#
+# The install is checked, not trusted. `bun install --frozen-lockfile` compares the lockfile against
+# the tree and reports "no changes" whenever they agree, which it does even when the packages
+# themselves are half there: bun's global cache has twice been found holding entries with their
+# whole `dist/` directory missing, and `node_modules` is copied from it, so the breakage is
+# faithfully reproduced and then declared fine in 50ms. What you get is an ERR_MODULE_NOT_FOUND
+# stack trace out of node with no hint that the install is the problem.
+#
+# So: after installing, check that vite's entry point is actually there, and if it is not, clear the
+# cache and install again for real. One `test -f` on the happy path.
 web-build:
-    cd {{WEB}} && bun install --frozen-lockfile && bun run build
+    cd {{WEB}} && bun install --frozen-lockfile
+    @if [ ! -f "{{WEB}}/node_modules/vite/dist/node/cli.js" ]; then \
+        echo "web panel: the install is incomplete (vite has no dist/). Repairing."; \
+        cd {{WEB}} && bun pm cache rm && rm -rf node_modules && bun install; \
+    fi
+    cd {{WEB}} && bun run build
 
 # Build the Rust workspace only (assumes web-panel/dist already exists)
 rust-build:
@@ -84,9 +99,10 @@ check-rust:
     @echo "── Supply chain (cargo-deny) ──"
     cargo deny check
 
-# Web panel typecheck + build
-check-web:
-    cd {{WEB}} && bun install --frozen-lockfile && bun run build
+# Web panel typecheck + build. Goes through `web-build` so it gets the same incomplete-install
+# check; this is the recipe CI runs, and a half-installed cache there fails as a stack trace out of
+# node with nothing pointing at the install.
+check-web: web-build
 
 # Format all Rust code
 fmt:
