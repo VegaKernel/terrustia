@@ -681,8 +681,69 @@ and re-spreads after any resynchronising event, for a guaranteed 624 us/tick at 
 Two things about that are worth keeping: the instrument said the cost was 345 us and was right about
 the wrong question. `examples/biome_scan_cost.rs` drove **one** slot for 60,000 ticks, and a per-tick
 mean over one player cannot see a per-tick maximum over 255. And the fix sat unmerged on a branch
-until a branch audit found it, so the gate has never been re-run against it. **Re-running the
-255-player soak on a quiet machine is the open item**, not finding the cause.
+until a branch audit found it, so the gate went a long time without being re-run against it.
+
+**Re-measured 2026-09-01, and the fix is load-bearing.** Four 255-player half-hours plus one
+deliberately neutralised run, all on the same box, `tools/soak_scale.sh 255 1800`. The `shed` column
+is the server's own `outbound queue full` count, which runs 1 to 3 were blind to (see below), and
+`stalls` is the run's external-stall count, which is how contended the box was:
+
+| run | p99 tick | median | max | peak RSS | shed | stalls | verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | 8711 us | 4654 us | 8884 us | 169 MiB | 0 | 3 | pass |
+| 2 | 8652 us | 4584 us | 9233 us | 1536 MiB | 3 | 35 | fail (memory) |
+| 3 | 4803 us | 2726 us | 5177 us | 600 MiB | 5 | 10 | pass |
+| 4 | 4861 us | 1935 us | 6227 us | 206 MiB | 0 | 1 | pass |
+| `BUDGET = u32::MAX` | 41688 us | 18961 us | 41688 us | 96 MiB | 0 | 0 | fail (p99) |
+
+Run 4 is the qualifying one: every clause met, nothing shed, one external stall in half an hour, and
+it is the only run made with the harness counting sheds. Runs 2 and 3 are kept in the table because
+the memory clause is what separates them from run 4, and the stall column is what separates those.
+
+The neutralised run is the evidence that the cap is what holds the p99 down and not the weather: with
+`BUDGET` removed every one of its 29 windows was over budget, every one of them with
+`phase=spawning`, worst `phase_us=40322`, which is the original failure's own signature
+(`phase=spawning phase_us=20763`). With the cap in place, across 702 windows of the four held runs,
+not one window went over budget at all; four passed *half* budget, and the worst `spawning` cost in
+any of them was `phase_us=6431` against the uncapped run's 40322. **The p99 clause is met**, between
+a quarter and a half of the budget with the cap and at two and a half times the budget without it.
+
+**Two things the same runs turned up, both open.**
+
+**The retention clause could not fail for the reason a real server sheds players.** It counted client
+exit codes, and a shed client cannot see that it was shed: `send_bytes` removes the player from the
+world the moment its outbound queue fills, but the socket only closes once `write_loop` has drained
+everything already queued behind that decision, and at `outbound_queue(255)` that is about a million
+frames. Runs 2 and 3 shed 3 and 5 clients with the queue at 1,052,626 and 1,052,669 of its 1,052,672
+capacity; all eight printed `done after 1800s`, exited zero, and were recorded as `255/255`. The
+harness now subtracts server-side sheds, so those runs read 252/255 and 250/255, and run 4 reads
+`255/255 clients connected and held (255 exited clean, 0 shed by the server)`. Confirmed by
+controlled experiment rather than deduction: rebuilt with a 9,212-frame queue, the shed client
+reports `the server closed the connection` within a second, because the backlog it has to drain
+first is small enough to clear.
+
+The *server* half of that is not fixed. A shed client should be disconnected when the server decides
+to shed it, not after replaying a half-hour-old backlog at whatever rate it can read. Dropping the
+`Sender` cannot do it, because `mpsc` still hands the buffered frames to `write_loop` before `recv`
+returns `None`. The shape of a fix is a shutdown signal created in `serve` before the `Join` event,
+carried on `Player`, selected on inside `write_loop`, and fired by `remove_player`, which would also
+close the same hole for `/kick` and `reap_stalled_handshakes`. Left un-attempted deliberately: it is
+a production disconnect-behaviour change and does not move any gate clause.
+
+**The memory ceiling and the retention bar are in tension at this queue depth.** Run 2 breached the
+1 GiB ceiling at 1536 MiB, and the mechanism is the same million-frame queue. `queue_peak` reports
+only the *deepest single* connection in a window, so it under-reports the total: run 2 held it at or
+just under the 1,052,672 ceiling for many consecutive windows, and one connection's backlog alone
+does not account for 1536 MiB, because run 4 held 800,668 frames on its deepest connection at a peak
+of 206 MiB. The backlog was spread across many connections at once. 255 slots times 1,052,672 frames
+is a theoretical ceiling in the tens of gigabytes, and nothing bounds the sum.
+
+`connection.rs` picked 4,096 per player to stop drops, which is the right trade for the retention
+clause and the wrong one for the memory clause, and the two have never been measured against each
+other. Which way a run falls tracks how contended the box is: peak RSS ran 1536, 600, 206 and 169 MiB
+against external-stall counts of 35, 10, 1 and 3, and `vm.swapusage` sat at 1.7 to 1.8 GiB of 3 GiB
+throughout. Qualifying the memory clause honestly needs a box that is not already paging; run 4 is
+the closest this one got.
 
 **The extended multi-hour boss soak is waived for v0.0.1** and carried to the next release. Its
 distinct value over the thirty-minute run is leak detection over a long horizon, and the shorter run
