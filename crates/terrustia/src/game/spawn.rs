@@ -1504,13 +1504,18 @@ const DESERT_SPAWN_WALLS: [u16; 9] = [
     223, // DesertFossil
 ];
 
-/// `WorldGen.checkUnderground` (`WorldGen.cs:10099-10145`), the other half of the underground
+/// `WorldGen.checkUnderground` (`WorldGen.cs:10099-10144`), the other half of the underground
 /// desert's gate.
 ///
 /// Deep enough down it is simply true, high enough up simply false, and in the band between it asks
 /// whether the roof is closed: a 120-by-3 strip 80 tiles above the point has to be at least 80%
-/// solid tile or walled. That band is the only place the strip is ever walked, and this is only
-/// reached once a desert wall has already been found, so the 360 reads are rare rather than routine.
+/// solid tile, or the point itself has to be walled. Three of those four answers are a handful of
+/// reads; only the fourth walks the strip, and see the hoist below for why the caller's own use
+/// almost never reaches it.
+///
+/// The game wraps the whole thing in a bare `catch { return false; }` for its own out-of-bounds
+/// tile access. `World::tile` answers for anything off the map already, so there is nothing here to
+/// catch and no behaviour dropped by not catching it.
 fn check_underground(world: &World, x: i32, y: i32) -> bool {
     /// `num`, `num2` and `num3` in the game's own order: the strip's width, how far above the point
     /// it sits, and how many rows of it are counted.
@@ -1558,7 +1563,8 @@ fn check_underground(world: &World, x: i32, y: i32) -> bool {
 /// `y` is this server's spawn row, the one the NPC's feet occupy, so the game's `spawnTileY` (the
 /// solid ground tile) is `y + 1` and its "or above" tile is `y` - the same one-row offset
 /// [`water_tile`] documents. `SpawnTileOrAboveHasAnyWallInSet` (`NPC.cs:5535-5556`) is exactly those
-/// two rows and nothing else.
+/// two rows and nothing else; its `InWorld(x, y, 2)` guard needs no counterpart, because
+/// `World::tile` already answers off the map with bare air, whose wall is 0 and so is in no set.
 ///
 /// The `|| spawnUndergroundDesert` half is the disclosed narrowing. That flag (`NPC.cs:1178-1201`)
 /// widens the branch to spots merely *near* desert walls above the rock layer: one attempt in three
@@ -1572,7 +1578,7 @@ pub fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
     (walled(y + 1) || walled(y)) && check_underground(world, x, y + 1)
 }
 
-/// The underground desert's roster, `NPC.cs:1683-1762`.
+/// The underground desert's roster, `NPC.cs:1684-1764`.
 ///
 /// The whole 1.4 desert lives here and nowhere else, which is why eleven types were unreachable:
 /// the ghouls, the lamias, the scorpion, the beast, the djinn, the tomb crawler and both giant
@@ -1580,7 +1586,7 @@ pub fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
 ///
 /// `spawn_y` is this server's spawn row; the game's `spawnTileY` is one below it, and every depth
 /// test here is written against the game's own row. Two things the caller owns rather than this:
-/// the Golfer at one attempt in twenty (`NPC.cs:1692-1697`), who arrives through [`bound_gate`]
+/// the Golfer at one attempt in twenty (`NPC.cs:1693-1697`), who arrives through [`bound_gate`]
 /// like every other bound resident, and the branch's position in the chain.
 ///
 /// `biome` stands in for the game's three independent `ZoneCorrupt`/`ZoneCrimson`/`ZoneHallow`
@@ -1598,7 +1604,7 @@ pub fn underground_desert_pick(
     alive: &dyn Fn(u16) -> usize,
     rng: &mut SmallRng,
 ) -> u16 {
-    // `num10` (`NPC.cs:1684-1691`), which thins the two worms out with depth.
+    // `num10` (`NPC.cs:1684-1692`), which thins the two worms out with depth.
     let ground_y = f64::from(spawn_y + 1);
     let rock = f64::from(world.rock_layer);
     let mut scale = 1.3f32;
@@ -1620,7 +1626,7 @@ pub fn underground_desert_pick(
     if worm_roll(rng) && !no_worms && deep && alive(513) == 0 {
         return 513;
     }
-    // Hardmode's own roster, four attempts in five (`NPC.cs:1708-1745`). The game builds a weighted
+    // Hardmode's own roster, four attempts in five (`NPC.cs:1708-1746`). The game builds a weighted
     // list and picks uniformly from it, so the duplicated ghoul really is twice as likely as the
     // rest; the lists below are that `List<int>` verbatim.
     if hard_mode && rng.random_range(0..5) != 0 {
@@ -1634,7 +1640,7 @@ pub fn underground_desert_pick(
         };
         return list[rng.random_range(0..list.len())];
     }
-    // ...and the antlions, which are the desert whatever the progression (`NPC.cs:1746-1761`).
+    // ...and the antlions, which are the desert whatever the progression (`NPC.cs:1747-1764`).
     let mut ty = [69, 580, 580, 580, 581][rng.random_range(0..5)];
     if rng.random_range(0..15) == 0 {
         ty = 537; // SandSlime, which replaces whatever was drawn rather than joining the draw.
@@ -1663,7 +1669,9 @@ const SAND_CONVERSION: [u16; 4] = [
 ///
 /// Walks up to eight rows down from the ground tile, and in each row up to four tiles right and four
 /// left, stopping the moment a row (or a run within it) leaves sand. At least 40 of the possible 72
-/// have to be sand. Every loop breaks early, so ordinary rock costs one read.
+/// have to be sand. Every loop breaks early, so ordinary rock costs one read. The game's
+/// `InWorld(x, y, 10)` guard needs no counterpart for the same reason [`underground_desert_spot`]'s
+/// does not: off the map reads as bare air, which is not sand, which breaks the walk.
 pub fn sandstone_check(world: &World, x: i32, ground_y: i32) -> bool {
     let sand = |x: i32, y: i32| {
         let tile = world.tile(x, y);
@@ -1691,7 +1699,7 @@ pub fn sandstone_check(world: &World, x: i32, ground_y: i32) -> bool {
     count >= 40
 }
 
-/// The desert during a sandstorm, `NPC.cs:3952-4019`.
+/// The desert during a sandstorm, `NPC.cs:3952-4022`.
 ///
 /// The gate is `Sandstorm.Happening && ZoneSandstorm && TileID.Sets.Conversion.Sand[tileType] &&
 /// Spawning_SandstoneCheck(spawnTileX, spawnTileY)`, and the caller owns the first two: a sandstorm
@@ -1749,7 +1757,7 @@ pub fn sandstorm_pick(
             0,
         );
     }
-    // A mummy for each sand (`NPC.cs:3993-4008`), which the game writes as four `else if` arms with
+    // A mummy for each sand (`NPC.cs:3994-4009`), which the game writes as four `else if` arms with
     // a roll each. Only one tile type can match, so folding them into a lookup keeps both the
     // one-in-three odds and the single roll.
     let mummy = match ground_block {
@@ -1766,7 +1774,7 @@ pub fn sandstorm_pick(
         return (mummy, 0);
     }
     // The tail of the chain, which is what an ordinary hardmode sandstorm mostly draws
-    // (`NPC.cs:4009-4019`).
+    // (`NPC.cs:4010-4021`).
     if rng.random_range(0..2) == 0 {
         return (546, 0); // Tumbleweed
     }
@@ -2599,7 +2607,7 @@ pub fn try_spawn(
                     sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
                 }
                 // The underground desert, which is its own chain and answers for everything in it
-                // (`NPC.cs:1682-1762`). It sits here because that is where vanilla puts it: ahead of
+                // (`NPC.cs:1682-1765`). It sits here because that is where vanilla puts it: ahead of
                 // every water branch, ahead of `spawnFriendly`, ahead of `ZoneDungeon` and ahead of
                 // every biome pool. A friendly attempt reaching a sandstone wall therefore draws a
                 // ghoul rather than a scorpion, which is the game's own ordering rather than an
@@ -3606,7 +3614,7 @@ mod tests {
     }
 
     /// The giant antlions are *not* a hardmode upgrade. The one-in-ten roll that turns a Walking or
-    /// Flying Antlion into its giant (`NPC.cs:1751-1760`) sits on the plain fallthrough path, which
+    /// Flying Antlion into its giant (`NPC.cs:1752-1763`) sits on the plain fallthrough path, which
     /// is the only path a pre-hardmode world ever takes, so a fresh world's underground desert
     /// already has them.
     ///
@@ -3636,7 +3644,7 @@ mod tests {
     /// Hardmode opens the ghouls, and which ghoul is a function of the *player's* zone rather than
     /// of the tile under the spawn: `SetSpawnFlags` copies `ZoneCorrupt`/`ZoneCrimson`/`ZoneHallow`
     /// straight off the player (`NPC.cs:381-383`) and the branch reads those copies
-    /// (`NPC.cs:1709-1740`). A clean desert gives the plain ghoul with the scorpion and the light
+    /// (`NPC.cs:1710-1741`). A clean desert gives the plain ghoul with the scorpion and the light
     /// lamia; a corrupt one gives the corrupt ghoul with the djinn and the dark lamia.
     ///
     /// Neutralised by collapsing `underground_desert_pick`'s `match biome` to its `_` arm: the
@@ -3710,7 +3718,7 @@ mod tests {
         world
     }
 
-    /// A sandstorm over a desert has a roster of its own (`NPC.cs:3952-4019`), and this server ran
+    /// A sandstorm over a desert has a roster of its own (`NPC.cs:3952-4022`), and this server ran
     /// sandstorms without ever spawning one of its members: the Tumbleweed, the Sand Elemental, all
     /// four Sandsharks and the Blood Mummy had no ambient spawn at all.
     ///
