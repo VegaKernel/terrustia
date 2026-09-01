@@ -606,9 +606,21 @@ over effort; the first three are roughly a day each.
    both off), autosave (15 saves in 15s at `autosave_secs = 1`, first at 1.108s), leaked processes
    and held ports (none at the instant of failure; every test port is unique), first-execution
    code-signature validation (0.42s), and machine load. It is a heisenbug: a diagnostic that dumps
-   the child's output on failure stops it reproducing. The next attempt should have the spawned
-   server log to a file unconditionally, so a failing run leaves evidence without the act of
-   looking changing the run. Full write-up in `.scratch/audit-2026-08-30/FLAKE-new-world-cli.md`.
+   the child's output on failure stops it reproducing.
+
+   **The lead worth following**, seen by a second observer during the pillar lane: `Command::spawn`
+   itself returning `ENOENT`. That is not a timeout, it is the binary in `CARGO_BIN_EXE_terrustia`
+   not being there at the instant of the exec, which is exactly what a concurrent relink of
+   `target/debug/terrustia` would produce. It explains every observation at once: only after a
+   relink, never in isolation, worse under load, and heisenbug-shaped because any diagnostic moves
+   the exec relative to the write. A world file that never lands inside 120 s is the same fault seen
+   from further away, since a server that never started cannot write one. The same observer
+   disproved the obvious alternative rather than assuming it: the scratch dirs are keyed off
+   `SystemTime` nanoseconds, and four concurrent readers collided 0 times in 2000 trials at macOS's
+   1 us clock resolution. Next step is to `stat` the binary immediately before spawning and record
+   its inode and mtime on failure; if that confirms it, copy the binary once per test and exec the
+   copy, which `tests/bare_server_boot.rs` already does for a different reason and has never flaked.
+   Full write-up in `.scratch/audit-2026-08-30/FLAKE-new-world-cli.md`.
 
 **Explicitly not on this list: another audit pass by reading.** The C3 pass found 99 findings and
 still missed Bone and the absent upward wake in `Liquid.Update`, both of which turned up during
