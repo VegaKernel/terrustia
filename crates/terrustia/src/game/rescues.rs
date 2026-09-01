@@ -23,9 +23,10 @@ pub struct Rescue {
 
 /// Every bound NPC in the game, with the townsperson each becomes.
 ///
-/// The Tax Collector is deliberately absent: he is a Tortured Soul turned by Purification Powder
-/// rather than freed by talking, which is a different mechanic and needs an item the server does
-/// not track.
+/// The Tax Collector is deliberately absent, and always will be: he is a Tortured Soul turned by
+/// Purification Powder rather than freed by talking, which is a different mechanic in a different
+/// place. It lives in `Server::tick_powders`, and it sets the same `saved_tax_collector` flag
+/// through [`remember`] below, which is why 441 has an arm there and no `Rescue` here.
 pub const RESCUES: &[Rescue] = &[
     Rescue {
         bound: 105,

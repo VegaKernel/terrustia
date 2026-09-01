@@ -3837,6 +3837,31 @@ impl GameServer {
             );
             return Ok(());
         }
+        // Purification Powder is the one throw whose effect the *server* settles rather than the
+        // thrower: `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14808`) runs under
+        // `Main.netMode != 1`, so in a real game it is the server that watches the cloud and turns
+        // a Tortured Soul into the Tax Collector when it touches one. Nothing about that arrives
+        // as a claim from the client, which is why the cloud has to be followed here rather than
+        // waited for on some packet. See [`Server::tick_powders`].
+        //
+        // Followed only while there is something for it to change, which in a world that has ever
+        // had its Tax Collector is never: that keeps the cost of the whole mechanism at one NPC
+        // scan on a packet nobody ordinarily sends, and it is what bounds the list against a client
+        // that sends nothing else. The cap is the second half of that bound.
+        if sync.projectile_type == crate::game::projectile::PURIFICATION_POWDER as i16
+            && self.powders.len() < MAX_TRACKED_POWDERS
+            && self
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == crate::game::spawn::TORTURED_SOUL && n.is_alive())
+        {
+            self.powders.push(crate::game::projectile::Powder {
+                position: sync.position,
+                velocity: sync.velocity,
+                age: 0.0,
+            });
+        }
+
         let frame = sync.encode()?;
         // Culled the same way an NPC's own state is, and for the same reason: a projectile outside
         // a client's loaded sections cannot be drawn by it. In combat this is the larger of the two

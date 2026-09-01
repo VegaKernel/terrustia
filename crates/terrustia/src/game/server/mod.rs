@@ -412,7 +412,18 @@ const TRAVELLING_MERCHANT: u16 = 368;
 const OLD_MAN: u16 = 37;
 /// ...nor is the Skeleton Merchant. Neither counts towards the two townsfolk the Travelling
 /// Merchant wants to see before he will visit.
-const SKELETON_MERCHANT: u16 = 453;
+const SKELETON_MERCHANT: u16 = crate::game::spawn::SKELETON_MERCHANT;
+
+/// The Tax Collector, who exists only as a turned Tortured Soul (`Projectile.cs:14798`).
+const TAX_COLLECTOR: u16 = 441;
+
+/// How many Purification Powder clouds the server will follow at once.
+///
+/// A trust boundary, not a game rule: `powders` is filled straight from packet 27, so without a
+/// ceiling a client that sent nothing but powder syncs would grow it without bound. Vanilla's own
+/// ceiling is `Main.maxProjectiles`, 1000 shared by everything in the world; this is far below
+/// that and still hundreds of clouds more than the one throw the mechanism needs.
+const MAX_TRACKED_POWDERS: usize = 256;
 /// He only turns up in the first half of the day, and leaves at this hour.
 const MERCHANT_ARRIVES_BEFORE: i32 = 27_000;
 const MERCHANT_LEAVES_AT: i32 = 48_600;
@@ -984,6 +995,11 @@ pub struct GameServer {
     autosave_ticks: Option<u64>,
     /// Everything currently in flight.
     projectiles: crate::game::projectile::ProjectileStore,
+    /// Purification Powder clouds a client has thrown, kept only until they settle.
+    ///
+    /// Not in `projectiles`, and not on the wire: see [`crate::game::projectile::Powder`] for why,
+    /// and [`Self::tick_powders`] for what they are for. Bounded, because a client packet fills it.
+    powders: Vec<crate::game::projectile::Powder>,
     /// How many shots have been fired since the server started, for `/npcs`.
     shots_thrown: u64,
     /// The invasion under way, if any.
@@ -1275,6 +1291,7 @@ impl GameServer {
             section_cache: HashMap::new(),
             rng: SmallRng::seed_from_u64(0x7e77_a51a),
             projectiles: crate::game::projectile::ProjectileStore::new(),
+            powders: Vec::new(),
             shots_thrown: 0,
             invasion: None,
             army: crate::game::army::ArmyState::default(),

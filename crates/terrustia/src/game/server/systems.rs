@@ -1408,6 +1408,70 @@ impl GameServer {
         }
     }
 
+    /// Move the Purification Powder clouds in flight, and turn any Tortured Soul they cover.
+    ///
+    /// `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14808`):
+    ///
+    /// ```csharp
+    /// if (type == 10 && Main.netMode != 1) {
+    ///     for (int i = 0; i < Main.maxNPCs; i++) {
+    ///         NPC nPC = Main.npc[i];
+    ///         if (!nPC.active) continue;
+    ///         if (nPC.type == 534) {
+    ///             if (projRectangle.Intersects(nPC.Hitbox)) { nPC.Transform(441); }
+    ///         }
+    ///         ...
+    /// ```
+    ///
+    /// This is the whole recruitment: no cost beyond the powder the throw already spent, no second
+    /// interaction, no guard against re-purifying (there is nothing left to purify, the Tortured
+    /// Soul is gone), and no announcement, because `Transform` makes none. The Tax Collector is the
+    /// only townsperson in the game who arrives this way, which is why he sits in no rescue table.
+    ///
+    /// Two deliberate narrowings, both disclosed rather than papered over. The same routine also
+    /// turns a Slime Spiked Yellow (687) into a Yellow Slime (683) and unlocks its spawn; neither
+    /// type is anywhere in this server's spawn producers, so there is nothing here to convert.
+    /// And the cloud's own flight is followed rather than the client's word for where it went:
+    /// packet 27 arrives once, at the throw, so its 180 ticks of drift are what
+    /// [`crate::game::projectile::Powder::step`] reproduces.
+    pub(super) fn tick_powders(&mut self) {
+        if self.powders.is_empty() {
+            return;
+        }
+        self.powders
+            .retain_mut(crate::game::projectile::Powder::step);
+
+        // Vanilla walks every NPC per powder; this walks the souls once and asks the powders, which
+        // is the same test with the loops the other way up. There is at most one Tortured Soul in a
+        // world (`NPC.cs:4877`'s own `!AnyNPCs(534)`), so this is nearly always an empty scan.
+        let turned: Vec<u8> =
+            self.npcs
+                .iter()
+                .filter(|(_, npc)| {
+                    npc.npc_type == crate::game::spawn::TORTURED_SOUL
+                        && npc.is_alive()
+                        && self.powders.iter().any(|powder| {
+                            powder.overlaps(npc.position, (npc.width(), npc.height()))
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+
+        for index in turned {
+            if let Some(npc) = self.npcs.get_mut(index) {
+                npc.become_type(TAX_COLLECTOR);
+            }
+            // `NPC.AI_007_TownEntities_UpdateSavedStates` (`NPC.cs:53489-53491`) sets
+            // `savedTaxCollector` from the Tax Collector's own AI, on the first tick he runs one.
+            // Setting it here instead is the same moment a tick earlier, and it is what shuts the
+            // underworld's spawn branch so a second Tortured Soul never appears.
+            crate::game::rescues::remember(&mut self.world.progress, TAX_COLLECTOR);
+            self.broadcast_npc(index);
+            self.broadcast_world_data();
+            info!("a Tortured Soul was purified into the Tax Collector");
+        }
+    }
+
     /// Hurt anyone standing in an enemy or in something one of them threw.
     ///
     /// The invulnerability window is what makes this survivable: without it a player inside a
@@ -11016,5 +11080,158 @@ mod blood_moon_turns_critters_evil {
         server.tick_npcs();
         server.tick_npcs();
         assert_eq!(server.npcs.get(index).expect("still there").npc_type, 47);
+    }
+}
+
+/// Purification Powder turning a Tortured Soul into the Tax Collector, the one recruitment in the
+/// game that is a thrown item rather than a conversation.
+#[cfg(test)]
+mod purification_powder_turns_the_tortured_soul {
+    use super::*;
+    use crate::game::projectile::{POWDER_SIZE, PURIFICATION_POWDER};
+    use crate::game::spawn::TORTURED_SOUL;
+
+    /// Where the soul stands, and the two corners its 18-by-40 hitbox spans.
+    const SOUL: (f32, f32) = (1000.0, 500.0);
+
+    fn server_with_a_soul() -> (GameServer, u8, mpsc::Receiver<Bytes>) {
+        let world = crate::world::World::empty(500, 300, "powder probe");
+        let mut server = GameServer::new(Config::default(), world);
+        let (out_tx, out_rx) = mpsc::channel(256);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().expect("loopback"), out_tx);
+        player.state = ConnState::Playing;
+        player.position = SOUL;
+        server.players[0] = Some(player);
+        let index = server
+            .npcs
+            .spawn(TORTURED_SOUL, SOUL)
+            .expect("a Tortured Soul in the world");
+        (server, index, out_rx)
+    }
+
+    /// Hand the server a packet-27 the way a real client's throw arrives: the projectile's own
+    /// top-left corner and the velocity it left with, nothing else.
+    fn throw(server: &mut GameServer, at: (f32, f32), velocity: (f32, f32)) {
+        let sync = terrustia_proto::projectile::SyncProjectile {
+            key: terrustia_proto::projectile::ProjectileKey {
+                owner: 0,
+                index: 3,
+                generation: 1,
+            },
+            position: at,
+            velocity,
+            projectile_type: PURIFICATION_POWDER as i16,
+            ai: [0.0; terrustia_proto::projectile::MAX_AI],
+            banner: 0,
+            damage: 0,
+            knockback: 0.0,
+            original_damage: 0,
+        };
+        let frame = sync.encode().expect("a powder encodes");
+        server
+            .on_client_projectile(0, &frame[3..])
+            .expect("the server takes the throw");
+    }
+
+    /// The whole mechanism, end to end: a throw that lands short, drifts on, and turns the soul.
+    ///
+    /// The powder starts clear of the soul on purpose. Its box is 64 wide with its right edge at
+    /// 980 against a soul beginning at 1000, so nothing overlaps at the moment the packet arrives:
+    /// a check done at throw time would find nothing here for ever, which is the whole reason the
+    /// cloud is followed for its 180 ticks (`Projectile.cs:24366-24372`, `aiStyle == 6`) instead.
+    ///
+    /// Fails before the fix in the only way it could: nothing in this server transformed a 534 at
+    /// all, so the assert below found a Tortured Soul still standing there.
+    #[test]
+    fn a_powder_thrown_at_a_tortured_soul_turns_him_into_the_tax_collector() {
+        let (mut server, index, _out) = server_with_a_soul();
+        let short = (SOUL.0 - POWDER_SIZE.0 - 20.0, SOUL.1 - 12.0);
+        assert!(
+            short.0 + POWDER_SIZE.0 < SOUL.0,
+            "the throw has to start clear of the soul or this proves nothing"
+        );
+        throw(&mut server, short, (4.0, 0.0));
+
+        server.tick_powders();
+        assert_eq!(
+            server.npcs.get(index).expect("still there").npc_type,
+            TORTURED_SOUL,
+            "one tick of drift is not enough to reach him yet"
+        );
+
+        for _ in 0..30 {
+            server.tick_powders();
+        }
+        assert_eq!(
+            server.npcs.get(index).expect("still there").npc_type,
+            crate::game::server::TAX_COLLECTOR,
+            "the drifting cloud never reached the soul"
+        );
+        assert!(
+            server.world.progress.saved_tax_collector,
+            "without the flag the underworld would keep offering Tortured Souls, and his arrival \
+             would never fire"
+        );
+    }
+
+    /// A powder thrown the other way is just dust. Vanilla's test is a rectangle intersection and
+    /// nothing else, so a miss has to stay a miss for the whole three seconds the cloud lasts.
+    #[test]
+    fn a_powder_thrown_away_from_him_leaves_him_alone() {
+        let (mut server, index, _out) = server_with_a_soul();
+        throw(
+            &mut server,
+            (SOUL.0 - POWDER_SIZE.0 - 20.0, SOUL.1 - 12.0),
+            (-4.0, 0.0),
+        );
+
+        for _ in 0..200 {
+            server.tick_powders();
+        }
+        assert_eq!(
+            server.npcs.get(index).expect("still there").npc_type,
+            TORTURED_SOUL,
+        );
+        assert!(!server.world.progress.saved_tax_collector);
+        assert!(
+            server.powders.is_empty(),
+            "the cloud dies at 180 ticks (`Projectile.cs:24372`), it does not accumulate"
+        );
+    }
+
+    /// Nothing to purify, nothing to follow: the server does not carry a cloud around a world with
+    /// no Tortured Soul in it, which is every world that has ever had its Tax Collector.
+    #[test]
+    fn no_soul_means_no_tracking_at_all() {
+        let (mut server, index, _out) = server_with_a_soul();
+        server.npcs.remove(index);
+        throw(&mut server, SOUL, (0.0, 0.0));
+        assert!(server.powders.is_empty());
+    }
+
+    /// An ordinary arrow is relayed and forgotten, as every other client projectile is.
+    #[test]
+    fn only_the_powder_is_followed() {
+        let (mut server, _index, _out) = server_with_a_soul();
+        let sync = terrustia_proto::projectile::SyncProjectile {
+            key: terrustia_proto::projectile::ProjectileKey {
+                owner: 0,
+                index: 3,
+                generation: 1,
+            },
+            position: SOUL,
+            velocity: (0.0, 0.0),
+            projectile_type: 1, // WoodenArrowFriendly
+            ai: [0.0; terrustia_proto::projectile::MAX_AI],
+            banner: 0,
+            damage: 5,
+            knockback: 0.0,
+            original_damage: 5,
+        };
+        let frame = sync.encode().expect("an arrow encodes");
+        server
+            .on_client_projectile(0, &frame[3..])
+            .expect("the server takes the shot");
+        assert!(server.powders.is_empty());
     }
 }
