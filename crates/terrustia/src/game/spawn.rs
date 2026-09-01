@@ -2354,7 +2354,7 @@ mod tests {
     /// the admin `/spawn` command, boss summon items, the transformations one NPC undergoes on
     /// another's death, and the segments a worm head grows behind itself.
     fn ambient_roster() -> std::collections::BTreeSet<u16> {
-        use crate::game::{army, cavern_monsters, event::Invasion, moons, rescues};
+        use crate::game::{army, cavern_monsters, event::Invasion, lunar, moons, rescues};
 
         let mut set = std::collections::BTreeSet::new();
         const DEPTHS: [Depth; 4] = [
@@ -2418,11 +2418,8 @@ mod tests {
         set.insert(crate::game::slime_rain::KING_SLIME);
 
         // The four lunar pillar zones, asked through their own producer for the same reason the
-        // sky is: a membership table is not a spawn path. `lunar::belongs_to` was read here as if
-        // it were one, and it is not — it classifies a *kill* against a pillar's shield. Reading
-        // it as reachability marked all twenty escort types as spawnable while nothing in the
-        // server spawned a single one of them, which is precisely the hole this whole test exists
-        // to find, hidden by the check meant to find it.
+        // sky is asked through its own chain: deleting an arm of one shows up here as a type that
+        // stopped being reachable.
         for pillar in lunar::PILLARS {
             for seed in 0..200u64 {
                 let mut rng = SmallRng::seed_from_u64(seed);
@@ -2438,13 +2435,11 @@ mod tests {
         // `moons::moon_spawn` in `spawn_at`, invasions through the invasion spawner, and the Old
         // One's Army through `apply_army`.
         //
-        // `lunar::belongs_to` was here too and has been removed, because it has no such path.
-        // It exists to classify a kill (`Lunar::note_kill`, which drops a pillar's shield) and to
-        // decide what despawns when the event ends. Nothing spawns a pillar minion at all: vanilla
-        // does it from `NPC.Spawner`'s four `ZoneTower*` arms (`NPC.cs:1357+`) and this server has
-        // no equivalent. Counting the membership table as reachability made the emptiest fight in
-        // the game invisible to the one tool built to find exactly that, and hid twenty-odd types
-        // from the gap ledger.
+        // `lunar::belongs_to` was here too and stays out, however reachable the pillar escort has
+        // since become. It exists to classify a kill (`Lunar::note_kill`, which drops a pillar's
+        // shield) and to decide what despawns when the event ends, and counting it as reachability
+        // made the emptiest fight in the game invisible to the one tool built to find exactly that.
+        // The escort is above, drawn from [`tower_pool`], which is what actually spawns it.
         for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
             if moons::moon_points(npc_type) > 0
                 || army::belongs(npc_type)
