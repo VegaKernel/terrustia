@@ -2897,6 +2897,45 @@ async fn a_wyvern_head_grows_its_own_body() {
     );
 }
 
+/// The two desert worms grow their own bodies the same way (`NPC.cs:51772-51794` for the Tomb
+/// Crawler, `:51796-51819` for the Dune Splicer, both `type == T && ai[0] == 0f`), and they have to
+/// for the same reason the Wyvern does: both arrive from this project's own ambient spawning (the
+/// underground desert and a sandstorm), which calls `NpcStore::spawn` directly and never consults
+/// `npc_params::worm_body`. Before this the Dune Splicer had been in the hardmode desert pool the
+/// whole time as a lone floating head.
+///
+/// The segment count is rolled rather than fixed (`Main.rand.Next(12, 21)` and `(6, 10)`), so this
+/// asserts on the three ids rather than on a length.
+#[tokio::test]
+async fn the_desert_worms_grow_their_own_bodies() {
+    for (head, body, tail) in [(510u16, 511u16, 512u16), (513, 514, 515)] {
+        let addr = start().await;
+        let mut alice = join(addr, "sand-worm-watcher").await;
+        alice.say(&format!("/spawn {head}")).await.unwrap();
+
+        let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(left, alice.next_event()).await {
+                Ok(Ok(Event::NpcSynced(n))) if [head, body, tail].contains(&n.npc_type()) => {
+                    seen.insert(n.npc_type());
+                }
+                Ok(Ok(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            std::collections::HashSet::from([head, body, tail]),
+            "expected {head}'s head, body and tail all real-grown, only saw {seen:?}"
+        );
+    }
+}
+
 /// Hitting the Crawltipede's tail — its only directly-damageable segment — has to actually kill
 /// the chain, or growing a real body (the test above) does not itself close the gap: real
 /// vanilla's own `realLife` redirects every hit against the tail to the *head*'s shared life pool

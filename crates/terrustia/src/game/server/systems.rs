@@ -321,6 +321,9 @@ impl GameServer {
         let mut crawltipedes_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
         // ...and Wyverns, which grow theirs the same way.
         let mut wyverns_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
+        // ...and the two desert worms, whose segment counts are rolled rather than fixed, so each
+        // carries the body, tail and range to draw in.
+        let mut sand_worms_to_grow: Vec<(u8, (f32, f32), u16, u16, usize, usize)> = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
         {
             // What the timid critters flee from. Only two styles read it, so the list is only
@@ -600,6 +603,17 @@ impl GameServer {
                     npc.ai[0] = 1.0;
                     wyverns_to_grow.push((index, npc.position));
                 }
+                // The Dune Splicer and the Tomb Crawler, likewise (`NPC.cs:51772-51819`). They have
+                // to be here rather than in `worm_body`: both arrive from ambient desert spawning,
+                // which `spawn` calls straight rather than through any of the spawn-time paths that
+                // consult that table, so before this a sandstorm's Dune Splicer was a lone head.
+                if let Some((body, tail, least, most)) =
+                    terrustia_proto::npc_params::self_growing_sand_worm(npc.npc_type)
+                    && npc.ai[0] == 0.0
+                {
+                    npc.ai[0] = 1.0;
+                    sand_worms_to_grow.push((index, npc.position, body, tail, least, most));
+                }
                 // A part reads its parent through this; it cannot see the table itself.
                 let parent = npc
                     .follows_boss
@@ -818,6 +832,13 @@ impl GameServer {
         for (head_index, at) in wyverns_to_grow {
             self.npcs
                 .grow_worm_chain(head_index, terrustia_proto::npc_params::WYVERN_SEGMENTS, at);
+        }
+
+        // ...and any desert worm, whose length is rolled here rather than in the loop above,
+        // because that loop holds the NPC table borrowed and this needs the server's own RNG.
+        for (head_index, at, body, tail, least, most) in sand_worms_to_grow {
+            let segments = self.rng.random_range(least..=most);
+            self.npcs.grow_worm_body(head_index, body, tail, segments, at);
         }
 
         // Each load goes to the most hurt part still standing.
