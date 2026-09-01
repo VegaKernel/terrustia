@@ -12,6 +12,11 @@
 
 use super::*;
 
+/// A desert worm head raised this tick and the chain it wants: its slot, where it is, its body and
+/// tail types, and the inclusive segment range to roll in
+/// (`npc_params::self_growing_sand_worm`).
+type SandWormToGrow = (u8, (f32, f32), u16, u16, usize, usize);
+
 /// Whether a player or NPC's hitbox overlaps the pixel square one tile occupies — the entity half
 /// of `Collision.EmptyTile(x, y, ignoreTiles: true)`, which skips the ordinary "is a block
 /// already there" check entirely and tests only entities. `occupants` is
@@ -323,7 +328,7 @@ impl GameServer {
         let mut wyverns_to_grow: Vec<(u8, (f32, f32))> = Vec::new();
         // ...and the two desert worms, whose segment counts are rolled rather than fixed, so each
         // carries the body, tail and range to draw in.
-        let mut sand_worms_to_grow: Vec<(u8, (f32, f32), u16, u16, usize, usize)> = Vec::new();
+        let mut sand_worms_to_grow: Vec<SandWormToGrow> = Vec::new();
         let mut ai_out = npc_ai::AiOutput::default();
         {
             // What the timid critters flee from. Only two styles read it, so the list is only
@@ -838,7 +843,8 @@ impl GameServer {
         // because that loop holds the NPC table borrowed and this needs the server's own RNG.
         for (head_index, at, body, tail, least, most) in sand_worms_to_grow {
             let segments = self.rng.random_range(least..=most);
-            self.npcs.grow_worm_body(head_index, body, tail, segments, at);
+            self.npcs
+                .grow_worm_body(head_index, body, tail, segments, at);
         }
 
         // Each load goes to the most hurt part still standing.

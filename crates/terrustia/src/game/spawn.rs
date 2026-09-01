@@ -1525,16 +1525,21 @@ fn check_underground(world: &World, x: i32, y: i32) -> bool {
     if f64::from(y) < surface / 2.0 {
         return false;
     }
+    // The game's own test is `SolidTile(i, j) || Main.tile[x, y].wall > 0`, and its second half
+    // reads the *point* rather than the strip: it does not depend on either loop variable, so when
+    // it holds every one of the 360 cells counts and the answer is already true. Hoisting it is the
+    // same answer, exactly, and it is what keeps this cheap where it is actually reached: the
+    // caller only asks after finding a desert wall, and a desert wall is a wall.
+    if world.tile(x, y).wall > 0 {
+        return true;
+    }
     let top = y - ABOVE;
     let left = (x - WIDTH / 2).clamp(0, (world.width() - WIDTH - 1).max(0));
     let mut closed = 0;
     for i in left..left + WIDTH {
         for j in top..top + ROWS {
             let tile = world.tile(i, j);
-            // The game's own `SolidTile(i, j) || Main.tile[x, y].wall > 0`, whose second half reads
-            // the *point*, not the strip: one walled spot makes the whole count. Transcribed as it
-            // is written rather than as it reads.
-            if (tile.is_active() && solid(tile.block)) || world.tile(x, y).wall > 0 {
+            if tile.is_active() && solid(tile.block) {
                 closed += 1;
             }
         }
@@ -1562,7 +1567,7 @@ fn check_underground(world: &World, x: i32, y: i32) -> bool {
 /// per-candidate path (20 candidates per player per tick) to reach spots the wall test misses
 /// anyway, and a real underground desert is walled throughout. The effect is that the roster starts
 /// a little further inside the biome than the game's does, never that it appears outside it.
-fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
+pub fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
     let walled = |row: i32| DESERT_SPAWN_WALLS.contains(&world.tile(x, row).wall);
     (walled(y + 1) || walled(y)) && check_underground(world, x, y + 1)
 }
@@ -1659,7 +1664,7 @@ const SAND_CONVERSION: [u16; 4] = [
 /// Walks up to eight rows down from the ground tile, and in each row up to four tiles right and four
 /// left, stopping the moment a row (or a run within it) leaves sand. At least 40 of the possible 72
 /// have to be sand. Every loop breaks early, so ordinary rock costs one read.
-fn sandstone_check(world: &World, x: i32, ground_y: i32) -> bool {
+pub fn sandstone_check(world: &World, x: i32, ground_y: i32) -> bool {
     let sand = |x: i32, y: i32| {
         let tile = world.tile(x, y);
         tile.is_active() && SAND_CONVERSION.contains(&tile.block)
@@ -2112,11 +2117,13 @@ pub struct BiomeCache {
     now: u64,
     /// Scans left to spend this tick, reset by [`Self::advance`].
     left: u32,
-    /// Indexed by player slot: the tick it was taken, where, and what it said - the winning zone
-    /// and `ZoneDesert`, which is a flag of its own rather than one of the winners (see
-    /// [`zones_at`]).
-    entries: Vec<Option<(u64, i32, i32, Biome, bool)>>,
+    /// Indexed by player slot.
+    entries: Vec<Option<Scan>>,
 }
+
+/// One cached scan: the tick it was taken, where, and what it said - the winning zone and
+/// `ZoneDesert`, which is a flag of its own rather than one of the winners (see [`zones_at`]).
+type Scan = (u64, i32, i32, Biome, bool);
 
 /// Hand-written rather than derived so a fresh cache starts with a full budget. A derived `Default`
 /// gives `left: 0`, which would make a cache that has not been advanced yet refuse every scan and
@@ -2372,7 +2379,8 @@ pub fn try_spawn(
         // than guess a zone: every rate and cap modifier below keys on it, so a wrong guess puts
         // them in the wrong spawn pool, and at roughly one attempt in 600 placing anything, a
         // player missing a few attempts is not observable.
-        let Some((player_biome, zone_desert)) = biomes.read(world, usize::from(player.slot), px, py)
+        let Some((player_biome, zone_desert)) =
+            biomes.read(world, usize::from(player.slot), px, py)
         else {
             continue;
         };
@@ -3525,10 +3533,7 @@ mod tests {
     /// sand slimes and antlions and nothing else.
     ///
     /// Neutralised by forcing `desert_spot` to `false` in `try_spawn`: nothing but the ordinary
-    /// `(_, Desert)`-less cavern pool comes out over ten thousand ticks and every assertion below
-    /// fails. Neutralised a second way by dropping the `|| walled(y)` half of
-    /// `underground_desert_spot`, which also fails it, since the wall the spawn stands in front of
-    /// is the row above the floor.
+    /// pool comes out over forty thousand ticks and every assertion below fails.
     #[test]
     fn the_underground_desert_draws_its_own_roster() {
         let world = desert_cavern(187, 53); // Sandstone wall, sand ledges.
@@ -3549,7 +3554,55 @@ mod tests {
             );
         }
         // Nothing from the ordinary cavern pool: vanilla's branch answers for the whole spot.
-        assert!(!set.contains(&21), "a Skeleton reached a desert spot: {set:?}");
+        assert!(
+            !set.contains(&21),
+            "a Skeleton reached a desert spot: {set:?}"
+        );
+    }
+
+    /// `SpawnTileOrAboveHasAnyWallInSet` reads two rows, not one (`NPC.cs:5535-5556`), and it is
+    /// the *ground* tile plus the one above it, which for this server's spawn row `y` is `y + 1`
+    /// and `y`. Half a sandstone wall is still an underground desert; no sandstone wall is not.
+    ///
+    /// Neutralised by dropping either `walled(y + 1)` or `walled(y)` from
+    /// `underground_desert_spot`: one of the two middle assertions fails each time. The world the
+    /// spawn test above uses has the wall on both rows, so it cannot see this on its own.
+    #[test]
+    fn the_desert_wall_is_read_on_the_ground_tile_and_the_one_above_it() {
+        use terrustia_proto::tile::Tile;
+        let mut world = desert_cavern(0, 53); // sand ledges, no wall anywhere.
+        // Row 351 is open, row 352 is a ledge, so 351 is a spawn row.
+        assert!(
+            !underground_desert_spot(&world, 400, 351),
+            "no wall, no desert"
+        );
+
+        let mut floor = Tile::block(53);
+        floor.wall = 187;
+        world.set_tile(400, 352, floor);
+        assert!(
+            underground_desert_spot(&world, 400, 351),
+            "the ground tile alone"
+        );
+
+        let mut world = desert_cavern(0, 53);
+        let mut above = Tile::AIR;
+        above.wall = 187;
+        world.set_tile(400, 351, above);
+        assert!(
+            underground_desert_spot(&world, 400, 351),
+            "the tile above alone"
+        );
+
+        // ...and a wall that is not one of the nine does not count, however sandy the floor is.
+        let mut world = desert_cavern(0, 53);
+        let mut floor = Tile::block(53);
+        floor.wall = 1; // StoneWall
+        world.set_tile(400, 352, floor);
+        assert!(
+            !underground_desert_spot(&world, 400, 351),
+            "a stone wall is not a desert"
+        );
     }
 
     /// The giant antlions are *not* a hardmode upgrade. The one-in-ten roll that turns a Walking or
@@ -3563,9 +3616,13 @@ mod tests {
     #[test]
     fn the_giant_antlions_do_not_wait_for_hardmode() {
         let world = desert_cavern(187, 53);
-        let early: std::collections::BTreeSet<u16> =
-            spawns_at(&world, false, 400, 350, 10_000).into_iter().collect();
-        assert!(early.contains(&508), "no giant walking antlion pre-hardmode");
+        let early: std::collections::BTreeSet<u16> = spawns_at(&world, false, 400, 350, 10_000)
+            .into_iter()
+            .collect();
+        assert!(
+            early.contains(&508),
+            "no giant walking antlion pre-hardmode"
+        );
         assert!(early.contains(&509), "no giant flying antlion pre-hardmode");
         // ...and none of hardmode's own roster is out early.
         for locked in [524u16, 528, 530, 532, 510] {
@@ -3587,8 +3644,9 @@ mod tests {
     #[test]
     fn the_ghoul_follows_the_players_zone_not_the_tile() {
         let clean = desert_cavern(187, 53);
-        let seen: std::collections::BTreeSet<u16> =
-            spawns_at(&clean, true, 400, 350, 10_000).into_iter().collect();
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&clean, true, 400, 350, 10_000)
+            .into_iter()
+            .collect();
         for (npc_type, name) in [
             (524u16, "DesertGhoul"),
             (530, "DesertScorpionWalk"),
@@ -3596,7 +3654,10 @@ mod tests {
             (532, "DesertBeast"),
             (510, "DuneSplicerHead"),
         ] {
-            assert!(seen.contains(&npc_type), "no {name} in a clean desert: {seen:?}");
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} in a clean desert: {seen:?}"
+            );
         }
         assert!(!seen.contains(&525), "a corrupt ghoul in a clean desert");
         assert!(!seen.contains(&533), "a djinn in a clean desert");
@@ -3613,7 +3674,10 @@ mod tests {
             (533, "DesertDjinn"),
             (529, "DesertLamiaDark"),
         ] {
-            assert!(seen.contains(&npc_type), "no {name} in a corrupt desert: {seen:?}");
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} in a corrupt desert: {seen:?}"
+            );
         }
         assert!(!seen.contains(&524), "the plain ghoul in a corrupt desert");
         assert!(!seen.contains(&530), "the scorpion in a corrupt desert");
@@ -3665,9 +3729,18 @@ mod tests {
             .into_iter()
             .map(|(ty, _)| ty)
             .collect();
-        assert!(early.contains(&546), "no tumbleweed in an early sandstorm: {early:?}");
-        assert!(early.contains(&61), "no vulture in an early sandstorm: {early:?}");
-        assert!(early.contains(&69), "no antlion in an early sandstorm: {early:?}");
+        assert!(
+            early.contains(&546),
+            "no tumbleweed in an early sandstorm: {early:?}"
+        );
+        assert!(
+            early.contains(&61),
+            "no vulture in an early sandstorm: {early:?}"
+        );
+        assert!(
+            early.contains(&69),
+            "no antlion in an early sandstorm: {early:?}"
+        );
         assert!(
             !early.contains(&542),
             "a sandshark before hardmode: {early:?}",
@@ -3688,7 +3761,10 @@ mod tests {
             (580, "WalkingAntlion"),
             (581, "FlyingAntlion"),
         ] {
-            assert!(set.contains(&npc_type), "no {name} in a hardmode sandstorm: {set:?}");
+            assert!(
+                set.contains(&npc_type),
+                "no {name} in a hardmode sandstorm: {set:?}"
+            );
         }
         // The Dune Splicer burrows in ten tiles below the spot it was chosen at
         // (`NPC.cs:3975`, `SpawnNPC(x, (spawnTileY + 10) * 16, 510)`), which is the one member that
@@ -3702,7 +3778,10 @@ mod tests {
                 .collect()
         };
         let splicers = rows(510);
-        assert!(!splicers.is_empty(), "no dune splicer in a hardmode sandstorm");
+        assert!(
+            !splicers.is_empty(),
+            "no dune splicer in a hardmode sandstorm"
+        );
         assert!(
             splicers.iter().all(|row| *row == 1),
             "a dune splicer did not burrow ten tiles in: {splicers:?}",
