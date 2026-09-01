@@ -1580,9 +1580,9 @@ pub fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
 
 /// The underground desert's roster, `NPC.cs:1684-1764`.
 ///
-/// The whole 1.4 desert lives here and nowhere else, which is why eleven types were unreachable:
-/// the ghouls, the lamias, the scorpion, the beast, the djinn, the tomb crawler and both giant
-/// antlions have no other ambient spawn in the game at all.
+/// The whole 1.4 desert lives here and nowhere else, which is why twelve types were unreachable:
+/// the four ghouls, the two lamias, the scorpion, the beast, the djinn, the tomb crawler and both
+/// giant antlions have no other ambient spawn in the game at all.
 ///
 /// `spawn_y` is this server's spawn row; the game's `spawnTileY` is one below it, and every depth
 /// test here is written against the game's own row. Two things the caller owns rather than this:
