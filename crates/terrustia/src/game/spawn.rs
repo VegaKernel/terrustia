@@ -1187,6 +1187,21 @@ const CAVERN_SENTINEL: u16 = u16::MAX;
 /// anyone who enters before Skeletron is down.
 const DUNGEON_GUARDIAN: u16 = 68;
 
+/// The Tortured Soul (`NPCID.TorturedSoul`, the table's `DemonTaxCollector`), the one hostile in
+/// the game a player turns into a townsperson rather than kills.
+pub const TORTURED_SOUL: u16 = 534;
+
+/// The Skeleton Merchant (`NPCID.SkeletonMerchant`), a wandering vendor rather than a resident: he
+/// takes no house, joins no town, and leaves on the ordinary despawn timer when nobody is near.
+pub const SKELETON_MERCHANT: u16 = 453;
+
+/// `Main.rand.Next(20)` on the Tortured Soul's branch (`NPC.cs:4877`).
+const TORTURED_SOUL_ODDS: u32 = 20;
+
+/// The Skeleton Merchant's two nested rolls collapsed (`NPC.cs:5004`'s `Next(2)` and `:5007`'s
+/// `Next(35)`), because nothing between them can spawn anything.
+const SKELETON_MERCHANT_ODDS: u32 = 70;
+
 /// How often a hostile type is drawn relative to the others sharing its pool, the game's own
 /// per-type spawn rate reduced to one number.
 ///
@@ -2264,6 +2279,57 @@ pub fn try_spawn(
                     let wet = water_pool(depth, player_biome);
                     wet[rng.random_range(0..wet.len())]
                 }
+                // The underworld arm's own first branch (`NPC.cs:4877`):
+                //
+                // ```csharp
+                // else if (Main.hardMode && !savedTaxCollector && Main.rand.Next(20) == 0 && !AnyNPCs(534))
+                // ```
+                //
+                // It sits ahead of everything else the underworld spawns, which is why it is a
+                // branch here rather than an entry in the pool: at one in twenty it is a fifth of
+                // the whole underworld draw while it is open, and it closes for good once the world
+                // has its Tax Collector. Without it the Tortured Soul never spawned, and since he
+                // is the only way a Tax Collector ever exists, an entire townsperson (his shop,
+                // his happiness, his arrival) was unreachable.
+                None if depth == Depth::Underworld
+                    && events.hard_mode
+                    && !world.progress.saved_tax_collector
+                    && rng.random_range(0..TORTURED_SOUL_ODDS) == 0
+                    && !npcs
+                        .iter()
+                        .any(|(_, n)| n.npc_type == TORTURED_SOUL && n.is_alive()) =>
+                {
+                    TORTURED_SOUL
+                }
+                // The cavern chain's rare wanderer (`NPC.cs:5004-5010`):
+                //
+                // ```csharp
+                // else if (Main.rand.Next(2) == 0)
+                // {
+                //     if (Main.rand.Next(35) == 0 && !ZoneShadowCandle && !waterTile && CountNPCS(453) == 0)
+                // ```
+                //
+                // One in seventy, at any point in a world's progression: he is not a hardmode or a
+                // dungeon spawn, whatever the wikis say. Two deliberate narrowings, both of which
+                // only make him very slightly more common than the game does. `ZoneShadowCandle`
+                // is not modelled here at all, and vanilla reaches this arm only after the cavern
+                // chain's earlier branches decline, whose per-tile conditions this server does not
+                // read. The biome exclusion is that chain's own upstream tile diversions
+                // (`NPC.cs:4066`, `:4125` for the two evils, `:3929-3948` for jungle mud): those
+                // tiles are answered before the fallthrough he lives in, so he is not found there.
+                None if depth == Depth::Cavern
+                    && !matches!(
+                        player_biome,
+                        Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
+                    )
+                    && !water_tile(world, x, y)
+                    && rng.random_range(0..SKELETON_MERCHANT_ODDS) == 0
+                    && !npcs
+                        .iter()
+                        .any(|(_, n)| n.npc_type == SKELETON_MERCHANT && n.is_alive()) =>
+                {
+                    SKELETON_MERCHANT
+                }
                 None => {
                     let biome = player_biome;
                     let ordinary = pool(depth, biome, world.day_time);
@@ -2410,6 +2476,13 @@ mod tests {
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
         set.extend(rescues::RESCUES.iter().map(|r| r.bound));
+        // The two `try_spawn` answers with a branch of their own rather than a pool entry: the
+        // Tortured Soul the underworld offers once per world, and the Skeleton Merchant the caverns
+        // offer one attempt in seventy. Both are asserted to be reachable by `try_spawn` itself in
+        // this module's own tests, so listing them here cannot drift into a claim their branches
+        // have stopped making good.
+        set.insert(TORTURED_SOUL);
+        set.insert(SKELETON_MERCHANT);
         // The six a world happens to have are drawn from thirteen, so every world's own set counts.
         for world_id in 0..200 {
             set.extend(cavern_monsters::CavernMonsters::for_world(world_id).flat());
@@ -4241,6 +4314,115 @@ mod tests {
                 assert_eq!(bound, 354, "only the Stylist is a day-one cavern find");
             }
         }
+    }
+
+    /// A flat, open, empty hall with a single floor row at `floor`, in a world whose surface and
+    /// rock layer are fixed so `depth_at` is predictable. `World::empty` is all air, so the floor
+    /// is the only tile in it and the biome scan reads a plain forest.
+    fn hall_world(floor: i32) -> World {
+        let mut world = World::empty(800, 600, "hall");
+        world.surface = 100;
+        world.rock_layer = 200;
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(1));
+        }
+        world
+    }
+
+    /// How many of `wanted` a long run of spawn attempts produces at `floor` in `world`.
+    fn spawns_of(
+        world: &World,
+        floor: i32,
+        events: &EventSpawns<'_>,
+        wanted: u16,
+        seed: u64,
+    ) -> usize {
+        let npcs = NpcStore::new();
+        let players = player_at(((world.width() / 2) as f32 * 16.0, (floor - 1) as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut seen = 0;
+        for _ in 0..60_000 {
+            seen += try_spawn(
+                world,
+                &npcs,
+                &players,
+                events,
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            )
+            .iter()
+            .filter(|(npc_type, _)| *npc_type == wanted)
+            .count();
+        }
+        seen
+    }
+
+    /// The underworld offers a Tortured Soul (`NPC.cs:4877`), and only under vanilla's own three
+    /// conditions: hardmode, and a world that has not got its Tax Collector yet.
+    ///
+    /// Fails before the fix, when 534 was in no pool and no branch: nothing this server could do
+    /// would ever put one in a world, so the Tax Collector - his shop, his happiness, his arrival
+    /// message, all of it already written - was unreachable for good.
+    #[test]
+    fn the_underworld_offers_a_tortured_soul_once_a_world_is_in_hardmode() {
+        let floor = 600 - UNDERWORLD_DEPTH + 50;
+        let mut world = hall_world(floor);
+        assert_eq!(
+            depth_at(&world, floor - 1),
+            Depth::Underworld,
+            "the hall has to be in the underworld for this to test anything"
+        );
+
+        // Pre-hardmode: `Main.hardMode` is the first clause of the branch, so never.
+        assert_eq!(
+            spawns_of(&world, floor, &quiet(), TORTURED_SOUL, 5),
+            0,
+            "a pre-hardmode underworld spawned a Tortured Soul"
+        );
+
+        let mut hard = quiet();
+        hard.hard_mode = true;
+        world.progress.hard_mode = true;
+        assert!(
+            spawns_of(&world, floor, &hard, TORTURED_SOUL, 5) > 0,
+            "a hardmode underworld never offered a Tortured Soul"
+        );
+
+        // `!savedTaxCollector`: once the world has him, the branch is shut for good.
+        world.progress.saved_tax_collector = true;
+        assert_eq!(
+            spawns_of(&world, floor, &hard, TORTURED_SOUL, 5),
+            0,
+            "a world that already has its Tax Collector kept spawning Tortured Souls"
+        );
+    }
+
+    /// The caverns offer a Skeleton Merchant (`NPC.cs:5004-5010`), at any point in a world's
+    /// progression, and never in the underworld above or the underground below him.
+    ///
+    /// Fails before the fix, when 453 was in no pool and no branch, so the one wandering vendor in
+    /// the game could not be met however long a world was played.
+    #[test]
+    fn the_caverns_offer_a_skeleton_merchant_at_any_progression() {
+        let cavern_floor = 300;
+        let world = hall_world(cavern_floor);
+        assert_eq!(depth_at(&world, cavern_floor - 1), Depth::Cavern);
+        assert!(
+            spawns_of(&world, cavern_floor, &quiet(), SKELETON_MERCHANT, 9) > 0,
+            "a plain cavern never offered a Skeleton Merchant"
+        );
+
+        // He is a cavern spawn, not an underworld one: vanilla's underworld arm is a whole branch
+        // earlier in the same chain and never reaches him.
+        let hell_floor = 600 - UNDERWORLD_DEPTH + 50;
+        let hell = hall_world(hell_floor);
+        assert_eq!(depth_at(&hell, hell_floor - 1), Depth::Underworld);
+        assert_eq!(
+            spawns_of(&hell, hell_floor, &quiet(), SKELETON_MERCHANT, 9),
+            0,
+            "the underworld spawned a Skeleton Merchant"
+        );
     }
 }
 
