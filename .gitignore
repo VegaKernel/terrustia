@@ -47,6 +47,8 @@ flamegraph.svg
 /decompiled/
 .scratch/
 
-# Agent worktrees used for concurrent fork work this session — not part of the tree itself, and
-# `git add -A` will otherwise swallow them whole as embedded repositories.
-/.claude/
+# Agent worktrees used for concurrent fork work: not part of the tree itself, and `git add -A`
+# will otherwise swallow them whole as embedded repositories. Custom subagent definitions live in
+# .claude/agents/ and are real project tooling, tracked despite the rest of .claude/ being ignored.
+/.claude/*
+!/.claude/agents/
