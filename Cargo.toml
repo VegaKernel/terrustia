@@ -103,15 +103,14 @@ rust-embed = { version = "8", features = ["axum"] }
 # out to the real `cosign` binary, the same trust chain `release.yml` already signs releases with
 # (keyless, GitHub Actions OIDC) rather than re-implementing Sigstore bundle verification here.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
-# UPnP IGD automatic port-mapping for the game port on startup (see `upnp.rs`) — the same job
-# AstroLauncher does for its own Terraria/Minecraft/Valheim server launcher. The actual protocol
-# (SSDP multicast discovery, then a SOAP call to whatever the router answers with) is exactly the
-# kind of "narrow, well-defined external protocol" this workspace otherwise hand-rolls — except
-# unlike TOML or the game's own wire format, there is no single specification to transcribe: real
-# router firmware disagrees on details in ways a compliant implementation already has to work
-# around, which is what this crate (an actively maintained fork of the original, now-unmaintained
-# `igd`) exists to have already sorted out. `aio_tokio` only, no separate blocking client needed.
-igd-next = { version = "0.17", default-features = false, features = ["aio_tokio"] }
+# UPnP IGD port-mapping has no dependency here on purpose. It used to be `igd-next`, which cost 31
+# crates (its own `hyper` client stack, `url`/`idna`, a transitive `ring`) for the two calls this
+# server makes: find a gateway, add one port mapping. IGD control traffic is plain HTTP/1.1 over
+# the LAN against raw `IP:port` literals, so none of TLS, real DNS or internationalized-domain
+# handling ever applied, which made the weight lopsided enough to be worth the rewrite. It is now
+# hand-rolled in `crates/terrustia/src/upnp.rs`, whose parsing is unit-tested against captured
+# output from real routers; read that module's doc comment (including what it does not claim to
+# have verified) before touching it.
 # `terrustia update`'s scratch directory for downloaded/extracted release files has to resist a
 # symlink/pre-creation attack from another local user on a shared machine — a predictable
 # `std::env::temp_dir().join(format!("...-{pid}"))` does not, since `create_dir_all` silently
