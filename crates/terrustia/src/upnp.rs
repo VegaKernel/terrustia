@@ -292,7 +292,12 @@ async fn exchange(host: &str, port: u16, request: Vec<u8>) -> Result<(u16, Vec<u
     };
     let raw = timeout(HTTP_TIMEOUT, read)
         .await
-        .map_err(|_| format!("{ip}:{port} did not answer within {}s", HTTP_TIMEOUT.as_secs()))?
+        .map_err(|_| {
+            format!(
+                "{ip}:{port} did not answer within {}s",
+                HTTP_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|e| format!("{ip}:{port}: {e}"))?;
 
     parse_http_response(&raw).ok_or_else(|| format!("{ip}:{port} sent an unparsable HTTP response"))
@@ -360,14 +365,13 @@ fn split_http_url(url: &str) -> Option<(&str, u16, &str)> {
     if authority.is_empty() {
         return None;
     }
-    // A colon inside a bare IPv6 literal is not a port separator; a bracketed literal's port
-    // always comes after the `]`, which is what the `contains(']')` test rules out.
+    // A colon inside a bare IPv6 literal is not a port separator, and the all-digits test is what
+    // rules that out: `[fe80::1]` splits into `[fe80:` and `:1]`, whose second half is not a port
+    // and cannot be mistaken for one. A bracketed literal that really does carry a port splits
+    // after the `]`, which leaves digits.
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port))
-            if !host.is_empty()
-                && !port.is_empty()
-                && !port.contains(']')
-                && port.bytes().all(|b| b.is_ascii_digit()) =>
+            if !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
         {
             (host, port.parse().ok()?)
         }
@@ -419,7 +423,11 @@ fn resolve_control_url(location: &str, xml: &str, control_url: &str) -> Option<S
         .filter(|base| !base.is_empty())
         .unwrap_or(location);
     let (host, port, _) = split_http_url(base)?;
-    let separator = if control_url.starts_with('/') { "" } else { "/" };
+    let separator = if control_url.starts_with('/') {
+        ""
+    } else {
+        "/"
+    };
     Some(format!("http://{host}:{port}{separator}{control_url}"))
 }
 
@@ -799,13 +807,16 @@ mod tests {
         assert!(datagram.contains("\r\nHOST: 239.255.255.250:1900\r\n"));
         assert!(datagram.contains("\r\nMAN: \"ssdp:discover\"\r\n"));
         assert!(datagram.contains("\r\nMX: 3\r\n"));
-        assert!(datagram.contains(
-            "\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n"
-        ));
+        assert!(
+            datagram.contains("\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n")
+        );
         // The blank line that ends the datagram: without it, a device ignores the search.
         assert!(datagram.ends_with("\r\n\r\n"));
         // Every line break is CRLF, never a bare LF.
-        assert_eq!(datagram.matches('\n').count(), datagram.matches("\r\n").count());
+        assert_eq!(
+            datagram.matches('\n').count(),
+            datagram.matches("\r\n").count()
+        );
     }
 
     #[test]
@@ -971,7 +982,10 @@ mod tests {
             ),
             "{body}"
         );
-        assert!(body.contains("</u:AddPortMapping></s:Body></s:Envelope>"), "{body}");
+        assert!(
+            body.contains("</u:AddPortMapping></s:Body></s:Envelope>"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -985,9 +999,18 @@ mod tests {
             0,
             "terrustia",
         );
-        assert!(body.contains("<NewExternalPort>7777</NewExternalPort>"), "{body}");
-        assert!(body.contains("<NewInternalPort>1234</NewInternalPort>"), "{body}");
-        assert!(body.contains("<NewLeaseDuration>0</NewLeaseDuration>"), "{body}");
+        assert!(
+            body.contains("<NewExternalPort>7777</NewExternalPort>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("<NewInternalPort>1234</NewInternalPort>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("<NewLeaseDuration>0</NewLeaseDuration>"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -1049,7 +1072,8 @@ mod tests {
 
     #[test]
     fn a_chunk_size_with_an_extension_is_still_a_chunk_size() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;name=v\r\nhello\r\n0\r\n\r\n";
+        let raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;name=v\r\nhello\r\n0\r\n\r\n";
         let (_, body) = parse_http_response(raw).unwrap();
         assert_eq!(body, b"hello");
     }
@@ -1062,7 +1086,10 @@ mod tests {
 
     #[test]
     fn a_response_with_no_header_terminator_is_refused_rather_than_guessed_at() {
-        assert_eq!(parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n"), None);
+        assert_eq!(
+            parse_http_response(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n"),
+            None
+        );
         assert_eq!(parse_http_response(b"garbage\r\n\r\nbody"), None);
     }
 
@@ -1070,9 +1097,17 @@ mod tests {
     fn the_tag_scanner_ignores_namespace_prefixes_and_attributes() {
         // The returned offset is one past `</b>`, so a caller resumes at `</a>`.
         assert_eq!(element("<a><b>x</b></a>", "b", 0), Some(("x", 11)));
-        assert_eq!(element("<s:Body><u:Ok>y</u:Ok></s:Body>", "Ok", 0).map(|e| e.0), Some("y"));
         assert_eq!(
-            element("<controlURL xml:lang=\"en\">/ctl</controlURL>", "controlURL", 0).map(|e| e.0),
+            element("<s:Body><u:Ok>y</u:Ok></s:Body>", "Ok", 0).map(|e| e.0),
+            Some("y")
+        );
+        assert_eq!(
+            element(
+                "<controlURL xml:lang=\"en\">/ctl</controlURL>",
+                "controlURL",
+                0
+            )
+            .map(|e| e.0),
             Some("/ctl")
         );
         assert_eq!(element("<a>x</a>", "b", 0), None);

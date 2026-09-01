@@ -5,13 +5,16 @@
 #
 # Re-audited when this failed a pre-tag check: 203 unique external crates (up from an earlier
 # "59, zero copyleft" note here that went stale once `ureq`/`igd-next` — the update-check and
-# UPnP dependencies — pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`). One of the three
-# licenses that addition needed, MPL-2.0, is real, file-level copyleft — but MPL-2.0 was written
-# specifically to be usable as-is inside a GPL-family work (Mozilla's own "Secondary Licenses"
-# compatibility clause), which is exactly this project's own situation (AGPL server/client, MIT
-# proto crate), so allowing it here is a deliberate, informed choice, not an oversight. ISC and
+# UPnP dependencies — pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`). ISC and
 # CDLA-Permissive-2.0 (the latter is `webpki-roots`' license for its own root-certificate *data*,
 # not code) are both plain permissive, the same tier as MIT/BSD-3-Clause already below.
+#
+# The one entry that ever needed an argument was MPL-2.0, real file-level copyleft, which arrived
+# with `attohttpc` under `igd-next`. Hand-rolling UPnP (2026-09-01) removed `igd-next`, and with
+# it the only MPL-2.0 crate in the graph, so the allowance is gone and there is nothing
+# copyleft-adjacent left to reason about. Do not add it back without re-making the argument: it
+# was that MPL-2.0's own "Secondary Licenses" clause makes it usable inside a GPL-family work,
+# which is this project's situation (AGPL server/client, MIT proto crate).
 #
 #   cargo deny check
 
@@ -29,9 +32,6 @@ allow = [
     "Unicode-3.0",
     "ISC",
     "CDLA-Permissive-2.0",
-    # File-level copyleft, deliberately allowed — see this file's own top comment for why it is
-    # safe alongside an AGPL workspace crate specifically.
-    "MPL-2.0",
 ]
 confidence-threshold = 0.9
 

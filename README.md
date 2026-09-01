@@ -113,7 +113,11 @@ winget, AUR) are all documented and supported equally; see [Packaging](#packagin
   UPnP-capable router answers, or it refuses, this logs a specific fallback message naming the port
   and the local address to forward it to by hand. It is never a fatal error. Set `upnp_enabled =
   false` to turn it off. This has nothing to do with the web panel, which stays bound to loopback
-  regardless.
+  regardless. The IGD protocol is hand-rolled (`upnp.rs`), and its parsing is tested against
+  captured output from real routers, but the **live socket path has not yet been verified against a
+  real router**: no CI runner has one to answer with. `cargo run --example upnp_probe` is the tool
+  for closing that on a real home network, and until someone has, treat the automatic mapping as
+  the convenience and the fallback message as the contract.
 - **`terrustia update`**: on boot, terrustia checks GitHub for a newer, signature-verified release
   and says so, in the console log and as an in-game notice to the first recognised admin who signs
   in afterward. Applying it is a separate, deliberate step: run `terrustia update` yourself. It
