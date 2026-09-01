@@ -1,5 +1,12 @@
 # Build output. Regenerated from source; several gigabytes.
-/target/
+#
+# `target*` and not just `/target/`, at any depth: every parallel worktree needs its own
+# CARGO_TARGET_DIR (cargo's unit hash omits the worktree path, so sharing one makes worktrees link
+# against each other's crates), and the obvious name for it is a variation on `target`. One named
+# `target-agent` sat outside `/target/` and a `git add -A` swallowed 9,324 build artifacts in a
+# single commit. Caught before it was pushed, but the next one might not be.
+target/
+target-*/
 **/*.rs.bk
 
 # Worlds. A .wld is a save file, not source: they are large, binary, and personal, and a stray
