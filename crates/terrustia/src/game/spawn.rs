@@ -3887,6 +3887,49 @@ mod tests {
         }
     }
 
+    /// What the tower-zone test costs on the spawn path, which runs once per player per tick.
+    ///
+    /// It is deliberately not a scan: a real client works its zone out in `SceneMetrics` by walking
+    /// every NPC (`SceneMetrics.cs:734-751`), and doing that here would be another pass over the
+    /// store per player per tick on top of the biome scan that already had to be cached to fit.
+    /// Instead the caller gathers the four positions once, only while the event is up, and this is
+    /// four distance comparisons against a stack array. On an M-series laptop, with the arguments
+    /// behind a `black_box` so the loop cannot be hoisted (which costs more than the test itself
+    /// does): 1.0 ns with no apocalypse running, which is almost always, 1.4 ns with all four
+    /// standing and no zone matched, 1.0 ns standing inside one. At the 255-player bar the worst
+    /// case is 0.4 us of a 16.67 ms tick, which is 0.002% of it.
+    #[test]
+    #[ignore]
+    fn measure_the_tower_zone_test() {
+        use crate::game::lunar;
+
+        let none = quiet();
+        let mut far = quiet();
+        far.towers = [Some((900_000.0, 900_000.0)); 4];
+        let mut inside = quiet();
+        let slot = lunar::PILLARS
+            .iter()
+            .position(|p| *p == lunar::SOLAR)
+            .expect("a real pillar");
+        inside.towers[slot] = Some((1_000.0, 1_000.0));
+
+        for (name, events) in [
+            ("no apocalypse", &none),
+            ("four standing, out of range", &far),
+            ("inside the solar zone", &inside),
+        ] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                let at = std::hint::black_box((1_000.0 + (i % 4) as f32, 1_000.0));
+                sink += u32::from(std::hint::black_box(events).tower_zone(at).unwrap_or(0));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("{name}: {each:.2} ns/test (sink {sink})");
+        }
+    }
+
     #[test]
     fn spawning_is_frequent_enough_to_matter() {
         // Picking a blind point and demanding it be the surface almost never works; scanning down
