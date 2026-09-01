@@ -111,6 +111,7 @@ ureq = { version = "3", default-features = false, features = ["rustls", "json"] 
 # hand-rolled in `crates/terrustia/src/upnp.rs`, whose parsing is unit-tested against captured
 # output from real routers; read that module's doc comment (including what it does not claim to
 # have verified) before touching it.
+
 # `terrustia update`'s scratch directory for downloaded/extracted release files has to resist a
 # symlink/pre-creation attack from another local user on a shared machine — a predictable
 # `std::env::temp_dir().join(format!("...-{pid}"))` does not, since `create_dir_all` silently
