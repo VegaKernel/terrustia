@@ -1426,11 +1426,20 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             66, // VoodooDemon
             39, // BoneSerpentHead
         ],
+        // The three big Angry Bones are not hardmode and not rare: the dungeon chain's own
+        // fallthrough is `int num43 = Main.rand.Next(5)` with cases 0, 1 and 2 taking 294, 295 and
+        // 296 (`NPC.cs:2767-2783`), and only cases 3 and 4 reach the plain Angry Bones below it
+        // (`:2784-2795`, where `-14` and `-13` are size variants of that same 31 rather than types
+        // of their own). Three fifths of what a pre-Skeletron-cleared dungeon actually throws at a
+        // player was therefore missing, and the dungeon was correspondingly softer than the game's.
         (_, Dungeon) => &[
-            31, // AngryBones
-            32, // DarkCaster
-            34, // CursedSkull
-            71, // DungeonSlime
+            31,  // AngryBones
+            294, // AngryBonesBig
+            295, // AngryBonesBigMuscle
+            296, // AngryBonesBigHelmet
+            32,  // DarkCaster
+            34,  // CursedSkull
+            71,  // DungeonSlime
         ],
         // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
         // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
@@ -5043,6 +5052,47 @@ mod tests {
             after > 0,
             "the post-Skeletron dungeon never spawned anything"
         );
+    }
+
+    /// The dungeon's fallthrough is mostly the *big* Angry Bones, not the plain one: `NPC.cs:2767`
+    /// rolls `Main.rand.Next(5)` and three of its five cases (`:2774-2782`) are 294, 295 and 296,
+    /// with only the other two reaching 31 at `:2794`. None of the three is gated on `hardDungeon`,
+    /// so they are what a player meets the first time they walk into a cleared dungeon.
+    ///
+    /// Neutralised by removing the three from `pool`'s dungeon arm: nothing but the four originals
+    /// is drawn in forty thousand ticks and the first assertion fails.
+    #[test]
+    fn the_dungeon_is_mostly_big_angry_bones() {
+        let (mut world, (cx, cy)) = dungeon_world();
+        world.progress.downed_boss3 = true;
+        let npcs = NpcStore::new();
+        let players = dungeon_player(cx, cy);
+
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..40_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            ) {
+                found.insert(npc_type);
+            }
+        }
+        for (npc_type, name) in [
+            (294u16, "AngryBonesBig"),
+            (295, "AngryBonesBigMuscle"),
+            (296, "AngryBonesBigHelmet"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in a cleared dungeon: {found:?}"
+            );
+        }
     }
 
     #[test]
