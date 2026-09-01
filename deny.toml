@@ -4,8 +4,8 @@
 # every dependency — including plain MIT — which reads like a licence problem and is not one.
 #
 # Re-audited when this failed a pre-tag check: 203 unique external crates (up from an earlier
-# "59, zero copyleft" note here that went stale once `ureq`/`igd-next` — the update-check and
-# UPnP dependencies — pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`). ISC and
+# "59, zero copyleft" note here that went stale once `ureq` and `igd-next`, the update-check and
+# UPnP dependencies, pulled in `rustls`/`ring`/`webpki-roots`/`attohttpc`). ISC and
 # CDLA-Permissive-2.0 (the latter is `webpki-roots`' license for its own root-certificate *data*,
 # not code) are both plain permissive, the same tier as MIT/BSD-3-Clause already below.
 #
