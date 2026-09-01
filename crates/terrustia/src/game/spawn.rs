@@ -1272,6 +1272,10 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
 /// (`NPC.cs:5021`), the bottom half of the stone, which is a different line from
 /// [`Conditions::below_dirt_midline`]'s `(worldSurface + rockLayer) / 2`.
 ///
+/// `ground_block` is the tile the spawn stands on, the game's own `spawnTileY` (`NPC.cs:329`:
+/// `FindSpawnTile` walks down to the first solid tile, so its `spawnTileY` is this server's
+/// `y + 1`). It is here for the two stone arms below and nothing else.
+///
 /// Deliberately left out, each with its place in the order kept so the arms that *are* here land at
 /// vanilla's own odds:
 ///
@@ -1282,10 +1286,6 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
 ///   test, no caller triggers it. Spawning a permanently idle prop is worse than the honest gap, so
 ///   195 stays in `docs/spawn-gaps.tsv` until the transformation has a lane.
 /// * `NPC.cs:5017` the Rune Wizard, already carried by [`hardmode_pool`].
-/// * `NPC.cs:5027` the marble arm (Medusa, Greek Skeleton) and `:5038` the granite one (Granite
-///   Golem, Granite Flyer). Both key on `nearMarble`/`nearGranite`, which vanilla fills from its
-///   own tile scan around the spot (`NPC.cs:1100-1143`); this server models neither micro-biome and
-///   will not add a second per-tile scan to the spawn path for them. 480-483 stay disclosed.
 /// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
 ///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
 ///   so a snow cavern never sees a Halloween skeleton.
@@ -1307,7 +1307,9 @@ pub fn cavern_seasonal_pick(
     at: Seasonal,
     no_worms: bool,
     lower_caverns: bool,
+    ground_block: u16,
     glowshroom_ground: bool,
+    alive: &dyn Fn(u16) -> bool,
     rng: &mut SmallRng,
 ) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
@@ -1335,6 +1337,48 @@ pub fn cavern_seasonal_pick(
     // weapon) is not read here, so Tim is very slightly rarer than the game's, never commoner.
     if lower_caverns && one_in(rng, 200) {
         return Some(45); // Tim
+    }
+    // NPC.cs:5027 and `:5039`, the marble and granite arms:
+    //
+    // ```csharp
+    // if (nearMarble && Main.rand.Next(4) != 0)
+    // {
+    //     if (Main.rand.Next(6) != 0 && !AnyNPCs(480) && Main.hardMode) 480; else 481;
+    //     return;
+    // }
+    // if (nearGranite && Main.rand.Next(5) != 0)
+    // {
+    //     if (Main.rand.Next(6) != 0 && !AnyNPCs(483)) 483; else 482;
+    //     return;
+    // }
+    // ```
+    //
+    // All four types come from here and nowhere else in `NPC.Spawner`, which is why all four were
+    // unreachable. Note what the gates actually say: only the Medusa is hardmode, so a granite
+    // pocket has its golems and flyers on day one, and a marble one has its Greek Skeletons.
+    //
+    // `nearMarble`/`nearGranite` are narrowed to the ground tile itself (`NPC.cs:1059-1065`, the
+    // first two of the flag's four branches). The other two are the player's own tile and a pair of
+    // random box sweeps up to 61 tiles across (`NPC.cs:1067-1143`), left out for the same reason
+    // `underground_desert_spot` and [`spider_pick`] leave out their equivalents: a real marble or
+    // granite pocket is floored in its own stone, so the tile test finds the biome from inside it,
+    // and the sweeps only widen the arm to spots outside one. The effect is that the four start a
+    // little further in than the game's do, never that they turn up in ordinary rock.
+    const MARBLE: u16 = 367;
+    const GRANITE: u16 = 368;
+    if ground_block == MARBLE && !one_in(rng, 4) {
+        return Some(if !one_in(rng, 6) && !alive(480) && at.hard_mode {
+            480 // Medusa
+        } else {
+            481 // GreekSkeleton
+        });
+    }
+    if ground_block == GRANITE && !one_in(rng, 5) {
+        return Some(if !one_in(rng, 6) && !alive(483) {
+            483 // GraniteFlyer
+        } else {
+            482 // GraniteGolem
+        });
     }
     // NPC.cs:5051, `if (Main.hardMode && Main.rand.Next(10) != 0)`: nine hardmode draws in ten
     // never reach the rest of this chain at all. Its own answers (Armored Viking, Armored Skeleton,
@@ -3614,8 +3658,9 @@ pub fn try_spawn(
                     // exclusions are vanilla's own diversions above it: the two evils and the
                     // jungle answer at `NPC.cs:4066`, `:4125` and `:3929-3948` on their tiles, the
                     // dungeon has its own arm, and the snow's `:5088`/`:5100` both return before
-                    // the season is ever asked. Nothing here reads a tile, so this costs three
-                    // comparisons and at most six `rng` draws on a path that already made several.
+                    // the season is ever asked. One tile read (the stone underfoot, for the marble
+                    // and granite arms) plus three comparisons and at most six `rng` draws, on a
+                    // path that already made several.
                     let cavern_chain = depth == Depth::Cavern
                         && !matches!(
                             biome,
@@ -3627,12 +3672,16 @@ pub fn try_spawn(
                         );
                     // `NPC.cs:5021`, the bottom half of the stone.
                     let lower_caverns = y > (i32::from(world.rock_layer) + world.height()) / 2;
+                    let alive =
+                        |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     if cavern_chain
                         && let Some(npc_type) = cavern_seasonal_pick(
                             seasonal,
                             no_worms,
                             lower_caverns,
+                            world.tile(x, y + 1).block,
                             glowshroom_ground,
+                            &alive,
                             rng,
                         )
                     {
@@ -3898,6 +3947,8 @@ mod tests {
         }
         // ...and the caverns' own chain, asked the same way. Both `no_worms` states, because the
         // Ghost's arm is gated on one of them, and both halves of the stone, because Tim's is.
+        // Three floors, because two of the arms key on the stone underfoot: plain rock, marble
+        // (367) and granite (368).
         for halloween in [false, true] {
             for graveyard in [false, true] {
                 for hard_mode in [false, true] {
@@ -3912,15 +3963,19 @@ mod tests {
                             // Both halves of the chain have a glowshroom arm, and each is the only
                             // source of its own Spore, so the flag is sampled like the rest.
                             for glowshroom in [false, true] {
-                                for seed in 0..4_000u64 {
-                                    let mut rng = SmallRng::seed_from_u64(seed);
-                                    set.extend(cavern_seasonal_pick(
-                                        at,
-                                        no_worms,
-                                        lower_caverns,
-                                        glowshroom,
-                                        &mut rng,
-                                    ));
+                                for ground_block in [1u16, 367, 368] {
+                                    for seed in 0..4_000u64 {
+                                        let mut rng = SmallRng::seed_from_u64(seed);
+                                        set.extend(cavern_seasonal_pick(
+                                            at,
+                                            no_worms,
+                                            lower_caverns,
+                                            ground_block,
+                                            glowshroom,
+                                            &|_| false,
+                                            &mut rng,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -4764,11 +4819,12 @@ mod tests {
     ///   6879 vs 6879".
     #[test]
     fn the_caverns_have_a_season_of_their_own() {
+        // Plain stone underfoot: the two arms that key on the floor are the stone test below.
         let sample = |at: Seasonal, no_worms: bool, lower_caverns: bool| {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    cavern_seasonal_pick(at, no_worms, lower_caverns, false, &mut rng)
+                    cavern_seasonal_pick(at, no_worms, lower_caverns, 1, false, &|_| false, &mut rng)
                 })
                 .collect::<Vec<u16>>()
         };
@@ -5040,7 +5096,15 @@ mod tests {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    cavern_seasonal_pick(Seasonal::default(), false, false, glowshroom, &mut rng)
+                    cavern_seasonal_pick(
+                        Seasonal::default(),
+                        false,
+                        false,
+                        1,
+                        glowshroom,
+                        &|_| false,
+                        &mut rng,
+                    )
                 })
                 .collect::<std::collections::BTreeSet<u16>>()
         };
@@ -5115,6 +5179,87 @@ mod tests {
                 "no {name} ({npc_type}) on a surface mushroom patch: {day:?}",
             );
         }
+    }
+
+    /// Marble and granite are the only home the four of them have (`NPC.cs:5027-5050`), and only
+    /// the Medusa waits for hardmode: a granite pocket has its golems and flyers on day one.
+    ///
+    /// Neutralised arm by arm, each failing its own assertion:
+    ///
+    /// * deleting the `NPC.cs:5027` marble arm: "no GreekSkeleton (481) on a marble floor: {}".
+    /// * deleting `:5039`'s granite arm: "no GraniteFlyer (483) on a granite floor: {}".
+    /// * dropping `&& at.hard_mode` from `:5029`: "a Medusa turned up before hardmode".
+    /// * dropping `!alive(483)` from `:5041`: "a second Granite Flyer while one is already up".
+    /// * dropping the `world.tile(x, y + 1).block` argument in `try_spawn` for a literal `1`: "no
+    ///   GraniteGolem (482) in a granite cavern", the arm written but wired to nothing.
+    #[test]
+    fn marble_and_granite_are_where_those_four_live() {
+        let stone = |ground_block: u16, hard_mode: bool, alive: &dyn Fn(u16) -> bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    cavern_seasonal_pick(
+                        Seasonal {
+                            hard_mode,
+                            ..Seasonal::default()
+                        },
+                        false,
+                        false,
+                        ground_block,
+                        false,
+                        alive,
+                        &mut rng,
+                    )
+                })
+                .collect::<std::collections::BTreeSet<u16>>()
+        };
+
+        // Pre-hardmode marble is the Greek Skeleton alone: `NPC.cs:5029` ends `&& Main.hardMode`.
+        let marble = stone(367, false, &|_| false);
+        assert!(
+            marble.contains(&481),
+            "no GreekSkeleton (481) on a marble floor: {marble:?}"
+        );
+        assert!(!marble.contains(&480), "a Medusa turned up before hardmode");
+        assert!(
+            stone(367, true, &|_| false).contains(&480),
+            "no Medusa on a hardmode marble floor"
+        );
+
+        // Granite has no such gate, and its two split on `!AnyNPCs(483)` (`NPC.cs:5041`).
+        let granite = stone(368, false, &|_| false);
+        for (npc_type, name) in [(483u16, "GraniteFlyer"), (482, "GraniteGolem")] {
+            assert!(
+                granite.contains(&npc_type),
+                "no {name} ({npc_type}) on a granite floor: {granite:?}"
+            );
+        }
+        assert!(
+            !stone(368, false, &|ty| ty == 483).contains(&483),
+            "a second Granite Flyer while one is already up"
+        );
+
+        // Ordinary stone answers none of the four, which is what makes the pocket the reason.
+        let plain = stone(1, true, &|_| false);
+        for npc_type in [480u16, 481, 482, 483] {
+            assert!(
+                !plain.contains(&npc_type),
+                "{npc_type} turned up on plain rock: {plain:?}"
+            );
+        }
+
+        // ...and it is wired to the caverns rather than merely written: a granite-floored hall.
+        let floor = 300;
+        let mut world = hall_world(floor);
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(368));
+        }
+        assert_eq!(depth_at(&world, floor - 1), Depth::Cavern);
+        assert_eq!(biome_at(&world, world.width() / 2, floor - 1), Biome::Forest);
+        assert!(
+            spawns_of(&world, floor, &quiet(), 482, 4) > 0,
+            "no GraniteGolem (482) in a granite cavern"
+        );
     }
 
     /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
