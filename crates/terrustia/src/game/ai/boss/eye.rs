@@ -14,24 +14,41 @@
 //!
 //! Dawn ends it: daylight sends the Eye straight up and out of the world.
 //!
-//! Expert Mode changes more than the numbers: it opens the split at 65% health rather than 50%,
-//! hovers faster and far more briefly in the first form, drops that form's "servants only from
-//! above" rule, calls a servant much more often, and — once split — strips still more armour as
-//! the second form nears death.
+//! Expert Mode changes far more than the numbers, and every one of these was missing here until
+//! EYE-1..EYE-7. First form: it opens the split at 65% health rather than 50%, hovers faster and
+//! far more briefly, drops the "servants only from above" rule, calls a servant much more often,
+//! dashes at seven rather than six, ends each dash a third sooner and drags harder while it does.
+//! The split itself is not free time: it throws a servant on a random bearing every twentieth tick
+//! of the spin, ten across the transformation. Second form: the hover gains a pixel of speed and
+//! 0.05 of acceleration at each of four hundred, six hundred and eight hundred pixels, so running
+//! away no longer works; each dash of a set is faster than the last; and below half health the
+//! whole dash-set pattern is replaced by a lunge cycle, which below 12% opens by dropping six
+//! hundred pixels beneath you first, and below 4% scatters twice as wide and comes twice as fast.
 
+use rand::{Rng, rngs::SmallRng};
 use terrustia_proto::npc_params::{
-    EYE_DASH_DRAG_FIRST, EYE_DASH_DRAG_SECOND, EYE_DASH_DRIVE, EYE_DASH_FIRST, EYE_DASH_SECOND,
-    EYE_DASH_TICKS_FIRST, EYE_DASH_TICKS_SECOND, EYE_DASHES, EYE_HOVER_FIRST,
-    EYE_HOVER_FIRST_EXPERT, EYE_HOVER_SECOND, EYE_HOVER_TICKS_FIRST, EYE_HOVER_TICKS_FIRST_EXPERT,
-    EYE_HOVER_TICKS_SECOND, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DAMAGE_EXPERT,
+    EYE_BACKOFF_ACCEL, EYE_BACKOFF_BELOW, EYE_BACKOFF_LUNGE_BONUS, EYE_BACKOFF_SPEED,
+    EYE_BACKOFF_TICKS, EYE_DASH_DRAG_FIRST, EYE_DASH_DRAG_FIRST_EXPERT, EYE_DASH_DRAG_SECOND,
+    EYE_DASH_DRAG_SECOND_EXPERT, EYE_DASH_DRIVE, EYE_DASH_DRIVE_SECOND_EXPERT, EYE_DASH_FIRST,
+    EYE_DASH_FIRST_EXPERT, EYE_DASH_SECOND, EYE_DASH_SECOND_EXPERT_STEPS, EYE_DASH_TICKS_FIRST,
+    EYE_DASH_TICKS_FIRST_EXPERT, EYE_DASH_TICKS_SECOND, EYE_DASH_TICKS_SECOND_EXPERT, EYE_DASHES,
+    EYE_HOVER_FIRST, EYE_HOVER_FIRST_EXPERT, EYE_HOVER_SECOND, EYE_HOVER_SECOND_EXPERT_ACCEL_STEP,
+    EYE_HOVER_SECOND_EXPERT_SPEED_STEP, EYE_HOVER_SECOND_EXPERT_STEPS, EYE_HOVER_TICKS_FIRST,
+    EYE_HOVER_TICKS_FIRST_EXPERT, EYE_HOVER_TICKS_SECOND, EYE_LUNGE_AT, EYE_LUNGE_AT_HOVER,
+    EYE_LUNGE_BREAK_AT, EYE_LUNGE_DRAG, EYE_LUNGE_HEAD_START, EYE_LUNGE_HOLD,
+    EYE_LUNGE_HOLD_DESPERATE, EYE_LUNGE_LEAD, EYE_LUNGE_LEAD_DESPERATE, EYE_LUNGE_LEAD_FROM_BELOW,
+    EYE_LUNGE_NUDGE, EYE_LUNGE_NUDGE_DESPERATE, EYE_LUNGE_RECOVER, EYE_LUNGE_SPEED,
+    EYE_LUNGE_SPEED_FROM_BELOW, EYE_LUNGE_STALL_RANGE, EYE_LUNGE_STRETCH, EYE_LUNGE_SWAP_RANGE,
+    EYE_LUNGES, EYE_SECOND_FORM_DAMAGE, EYE_SECOND_FORM_DAMAGE_EXPERT,
     EYE_SECOND_FORM_DAMAGE_EXPERT_LOW, EYE_SECOND_FORM_DEFENSE, EYE_SECOND_FORM_DEFENSE_LOW,
     EYE_SECOND_FORM_DEFENSE_LOW_AT, EYE_SECOND_FORM_DEFENSE_VERY_LOW,
     EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT, EYE_SERVANT_EVERY, EYE_SERVANT_EVERY_EXPERT,
-    EYE_SERVANT_RANGE, EYE_SERVANT_SPEED, EYE_SERVANT_SPEED_EXPERT, EYE_SPIN_MAX, EYE_SPIN_RAMP,
-    EYE_SPLIT_AT, EYE_SPLIT_AT_EXPERT, EYE_SPLIT_TICKS, SERVANT_OF_CTHULHU,
+    EYE_SERVANT_RANGE, EYE_SERVANT_SPEED, EYE_SERVANT_SPEED_EXPERT, EYE_SERVANT_THROW,
+    EYE_SPIN_MAX, EYE_SPIN_RAMP, EYE_SPLIT_AT, EYE_SPLIT_AT_EXPERT, EYE_SPLIT_SERVANT_EVERY,
+    EYE_SPLIT_SERVANT_SPEED, EYE_SPLIT_SERVANT_SPREAD, EYE_SPLIT_TICKS, SERVANT_OF_CTHULHU,
 };
 
-use crate::game::ai::World;
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, World};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -39,10 +56,14 @@ use crate::game::npc_ai::Spawn;
 const FIRST_FORM: f32 = 0.0;
 const SECOND_FORM: f32 = 3.0;
 
-/// The three steps of a dash set, as `ai[1]` records them.
+/// The three steps of a dash set, as `ai[1]` records them, and the three more the Expert second
+/// form's lunge cycle adds (`NPC.cs:20636`, `:20746`, `:20800`).
 const HOVERING: f32 = 0.0;
 const LAUNCHING: f32 = 1.0;
 const DASHING: f32 = 2.0;
+const AIMING: f32 = 3.0;
+const LUNGING: f32 = 4.0;
+const BACKING_OFF: f32 = 5.0;
 
 /// Edge one axis toward a wanted velocity, doubling the push while still going the wrong way.
 fn close_on(velocity: &mut f32, wanted: f32, accel: f32) {
@@ -60,7 +81,7 @@ fn close_on(velocity: &mut f32, wanted: f32, accel: f32) {
 }
 
 /// Drive the Eye of Cthulhu for a tick.
-pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
+pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> Vec<Spawn> {
     let mut summoned = Vec::new();
     let expert = world.conditions.expert;
     let Some(target) = world.target else {
@@ -83,11 +104,37 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     );
     let their_middle = (target.center.0, target.center.1);
 
+    let health = npc.life as f32 / npc.life_max.max(1) as f32;
+
     // The two halves of the split: it spins in place, faster and faster, and comes out changed.
     if npc.ai[0] == 1.0 || npc.ai[0] == 2.0 {
         npc.ai[2] = (npc.ai[2] + EYE_SPIN_RAMP).min(EYE_SPIN_MAX);
         npc.rotation += npc.ai[2];
         npc.ai[1] += 1.0;
+        // EYE-4: an Expert split is not two hundred free ticks. Every twentieth tick throws a
+        // servant out on a random bearing (`NPC.cs:20363-20400`), ten across the transformation.
+        if expert && npc.ai[1] % EYE_SPLIT_SERVANT_EVERY == 0.0 {
+            let spread = EYE_SPLIT_SERVANT_SPREAD;
+            let mut throw = (
+                rng.random_range(-spread..spread) as f32,
+                rng.random_range(-spread..spread) as f32,
+            );
+            let length = throw.0.hypot(throw.1).max(f32::MIN_POSITIVE);
+            throw = (
+                throw.0 / length * EYE_SPLIT_SERVANT_SPEED,
+                throw.1 / length * EYE_SPLIT_SERVANT_SPEED,
+            );
+            summoned.push(Spawn {
+                npc_type: SERVANT_OF_CTHULHU,
+                position: (
+                    centre.0 + throw.0 * EYE_SERVANT_THROW,
+                    centre.1 + throw.1 * EYE_SERVANT_THROW,
+                ),
+                velocity: throw,
+                parent: None,
+                ai: [None; 4],
+            });
+        }
         if npc.ai[1] >= EYE_SPLIT_TICKS {
             npc.ai[0] += 1.0;
             npc.ai[1] = 0.0;
@@ -109,8 +156,13 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     }
 
     let second = npc.ai[0] == SECOND_FORM;
-    // Expert Mode hovers faster and much more briefly in the first form — the second form's own
-    // hover (already faster and briefer than the first's) does not change again in Expert Mode.
+    // Vanilla's `flag2` and `flag3` (`NPC.cs:20012-20021`): the last two health bands, which only
+    // exist in Expert and which only the second form can reach.
+    let frenzied = second && expert && health < EYE_SECOND_FORM_DEFENSE_LOW_AT;
+    let desperate = second && expert && health < EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT;
+
+    // Expert Mode hovers faster and much more briefly in the first form. The second form's own
+    // hover keeps its numbers here and gains a distance term inside the hover itself (EYE-5).
     let (lift, hover_speed, hover_accel) = if second {
         EYE_HOVER_SECOND
     } else if expert {
@@ -129,21 +181,42 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
     } else {
         EYE_HOVER_TICKS_FIRST
     };
+    // EYE-1: the first form's dash is 7 in Expert, not 6 (`NPC.cs:20252-20256`). The second form's
+    // own Expert multipliers are per-dash and applied at the launch below.
     let dash_speed = if second {
         EYE_DASH_SECOND
+    } else if expert {
+        EYE_DASH_FIRST_EXPERT
     } else {
         EYE_DASH_FIRST
     };
-    let dash_for = if second {
-        EYE_DASH_TICKS_SECOND
-    } else {
-        EYE_DASH_TICKS_FIRST
+    // EYE-2/EYE-6: both forms end a dash sooner in Expert (`NPC.cs:20298-20302`, `:20608-20612`).
+    let dash_for = match (second, expert) {
+        (true, true) => EYE_DASH_TICKS_SECOND_EXPERT,
+        (true, false) => EYE_DASH_TICKS_SECOND,
+        (false, true) => EYE_DASH_TICKS_FIRST_EXPERT,
+        (false, false) => EYE_DASH_TICKS_FIRST,
     };
-    let drag = if second {
+    // ...and the second form drives 25% longer before it starts braking (`NPC.cs:20582-20587`).
+    let drive = if second && expert {
+        EYE_DASH_DRIVE_SECOND_EXPERT
+    } else {
+        EYE_DASH_DRIVE
+    };
+    // EYE-3: Expert multiplies the drag *on top of* the classic figure rather than replacing it
+    // (`NPC.cs:20276-20280`, `:20590-20594`), so a spent Expert dash bleeds off faster.
+    let mut drag = if second {
         EYE_DASH_DRAG_SECOND
     } else {
         EYE_DASH_DRAG_FIRST
     };
+    if expert {
+        drag *= if second {
+            EYE_DASH_DRAG_SECOND_EXPERT
+        } else {
+            EYE_DASH_DRAG_FIRST_EXPERT
+        };
+    }
 
     // Its shell is gone, so nothing softens a hit any more — and Expert Mode strips even more
     // armour once it is nearly dead. Both write the live `defense`/`damage_bonus` fields combat
@@ -159,33 +232,57 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         let mut normal = EYE_SECOND_FORM_DAMAGE;
         if expert {
             normal = EYE_SECOND_FORM_DAMAGE_EXPERT;
-            let health = npc.life as f32 / npc.life_max as f32;
-            if health < EYE_SECOND_FORM_DEFENSE_VERY_LOW_AT {
+            if desperate {
                 npc.defense = EYE_SECOND_FORM_DEFENSE_VERY_LOW;
                 normal = EYE_SECOND_FORM_DAMAGE_EXPERT_LOW;
-            } else if health < EYE_SECOND_FORM_DEFENSE_LOW_AT {
+            } else if frenzied {
                 npc.defense = EYE_SECOND_FORM_DEFENSE_LOW;
             }
         }
         npc.set_contact_damage(normal);
+        // EYE-7: in the frenzy band the hover is not entered at all, it is swapped for the
+        // back-off (`NPC.cs:20464-20467`).
+        //
+        // Disclosed narrowing: vanilla's hover branch carries a second escape for the `flag3` band
+        // (`NPC.cs:20544-20551`, `ai[1] = 3; ai[3] -= 1000`), and it can never run. `flag3` implies
+        // `flag2`, so this line has already moved `ai[1]` off the hover before that branch is
+        // reached. It is left out here rather than transcribed as code nothing can enter.
+        if frenzied && npc.ai[1] == HOVERING {
+            npc.ai[1] = BACKING_OFF;
+        }
     }
 
     if npc.ai[1] == HOVERING {
         // Hanging above them, easing into position.
-        let wanted = {
-            let (dx, dy) = (their_middle.0 - centre.0, their_middle.1 - lift - centre.1);
-            let reach = (dx * dx + dy * dy).sqrt().max(f32::MIN_POSITIVE);
-            let k = hover_speed / reach;
-            (dx * k, dy * k)
-        };
-        close_on(&mut npc.velocity.0, wanted.0, hover_accel);
-        close_on(&mut npc.velocity.1, wanted.1, hover_accel);
+        let (dx, dy) = (their_middle.0 - centre.0, their_middle.1 - lift - centre.1);
+        let reach = (dx * dx + dy * dy).sqrt().max(f32::MIN_POSITIVE);
+        // EYE-5: an Expert second form closes the gap rather than letting you open it. One pixel a
+        // tick and 0.05 of acceleration at each of four hundred, six hundred and eight hundred
+        // pixels, cumulative (`NPC.cs:20476-20490`). Classic has no such term.
+        let (mut speed, mut accel) = (hover_speed, hover_accel);
+        if second && expert {
+            for step in EYE_HOVER_SECOND_EXPERT_STEPS {
+                if reach > step {
+                    speed += EYE_HOVER_SECOND_EXPERT_SPEED_STEP;
+                    accel += EYE_HOVER_SECOND_EXPERT_ACCEL_STEP;
+                }
+            }
+        }
+        let k = speed / reach;
+        let wanted = (dx * k, dy * k);
+        close_on(&mut npc.velocity.0, wanted.0, accel);
+        close_on(&mut npc.velocity.1, wanted.1, accel);
 
         npc.ai[2] += 1.0;
         if npc.ai[2] >= hover_for {
             npc.ai[1] = LAUNCHING;
             npc.ai[2] = 0.0;
             npc.ai[3] = 0.0;
+            // EYE-7: below 35% an Expert second form leaves the hover into a lunge, not a dash set
+            // (`NPC.cs:20537-20540`).
+            if second && expert && health < EYE_LUNGE_AT_HOVER {
+                npc.ai[1] = AIMING;
+            }
             npc.dirty = true;
         } else if !second {
             // The first form spits servants while it hovers, close enough and — in Normal mode
@@ -213,7 +310,10 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
                     summoned.push(Spawn {
                         npc_type: SERVANT_OF_CTHULHU,
                         // Thrown out ahead of itself rather than dropped.
-                        position: (centre.0 + throw.0 * 10.0, centre.1 + throw.1 * 10.0),
+                        position: (
+                            centre.0 + throw.0 * EYE_SERVANT_THROW,
+                            centre.1 + throw.1 * EYE_SERVANT_THROW,
+                        ),
                         velocity: throw,
                         parent: None,
                         ai: [None; 4],
@@ -226,13 +326,22 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
         // One tick to commit: the whole dash is aimed here and never corrected.
         let (dx, dy) = (their_middle.0 - centre.0, their_middle.1 - centre.1);
         let reach = (dx * dx + dy * dy).sqrt().max(f32::MIN_POSITIVE);
-        let k = dash_speed / reach;
+        // EYE-6: the second form's dashes get faster within a set in Expert (`NPC.cs:20558-20565`).
+        let mut speed = dash_speed;
+        if second && expert {
+            if npc.ai[3] == 1.0 {
+                speed *= EYE_DASH_SECOND_EXPERT_STEPS[0];
+            } else if npc.ai[3] == 2.0 {
+                speed *= EYE_DASH_SECOND_EXPERT_STEPS[1];
+            }
+        }
+        let k = speed / reach;
         npc.velocity = (dx * k, dy * k);
         npc.ai[1] = DASHING;
         npc.dirty = true;
     } else if npc.ai[1] == DASHING {
         npc.ai[2] += 1.0;
-        if npc.ai[2] >= EYE_DASH_DRIVE {
+        if npc.ai[2] >= drive {
             npc.velocity.0 *= drag;
             npc.velocity.1 *= drag;
             if npc.velocity.0.abs() < 0.1 {
@@ -250,12 +359,163 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
             // Three to a set, then back to hovering.
             npc.ai[1] = if npc.ai[3] >= EYE_DASHES {
                 npc.ai[3] = 0.0;
-                HOVERING
+                // EYE-7: below half health an Expert second form lunges instead, with a random
+                // head start on the lunge count so the run is shorter (`NPC.cs:20623-20627`).
+                if second && expert && health < EYE_LUNGE_AT {
+                    npc.ai[3] += rng.random_range(EYE_LUNGE_HEAD_START) as f32;
+                    AIMING
+                } else {
+                    HOVERING
+                }
             } else {
                 LAUNCHING
             };
             npc.dirty = true;
         }
+    } else if npc.ai[1] == AIMING {
+        // EYE-7: the lunge's one aiming tick (`NPC.cs:20636-20745`). It leads your own velocity,
+        // scatters the line, and then, unless it is nearly dead, turns the whole thing ninety
+        // degrees so the lunge sweeps past you rather than landing on you.
+        if frenzied && npc.ai[3] == EYE_LUNGE_BREAK_AT && centre.1 > their_middle.1 {
+            // The one escape from the cycle.
+            npc.ai[1] = HOVERING;
+            npc.ai[2] = 0.0;
+            npc.ai[3] = 0.0;
+        } else {
+            let mut speed = EYE_LUNGE_SPEED;
+            let mut lead = EYE_LUNGE_LEAD;
+            // Straight off the back-off it leads much further and travels faster.
+            if npc.ai[2] == -1.0 && !desperate {
+                lead *= EYE_LUNGE_LEAD_FROM_BELOW;
+                speed *= EYE_LUNGE_SPEED_FROM_BELOW;
+            }
+            if desperate {
+                lead *= EYE_LUNGE_LEAD_DESPERATE;
+            }
+            let stretch = |rng: &mut SmallRng| {
+                1.0 + rng.random_range(-EYE_LUNGE_STRETCH..=EYE_LUNGE_STRETCH) as f32 * 0.01
+            };
+            let nudge = |rng: &mut SmallRng, n: i32| rng.random_range(-n..=n) as f32 * 0.1;
+            let mut aim = (
+                their_middle.0 - centre.0 - target.velocity.0 * lead,
+                their_middle.1 - centre.1 - target.velocity.1 * lead / 4.0,
+            );
+            aim = (aim.0 * stretch(rng), aim.1 * stretch(rng));
+            if desperate {
+                aim = (aim.0 * stretch(rng), aim.1 * stretch(rng));
+            }
+            let reach = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
+            let k = speed / reach;
+            npc.velocity = (aim.0 * k, aim.1 * k);
+            npc.velocity.0 += nudge(rng, EYE_LUNGE_NUDGE);
+            npc.velocity.1 += nudge(rng, EYE_LUNGE_NUDGE);
+            // The perpendicular swap: whichever branch runs, the two components are exchanged and
+            // signed away from the player, which is what turns a lunge into a pass.
+            let signed = |npc: &Npc| {
+                let (mut across, mut down) = (npc.velocity.0.abs(), npc.velocity.1.abs());
+                if centre.0 > their_middle.0 {
+                    down = -down;
+                }
+                if centre.1 > their_middle.1 {
+                    across = -across;
+                }
+                (across, down)
+            };
+            if desperate {
+                npc.velocity.0 += nudge(rng, EYE_LUNGE_NUDGE_DESPERATE);
+                npc.velocity.1 += nudge(rng, EYE_LUNGE_NUDGE_DESPERATE);
+                let (across, down) = signed(npc);
+                npc.velocity = (down + npc.velocity.0, across + npc.velocity.1);
+                let length = npc.velocity.0.hypot(npc.velocity.1).max(f32::MIN_POSITIVE);
+                npc.velocity = (
+                    npc.velocity.0 / length * speed,
+                    npc.velocity.1 / length * speed,
+                );
+                npc.velocity.0 += nudge(rng, EYE_LUNGE_NUDGE);
+                npc.velocity.1 += nudge(rng, EYE_LUNGE_NUDGE);
+            } else if reach < EYE_LUNGE_SWAP_RANGE {
+                if npc.velocity.0.abs() > npc.velocity.1.abs() {
+                    let (across, down) = signed(npc);
+                    npc.velocity = (down, across);
+                }
+            } else if npc.velocity.0.abs() > npc.velocity.1.abs() {
+                let mean = (npc.velocity.0.abs() + npc.velocity.1.abs()) / 2.0;
+                let (mut across, mut down) = (mean, mean);
+                if centre.0 > their_middle.0 {
+                    across = -across;
+                }
+                if centre.1 > their_middle.1 {
+                    down = -down;
+                }
+                npc.velocity = (across, down);
+            }
+            npc.ai[1] = LUNGING;
+        }
+        npc.dirty = true;
+    } else if npc.ai[1] == LUNGING {
+        // EYE-7: holding the line, then braking (`NPC.cs:20746-20799`).
+        let hold = if desperate {
+            EYE_LUNGE_HOLD_DESPERATE
+        } else {
+            EYE_LUNGE_HOLD
+        };
+        npc.ai[2] += 1.0;
+        // Right on top of you it refuses to start braking, so the lunge carries through rather
+        // than stalling in your face (`NPC.cs:20754-20757`, a `position`-to-`position` distance).
+        let their_corner = (
+            their_middle.0 - PLAYER_WIDTH as f32 / 2.0,
+            their_middle.1 - PLAYER_HEIGHT as f32 / 2.0,
+        );
+        let apart = (npc.position.0 - their_corner.0).hypot(npc.position.1 - their_corner.1);
+        if npc.ai[2] == hold && apart < EYE_LUNGE_STALL_RANGE {
+            npc.ai[2] -= 1.0;
+        }
+        if npc.ai[2] >= hold {
+            npc.velocity.0 *= EYE_LUNGE_DRAG;
+            npc.velocity.1 *= EYE_LUNGE_DRAG;
+            if npc.velocity.0.abs() < 0.1 {
+                npc.velocity.0 = 0.0;
+            }
+            if npc.velocity.1.abs() < 0.1 {
+                npc.velocity.1 = 0.0;
+            }
+        } else {
+            npc.rotation = npc.velocity.1.atan2(npc.velocity.0) - 1.57;
+        }
+        if npc.ai[2] >= hold + EYE_LUNGE_RECOVER {
+            npc.ai[3] += 1.0;
+            npc.ai[2] = 0.0;
+            if npc.ai[3] >= EYE_LUNGES {
+                npc.ai[1] = HOVERING;
+                npc.ai[3] = 0.0;
+            } else {
+                npc.ai[1] = AIMING;
+            }
+            npc.dirty = true;
+        }
+    } else if npc.ai[1] == BACKING_OFF {
+        // EYE-7: six hundred pixels *below* you, and then up through you (`NPC.cs:20800-20852`).
+        let (dx, dy) = (
+            their_middle.0 - centre.0,
+            their_middle.1 + EYE_BACKOFF_BELOW - centre.1,
+        );
+        let reach = dx.hypot(dy).max(f32::MIN_POSITIVE);
+        let k = EYE_BACKOFF_SPEED / reach;
+        close_on(&mut npc.velocity.0, dx * k, EYE_BACKOFF_ACCEL);
+        close_on(&mut npc.velocity.1, dy * k, EYE_BACKOFF_ACCEL);
+        npc.ai[2] += 1.0;
+        if npc.ai[2] >= EYE_BACKOFF_TICKS {
+            npc.ai[1] = AIMING;
+            // The marker the aim reads to know this is the fast lunge.
+            npc.ai[2] = -1.0;
+            npc.ai[3] = rng.random_range(EYE_BACKOFF_LUNGE_BONUS) as f32;
+            npc.dirty = true;
+        }
+    }
+
+    // EYE-7: nearly dead it does not back off at all, it just keeps lunging (`NPC.cs:20854-20857`).
+    if desperate && npc.ai[1] == BACKING_OFF {
+        npc.ai[1] = AIMING;
     }
 
     // Half health opens it up — 65% in Expert Mode. Checked only in the first form, so it happens
@@ -305,13 +565,25 @@ mod tests {
         }
     }
 
+    fn seeded() -> SmallRng {
+        use rand::SeedableRng;
+        SmallRng::seed_from_u64(4)
+    }
+
+    /// One tick for the tests that do not care about the random branches: each call gets its own
+    /// fixed generator, so they are as deterministic as they were before the Expert lunge cycle
+    /// needed one.
+    fn tick<T: TileView>(npc: &mut Npc, world: &World<'_, T>) -> Vec<Spawn> {
+        update(npc, world, &mut seeded())
+    }
+
     #[test]
     fn it_hovers_above_you_rather_than_on_you() {
         let tiles = Night;
         let mut e = eye();
         let t = Some(player_at(10_000.0, 10_000.0));
         for _ in 0..300 {
-            update(&mut e, &world(&tiles, t));
+            tick(&mut e, &world(&tiles, t));
             e.position.0 += e.velocity.0;
             e.position.1 += e.velocity.1;
         }
@@ -333,7 +605,7 @@ mod tests {
         let mut back_to_hovering = false;
         for _ in 0..2000 {
             let before = e.ai[1];
-            update(&mut e, &world(&tiles, t));
+            tick(&mut e, &world(&tiles, t));
             if before == LAUNCHING && e.ai[1] == DASHING {
                 dashes += 1;
             }
@@ -352,7 +624,7 @@ mod tests {
         let mut e = eye();
         let t = Some(player_at(10_000.0, 10_000.0));
         e.ai[1] = LAUNCHING;
-        update(&mut e, &world(&tiles, t));
+        tick(&mut e, &world(&tiles, t));
         let launched = e.velocity;
         assert!(
             (launched.0.hypot(launched.1) - EYE_DASH_FIRST).abs() < 1e-3,
@@ -361,7 +633,7 @@ mod tests {
 
         // Move the player: the dash keeps its original heading.
         let moved = Some(player_at(4_000.0, 10_000.0));
-        update(&mut e, &world(&tiles, moved));
+        tick(&mut e, &world(&tiles, moved));
         assert_eq!(e.velocity, launched, "a committed dash does not steer");
     }
 
@@ -374,7 +646,7 @@ mod tests {
         let t = Some(player_at(10_000.0, 10_000.0));
         let mut spawned = Vec::new();
         for _ in 0..(EYE_SERVANT_EVERY as i32 + 5) {
-            spawned.extend(update(&mut e, &world(&tiles, t)));
+            spawned.extend(tick(&mut e, &world(&tiles, t)));
         }
         assert!(!spawned.is_empty(), "should have summoned");
         let servant = spawned[0];
@@ -394,7 +666,7 @@ mod tests {
         e.ai[0] = SECOND_FORM;
         let t = Some(player_at(10_000.0, 10_000.0));
         for _ in 0..600 {
-            assert!(update(&mut e, &world(&tiles, t)).is_empty());
+            assert!(tick(&mut e, &world(&tiles, t)).is_empty());
         }
     }
 
@@ -403,17 +675,17 @@ mod tests {
         let tiles = Night;
         let mut e = eye();
         let t = Some(player_at(10_000.0, 10_000.0));
-        update(&mut e, &world(&tiles, t));
+        tick(&mut e, &world(&tiles, t));
         assert_eq!(e.ai[0], FIRST_FORM);
 
         e.life = (e.life_max as f32 * EYE_SPLIT_AT) as i32 - 1;
-        update(&mut e, &world(&tiles, t));
+        tick(&mut e, &world(&tiles, t));
         assert_eq!(e.ai[0], 1.0, "should have started to split");
 
         // Two hundred ticks of spinning and it is through.
         let before = e.rotation;
         for _ in 0..(EYE_SPLIT_TICKS as i32 * 2 + 2) {
-            update(&mut e, &world(&tiles, t));
+            tick(&mut e, &world(&tiles, t));
         }
         assert_eq!(e.ai[0], SECOND_FORM);
         assert!(e.rotation != before, "and it should have been spinning");
@@ -425,7 +697,7 @@ mod tests {
         let mut e = eye();
         e.ai[0] = SECOND_FORM;
         let t = Some(player_at(10_000.0, 10_000.0));
-        update(&mut e, &world(&tiles, t));
+        tick(&mut e, &world(&tiles, t));
         // The live fields combat actually reads (`server.rs`'s "live armour, not the type's"),
         // not the type's own baseline stats — writing those left the shell's defence in place.
         assert_eq!(e.defense, EYE_SECOND_FORM_DEFENSE);
@@ -447,7 +719,7 @@ mod tests {
             e.life = (e.life_max as f32 * life_fraction) as i32;
             let mut w = world(&tiles, t);
             w.conditions.expert = expert;
-            update(&mut e, &w);
+            tick(&mut e, &w);
             e.defense
         };
         assert_eq!(
@@ -476,7 +748,7 @@ mod tests {
             e.life = (e.life_max as f32 * 0.6) as i32;
             let mut w = world(&tiles, t);
             w.conditions.expert = expert;
-            update(&mut e, &w);
+            tick(&mut e, &w);
             e.ai[0]
         };
         assert_eq!(
@@ -501,7 +773,7 @@ mod tests {
             w.conditions.expert = expert;
             let mut ticks = 0;
             while e.ai[1] == HOVERING && ticks < 2000 {
-                update(&mut e, &w);
+                tick(&mut e, &w);
                 ticks += 1;
             }
             ticks
@@ -513,7 +785,7 @@ mod tests {
             let mut e = eye();
             let mut w = world(&tiles, t);
             w.conditions.expert = expert;
-            update(&mut e, &w);
+            tick(&mut e, &w);
             e.velocity.0.hypot(e.velocity.1)
         };
         assert!(
@@ -538,7 +810,7 @@ mod tests {
             w.conditions.expert = expert;
             let mut spawned = 0;
             for _ in 0..(EYE_SERVANT_EVERY as i32 + 5) {
-                spawned += update(&mut e, &w).len();
+                spawned += tick(&mut e, &w).len();
             }
             spawned
         };
@@ -555,7 +827,7 @@ mod tests {
             w.conditions.expert = expert;
             let mut spawned = 0;
             for _ in 0..(EYE_SERVANT_EVERY_EXPERT as i32 + 5) {
-                spawned += update(&mut e, &w).len();
+                spawned += tick(&mut e, &w).len();
             }
             spawned
         };
@@ -584,7 +856,7 @@ mod tests {
         let t = Some(player_at(10_000.0, 10_000.0));
         let mut w = world(&tiles, t);
         w.conditions.day = true;
-        update(&mut e, &w);
+        tick(&mut e, &w);
         assert!(e.velocity.1 < 0.0, "it should climb away");
         assert!(e.time_left <= 10);
     }
@@ -599,7 +871,337 @@ mod tests {
             velocity: (0.0, 0.0),
             alive: false,
         });
-        update(&mut e, &world(&tiles, dead));
+        tick(&mut e, &world(&tiles, dead));
         assert!(e.time_left <= 10);
+    }
+
+    /// A world at a chosen difficulty, with the player somewhere below.
+    fn fight<'a>(tiles: &'a Night, expert: bool, player: (f32, f32)) -> World<'a, Night> {
+        let mut w = world(tiles, Some(player_at(player.0, player.1)));
+        w.conditions.expert = expert;
+        w
+    }
+
+    /// EYE-1: the first form dashes at seven in Expert, not six (`NPC.cs:20252-20256`).
+    #[test]
+    fn expert_mode_speeds_up_the_first_forms_dash() {
+        let tiles = Night;
+        let launched = |expert: bool| {
+            let mut e = eye();
+            e.ai[1] = LAUNCHING;
+            tick(&mut e, &fight(&tiles, expert, (10_000.0, 10_400.0)));
+            e.velocity.0.hypot(e.velocity.1)
+        };
+        assert!((launched(false) - EYE_DASH_FIRST).abs() < 1e-4);
+        assert!((launched(true) - EYE_DASH_FIRST_EXPERT).abs() < 1e-4);
+    }
+
+    /// EYE-2: and ends it a third sooner (`NPC.cs:20298-20302`), so an Expert set comes round again
+    /// far faster.
+    #[test]
+    fn expert_mode_shortens_the_first_forms_dash() {
+        let tiles = Night;
+        let dash_ticks = |expert: bool| {
+            let mut e = eye();
+            e.ai[1] = DASHING;
+            let w = fight(&tiles, expert, (10_000.0, 10_400.0));
+            let mut ticks = 0;
+            while e.ai[1] == DASHING && ticks < 1_000 {
+                tick(&mut e, &w);
+                ticks += 1;
+            }
+            ticks as f32
+        };
+        assert_eq!(dash_ticks(false), EYE_DASH_TICKS_FIRST);
+        assert_eq!(dash_ticks(true), EYE_DASH_TICKS_FIRST_EXPERT);
+    }
+
+    /// EYE-3: the Expert drag multiplies the classic one rather than replacing it
+    /// (`NPC.cs:20276-20280`), so a spent Expert dash bleeds off faster.
+    #[test]
+    fn expert_mode_drags_a_spent_dash_harder() {
+        let tiles = Night;
+        let after = |expert: bool| {
+            let mut e = eye();
+            e.ai[1] = DASHING;
+            e.ai[2] = EYE_DASH_DRIVE; // already braking
+            e.velocity = (10.0, 0.0);
+            tick(&mut e, &fight(&tiles, expert, (10_000.0, 10_400.0)));
+            e.velocity.0
+        };
+        assert!((after(false) - 10.0 * EYE_DASH_DRAG_FIRST).abs() < 1e-4);
+        assert!(
+            (after(true) - 10.0 * EYE_DASH_DRAG_FIRST * EYE_DASH_DRAG_FIRST_EXPERT).abs() < 1e-4
+        );
+    }
+
+    /// EYE-4: the Expert split is not two hundred free ticks. It throws a servant every twentieth
+    /// tick of the spin (`NPC.cs:20363-20400`), ten across the whole transformation, on bearings
+    /// that go every way rather than at you.
+    #[test]
+    fn the_expert_split_throws_servants_while_it_spins() {
+        let tiles = Night;
+        let through_the_split = |expert: bool| {
+            let mut rng = seeded();
+            let mut e = eye();
+            e.ai[0] = 1.0; // mid-transformation
+            let w = fight(&tiles, expert, (10_000.0, 10_400.0));
+            let mut thrown = Vec::new();
+            for _ in 0..(EYE_SPLIT_TICKS as i32 * 2) {
+                thrown.extend(update(&mut e, &w, &mut rng));
+            }
+            thrown
+        };
+        assert!(through_the_split(false).is_empty(), "classic throws none");
+        let expert = through_the_split(true);
+        assert_eq!(
+            expert.len(),
+            (EYE_SPLIT_TICKS as i32 * 2 / EYE_SPLIT_SERVANT_EVERY as i32) as usize,
+            "ten across the transformation"
+        );
+        assert!(expert.iter().all(|s| s.npc_type == SERVANT_OF_CTHULHU));
+        assert!(
+            expert
+                .iter()
+                .all(|s| (s.velocity.0.hypot(s.velocity.1) - EYE_SPLIT_SERVANT_SPEED).abs() < 1e-3)
+        );
+        // Random bearings, not aimed: they go both ways.
+        assert!(expert.iter().any(|s| s.velocity.0 > 0.0));
+        assert!(expert.iter().any(|s| s.velocity.0 < 0.0));
+    }
+
+    /// EYE-5: an Expert second form closes the gap rather than letting you open it
+    /// (`NPC.cs:20476-20490`): a pixel of speed and 0.05 of acceleration at each of four hundred,
+    /// six hundred and eight hundred pixels. Classic has no such term, which is why kiting works
+    /// there and not here.
+    #[test]
+    fn the_expert_second_form_chases_harder_the_further_off_you_are() {
+        let tiles = Night;
+        let push = |expert: bool, across: f32| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.velocity = (0.0, 0.0);
+            // Sat exactly at the hover offset, so the whole gap is the horizontal one and the
+            // acceleration lands entirely on `velocity.0`.
+            let (cx, cy) = e.center();
+            let at = (cx + across, cy + EYE_HOVER_SECOND.0);
+            tick(&mut e, &fight(&tiles, expert, at));
+            e.velocity.0
+        };
+        let base = EYE_HOVER_SECOND.2;
+        assert!((push(false, 100.0) - base).abs() < 1e-4, "classic, close");
+        assert!(
+            (push(false, 900.0) - base).abs() < 1e-4,
+            "classic does not change with distance"
+        );
+        assert!((push(true, 100.0) - base).abs() < 1e-4, "expert, close");
+        assert!(
+            (push(true, 900.0) - (base + 3.0 * EYE_HOVER_SECOND_EXPERT_ACCEL_STEP)).abs() < 1e-4,
+            "expert past eight hundred takes all three steps, got {}",
+            push(true, 900.0)
+        );
+    }
+
+    /// EYE-6: each dash of an Expert second form's set is faster than the last
+    /// (`NPC.cs:20558-20565`), and the dash both drives longer before braking and ends sooner
+    /// (`:20582-20587`, `:20608-20612`).
+    #[test]
+    fn the_expert_second_forms_dashes_escalate_within_a_set() {
+        let tiles = Night;
+        let launched = |expert: bool, index: f32| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[1] = LAUNCHING;
+            e.ai[3] = index;
+            tick(&mut e, &fight(&tiles, expert, (10_000.0, 10_400.0)));
+            e.velocity.0.hypot(e.velocity.1)
+        };
+        for index in [0.0, 1.0, 2.0] {
+            assert!(
+                (launched(false, index) - EYE_DASH_SECOND).abs() < 1e-4,
+                "classic runs all three flat"
+            );
+        }
+        assert!((launched(true, 0.0) - EYE_DASH_SECOND).abs() < 1e-4);
+        assert!(
+            (launched(true, 1.0) - EYE_DASH_SECOND * EYE_DASH_SECOND_EXPERT_STEPS[0]).abs() < 1e-3
+        );
+        assert!(
+            (launched(true, 2.0) - EYE_DASH_SECOND * EYE_DASH_SECOND_EXPERT_STEPS[1]).abs() < 1e-3
+        );
+
+        // The brake and the end of the dash both move.
+        let braked_at = |expert: bool| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[1] = DASHING;
+            e.velocity = (10.0, 0.0);
+            let w = fight(&tiles, expert, (10_000.0, 10_400.0));
+            let mut ticks = 0;
+            // The first tick on which the drag actually bites.
+            while e.velocity.0 == 10.0 && ticks < 1_000 {
+                tick(&mut e, &w);
+                ticks += 1;
+            }
+            ticks as f32
+        };
+        assert_eq!(braked_at(false), EYE_DASH_DRIVE);
+        assert_eq!(braked_at(true), EYE_DASH_DRIVE_SECOND_EXPERT);
+
+        let dash_ticks = |expert: bool| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[1] = DASHING;
+            let w = fight(&tiles, expert, (10_000.0, 10_400.0));
+            let mut ticks = 0;
+            while e.ai[1] == DASHING && ticks < 1_000 {
+                tick(&mut e, &w);
+                ticks += 1;
+            }
+            ticks as f32
+        };
+        assert_eq!(dash_ticks(false), EYE_DASH_TICKS_SECOND);
+        assert_eq!(dash_ticks(true), EYE_DASH_TICKS_SECOND_EXPERT);
+    }
+
+    /// EYE-7: below half health an Expert second form stops running dash sets and starts lunging
+    /// (`NPC.cs:20623-20627`). Classic never does, at any health.
+    #[test]
+    fn a_wounded_expert_second_form_lunges_instead_of_dashing() {
+        let tiles = Night;
+        let after_a_set = |expert: bool, health: f32| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[1] = DASHING;
+            e.ai[3] = EYE_DASHES - 1.0; // the last dash of the set
+            e.ai[2] = if expert {
+                EYE_DASH_TICKS_SECOND_EXPERT
+            } else {
+                EYE_DASH_TICKS_SECOND
+            } - 1.0;
+            e.life = (e.life_max as f32 * health) as i32;
+            tick(&mut e, &fight(&tiles, expert, (10_000.0, 10_400.0)));
+            (e.ai[1], e.ai[3])
+        };
+        assert_eq!(after_a_set(false, 0.45).0, HOVERING, "classic hovers again");
+        assert_eq!(
+            after_a_set(true, 0.8).0,
+            HOVERING,
+            "and so does a healthy expert one"
+        );
+        let (state, count) = after_a_set(true, 0.45);
+        assert_eq!(state, AIMING, "below half, expert lunges");
+        assert!(
+            (1.0..4.0).contains(&count),
+            "with a random head start on the lunge count, got {count}"
+        );
+    }
+
+    /// EYE-7: and below 35% it leaves the hover straight into a lunge too
+    /// (`NPC.cs:20537-20540`).
+    #[test]
+    fn a_badly_hurt_expert_second_form_lunges_out_of_the_hover() {
+        let tiles = Night;
+        let after_a_hover = |health: f32| {
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[2] = EYE_HOVER_TICKS_SECOND - 1.0;
+            e.life = (e.life_max as f32 * health) as i32;
+            tick(&mut e, &fight(&tiles, true, (10_000.0, 10_400.0)));
+            e.ai[1]
+        };
+        assert_eq!(after_a_hover(0.45), LAUNCHING, "above 35% it still dashes");
+        assert_eq!(after_a_hover(0.3), AIMING, "below it lunges");
+    }
+
+    /// EYE-7: the lunge itself. One aiming tick at twenty pixels a tick, held and then braked, five
+    /// times over before it hovers again (`NPC.cs:20649`, `:20746-20798`).
+    #[test]
+    fn the_lunge_cycle_runs_five_times_and_then_hovers() {
+        let tiles = Night;
+        let mut rng = seeded();
+        let mut e = eye();
+        e.ai[0] = SECOND_FORM;
+        e.ai[1] = AIMING;
+        e.life = (e.life_max as f32 * 0.45) as i32;
+        let w = fight(&tiles, true, (10_000.0, 10_800.0));
+
+        update(&mut e, &w, &mut rng);
+        assert_eq!(e.ai[1], LUNGING, "one tick to aim, then it commits");
+        assert!(
+            (e.velocity.0.hypot(e.velocity.1) - EYE_LUNGE_SPEED).abs() < 3.0,
+            "roughly twenty a tick before the scatter, got {}",
+            e.velocity.0.hypot(e.velocity.1)
+        );
+
+        let mut lunges = 1;
+        for _ in 0..2_000 {
+            update(&mut e, &w, &mut rng);
+            if e.ai[1] == AIMING {
+                lunges += 1;
+            }
+            if e.ai[1] == HOVERING {
+                break;
+            }
+        }
+        assert_eq!(e.ai[1], HOVERING, "the cycle ends");
+        assert_eq!(lunges as f32, EYE_LUNGES, "five lunges to a cycle");
+    }
+
+    /// EYE-7: below 12% every cycle opens by dropping six hundred pixels *beneath* you first, and
+    /// it comes back up marked for the faster lunge (`NPC.cs:20464-20467`, `:20800-20852`).
+    #[test]
+    fn a_frenzied_expert_second_form_backs_off_underneath_you() {
+        let tiles = Night;
+        let mut rng = seeded();
+        let mut e = eye();
+        e.ai[0] = SECOND_FORM;
+        e.life = (e.life_max as f32 * 0.1) as i32;
+        let w = fight(&tiles, true, (10_000.0, 9_000.0));
+
+        update(&mut e, &w, &mut rng);
+        assert_eq!(e.ai[1], BACKING_OFF, "the hover is replaced outright");
+        assert!(e.velocity.1 > 0.0, "and it heads down, below the player");
+
+        let mut ticks = 1;
+        while e.ai[1] == BACKING_OFF && ticks < 500 {
+            update(&mut e, &w, &mut rng);
+            ticks += 1;
+        }
+        assert_eq!(ticks as f32, EYE_BACKOFF_TICKS, "seventy ticks under you");
+        assert_eq!(e.ai[1], AIMING);
+        assert_eq!(e.ai[2], -1.0, "marked as the fast lunge");
+        assert!(
+            EYE_BACKOFF_LUNGE_BONUS.contains(&(e.ai[3] as i32)),
+            "with extra lunges to come, got {}",
+            e.ai[3]
+        );
+    }
+
+    /// EYE-7: and below 4% it never backs off and never stops lunging (`NPC.cs:20544-20551`,
+    /// `:20854-20857`).
+    #[test]
+    fn a_desperate_expert_second_form_only_lunges() {
+        let tiles = Night;
+        let w = fight(&tiles, true, (10_000.0, 9_000.0));
+        // Both routes out of the lunge cycle are closed in this band, and both close in the same
+        // tick: the hover is swapped for the back-off going in, and the back-off is turned straight
+        // back into an aim coming out.
+        let from = |state: f32| {
+            let mut rng = seeded();
+            let mut e = eye();
+            e.ai[0] = SECOND_FORM;
+            e.ai[1] = state;
+            e.life = (e.life_max as f32 * 0.02) as i32;
+            update(&mut e, &w, &mut rng);
+            e.ai[1]
+        };
+        assert_eq!(
+            from(BACKING_OFF),
+            AIMING,
+            "the back-off is turned straight back round"
+        );
+        assert_eq!(from(HOVERING), AIMING, "and the hover is never entered");
+        assert_eq!(from(LUNGING), LUNGING, "the lunge itself carries on");
     }
 }

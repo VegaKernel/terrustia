@@ -1184,6 +1184,34 @@ mod tests {
         assert_eq!(s.ai[0], 1.0, "the wait should have run out anyway");
     }
 
+    /// It plants rather than driving past you once you are within fifty pixels
+    /// (`NPC.cs:34165-34168`), which is what stops it shunting you along the ground.
+    #[test]
+    fn santa_plants_when_you_are_right_next_to_it() {
+        let sky = Sky(HashMap::new());
+        let rng = SmallRng::seed_from_u64(61);
+        let brake = |across: f32| {
+            let mut s = boss(terrustia_proto::npc_params::SANTA_NK1, 0.0, 0.0);
+            s.velocity.0 = 4.0;
+            let w = night(&sky, Some((s.center().0 + across, 0.0)));
+            santa(&mut s, &w, &mut rng.clone());
+            s.velocity.0
+        };
+        // Planted, the brake is a flat 0.9 a tick; driving, the same speed is lerped toward the
+        // walk over twenty-one ticks, which from four is a far gentler fall.
+        assert!(
+            (brake(20.0) - 4.0 * 0.9).abs() < 1e-4,
+            "close in it plants, got {}",
+            brake(20.0)
+        );
+        assert!(
+            brake(400.0) > brake(20.0),
+            "further off it drives on: {} vs {}",
+            brake(400.0),
+            brake(20.0)
+        );
+    }
+
     /// Santa's gun speeds up as it is worn down.
     #[test]
     fn santa_fires_faster_as_it_dies() {
