@@ -916,7 +916,7 @@ pub enum Depth {
 /// Everything one scan of the tiles around a point says about the place.
 ///
 /// The game's zones are independent flags rather than one winner, and `SceneMetrics.CalculateZones`
-/// (`SceneMetrics.cs:672-700`) sets all of them off the same pass of tile counts. [`Biome`] has to
+/// (`SceneMetrics.cs:668-686`) sets all of them off the same pass of tile counts. [`Biome`] has to
 /// pick one, so the three flags that have their own spawn branches and are not a `Biome` ride along
 /// here rather than being thrown away: each is a counter the scan is already walking every tile for,
 /// so none of them costs a second pass.
@@ -2489,10 +2489,10 @@ pub fn mushroom_pick(surface: bool, hard_mode: bool, rng: &mut SmallRng) -> Opti
         if (!hard_mode && one_in(rng, 6)) || one_in(rng, 12) {
             return Some(360); // GlowingSnail
         }
-        // NPC.cs:3642-3663, the critter third of the arm.
+        // NPC.cs:3643-3664, the critter third of the arm.
         if one_in(rng, 3) {
             if one_in(rng, 4) {
-                // NPC.cs:3646-3654.
+                // NPC.cs:3645-3655.
                 return Some(if hard_mode && !one_in(rng, 3) {
                     260 // GiantFungiBulb
                 } else {
@@ -2505,7 +2505,7 @@ pub fn mushroom_pick(surface: bool, hard_mode: bool, rng: &mut SmallRng) -> Opti
                 258 // MushiLadybug
             });
         }
-        // NPC.cs:3664-3671, the rest: the mushroom zombies.
+        // NPC.cs:3665-3672, the rest: the mushroom zombies.
         return Some(if one_in(rng, 2) {
             254 // ZombieMushroom
         } else {
@@ -2529,7 +2529,7 @@ pub fn mushroom_pick(surface: bool, hard_mode: bool, rng: &mut SmallRng) -> Opti
     if one_in(rng, 8) {
         return Some(360); // GlowingSnail
     }
-    // NPC.cs:3684-3692.
+    // NPC.cs:3684-3694.
     if one_in(rng, 4) {
         return Some(if !one_in(rng, 3) {
             260 // GiantFungiBulb
@@ -2537,7 +2537,7 @@ pub fn mushroom_pick(surface: bool, hard_mode: bool, rng: &mut SmallRng) -> Opti
             259 // FungiBulb
         });
     }
-    // NPC.cs:3693-3700.
+    // NPC.cs:3695-3702.
     Some(if one_in(rng, 2) {
         257 // AnomuraFungus
     } else {
