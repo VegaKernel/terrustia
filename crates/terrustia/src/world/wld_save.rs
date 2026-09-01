@@ -1215,7 +1215,11 @@ mod tests {
         // false, so they are checked to still hold the fixture's untouched filler byte.
         assert_eq!(header[840], 1, "the old slime, freed");
         assert_eq!(header[840 + 1], 0, "the purple slime, still bound");
-        assert_eq!(header[840 + 2], 0xAA, "the rainbow slime, not ours to write");
+        assert_eq!(
+            header[840 + 2],
+            0xAA,
+            "the rainbow slime, not ours to write"
+        );
         assert_eq!(header[840 + 3], 0xAA, "the red slime, not ours to write");
         assert_eq!(header[840 + 4], 1, "the yellow slime, freed");
         // The hardmode ores an altar chose: three i32s, cobalt first.

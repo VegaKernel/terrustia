@@ -1477,23 +1477,22 @@ impl GameServer {
         // the powders, which is the same test with the loops the other way up. A world holds at
         // most one Tortured Soul (`NPC.cs:4877`'s own `!AnyNPCs(534)`) and at most one bound
         // Yellow Slime (`NPC.cs:5623`'s `!AnyNPCs(687)`), so this is nearly always an empty scan.
-        let turned: Vec<(u8, u16)> = self
-            .npcs
-            .iter()
-            .filter_map(|(index, npc)| {
-                let into = match npc.npc_type {
-                    crate::game::spawn::TORTURED_SOUL => TAX_COLLECTOR,
-                    crate::game::spawn::BOUND_TOWN_SLIME_YELLOW => YELLOW_SLIME,
-                    _ => return None,
-                };
-                let covered = npc.is_alive()
-                    && self
-                        .powders
-                        .iter()
-                        .any(|powder| powder.overlaps(npc.position, (npc.width(), npc.height())));
-                covered.then_some((index, into))
-            })
-            .collect();
+        let turned: Vec<(u8, u16)> =
+            self.npcs
+                .iter()
+                .filter_map(|(index, npc)| {
+                    let into = match npc.npc_type {
+                        crate::game::spawn::TORTURED_SOUL => TAX_COLLECTOR,
+                        crate::game::spawn::BOUND_TOWN_SLIME_YELLOW => YELLOW_SLIME,
+                        _ => return None,
+                    };
+                    let covered = npc.is_alive()
+                        && self.powders.iter().any(|powder| {
+                            powder.overlaps(npc.position, (npc.width(), npc.height()))
+                        });
+                    covered.then_some((index, into))
+                })
+                .collect();
 
         for (index, into) in turned {
             if let Some(npc) = self.npcs.get_mut(index) {
@@ -10143,7 +10142,10 @@ mod boss_drop_table_fixes {
             .spawn(1, (0.0, 0.0))
             .expect("a slot for a blue slime");
         server.npc_died(index, 1, (0.0, 0.0), 0.0);
-        assert!(server.npcs.get(index).is_none(), "a slime is still a corpse");
+        assert!(
+            server.npcs.get(index).is_none(),
+            "a slime is still a corpse"
+        );
     }
 }
 

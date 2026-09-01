@@ -166,7 +166,10 @@ mod tests {
     #[test]
     fn freeing_a_town_slime_is_remembered() {
         for (freed, read) in [
-            (679u16, (|p: &Progress| p.unlocked_slime_old) as fn(&Progress) -> bool),
+            (
+                679u16,
+                (|p: &Progress| p.unlocked_slime_old) as fn(&Progress) -> bool,
+            ),
             (680, |p: &Progress| p.unlocked_slime_purple),
             (683, |p: &Progress| p.unlocked_slime_yellow),
         ] {

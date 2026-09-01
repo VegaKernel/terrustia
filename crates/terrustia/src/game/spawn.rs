@@ -6713,6 +6713,63 @@ mod tests {
         }
     }
 
+    /// What the bound town slimes cost the two chains they were added to.
+    ///
+    /// Neither adds a scan to the common path. `sky_pick` gains one bool read and, only when that
+    /// bool is false, one `rand` call; `spawn_frog` is a whole new function but sits behind a `u16`
+    /// compare on a draw that only ever happens in a jungle, and its `alive` closure (the one thing
+    /// here that walks the NPC table) is the last term of a `&&` chain, so it runs on roughly one
+    /// frog draw in thirty and never at all once the slime is freed.
+    ///
+    /// Measured on an M-series laptop, arguments behind a `black_box`:
+    ///
+    /// * `sky_pick`, fresh world: 2.49 ns. Freed (the arm short-circuits on the flag): 0.71 ns.
+    /// * `spawn_frog`, fresh world: 2.44 ns. Freed: 0.72 ns, the flag read and nothing else.
+    ///
+    /// The freed numbers are the steady state of any world past its rescues, and they are the flag
+    /// read alone: the arm costs nothing at all once the slime has moved in.
+    ///
+    /// Both are reached at most once per tick server-wide, after the rate roll has let an attempt
+    /// through and a tile has been settled on, so this is nanoseconds per *tick*, not per player.
+    #[test]
+    #[ignore]
+    fn measure_the_town_slime_arms() {
+        let mut fresh = World::empty(800, 600, "bench");
+        fresh.progress.downed_golem = true;
+        let mut freed = fresh.clone();
+        freed.progress.unlocked_slime_purple = true;
+        freed.progress.unlocked_slime_yellow = true;
+        let never = |_: u16| false;
+
+        for (name, world) in [("fresh", &fresh), ("freed", &freed)] {
+            let n = 10_000_000;
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(sky_pick(
+                    false,
+                    false,
+                    std::hint::black_box(world),
+                    false,
+                    &never,
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("sky_pick, {name}: {each:.2} ns/call (sink {sink})");
+
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(spawn_frog(std::hint::black_box(world), &never, &mut rng));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("spawn_frog, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {

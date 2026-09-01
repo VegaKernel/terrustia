@@ -1345,6 +1345,34 @@ mod tests {
         assert_eq!(data.flags.0[6] & 0b1001_0000, 0, "byte 6 secret-seed bits");
         assert_eq!(data.flags.0[7] & 0b0001_1011, 0, "byte 7 secret-seed bits");
     }
+
+    /// The three freed town slimes reach the client, in `bitsByte12`'s own bit positions
+    /// (`NetMessage.cs:362-374`): green, old, purple, rainbow, red, yellow, copper, dusk.
+    ///
+    /// Fails before the fix, when these flags did not exist: byte 8 was always zero, so a client
+    /// on a world whose slimes had all moved in still believed every one of them was out there
+    /// waiting to be freed. The empty baseline is checked too, because a wrong bit index sets a
+    /// real bit in the right byte and only a "nothing is on" case catches that.
+    #[test]
+    fn world_data_carries_the_freed_town_slimes() {
+        let mut w = World::empty(400, 300, "t");
+        assert_eq!(data_byte8(&w), 0, "a fresh world has freed nothing");
+
+        w.progress.unlocked_slime_old = true;
+        assert_eq!(data_byte8(&w), 0b0000_0010, "the old slime is bit 1");
+        w.progress.unlocked_slime_old = false;
+
+        w.progress.unlocked_slime_purple = true;
+        assert_eq!(data_byte8(&w), 0b0000_0100, "the purple slime is bit 2");
+        w.progress.unlocked_slime_purple = false;
+
+        w.progress.unlocked_slime_yellow = true;
+        assert_eq!(data_byte8(&w), 0b0010_0000, "the yellow slime is bit 5");
+    }
+
+    fn data_byte8(w: &World) -> u8 {
+        w.world_data().flags.0[8]
+    }
 }
 
 #[cfg(test)]
