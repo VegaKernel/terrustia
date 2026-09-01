@@ -96,12 +96,13 @@ built.
    `docs/generated-tables.md`.
 
 3. **Hand-roll narrow, well-defined things; stability over build time.** This workspace hand-rolls
-   the game's wire format, TOML-shaped needs, terminal line editing, and similar narrow protocols on
-   purpose. A dependency is taken only where hand-rolling would be worse: password hashing (`argon2`),
-   a secure temp directory (`tempfile`), config and admin-store TOML (`toml`), logging
-   (`tracing`/`tracing-subscriber`), portable raw-mode/key decoding (`crossterm`), the panel's
-   HTTP/WebSocket surface (`axum`), embedding the panel (`rust-embed`), the one update HTTP client
-   (`ureq`), UPnP IGD port-mapping (`igd-next`), and deflate (`flate2` with the `zlib-rs` backend).
+   the game's wire format, TOML-shaped needs, terminal line editing, UPnP IGD port-mapping
+   (`upnp.rs`), and similar narrow protocols on purpose. A dependency is taken only where
+   hand-rolling would be worse: password hashing (`argon2`), a secure temp directory (`tempfile`),
+   config and admin-store TOML (`toml`), logging (`tracing`/`tracing-subscriber`), portable
+   raw-mode/key decoding (`crossterm`), the panel's HTTP/WebSocket surface (`axum`), embedding the
+   panel (`rust-embed`), the one update HTTP client (`ureq`), and deflate (`flate2` with the
+   `zlib-rs` backend).
    Each of those choices is justified in a comment in the root `Cargo.toml`; read it before touching
    dependencies. Do not rewrite a working, already-verified subsystem to shave crates: a mature
    dependency is worth more than the crates it costs, and rewriting resets verification that has been

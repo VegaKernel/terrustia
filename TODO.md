@@ -785,29 +785,66 @@ wants `\n`, and a word break carried its tail down without checking it fitted, w
 
 ## Dependency pruning (decided; the record stays visible)
 
-The default server build resolves **171 external crates**. **Decision (2026-08-29): stability over
-crate count.** The only cut being made is hand-rolling UPnP away from `igd-next` (-31 crates, no
-new dependencies). Everything else that could be cut is a working, in several cases
-already-verified subsystem and is deliberately kept: a mature dependency is worth more than the
-crates it costs, and rewriting one resets verification that has been earned.
+The default server build resolves **133 external crates**, down from 171. **Decision (2026-08-29):
+stability over crate count.** The only cut made is hand-rolling UPnP away from `igd-next`, **done
+2026-09-01** (-38 crates, no new dependencies). Everything else that could be cut is a working, in
+several cases already-verified subsystem and is deliberately kept: a mature dependency is worth
+more than the crates it costs, and rewriting one resets verification that has been earned.
 
-Measured with `cargo tree -e no-dev --workspace --no-dedupe` (plain `cargo metadata` returns a
-feature-unified maximal graph and undercounted `igd-next` by 20 crates; do not trust it for
-feature-gated ownership). Exclusive ownership: `igd-next` 31 (hand-roll, decided), `ureq` 13 plus
-`tempfile` 2 (keep: rustls/ring is the irreducible core of a secure `terrustia update`),
-`rust-embed` 8 (keep), `crossterm` 7 (keep: Windows console path), `toml` 6 (keep, deferred),
-`tracing-subscriber` 4 (keep, deferred), `argon2` 4 (keep: the one KDF this workspace does not
-hand-roll), `axum` 23 with `rust-embed` (keep: the panel is Playwright-verified and a transport
-rewrite resets that to zero). The combined `igd-next` + `rust-embed` + `axum` lever (171 -> 96) is
-recorded in git history with the full crate list; it was weighed and declined.
+Measured with `cargo tree -e no-dev --workspace --no-dedupe`, counting unique crate names and not
+counting the four workspace members themselves (plain `cargo metadata` returns a feature-unified
+maximal graph and undercounted `igd-next` by 20 crates; do not trust it for feature-gated
+ownership). Exclusive ownership, as measured 2026-08-29: `igd-next` 31 (hand-rolled away; the real
+figure turned out to be 38), `ureq` 13 plus `tempfile` 2 (keep: rustls/ring is the irreducible core
+of a secure `terrustia update`), `rust-embed` 8 (keep), `crossterm` 7 (keep: Windows console path),
+`toml` 6 (keep, deferred), `tracing-subscriber` 4 (keep, deferred), `argon2` 4 (keep: the one KDF
+this workspace does not hand-roll), `axum` 23 with `rust-embed` (keep: the panel is
+Playwright-verified and a transport rewrite resets that to zero). The combined `igd-next` +
+`rust-embed` + `axum` lever (171 -> 96) is recorded in git history with the full crate list; only
+its first third was taken.
 
-**The UPnP hand-roll**: only `search_gateway` and `add_port` are used; UPnP-IGD control traffic is
-plain HTTP/1.1 over the LAN with raw `IP:port` literals, so none of `url`/`idna`/ICU is needed.
-A small pure module (SSDP M-SEARCH datagram, LOCATION parse, a tolerant tag scanner for
-`serviceType`/`controlURL` and SOAP faults, URL splitting, the `AddPortMapping` envelope, a minimal
-HTTP/1.1 exchange) with the socket I/O as a thin shell; the public API stays exactly
-`pub async fn attempt(listen: SocketAddr)`. All parsing pure and unit-tested, since the live path
-needs a real router.
+**The UPnP hand-roll: done.** Only `search_gateway` and `add_port` were ever used, and UPnP-IGD
+control traffic is plain HTTP/1.1 over the LAN with raw `IP:port` literals, so none of
+`url`/`idna`/ICU was ever needed. `crates/terrustia/src/upnp.rs` now does the job itself: an SSDP
+M-SEARCH datagram, a LOCATION parse, a tolerant tag scanner for `serviceType`/`controlURL` and SOAP
+faults, `controlURL` resolution against `URLBase`, URL splitting, the `AddPortMapping` envelope, and
+HTTP/1.1 framing (`Content-Length` and chunked). Every decision is a pure function over a `&str`;
+the socket I/O is a thin shell of one multicast send/receive, one GET and one POST around them.
+`pub async fn attempt(listen: SocketAddr)` and its behaviour are unchanged.
+
+**Measured, not estimated: 171 -> 133 external crates, -38**, against the -31 this section had
+estimated. Removed: `igd-next` and its `hyper`-side stack (`h2`, `attohttpc`, `want`, `try-lock`,
+`fnv`, four `futures*`), its XML parser (`xmltree`, `xml-rs`), `url` and the whole `idna`/ICU tail
+(`idna`, `idna_adapter`, six `icu_*`, `zerovec`(+derive), `zerotrie`, `zerofrom`(+derive), `yoke`
+(+derive), `tinystr`, `writeable`, `litemap`, `utf8_iter`, `potential_utf`, `stable_deref_trait`,
+`displaydoc`, `synstructure`), and `chacha20`, whose yank from crates.io broke CI once already
+(see `AUDIT.md`). Nothing was added.
+
+The parsing is unit-tested against captured output from real routers, cited in each fixture: two
+SSDP search responses (a Wanadoo Livebox and a Linksys 802.11b, from miniupnpd's own `minissdp.c`),
+two device descriptions (a LINKSYS WAG200G and a Sagemcom Livebox, from miniupnpc's parser test
+corpus), and the success and fault bodies miniupnpd's `upnpsoap.c` actually builds. Fifteen
+deliberate mutations of the pure functions were each confirmed to fail a named test, the same
+"a checker that cannot fail is not a checker" discipline `just check-mutants` applies to the
+generated tables. A sixteenth survived, and was right to: the condition it broke was redundant
+with the all-digits port test beside it, and is now deleted rather than left untested.
+
+It also took the workspace's only file-level-copyleft dependency with it. `attohttpc` (MPL-2.0)
+came in through `igd-next`'s blocking search path, and the AGPL/MPL compatibility argument
+`deny.toml` used to have to make no longer arises: that allowance is removed and `cargo deny
+check` is clean without it.
+
+Three real gaps in `igd-next` closed on the way past: it only searched for
+`InternetGatewayDevice:1` and only accepted three service types, so an IGD:2 router advertising
+`WANPPPConnection:2` (the Livebox fixture is one) was invisible to it; it ignored `URLBase`, which
+is wrong for a router serving its description and its control endpoint on different ports; and its
+tokio SOAP client had no timeout at all. Discovery timeouts are unchanged at its own 10s/5s.
+
+**Still unverified, and the reason this is not "finished":** the live socket path has never run
+against a real UPnP router, and CI cannot run it, having no IGD to answer an M-SEARCH. Closing that
+means a human running `cargo run --example upnp_probe` on a real home network behind a real
+UPnP-capable router and confirming the mapping appears in the router's own port-forwarding table.
+`upnp.rs`'s own module doc says the same thing where someone changing it will read it.
 
 ## Release
 
