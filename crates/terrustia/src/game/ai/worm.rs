@@ -130,7 +130,10 @@ fn arc_through_air(npc: &mut Npc, offset: (f32, f32), speed: f32, turn: f32) {
 /// either axis it trims both, and otherwise it commits to whichever axis has further to cover and
 /// keeps its speed up on the other. There is no braking term anywhere, which is the whole reason a
 /// worm circles rather than homing.
-fn swim_through_rock(npc: &mut Npc, offset: (f32, f32), speed: f32, turn: f32) {
+///
+/// `hard` is the Destroyer's second, sharper trim, which runs *before* the three branches and only
+/// while both axes already agree; see [`worm_hard_turn`]. It is zero for every other worm.
+fn swim_through_rock(npc: &mut Npc, offset: (f32, f32), speed: f32, turn: f32, hard: f32) {
     let reach = (offset.0 * offset.0 + offset.1 * offset.1).sqrt();
     if reach == 0.0 {
         return;
@@ -138,12 +141,30 @@ fn swim_through_rock(npc: &mut Npc, offset: (f32, f32), speed: f32, turn: f32) {
     let (run, rise) = (offset.0.abs(), offset.1.abs());
     let k = speed / reach;
     let want = (offset.0 * k, offset.1 * k);
-    let (vx, vy) = npc.velocity;
+    let agrees = |v: f32, w: f32| (v > 0.0 && w > 0.0) || (v < 0.0 && w < 0.0);
 
-    let on_course = (vx > 0.0 && want.0 > 0.0)
-        || (vx < 0.0 && want.0 < 0.0)
-        || (vy > 0.0 && want.1 > 0.0)
-        || (vy < 0.0 && want.1 < 0.0);
+    // MECH-4: `DESTROYER_TURN_HARD` was a constant nothing read. `NPC.cs:50633-50651` is a pass the
+    // shared style-6 burrow does not have: a Destroyer whose velocity already agrees with the
+    // wanted one on *both* axes trims at 0.15 here and then again at 0.1 below, closing at 0.25 a
+    // tick. Without it the Destroyer took two and a half times as long to settle onto a line it was
+    // already on, so it drifted wide of a player it had lined up.
+    if hard > 0.0 && agrees(npc.velocity.0, want.0) && agrees(npc.velocity.1, want.1) {
+        if npc.velocity.0 < want.0 {
+            npc.velocity.0 += hard;
+        } else if npc.velocity.0 > want.0 {
+            npc.velocity.0 -= hard;
+        }
+        if npc.velocity.1 < want.1 {
+            npc.velocity.1 += hard;
+        } else if npc.velocity.1 > want.1 {
+            npc.velocity.1 -= hard;
+        }
+    }
+
+    // Read after that pass, as vanilla's own `if` at `NPC.cs:50652` reads the velocity it just
+    // moved. For every worm but the Destroyer the pass above is skipped, so this is unchanged.
+    let (vx, vy) = npc.velocity;
+    let on_course = agrees(vx, want.0) || agrees(vy, want.1);
 
     if on_course {
         if npc.velocity.0 < want.0 {
@@ -203,7 +224,14 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, expert: bool) {
     let target_in_sandstorm = world.target.is_some_and(|t| t.alive)
         && world.conditions.sandstorm
         && world.conditions.desert;
-    let motion = worm_motion(npc.npc_type, expert, target_in_sandstorm);
+    let mut motion = worm_motion(npc.npc_type, expert, target_in_sandstorm);
+    // The Destroyer's second turn rate, and the get-fixed-boi fifth on top of both of them
+    // (`NPC.cs:50509-50515`). Style 6's own get-good bumps already live in `worm_motion`'s table.
+    let mut hard = terrustia_proto::npc_params::worm_hard_turn(npc.npc_type);
+    if hard > 0.0 && world.conditions.get_good_world {
+        motion.turn *= terrustia_proto::npc_params::DESTROYER_TURN_GET_GOOD;
+        hard *= terrustia_proto::npc_params::DESTROYER_TURN_GET_GOOD;
+    }
 
     if let Some(t) = world.target {
         face(npc, t);
@@ -249,7 +277,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, expert: bool) {
     );
 
     if digging {
-        swim_through_rock(npc, offset, motion.speed, motion.turn);
+        swim_through_rock(npc, offset, motion.speed, motion.turn, hard);
     } else {
         arc_through_air(npc, offset, motion.speed, motion.turn);
     }

@@ -2228,7 +2228,24 @@ impl GameServer {
                 .is_some_and(|npc| matches!(npc.ai[3] as i32, 2 | 3));
         // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
         let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
+        // GOL-1: the Golem's head comes off when it dies and flies on its own
+        // (`NPC.cs:85913-85918`, `HitEffect`'s `type == 246` branch). Nothing in production ever
+        // spawned type 249, so the whole style-48 free-head routine was unreachable code. Read off
+        // the corpse before it is gone: vanilla's `NewNPC` places it by its bottom centre, and it
+        // inherits the head's link to the body, which every threshold in style 48 keys on.
+        let free_head = removed
+            .as_ref()
+            .filter(|_| npc_type == terrustia_proto::npc_params::GOLEM_HEAD)
+            .map(|head| {
+                (
+                    (head.center().0, head.position.1 + head.height()),
+                    head.follows_boss,
+                )
+            });
         self.broadcast_npc_death(index);
+        if let Some((bottom, body)) = free_head {
+            self.free_the_golem_head(bottom, body);
+        }
         // An expert boss's coins ride inside its treasure bag, so the bag's own drop zeroes the
         // NPC's money (`CommonCode.DropItemLocalPerClientAndSetNPCMoneyTo0` sets `npc.value = 0f`,
         // `CommonCode.cs:31`). Without this an expert boss paid out both the loose coins and the
@@ -2258,6 +2275,28 @@ impl GameServer {
         self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
         self.note_slime_rain_kill(npc_type, center);
+    }
+
+    /// Put the Golem's freed head into the world at the dead head's bottom centre.
+    ///
+    /// `bottom` is vanilla's `(Center.X, position.Y + height)`, which `NewNPC` reads as a bottom
+    /// centre; ours is a top-left, so the new head's own size comes back off it.
+    fn free_the_golem_head(&mut self, bottom: (f32, f32), body: Option<u8>) {
+        let npc_type = terrustia_proto::npc_params::GOLEM_HEAD_FREE;
+        let Some(stats) = terrustia_proto::npc_data::npc_stats(npc_type) else {
+            return;
+        };
+        let at = (
+            bottom.0 - stats.width as f32 / 2.0,
+            bottom.1 - stats.height as f32,
+        );
+        let Some(index) = self.npcs.spawn(npc_type, at) else {
+            return;
+        };
+        if let Some(npc) = self.npcs.get_mut(index) {
+            npc.follows_boss = body;
+        }
+        self.broadcast_npc(index);
     }
 
     /// `DoDeathEvents_AdvanceSlimeRain`. Advances the kill count while a rain is up and, once the
@@ -9484,6 +9523,70 @@ mod boss_drop_table_fixes {
                 "item {item} missing from a red-hat Skeletron kill: {dropped:?}"
             );
         }
+    }
+
+    /// GOL-1: the Golem's head comes off when it dies and flies on its own
+    /// (`NPC.cs:85913-85918`).
+    ///
+    /// Nothing in production ever spawned type 249: `GOLEM_HEAD_FREE` appeared only in
+    /// `npc_params.rs` and in the golem tests, so the whole style-48 free-head routine was
+    /// unreachable code. It has to inherit the dead head's link to the body, because every
+    /// threshold in that style keys on the body's health rather than its own.
+    #[test]
+    fn the_golems_head_comes_off_when_it_dies() {
+        use terrustia_proto::npc_params::{GOLEM_BODY, GOLEM_HEAD, GOLEM_HEAD_FREE};
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let body = server
+            .npcs
+            .spawn(GOLEM_BODY, (1_000.0, 1_000.0))
+            .expect("a slot for the Golem");
+        let head = server
+            .npcs
+            .spawn(GOLEM_HEAD, (1_000.0, 900.0))
+            .expect("a slot for its head");
+        let bottom = {
+            let attached = server.npcs.get_mut(head).expect("just spawned");
+            attached.follows_boss = Some(body);
+            (attached.center().0, attached.position.1 + attached.height())
+        };
+
+        server.npc_died(head, GOLEM_HEAD, (1_000.0, 900.0), 0.0);
+
+        let freed: Vec<_> = server
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.npc_type == GOLEM_HEAD_FREE)
+            .collect();
+        assert_eq!(freed.len(), 1, "the head should have been freed");
+        let (_, free) = freed[0];
+        assert_eq!(
+            free.follows_boss,
+            Some(body),
+            "and it has to know which body to read"
+        );
+        // Vanilla hands `NewNPC` a bottom centre; ours is a top-left.
+        assert!((free.center().0 - bottom.0).abs() < 1.0);
+        assert!((free.position.1 + free.height() - bottom.1).abs() < 1.0);
+    }
+
+    /// ...and nothing else sheds a head: an ordinary kill leaves no free head behind.
+    #[test]
+    fn an_ordinary_kill_frees_no_golem_head() {
+        use terrustia_proto::npc_params::GOLEM_HEAD_FREE;
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(1, (0.0, 0.0))
+            .expect("a slot for a slime");
+        server.npc_died(index, 1, (0.0, 0.0), 0.0);
+        assert!(
+            !server
+                .npcs
+                .iter()
+                .any(|(_, n)| n.npc_type == GOLEM_HEAD_FREE)
+        );
     }
 
     /// The Terraprisma, driven through the real `npc_died` entry point.

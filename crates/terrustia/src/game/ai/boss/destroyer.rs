@@ -325,4 +325,50 @@ mod tests {
             "daybreak must reach the server as a despawn, not just a dive"
         );
     }
+
+    /// MECH-4: `DESTROYER_TURN_HARD` was a producer with no consumer.
+    ///
+    /// Style 37 trims the velocity twice a tick (`NPC.cs:50633-50651` then `:50652-50692`), and the
+    /// first pass only lands while both axes already agree with the wanted heading. So a Destroyer
+    /// already on course closes at `0.15 + 0.1` a tick, not at the shared style-6 rate of `0.1`.
+    #[test]
+    fn a_destroyer_already_on_course_trims_twice() {
+        let tiles = buried();
+        let w = night(&tiles, Some((4000.0, 4000.0)));
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut head = segment(DESTROYER_HEAD, 0.0, 0.0);
+        // Already going down and right, which is where it wants to go, and well under top speed.
+        head.velocity = (1.0, 1.0);
+        destroyer(&mut head, &w, &mut rng);
+        let across = head.velocity.0 - 1.0;
+        let down = head.velocity.1 - 1.0;
+        // Vanilla's own figures, written out rather than read back from the constants under test:
+        // `num20 = 0.15f` then `num19 = 0.1f`, both applied.
+        assert!(
+            (across - 0.25).abs() < 1e-5,
+            "expected 0.25 a tick across, got {across}"
+        );
+        assert!(
+            (down - 0.25).abs() < 1e-5,
+            "expected 0.25 a tick down, got {down}"
+        );
+    }
+
+    /// ...and no other worm gets that pass: style 6 has a single rate (`NPC.cs:52662-52679`).
+    #[test]
+    fn an_ordinary_worm_trims_once() {
+        let tiles = buried();
+        let w = night(&tiles, Some((4000.0, 4000.0)));
+        // Type 7, a Devourer head: the same burrow, one turn rate.
+        let motion = terrustia_proto::npc_params::worm_motion(7, false, false);
+        let mut worm = segment(7, 0.0, 0.0);
+        worm.velocity = (1.0, 1.0);
+        crate::game::ai::worm::update(&mut worm, &w, false);
+        assert!(
+            (worm.velocity.0 - 1.0 - motion.turn).abs() < 1e-5,
+            "expected {} a tick, got {}",
+            motion.turn,
+            worm.velocity.0 - 1.0
+        );
+    }
 }
