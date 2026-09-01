@@ -588,6 +588,54 @@ mod rate_tests {
         }
     }
 
+    /// Standing among tombstones does not make the place safe, which is the whole point of building
+    /// there: the town-suppression block's graveyard sub-cases throttle the rate by a smaller factor
+    /// and then roll *separately* for the friendly fork (`NPC.cs:861-869`, `:886-892`, `:906-913`),
+    /// where the ordinary case picks one or the other.
+    ///
+    /// The measure is monsters per attempt, not `spawnRate`: at two residents a graveyard is
+    /// actually the *slower* of the two on raw rate (2.33x flat, against a mean of 1.67x), and is
+    /// still three times as dangerous, because five attempts in six there draw a monster where two
+    /// in three of the ordinary ones draw a harmless critter instead. Comparing rates alone would
+    /// have read that backwards.
+    ///
+    /// Neutralised by deleting the three `if at.graveyard` arms in `rates` so both sides take the
+    /// ordinary path: the two figures come out identical and the assertion fails at every one of
+    /// the three headcounts.
+    #[test]
+    fn a_town_does_not_quieten_a_graveyard_the_way_it_quietens_a_forest() {
+        for town_npcs in [1u32, 2, 3] {
+            // Both forks are rolls, so this is an average over many draws: the chance that one
+            // attempt puts a *monster* on the field, which is `1/rate` on the attempts that are not
+            // diverted into a critter.
+            let monsters_per_attempt = |graveyard: bool| {
+                let mut rng = SmallRng::seed_from_u64(4);
+                let mut total = 0.0;
+                for _ in 0..20_000 {
+                    let (rate, _, friendly) = rates(
+                        Conditions {
+                            town_npcs,
+                            graveyard,
+                            ..plain()
+                        },
+                        &mut rng,
+                    );
+                    if !friendly {
+                        total += 1.0 / f64::from(rate);
+                    }
+                }
+                total / 20_000.0
+            };
+            let ordinary = monsters_per_attempt(false);
+            let haunted = monsters_per_attempt(true);
+            assert!(
+                haunted > ordinary * 1.5,
+                "{town_npcs} residents: a graveyard base ({haunted:.6} monsters an attempt) should \
+                 stay far more dangerous than an ordinary one ({ordinary:.6})"
+            );
+        }
+    }
+
     /// An event overrules the town: a blood moon still comes to a full street.
     #[test]
     fn an_event_ignores_the_town() {
@@ -2957,9 +3005,7 @@ pub fn try_spawn(
                             biome,
                             Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
                         );
-                    if seasonal_ground
-                        && let Some(npc_type) = seasonal_night_pick(seasonal, rng)
-                    {
+                    if seasonal_ground && let Some(npc_type) = seasonal_night_pick(seasonal, rng) {
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
@@ -3739,12 +3785,30 @@ mod tests {
     /// leave it: nothing accumulates, so the near-player cap never closes and a run of ticks is a
     /// run of independent attempts.
     fn spawns_at(world: &World, hard_mode: bool, px: i32, py: i32, ticks: u32) -> Vec<u16> {
-        spawns_with(
+        spawns_at_in(world, hard_mode, false, px, py, ticks)
+    }
+
+    /// The same, for a player who is (or is not) standing in a graveyard.
+    ///
+    /// The graveyard is a bit in the zone packet the client last sent, exactly as it reaches a real
+    /// server: `[id][zone1][zone2][zone3][zone4][zone5][townNPCs]` with `ZoneGraveyard` at
+    /// `zone4[6]` (`NetMessage.cs:936-946`, `Player.cs:3771`). Setting the bit here is what a client
+    /// standing among twenty-eight tombstones would send.
+    fn spawns_at_in(
+        world: &World,
+        hard_mode: bool,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<u16> {
+        spawns_with_zone(
             world,
             &EventSpawns {
                 hard_mode,
                 ..quiet()
             },
+            graveyard,
             px,
             py,
             ticks,
@@ -3763,12 +3827,27 @@ mod tests {
         py: i32,
         ticks: u32,
     ) -> Vec<(u16, (f32, f32))> {
+        spawns_with_zone(world, events, false, px, py, ticks)
+    }
+
+    /// The one body the three helpers above are views onto.
+    fn spawns_with_zone(
+        world: &World,
+        events: &EventSpawns<'_>,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<(u16, (f32, f32))> {
         let npcs = NpcStore::new();
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
         player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        if graveyard {
+            player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        }
         let players = vec![Some(player)];
 
         let mut rng = SmallRng::seed_from_u64(20260830);
@@ -3786,6 +3865,210 @@ mod tests {
             ));
         }
         seen
+    }
+
+    /// A plain forest surface and a place to stand on it.
+    ///
+    /// Deliberately not `test_world`: the generated world's own spawn point for seed 7 sits in the
+    /// corruption, whose surface is answered by an earlier arm of vanilla's chain (`NPC.cs:4125`)
+    /// and never reaches the seasonal one. A flat stone floor above the surface line is the
+    /// simplest thing `biome_at` calls a forest, which is what these tests are about.
+    fn forest_surface() -> (World, (i32, i32)) {
+        let world = flat_world(90);
+        let at = (400, 88);
+        assert_eq!(biome_at(&world, at.0, at.1), Biome::Forest);
+        assert_eq!(depth_at(&world, at.1), Depth::Surface);
+        (world, at)
+    }
+
+    /// The same, after dark.
+    fn night_world() -> (World, (i32, i32)) {
+        let (mut world, at) = forest_surface();
+        world.day_time = false;
+        (world, at)
+    }
+
+    /// A graveyard owns the surface night: the Ghost, the Groom, the Bride and the Maggot Zombie
+    /// appear nowhere else on an ordinary night (`NPC.cs:4544`, `:4623`, `:4628`, `:4717`), and
+    /// before this the server had no notion of a graveyard at all, so none of the four was in any
+    /// producer and nobody could ever meet one.
+    ///
+    /// Neutralised by making `seasonal_night_pick` return `None` on its first line: every one of
+    /// the four assertions below fails, and the same run with `graveyard: false` is unaffected,
+    /// which is the other half of the claim.
+    #[test]
+    fn a_graveyard_brings_out_the_ghosts_and_the_wedding() {
+        let (world, (px, py)) = night_world();
+        let seen = spawns_at_in(&world, false, true, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for (npc_type, name) in [
+            (316u16, "Ghost"),
+            (53, "TheGroom"),
+            (536, "TheBride"),
+            (632, "MaggotZombie"),
+            (301, "Raven"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in a graveyard: {found:?}"
+            );
+        }
+
+        // And none of them anywhere else, which is what makes the graveyard the reason they came.
+        let ordinary = spawns_at_in(&world, false, false, px, py, 200_000);
+        let ordinary: std::collections::BTreeSet<u16> = ordinary.iter().copied().collect();
+        for npc_type in [316u16, 53, 536, 632, 301] {
+            assert!(
+                !ordinary.contains(&npc_type),
+                "{npc_type} turned up on an ordinary night: {ordinary:?}"
+            );
+        }
+    }
+
+    /// A graveyard runs the *night* roster in broad daylight: `NPC.cs:4202`'s daytime block is
+    /// gated on `!ZoneGraveyard`, so standing among tombstones skips it entirely and drops through
+    /// to the chain below, whose fallthrough is the zombie rather than the day's blue slime.
+    ///
+    /// Neutralised by dropping the `&& !seasonal.graveyard` from the `day` binding in `try_spawn`:
+    /// the daylit graveyard then draws the day pool and no zombie appears, failing the assertion.
+    #[test]
+    fn a_graveyard_is_dark_at_noon() {
+        let (world, (px, py)) = forest_surface();
+        assert!(world.day_time, "an untouched world starts in daylight");
+        let seen = spawns_at_in(&world, false, true, px, py, 20_000);
+        assert!(
+            seen.contains(&3),
+            "no zombies in a daylit graveyard: {:?}",
+            seen.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+    }
+
+    /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
+    /// demon eyes and the three costumed zombies (`NPC.cs:4539`, `:4561`, `:4734`).
+    ///
+    /// Neutralised by forcing `Seasonal::halloween` to `false` where `try_spawn` builds it: none of
+    /// the six types below is drawn in two hundred thousand ticks.
+    #[test]
+    fn halloween_dresses_the_night_up() {
+        let (mut world, (px, py)) = night_world();
+        world.halloween = true;
+        let seen = spawns_at_in(&world, false, false, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for (npc_type, name) in [
+            (301u16, "Raven"),
+            (317, "DemonEyeOwl"),
+            (318, "DemonEyeSpaceship"),
+            (319, "ZombieDoctor"),
+            (320, "ZombieSuperman"),
+            (321, "ZombiePixie"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) at Halloween: {found:?}"
+            );
+        }
+    }
+
+    /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
+    /// `Main.rand.Next(331, 333)`), and dresses the surface slime in ribbons
+    /// (`NPC.cs:5660-5662`).
+    ///
+    /// Neutralised by forcing `Seasonal::xmas` to `false` in `try_spawn`: none of the four appears.
+    #[test]
+    fn christmas_puts_the_zombies_in_sweaters() {
+        let (mut world, (px, py)) = night_world();
+        world.xmas = true;
+        let seen = spawns_at_in(&world, false, false, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for npc_type in [331u16, 332] {
+            assert!(
+                found.contains(&npc_type),
+                "no {npc_type} at Christmas: {found:?}"
+            );
+        }
+
+        // The daytime slime wears ribbons too, and that swap is a different site
+        // (`GetBasicSlimeToSpawn`, not the night chain). Two draws in three take a ribbon
+        // (`GetBasicSlimeToSpawn_ChanceToBeHolidaySlime`, `NPC.cs:5678-5685`), so the plain blue
+        // slime is still there and should be outnumbered rather than gone.
+        let (mut day, _) = forest_surface();
+        day.xmas = true;
+        let seen = spawns_at_in(&day, false, false, px, py, 50_000);
+        let ribboned = seen.iter().filter(|&&ty| (333..=336).contains(&ty)).count();
+        let plain_slime = seen.iter().filter(|&&ty| ty == 1).count();
+        assert!(ribboned > 0, "no ribboned slime at Christmas");
+        assert!(
+            ribboned > plain_slime,
+            "{ribboned} ribboned slimes against {plain_slime} plain ones: the two-in-three roll is \
+             not being made"
+        );
+        // All four colours, since `Main.rand.Next(333, 337)` is a flat draw over them.
+        for colour in 333u16..=336 {
+            assert!(seen.contains(&colour), "no slime in ribbon colour {colour}");
+        }
+    }
+
+    /// The full moon in hardmode is the only thing that brings a Werewolf, and only two attempts in
+    /// three at that (`NPC.cs:4633`: `!Main.dayTime && Main.moonPhase == 0 && Main.hardMode &&
+    /// Main.rand.Next(3) != 0`).
+    ///
+    /// Neutralised by deleting the Werewolf arm from `seasonal_night_pick`: the first assertion
+    /// fails. The second half of the test is the gate itself, which is what stops a Werewolf on
+    /// every other night of the eight.
+    #[test]
+    fn a_full_moon_in_hardmode_brings_out_the_werewolves() {
+        let (mut world, (px, py)) = night_world();
+        world.moon_phase = 0; // MoonPhase.Full
+        let seen = spawns_at_in(&world, true, false, px, py, 50_000);
+        assert!(
+            seen.contains(&104),
+            "no Werewolf under a hardmode full moon: {:?}",
+            seen.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+
+        // Not on any other phase, and not before the wall falls.
+        world.moon_phase = 1;
+        assert!(
+            !spawns_at_in(&world, true, false, px, py, 50_000).contains(&104),
+            "a Werewolf on a waning moon"
+        );
+        world.moon_phase = 0;
+        assert!(
+            !spawns_at_in(&world, false, false, px, py, 50_000).contains(&104),
+            "a Werewolf before hardmode"
+        );
+    }
+
+    /// The five coloured eyes are the tail of the demon-eye branch, and the new moon
+    /// (`MoonPhase.Empty`, phase 4) doubles how often that branch is entered at all
+    /// (`NPC.cs:4554`: `Main.rand.Next(6) == 0 || (Main.moonPhase == 4 && Main.rand.Next(2) == 0)`).
+    ///
+    /// Neutralised by dropping the `|| (at.moon_phase == 4 && one_in(rng, 2))` half of that
+    /// condition: the two counts below come out equal and the assertion fails. Neutralised the
+    /// other way, by deleting the whole eye arm, the first assertion fails instead.
+    #[test]
+    fn the_new_moon_is_the_night_of_the_eyes() {
+        let count = |phase: u8| {
+            let at = Seasonal {
+                moon_phase: phase,
+                ..Seasonal::default()
+            };
+            let mut rng = SmallRng::seed_from_u64(99);
+            (0..200_000)
+                .filter(|_| {
+                    matches!(seasonal_night_pick(at, &mut rng), Some(ty) if (190..=194).contains(&ty))
+                })
+                .count()
+        };
+        let full = count(0);
+        let new_moon = count(4);
+        assert!(full > 0, "no coloured eyes at all on an ordinary night");
+        // Entering the branch goes from one attempt in six to one in six plus one in two of the
+        // remaining five sixths, which is 7/12: a factor of 3.5, so 3x is a wide floor.
+        assert!(
+            new_moon > full * 3,
+            "the new moon should be thick with eyes: {new_moon} against {full}"
+        );
     }
 
     /// A world whose surface line is at 200, so the sky line (`worldSurface * 0.35`) is row 70 and

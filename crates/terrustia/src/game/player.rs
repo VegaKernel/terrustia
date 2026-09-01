@@ -311,6 +311,41 @@ mod tests {
         assert!(!test_player().is_playing());
     }
 
+    /// The graveyard is one bit of one byte of the zone packet, and picking the wrong one would
+    /// read some other zone silently: `ZoneGraveyard` is `zone4[6]` (`Player.cs:3771`) and `zone4`
+    /// is the fifth byte of the payload, after the player id (`NetMessage.cs:936-946`).
+    ///
+    /// Its neighbours are checked as well, since an off-by-one here would read the Lihzahrd Temple
+    /// or the Shadow Candle instead and nothing would ever say so.
+    #[test]
+    fn a_graveyard_is_the_seventh_bit_of_the_fifth_zone_byte() {
+        let mut p = test_player();
+        assert!(!p.in_graveyard(), "a client that has sent no zone packet");
+
+        p.zone = Some(Bytes::from_static(&[3, 0xff, 0xff, 0xff, 1 << 6, 0, 0]));
+        assert!(p.in_graveyard());
+
+        // `zone4[5]` is ZoneLihzhardTemple and `zone4[7]` is ZoneShadowCandle: neither is this.
+        p.zone = Some(Bytes::from_static(&[3, 0, 0, 0, (1 << 5) | (1 << 7), 0, 0]));
+        assert!(!p.in_graveyard());
+
+        // The same bit in any *other* byte is a different zone entirely.
+        p.zone = Some(Bytes::from_static(&[
+            3,
+            1 << 6,
+            1 << 6,
+            1 << 6,
+            0,
+            1 << 6,
+            0,
+        ]));
+        assert!(!p.in_graveyard());
+
+        // A truncated payload reads as no graveyard rather than panicking on the packet path.
+        p.zone = Some(Bytes::from_static(&[3, 0, 0, 0]));
+        assert!(!p.in_graveyard());
+    }
+
     #[test]
     fn states_are_ordered_along_the_handshake() {
         assert!(ConnState::Greeting < ConnState::SlotAssigned);
