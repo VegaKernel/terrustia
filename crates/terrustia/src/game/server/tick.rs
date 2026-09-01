@@ -463,6 +463,11 @@ impl GameServer {
         if self.world.day_time && !was_day {
             self.stop_moon();
             self.world.blood_moon = false;
+            // `Main.checkXMas(); Main.checkHalloween();` sit in this same dawn block
+            // (`Main.cs:66375-66376`, two lines after `bloodMoon = false`), so a server left running
+            // across midnight on the ninth of October starts spawning the Halloween roster on its
+            // own rather than needing a restart.
+            self.world.refresh_calendar();
             self.roll_dawn_events();
             self.broadcast_world_data();
         }

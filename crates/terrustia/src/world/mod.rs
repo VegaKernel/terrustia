@@ -1,4 +1,5 @@
 pub mod bulbs;
+pub mod calendar;
 pub mod census;
 pub mod doors;
 pub mod growth;

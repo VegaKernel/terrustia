@@ -249,6 +249,33 @@ impl Player {
         self.state == ConnState::Playing
     }
 
+    /// `Player.ZoneGraveyard`: whether this player is standing among enough tombstones.
+    ///
+    /// Read off the client's own zone packet rather than worked out here, because that is exactly
+    /// what a vanilla *server* does. The zone flags are computed client-side by `SceneMetrics.Scan`
+    /// (a 169-by-124-tile box around the player, `SceneMetrics.cs:16` and `:356`; a graveyard is
+    /// `_tileCounts[85] - _tileCounts[27] / 2 >= 28`, `SceneMetrics.cs:622-623` and `:272`) and sent
+    /// up as packet 36; `MessageBuffer.cs:2178-2200` stores them straight onto `Main.player[i]`, and
+    /// `NPC.SetSpawnFlags` (`NPC.cs:389`) then copies `player.ZoneGraveyard` into the spawner. The
+    /// server never scans tiles for this at all, which is why a graveyard costs the tick nothing.
+    ///
+    /// The layout is `MessageBuffer.cs:2179-2189` / `NetMessage.cs:936-946`:
+    /// `[player id][zone1][zone2][zone3][zone4][zone5][townNPCs]`, and `ZoneGraveyard` is `zone4[6]`
+    /// (`Player.cs:3771-3781`, the seventh property in that byte's run).
+    ///
+    /// A client that has not sent a zone packet yet reads as not in a graveyard, which is the same
+    /// answer vanilla gives for a freshly zeroed `Player`.
+    pub fn in_graveyard(&self) -> bool {
+        /// Byte 0 is the player id, so `zone4` is the fifth byte of the payload.
+        const ZONE4: usize = 4;
+        /// `Player.ZoneGraveyard` is `zone4[6]` (`Player.cs:3771`).
+        const GRAVEYARD_BIT: u8 = 1 << 6;
+        self.zone
+            .as_ref()
+            .and_then(|zone| zone.get(ZONE4))
+            .is_some_and(|zone4| zone4 & GRAVEYARD_BIT != 0)
+    }
+
     /// Advance the handshake, never backwards.
     ///
     /// A client that re-sends an earlier packet must not be able to rewind its own state and
@@ -282,6 +309,41 @@ mod tests {
     #[test]
     fn a_fresh_player_is_not_playing() {
         assert!(!test_player().is_playing());
+    }
+
+    /// The graveyard is one bit of one byte of the zone packet, and picking the wrong one would
+    /// read some other zone silently: `ZoneGraveyard` is `zone4[6]` (`Player.cs:3771`) and `zone4`
+    /// is the fifth byte of the payload, after the player id (`NetMessage.cs:936-946`).
+    ///
+    /// Its neighbours are checked as well, since an off-by-one here would read the Lihzahrd Temple
+    /// or the Shadow Candle instead and nothing would ever say so.
+    #[test]
+    fn a_graveyard_is_the_seventh_bit_of_the_fifth_zone_byte() {
+        let mut p = test_player();
+        assert!(!p.in_graveyard(), "a client that has sent no zone packet");
+
+        p.zone = Some(Bytes::from_static(&[3, 0xff, 0xff, 0xff, 1 << 6, 0, 0]));
+        assert!(p.in_graveyard());
+
+        // `zone4[5]` is ZoneLihzhardTemple and `zone4[7]` is ZoneShadowCandle: neither is this.
+        p.zone = Some(Bytes::from_static(&[3, 0, 0, 0, (1 << 5) | (1 << 7), 0, 0]));
+        assert!(!p.in_graveyard());
+
+        // The same bit in any *other* byte is a different zone entirely.
+        p.zone = Some(Bytes::from_static(&[
+            3,
+            1 << 6,
+            1 << 6,
+            1 << 6,
+            0,
+            1 << 6,
+            0,
+        ]));
+        assert!(!p.in_graveyard());
+
+        // A truncated payload reads as no graveyard rather than panicking on the packet path.
+        p.zone = Some(Bytes::from_static(&[3, 0, 0, 0]));
+        assert!(!p.in_graveyard());
     }
 
     #[test]

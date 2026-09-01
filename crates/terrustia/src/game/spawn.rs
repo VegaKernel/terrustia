@@ -79,6 +79,14 @@ pub struct Conditions {
     pub behind_a_house_wall: bool,
     /// `numberOfActivePlayers` (`NPC.cs:266`), which the moon override's cap is a function of.
     pub active_players: u32,
+    /// `Player.ZoneGraveyard`: whether the player is standing among enough tombstones.
+    ///
+    /// `SetSpawnFlags` copies it across with the rest of the zones (`NPC.cs:389`), and it is the one
+    /// player-carried zone the server *can* know, because the client computes it and sends it up
+    /// (see [`crate::game::player::Player::in_graveyard`]). A graveyard is not a quiet place: it
+    /// takes over the surface night roster and it loosens town suppression rather than tightening
+    /// it (`NPC.cs:861`, `:884`, `:906`).
+    pub graveyard: bool,
     /// Whether the player is standing inside a lunar pillar's zone.
     ///
     /// This is vanilla's `invaders`, not a flag of its own: `SetSpawnFlags` (`NPC.cs:404-409`)
@@ -277,47 +285,78 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     // them, so a blood moon still comes to a full town. Real vanilla (`NPC.cs:795-924`) is not a
     // flat multiplier here: past the event gate, every attempt is a coin flip between throttling
     // `spawnRate` and leaving it alone while shrinking `maxSpawns` and forcing the spawn to be a
-    // friendly critter instead of a monster (`spawnFriendly`). Two things are deliberately not
+    // friendly critter instead of a monster (`spawnFriendly`). One thing is deliberately not
     // modelled: the underworld's own separate, simpler fork (`NPC.cs:802-855`) — a base built in
-    // the underworld is the rare exception, not the case this quiets — and the `ZoneGraveyard`
-    // sub-case inside each branch below, since this project has no notion of a graveyard zone at
-    // all yet (the same reason `ZonePeaceCandle` and the rest of a player's own buffs are already
-    // out of `Conditions`' scope, per this struct's own doc comment).
+    // the underworld is the rare exception, not the case this quiets.
+    //
+    // Each branch's `ZoneGraveyard` sub-case *is* modelled now that a graveyard is a thing the
+    // server knows about, and it is not a variation on the ordinary case: it throttles the rate by
+    // a smaller factor and then rolls *separately* for the friendly fork, where the ordinary case
+    // picks one or the other. A base built in a graveyard stays a dangerous place to live, which is
+    // the point of building one. Vanilla's own condition is
+    // `ZoneGraveyard && (!ZonePeaceCandle || Main.rand.Next(3) == 0)`; `ZonePeaceCandle` is a
+    // player-carried effect this server cannot see (this struct's own doc comment), so it is taken
+    // as absent, which makes the left-hand disjunct true and leaves the bare graveyard test.
     let mut spawn_friendly = false;
     if town_suppression_applies(at) {
         match at.town_npcs {
             0 => {}
-            // NPC.cs:870-878, the ordinary (non-graveyard) case: a one-in-three chance forces a
-            // friendly spawn and shrinks the cap; the other two-in-three simply double the rate.
+            // NPC.cs:861-882.
             1 => {
-                if rng.random_ratio(1, 3) {
+                if at.graveyard {
+                    // NPC.cs:863-869.
+                    rate *= 1.66;
+                    if rng.random_ratio(1, 9) {
+                        spawn_friendly = true;
+                        max *= 0.6;
+                    }
+                } else if rng.random_ratio(1, 3) {
+                    // NPC.cs:870-878, the ordinary case: a one-in-three chance forces a friendly
+                    // spawn and shrinks the cap; the other two-in-three simply double the rate.
                     spawn_friendly = true;
                     max *= 0.6;
                 } else {
                     rate *= 2.0;
                 }
             }
-            // NPC.cs:893-901: the odds flip to two-in-three for the friendly fork, and the rate
+            // NPC.cs:884-900: the odds flip to two-in-three for the friendly fork, and the rate
             // triples on the remaining one-in-three.
             2 => {
-                if !rng.random_ratio(1, 3) {
+                if at.graveyard {
+                    // NPC.cs:886-892.
+                    rate *= 2.33;
+                    if rng.random_ratio(1, 6) {
+                        spawn_friendly = true;
+                        max *= 0.6;
+                    }
+                } else if !rng.random_ratio(1, 3) {
                     spawn_friendly = true;
                     max *= 0.6;
                 } else {
                     rate *= 3.0;
                 }
             }
-            // NPC.cs:917-921: `!Main.expertMode` is unconditionally true in classic mode, so this
-            // branch sets `spawnFriendly` on *every* attempt rather than rolling for it —
-            // `spawnRate` is never assigned here at all. Expert mode's own further
+            // NPC.cs:902-921. `!Main.expertMode` is unconditionally true in classic mode, so the
+            // ordinary branch sets `spawnFriendly` on *every* attempt rather than rolling for it —
+            // `spawnRate` is never assigned there at all. Expert mode's own further
             // `Main.rand.Next(30) != 0` (a 29-in-30 chance) is folded into the same unconditional
             // case rather than threading a whole difficulty flag through `Conditions` for a
             // 1-in-30 edge: friendly wins the overwhelming majority of the time in expert mode
             // too, and this module already accepts small, disclosed over-approximations like it
             // elsewhere.
             _ => {
-                spawn_friendly = true;
-                max *= 0.6;
+                if at.graveyard {
+                    // NPC.cs:906-913: a full town in a graveyard still only triples the rate, and
+                    // still spawns monsters two attempts in three.
+                    rate *= 3.0;
+                    if rng.random_ratio(1, 3) {
+                        spawn_friendly = true;
+                        max *= 0.6;
+                    }
+                } else {
+                    spawn_friendly = true;
+                    max *= 0.6;
+                }
             }
         }
     }
@@ -418,6 +457,7 @@ mod rate_tests {
             behind_a_house_wall: false,
             active_players: 1,
             in_tower_zone: false,
+            graveyard: false,
         }
     }
 
@@ -545,6 +585,54 @@ mod rate_tests {
             assert_eq!(rate, wild, "townNPCs >= 3 never assigns spawnRate");
             assert!(friendly, "and always forces a friendly spawn");
             assert_eq!(cap, wild_cap * 0.6);
+        }
+    }
+
+    /// Standing among tombstones does not make the place safe, which is the whole point of building
+    /// there: the town-suppression block's graveyard sub-cases throttle the rate by a smaller factor
+    /// and then roll *separately* for the friendly fork (`NPC.cs:861-869`, `:886-892`, `:906-913`),
+    /// where the ordinary case picks one or the other.
+    ///
+    /// The measure is monsters per attempt, not `spawnRate`: at two residents a graveyard is
+    /// actually the *slower* of the two on raw rate (2.33x flat, against a mean of 1.67x), and is
+    /// still three times as dangerous, because five attempts in six there draw a monster where two
+    /// in three of the ordinary ones draw a harmless critter instead. Comparing rates alone would
+    /// have read that backwards.
+    ///
+    /// Neutralised by deleting the three `if at.graveyard` arms in `rates` so both sides take the
+    /// ordinary path: the two figures come out identical and the assertion fails at every one of
+    /// the three headcounts.
+    #[test]
+    fn a_town_does_not_quieten_a_graveyard_the_way_it_quietens_a_forest() {
+        for town_npcs in [1u32, 2, 3] {
+            // Both forks are rolls, so this is an average over many draws: the chance that one
+            // attempt puts a *monster* on the field, which is `1/rate` on the attempts that are not
+            // diverted into a critter.
+            let monsters_per_attempt = |graveyard: bool| {
+                let mut rng = SmallRng::seed_from_u64(4);
+                let mut total = 0.0;
+                for _ in 0..20_000 {
+                    let (rate, _, friendly) = rates(
+                        Conditions {
+                            town_npcs,
+                            graveyard,
+                            ..plain()
+                        },
+                        &mut rng,
+                    );
+                    if !friendly {
+                        total += 1.0 / f64::from(rate);
+                    }
+                }
+                total / 20_000.0
+            };
+            let ordinary = monsters_per_attempt(false);
+            let haunted = monsters_per_attempt(true);
+            assert!(
+                haunted > ordinary * 1.5,
+                "{town_npcs} residents: a graveyard base ({haunted:.6} monsters an attempt) should \
+                 stay far more dangerous than an ordinary one ({ordinary:.6})"
+            );
         }
     }
 
@@ -911,6 +999,172 @@ pub fn blood_moon_pool(depth: Depth, hard_mode: bool) -> &'static [u16] {
         return &[];
     }
     if hard_mode { &LATE } else { &EARLY }
+}
+
+/// What the surface night has going on beyond the plain weather and depth of it.
+///
+/// Its own struct rather than more fields on [`Conditions`], which is documented as the rate and
+/// cap inputs: none of these changes how *fast* anything spawns, only what turns up.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seasonal {
+    /// `Main.halloween` (`Main.cs:13329-13347`), the real-world calendar rather than world state.
+    pub halloween: bool,
+    /// `Main.xMas` (`Main.cs:13290-13309`).
+    pub xmas: bool,
+    /// `Player.ZoneGraveyard` (`NPC.cs:389`), which is the client's own answer (see
+    /// [`crate::game::player::Player::in_graveyard`]).
+    pub graveyard: bool,
+    pub hard_mode: bool,
+    pub blood_moon: bool,
+    /// `Main.dayTime`. The chain below is the *night* chain, and a graveyard is the one thing that
+    /// reaches it in daylight (`NPC.cs:4202`, `if (!ZoneGraveyard && Main.dayTime)`: standing among
+    /// tombstones skips the whole daytime block and drops through to this).
+    pub day_time: bool,
+    /// `Main.moonPhase`. `Terraria.Enums.MoonPhase` names them: 0 is `Full` and 4 is `Empty`, the
+    /// new moon, which is the darkest night and the one that doubles the demon eyes.
+    pub moon_phase: u8,
+}
+
+/// The surface night chain's own arms, ahead of the ordinary pool: `NPC.cs:4539-4740`.
+///
+/// This is not a pool. Vanilla's surface night is a *sequence* of independent rolls, each of which
+/// returns the moment it hits, and the biome pool is only what is left when every one of them
+/// misses. Folding these into a weighted list would give the Raven and the Ghost a share of every
+/// night instead of one attempt in twelve and one in thirty, so the shape is kept: `None` means
+/// nothing here answered and the caller should draw from [`pool`] as before.
+///
+/// Reached whenever the surface is dark, and *also* in daylight in a graveyard (`NPC.cs:4202`).
+/// Not reached in the corruption, the crimson, the jungle or the dungeon, which vanilla answers
+/// with their own arms of the outer chain before `else if (surfaceSpawn)` at `NPC.cs:4168` is
+/// tested at all.
+///
+/// Deliberately left to the pools and to other lanes, each with its place in the order below kept
+/// so the arms that *are* here land at vanilla's own odds:
+///
+/// * `NPC.cs:4620` the blood-moon Clown, `:4636` the Possessed Armor and `:4640` the Blood Zombie
+///   and Drippler. All three already have a home in [`hardmode_pool`] and [`blood_moon_pool`];
+///   taking them here as well would give each of them two sources.
+/// * `NPC.cs:4655-4670` the snow arm and `:4677-4690` the rain arm, which belong to the biome and
+///   weather pools rather than to the season.
+/// * `NPC.cs:4691-4711` the Skyblock arm, for a world shape this server does not generate.
+/// * `NPC.cs:4712` the Moss Zombie, which is gated on `RollOnlyBadLuckExtreme(30) == 0`. That
+///   returns `-1` for any player whose luck is not negative (`Luck.cs:53-60`), and this server
+///   models no luck at all, so the arm cannot fire here any more than it fires for a vanilla player
+///   with no luck effects. Same reasoning, and the same citation, as the `rate * 0.85` bonus
+///   [`rates`] declines to transcribe. NPC 691 therefore stays in `docs/spawn-gaps.tsv` on purpose.
+/// * `NPC.cs:4722` the Torch Zombie and `:4743` the armed and styled zombies, which are the
+///   ordinary zombie's own variants rather than a season's.
+///
+/// The negative ids vanilla spawns alongside three of these arms (`-38` to `-43`, `NPC.cs:4569`,
+/// `:4581-4610`) are not types: `NPCID.FromNetId` (`NPCID.cs:12478`) maps them back onto the very
+/// same NPC with a size multiplier (`NPC.cs:8080-8137`). `tools/check_spawn_reach.py` drops them
+/// from vanilla's roster for that reason, and nothing here models NPC scale, so they are dropped
+/// here too.
+pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
+    let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
+
+    // NPC.cs:4539. The Raven is the season's own bird, and a graveyard has one whether or not it is
+    // October.
+    if (at.halloween || at.graveyard) && one_in(rng, 12) {
+        return Some(301); // Raven
+    }
+    // NPC.cs:4544. The Ghost is the graveyard's alone: no calendar produces one.
+    if at.graveyard && one_in(rng, 30) {
+        return Some(316); // Ghost
+    }
+    // NPC.cs:4549.
+    if (at.halloween || at.graveyard) && at.hard_mode && one_in(rng, 10) {
+        return Some(304); // HoppinJack
+    }
+    // NPC.cs:4554: one attempt in six takes the demon-eye branch, and on the new moon a further one
+    // in two of the rest takes it as well, so the darkest night of the eight is roughly three times
+    // as full of eyes as the others.
+    if one_in(rng, 6) || (at.moon_phase == 4 && one_in(rng, 2)) {
+        // NPC.cs:4556. Left to `hardmode_pool`, which already carries the Wandering Eye; the roll
+        // itself is still made, because skipping it would hand its third of this branch to the arms
+        // below and make them a third too common in hardmode.
+        if at.hard_mode && one_in(rng, 3) {
+            return None;
+        }
+        // NPC.cs:4561: `Main.rand.Next(317, 319)`, so 317 or 318.
+        if at.halloween && one_in(rng, 2) {
+            return Some(317 + rng.random_range(0..2)); // DemonEyeOwl, DemonEyeSpaceship
+        }
+        // NPC.cs:4566. The plain Demon Eye, which the surface night pool also carries; the same
+        // reasoning as the Wandering Eye above applies, so the roll stands and the draw is left to
+        // the pool.
+        if one_in(rng, 2) {
+            return None;
+        }
+        // NPC.cs:4577-4612: the five coloured eyes, one of which is drawn flat.
+        const EYES: [u16; 5] = [
+            190, // CataractEye
+            191, // SleepyEye
+            192, // DialatedEye
+            193, // GreenEye
+            194, // PurpleEye
+        ];
+        return Some(EYES[rng.random_range(0..EYES.len())]);
+    }
+    // NPC.cs:4623 and :4628. `RollOnlyBadLuck(300)` is a plain `Main.rand.Next(300)` at luck zero
+    // (`Luck.cs:31-37`), unlike its `Extreme` sibling. The pair are the only wedding a blood moon
+    // ever throws, and a graveyard has them on an ordinary night.
+    if (at.blood_moon || at.graveyard) && one_in(rng, 300) {
+        return Some(53); // TheGroom
+    }
+    if (at.blood_moon || at.graveyard) && one_in(rng, 300) {
+        return Some(536); // TheBride
+    }
+    // NPC.cs:4633. The full moon, and note the third condition: this is *two* attempts in three, not
+    // every one, and `!Main.dayTime` is explicit here, so a daylit graveyard gets no werewolves.
+    if !at.day_time && at.moon_phase == 0 && at.hard_mode && !one_in(rng, 3) {
+        return Some(104); // Werewolf
+    }
+    // NPC.cs:4717: the graveyard's own zombie. `maggotZombieChance` is 20 and nothing in
+    // `GetZombieSettings` (`NPC.cs:5595-5619`) ever moves it.
+    if at.graveyard && one_in(rng, 20) {
+        return Some(632); // MaggotZombie
+    }
+    // NPC.cs:4734: `Main.rand.Next(319, 322)`, so 319, 320 or 321.
+    if at.halloween && one_in(rng, 2) {
+        return Some(319 + rng.random_range(0..3)); // ZombieDoctor, ZombieSuperman, ZombiePixie
+    }
+    // NPC.cs:4739: `Main.rand.Next(331, 333)`, so 331 or 332.
+    if at.xmas && one_in(rng, 2) {
+        return Some(331 + rng.random_range(0..2)); // ZombieXmas, ZombieSweater
+    }
+    None
+}
+
+/// The holiday costume a critter or a plain slime wears, or the type unchanged.
+///
+/// Vanilla puts these swaps inside the draw rather than after it, as an `else if` above the
+/// ordinary answer: `SpawnBunny`'s chain (`NPC.cs:1637-1644`, and again at `:2588-2595` and
+/// `:4284-4291`) tries the Halloween bunny, then the Christmas one, then the party one, then the
+/// plain one; `GetBasicSlimeToSpawn` (`NPC.cs:5654-5663`) does the same for the surface's blue
+/// slime. Applying them to the type already drawn is the same distribution written the other way
+/// round, and it does not need the season threaded through every pool table.
+///
+/// `GetBasicSlimeToSpawn_ChanceToBeHolidaySlime` (`NPC.cs:5678-5685`) is `Main.rand.Next(3) != 0`
+/// outside Skyblock, the same two-in-three the bunny uses.
+///
+/// The slime swap is surface-only because vanilla's is: `GetBasicSlimeToSpawn(surface: false, ...)`
+/// has no holiday case at all, and the two tile types with their own answer (jungle grass, and snow
+/// or ice) are answered before the default case this replaces.
+fn holiday_costume(npc_type: u16, depth: Depth, at: Seasonal, rng: &mut SmallRng) -> u16 {
+    const BUNNY: u16 = 46;
+    const BLUE_SLIME: u16 = 1;
+    let two_in_three = |rng: &mut SmallRng| !rng.random_ratio(1, 3);
+    match npc_type {
+        BUNNY if at.halloween && two_in_three(rng) => 303, // BunnySlimed
+        BUNNY if at.xmas && two_in_three(rng) => 337,      // BunnyXmas
+        BLUE_SLIME if depth == Depth::Surface && at.halloween && two_in_three(rng) => 302, // SlimeMasked
+        // `Main.rand.Next(333, 337)`, so 333 to 336: the four ribbon colours.
+        BLUE_SLIME if depth == Depth::Surface && at.xmas && two_in_three(rng) => {
+            333 + rng.random_range(0..4)
+        }
+        _ => npc_type,
+    }
 }
 
 /// Classify a spawn point by how far down it is.
@@ -1307,6 +1561,16 @@ fn choose_weighted(
 /// weather, season and time this server does not all model, so this returns the ordinary set for
 /// the place and lets the caller pick evenly among it. The underworld's lava-bait critters and the
 /// gold and gem variants are left out on purpose; they are cosmetic rolls on top of these.
+/// The whole of a graveyard's friendly draw (`NPC.cs:2101-2115`).
+///
+/// Not part of [`friendly_pool`], because vanilla's arm is not a variation on the ordinary one: it
+/// sits ahead of every other friendly branch and `return`s, so among tombstones there are no birds,
+/// no bunnies and no fireflies, only these two.
+pub const GRAVEYARD_VERMIN: [u16; 2] = [
+    606, // Maggot
+    610, // Rat
+];
+
 pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     use Biome::*;
     use Depth::*;
@@ -2425,6 +2689,18 @@ pub fn try_spawn(
             behind_a_house_wall: terrustia_proto::housing::wall_encloses(world.tile(px, py).wall),
             active_players,
             in_tower_zone: tower.is_some(),
+            graveyard: player.in_graveyard(),
+        };
+        // The season and the graveyard, read once per player per attempt: two bools off the world
+        // and one bit off the zone packet this player last sent, so nothing here walks a tile.
+        let seasonal = Seasonal {
+            halloween: world.halloween,
+            xmas: world.xmas,
+            graveyard: conditions.graveyard,
+            hard_mode: events.hard_mode,
+            blood_moon: world.blood_moon,
+            day_time: world.day_time,
+            moon_phase: world.moon_phase,
         };
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
@@ -2632,11 +2908,23 @@ pub fn try_spawn(
                 // critter for it (the underworld), the attempt is dropped rather than turned into a
                 // monster the game would not have spawned here.
                 None if spawn_friendly => {
-                    let critters = friendly_pool(depth, player_biome, world.day_time);
+                    // A graveyard's friendly draw is its own and it is exactly two things
+                    // (`NPC.cs:2101-2115`): a Maggot or a Rat, on dry land, and nothing at all
+                    // standing in water. The arm sits ahead of every other friendly one, so no
+                    // bird, bunny or firefly is drawn among the tombstones.
+                    let critters = if seasonal.graveyard {
+                        if water_tile(world, x, y) {
+                            continue;
+                        }
+                        &GRAVEYARD_VERMIN[..]
+                    } else {
+                        friendly_pool(depth, player_biome, world.day_time)
+                    };
                     if critters.is_empty() {
                         continue;
                     }
-                    critters[rng.random_range(0..critters.len())]
+                    let critter = critters[rng.random_range(0..critters.len())];
+                    holiday_costume(critter, depth, seasonal, rng)
                 }
                 // Below the dungeon before Skeletron falls, the dungeon answers with the Dungeon
                 // Guardian instead of its ordinary residents (`NPC.cs:2646-2654`: `!downedBoss3` in
@@ -2727,14 +3015,33 @@ pub fn try_spawn(
                 }
                 None => {
                     let biome = player_biome;
-                    let ordinary = pool(depth, biome, world.day_time);
+                    // The surface night has a chain of its own ahead of the pool, and a graveyard
+                    // reaches it in daylight too (`NPC.cs:4202`). It answers only where vanilla's
+                    // `else if (surfaceSpawn)` (`NPC.cs:4168`) is reached: the corruption, the
+                    // crimson, the jungle and the dungeon are all answered by earlier arms of the
+                    // outer chain and never get here.
+                    let seasonal_ground = depth == Depth::Surface
+                        && (!world.day_time || seasonal.graveyard)
+                        && !matches!(
+                            biome,
+                            Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
+                        );
+                    if seasonal_ground && let Some(npc_type) = seasonal_night_pick(seasonal, rng) {
+                        out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
+                    // A graveyard's daylight draws the *night* pool, for the same reason: with the
+                    // daytime block skipped, the chain below `NPC.cs:4202` is the one that answers,
+                    // and its fallthrough is the zombie (`NPC.cs:4770-4816`), not the day's slime.
+                    let day = world.day_time && !seasonal.graveyard;
+                    let ordinary = pool(depth, biome, day);
                     // Hardmode adds to what a place had rather than replacing it, so a hardmode
                     // forest still has zombies in it. The underworld's additions wait for a
                     // mechanical boss, which is progression rather than place and so is held here.
                     let extra = if events.hard_mode
                         && (depth != Depth::Underworld || events.downed_mech_any)
                     {
-                        hardmode_pool(depth, biome, world.day_time)
+                        hardmode_pool(depth, biome, day)
                     } else {
                         &[]
                     };
@@ -2777,7 +3084,7 @@ pub fn try_spawn(
                     if ty == CAVERN_SENTINEL {
                         events.cavern_monsters.pick(rng)
                     } else {
-                        ty
+                        holiday_costume(ty, depth, seasonal, rng)
                     }
                 }
             };
@@ -2923,6 +3230,59 @@ mod tests {
                 }
             }
         }
+        // The surface night's own chain, asked through itself for the same reason the sky is:
+        // deleting an arm shows up here as a type that stopped being reachable. Every combination
+        // of the five flags it reads, since each one opens arms the others do not, and both moon
+        // phases it names.
+        for halloween in [false, true] {
+            for xmas in [false, true] {
+                for graveyard in [false, true] {
+                    for hard_mode in [false, true] {
+                        for blood_moon in [false, true] {
+                            for moon_phase in [0u8, 4] {
+                                let at = Seasonal {
+                                    halloween,
+                                    xmas,
+                                    graveyard,
+                                    hard_mode,
+                                    blood_moon,
+                                    day_time: false,
+                                    moon_phase,
+                                };
+                                for seed in 0..4_000u64 {
+                                    let mut rng = SmallRng::seed_from_u64(seed);
+                                    set.extend(seasonal_night_pick(at, &mut rng));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The holiday costumes, which swap a critter or a plain slime for a dressed-up one after it
+        // is drawn rather than sitting in a pool of their own.
+        for at in [
+            Seasonal {
+                halloween: true,
+                ..Seasonal::default()
+            },
+            Seasonal {
+                xmas: true,
+                ..Seasonal::default()
+            },
+        ] {
+            for base in [46, 1] {
+                for seed in 0..200u64 {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    set.insert(holiday_costume(base, Depth::Surface, at, &mut rng));
+                }
+            }
+        }
+
+        // ...and what a friendly attempt draws in a graveyard, which is its own two-entry list
+        // rather than an arm of `friendly_pool`.
+        set.extend(GRAVEYARD_VERMIN);
+
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
         set.extend(rescues::RESCUES.iter().map(|r| r.bound));
@@ -3450,12 +3810,30 @@ mod tests {
     /// leave it: nothing accumulates, so the near-player cap never closes and a run of ticks is a
     /// run of independent attempts.
     fn spawns_at(world: &World, hard_mode: bool, px: i32, py: i32, ticks: u32) -> Vec<u16> {
-        spawns_with(
+        spawns_at_in(world, hard_mode, false, px, py, ticks)
+    }
+
+    /// The same, for a player who is (or is not) standing in a graveyard.
+    ///
+    /// The graveyard is a bit in the zone packet the client last sent, exactly as it reaches a real
+    /// server: `[id][zone1][zone2][zone3][zone4][zone5][townNPCs]` with `ZoneGraveyard` at
+    /// `zone4[6]` (`NetMessage.cs:936-946`, `Player.cs:3771`). Setting the bit here is what a client
+    /// standing among twenty-eight tombstones would send.
+    fn spawns_at_in(
+        world: &World,
+        hard_mode: bool,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<u16> {
+        spawns_with_zone(
             world,
             &EventSpawns {
                 hard_mode,
                 ..quiet()
             },
+            graveyard,
             px,
             py,
             ticks,
@@ -3474,12 +3852,27 @@ mod tests {
         py: i32,
         ticks: u32,
     ) -> Vec<(u16, (f32, f32))> {
+        spawns_with_zone(world, events, false, px, py, ticks)
+    }
+
+    /// The one body the three helpers above are views onto.
+    fn spawns_with_zone(
+        world: &World,
+        events: &EventSpawns<'_>,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<(u16, (f32, f32))> {
         let npcs = NpcStore::new();
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
         player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        if graveyard {
+            player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        }
         let players = vec![Some(player)];
 
         let mut rng = SmallRng::seed_from_u64(20260830);
@@ -3497,6 +3890,265 @@ mod tests {
             ));
         }
         seen
+    }
+
+    /// A plain forest surface and a place to stand on it.
+    ///
+    /// Deliberately not `test_world`: the generated world's own spawn point for seed 7 sits in the
+    /// corruption, whose surface is answered by an earlier arm of vanilla's chain (`NPC.cs:4125`)
+    /// and never reaches the seasonal one. A flat stone floor above the surface line is the
+    /// simplest thing `biome_at` calls a forest, which is what these tests are about.
+    fn forest_surface() -> (World, (i32, i32)) {
+        let world = flat_world(90);
+        let at = (400, 88);
+        assert_eq!(biome_at(&world, at.0, at.1), Biome::Forest);
+        assert_eq!(depth_at(&world, at.1), Depth::Surface);
+        (world, at)
+    }
+
+    /// The same, after dark.
+    fn night_world() -> (World, (i32, i32)) {
+        let (mut world, at) = forest_surface();
+        world.day_time = false;
+        (world, at)
+    }
+
+    /// A graveyard owns the surface night: the Ghost, the Groom, the Bride and the Maggot Zombie
+    /// appear nowhere else on an ordinary night (`NPC.cs:4544`, `:4623`, `:4628`, `:4717`), and
+    /// before this the server had no notion of a graveyard at all, so none of the four was in any
+    /// producer and nobody could ever meet one.
+    ///
+    /// Neutralised by making `seasonal_night_pick` return `None` on its first line: every one of
+    /// the four assertions below fails, and the same run with `graveyard: false` is unaffected,
+    /// which is the other half of the claim.
+    #[test]
+    fn a_graveyard_brings_out_the_ghosts_and_the_wedding() {
+        let (world, (px, py)) = night_world();
+        let seen = spawns_at_in(&world, false, true, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for (npc_type, name) in [
+            (316u16, "Ghost"),
+            (53, "TheGroom"),
+            (536, "TheBride"),
+            (632, "MaggotZombie"),
+            (301, "Raven"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in a graveyard: {found:?}"
+            );
+        }
+
+        // And none of them anywhere else, which is what makes the graveyard the reason they came.
+        let ordinary = spawns_at_in(&world, false, false, px, py, 200_000);
+        let ordinary: std::collections::BTreeSet<u16> = ordinary.iter().copied().collect();
+        for npc_type in [316u16, 53, 536, 632, 301] {
+            assert!(
+                !ordinary.contains(&npc_type),
+                "{npc_type} turned up on an ordinary night: {ordinary:?}"
+            );
+        }
+    }
+
+    /// A graveyard runs the *night* roster in broad daylight: `NPC.cs:4202`'s daytime block is
+    /// gated on `!ZoneGraveyard`, so standing among tombstones skips it entirely and drops through
+    /// to the chain below, whose fallthrough is the zombie rather than the day's blue slime.
+    ///
+    /// Neutralised by dropping the `&& !seasonal.graveyard` from the `day` binding in `try_spawn`:
+    /// the daylit graveyard then draws the day pool and no zombie appears, failing the assertion.
+    #[test]
+    fn a_graveyard_is_dark_at_noon() {
+        let (world, (px, py)) = forest_surface();
+        assert!(world.day_time, "an untouched world starts in daylight");
+        let seen = spawns_at_in(&world, false, true, px, py, 20_000);
+        assert!(
+            seen.contains(&3),
+            "no zombies in a daylit graveyard: {:?}",
+            seen.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+    }
+
+    /// A town in a graveyard has vermin instead of songbirds: the friendly branch's own graveyard
+    /// arm (`NPC.cs:2101-2115`) sits ahead of every other, so a Maggot or a Rat is the *only* thing
+    /// a friendly attempt can draw there.
+    ///
+    /// Neutralised by dropping the `if seasonal.graveyard` fork in `try_spawn`'s friendly arm, so
+    /// both cases read `friendly_pool`: no Maggot or Rat is drawn in an hour of ticks and the first
+    /// assertion fails. The second assertion is what makes it a *replacement* rather than an
+    /// addition, and it fails the same way in reverse if the arm is made additive.
+    #[test]
+    fn a_town_among_the_tombstones_draws_vermin_and_nothing_else() {
+        const GUIDE: u16 = 22;
+        let (world, (px, py)) = forest_surface();
+        let mut npcs = NpcStore::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        // Three townsfolk right where the player stands, which is what turns `spawnFriendly` on.
+        for _ in 0..3 {
+            npcs.spawn(GUIDE, player.position);
+        }
+        let players = vec![Some(player)];
+
+        let mut rng = SmallRng::seed_from_u64(21);
+        let mut biomes = BiomeCache::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..20_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut biomes,
+                &mut rng,
+            ) {
+                seen.insert(npc_type);
+            }
+        }
+        for vermin in GRAVEYARD_VERMIN {
+            assert!(
+                seen.contains(&vermin),
+                "no {vermin} in a graveyard: {seen:?}"
+            );
+        }
+        for songbird in friendly_pool(Depth::Surface, Biome::Forest, true) {
+            assert!(
+                !seen.contains(songbird),
+                "the ordinary critter {songbird} should not reach a graveyard: {seen:?}"
+            );
+        }
+    }
+
+    /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
+    /// demon eyes and the three costumed zombies (`NPC.cs:4539`, `:4561`, `:4734`).
+    ///
+    /// Neutralised by forcing `Seasonal::halloween` to `false` where `try_spawn` builds it: none of
+    /// the six types below is drawn in two hundred thousand ticks.
+    #[test]
+    fn halloween_dresses_the_night_up() {
+        let (mut world, (px, py)) = night_world();
+        world.halloween = true;
+        let seen = spawns_at_in(&world, false, false, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for (npc_type, name) in [
+            (301u16, "Raven"),
+            (317, "DemonEyeOwl"),
+            (318, "DemonEyeSpaceship"),
+            (319, "ZombieDoctor"),
+            (320, "ZombieSuperman"),
+            (321, "ZombiePixie"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) at Halloween: {found:?}"
+            );
+        }
+    }
+
+    /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
+    /// `Main.rand.Next(331, 333)`), and dresses the surface slime in ribbons
+    /// (`NPC.cs:5660-5662`).
+    ///
+    /// Neutralised by forcing `Seasonal::xmas` to `false` in `try_spawn`: none of the four appears.
+    #[test]
+    fn christmas_puts_the_zombies_in_sweaters() {
+        let (mut world, (px, py)) = night_world();
+        world.xmas = true;
+        let seen = spawns_at_in(&world, false, false, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for npc_type in [331u16, 332] {
+            assert!(
+                found.contains(&npc_type),
+                "no {npc_type} at Christmas: {found:?}"
+            );
+        }
+
+        // The daytime slime wears ribbons too, and that swap is a different site
+        // (`GetBasicSlimeToSpawn`, not the night chain). Two draws in three take a ribbon
+        // (`GetBasicSlimeToSpawn_ChanceToBeHolidaySlime`, `NPC.cs:5678-5685`), so the plain blue
+        // slime is still there and should be outnumbered rather than gone.
+        let (mut day, _) = forest_surface();
+        day.xmas = true;
+        let seen = spawns_at_in(&day, false, false, px, py, 50_000);
+        let ribboned = seen.iter().filter(|&&ty| (333..=336).contains(&ty)).count();
+        let plain_slime = seen.iter().filter(|&&ty| ty == 1).count();
+        assert!(ribboned > 0, "no ribboned slime at Christmas");
+        assert!(
+            ribboned > plain_slime,
+            "{ribboned} ribboned slimes against {plain_slime} plain ones: the two-in-three roll is \
+             not being made"
+        );
+        // All four colours, since `Main.rand.Next(333, 337)` is a flat draw over them.
+        for colour in 333u16..=336 {
+            assert!(seen.contains(&colour), "no slime in ribbon colour {colour}");
+        }
+    }
+
+    /// The full moon in hardmode is the only thing that brings a Werewolf, and only two attempts in
+    /// three at that (`NPC.cs:4633`: `!Main.dayTime && Main.moonPhase == 0 && Main.hardMode &&
+    /// Main.rand.Next(3) != 0`).
+    ///
+    /// Neutralised by deleting the Werewolf arm from `seasonal_night_pick`: the first assertion
+    /// fails. The second half of the test is the gate itself, which is what stops a Werewolf on
+    /// every other night of the eight.
+    #[test]
+    fn a_full_moon_in_hardmode_brings_out_the_werewolves() {
+        let (mut world, (px, py)) = night_world();
+        world.moon_phase = 0; // MoonPhase.Full
+        let seen = spawns_at_in(&world, true, false, px, py, 50_000);
+        assert!(
+            seen.contains(&104),
+            "no Werewolf under a hardmode full moon: {:?}",
+            seen.iter().collect::<std::collections::BTreeSet<_>>()
+        );
+
+        // Not on any other phase, and not before the wall falls.
+        world.moon_phase = 1;
+        assert!(
+            !spawns_at_in(&world, true, false, px, py, 50_000).contains(&104),
+            "a Werewolf on a waning moon"
+        );
+        world.moon_phase = 0;
+        assert!(
+            !spawns_at_in(&world, false, false, px, py, 50_000).contains(&104),
+            "a Werewolf before hardmode"
+        );
+    }
+
+    /// The five coloured eyes are the tail of the demon-eye branch, and the new moon
+    /// (`MoonPhase.Empty`, phase 4) doubles how often that branch is entered at all
+    /// (`NPC.cs:4554`: `Main.rand.Next(6) == 0 || (Main.moonPhase == 4 && Main.rand.Next(2) == 0)`).
+    ///
+    /// Neutralised by dropping the `|| (at.moon_phase == 4 && one_in(rng, 2))` half of that
+    /// condition: the two counts below come out equal and the assertion fails. Neutralised the
+    /// other way, by deleting the whole eye arm, the first assertion fails instead.
+    #[test]
+    fn the_new_moon_is_the_night_of_the_eyes() {
+        let count = |phase: u8| {
+            let at = Seasonal {
+                moon_phase: phase,
+                ..Seasonal::default()
+            };
+            let mut rng = SmallRng::seed_from_u64(99);
+            (0..200_000)
+                .filter(|_| {
+                    matches!(seasonal_night_pick(at, &mut rng), Some(ty) if (190..=194).contains(&ty))
+                })
+                .count()
+        };
+        let full = count(0);
+        let new_moon = count(4);
+        assert!(full > 0, "no coloured eyes at all on an ordinary night");
+        // Entering the branch goes from one attempt in six to one in six plus one in two of the
+        // remaining five sixths, which is 7/12: a factor of 3.5, so 3x is a wide floor.
+        assert!(
+            new_moon > full * 3,
+            "the new moon should be thick with eyes: {new_moon} against {full}"
+        );
     }
 
     /// A world whose surface line is at 200, so the sky line (`worldSurface * 0.35`) is row 70 and
@@ -4761,6 +5413,74 @@ mod tests {
     /// does): 1.0 ns with no apocalypse running, which is almost always, 1.4 ns with all four
     /// standing and no zone matched, 1.0 ns standing inside one. At the 255-player bar the worst
     /// case is 0.4 us of a 16.67 ms tick, which is 0.002% of it.
+    /// What the graveyard and the seasonal chain cost the tick, which is the thing to be careful
+    /// about here: vanilla works `ZoneGraveyard` out by counting tombstones in a 169-by-124 tile box
+    /// (`SceneMetrics.cs:16`, `:356`, `:622`), and doing *that* per player per tick would be about
+    /// twenty-one thousand tile reads a head, which does not fit. It is not done. The client already
+    /// counts them and sends the answer up in packet 36, exactly as it does for every other zone, so
+    /// the server's whole graveyard test is one byte and one mask.
+    ///
+    /// Measured on an M-series laptop, arguments behind a `black_box` so nothing is hoisted:
+    ///
+    /// * `Player::in_graveyard`: 0.4 ns with no zone packet yet, 0.6 ns with one. That is one
+    ///   `Option` test, one bounds-checked byte and a mask. It runs once per player per attempt, so
+    ///   at the 255-player bar it is 0.15 us of a 16.67 ms tick: 0.001% of it. A tile scan for the
+    ///   same answer would be twenty-one thousand tile reads a head and could not be afforded.
+    /// * `seasonal_night_pick` on an ordinary night, the case that runs almost always: 4.2 ns. It
+    ///   is reached at most once per tick server-wide, well after the rate roll has let an attempt
+    ///   through and `try_spawn` has settled on a tile, so it is nanoseconds per *tick*, not per
+    ///   player.
+    /// * The same in a graveyard at Halloween with every arm live: 15.3 ns, which is the chain
+    ///   actually rolling its dice rather than falling out of the first condition.
+    #[test]
+    #[ignore]
+    fn measure_the_graveyard_and_the_seasonal_chain() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut bare = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx.clone());
+        let mut haunted = Player::new(0, "127.0.0.1:1".parse().unwrap(), tx);
+        haunted.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+
+        for (name, player) in [
+            ("no zone packet yet", &mut bare),
+            ("graveyard", &mut haunted),
+        ] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(std::hint::black_box(&*player).in_graveyard());
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("in_graveyard, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        for (name, at) in [
+            ("ordinary night", Seasonal::default()),
+            (
+                "graveyard at Halloween",
+                Seasonal {
+                    halloween: true,
+                    graveyard: true,
+                    hard_mode: true,
+                    blood_moon: true,
+                    moon_phase: 4,
+                    ..Seasonal::default()
+                },
+            ),
+        ] {
+            let n = 10_000_000;
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink +=
+                    u32::from(seasonal_night_pick(std::hint::black_box(at), &mut rng).unwrap_or(0));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("seasonal_night_pick, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {

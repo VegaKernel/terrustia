@@ -640,7 +640,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                 || world.conditions.slime_rain;
             slime::update(npc, target, npc.on_ground, active, world.wet);
         }
-        // No graveyard biome yet, so nothing keeps the eyes out past dawn.
+        // Still `false`, but no longer for want of a graveyard: the server does know about one now
+        // (`Player::in_graveyard`, off the client's own zone packet). What is missing is the wiring
+        // between the two, because this argument is the *target's* graveyard rather than the
+        // nearest player's, so it cannot come off [`Conditions`] the way `crimson` and `snow` do
+        // and wants a per-NPC lookup that belongs with the AI rather than with the spawner.
         2 => eye::update(npc, world, false),
         6 => worm::update(npc, world, false),
         7 => {

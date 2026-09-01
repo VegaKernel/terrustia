@@ -1232,6 +1232,11 @@ pub struct GameServer {
 
 impl GameServer {
     pub fn new(config: Config, mut world: World) -> Self {
+        // What day it is in the real world, which decides Halloween and Christmas. The game reads
+        // it here too, on load and on generation (`WorldGen.cs:6906-6907`, `:11267-11268`), not only
+        // at dawn: a server started on the thirty-first of October should be spawning Hoppin' Jacks
+        // that first night rather than waiting for the following morning.
+        world.refresh_calendar();
         // From here on, tile edits invalidate cached sections.
         world.start_tracking_changes();
         // A full snapshot now, while startup has no tick budget to blow, so the *first* real
@@ -3121,6 +3126,51 @@ mod panic_path {
             Stopped::Panicked,
             "a panic on the packet path must be caught and reported, not unwind the task"
         );
+    }
+
+    /// Halloween and Christmas come off the wall clock, and the server has to actually go and look.
+    ///
+    /// Both tests hand the server a world that arrives *claiming* it is Halloween, which nothing
+    /// legitimate ever does (neither flag is saved: see `World`'s own persistence audit), and check
+    /// that the claim is overwritten by what the calendar really says. Written that way on purpose,
+    /// so the test means something on the three hundred and thirty days of the year when the honest
+    /// answer is `false` and a missing call would look identical to a working one.
+    ///
+    /// Neutralised by deleting `world.refresh_calendar()` from `GameServer::new`: the first fails.
+    /// Neutralised by deleting it from the tick's dawn block: the second fails.
+    #[test]
+    fn booting_re_reads_the_calendar_rather_than_trusting_the_world() {
+        use crate::world::calendar;
+
+        let mut world = tiny_world();
+        world.halloween = true;
+        world.xmas = true;
+        let server = GameServer::new(Config::default(), world);
+
+        let (month, day) = calendar::today();
+        assert_eq!(server.world.halloween, calendar::is_halloween(month, day));
+        assert_eq!(server.world.xmas, calendar::is_xmas(month, day));
+    }
+
+    /// ...and again at every dawn, where `Main.cs:66375-66376` reads it, so a server left up across
+    /// the ninth of October starts spawning the Halloween roster without a restart.
+    #[test]
+    fn dawn_re_reads_the_calendar() {
+        use crate::world::calendar;
+        use crate::world::world::NIGHT_LENGTH;
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        server.world.day_time = false;
+        server.world.time = NIGHT_LENGTH - 1;
+        server.world.halloween = true;
+        server.world.xmas = true;
+
+        server.tick();
+        assert!(server.world.day_time, "the tick should have reached dawn");
+
+        let (month, day) = calendar::today();
+        assert_eq!(server.world.halloween, calendar::is_halloween(month, day));
+        assert_eq!(server.world.xmas, calendar::is_xmas(month, day));
     }
 
     /// The ordinary case still reports a clean stop, so the exit code stays meaningful.
