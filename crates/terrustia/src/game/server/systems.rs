@@ -6022,6 +6022,8 @@ impl GameServer {
         let events = spawn::EventSpawns {
             moon: self.moon.moon.map(|m| (m, self.moon.wave)),
             eclipse: self.world.eclipse,
+            // `Sandstorm.Happening`, which the weather tick already keeps.
+            sandstorm: self.weather.sandstorm,
             downed_plantera: progress.downed_plantera,
             hard_mode: progress.hard_mode,
             downed_mech_any: progress.downed_mech_any,

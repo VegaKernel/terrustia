@@ -1465,6 +1465,293 @@ pub fn water_pool(depth: Depth, biome: Biome) -> &'static [u16] {
     }
 }
 
+/// The walls an underground desert is made of, `WallID.Sets.AllowsUndergroundDesertEnemiesToSpawn`
+/// (`WallID.cs:42`): plain sandstone and hardened sand, each of their three converted forms, and
+/// desert fossil.
+///
+/// This set, not a biome scan, is what the game's whole underground-desert roster hangs off
+/// (`NPC.cs:1682`). That matters twice over. It is exact where a tile-count zone is a guess, and it
+/// costs two tile reads where [`biome_at`] costs twenty thousand, so the branch it gates can be
+/// tested on every candidate tile rather than once per player per tick.
+const DESERT_SPAWN_WALLS: [u16; 9] = [
+    187, // Sandstone
+    216, // HardenedSand
+    217, // CorruptHardenedSand
+    218, // CrimsonHardenedSand
+    219, // HallowHardenedSand
+    220, // CorruptSandstone
+    221, // CrimsonSandstone
+    222, // HallowSandstone
+    223, // DesertFossil
+];
+
+/// `WorldGen.checkUnderground` (`WorldGen.cs:10099-10145`), the other half of the underground
+/// desert's gate.
+///
+/// Deep enough down it is simply true, high enough up simply false, and in the band between it asks
+/// whether the roof is closed: a 120-by-3 strip 80 tiles above the point has to be at least 80%
+/// solid tile or walled. That band is the only place the strip is ever walked, and this is only
+/// reached once a desert wall has already been found, so the 360 reads are rare rather than routine.
+fn check_underground(world: &World, x: i32, y: i32) -> bool {
+    /// `num`, `num2` and `num3` in the game's own order: the strip's width, how far above the point
+    /// it sits, and how many rows of it are counted.
+    const WIDTH: i32 = 120;
+    const ABOVE: i32 = 80;
+    const ROWS: i32 = 3;
+
+    let surface = f64::from(world.surface);
+    if f64::from(y) > surface + f64::from(ABOVE) {
+        return true;
+    }
+    if f64::from(y) < surface / 2.0 {
+        return false;
+    }
+    let top = y - ABOVE;
+    let left = (x - WIDTH / 2).clamp(0, (world.width() - WIDTH - 1).max(0));
+    let mut closed = 0;
+    for i in left..left + WIDTH {
+        for j in top..top + ROWS {
+            let tile = world.tile(i, j);
+            // The game's own `SolidTile(i, j) || Main.tile[x, y].wall > 0`, whose second half reads
+            // the *point*, not the strip: one walled spot makes the whole count. Transcribed as it
+            // is written rather than as it reads.
+            if (tile.is_active() && solid(tile.block)) || world.tile(x, y).wall > 0 {
+                closed += 1;
+            }
+        }
+    }
+    f64::from(closed) >= f64::from(WIDTH * ROWS) * 0.8
+}
+
+/// Whether a candidate spot is in the underground desert, `NPC.cs:1682`:
+///
+/// ```csharp
+/// else if ((SpawnTileOrAboveHasAnyWallInSet(spawnTileX, spawnTileY,
+///               WallID.Sets.AllowsUndergroundDesertEnemiesToSpawn) || spawnUndergroundDesert)
+///          && WorldGen.checkUnderground(spawnTileX, spawnTileY))
+/// ```
+///
+/// `y` is this server's spawn row, the one the NPC's feet occupy, so the game's `spawnTileY` (the
+/// solid ground tile) is `y + 1` and its "or above" tile is `y` - the same one-row offset
+/// [`water_tile`] documents. `SpawnTileOrAboveHasAnyWallInSet` (`NPC.cs:5535-5556`) is exactly those
+/// two rows and nothing else.
+///
+/// The `|| spawnUndergroundDesert` half is the disclosed narrowing. That flag (`NPC.cs:1178-1201`)
+/// widens the branch to spots merely *near* desert walls above the rock layer: one attempt in three
+/// sweeps a box of radius 5 to 15 around the chosen tile, and the other two read the wall at the
+/// player's own tile. Left out on purpose, because the box is up to 900 tile reads on the
+/// per-candidate path (20 candidates per player per tick) to reach spots the wall test misses
+/// anyway, and a real underground desert is walled throughout. The effect is that the roster starts
+/// a little further inside the biome than the game's does, never that it appears outside it.
+fn underground_desert_spot(world: &World, x: i32, y: i32) -> bool {
+    let walled = |row: i32| DESERT_SPAWN_WALLS.contains(&world.tile(x, row).wall);
+    (walled(y + 1) || walled(y)) && check_underground(world, x, y + 1)
+}
+
+/// The underground desert's roster, `NPC.cs:1683-1762`.
+///
+/// The whole 1.4 desert lives here and nowhere else, which is why eleven types were unreachable:
+/// the ghouls, the lamias, the scorpion, the beast, the djinn, the tomb crawler and both giant
+/// antlions have no other ambient spawn in the game at all.
+///
+/// `spawn_y` is this server's spawn row; the game's `spawnTileY` is one below it, and every depth
+/// test here is written against the game's own row. Two things the caller owns rather than this:
+/// the Golfer at one attempt in twenty (`NPC.cs:1692-1697`), who arrives through [`bound_gate`]
+/// like every other bound resident, and the branch's position in the chain.
+///
+/// `biome` stands in for the game's three independent `ZoneCorrupt`/`ZoneCrimson`/`ZoneHallow`
+/// flags, which `SetSpawnFlags` copies straight off the player (`NPC.cs:381-383`). It is the
+/// *player's* zone that picks the ghoul, not the tile under the spawn, so no per-spot scan is
+/// needed or wanted. The narrowing is that [`Biome`] names one winner where the game can have two
+/// set at once; with one set the two agree exactly, and the game's own "no evil, no hallow" fallback
+/// to the plain ghoul is this function's `_` arm.
+pub fn underground_desert_pick(
+    world: &World,
+    spawn_y: i32,
+    hard_mode: bool,
+    biome: Biome,
+    no_worms: bool,
+    alive: &dyn Fn(u16) -> usize,
+    rng: &mut SmallRng,
+) -> u16 {
+    // `num10` (`NPC.cs:1684-1691`), which thins the two worms out with depth.
+    let ground_y = f64::from(spawn_y + 1);
+    let rock = f64::from(world.rock_layer);
+    let mut scale = 1.3f32;
+    if ground_y > (rock * 2.0 + f64::from(world.height())) / 3.0 {
+        scale *= 0.5;
+    } else if ground_y > rock {
+        scale *= 0.85;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let worm_odds = (50.0 * scale) as u32;
+    let worm_roll = |rng: &mut SmallRng| rng.random_range(0..worm_odds.max(1)) == 0;
+    let deep = ground_y > f64::from(world.surface) + 100.0;
+
+    // The Dune Splicer, hardmode only (`NPC.cs:1698-1702`).
+    if hard_mode && worm_roll(rng) && !no_worms && deep {
+        return 510;
+    }
+    // The Tomb Crawler, at any progression, but only ever one at a time (`NPC.cs:1703-1707`).
+    if worm_roll(rng) && !no_worms && deep && alive(513) == 0 {
+        return 513;
+    }
+    // Hardmode's own roster, four attempts in five (`NPC.cs:1708-1745`). The game builds a weighted
+    // list and picks uniformly from it, so the duplicated ghoul really is twice as likely as the
+    // rest; the lists below are that `List<int>` verbatim.
+    if hard_mode && rng.random_range(0..5) != 0 {
+        let list: &[u16] = match biome {
+            // 525 x2, then the `ZoneCorrupt || ZoneCrimson` pair, then the beast.
+            Biome::Corruption => &[525, 525, 533, 529, 532],
+            Biome::Crimson => &[526, 526, 533, 529, 532],
+            // The hallow takes the *other* pair, since it is neither evil.
+            Biome::Hallow => &[527, 527, 530, 528, 532],
+            _ => &[524, 524, 530, 528, 532],
+        };
+        return list[rng.random_range(0..list.len())];
+    }
+    // ...and the antlions, which are the desert whatever the progression (`NPC.cs:1746-1761`).
+    let mut ty = [69, 580, 580, 580, 581][rng.random_range(0..5)];
+    if rng.random_range(0..15) == 0 {
+        ty = 537; // SandSlime, which replaces whatever was drawn rather than joining the draw.
+    } else if rng.random_range(0..10) == 0 {
+        // The giants are not a hardmode upgrade: this roll is on the plain path, so a fresh world's
+        // underground desert already has them.
+        ty = match ty {
+            580 => 508, // GiantWalkingAntlion
+            581 => 509, // GiantFlyingAntlion
+            other => other,
+        };
+    }
+    ty
+}
+
+/// `TileID.Sets.Conversion.Sand` (`TileID.cs:30`): sand and its three converted forms.
+const SAND_CONVERSION: [u16; 4] = [
+    53,  // Sand
+    112, // Ebonsand
+    116, // Pearlsand
+    234, // Crimsand
+];
+
+/// `NPC.Spawner.Spawning_SandstoneCheck` (`NPC.cs:5464-5503`): enough sand under the spot to call it
+/// a desert rather than a beach.
+///
+/// Walks up to eight rows down from the ground tile, and in each row up to four tiles right and four
+/// left, stopping the moment a row (or a run within it) leaves sand. At least 40 of the possible 72
+/// have to be sand. Every loop breaks early, so ordinary rock costs one read.
+fn sandstone_check(world: &World, x: i32, ground_y: i32) -> bool {
+    let sand = |x: i32, y: i32| {
+        let tile = world.tile(x, y);
+        tile.is_active() && SAND_CONVERSION.contains(&tile.block)
+    };
+    let mut count = 0;
+    for i in 0..8 {
+        if !sand(x, ground_y + i) {
+            break;
+        }
+        count += 1;
+        for j in 1..=4 {
+            if !sand(x + j, ground_y + i) {
+                break;
+            }
+            count += 1;
+        }
+        for k in 1..=4 {
+            if !sand(x - k, ground_y + i) {
+                break;
+            }
+            count += 1;
+        }
+    }
+    count >= 40
+}
+
+/// The desert during a sandstorm, `NPC.cs:3952-4019`.
+///
+/// The gate is `Sandstorm.Happening && ZoneSandstorm && TileID.Sets.Conversion.Sand[tileType] &&
+/// Spawning_SandstoneCheck(spawnTileX, spawnTileY)`, and the caller owns the first two: a sandstorm
+/// is world weather (`game/weather.rs` already runs one) and `ZoneSandstorm` is
+/// `ZoneDesert && SurfaceAtmospherics && Sandstorm.Happening` (`SceneMetrics.cs:706`), which is a
+/// property of where the *player* stands. This owns the two per-spot halves and the roster.
+///
+/// Returns the type and how many tiles below the spawn row to put it: the Dune Splicer alone arrives
+/// ten tiles down (`NPC.cs:3975`, `(spawnTileY + 10) * 16`), because it burrows in rather than
+/// standing on the sand.
+///
+/// `ground_block` is the tile the spawn stands on, the game's `tileType`. It decides the sandshark's
+/// flavour, and that one *is* per-spot rather than per-player: corrupt sand gives a corrupt
+/// sandshark wherever it is, which is the opposite of how the ghouls above resolve their evil.
+pub fn sandstorm_pick(
+    hard_mode: bool,
+    downed_boss1: bool,
+    no_worms: bool,
+    ground_block: u16,
+    alive: &dyn Fn(u16) -> usize,
+    rng: &mut SmallRng,
+) -> (u16, i32) {
+    // Before the Eye of Cthulhu, a sandstorm is tumbleweeds, vultures and antlions
+    // (`NPC.cs:3954-3968`).
+    if !downed_boss1 && !hard_mode {
+        if rng.random_range(0..2) == 0 {
+            return (546, 0); // Tumbleweed
+        }
+        if rng.random_range(0..2) == 0 {
+            return (61, 0); // Vulture
+        }
+        return (69, 0); // Antlion
+    }
+    // The Sand Elemental, one at a time (`NPC.cs:3969-3972`).
+    if hard_mode && rng.random_range(0..20) == 0 && alive(541) == 0 {
+        return (541, 0);
+    }
+    // Dune Splicers, up to four (`NPC.cs:3973-3976`).
+    if hard_mode && !no_worms && rng.random_range(0..3) == 0 && alive(510) < 4 {
+        return (510, 10);
+    }
+    // Sandsharks, flavoured by the sand they swim through (`NPC.cs:3977-3992`). The game tests all
+    // three sets in sequence rather than as an `else if` chain, so the last match wins; no tile is
+    // in two of them, so the order is not observable.
+    if hard_mode && !no_worms && rng.random_range(0..2) == 0 {
+        // `TileID.Sets.Corrupt` / `Crimson` / `Hallow` (`TileID.cs:333`, `:351`, `:341`), narrowed
+        // to the sand members, since `ground_block` has already passed [`SAND_CONVERSION`].
+        return (
+            match ground_block {
+                112 => 543, // Ebonsand: SandsharkCorrupt
+                234 => 544, // Crimsand: SandsharkCrimson
+                116 => 545, // Pearlsand: SandsharkHallow
+                _ => 542,   // SandShark
+            },
+            0,
+        );
+    }
+    // A mummy for each sand (`NPC.cs:3993-4008`), which the game writes as four `else if` arms with
+    // a roll each. Only one tile type can match, so folding them into a lookup keeps both the
+    // one-in-three odds and the single roll.
+    let mummy = match ground_block {
+        53 => Some(78),   // Mummy
+        112 => Some(79),  // DarkMummy
+        234 => Some(630), // BloodMummy
+        116 => Some(80),  // LightMummy
+        _ => None,
+    };
+    if hard_mode
+        && let Some(mummy) = mummy
+        && rng.random_range(0..3) == 0
+    {
+        return (mummy, 0);
+    }
+    // The tail of the chain, which is what an ordinary hardmode sandstorm mostly draws
+    // (`NPC.cs:4009-4019`).
+    if rng.random_range(0..2) == 0 {
+        return (546, 0); // Tumbleweed
+    }
+    if rng.random_range(0..2) == 0 {
+        return (580, 0); // WalkingAntlion
+    }
+    (581, 0) // FlyingAntlion
+}
+
 /// The Harpy (48), which is the whole reason the sky is a place.
 pub const HARPY: u16 = 48;
 /// The Wyvern's head (87). Its fourteen trailing segments grow from its own first AI tick, the way
@@ -1581,6 +1868,12 @@ pub struct EventSpawns<'a> {
     pub moon: Option<(crate::game::moons::Moon, i32)>,
     /// Whether a solar eclipse is happening.
     pub eclipse: bool,
+    /// `Sandstorm.Happening` (`Sandstorm.cs:14`), which `game/weather.rs` already simulates.
+    ///
+    /// Half of `ZoneSandstorm` (`SceneMetrics.cs:706`,
+    /// `ZoneDesert && SurfaceAtmospherics && Sandstorm.Happening`); the other two halves are the
+    /// player's biome and height, which [`try_spawn`] has to hand.
+    pub sandstorm: bool,
     pub downed_plantera: bool,
     pub downed_all_mechs: bool,
     /// Whether the field already holds as many event bosses as it will take.
@@ -2061,6 +2354,13 @@ pub fn try_spawn(
         let Some(player_biome) = biomes.read(world, usize::from(player.slot), px, py) else {
             continue;
         };
+        // `ZoneSandstorm` (`SceneMetrics.cs:706`): `ZoneDesert && SurfaceAtmospherics &&
+        // Sandstorm.Happening`, where `SurfaceAtmospherics` is `IsSurfaceForAtmospherics`
+        // (`WorldGen.cs:11003-11014`) and outside a remix world is simply `y <= worldSurface`. It is
+        // a *player* zone like every other, so it is answered once here rather than per candidate
+        // tile; only the sand under the chosen spot is decided down there.
+        let sandstorm_zone =
+            events.sandstorm && player_biome == Biome::Desert && py <= i32::from(world.surface);
         let near = nearby_active_npcs(npcs, player.position);
 
         // The rate and cap are the player's own, not one number for the world: two people in the
@@ -2197,6 +2497,18 @@ pub fn try_spawn(
             }
 
             let depth = depth_at(world, y);
+            // The two desert branches are decided at the *tile*, not from the player's zone, which
+            // is what lets them be tested on every candidate: the underground desert is two wall
+            // reads (`underground_desert_spot`) and the sandstorm is one tile read plus a sand
+            // check that breaks out of its own first row on anything else. Neither goes near
+            // `biome_at`.
+            let desert_spot = !sky && underground_desert_spot(world, x, y);
+            let sandstorm_spot = sandstorm_zone && !sky && {
+                // `TileID.Sets.Conversion.Sand[tileType]`, where `tileType` is the ground tile the
+                // spawn stands on: this server's row `y` is one above the game's `spawnTileY`.
+                let ground = world.tile(x, y + 1);
+                SAND_CONVERSION.contains(&ground.block) && sandstone_check(world, x, y + 1)
+            };
             // An event owns the surface while it runs, and nothing below it. Except the sky:
             // vanilla's `skyMob` arm sits above every event arm in the same `else if` chain
             // (`NPC.cs:1383`), so a pumpkin moon does not reach up there.
@@ -2254,6 +2566,28 @@ pub fn try_spawn(
                         |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
                 }
+                // The underground desert, which is its own chain and answers for everything in it
+                // (`NPC.cs:1682-1762`). It sits here because that is where vanilla puts it: ahead of
+                // every water branch, ahead of `spawnFriendly`, ahead of `ZoneDungeon` and ahead of
+                // every biome pool. A friendly attempt reaching a sandstone wall therefore draws a
+                // ghoul rather than a scorpion, which is the game's own ordering rather than an
+                // oversight here.
+                None if desert_spot => {
+                    let alive_count = |ty: u16| {
+                        npcs.iter()
+                            .filter(|(_, n)| n.npc_type == ty && n.is_alive())
+                            .count()
+                    };
+                    underground_desert_pick(
+                        world,
+                        y,
+                        events.hard_mode,
+                        player_biome,
+                        no_worms,
+                        &alive_count,
+                        rng,
+                    )
+                }
                 // A friendly attempt draws a harmless critter for this place; if there is no
                 // critter for it (the underworld), the attempt is dropped rather than turned into a
                 // monster the game would not have spawned here.
@@ -2278,6 +2612,27 @@ pub fn try_spawn(
                 None if water_tile(world, x, y) && !water_pool(depth, player_biome).is_empty() => {
                     let wet = water_pool(depth, player_biome);
                     wet[rng.random_range(0..wet.len())]
+                }
+                // A sandstorm over the desert, which owns the surface while it blows
+                // (`NPC.cs:3952-4022`). It sits after the water and the dungeon, as vanilla's does,
+                // and pushes its own result because one member of it does not stand where it was
+                // chosen: the Dune Splicer burrows in ten tiles down.
+                None if sandstorm_spot => {
+                    let alive_count = |ty: u16| {
+                        npcs.iter()
+                            .filter(|(_, n)| n.npc_type == ty && n.is_alive())
+                            .count()
+                    };
+                    let (npc_type, drop) = sandstorm_pick(
+                        events.hard_mode,
+                        world.progress.downed_boss1,
+                        no_worms,
+                        world.tile(x, y + 1).block,
+                        &alive_count,
+                        rng,
+                    );
+                    out.push((npc_type, (x as f32 * 16.0, (y + drop) as f32 * 16.0)));
+                    break;
                 }
                 // The underworld arm's own first branch (`NPC.cs:4877`):
                 //
@@ -2473,6 +2828,61 @@ mod tests {
                 }
             }
         }
+        // The two desert chains, asked through their own producers for the same reason the sky and
+        // the pillars are: deleting an arm of one shows up here as a type that stopped being
+        // reachable, rather than as nothing at all. Both are sampled across every input that
+        // changes what they can answer - progression, the player's zone, whether burrowers are
+        // allowed, and (for the sandstorm) which sand is underfoot.
+        let mut desert = World::empty(800, 600, "roster");
+        desert.surface = 200;
+        desert.rock_layer = 300;
+        for seed in 0..400u64 {
+            for hard_mode in [false, true] {
+                for biome in [
+                    Biome::Forest,
+                    Biome::Corruption,
+                    Biome::Crimson,
+                    Biome::Hallow,
+                ] {
+                    for no_worms in [false, true] {
+                        // Two rows: one below `worldSurface + 100` where the worms are allowed, and
+                        // one above it where they are not.
+                        for spawn_y in [250, 350] {
+                            let mut rng = SmallRng::seed_from_u64(seed);
+                            set.insert(underground_desert_pick(
+                                &desert,
+                                spawn_y,
+                                hard_mode,
+                                biome,
+                                no_worms,
+                                &|_| 0,
+                                &mut rng,
+                            ));
+                        }
+                    }
+                }
+            }
+            for hard_mode in [false, true] {
+                for downed_boss1 in [false, true] {
+                    for no_worms in [false, true] {
+                        for ground in SAND_CONVERSION {
+                            let mut rng = SmallRng::seed_from_u64(seed);
+                            set.insert(
+                                sandstorm_pick(
+                                    hard_mode,
+                                    downed_boss1,
+                                    no_worms,
+                                    ground,
+                                    &|_| 0,
+                                    &mut rng,
+                                )
+                                .0,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
         set.extend(rescues::RESCUES.iter().map(|r| r.bound));
@@ -2575,6 +2985,7 @@ mod tests {
         EventSpawns {
             moon: None,
             eclipse: false,
+            sandstorm: false,
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
