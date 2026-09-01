@@ -2575,6 +2575,23 @@ pub const SOLAR_CRAWLTIPEDE_HEAD: u16 = 412;
 /// is a table rather than a count.
 pub const WYVERN_HEAD: u16 = 87;
 pub const WYVERN_SEGMENTS: [u16; 14] = [89, 88, 89, 89, 89, 89, 89, 89, 88, 89, 89, 90, 91, 92];
+
+/// The two desert worms, and the body, tail and inclusive segment range each grows for itself on its
+/// own first AI tick (`NPC.cs:51772-51794` for the Tomb Crawler, `:51796-51819` for the Dune
+/// Splicer, both `type == T && ai[0] == 0f`).
+///
+/// Same mechanism as [`WYVERN_HEAD`] and [`SOLAR_CRAWLTIPEDE_HEAD`], and out of [`worm_body`] for
+/// the same reason: both arrive from ambient underground-desert and sandstorm spawning, which no
+/// spawn-time path sees. Unlike those two the count is rolled rather than fixed, so the range comes
+/// back and the caller draws inside it: `Main.rand.Next(12, 21)` and `Main.rand.Next(6, 10)`, whose
+/// upper bounds are exclusive in the game and inclusive here.
+pub fn self_growing_sand_worm(head_type: u16) -> Option<(u16, u16, usize, usize)> {
+    match head_type {
+        510 => Some((511, 512, 12, 20)), // DuneSplicer
+        513 => Some((514, 515, 6, 9)),   // TombCrawler
+        _ => None,
+    }
+}
 pub const SOLAR_CRAWLTIPEDE_BODY: u16 = 413;
 pub const SOLAR_CRAWLTIPEDE_TAIL: u16 = 414;
 pub const SOLAR_CRAWLTIPEDE_SEGMENTS: usize = 30;
