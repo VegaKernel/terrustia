@@ -120,6 +120,19 @@ pub struct World {
     /// A solar eclipse: a daytime event, and the only time Mothron and its brood appear.
     pub eclipse: bool,
     pub moon_phase: u8,
+    /// `Main.halloween` and `Main.xMas`: the real-world calendar, not world state.
+    ///
+    /// Neither is saved, seeded or sent: the game recomputes both from the wall clock every dawn
+    /// (`Main.cs:66375-66376`) and a client does the same for itself on receiving world data
+    /// (`MessageBuffer.cs:660-661`). They are held here because that is what `Main` does with them
+    /// and because the ambient spawner reads them alongside every other world flag.
+    ///
+    /// Deliberately left `false` by every constructor rather than read from the clock there:
+    /// [`Self::refresh_calendar`] is called from the server's own boot and dawn, so a test that
+    /// builds a `World` gets the same answer in October as in June. See
+    /// [`crate::world::calendar`] for the date rules and the one disclosed narrowing (UTC).
+    pub halloween: bool,
+    pub xmas: bool,
     /// Whether it is raining, how long the shower has left, and how hard it is coming down.
     ///
     /// Rain is not only weather: it changes which town NPCs will go outside, and several routines
@@ -295,6 +308,8 @@ impl World {
             blood_moon: false,
             eclipse: false,
             moon_phase: 0,
+            halloween: false,
+            xmas: false,
             dungeon_x: None,
             dungeon_y: None,
             pumpkin_moon: false,
@@ -786,6 +801,18 @@ impl World {
         }
     }
 
+    /// Re-read the real-world calendar, as `Main.checkXMas`/`Main.checkHalloween` do
+    /// (`Main.cs:66375-66376`, the dawn block; `WorldGen.cs:6906-6907` and `:11267-11268` on load
+    /// and generation).
+    ///
+    /// One clock read per in-game dawn, which is once every twenty-four real minutes at the default
+    /// time rate, so nothing on the tick path pays for it.
+    pub fn refresh_calendar(&mut self) {
+        let (month, day) = super::calendar::today();
+        self.halloween = super::calendar::is_halloween(month, day);
+        self.xmas = super::calendar::is_xmas(month, day);
+    }
+
     /// Build the packet `7` payload describing this world.
     ///
     /// The flag block is filled in from the world's own history rather than left blank. The client
@@ -1008,6 +1035,8 @@ mod persistence {
             dirty_sections,
             changed_since_snapshot,
             track_dirty,
+            halloween,
+            xmas,
         } = &world;
 
         let fates: &[(&str, Fate, &dyn std::fmt::Debug)] = &[
@@ -1097,6 +1126,12 @@ mod persistence {
             // them is not implemented here, so there is nothing meaningful to resume into yet.
             ("pumpkin_moon", Fate::Session, pumpkin_moon),
             ("snow_moon", Fate::Session, snow_moon),
+            // Halloween and Christmas are read off the wall clock, not out of the file: vanilla
+            // saves neither, and recomputes both from `DateTime.Now` on load, on generation and at
+            // every dawn (`Main.cs:66375-66376`). Saving them would be worse than useless, because
+            // a world stored in October would come back haunted in June.
+            ("halloween", Fate::Session, halloween),
+            ("xmas", Fate::Session, xmas),
             ("preserved", Fate::Session, &preserved.is_some()),
             ("dirty_sections", Fate::Session, &dirty_sections.marked),
             (

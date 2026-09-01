@@ -55,6 +55,7 @@ fn plain() -> Conditions {
         behind_a_house_wall: false,
         active_players: 1,
         in_tower_zone: false,
+        graveyard: false,
     }
 }
 

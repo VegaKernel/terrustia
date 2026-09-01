@@ -1232,6 +1232,11 @@ pub struct GameServer {
 
 impl GameServer {
     pub fn new(config: Config, mut world: World) -> Self {
+        // What day it is in the real world, which decides Halloween and Christmas. The game reads
+        // it here too, on load and on generation (`WorldGen.cs:6906-6907`, `:11267-11268`), not only
+        // at dawn: a server started on the thirty-first of October should be spawning Hoppin' Jacks
+        // that first night rather than waiting for the following morning.
+        world.refresh_calendar();
         // From here on, tile edits invalidate cached sections.
         world.start_tracking_changes();
         // A full snapshot now, while startup has no tick budget to blow, so the *first* real
