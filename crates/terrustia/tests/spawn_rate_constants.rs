@@ -54,6 +54,7 @@ fn plain() -> Conditions {
         downed_boss3: true,
         behind_a_house_wall: false,
         active_players: 1,
+        in_tower_zone: false,
     }
 }
 
@@ -363,6 +364,54 @@ fn a_moon_overrides_the_clamped_rate_with_a_flat_20() {
         "the override is absolute, not another multiplier"
     );
     assert_eq!(stacked.1, 5.0 * 3.2, "four players: 5 * (2 + 1.2)");
+}
+
+/// `NPC.cs:782-786`, the invasion override, which is what a lunar pillar's zone runs at:
+/// ```csharp
+/// if (invaders) {
+///     maxSpawns = (int)((double)defaultMaxSpawns * (2.0 + 0.3 * (double)numberOfActivePlayers));
+///     spawnRate = 20;
+/// }
+/// ```
+/// A tower zone sets `invaders` outright (`NPC.cs:404-409`), so this is the pillar fight's rate
+/// and there is no other. At the surrounding surface's ordinary 600 an escort of a hundred would
+/// take about an hour of real time per pillar, which is why the numbers here are the whole
+/// difference between a fight and an unbreakable shield.
+#[test]
+fn a_lunar_pillar_zone_overrides_the_rate_with_a_flat_20() {
+    let one = rates(
+        Conditions {
+            in_tower_zone: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(one.0, 20, "NPC.cs:785, spawnRate = 20 flat");
+    assert_eq!(one.1, 5.0 * 2.3, "NPC.cs:784, defaultMaxSpawns * (2 + 0.3)");
+
+    // ...and it wins over the daytime forest's own clamped 600 with four people standing in it.
+    let crowded = rates(
+        Conditions {
+            in_tower_zone: true,
+            active_players: 4,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(crowded.0, 20);
+    assert_eq!(crowded.1, 5.0 * 3.2, "four players: 5 * (2 + 1.2)");
+
+    // The town does not quiet a pillar fight: `NPC.cs:800`'s gate opens with `!invaders`, so three
+    // residents beside a tower cannot turn its escort into bunnies.
+    let (_, _, friendly) = rates(
+        Conditions {
+            in_tower_zone: true,
+            town_npcs: 3,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert!(!friendly, "NPC.cs:800, an event overrules the town");
 }
 
 /// `NPC.cs:591-595`, `NPC.cs:787-790`: the dungeon is busy, and before Skeletron it is relentless.

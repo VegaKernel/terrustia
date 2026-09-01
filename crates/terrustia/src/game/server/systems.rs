@@ -2272,6 +2272,7 @@ impl GameServer {
         self.note_army_kill(npc_type);
         self.note_moon_kill(npc_type);
         self.lunar.note_kill(npc_type);
+        self.split_on_death(npc_type, center);
         self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
         self.note_slime_rain_kill(npc_type, center);
@@ -2283,20 +2284,110 @@ impl GameServer {
     /// centre; ours is a top-left, so the new head's own size comes back off it.
     fn free_the_golem_head(&mut self, bottom: (f32, f32), body: Option<u8>) {
         let npc_type = terrustia_proto::npc_params::GOLEM_HEAD_FREE;
-        let Some(stats) = terrustia_proto::npc_data::npc_stats(npc_type) else {
-            return;
-        };
-        let at = (
-            bottom.0 - stats.width as f32 / 2.0,
-            bottom.1 - stats.height as f32,
-        );
-        let Some(index) = self.npcs.spawn(npc_type, at) else {
+        let Some(index) = self.spawn_at_bottom(npc_type, bottom) else {
             return;
         };
         if let Some(npc) = self.npcs.get_mut(index) {
             npc.follows_boss = body;
         }
         self.broadcast_npc(index);
+    }
+
+    /// The two lunar minions that leave something behind when they die.
+    ///
+    /// * The Stardust Cell (`NPC.cs:84381-84403`): a big cell (405) bursts into up to four small
+    ///   ones (406), fewer the more of them are already about.
+    /// * The Vortex Hornet Queen (`NPC.cs:83981-83994`): a queen (426) leaves three larvae (428)
+    ///   behind, unless the swarm is already twenty strong.
+    ///
+    /// Neither child appears anywhere in vanilla's ambient spawning, so a split is the only way
+    /// either one is ever seen at all. Neither counts toward a pillar's shield either: the game's
+    /// own credit lists (`NPC.cs:80095-80136`, which [`crate::game::lunar::belongs_to`]
+    /// transcribes) name 425-427 and 429 for the Vortex and 402/405/407/409/411 for the Stardust,
+    /// and exclude both children.
+    ///
+    /// Both counts include the NPC that is dying. Vanilla runs `HitEffect` from `StrikeNPC`
+    /// (`NPC.cs:82325`) while it is still `active`, so its own `CountNPCS` sees it; here
+    /// [`Self::npc_died`] has already taken it out of the store, so it is added back by hand.
+    fn split_on_death(&mut self, npc_type: u16, center: (f32, f32)) {
+        use rand::Rng;
+
+        let count = |server: &Self, ty: u16| {
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == ty && n.is_alive())
+                .count()
+        };
+        let Some(parent) = terrustia_proto::npc_data::npc_stats(npc_type) else {
+            return;
+        };
+
+        match npc_type {
+            // `NPC.cs:84381-84403`.
+            405 => {
+                let about = count(self, 406) + count(self, 405) + 1;
+                let children = match about {
+                    0..=3 => 4,
+                    4..=6 => 3,
+                    7..=9 => 2,
+                    _ => 1,
+                };
+                // `NewNPC(Center.X, Bottom.Y, 406)`.
+                let from = (center.0, center.1 + parent.height as f32 / 2.0);
+                for _ in 0..children {
+                    // `Vector2.UnitY.RotatedByRandom(2pi) * (3f + rand.NextFloat() * 4f)`.
+                    let angle = self.rng.random_range(0.0..std::f32::consts::TAU);
+                    let speed = 3.0 + self.rng.random::<f32>() * 4.0;
+                    self.spawn_split(406, from, (-angle.sin() * speed, angle.cos() * speed));
+                }
+            }
+            // `NPC.cs:83981-83994`.
+            426 => {
+                let swarm = count(self, 428) + count(self, 427) + (count(self, 426) + 1) * 3;
+                if swarm >= 20 {
+                    return;
+                }
+                // `NewNPC(Center.X, Center.Y, 428)`, three of them.
+                for _ in 0..3 {
+                    // `-Vector2.UnitY.RotatedByRandom(2pi) * rand.Next(3, 6) - Vector2.UnitY * 2f`.
+                    let angle = self.rng.random_range(0.0..std::f32::consts::TAU);
+                    let speed = self.rng.random_range(3..6) as f32;
+                    self.spawn_split(
+                        428,
+                        center,
+                        (angle.sin() * speed, -angle.cos() * speed - 2.0),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// One child of a split, thrown clear of where its parent died.
+    fn spawn_split(&mut self, npc_type: u16, bottom: (f32, f32), velocity: (f32, f32)) {
+        let Some(index) = self.spawn_at_bottom(npc_type, bottom) else {
+            return;
+        };
+        if let Some(child) = self.npcs.get_mut(index) {
+            child.velocity = velocity;
+            child.dirty = true;
+        }
+        self.broadcast_npc(index);
+    }
+
+    /// `NewNPC`'s own placement: its argument is a bottom centre, while [`NpcStore::spawn`] takes a
+    /// top-left, so the new NPC's own size comes back off it. Not broadcast, because both callers
+    /// have a field to set on it first.
+    fn spawn_at_bottom(&mut self, npc_type: u16, bottom: (f32, f32)) -> Option<u8> {
+        let stats = terrustia_proto::npc_data::npc_stats(npc_type)?;
+        self.npcs.spawn(
+            npc_type,
+            (
+                bottom.0 - stats.width as f32 / 2.0,
+                bottom.1 - stats.height as f32,
+            ),
+        )
     }
 
     /// `DoDeathEvents_AdvanceSlimeRain`. Advances the kill count while a rain is up and, once the
@@ -3943,6 +4034,31 @@ impl GameServer {
         } else if clouds_changed {
             self.broadcast_world_data();
         }
+    }
+
+    /// Where each pillar that is still standing is, in [`crate::game::lunar::PILLARS`] order.
+    ///
+    /// What a real client's `SceneMetrics.ScanNPCPositions` keeps (`SceneMetrics.cs:734-751`), and
+    /// the only thing the spawn path needs in order to know it is inside a tower zone. Gathered
+    /// once a tick, and only while the event is up: with no apocalypse running this is four
+    /// `None`s and no pass over the NPC store at all.
+    pub(super) fn standing_pillars(&self) -> [Option<(f32, f32)>; 4] {
+        let mut at = [None; 4];
+        if !self.lunar.up {
+            return at;
+        }
+        for (_, npc) in self.npcs.iter() {
+            if !npc.is_alive() {
+                continue;
+            }
+            if let Some(slot) = crate::game::lunar::PILLARS
+                .iter()
+                .position(|p| *p == npc.npc_type)
+            {
+                at[slot] = Some(npc.center());
+            }
+        }
+        at
     }
 
     /// One tick of the Lunar Apocalypse: the pillars' shields, and the minute after the last one.
@@ -5859,6 +5975,11 @@ impl GameServer {
                 || self.npcs.iter().any(|(_, n)| n.stats.boss && n.is_alive()),
             census: &count,
             cavern_monsters: self.cavern_monsters,
+            // Where the four pillars are, gathered once a tick and only while the event is up, so
+            // the zone test on the spawn path is four distance comparisons per player rather than
+            // another pass over the store. `SceneMetrics.ScanNPCPositions` does the same job on a
+            // real client (`SceneMetrics.cs:734-751`).
+            towers: self.standing_pillars(),
         };
         self.player_biomes.advance(self.ticks);
         let spawned = spawn::try_spawn(
@@ -6508,6 +6629,153 @@ impl GameServer {
         let index = self.take_item_slot(item, position)?;
         self.broadcast_item(index);
         Some(index)
+    }
+}
+
+/// The pillar fight, from the far side of the spawn path: a kill counts against one shield and one
+/// only, and the pillar it belongs to is the only one that becomes hittable.
+#[cfg(test)]
+mod lunar_pillar_fight {
+    use super::*;
+    use crate::config::Config;
+    use crate::game::lunar::{self, PILLARS, SHIELD_STRENGTH};
+
+    /// The Solar Solenian: solar escort, no worm body, and nothing splits off it.
+    const SOLENIAN: u16 = 419;
+
+    fn arena() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(500, 300, "pillar fight probe"),
+        )
+    }
+
+    /// Kill one of a type, through the server's own death path rather than by poking the state.
+    fn kill(server: &mut GameServer, npc_type: u16) {
+        let index = server
+            .npcs
+            .spawn(npc_type, (2000.0, 2000.0))
+            .expect("a free NPC slot");
+        let center = server.npcs.get(index).expect("just spawned").center();
+        server.npc_died(index, npc_type, center, 0.0);
+    }
+
+    fn alive(server: &GameServer, npc_type: u16) -> usize {
+        server
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.npc_type == npc_type && n.is_alive())
+            .count()
+    }
+
+    fn invulnerable(server: &GameServer, pillar: u16) -> bool {
+        server
+            .npcs
+            .iter()
+            .find(|(_, n)| n.npc_type == pillar)
+            .map(|(_, n)| n.invulnerable)
+            .expect("the pillar should still be standing")
+    }
+
+    /// A hundred kills clear the tower those kills belonged to, and leave the other three exactly
+    /// as they were. `NPC.cs:80095-80136` is the game's own credit list, and it is per pillar.
+    ///
+    /// Neutralised by deleting `self.lunar.note_kill(npc_type)` from `npc_died`: the solar shield
+    /// stays at its full hundred and the first assertion after the kills fails.
+    #[test]
+    fn clearing_one_escort_drops_only_its_own_pillars_shield() {
+        let mut server = arena();
+        server.trigger_lunar_apocalypse();
+        for pillar in PILLARS {
+            assert_eq!(server.lunar.shield_of(pillar), SHIELD_STRENGTH);
+        }
+
+        for _ in 0..SHIELD_STRENGTH {
+            kill(&mut server, SOLENIAN);
+        }
+
+        assert_eq!(server.lunar.shield_of(lunar::SOLAR), 0);
+        for pillar in [lunar::VORTEX, lunar::NEBULA, lunar::STARDUST] {
+            assert_eq!(
+                server.lunar.shield_of(pillar),
+                SHIELD_STRENGTH,
+                "pillar {pillar}'s shield moved for a kill that was not its own",
+            );
+        }
+    }
+
+    /// ...and only then does that pillar take damage. The shield is not a health bar, it is the
+    /// gate on the health bar (`ai/hardmode/pillar.rs`, `NPC.cs:39492`).
+    ///
+    /// Neutralised by deleting the `pillar.shield = shield` write from `tick_lunar`: the pillar's
+    /// own copy of the count stays at whatever it was raised with, its routine keeps
+    /// `invulnerable` set, and the "the solar pillar should be hittable now" assertion fails.
+    #[test]
+    fn a_pillar_becomes_damageable_only_once_its_own_escort_is_gone() {
+        let mut server = arena();
+        server.trigger_lunar_apocalypse();
+        server.tick_lunar();
+        server.tick_npcs();
+        for pillar in PILLARS {
+            assert!(
+                invulnerable(&server, pillar),
+                "pillar {pillar} was hittable with its shield up",
+            );
+        }
+
+        for _ in 0..SHIELD_STRENGTH {
+            kill(&mut server, SOLENIAN);
+        }
+        server.tick_lunar();
+        server.tick_npcs();
+
+        assert!(
+            !invulnerable(&server, lunar::SOLAR),
+            "the solar pillar should be hittable now its escort is dead",
+        );
+        for pillar in [lunar::VORTEX, lunar::NEBULA, lunar::STARDUST] {
+            assert!(
+                invulnerable(&server, pillar),
+                "pillar {pillar} became hittable off somebody else's kills",
+            );
+        }
+    }
+
+    /// The two escorts that leave something behind, and the caps that stop a burst becoming a
+    /// swarm: `NPC.cs:84381-84403` and `NPC.cs:83981-83994`.
+    ///
+    /// Neutralised by deleting `self.split_on_death(npc_type, center)` from `npc_died`: nothing is
+    /// left behind by either death and the first count in each half reads zero.
+    #[test]
+    fn a_stardust_cell_bursts_and_a_hornet_queen_leaves_larvae() {
+        let mut server = arena();
+
+        // `num172` counts 406 and 405 including the cell that is dying, so the first burst sees
+        // one and gives the full four.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 4, "the first cell should give four");
+        // Five about: 4 -> three more.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 7);
+        // Eight about: 7 -> two more.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 9);
+        // Ten about: 10 -> one more, and every burst after this is one.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 10);
+
+        let mut server = arena();
+        // `num137` is `CountNPCS(428) + CountNPCS(427) + CountNPCS(426) * 3`, again counting the
+        // queen that is dying, so the first death is three against a threshold of twenty.
+        kill(&mut server, 426);
+        assert_eq!(alive(&server, 428), 3, "a queen should leave three larvae");
+        for _ in 0..5 {
+            kill(&mut server, 426);
+        }
+        assert_eq!(alive(&server, 428), 18, "six queens, three larvae each");
+        // The seventh finds the swarm at twenty-one and leaves nothing.
+        kill(&mut server, 426);
+        assert_eq!(alive(&server, 428), 18, "the swarm is capped at twenty");
     }
 }
 

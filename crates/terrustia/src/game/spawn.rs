@@ -79,6 +79,15 @@ pub struct Conditions {
     pub behind_a_house_wall: bool,
     /// `numberOfActivePlayers` (`NPC.cs:266`), which the moon override's cap is a function of.
     pub active_players: u32,
+    /// Whether the player is standing inside a lunar pillar's zone.
+    ///
+    /// This is vanilla's `invaders`, not a flag of its own: `SetSpawnFlags` (`NPC.cs:404-409`)
+    /// forces `invaders = true` and `ignoreSafeWalls = true` for any of the four `ZoneTower*`,
+    /// which is what gives a pillar fight an invasion's rate and cap (`NPC.cs:782-786`) and lets
+    /// its escort spawn through a walled-off arena. Named for the zone rather than for `invaders`
+    /// because the server's own invasions never reach this function: `tick_spawning` returns into
+    /// `spawn_invaders` before it.
+    pub in_tower_zone: bool,
 }
 
 /// Which rate band a *player* is in, which is not the same question [`depth_at`] answers.
@@ -247,6 +256,16 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
         rate = 20.0;
     }
 
+    // `NPC.cs:782-786`, the invasion override, and the only rate a pillar fight ever runs at: a
+    // tower zone sets `invaders` outright (`NPC.cs:404-409`), so the numbers are the moon
+    // override's exactly. Without it a pillar's escort would arrive at the surrounding terrain's
+    // ordinary rate, which is 30 times slower than the game's and would leave a hundred-kill
+    // shield unbreakable in practice as well as in principle.
+    if at.in_tower_zone {
+        max = MAX_SPAWNS * (2.0 + 0.3 * at.active_players as f32);
+        rate = 20.0;
+    }
+
     // `NPC.cs:787-790`: below the dungeon before Skeletron falls, the rate is a flat 10, which is
     // the pressure that makes early-dungeon farming impractical. The Dungeon Guardian this pairs
     // with landed in PR #32; the rate did not, so it arrived every 240 to 600 ticks instead.
@@ -346,11 +365,14 @@ pub fn no_worms(at: Conditions) -> bool {
 /// Note the moon here is tested with **no** height condition, unlike the two rate branches: a
 /// player underground during a pumpkin moon still has town suppression switched off.
 ///
-/// Three of the game's exclusions are dropped, each because the thing they test does not exist
-/// here: `invaders` (invasions do not route through this function), `ZoneMeteor` and
+/// `invaders` is real here for one case only, and it is the pillar fight: a tower zone sets it
+/// (`NPC.cs:404-409`), and this server's own invasions never reach this function at all, because
+/// `tick_spawning` returns into `spawn_invaders` before it. Two of the game's exclusions are still
+/// dropped, each because the thing they test does not exist here: `ZoneMeteor` and
 /// `ZoneOldOneArmy`. `Main.infectedSeed`, which would clear `flag` again, is likewise unmodelled.
 fn town_suppression_applies(at: Conditions) -> bool {
-    ((!at.blood_moon && !at.event_moon) || at.day_time)
+    !at.in_tower_zone
+        && ((!at.blood_moon && !at.event_moon) || at.day_time)
         && (!at.eclipse || !at.day_time)
         && !matches!(at.biome, Biome::Corruption | Biome::Crimson)
 }
@@ -395,6 +417,7 @@ mod rate_tests {
             downed_boss3: true,
             behind_a_house_wall: false,
             active_players: 1,
+            in_tower_zone: false,
         }
     }
 
@@ -1567,6 +1590,15 @@ pub struct EventSpawns<'a> {
     /// six of the thirteen from its own id. Two worlds therefore feel different underground, and
     /// a player who knows theirs has Salamanders and no Crawdads is right about that permanently.
     pub cavern_monsters: crate::game::cavern_monsters::CavernMonsters,
+    /// Where each lunar pillar that is still standing is, in [`crate::game::lunar::PILLARS`] order.
+    ///
+    /// Vanilla decides a tower zone on the client, in `SceneMetrics`: `ScanNPCPositions`
+    /// (`SceneMetrics.cs:734-751`) keeps the nearest live NPC of every type, and each
+    /// `CloseEnoughTo*Tower` (`SceneMetrics.cs:276-282`) is `WithinRangeOfNPC(<pillar>,
+    /// NPCEventZoneRadius)` against it. The caller gathers the four positions once a tick, and only
+    /// while the event is up, so the test in [`Self::tower_zone`] is four distance comparisons per
+    /// player rather than another pass over the NPC store on the spawn path.
+    pub towers: [Option<(f32, f32)>; 4],
 }
 
 impl EventSpawns<'_> {
@@ -1574,6 +1606,106 @@ impl EventSpawns<'_> {
     fn running(&self) -> bool {
         self.moon.is_some() || self.eclipse
     }
+
+    /// Which pillar's zone a point is inside, if any.
+    ///
+    /// The order is vanilla's own `else if` chain (Nebula, Vortex, Stardust, Solar:
+    /// `NPC.cs:1297`, `:1321`, `:1347`, `:1356`), so two overlapping zones resolve the way the
+    /// game resolves them rather than by whichever pillar happens to be nearer.
+    fn tower_zone(&self, at: (f32, f32)) -> Option<u16> {
+        use crate::game::lunar;
+
+        /// `SceneMetrics.NPCEventZoneRadius` (`SceneMetrics.cs:130`), in pixels.
+        const RADIUS: f32 = 4000.0;
+        const ORDER: [u16; 4] = [lunar::NEBULA, lunar::VORTEX, lunar::STARDUST, lunar::SOLAR];
+
+        ORDER.into_iter().find(|&pillar| {
+            lunar::PILLARS
+                .iter()
+                .position(|p| *p == pillar)
+                .and_then(|slot| self.towers[slot])
+                // `WithinRangeOfNPC` (`SceneMetrics.cs:912-920`) compares squared distances.
+                .is_some_and(|(x, y)| {
+                    let (dx, dy) = (x - at.0, y - at.1);
+                    dx * dx + dy * dy <= RADIUS * RADIUS
+                })
+        })
+    }
+}
+
+/// What a lunar pillar's zone spawns, and nothing else spawns there: `NPC.cs:1297-1372`.
+///
+/// Each arm is a `Utils.SelectRandom` list, which is a uniform draw over the array
+/// (`Utils.cs:2628-2631`), so a repeated id is that id's weight. Three of the four then sit inside
+/// a `while` that re-rolls whenever the type drawn is already at its own live cap, `CountNPCS`
+/// being `alive` here; the Stardust arm has no such loop at all.
+///
+/// The bound on the loop is ours. Vanilla's `while` is unbounded and cannot hang, because every
+/// list has at least one entry with no cap on it (`427` for Vortex, `421` for Nebula, `417` and
+/// friends for Solar); the bound is so a future edit to one of these tables cannot spin a tick
+/// instead of failing. `None` means the roster was capped out, and the attempt is dropped.
+pub fn tower_pool(pillar: u16, alive: &dyn Fn(u16) -> usize, rng: &mut SmallRng) -> Option<u16> {
+    use crate::game::lunar;
+
+    /// Nebula Soldier, Nebula Beast, Nebula Headcrab, Nebula Brain (`NPC.cs:1302`).
+    const NEBULA: [u16; 11] = [424, 424, 424, 423, 423, 423, 421, 421, 421, 420, 420];
+    /// Vortex Soldier, Vortex Hornet, Vortex Rifleman, Vortex Hornet Queen (`NPC.cs:1328`).
+    const VORTEX: [u16; 9] = [429, 429, 429, 429, 427, 427, 425, 425, 426];
+    /// Stardust Soldier, Spider, Jellyfish, Worm, Cell (`NPC.cs:1349`).
+    const STARDUST: [u16; 8] = [411, 411, 411, 409, 409, 407, 402, 405];
+    /// Solar Spearman, Solenian, Corite, Crawltipede, Sroller, Drakomire Rider, Drakomire
+    /// (`NPC.cs:1364`).
+    const SOLAR: [u16; 7] = [518, 419, 418, 412, 417, 416, 415];
+    /// What half of the Corite draws become instead (`NPC.cs:1368`).
+    const SOLAR_INSTEAD_OF_CORITE: [u16; 4] = [415, 416, 419, 417];
+    /// How many re-rolls before the roster is called capped out. See this function's own doc.
+    const ATTEMPTS: usize = 64;
+
+    let pick = |list: &[u16], rng: &mut SmallRng| list[rng.random_range(0..list.len())];
+
+    for _ in 0..ATTEMPTS {
+        let drawn = match pillar {
+            // `NPC.cs:1297-1319`.
+            lunar::NEBULA => {
+                let num = pick(&NEBULA, rng);
+                if (num == 424 && alive(424) >= 3)
+                    || (num == 423 && alive(423) >= 3)
+                    || (num == 420 && alive(420) >= 3)
+                {
+                    continue;
+                }
+                num
+            }
+            // `NPC.cs:1321-1345`.
+            lunar::VORTEX => {
+                let num = pick(&VORTEX, rng);
+                if (num == 425 && alive(425) >= 3)
+                    || (num == 426 && alive(426) >= 3)
+                    || (num == 429 && alive(429) >= 4)
+                {
+                    continue;
+                }
+                num
+            }
+            // `NPC.cs:1347-1354`: one draw, no cap, no loop.
+            lunar::STARDUST => pick(&STARDUST, rng),
+            // `NPC.cs:1356-1372`. The Corite is re-drawn on a coin flip *inside* the loop, so a
+            // re-draw that lands on a capped type re-rolls the whole thing, as the game's does.
+            lunar::SOLAR => {
+                let mut num = pick(&SOLAR, rng);
+                if num == 418 && rng.random_range(0..2) == 0 {
+                    num = pick(&SOLAR_INSTEAD_OF_CORITE, rng);
+                }
+                if (num == 518 && alive(518) >= 2) || (num == 412 && alive(412) >= 1) {
+                    continue;
+                }
+                num
+            }
+            _ => return None,
+        };
+        return Some(drawn);
+    }
+    None
 }
 
 /// How many townsfolk are close enough to a point to quiet it down.
@@ -1876,6 +2008,10 @@ pub fn try_spawn(
             continue;
         }
 
+        // Which pillar's zone this player is standing in, if any. Four distance comparisons
+        // against positions the caller already gathered, so nothing here walks the NPC store.
+        let tower = events.tower_zone(player_centre);
+
         // Journey mode's `SpawnRate`, gated on the world's own difficulty being literally
         // Journey (`Main.IsJourneyMode` — every one of its five real vanilla call sites checks
         // this before reading the power at all; the power itself has no effect outside a Journey
@@ -1933,6 +2069,7 @@ pub fn try_spawn(
             // `NPC.cs:411`, read at the player's own tile.
             behind_a_house_wall: terrustia_proto::housing::wall_encloses(world.tile(px, py).wall),
             active_players,
+            in_tower_zone: tower.is_some(),
         };
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
@@ -1971,14 +2108,15 @@ pub fn try_spawn(
             //
             // `wall_encloses` is `Main.wallHouse` exactly (all 279 ids, `Main.cs:9880-10745`), which
             // is why housing and spawn suppression agree about what a wall is: the same set decides
-            // both, in the game and here. `ignoreSafeWalls` is set only inside a lunar pillar's zone
-            // (`NPC.cs:404-409`), an event this server does not field, so it is left out rather than
-            // threaded through as a constant `false`.
+            // both, in the game and here. `ignoreSafeWalls` is exactly one thing: standing inside a
+            // lunar pillar's zone (`NPC.cs:404-409`), where a walled arena does not keep the
+            // escort out. It has to be honoured, or a player could simply wall the pillar in and
+            // stand there while a shield that only falls to kills never moved.
             //
             // Without this test, a fully walled and fully lit base spawned zombies inside itself.
             let chosen = world.tile(x, from_y);
             if (chosen.is_active() && solid(chosen.block))
-                || terrustia_proto::housing::wall_encloses(chosen.wall)
+                || (tower.is_none() && terrustia_proto::housing::wall_encloses(chosen.wall))
             {
                 continue;
             }
@@ -1990,8 +2128,12 @@ pub fn try_spawn(
             // and the Wyvern were unreachable in this server outright.
             //
             // A friendly attempt is excluded by the game at the same point it decides this, so it
-            // is excluded here too: `!spawnFriendly` is part of both `skyMob` branches.
-            let sky = !spawn_friendly && sky_tile(world, x, from_y, events.hard_mode, rng);
+            // is excluded here too: `!spawnFriendly` is part of both `skyMob` branches. So is
+            // `!invaders` (`NPC.cs:981`, `:983`), which is why a tower zone never reaches the sky
+            // and its escort always walks down to ground.
+            let sky = tower.is_none()
+                && !spawn_friendly
+                && sky_tile(world, x, from_y, events.hard_mode, rng);
 
             // Drop to whatever ground is under the chosen point, then stand on top of it. The
             // descent stops at the bottom of the spawn box, as `NPC.cs:990-993` does, rather than a
@@ -2018,6 +2160,25 @@ pub fn try_spawn(
                 has_room(world, x, y)
             }) {
                 continue;
+            }
+
+            // A pillar's zone owns the spawn chain outright. Vanilla's four `ZoneTower*` arms sit
+            // at the head of `SpawnAnNPC`'s `else if` chain (`NPC.cs:1297-1372`), ahead of the sky,
+            // the invasions, the water, every biome and every moon, so inside a zone the only
+            // things that appear are that pillar's own escort. This is the whole lunar event: the
+            // shield is a count of escort killed (`game/lunar.rs`), so with nothing spawning the
+            // four pillars could not be damaged at all and the Moon Lord was unreachable.
+            if let Some(pillar) = tower {
+                let alive_count = |ty: u16| {
+                    npcs.iter()
+                        .filter(|(_, n)| n.npc_type == ty && n.is_alive())
+                        .count()
+                };
+                let Some(npc_type) = tower_pool(pillar, &alive_count, rng) else {
+                    continue;
+                };
+                out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                break;
             }
 
             let depth = depth_at(world, y);
@@ -2193,7 +2354,7 @@ mod tests {
     /// the admin `/spawn` command, boss summon items, the transformations one NPC undergoes on
     /// another's death, and the segments a worm head grows behind itself.
     fn ambient_roster() -> std::collections::BTreeSet<u16> {
-        use crate::game::{army, cavern_monsters, event::Invasion, moons, rescues};
+        use crate::game::{army, cavern_monsters, event::Invasion, lunar, moons, rescues};
 
         let mut set = std::collections::BTreeSet::new();
         const DEPTHS: [Depth; 4] = [
@@ -2256,6 +2417,16 @@ mod tests {
         // King Slime arrives on his own during a slime rain, which nothing else summons.
         set.insert(crate::game::slime_rain::KING_SLIME);
 
+        // The four lunar pillar zones, asked through their own producer for the same reason the
+        // sky is asked through its own chain: deleting an arm of one shows up here as a type that
+        // stopped being reachable.
+        for pillar in lunar::PILLARS {
+            for seed in 0..200u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.extend(tower_pool(pillar, &|_| 0, &mut rng));
+            }
+        }
+
         // The rosters that already carry a membership test are read through it, which is exact
         // where sampling their spawn functions would only be likely.
         //
@@ -2264,13 +2435,11 @@ mod tests {
         // `moons::moon_spawn` in `spawn_at`, invasions through the invasion spawner, and the Old
         // One's Army through `apply_army`.
         //
-        // `lunar::belongs_to` was here too and has been removed, because it has no such path.
-        // It exists to classify a kill (`Lunar::note_kill`, which drops a pillar's shield) and to
-        // decide what despawns when the event ends. Nothing spawns a pillar minion at all: vanilla
-        // does it from `NPC.Spawner`'s four `ZoneTower*` arms (`NPC.cs:1357+`) and this server has
-        // no equivalent. Counting the membership table as reachability made the emptiest fight in
-        // the game invisible to the one tool built to find exactly that, and hid twenty-odd types
-        // from the gap ledger.
+        // `lunar::belongs_to` was here too and stays out, however reachable the pillar escort has
+        // since become. It exists to classify a kill (`Lunar::note_kill`, which drops a pillar's
+        // shield) and to decide what despawns when the event ends, and counting it as reachability
+        // made the emptiest fight in the game invisible to the one tool built to find exactly that.
+        // The escort is above, drawn from [`tower_pool`], which is what actually spawns it.
         for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
             if moons::moon_points(npc_type) > 0
                 || army::belongs(npc_type)
@@ -2341,6 +2510,7 @@ mod tests {
             downed_mech_any: false,
             census: &|_| 0,
             cavern_monsters: crate::game::cavern_monsters::CavernMonsters::for_world(7),
+            towers: [None; 4],
         }
     }
     use crate::world::worldgen;
@@ -3592,6 +3762,166 @@ mod tests {
                 "the sea drew {npc_type} ({}), which is not in its water roster",
                 stats.name,
             );
+        }
+    }
+
+    /// A flat world with a floor to stand on, for the tower-zone tests below.
+    fn flat_world(floor: i32) -> World {
+        let mut world = World::empty(800, 600, "pillar arena");
+        world.surface = 100;
+        world.rock_layer = 200;
+        for x in 0..world.width() {
+            for y in floor..(floor + 4) {
+                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+        world
+    }
+
+    /// Everything a pillar standing `offset` pixels from the player draws over `ticks` attempts.
+    fn tower_spawns(
+        world: &World,
+        pillar: u16,
+        at: (i32, i32),
+        offset: f32,
+        ticks: u32,
+    ) -> Vec<u16> {
+        let mut towers = [None; 4];
+        let slot = crate::game::lunar::PILLARS
+            .iter()
+            .position(|p| *p == pillar)
+            .expect("a real pillar");
+        towers[slot] = Some((at.0 as f32 * 16.0 + offset, at.1 as f32 * 16.0));
+
+        let events = EventSpawns {
+            hard_mode: true,
+            towers,
+            ..quiet()
+        };
+        let npcs = NpcStore::new();
+        let players = player_at((at.0 as f32 * 16.0, at.1 as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(0x10_0000 + u64::from(pillar));
+        let mut biomes = BiomeCache::default();
+        let mut seen = Vec::new();
+        for _ in 0..ticks {
+            seen.extend(
+                try_spawn(
+                    world,
+                    &npcs,
+                    &players,
+                    &events,
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                )
+                .into_iter()
+                .map(|(npc_type, _)| npc_type),
+            );
+        }
+        seen
+    }
+
+    /// Inside a pillar's zone, that pillar's escort is the only thing the world produces, and
+    /// outside it none of the escort appears at all.
+    ///
+    /// This is the whole Lunar Apocalypse. A pillar's shield is a count of its own escort killed
+    /// (`game/lunar.rs`) and a pillar takes no damage while the shield holds, so with nothing
+    /// spawning the four towers were indestructible and the Moon Lord unreachable.
+    ///
+    /// Neutralised by deleting the `if let Some(pillar) = tower` arm from `try_spawn`'s candidate
+    /// loop: every zone then draws the surface forest roster instead and the first assertion in
+    /// each arm fails on a Zombie.
+    #[test]
+    fn a_pillar_zone_spawns_its_own_escort_and_nothing_else() {
+        use crate::game::lunar;
+
+        let floor = 150;
+        let world = flat_world(floor);
+        let at = (400, floor - 2);
+
+        // The four rosters, `NPC.cs:1302`, `:1328`, `:1349`, `:1364`, as sets.
+        let rosters: [(u16, &[u16]); 4] = [
+            (lunar::NEBULA, &[420, 421, 423, 424]),
+            (lunar::VORTEX, &[425, 426, 427, 429]),
+            (lunar::STARDUST, &[402, 405, 407, 409, 411]),
+            (lunar::SOLAR, &[412, 415, 416, 417, 418, 419, 518]),
+        ];
+
+        for (pillar, roster) in rosters {
+            let seen = tower_spawns(&world, pillar, at, 0.0, 4_000);
+            assert!(
+                !seen.is_empty(),
+                "pillar {pillar} spawned nothing at all in four thousand ticks",
+            );
+            for npc_type in &seen {
+                assert!(
+                    roster.contains(npc_type),
+                    "pillar {pillar}'s zone drew {npc_type}, which is not on its list",
+                );
+            }
+            // ...and every uncapped entry really is reachable, so a typo in one weight cannot
+            // quietly drop a type out of the fight.
+            let drawn: std::collections::BTreeSet<u16> = seen.into_iter().collect();
+            for npc_type in roster {
+                assert!(
+                    drawn.contains(npc_type),
+                    "pillar {pillar}'s zone never drew {npc_type} in four thousand ticks",
+                );
+            }
+        }
+
+        // `SceneMetrics.NPCEventZoneRadius` is 4000 px (`SceneMetrics.cs:130`), so a pillar half a
+        // world away is not a zone: the ordinary surface roster answers instead.
+        let far = tower_spawns(&world, lunar::SOLAR, at, 5_000.0, 4_000);
+        assert!(!far.is_empty(), "the ordinary world stopped spawning too");
+        for npc_type in &far {
+            assert!(
+                lunar::belongs_to(*npc_type).is_none(),
+                "{npc_type} spawned five thousand pixels from its pillar",
+            );
+        }
+    }
+
+    /// What the tower-zone test costs on the spawn path, which runs once per player per tick.
+    ///
+    /// It is deliberately not a scan: a real client works its zone out in `SceneMetrics` by walking
+    /// every NPC (`SceneMetrics.cs:734-751`), and doing that here would be another pass over the
+    /// store per player per tick on top of the biome scan that already had to be cached to fit.
+    /// Instead the caller gathers the four positions once, only while the event is up, and this is
+    /// four distance comparisons against a stack array. On an M-series laptop, with the arguments
+    /// behind a `black_box` so the loop cannot be hoisted (which costs more than the test itself
+    /// does): 1.0 ns with no apocalypse running, which is almost always, 1.4 ns with all four
+    /// standing and no zone matched, 1.0 ns standing inside one. At the 255-player bar the worst
+    /// case is 0.4 us of a 16.67 ms tick, which is 0.002% of it.
+    #[test]
+    #[ignore]
+    fn measure_the_tower_zone_test() {
+        use crate::game::lunar;
+
+        let none = quiet();
+        let mut far = quiet();
+        far.towers = [Some((900_000.0, 900_000.0)); 4];
+        let mut inside = quiet();
+        let slot = lunar::PILLARS
+            .iter()
+            .position(|p| *p == lunar::SOLAR)
+            .expect("a real pillar");
+        inside.towers[slot] = Some((1_000.0, 1_000.0));
+
+        for (name, events) in [
+            ("no apocalypse", &none),
+            ("four standing, out of range", &far),
+            ("inside the solar zone", &inside),
+        ] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                let at = std::hint::black_box((1_000.0 + (i % 4) as f32, 1_000.0));
+                sink += u32::from(std::hint::black_box(events).tower_zone(at).unwrap_or(0));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("{name}: {each:.2} ns/test (sink {sink})");
         }
     }
 
