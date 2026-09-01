@@ -539,6 +539,76 @@ mod rate_tests {
         assert!(blood_cap > rates(plain(), &mut any_rng()).1);
     }
 
+    /// A meteor crater is busier than the ground it fell on, and a town cannot quiet it.
+    ///
+    /// Two vanilla lines, and they pull the same way: `NPC.cs:636-640` is the last arm of the zone
+    /// rate chain (`spawnRate * 0.4`, `maxSpawns * 1.1`), and `NPC.cs:800` names `!ZoneMeteor` among
+    /// the exclusions on the whole town-suppression block, alongside the evils. Building a house on
+    /// a crater is not meant to make it safe.
+    ///
+    /// Neutralised twice, each failing its own assertion: deleting the `_ if at.meteor` arm from the
+    /// biome chain gives "a crater should be busier than the forest it fell on: 216 vs 216", and
+    /// dropping `&& !at.meteor` from `town_suppression_applies` gives "a full town should not quiet
+    /// a crater".
+    #[test]
+    fn a_crater_is_busier_than_the_ground_it_fell_on_and_a_town_cannot_quiet_it() {
+        let (forest, forest_cap, _) = rates(plain(), &mut any_rng());
+        let crater = Conditions {
+            meteor: true,
+            ..plain()
+        };
+        let (rate, cap, _) = rates(crater, &mut any_rng());
+        assert!(
+            rate < forest,
+            "a crater should be busier than the forest it fell on: {rate} vs {forest}"
+        );
+        assert!(cap > forest_cap, "and hold more of them: {cap} vs {forest_cap}");
+
+        // The evils take their own arm first, so a corrupted crater is corruption's rate, not the
+        // crater's: vanilla's chain is `else if`, and this is the arm order rather than a tie.
+        let corrupt = Conditions {
+            biome: Biome::Corruption,
+            ..plain()
+        };
+        assert_eq!(
+            rates(corrupt, &mut any_rng()).0,
+            rates(
+                Conditions {
+                    meteor: true,
+                    ..corrupt
+                },
+                &mut any_rng()
+            )
+            .0,
+            "the corruption's arm answers before the crater's",
+        );
+
+        // ...and a full town, which quiets a forest outright, does nothing at all here.
+        let mut rng = SmallRng::seed_from_u64(1);
+        for _ in 0..200 {
+            let (town_rate, town_cap, friendly) = rates(
+                Conditions {
+                    town_npcs: 3,
+                    ..crater
+                },
+                &mut rng,
+            );
+            assert!(!friendly, "a full town should not quiet a crater");
+            assert_eq!((town_rate, town_cap), (rate, cap));
+        }
+        assert!(
+            rates(
+                Conditions {
+                    town_npcs: 3,
+                    ..plain()
+                },
+                &mut rng
+            )
+            .2,
+            "a full town does quiet an ordinary forest, which is what makes the above a difference",
+        );
+    }
+
     /// A town of one or two residents forks every attempt between throttling the rate and
     /// shrinking the cap while forcing a friendly spawn — real vanilla is not a flat multiplier
     /// here (`NPC.cs:870-901`), so this samples many attempts rather than asserting one.
@@ -4752,6 +4822,235 @@ mod tests {
         }
     }
 
+    /// A meteor crater answers with Meteor Heads and with nothing else at all (`NPC.cs:2796-2799`).
+    ///
+    /// The branch has no roll and no roster inside it: one `SpawnNPC(..., 23)` and a closing brace.
+    /// Standing in a crater, that is the whole of it, which is what makes a meteorite field a place
+    /// you clear rather than a place you walk through. The same ground without the meteorite draws
+    /// the ordinary cavern pool, which is what proves the zone rather than the terrain is doing it.
+    ///
+    /// Neutralised by deleting the `None if zones.meteor` arm: "a crater spawned 21, not a Meteor
+    /// Head", the plain cavern skeleton, and 23 never appears at all.
+    #[test]
+    fn a_crater_spawns_meteor_heads_and_nothing_else() {
+        const METEORITE: u16 = 37;
+        let world = flat_world_of(250, METEORITE);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+        assert!(
+            zones_at(&world, px, py).meteor,
+            "a floor of meteorite is a crater",
+        );
+
+        // A bound resident is not a monster and is not the crater's doing: vanilla's own bound arms
+        // (`NPC.cs:1662`, `:2087-2098`) all sit *above* `else if (ZoneMeteor)`, so a crater is where
+        // one may still be found. Rescues are not what this test is about.
+        let monsters = |seen: Vec<u16>| {
+            seen.into_iter()
+                .filter(|ty| {
+                    !terrustia_proto::npc_data::npc_stats(*ty)
+                        .expect("a real type")
+                        .friendly
+                })
+                .collect::<Vec<u16>>()
+        };
+        let seen = monsters(spawns_at(&world, false, px, py, 40_000));
+        assert!(!seen.is_empty(), "the crater never spawned anything");
+        for npc_type in &seen {
+            assert_eq!(
+                *npc_type, METEOR_HEAD,
+                "a crater spawned {npc_type}, not a Meteor Head",
+            );
+        }
+
+        // The same cavern floored with stone instead: an ordinary pool, and no Meteor Head in it.
+        let stone = flat_world(250);
+        assert!(!zones_at(&stone, px, py).meteor);
+        let ordinary: std::collections::BTreeSet<u16> =
+            monsters(spawns_at(&stone, false, px, py, 40_000))
+                .into_iter()
+                .collect();
+        assert!(
+            ordinary.len() > 1 && !ordinary.contains(&METEOR_HEAD),
+            "an ordinary cavern drew {ordinary:?}",
+        );
+    }
+
+    /// The Glowing Mushroom roster hangs off the ground tile, not off `ZoneGlowshroom`.
+    ///
+    /// This is the thing worth pinning, because it is the opposite of what the zone flag beside it
+    /// suggests. Vanilla's two arms (`NPC.cs:3637`, `:3674`) test `tileType == 70` and nothing else
+    /// about the biome, so the surface arm is open from the first day of a world and the
+    /// underground one waits only on hardmode. Only the Spore pair (`:5110`, `:5209`) wants the
+    /// zone as well, and that is the next test.
+    ///
+    /// Neutralised twice: dropping the `!hard_mode ||` from the underground arm's gate gives "no
+    /// TruffleWorm (374) in a hardmode mushroom cave" turned inside out - the worm appears before
+    /// hardmode, failing the classic-mode assertion; and returning `None` unconditionally from the
+    /// surface arm gives "no ZombieMushroom (254) in a surface mushroom patch: {}".
+    #[test]
+    fn the_mushroom_roster_hangs_off_the_ground_tile() {
+        let sample = |surface: bool, hard_mode: bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    mushroom_pick(surface, hard_mode, &mut rng)
+                })
+                .collect::<std::collections::BTreeSet<u16>>()
+        };
+
+        // The surface arm, which needs no progression at all.
+        let classic = sample(true, false);
+        for (npc_type, name) in [
+            (254u16, "ZombieMushroom"),
+            (255, "ZombieMushroomHat"),
+            (257, "AnomuraFungus"),
+            (258, "MushiLadybug"),
+            (259, "FungiBulb"),
+            (360, "GlowingSnail"),
+        ] {
+            assert!(
+                classic.contains(&npc_type),
+                "no {name} ({npc_type}) in a surface mushroom patch: {classic:?}",
+            );
+        }
+        // `Main.hardMode && Main.rand.Next(3) != 0` (`NPC.cs:3647`) is the only source of the big
+        // bulb, and the Truffle Worm is the underground arm's alone.
+        assert!(
+            !classic.contains(&260) && !classic.contains(&374),
+            "a classic surface patch drew {classic:?}",
+        );
+        assert!(sample(true, true).contains(&260), "no GiantFungiBulb");
+
+        // The underground arm is hardmode's outright: `Main.hardMode` is part of its own gate.
+        assert!(
+            sample(false, false).is_empty(),
+            "a pre-hardmode mushroom cave answers nothing here",
+        );
+        let hard = sample(false, true);
+        for (npc_type, name) in [
+            (374u16, "TruffleWorm"),
+            (360, "GlowingSnail"),
+            (259, "FungiBulb"),
+            (260, "GiantFungiBulb"),
+            (257, "AnomuraFungus"),
+            (258, "MushiLadybug"),
+        ] {
+            assert!(
+                hard.contains(&npc_type),
+                "no {name} ({npc_type}) in a hardmode mushroom cave: {hard:?}",
+            );
+        }
+        // The mushroom zombies are the surface arm's alone: nothing walks in the caves.
+        assert!(
+            !hard.contains(&254) && !hard.contains(&255),
+            "a mushroom zombie underground: {hard:?}",
+        );
+
+        // One attempt in three declines outright (`Main.rand.Next(3) != 0` on both arms), which is
+        // what lets the ordinary chain still answer inside a mushroom biome.
+        let declined = (0..40_000u64)
+            .filter(|seed| {
+                let mut rng = SmallRng::seed_from_u64(*seed);
+                mushroom_pick(true, false, &mut rng).is_none()
+            })
+            .count();
+        assert!(
+            (12_000..15_000).contains(&declined),
+            "{declined} of 40000 attempts declined, expected about a third",
+        );
+    }
+
+    /// The Spore pair is the one thing here that really does want `ZoneGlowshroom`, and it wants the
+    /// ground tile too: `ZoneGlowshroom && (tileType == 70 || tileType == 190)` (`NPC.cs:5110` for
+    /// the Skeleton, `:5209` for the Bat).
+    ///
+    /// The two sit in opposite halves of the cavern chain's own coin flip, so a mushroom cavern gets
+    /// both and everywhere else gets neither.
+    ///
+    /// Neutralised by dropping `glowshroom_ground` from both arms (making each unconditional): the
+    /// last assertion fails with "an ordinary cavern grew spores: {634}", the bat having reached a
+    /// stone cave.
+    #[test]
+    fn the_spore_pair_wants_the_zone_and_the_ground() {
+        let sample = |glowshroom: bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    cavern_seasonal_pick(Seasonal::default(), false, false, glowshroom, &mut rng)
+                })
+                .collect::<std::collections::BTreeSet<u16>>()
+        };
+        let mushroom = sample(true);
+        assert!(
+            mushroom.contains(&634) && mushroom.contains(&635),
+            "a mushroom cavern should grow both spores: {mushroom:?}",
+        );
+        assert!(
+            !sample(false).contains(&634) && !sample(false).contains(&635),
+            "an ordinary cavern grew spores: {:?}",
+            sample(false),
+        );
+    }
+
+    /// The same three arms through `try_spawn`, which is what proves they are wired to the ground
+    /// rather than merely written.
+    ///
+    /// Neutralised by pinning `mushroom_ground` and `glowshroom_ground` to `false` in `try_spawn`:
+    /// "no TruffleWorm (374) standing on mushroom grass" and "no SporeSkeleton (635) in a mushroom
+    /// cavern", with the plain cavern pool answering instead.
+    #[test]
+    fn a_mushroom_cave_is_wired_to_the_spawner() {
+        // Deep enough to be caverns, so both the underground mushroom arm and the cavern chain that
+        // holds the Spore pair are in play.
+        let world = flat_world_of(250, MUSHROOM_GRASS);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+        let zones = zones_at(&world, px, py);
+        assert!(zones.glowshroom, "a floor of mushroom grass is the zone");
+        assert_eq!(zones.biome, Biome::Forest, "and it is nobody else's biome");
+
+        let hard: std::collections::BTreeSet<u16> =
+            spawns_at(&world, true, px, py, 200_000).into_iter().collect();
+        for (npc_type, name) in [
+            (374u16, "TruffleWorm"),
+            (360, "GlowingSnail"),
+            (259, "FungiBulb"),
+            (635, "SporeSkeleton"),
+            (634, "SporeBat"),
+        ] {
+            assert!(
+                hard.contains(&npc_type),
+                "no {name} ({npc_type}) in a mushroom cavern: {hard:?}",
+            );
+        }
+
+        // Before hardmode the underground arm is shut, so the worm and the snail are gone and the
+        // Spore pair - which has no progression gate at all - is not.
+        let classic: std::collections::BTreeSet<u16> =
+            spawns_at(&world, false, px, py, 200_000).into_iter().collect();
+        assert!(
+            !classic.contains(&374),
+            "a Truffle Worm before hardmode: {classic:?}",
+        );
+        assert!(
+            classic.contains(&634) && classic.contains(&635),
+            "the Spore pair waits on no boss: {classic:?}",
+        );
+
+        // ...and the surface arm, which waits on nothing at all.
+        let surface = flat_world_of(80, MUSHROOM_GRASS);
+        assert_eq!(depth_at(&surface, 78), Depth::Surface);
+        let day: std::collections::BTreeSet<u16> =
+            spawns_at(&surface, false, px, 78, 200_000).into_iter().collect();
+        for (npc_type, name) in [(254u16, "ZombieMushroom"), (255, "ZombieMushroomHat")] {
+            assert!(
+                day.contains(&npc_type),
+                "no {name} ({npc_type}) on a surface mushroom patch: {day:?}",
+            );
+        }
+    }
+
     /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
     /// `Main.rand.Next(331, 333)`), and dresses the surface slime in ribbons
     /// (`NPC.cs:5660-5662`).
@@ -5379,7 +5678,8 @@ mod tests {
         (world, (cx, cy))
     }
 
-    fn dungeon_player(cx: i32, cy: i32) -> Vec<Option<Player>> {
+    /// One live player standing on a tile, which is all `try_spawn` needs of a player list.
+    fn player_standing_at(cx: i32, cy: i32) -> Vec<Option<Player>> {
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
@@ -5396,7 +5696,7 @@ mod tests {
     fn the_dungeon_gates_on_the_guardian_before_skeletron() {
         let (mut world, (cx, cy)) = dungeon_world();
         let npcs = NpcStore::new();
-        let players = dungeon_player(cx, cy);
+        let players = player_standing_at(cx, cy);
 
         // Skeletron not yet beaten: every spawn the dungeon offers is the Guardian.
         world.progress.downed_boss3 = false;
@@ -5474,7 +5774,7 @@ mod tests {
         let (mut world, (cx, cy)) = dungeon_world();
         world.progress.downed_boss3 = true;
         let npcs = NpcStore::new();
-        let players = dungeon_player(cx, cy);
+        let players = player_standing_at(cx, cy);
 
         let mut rng = SmallRng::seed_from_u64(3);
         let mut found = std::collections::BTreeSet::new();
@@ -6125,12 +6425,18 @@ mod tests {
 
     /// A flat world with a floor to stand on, for the tower-zone tests below.
     fn flat_world(floor: i32) -> World {
+        flat_world_of(floor, 1)
+    }
+
+    /// The same, with the floor made of something in particular: the two zone flags this module
+    /// classifies and every mushroom arm are decided by what the ground is made of.
+    fn flat_world_of(floor: i32, block: u16) -> World {
         let mut world = World::empty(800, 600, "pillar arena");
         world.surface = 100;
         world.rock_layer = 200;
         for x in 0..world.width() {
             for y in floor..(floor + 4) {
-                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+                world.set_tile(x, y, terrustia_proto::Tile::block(block));
             }
         }
         world
