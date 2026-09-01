@@ -2193,7 +2193,7 @@ mod tests {
     /// the admin `/spawn` command, boss summon items, the transformations one NPC undergoes on
     /// another's death, and the segments a worm head grows behind itself.
     fn ambient_roster() -> std::collections::BTreeSet<u16> {
-        use crate::game::{army, cavern_monsters, event::Invasion, lunar, moons, rescues};
+        use crate::game::{army, cavern_monsters, event::Invasion, moons, rescues};
 
         let mut set = std::collections::BTreeSet::new();
         const DEPTHS: [Depth; 4] = [
@@ -2258,10 +2258,22 @@ mod tests {
 
         // The rosters that already carry a membership test are read through it, which is exact
         // where sampling their spawn functions would only be likely.
+        //
+        // A membership test is only allowed to stand in for a roster when something actually
+        // spawns from that roster. Each of the three below has a real path: the moons through
+        // `moons::moon_spawn` in `spawn_at`, invasions through the invasion spawner, and the Old
+        // One's Army through `apply_army`.
+        //
+        // `lunar::belongs_to` was here too and has been removed, because it has no such path.
+        // It exists to classify a kill (`Lunar::note_kill`, which drops a pillar's shield) and to
+        // decide what despawns when the event ends. Nothing spawns a pillar minion at all: vanilla
+        // does it from `NPC.Spawner`'s four `ZoneTower*` arms (`NPC.cs:1357+`) and this server has
+        // no equivalent. Counting the membership table as reachability made the emptiest fight in
+        // the game invisible to the one tool built to find exactly that, and hid twenty-odd types
+        // from the gap ledger.
         for npc_type in 0..terrustia_proto::npc_data::NPC_COUNT {
             if moons::moon_points(npc_type) > 0
                 || army::belongs(npc_type)
-                || lunar::belongs_to(npc_type).is_some()
                 || [
                     Invasion::Goblin,
                     Invasion::FrostLegion,
