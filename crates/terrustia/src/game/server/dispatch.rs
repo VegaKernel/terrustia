@@ -577,16 +577,43 @@ impl GameServer {
         }
         // Vanilla sends the live entities after the tiles and before StartPlaying; without this a
         // joining player sees an empty world where everyone else sees dropped loot.
-        let existing: Vec<(i16, (f32, f32), ItemStack)> = self
+        //
+        // A `22` follows each `21`, exactly as vanilla's own join loop pairs them
+        // (`MessageBuffer.cs:843-850`, case 8), and with the same zero reservation timer: that
+        // call passes no `number2`, so `NetMessage`'s case 22 writes a zero there
+        // (`NetMessage.cs:678-687`) and only the owner itself carries. Without it a joining client
+        // believed every item was free, walked up to one already reserved for somebody else, and
+        // turned it to air locally on the way to a `151` this server then refused: the item stayed
+        // on the server and stayed invisible to that one client, with nothing scheduled to tell it
+        // otherwise, because `tick_items` only broadcasts a `22` for an item it is *newly*
+        // reserving.
+        let existing: Vec<(i16, ItemOwner, ItemStack)> = self
             .items
             .iter()
-            .map(|(index, item)| (index, item.position, item.item))
+            .map(|(index, item)| {
+                let owner = ItemOwner {
+                    index,
+                    owner: item.owner,
+                    keep_reservation_ticks: 0,
+                    grab_delay_player: 0,
+                    grab_delay_ticks: 0,
+                    position: item.position,
+                };
+                (index, owner, item.item)
+            })
             .collect();
-        for (index, position, stack) in existing {
-            match SyncItem::dropped(index, position, stack).encode() {
+        for (index, owner, stack) in existing {
+            match SyncItem::dropped(index, owner.position, stack).encode() {
                 Ok(frame) => self.send(slot, frame),
                 Err(e) => {
                     warn!(slot, error = %e, "could not encode a dropped item for a joining player");
+                    return;
+                }
+            }
+            match owner.encode() {
+                Ok(frame) => self.send(slot, frame),
+                Err(e) => {
+                    warn!(slot, error = %e, "could not encode an item's owner for a joining player");
                     return;
                 }
             }
@@ -3720,7 +3747,11 @@ impl GameServer {
         let sync = SyncItem::decode(payload)?;
 
         if sync.is_new() {
-            let Some(index) = self.items.spawn(sync.item, sync.position) else {
+            // Through `take_item_slot` rather than the store directly: a client asking for a slot
+            // gets one the same way a server-side drop does, recycled item and its `151` included.
+            // Vanilla routes this branch back through `Item.NewItem` itself for that very reason
+            // (`MessageBuffer.cs:1501-1505`, case 21).
+            let Some(index) = self.take_item_slot(sync.item, sync.position) else {
                 return Ok(());
             };
             if let Some(item) = self.items.get_mut(index) {
@@ -7448,5 +7479,61 @@ mod server_side_effects {
         server.handle_packet(0, frame(id::EMOJI, &[0, 200]));
 
         assert!(of(&drain(&mut watcher), id::SYNC_EMOTE_BUBBLE).is_empty());
+    }
+}
+
+/// Vanilla's join loop sends a `21` and then a `22` for every live item
+/// (`MessageBuffer.cs:843-850`, case 8). This sent only the `21`, so a joining client believed
+/// every item on the ground was free to take: it would walk up to one already reserved for
+/// somebody else, turn it to air locally on its way to a `151`, and have that `151` refused. The
+/// item then stayed on the server and stayed invisible to that one client, with nothing scheduled
+/// to correct it, because `tick_items` broadcasts a `22` only for an item it is *newly* reserving
+/// and this one was already reserved.
+///
+/// Tested here rather than through `tests/gameplay.rs` because the headless client cannot see this:
+/// `Client::handshake` interprets and discards everything between `SpawnTileData` and
+/// `InitialSpawn`, which is the whole join stream. Its `joined_with` buffer only starts collecting
+/// after that. `a_joining_player_is_told_about_npcs_already_alive` passes on the live NPC sync
+/// broadcasts rather than on the join stream it names, for the same reason.
+#[cfg(test)]
+mod join_stream_item_owners {
+    use super::*;
+    use crate::config::Config;
+
+    fn tiny_world() -> crate::world::World {
+        crate::world::World::empty(200, 150, "join stream probe")
+    }
+
+    #[test]
+    fn every_item_in_the_join_stream_is_followed_by_who_it_belongs_to() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let (index, _) = server
+            .items
+            .spawn(ItemStack::new(9, 1, 0), (320.0, 480.0))
+            .expect("a slot");
+        server.items.get_mut(index).expect("the item").owner = 3;
+
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        // Anything below `TilesSent`: the join tail runs once and then advances past this.
+        player.state = ConnState::WorldSent;
+        server.players[0] = Some(player);
+
+        server.finish_join_stream(0);
+
+        let sent: Vec<Bytes> = std::iter::from_fn(|| out_rx.try_recv().ok()).collect();
+        let ids: Vec<u8> = sent.iter().map(|f| f[2]).collect();
+        assert_eq!(
+            &ids[..2],
+            &[id::SYNC_ITEM, id::ITEM_OWNER],
+            "each item goes out as a 21 and then a 22, the way vanilla's own join loop pairs them"
+        );
+
+        let owner = ItemOwner::decode(&sent[1][3..]).expect("a decodable 22");
+        assert_eq!((owner.index, owner.owner), (index, 3));
+        assert_eq!(
+            owner.keep_reservation_ticks, 0,
+            "vanilla's join loop passes no `number2`, so this field goes out as zero"
+        );
     }
 }

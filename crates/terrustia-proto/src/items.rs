@@ -18,6 +18,35 @@ pub const NEW_ITEM_INDEX: i16 = 400;
 /// The owner value meaning "reserved for nobody".
 pub const NO_OWNER: u8 = 255;
 
+/// How old a pickup has to be before the slot picker is willing to throw it away to make room,
+/// in ticks. `Item.PickupReplacementTime` (`Item.cs:334`).
+pub const PICKUP_REPLACEMENT_TIME: u32 = 1200;
+
+/// How many of the 400 slots a server holds back before it starts recycling rather than handing
+/// out the next free one. `Item.SlotsRemainingBeforeEmergencyStackingInMultiplayer`
+/// (`Item.cs:336`), applied only when `Main.netMode == 2` (`Item.cs:49798-49802`) - which for this
+/// project is always, since it only ever runs as a dedicated server.
+pub const SLOTS_RESERVED_BEFORE_RECYCLING: usize = 40;
+
+/// Whether an item is one of the game's "pickups": the hearts and mana stars an enemy scatters by
+/// the dozen, their Halloween and Christmas reskins, the Nebula armour boosters and the Mana Cloak
+/// star. `ItemID.Sets.IsAPickup` (`ItemID.cs:254`).
+///
+/// This is the set the slot picker is willing to destroy first when the world is running out of
+/// item slots: they drop constantly, they are worth almost nothing individually, and one vanishing
+/// is not something a player notices the way a vanishing weapon would be.
+pub fn is_a_pickup(id: i32) -> bool {
+    matches!(
+        id,
+        // Heart, Star.
+        58 | 184
+        // Candy Apple, Soul Cake (Halloween), Candy Cane, Sugar Plum (Christmas).
+        | 1734 | 1735 | 1867 | 1868
+        // NebulaPickup1..3, ManaCloakStar.
+        | 3453 | 3454 | 3455 | 4143
+    )
+}
+
 /// Packet `21`: an item entity's full state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SyncItem {
