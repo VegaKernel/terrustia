@@ -1143,6 +1143,10 @@ pub struct Seasonal {
     /// `Main.moonPhase`. `Terraria.Enums.MoonPhase` names them: 0 is `Full` and 4 is `Empty`, the
     /// new moon, which is the darkest night and the one that doubles the demon eyes.
     pub moon_phase: u8,
+    /// `Main.raining` (`NPC.cs:1287`, `raining = Main.raining`), for the surface night's own rain
+    /// arm (`NPC.cs:4675`). It is here rather than on [`Conditions`] for the same reason the rest
+    /// of this struct is: rain changes what turns up, not how fast.
+    pub raining: bool,
 }
 
 /// The surface night chain's own arms, ahead of the ordinary pool: `NPC.cs:4539-4740`.
@@ -1161,11 +1165,16 @@ pub struct Seasonal {
 /// Deliberately left to the pools and to other lanes, each with its place in the order below kept
 /// so the arms that *are* here land at vanilla's own odds:
 ///
-/// * `NPC.cs:4620` the blood-moon Clown, `:4636` the Possessed Armor and `:4640` the Blood Zombie
+/// * `NPC.cs:4618` the blood-moon Clown, `:4638` the Possessed Armor and `:4643` the Blood Zombie
 ///   and Drippler. All three already have a home in [`hardmode_pool`] and [`blood_moon_pool`];
-///   taking them here as well would give each of them two sources.
-/// * `NPC.cs:4655-4670` the snow arm and `:4677-4690` the rain arm, which belong to the biome and
-///   weather pools rather than to the season.
+///   taking them here as well would give each of them two sources. The last two now make their
+///   rolls and hand the draw back, which is what the promise above is worth: without them a snowy
+///   hardmode night would answer with a Wolf where the game had already answered with an armour.
+///   (The line numbers here were `:4636` and `:4640` and named the wrong arm; both are corrected.)
+/// * `NPC.cs:4665` the Armed Zombie Eskimo, whose gate is `Main.expertMode` and nothing this
+///   signature can see. It is the third branch of the snow arm below, so skipping it hands its
+///   share to the arm's own fallthrough, which is 161 and already in [`pool`]'s snow night. 431
+///   stays disclosed.
 /// * `NPC.cs:4691-4711` the Skyblock arm, for a world shape this server does not generate.
 /// * `NPC.cs:4712` the Moss Zombie, which is gated on `RollOnlyBadLuckExtreme(30) == 0`. That
 ///   returns `-1` for any player whose luck is not negative (`Luck.cs:53-60`), and this server
@@ -1175,12 +1184,16 @@ pub struct Seasonal {
 /// * `NPC.cs:4722` the Torch Zombie and `:4743` the armed and styled zombies, which are the
 ///   ordinary zombie's own variants rather than a season's.
 ///
-/// The negative ids vanilla spawns alongside three of these arms (`-38` to `-43`, `NPC.cs:4569`,
-/// `:4581-4610`) are not types: `NPCID.FromNetId` (`NPCID.cs:12478`) maps them back onto the very
-/// same NPC with a size multiplier (`NPC.cs:8080-8137`). `tools/check_spawn_reach.py` drops them
-/// from vanilla's roster for that reason, and nothing here models NPC scale, so they are dropped
-/// here too.
-pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
+/// The negative ids vanilla spawns alongside four of these arms (`-38` to `-43`, `NPC.cs:4569`,
+/// `:4581-4610`, and `-54`/`-55` in the rain arm) are not types: `NPCID.FromNetId`
+/// (`NPCID.cs:12478`) maps them back onto the very same NPC with a size multiplier
+/// (`NPC.cs:8080-8137`), so `SmallRainZombie` and `BigRainZombie` are both 223.
+/// `tools/check_spawn_reach.py` drops them from vanilla's roster for that reason, and nothing here
+/// models NPC scale, so they are dropped here too.
+///
+/// `ground_block` is the tile the spawn stands on, the game's own `spawnTileY` (`NPC.cs:329`), which
+/// is this server's `y + 1`. Only the snow arm reads it.
+pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
 
     // NPC.cs:4539. The Raven is the season's own bird, and a graveyard has one whether or not it is
@@ -1239,6 +1252,48 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
     // every one, and `!Main.dayTime` is explicit here, so a daylit graveyard gets no werewolves.
     if !at.day_time && at.moon_phase == 0 && at.hard_mode && !one_in(rng, 3) {
         return Some(104); // Werewolf
+    }
+    // NPC.cs:4638, the Possessed Armor, and `:4643`, the Blood Zombie and the Drippler. Both are
+    // already carried by [`hardmode_pool`] and [`blood_moon_pool`], so both rolls are made and the
+    // draw is handed straight back: they sit above the snow and rain arms below, and without them a
+    // hardmode or blood-moon night would reach those arms every time instead of two thirds and
+    // three fifths of the time.
+    if !at.day_time && at.hard_mode && one_in(rng, 3) {
+        return None;
+    }
+    // `Main.rand.Next(5) < 2`, which is not a `one_in`.
+    if at.blood_moon && rng.random_range(0..5) < 2 {
+        return None;
+    }
+    // NPC.cs:4655, the snow arm. It keys on the tile underfoot rather than on the player's zone, so
+    // a patch of ice in a forest answers here too, and it `return`s: a snowy graveyard has no Maggot
+    // Zombies and a snowy October no costumed ones, because vanilla never reaches those arms with
+    // ice under the spawn.
+    //
+    // `TileID.Sets.IcesSnow` is `{161, 200, 163, 164, 147}` (`TileID.cs:297`) and the arm adds 162,
+    // the thin ice, on its own line. These are tile ids: 163 and 164 here are Purple and Pink Ice,
+    // not the two spiders.
+    const SNOW_GROUND: [u16; 6] = [147, 161, 162, 163, 164, 200];
+    if SNOW_GROUND.contains(&ground_block) {
+        // NPC.cs:4657 and `:4661`. The Ice Elemental and the Wolf come from here and from one
+        // other place each in the whole spawner (`:5232` is the caverns' own Ice Elemental, the
+        // flying chain's snow arm), so without this arm both were unreachable. Note `!ZoneGraveyard`
+        // on both: a graveyard in the snow gets neither.
+        if !at.graveyard && at.hard_mode && one_in(rng, 4) {
+            return Some(169); // IceElemental
+        }
+        if !at.graveyard && at.hard_mode && one_in(rng, 3) {
+            return Some(155); // Wolf
+        }
+        // NPC.cs:4665's expert Armed Zombie Eskimo and `:4671`'s plain Zombie Eskimo, which is the
+        // arm's fallthrough and already in [`pool`]'s snow night. Handed back rather than answered.
+        return None;
+    }
+    // NPC.cs:4675, the rain arm. All three of its outcomes are NPC 223 (`-54` and `-55` are the
+    // small and big Rain Zombie, the same type at a different scale), so the inner `Next(3)` and
+    // `Next(2)` collapse away.
+    if at.raining && one_in(rng, 2) {
+        return Some(223); // ZombieRaincoat
     }
     // NPC.cs:4717: the graveyard's own zombie. `maggotZombieChance` is 20 and nothing in
     // `GetZombieSettings` (`NPC.cs:5595-5619`) ever moves it.
@@ -3291,6 +3346,8 @@ pub fn try_spawn(
             blood_moon: world.blood_moon,
             day_time: world.day_time,
             moon_phase: world.moon_phase,
+            // `NPC.cs:372`, `raining = Main.raining`.
+            raining: world.raining,
         };
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
@@ -3649,7 +3706,10 @@ pub fn try_spawn(
                             biome,
                             Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
                         );
-                    if seasonal_ground && let Some(npc_type) = seasonal_night_pick(seasonal, rng) {
+                    if seasonal_ground
+                        && let Some(npc_type) =
+                            seasonal_night_pick(seasonal, world.tile(x, y + 1).block, rng)
+                    {
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
@@ -3918,26 +3978,35 @@ mod tests {
         }
         // The surface night's own chain, asked through itself for the same reason the sky is:
         // deleting an arm shows up here as a type that stopped being reachable. Every combination
-        // of the five flags it reads, since each one opens arms the others do not, and both moon
-        // phases it names.
+        // of the flags it reads, since each one opens arms the others do not, both moon phases it
+        // names, and two floors, because the snow arm keys on the tile underfoot.
         for halloween in [false, true] {
             for xmas in [false, true] {
                 for graveyard in [false, true] {
                     for hard_mode in [false, true] {
                         for blood_moon in [false, true] {
-                            for moon_phase in [0u8, 4] {
-                                let at = Seasonal {
-                                    halloween,
-                                    xmas,
-                                    graveyard,
-                                    hard_mode,
-                                    blood_moon,
-                                    day_time: false,
-                                    moon_phase,
-                                };
-                                for seed in 0..4_000u64 {
-                                    let mut rng = SmallRng::seed_from_u64(seed);
-                                    set.extend(seasonal_night_pick(at, &mut rng));
+                            for raining in [false, true] {
+                                for moon_phase in [0u8, 4] {
+                                    let at = Seasonal {
+                                        halloween,
+                                        xmas,
+                                        graveyard,
+                                        hard_mode,
+                                        blood_moon,
+                                        day_time: false,
+                                        moon_phase,
+                                        raining,
+                                    };
+                                    for ground_block in [2u16, 147] {
+                                        for seed in 0..4_000u64 {
+                                            let mut rng = SmallRng::seed_from_u64(seed);
+                                            set.extend(seasonal_night_pick(
+                                                at,
+                                                ground_block,
+                                                &mut rng,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -5349,7 +5418,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(99);
             (0..200_000)
                 .filter(|_| {
-                    matches!(seasonal_night_pick(at, &mut rng), Some(ty) if (190..=194).contains(&ty))
+                    matches!(seasonal_night_pick(at, 2, &mut rng), Some(ty) if (190..=194).contains(&ty))
                 })
                 .count()
         };
@@ -5362,6 +5431,88 @@ mod tests {
             new_moon > full * 3,
             "the new moon should be thick with eyes: {new_moon} against {full}"
         );
+    }
+
+    /// Ice underfoot on a surface night is the Ice Elemental's and the Wolf's only home outside the
+    /// caverns' flying chain (`NPC.cs:4655-4673`), and the arm keys on the *tile* rather than on the
+    /// player's zone: 169 was in no producer at all and 155 in none either.
+    ///
+    /// The floor is snow in a world the zone scan still calls a forest (169 snow tiles in a
+    /// 169-by-124 box, against a `SnowTileNormalThreshold` of 1500), which is what makes this a
+    /// test of the tile and not of the biome.
+    ///
+    /// Neutralised arm by arm:
+    ///
+    /// * deleting the `SNOW_GROUND.contains(&ground_block)` block: "no IceElemental (169) on ice".
+    /// * dropping `!at.graveyard` from both hardmode arms: "a Wolf in a snowy graveyard".
+    /// * dropping `at.hard_mode` from both: "an Ice Elemental before hardmode".
+    /// * passing `2` instead of `world.tile(x, y + 1).block` in `try_spawn`: "no IceElemental (169)
+    ///   on ice", the arm written but wired to nothing.
+    #[test]
+    fn ice_underfoot_brings_the_wolves_out() {
+        let (mut world, (px, py)) = night_world();
+        for x in 0..world.width() {
+            world.set_tile(x, 90, terrustia_proto::Tile::block(147)); // SnowBlock
+        }
+        assert_eq!(
+            biome_at(&world, px, py),
+            Biome::Forest,
+            "one row of snow is not a snow biome, which is the point of this test"
+        );
+
+        let found: std::collections::BTreeSet<u16> = spawns_at_in(&world, true, false, px, py, 60_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [(169u16, "IceElemental"), (155, "Wolf")] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) on ice: {found:?}"
+            );
+        }
+
+        // `!ZoneGraveyard` on both arms (`NPC.cs:4657`, `:4661`): tombstones in the snow get neither.
+        let haunted: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, true, true, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(!haunted.contains(&155), "a Wolf in a snowy graveyard");
+        assert!(
+            !haunted.contains(&169),
+            "an Ice Elemental in a snowy graveyard"
+        );
+
+        // ...and `Main.hardMode` on both, so a fresh world's snow is just cold.
+        let early: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(!early.contains(&169), "an Ice Elemental before hardmode");
+        assert!(!early.contains(&155), "a Wolf before hardmode");
+    }
+
+    /// Rain on a surface night is the Zombie Raincoat's only home (`NPC.cs:4675-4689`), and all
+    /// three of vanilla's outcomes there are the same 223 at different scales.
+    ///
+    /// Neutralised by deleting the `at.raining` arm: "no ZombieRaincoat (223) in the rain".
+    /// Neutralised the other way, by dropping `at.raining` from the condition so it fires dry: the
+    /// second assertion fails instead.
+    #[test]
+    fn rain_puts_a_coat_on_the_zombies() {
+        let (mut world, (px, py)) = night_world();
+        world.raining = true;
+        let wet: std::collections::BTreeSet<u16> = spawns_at_in(&world, false, false, px, py, 60_000)
+            .into_iter()
+            .collect();
+        assert!(
+            wet.contains(&223),
+            "no ZombieRaincoat (223) in the rain: {wet:?}"
+        );
+
+        world.raining = false;
+        let dry: std::collections::BTreeSet<u16> = spawns_at_in(&world, false, false, px, py, 60_000)
+            .into_iter()
+            .collect();
+        assert!(!dry.contains(&223), "a raincoat on a dry night: {dry:?}");
     }
 
     /// A world whose surface line is at 200, so the sky line (`worldSurface * 0.35`) is row 70 and
@@ -6828,8 +6979,10 @@ mod tests {
             let start = std::time::Instant::now();
             let mut sink = 0u32;
             for _ in 0..n {
-                sink +=
-                    u32::from(seasonal_night_pick(std::hint::black_box(at), &mut rng).unwrap_or(0));
+                sink += u32::from(
+                    seasonal_night_pick(std::hint::black_box(at), std::hint::black_box(2), &mut rng)
+                        .unwrap_or(0),
+                );
             }
             let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
             println!("seasonal_night_pick, {name}: {each:.2} ns/call (sink {sink})");
