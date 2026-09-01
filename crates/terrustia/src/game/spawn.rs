@@ -1086,14 +1086,15 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
                 ]
             }
         }
-        // ...and everything under it.
+        // ...and everything under it. No Black Recluse (163): `NPC.Spawner` reaches it from exactly
+        // one place, the spider nest's own arm (`NPC.cs:1673`, see [`spider_pick`]), so listing it
+        // here put recluses in every hardmode cave instead of in the nests they belong to.
         (Underground | Cavern, _) => &[
             77,  // ArmoredSkeleton
             85,  // Mimic
             93,  // GiantBat
             110, // SkeletonArcher
             141, // ToxicSludge
-            163, // BlackRecluse
             172, // RuneWizard
         ],
     }
@@ -2086,6 +2087,48 @@ fn check_underground(world: &World, x: i32, y: i32) -> bool {
         }
     }
     f64::from(closed) >= f64::from(WIDTH * ROWS) * 0.8
+}
+
+/// `WallID.SpiderUnsafe`, the wall a spider nest is lined with and the only thing that puts one on
+/// the spawn path (`NPC.cs:1662`).
+pub const SPIDER_WALL: u16 = 62;
+
+/// The spider nest's roster, `NPC.cs:1662-1680`:
+///
+/// ```csharp
+/// else if ((Main.tile[spawnTileX, spawnTileY].wall == 62 || spawnSpider) && CheckToSpawnSpider(...))
+/// {
+///     ...
+///     else if (Main.hardMode && Main.rand.Next(10) != 0) 163;
+///     else                                               164;
+/// }
+/// ```
+///
+/// The Wall Creeper and the Black Recluse have no other ambient spawn in the game at all: 163 and
+/// 164 are the only two ids `NPC.Spawner` reaches from this arm, so with no arm the Wall Creeper was
+/// unreachable outright and the Black Recluse was only reachable because [`hardmode_pool`] carried
+/// it in the generic cavern list, which put recluses in every hardmode cave rather than in nests.
+///
+/// `CheckToSpawnSpider` (`NPC.cs:5790-5801`) is `true` outside the "not the bees" for-the-worthy
+/// seed, so it is not transcribed.
+///
+/// Two things left to the caller, both disclosed:
+///
+/// * `|| spawnSpider` (`NPC.cs:1145-1176`), which widens the arm to spots merely *near* a spider
+///   wall by sweeping a box of radius 5 to 15 one attempt in three. Left out for the same reason
+///   `underground_desert_spot` leaves out its twin: it is up to 900 tile reads on the per-candidate
+///   path to reach spots the wall test itself misses anyway, and a real nest is walled throughout.
+/// * `NPC.cs:1669`, the Stylist at one dry nest tile in eight below the rock layer. She already has
+///   a path here, [`bound_gate`], which reaches her through the same rescue table as every other
+///   bound resident; giving her a second one would mean two mechanisms racing for the same
+///   townsperson. The effect of skipping the branch is that 163 and 164 take that eighth as well,
+///   in the window before she is rescued.
+fn spider_pick(hard_mode: bool, rng: &mut SmallRng) -> u16 {
+    if hard_mode && !rng.random_ratio(1, 10) {
+        163 // BlackRecluse
+    } else {
+        164 // WallCreeper
+    }
 }
 
 /// Whether a candidate spot is in the underground desert, `NPC.cs:1682`:
@@ -3395,6 +3438,14 @@ pub fn try_spawn(
                         |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
                 }
+                // A spider nest, which owns its own arm the way the desert below owns its
+                // (`NPC.cs:1662`), one row above it in vanilla's chain and therefore one arm above
+                // it here. The wall is read on the game's own `spawnTileY`, the solid ground tile,
+                // which is this server's `y + 1`; it carries no depth or biome gate of its own,
+                // because vanilla's does not either.
+                None if world.tile(x, y + 1).wall == SPIDER_WALL => {
+                    spider_pick(events.hard_mode, rng)
+                }
                 // The underground desert, which is its own chain and answers for everything in it
                 // (`NPC.cs:1682-1765`). It sits here because that is where vanilla puts it: ahead of
                 // every water branch, ahead of `spawnFriendly`, ahead of `ZoneDungeon` and ahead of
@@ -3806,6 +3857,14 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+        // The spider nest's two, asked through their own producer for the same reason: it is the
+        // only place in the game either of them comes from.
+        for hard_mode in [false, true] {
+            for seed in 0..200u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.insert(spider_pick(hard_mode, &mut rng));
             }
         }
         // The surface night's own chain, asked through itself for the same reason the sky is:
@@ -7088,6 +7147,59 @@ mod tests {
             spawns_of(&hell, hell_floor, &quiet(), SKELETON_MERCHANT, 9),
             0,
             "the underworld spawned a Skeleton Merchant"
+        );
+    }
+
+    /// A spider nest is the only place either spider comes from (`NPC.cs:1662-1680`), and the arm
+    /// keys on the nest's own wall rather than on a depth or a biome.
+    ///
+    /// Neutralised by deleting the `None if world.tile(x, y + 1).wall == SPIDER_WALL` arm from
+    /// `try_spawn`: the first assertion fails with "a spider nest produced no Wall Creeper", and
+    /// the hardmode one with "a hardmode nest produced no Black Recluse". Neutralised again by
+    /// putting `163` back in `hardmode_pool`'s generic `(Underground | Cavern, _)` list: the last
+    /// assertion fails, an ordinary walled-off hardmode cavern producing recluses.
+    #[test]
+    fn a_spider_nest_is_where_the_spiders_are() {
+        let floor = 300;
+        let nest = {
+            let mut world = hall_world(floor);
+            assert!(
+                !terrustia_proto::housing::wall_encloses(SPIDER_WALL),
+                "a nest wall must not read as a house wall, or nothing would spawn in one"
+            );
+            for x in 0..world.width() {
+                let mut tile = terrustia_proto::Tile::block(1);
+                tile.wall = SPIDER_WALL;
+                world.set_tile(x, floor, tile);
+            }
+            world
+        };
+        assert_eq!(depth_at(&nest, floor - 1), Depth::Cavern);
+
+        // Pre-hardmode the arm answers with the Wall Creeper alone (`NPC.cs:1677-1680`).
+        assert!(
+            spawns_of(&nest, floor, &quiet(), 164, 3) > 0,
+            "a spider nest produced no Wall Creeper"
+        );
+        let mut hard = quiet();
+        hard.hard_mode = true;
+        assert!(
+            spawns_of(&nest, floor, &hard, 163, 3) > 0,
+            "a hardmode nest produced no Black Recluse"
+        );
+
+        // ...and the same cavern without the wall has neither, which is what makes the nest the
+        // reason they came rather than the depth (`NPC.cs:1673`, the only `163` in the spawner).
+        let plain = hall_world(floor);
+        assert_eq!(
+            spawns_of(&plain, floor, &hard, 164, 3),
+            0,
+            "a Wall Creeper turned up in a cavern with no nest"
+        );
+        assert_eq!(
+            spawns_of(&plain, floor, &hard, 163, 3),
+            0,
+            "a Black Recluse turned up in a cavern with no nest"
         );
     }
 }
