@@ -177,7 +177,29 @@ panics=$(grep -icE "panic|thread .* panicked" "$WORK/server.log")
 # Ninety percent, rounded up. Integer division truncates, which at 255 put the bar at 229 (89.8%)
 # and passed a run that missed the stated bar by half a client.
 required_ok=$(( (PLAYERS * 9 + 9) / 10 ))
-if [ "$ok" -ge "$required_ok" ]; then echo "PASS  $ok/$PLAYERS clients connected and held"; else echo "FAIL  only $ok/$PLAYERS clients held, need $required_ok"; fail=1; fi
+# A client the server shed is not a client that held, and its own exit code cannot see that it was
+# shed. `send_bytes` removes the player from the world the moment its outbound queue fills, but the
+# socket only closes once `write_loop` has drained everything already queued behind that decision,
+# which at `outbound_queue(255)` is about a million frames. So the client keeps reading a backlog
+# for the rest of the hold, never sees EOF, never sees a write fail, and exits zero.
+#
+# That is not hypothetical and it is not rare. Two 255-player half-hours measured here shed 3 and 5
+# clients respectively, with the queue at 1,052,626 and 1,052,669 of its 1,052,672 capacity; every
+# one of the eight printed `done after 1800s` and exited zero, and both runs were recorded as
+# `255/255 clients connected and held`. Counting only exit codes made this clause unable to fail
+# for the one reason a real server sheds players under load.
+#
+# Subtracting is deliberately conservative: a client that was shed *and* noticed in time would be
+# counted against twice, which can only make this bar stricter, never looser.
+shed=$(grep -c "outbound queue full" "$WORK/server.log")
+held=$(( ok - shed ))
+[ "$held" -lt 0 ] && held=0
+if [ "$held" -ge "$required_ok" ]; then
+  echo "PASS  $held/$PLAYERS clients connected and held ($ok exited clean, $shed shed by the server)"
+else
+  echo "FAIL  only $held/$PLAYERS clients held, need $required_ok ($ok exited clean, $shed shed by the server)"
+  fail=1
+fi
 if [ "$saved_bytes" -gt 0 ]; then echo "PASS  world saved on shutdown ($saved_bytes bytes)"; else echo "FAIL  no world written on shutdown"; fail=1; fi
 # The release bar names p99 tick cost, so the run judges it rather than printing a number for a
 # person to eyeball. No samples is a failure and not a pass: an absent measurement used to be
