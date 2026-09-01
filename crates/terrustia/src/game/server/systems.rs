@@ -222,7 +222,35 @@ impl GameServer {
         counts
     }
 
+    /// Under a blood moon, critters turn evil where they stand.
+    ///
+    /// `NPC.UpdateNPC_BloodMoonTransformations`, `NPC.cs:93033-93048`: the server runs
+    /// `AttemptToConvertNPCToEvil(WorldGen.crimson)` over every NPC while `Main.bloodMoon` is set.
+    /// Guarded on the flag here so it costs nothing on an ordinary night, which is the only
+    /// difference from vanilla's shape: it makes the same test per NPC per tick either way.
+    ///
+    /// This is the only way a Corrupt Bunny is supposed to exist. Ours used to list type 47
+    /// directly in the surface-corruption spawn pool, so corrupt bunnies appeared out of nothing in
+    /// broad daylight, while vanilla's `NPC.Spawner` never spawns one at all.
+    fn convert_critters_under_a_blood_moon(&mut self) {
+        let crimson = self.world.crimson;
+        let converted: Vec<u8> = self
+            .npcs
+            .iter_mut()
+            .filter(|(_, npc)| npc.is_alive())
+            .filter_map(|(index, npc)| npc.attempt_to_convert_to_evil(crimson).then_some(index))
+            .collect();
+        // A transform is a different creature in the same slot, so every client has to be told;
+        // `Transform` sets `netUpdate` in vanilla for the same reason.
+        for index in converted {
+            self.broadcast_npc(index);
+        }
+    }
+
     pub(super) fn tick_npcs(&mut self) {
+        if self.world.blood_moon {
+            self.convert_critters_under_a_blood_moon();
+        }
         let targets: Vec<Target> = self
             .players
             .iter()
@@ -10499,5 +10527,69 @@ mod tile_squares_only_reach_who_can_see_them {
 
         assert_eq!(squares(&mut rx0), 0, "not echoed back to whoever sent it");
         assert_eq!(squares(&mut rx1), 1, "but it does reach the other client");
+    }
+}
+
+/// A blood moon turns the world's critters evil, which is the only way a Corrupt Bunny exists.
+///
+/// `NPC.UpdateNPC_BloodMoonTransformations` (`NPC.cs:93033-93048`). Our surface-corruption spawn
+/// pool used to list type 47 outright, so corrupt bunnies appeared out of nothing in daylight
+/// while vanilla's `NPC.Spawner` never spawns one at any depth.
+#[cfg(test)]
+mod blood_moon_turns_critters_evil {
+    use super::*;
+
+    fn server_with_a_bunny(crimson: bool, blood_moon: bool) -> (GameServer, u8) {
+        let mut world = crate::world::World::empty(500, 300, "blood moon probe");
+        world.crimson = crimson;
+        world.blood_moon = blood_moon;
+        let mut server = GameServer::new(Config::default(), world);
+        let index = server
+            .npcs
+            .spawn(46, (1000.0, 1000.0))
+            .expect("a bunny in the world");
+        (server, index)
+    }
+
+    #[test]
+    fn a_blood_moon_over_a_corruption_world_turns_the_bunny() {
+        let (mut server, index) = server_with_a_bunny(false, true);
+        server.tick_npcs();
+        assert_eq!(
+            server.npcs.get(index).expect("still in its slot").npc_type,
+            47,
+            "the bunny should have turned corrupt where it stood"
+        );
+    }
+
+    #[test]
+    fn a_blood_moon_over_a_crimson_world_turns_it_the_other_way() {
+        let (mut server, index) = server_with_a_bunny(true, true);
+        server.tick_npcs();
+        assert_eq!(server.npcs.get(index).expect("still there").npc_type, 464);
+    }
+
+    /// The flag is the gate. An ordinary night leaves the world's bunnies alone.
+    #[test]
+    fn an_ordinary_night_leaves_the_bunny_alone() {
+        let (mut server, index) = server_with_a_bunny(false, false);
+        for _ in 0..10 {
+            server.tick_npcs();
+        }
+        assert_eq!(
+            server.npcs.get(index).expect("still there").npc_type,
+            46,
+            "nothing but a blood moon converts anything"
+        );
+    }
+
+    /// And it stays converted rather than flickering: the second tick finds a Corrupt Bunny, which
+    /// has no evil form of its own, so nothing happens to it.
+    #[test]
+    fn a_converted_critter_is_not_converted_again() {
+        let (mut server, index) = server_with_a_bunny(false, true);
+        server.tick_npcs();
+        server.tick_npcs();
+        assert_eq!(server.npcs.get(index).expect("still there").npc_type, 47);
     }
 }

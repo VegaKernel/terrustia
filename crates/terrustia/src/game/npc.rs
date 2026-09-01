@@ -361,6 +361,45 @@ impl Npc {
         )
     }
 
+    /// The evil form of a critter, if this type has one: `NPC.AttemptToConvertNPCToEvil`,
+    /// `NPC.cs:93050-93083`.
+    ///
+    /// Three groups and nothing else. The bunny family (Bunny, and the four seasonal and gold
+    /// variants), the goldfish family, and the two penguins, each becoming its crimson form or its
+    /// corrupt one depending on which evil the world carries. Returns `None` for everything else,
+    /// which is most of the roster: this is a critter mechanic, not a general one.
+    pub fn evil_form(npc_type: u16, crimson: bool) -> Option<u16> {
+        match npc_type {
+            46 | 303 | 337 | 443 | 540 => Some(if crimson { 464 } else { 47 }),
+            55 | 230 | 592 | 593 => Some(if crimson { 465 } else { 57 }),
+            148 | 149 => Some(if crimson { 470 } else { 168 }),
+            _ => None,
+        }
+    }
+
+    /// Turn evil where it stands, if this is a critter with an evil form. Returns whether it did.
+    ///
+    /// `NPC.UpdateNPC_BloodMoonTransformations` (`NPC.cs:93033-93048`) is the caller that matters:
+    /// under a blood moon the server runs this over every NPC, every tick, so the world's bunnies
+    /// and goldfish turn as the moon comes up rather than being spawned already evil.
+    ///
+    /// The coin guard is vanilla's and is transcribed rather than reasoned about: it records
+    /// whether `value` was zero *before* the transform and forces it back to zero afterwards.
+    /// `Transform` goes through `SetDefaults`, which loads the new type's own coin value, so
+    /// without this a statue-spawned critter (worth nothing, exactly so it cannot be farmed)
+    /// becomes worth its evil form's coins the moment a blood moon rises.
+    pub fn attempt_to_convert_to_evil(&mut self, crimson: bool) -> bool {
+        let Some(evil) = Self::evil_form(self.npc_type, crimson) else {
+            return false;
+        };
+        let was_worthless = self.stats.value == 0.0;
+        self.become_type(evil);
+        if was_worthless {
+            self.stats.value = 0.0;
+        }
+        true
+    }
+
     /// Turn into another type in place, the way the game's `NPC.Transform` does.
     ///
     /// The slot, the position and the generation all survive; everything the type decides — stats,
@@ -1906,5 +1945,75 @@ mod tests {
         assert_eq!((n.width(), n.height()), (45.0, 30.0));
         n.become_type(1);
         assert_eq!((n.width(), n.height()), (24.0, 18.0), "and back down again");
+    }
+
+    /// A Corrupt Bunny is a converted Bunny, never a spawned one: vanilla's `NPC.Spawner` cannot
+    /// produce type 47 at any depth, and `AttemptToConvertNPCToEvil` is the only source.
+    #[test]
+    fn a_bunny_turns_corrupt_under_a_corruption_worlds_blood_moon() {
+        let mut bunny = Npc::new(46, (100.0, 100.0), 1).expect("a bunny");
+        assert!(bunny.attempt_to_convert_to_evil(false), "it converts");
+        assert_eq!(bunny.npc_type, 47, "into a Corrupt Bunny");
+    }
+
+    /// `NPC.cs:93055`: the same bunny in a crimson world becomes the crimson form instead.
+    #[test]
+    fn the_same_bunny_turns_crimson_in_a_crimson_world() {
+        let mut bunny = Npc::new(46, (100.0, 100.0), 1).expect("a bunny");
+        assert!(bunny.attempt_to_convert_to_evil(true));
+        assert_eq!(bunny.npc_type, 464);
+    }
+
+    /// All three groups, both evils, from `NPC.cs:93052-93082`. Written out rather than looped so
+    /// a wrong pairing is visible as a wrong pairing.
+    #[test]
+    fn every_group_the_game_converts_and_nothing_else() {
+        for t in [46, 303, 337, 443, 540] {
+            assert_eq!(
+                Npc::evil_form(t, false),
+                Some(47),
+                "bunny family, corruption"
+            );
+            assert_eq!(Npc::evil_form(t, true), Some(464), "bunny family, crimson");
+        }
+        for t in [55, 230, 592, 593] {
+            assert_eq!(Npc::evil_form(t, false), Some(57));
+            assert_eq!(Npc::evil_form(t, true), Some(465));
+        }
+        for t in [148, 149] {
+            assert_eq!(Npc::evil_form(t, false), Some(168));
+            assert_eq!(Npc::evil_form(t, true), Some(470));
+        }
+        // A zombie is not a critter and a blood moon does not change it into anything.
+        assert_eq!(Npc::evil_form(3, false), None);
+        assert_eq!(Npc::evil_form(1, true), None);
+    }
+
+    /// Vanilla's own anti-farm guard (`NPC.cs:93037-93046`): a critter worth no coins, which is
+    /// what a statue spawns, must still be worth no coins after it turns. Without this a blood
+    /// moon over a bunny statue becomes a coin farm.
+    #[test]
+    fn a_worthless_critter_is_still_worthless_once_it_turns() {
+        let mut bunny = Npc::new(46, (100.0, 100.0), 1).expect("a bunny");
+        bunny.stats.value = 0.0;
+        bunny.attempt_to_convert_to_evil(false);
+        assert_eq!(
+            bunny.stats.value, 0.0,
+            "a statue-spawned critter must not become worth its evil form's coins"
+        );
+    }
+
+    /// And one that was worth something keeps whatever its new form is worth, so the guard is a
+    /// guard and not a blanket zeroing.
+    #[test]
+    fn a_wild_critter_takes_its_new_forms_value() {
+        let mut bunny = Npc::new(46, (100.0, 100.0), 1).expect("a bunny");
+        bunny.stats.value = 5.0;
+        bunny.attempt_to_convert_to_evil(false);
+        assert_eq!(
+            bunny.stats.value,
+            npc_stats(47).expect("corrupt bunny").value,
+            "a wild one is worth exactly what a Corrupt Bunny is worth"
+        );
     }
 }

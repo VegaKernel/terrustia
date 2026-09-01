@@ -1047,10 +1047,14 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         // A dry beach tile falls through to the ordinary surface pool the same way vanilla's does,
         // which is why standing on the shore at night still brings zombies.
         (depth, Ocean) => pool(depth, Forest, day),
+        // No Corrupt Bunny (47) here, deliberately: vanilla's `NPC.Spawner` never spawns one at
+        // any depth. The only way a Corrupt Bunny exists is `AttemptToConvertNPCToEvil`
+        // (`NPC.cs:93050`) turning an ordinary Bunny under a blood moon, which
+        // `convert_critters_under_a_blood_moon` now does. Listing it here made them appear out of
+        // nothing in daylight.
         (Surface, Corruption) => &[
-            6,  // EaterofSouls
-            7,  // DevourerHead
-            47, // CorruptBunny
+            6, // EaterofSouls
+            7, // DevourerHead
         ],
         (_, Corruption) => &[
             6,  // EaterofSouls
