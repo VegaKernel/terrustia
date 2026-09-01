@@ -1136,6 +1136,100 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
     None
 }
 
+/// The cavern chain's own seasonal arms, ahead of the ordinary pool: `NPC.cs:5005-5199`.
+///
+/// The surface's sibling of [`seasonal_night_pick`], and the same shape for the same reason:
+/// vanilla's caverns are a *sequence* of independent rolls, each returning the moment it hits, and
+/// the pool is only what is left when every one of them misses. `None` means nothing here answered
+/// and the caller should draw from [`pool`] as before.
+///
+/// Named for the cavern rather than "underground" on purpose. Vanilla's own `underGround`
+/// (`NPC.cs:1144`) is `spawnTileY <= Main.rockLayer`, the *dirt* layer, whose arm is `NPC.cs:4818`
+/// and is not this one. This chain is the fallthrough below the rock layer and above the
+/// underworld, which is [`Depth::Cavern`] here.
+///
+/// `lower_caverns` is `(double)spawnTileY > (Main.rockLayer + (double)Main.maxTilesY) / 2.0`
+/// (`NPC.cs:5021`), the bottom half of the stone, which is a different line from
+/// [`Conditions::below_dirt_midline`]'s `(worldSurface + rockLayer) / 2`.
+///
+/// Deliberately left out, each with its place in the order kept so the arms that *are* here land at
+/// vanilla's own odds:
+///
+/// * `NPC.cs:5007` the Skeleton Merchant, who already has his own branch in [`try_spawn`] with the
+///   two conditions this signature cannot see (standing water, and one alive at a time).
+/// * `NPC.cs:5013` the Lost Girl. Reachable in one line here, but she is a decoration until
+///   something turns her into a Nymph, and nothing does: `Npc::become_type(196)` exists and has a
+///   test, no caller triggers it. Spawning a permanently idle prop is worse than the honest gap, so
+///   195 stays in `docs/spawn-gaps.tsv` until the transformation has a lane.
+/// * `NPC.cs:5017` the Rune Wizard, already carried by [`hardmode_pool`].
+/// * `NPC.cs:5027` the marble arm (Medusa, Greek Skeleton) and `:5038` the granite one (Granite
+///   Golem, Granite Flyer). Both key on `nearMarble`/`nearGranite`, which vanilla fills from its
+///   own tile scan around the spot (`NPC.cs:1100-1143`); this server models neither micro-biome and
+///   will not add a second per-tile scan to the spawn path for them. 480-483 stay disclosed.
+/// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
+///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
+///   so a snow cavern never sees a Halloween skeleton.
+/// * `NPC.cs:5110` the Spore Skeleton, gated on `ZoneGlowshroom`, a biome this server does not
+///   classify. 635 stays disclosed.
+/// * `NPC.cs:5120` the four Bone Throwing Skeletons. The arm is `int num56 = Main.rand.Next(4)`
+///   followed by three `num56 == 0` tests in a row, so 450 and 451 are dead in the game itself and
+///   449 is one draw in four with 452 taking the rest. Transcribing the bug faithfully would still
+///   leave two of the four in the gap list, and transcribing it *unfaithfully* to clear them is the
+///   opposite of the point, so all four stay disclosed.
+/// * `NPC.cs:5145-5198` the closing `switch`, whose four cases are the plain Skeleton and its three
+///   look-alikes (201-203). [`pool`] already carries 21 for the caverns; the three variants are the
+///   same enemy with a different sprite, so they are left rather than given the pool three more
+///   entries that would quadruple the skeleton share of every cavern draw.
+pub fn cavern_seasonal_pick(
+    at: Seasonal,
+    no_worms: bool,
+    lower_caverns: bool,
+    rng: &mut SmallRng,
+) -> Option<u16> {
+    let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
+
+    // NPC.cs:5005, `else if (Main.rand.Next(2) == 0)`: heads is this chain, the walkers, and tails
+    // is the flying chain at `:5201` (Illuminant Bat, Jungle Bat, Chaos Elemental, Ice Bat, Giant
+    // Bat). Both are [`pool`]'s business apart from the arms below, so the roll is still made and a
+    // tails hands the draw straight back: skipping it would make every arm here twice as common.
+    if !one_in(rng, 2) {
+        return None;
+    }
+    // NPC.cs:5021. `offensiveToTim` (a second, likelier one in fifty for a player carrying a magic
+    // weapon) is not read here, so Tim is very slightly rarer than the game's, never commoner.
+    if lower_caverns && one_in(rng, 200) {
+        return Some(45); // Tim
+    }
+    // NPC.cs:5051, `if (Main.hardMode && Main.rand.Next(10) != 0)`: nine hardmode draws in ten
+    // never reach the rest of this chain at all. Its own answers (Armored Viking, Armored Skeleton,
+    // Icy Merman, Skeleton Archer) are all in [`hardmode_pool`] already, so the roll stands and the
+    // draw is handed back. Without it a hardmode Halloween cavern would be ten times as full of
+    // costumed skeletons as the game's.
+    if at.hard_mode && !one_in(rng, 10) {
+        return None;
+    }
+    // NPC.cs:5078. The graveyard's Ghost underground, and October's: unlike the surface arm at
+    // `:4544`, which is the graveyard's alone, the calendar opens this one too. `!noWorms` is
+    // vanilla's own condition on it, odd as it looks on something that does not burrow.
+    if !no_worms && (at.halloween || at.graveyard) && one_in(rng, 30) {
+        return Some(316); // Ghost
+    }
+    // NPC.cs:5083, the Undead Miner, and `:5105`, this world's own six cavern monsters. Both are
+    // already in the caller's draw (44 in [`pool`], the six behind `CAVERN_SENTINEL`), so both
+    // rolls are made and handed back. The one in three especially: dropping it would make the
+    // Halloween arm below half again as common as the game's.
+    if one_in(rng, 20) || one_in(rng, 3) {
+        return None;
+    }
+    // NPC.cs:5115: `Main.rand.Next(322, 325)`, so 322, 323 or 324. The calendar alone, with no
+    // graveyard half: standing among tombstones in June brings no costumes up out of the stone.
+    if at.halloween && one_in(rng, 2) {
+        // SkeletonTopHat, SkeletonAstonaut, SkeletonAlien
+        return Some(322 + rng.random_range(0..3));
+    }
+    None
+}
+
 /// The holiday costume a critter or a plain slime wears, or the type unchanged.
 ///
 /// Vanilla puts these swaps inside the draw rather than after it, as an `else if` above the
@@ -1332,11 +1426,20 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             66, // VoodooDemon
             39, // BoneSerpentHead
         ],
+        // The three big Angry Bones are not hardmode and not rare: the dungeon chain's own
+        // fallthrough is `int num43 = Main.rand.Next(5)` with cases 0, 1 and 2 taking 294, 295 and
+        // 296 (`NPC.cs:2767-2783`), and only cases 3 and 4 reach the plain Angry Bones below it
+        // (`:2784-2795`, where `-14` and `-13` are size variants of that same 31 rather than types
+        // of their own). Three fifths of what a pre-Skeletron-cleared dungeon actually throws at a
+        // player was therefore missing, and the dungeon was correspondingly softer than the game's.
         (_, Dungeon) => &[
-            31, // AngryBones
-            32, // DarkCaster
-            34, // CursedSkull
-            71, // DungeonSlime
+            31,  // AngryBones
+            294, // AngryBonesBig
+            295, // AngryBonesBigMuscle
+            296, // AngryBonesBigHelmet
+            32,  // DarkCaster
+            34,  // CursedSkull
+            71,  // DungeonSlime
         ],
         // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
         // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
@@ -3030,6 +3133,31 @@ pub fn try_spawn(
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
+                    // The caverns have a chain of their own ahead of their pool, and it is where
+                    // October and a graveyard reach underground (`NPC.cs:5005-5199`). The biome
+                    // exclusions are vanilla's own diversions above it: the two evils and the
+                    // jungle answer at `NPC.cs:4066`, `:4125` and `:3929-3948` on their tiles, the
+                    // dungeon has its own arm, and the snow's `:5088`/`:5100` both return before
+                    // the season is ever asked. Nothing here reads a tile, so this costs three
+                    // comparisons and at most six `rng` draws on a path that already made several.
+                    let cavern_chain = depth == Depth::Cavern
+                        && !matches!(
+                            biome,
+                            Biome::Corruption
+                                | Biome::Crimson
+                                | Biome::Jungle
+                                | Biome::Dungeon
+                                | Biome::Snow
+                        );
+                    // `NPC.cs:5021`, the bottom half of the stone.
+                    let lower_caverns = y > (i32::from(world.rock_layer) + world.height()) / 2;
+                    if cavern_chain
+                        && let Some(npc_type) =
+                            cavern_seasonal_pick(seasonal, no_worms, lower_caverns, rng)
+                    {
+                        out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
                     // A graveyard's daylight draws the *night* pool, for the same reason: with the
                     // daytime block skipped, the chain below `NPC.cs:4202` is the one that answers,
                     // and its fallthrough is the zombie (`NPC.cs:4770-4816`), not the day's slime.
@@ -3259,6 +3387,34 @@ mod tests {
                 }
             }
         }
+        // ...and the caverns' own chain, asked the same way. Both `no_worms` states, because the
+        // Ghost's arm is gated on one of them, and both halves of the stone, because Tim's is.
+        for halloween in [false, true] {
+            for graveyard in [false, true] {
+                for hard_mode in [false, true] {
+                    let at = Seasonal {
+                        halloween,
+                        graveyard,
+                        hard_mode,
+                        ..Seasonal::default()
+                    };
+                    for no_worms in [false, true] {
+                        for lower_caverns in [false, true] {
+                            for seed in 0..4_000u64 {
+                                let mut rng = SmallRng::seed_from_u64(seed);
+                                set.extend(cavern_seasonal_pick(
+                                    at,
+                                    no_worms,
+                                    lower_caverns,
+                                    &mut rng,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // The holiday costumes, which swap a critter or a plain slime for a dressed-up one after it
         // is drawn rather than sitting in a pool of their own.
         for at in [
@@ -4049,6 +4205,145 @@ mod tests {
         }
     }
 
+    /// The caverns have a season too, and it is a different chain from the surface's: October
+    /// dresses the skeletons up (`NPC.cs:5115`, `Main.rand.Next(322, 325)`) and October *or* a
+    /// graveyard puts a Ghost in the stone (`NPC.cs:5078`, unlike the surface's `:4544`, which is
+    /// the graveyard's alone).
+    ///
+    /// Neutralised arm by arm, each run and each failing its own assertion:
+    ///
+    /// * dropping the `NPC.cs:5115` branch: "no SkeletonTopHat (322) in an October cavern: {316}".
+    /// * cutting `:5078`'s condition down to `at.graveyard` alone: "no Ghost (316) in an October
+    ///   cavern: {322, 323, 324}".
+    /// * cutting it down to `at.halloween` alone instead: "no Ghost in an underground graveyard".
+    /// * dropping `!no_worms` from `:5078`: "a Ghost got past `noWorms`".
+    /// * dropping `lower_caverns` from `:5021`: "an ordinary cavern answered the seasonal chain",
+    ///   Tim having reached the upper stone.
+    /// * dropping the `:5051` hardmode gate: "hardmode should reach this chain far less often:
+    ///   6879 vs 6879".
+    #[test]
+    fn the_caverns_have_a_season_of_their_own() {
+        let sample = |at: Seasonal, no_worms: bool, lower_caverns: bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    cavern_seasonal_pick(at, no_worms, lower_caverns, &mut rng)
+                })
+                .collect::<Vec<u16>>()
+        };
+        let set = |v: Vec<u16>| v.into_iter().collect::<std::collections::BTreeSet<u16>>();
+        let october = Seasonal {
+            halloween: true,
+            ..Seasonal::default()
+        };
+        let graveyard = Seasonal {
+            graveyard: true,
+            ..Seasonal::default()
+        };
+        let plain = Seasonal::default();
+
+        let found = set(sample(october, false, false));
+        for (npc_type, name) in [
+            (316u16, "Ghost"),
+            (322, "SkeletonTopHat"),
+            (323, "SkeletonAstonaut"),
+            (324, "SkeletonAlien"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in an October cavern: {found:?}"
+            );
+        }
+
+        // A graveyard underground is the Ghost and only the Ghost: the costumes are the calendar's.
+        let found = set(sample(graveyard, false, false));
+        assert!(
+            found.contains(&316),
+            "no Ghost in an underground graveyard: {found:?}"
+        );
+        for npc_type in [322u16, 323, 324] {
+            assert!(
+                !found.contains(&npc_type),
+                "{npc_type} wore a costume in a June graveyard: {found:?}"
+            );
+        }
+
+        // An ordinary cavern in the upper stone answers nothing here at all, which is what makes
+        // every type above the season's doing rather than the chain's.
+        assert!(
+            set(sample(plain, false, false)).is_empty(),
+            "an ordinary cavern answered the seasonal chain"
+        );
+        // ...and the bottom half of the stone answers exactly one thing: Tim (`NPC.cs:5021`).
+        assert_eq!(
+            set(sample(plain, false, true)),
+            std::collections::BTreeSet::from([45u16]),
+            "the lower caverns should add Tim and nothing else"
+        );
+
+        // `!noWorms` is vanilla's own gate on the Ghost, odd as it looks on something that floats.
+        assert!(
+            !set(sample(graveyard, true, false)).contains(&316),
+            "a Ghost got past `noWorms`"
+        );
+
+        // `NPC.cs:5051` swallows nine hardmode draws in ten before the season is ever asked.
+        let classic = sample(october, false, false).len();
+        let hard = sample(
+            Seasonal {
+                hard_mode: true,
+                ..october
+            },
+            false,
+            false,
+        )
+        .len();
+        assert!(
+            hard * 4 < classic,
+            "hardmode should reach this chain far less often: {hard} vs {classic}"
+        );
+    }
+
+    /// The same chain through `try_spawn`, which is what proves it is wired to the caverns rather
+    /// than merely written: an October cavern brings up costumed skeletons and an ordinary one does
+    /// not.
+    ///
+    /// Neutralised by pointing `try_spawn`'s `cavern_chain` gate at `Depth::Underworld` instead of
+    /// `Depth::Cavern`, so the chain is still written and still called but no longer reaches the
+    /// caverns: "no SkeletonTopHat (322) in an October cavern: {10, 16, 21, 44, 49, 93, 354, 453,
+    /// 496, 497, 498, 504, 506}", the plain cavern pool and nothing else.
+    #[test]
+    fn halloween_reaches_down_into_the_caverns() {
+        let mut world = flat_world(250);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+        assert_eq!(biome_at(&world, px, py), Biome::Forest);
+        world.halloween = true;
+
+        let seen = spawns_at_in(&world, false, false, px, py, 200_000);
+        let found: std::collections::BTreeSet<u16> = seen.iter().copied().collect();
+        for (npc_type, name) in [
+            (322u16, "SkeletonTopHat"),
+            (323, "SkeletonAstonaut"),
+            (324, "SkeletonAlien"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in an October cavern: {found:?}"
+            );
+        }
+
+        world.halloween = false;
+        let ordinary = spawns_at_in(&world, false, false, px, py, 200_000);
+        let ordinary: std::collections::BTreeSet<u16> = ordinary.iter().copied().collect();
+        for npc_type in [322u16, 323, 324] {
+            assert!(
+                !ordinary.contains(&npc_type),
+                "{npc_type} turned up in an ordinary cavern: {ordinary:?}"
+            );
+        }
+    }
+
     /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
     /// `Main.rand.Next(331, 333)`), and dresses the surface slime in ribbons
     /// (`NPC.cs:5660-5662`).
@@ -4757,6 +5052,47 @@ mod tests {
             after > 0,
             "the post-Skeletron dungeon never spawned anything"
         );
+    }
+
+    /// The dungeon's fallthrough is mostly the *big* Angry Bones, not the plain one: `NPC.cs:2767`
+    /// rolls `Main.rand.Next(5)` and three of its five cases (`:2774-2782`) are 294, 295 and 296,
+    /// with only the other two reaching 31 at `:2794`. None of the three is gated on `hardDungeon`,
+    /// so they are what a player meets the first time they walk into a cleared dungeon.
+    ///
+    /// Neutralised by removing the three from `pool`'s dungeon arm: nothing but the four originals
+    /// is drawn in forty thousand ticks and the first assertion fails.
+    #[test]
+    fn the_dungeon_is_mostly_big_angry_bones() {
+        let (mut world, (cx, cy)) = dungeon_world();
+        world.progress.downed_boss3 = true;
+        let npcs = NpcStore::new();
+        let players = dungeon_player(cx, cy);
+
+        let mut rng = SmallRng::seed_from_u64(3);
+        let mut found = std::collections::BTreeSet::new();
+        for _ in 0..40_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut BiomeCache::default(),
+                &mut rng,
+            ) {
+                found.insert(npc_type);
+            }
+        }
+        for (npc_type, name) in [
+            (294u16, "AngryBonesBig"),
+            (295, "AngryBonesBigMuscle"),
+            (296, "AngryBonesBigHelmet"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) in a cleared dungeon: {found:?}"
+            );
+        }
     }
 
     #[test]

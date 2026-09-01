@@ -3,7 +3,6 @@
 # hand-edited: rerun the tool and review the diff, as with the other generated tables.
 # id	name
 23	MeteorHead
-45	Tim
 52	DoctorBones
 57	CorruptGoldfish
 58	Piranha
@@ -63,13 +62,7 @@
 291	SkeletonSniper
 292	TacticalSkeleton
 293	SkeletonCommando
-294	AngryBonesBig
-295	AngryBonesBigMuscle
-296	AngryBonesBigHelmet
 300	Mouse
-322	SkeletonTopHat
-323	SkeletonAstonaut
-324	SkeletonAlien
 357	Worm
 358	LightningBug
 359	Snail
