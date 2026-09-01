@@ -456,8 +456,21 @@ fn crowding_at(npc: &Npc, hazards: &[Hazard], reach: f32) -> (f32, f32) {
 }
 
 /// Count down toward despawn when nobody is close enough to care.
+///
+/// `NPC.CheckActive` (`NPC.cs:78697`) is the gate: `if (!active || ... || townNPC) return;`. The
+/// Skeleton Merchant is the one creature where reading that as "`town_npc` in our table" is wrong.
+/// `SetDefaults`' own arm for 453 (`NPC.cs:14427-14441`) sets `friendly` and never `townNPC`, which
+/// is precisely why the game needs a separate `NPC.isLikeATownNPC` property (`NPC.cs:6880-6890`,
+/// literally `if (type == 453) return true; return townNPC;`) for the places that *do* want to
+/// count him as one. `npc_data.rs`'s 453 entry carries `town_npc: true` deliberately, and its own
+/// comment says the faithful fix belongs at the call sites rather than in the table: this is the
+/// one where the difference is observable. He is a passing encounter, not a resident, and vanilla
+/// takes him away 750 ticks after the last player walks off. Without this he would wander the
+/// caverns for the life of the world.
 fn tick_life(npc: &mut Npc, targets: &[Target]) {
-    if npc.stats.town_npc || npc.stats.boss {
+    if (npc.stats.town_npc && npc.npc_type != crate::game::spawn::SKELETON_MERCHANT)
+        || npc.stats.boss
+    {
         return;
     }
     // The game's box, not a radius: a screen either side of the creature, widened by its own size.
@@ -815,6 +828,46 @@ mod tests {
             update(&mut guide, &terrain, &[], &mut r, &mut AiOutput::default());
         }
         assert_eq!(guide.time_left, super::super::npc::DEFAULT_TIME_LEFT);
+    }
+
+    /// ...but the Skeleton Merchant does, because he is not one. `SetDefaults` never sets
+    /// `townNPC` on 453 (`NPC.cs:14427-14441`), so `NPC.CheckActive`'s `townNPC` early-return
+    /// (`NPC.cs:78697`) does not cover him and he goes on the ordinary 750-tick inactivity clock.
+    /// He is a passing encounter in the game, not a resident.
+    ///
+    /// Fails before the fix, when `npc_data.rs`'s deliberate `town_npc: true` for him was read
+    /// here as vanilla's `townNPC`: a Skeleton Merchant would have wandered forever.
+    #[test]
+    fn a_skeleton_merchant_is_not_a_town_npc_and_does_expire() {
+        let terrain = flat();
+        let mut merchant = stand_on(crate::game::spawn::SKELETON_MERCHANT, 100.0, 10.0);
+        settle(&mut merchant, &terrain);
+        let start = merchant.time_left;
+        let mut r = rng();
+        for _ in 0..300 {
+            update(
+                &mut merchant,
+                &terrain,
+                &[],
+                &mut r,
+                &mut AiOutput::default(),
+            );
+        }
+        assert!(
+            merchant.time_left < start,
+            "he wandered off nobody's clock at all"
+        );
+
+        // And a player standing next to him keeps him, exactly like any other wanderer.
+        let targets = [player_at(100.0 * 16.0, 150.0)];
+        update(
+            &mut merchant,
+            &terrain,
+            &targets,
+            &mut r,
+            &mut AiOutput::default(),
+        );
+        assert_eq!(merchant.time_left, super::super::npc::DEFAULT_TIME_LEFT);
     }
 
     #[test]
