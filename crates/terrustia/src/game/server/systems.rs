@@ -6632,6 +6632,153 @@ impl GameServer {
     }
 }
 
+/// The pillar fight, from the far side of the spawn path: a kill counts against one shield and one
+/// only, and the pillar it belongs to is the only one that becomes hittable.
+#[cfg(test)]
+mod lunar_pillar_fight {
+    use super::*;
+    use crate::config::Config;
+    use crate::game::lunar::{self, PILLARS, SHIELD_STRENGTH};
+
+    /// The Solar Solenian: solar escort, no worm body, and nothing splits off it.
+    const SOLENIAN: u16 = 419;
+
+    fn arena() -> GameServer {
+        GameServer::new(
+            Config::default(),
+            crate::world::World::empty(500, 300, "pillar fight probe"),
+        )
+    }
+
+    /// Kill one of a type, through the server's own death path rather than by poking the state.
+    fn kill(server: &mut GameServer, npc_type: u16) {
+        let index = server
+            .npcs
+            .spawn(npc_type, (2000.0, 2000.0))
+            .expect("a free NPC slot");
+        let center = server.npcs.get(index).expect("just spawned").center();
+        server.npc_died(index, npc_type, center, 0.0);
+    }
+
+    fn alive(server: &GameServer, npc_type: u16) -> usize {
+        server
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.npc_type == npc_type && n.is_alive())
+            .count()
+    }
+
+    fn invulnerable(server: &GameServer, pillar: u16) -> bool {
+        server
+            .npcs
+            .iter()
+            .find(|(_, n)| n.npc_type == pillar)
+            .map(|(_, n)| n.invulnerable)
+            .expect("the pillar should still be standing")
+    }
+
+    /// A hundred kills clear the tower those kills belonged to, and leave the other three exactly
+    /// as they were. `NPC.cs:80095-80136` is the game's own credit list, and it is per pillar.
+    ///
+    /// Neutralised by deleting `self.lunar.note_kill(npc_type)` from `npc_died`: the solar shield
+    /// stays at its full hundred and the first assertion after the kills fails.
+    #[test]
+    fn clearing_one_escort_drops_only_its_own_pillars_shield() {
+        let mut server = arena();
+        server.trigger_lunar_apocalypse();
+        for pillar in PILLARS {
+            assert_eq!(server.lunar.shield_of(pillar), SHIELD_STRENGTH);
+        }
+
+        for _ in 0..SHIELD_STRENGTH {
+            kill(&mut server, SOLENIAN);
+        }
+
+        assert_eq!(server.lunar.shield_of(lunar::SOLAR), 0);
+        for pillar in [lunar::VORTEX, lunar::NEBULA, lunar::STARDUST] {
+            assert_eq!(
+                server.lunar.shield_of(pillar),
+                SHIELD_STRENGTH,
+                "pillar {pillar}'s shield moved for a kill that was not its own",
+            );
+        }
+    }
+
+    /// ...and only then does that pillar take damage. The shield is not a health bar, it is the
+    /// gate on the health bar (`ai/hardmode/pillar.rs`, `NPC.cs:39492`).
+    ///
+    /// Neutralised by deleting the `pillar.shield = shield` write from `tick_lunar`: the pillar's
+    /// own copy of the count stays at whatever it was raised with, its routine keeps
+    /// `invulnerable` set, and the "the solar pillar should be hittable now" assertion fails.
+    #[test]
+    fn a_pillar_becomes_damageable_only_once_its_own_escort_is_gone() {
+        let mut server = arena();
+        server.trigger_lunar_apocalypse();
+        server.tick_lunar();
+        server.tick_npcs();
+        for pillar in PILLARS {
+            assert!(
+                invulnerable(&server, pillar),
+                "pillar {pillar} was hittable with its shield up",
+            );
+        }
+
+        for _ in 0..SHIELD_STRENGTH {
+            kill(&mut server, SOLENIAN);
+        }
+        server.tick_lunar();
+        server.tick_npcs();
+
+        assert!(
+            !invulnerable(&server, lunar::SOLAR),
+            "the solar pillar should be hittable now its escort is dead",
+        );
+        for pillar in [lunar::VORTEX, lunar::NEBULA, lunar::STARDUST] {
+            assert!(
+                invulnerable(&server, pillar),
+                "pillar {pillar} became hittable off somebody else's kills",
+            );
+        }
+    }
+
+    /// The two escorts that leave something behind, and the caps that stop a burst becoming a
+    /// swarm: `NPC.cs:84381-84403` and `NPC.cs:83981-83994`.
+    ///
+    /// Neutralised by deleting `self.split_on_death(npc_type, center)` from `npc_died`: nothing is
+    /// left behind by either death and the first count in each half reads zero.
+    #[test]
+    fn a_stardust_cell_bursts_and_a_hornet_queen_leaves_larvae() {
+        let mut server = arena();
+
+        // `num172` counts 406 and 405 including the cell that is dying, so the first burst sees
+        // one and gives the full four.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 4, "the first cell should give four");
+        // Five about: 4 -> three more.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 7);
+        // Eight about: 7 -> two more.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 9);
+        // Ten about: 10 -> one more, and every burst after this is one.
+        kill(&mut server, 405);
+        assert_eq!(alive(&server, 406), 10);
+
+        let mut server = arena();
+        // `num137` is `CountNPCS(428) + CountNPCS(427) + CountNPCS(426) * 3`, again counting the
+        // queen that is dying, so the first death is three against a threshold of twenty.
+        kill(&mut server, 426);
+        assert_eq!(alive(&server, 428), 3, "a queen should leave three larvae");
+        for _ in 0..5 {
+            kill(&mut server, 426);
+        }
+        assert_eq!(alive(&server, 428), 18, "six queens, three larvae each");
+        // The seventh finds the swarm at twenty-one and leaves nothing.
+        kill(&mut server, 426);
+        assert_eq!(alive(&server, 428), 18, "the swarm is capped at twenty");
+    }
+}
+
 #[cfg(test)]
 mod lunar_pillar_persistence {
     use super::*;

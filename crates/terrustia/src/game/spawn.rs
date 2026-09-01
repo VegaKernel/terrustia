@@ -3770,6 +3770,123 @@ mod tests {
         }
     }
 
+    /// A flat world with a floor to stand on, for the tower-zone tests below.
+    fn flat_world(floor: i32) -> World {
+        let mut world = World::empty(800, 600, "pillar arena");
+        world.surface = 100;
+        world.rock_layer = 200;
+        for x in 0..world.width() {
+            for y in floor..(floor + 4) {
+                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+        world
+    }
+
+    /// Everything a pillar standing `offset` pixels from the player draws over `ticks` attempts.
+    fn tower_spawns(
+        world: &World,
+        pillar: u16,
+        at: (i32, i32),
+        offset: f32,
+        ticks: u32,
+    ) -> Vec<u16> {
+        let mut towers = [None; 4];
+        let slot = crate::game::lunar::PILLARS
+            .iter()
+            .position(|p| *p == pillar)
+            .expect("a real pillar");
+        towers[slot] = Some((at.0 as f32 * 16.0 + offset, at.1 as f32 * 16.0));
+
+        let events = EventSpawns {
+            hard_mode: true,
+            towers,
+            ..quiet()
+        };
+        let npcs = NpcStore::new();
+        let players = player_at((at.0 as f32 * 16.0, at.1 as f32 * 16.0));
+        let mut rng = SmallRng::seed_from_u64(0x10_0000 + u64::from(pillar));
+        let mut biomes = BiomeCache::default();
+        let mut seen = Vec::new();
+        for _ in 0..ticks {
+            seen.extend(
+                try_spawn(
+                    world,
+                    &npcs,
+                    &players,
+                    &events,
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                )
+                .into_iter()
+                .map(|(npc_type, _)| npc_type),
+            );
+        }
+        seen
+    }
+
+    /// Inside a pillar's zone, that pillar's escort is the only thing the world produces — and
+    /// outside it, none of the escort appears at all.
+    ///
+    /// This is the whole Lunar Apocalypse. A pillar's shield is a count of its own escort killed
+    /// (`game/lunar.rs`) and a pillar takes no damage while the shield holds, so with nothing
+    /// spawning the four towers were indestructible and the Moon Lord unreachable.
+    ///
+    /// Neutralised by deleting the `if let Some(pillar) = tower` arm from `try_spawn`'s candidate
+    /// loop: every zone then draws the surface forest roster instead and the first assertion in
+    /// each arm fails on a Zombie.
+    #[test]
+    fn a_pillar_zone_spawns_its_own_escort_and_nothing_else() {
+        use crate::game::lunar;
+
+        let floor = 150;
+        let world = flat_world(floor);
+        let at = (400, floor - 2);
+
+        // The four rosters, `NPC.cs:1302`, `:1328`, `:1349`, `:1364`, as sets.
+        let rosters: [(u16, &[u16]); 4] = [
+            (lunar::NEBULA, &[420, 421, 423, 424]),
+            (lunar::VORTEX, &[425, 426, 427, 429]),
+            (lunar::STARDUST, &[402, 405, 407, 409, 411]),
+            (lunar::SOLAR, &[412, 415, 416, 417, 418, 419, 518]),
+        ];
+
+        for (pillar, roster) in rosters {
+            let seen = tower_spawns(&world, pillar, at, 0.0, 4_000);
+            assert!(
+                !seen.is_empty(),
+                "pillar {pillar} spawned nothing at all in four thousand ticks",
+            );
+            for npc_type in &seen {
+                assert!(
+                    roster.contains(npc_type),
+                    "pillar {pillar}'s zone drew {npc_type}, which is not on its list",
+                );
+            }
+            // ...and every uncapped entry really is reachable, so a typo in one weight cannot
+            // quietly drop a type out of the fight.
+            let drawn: std::collections::BTreeSet<u16> = seen.into_iter().collect();
+            for npc_type in roster {
+                assert!(
+                    drawn.contains(npc_type),
+                    "pillar {pillar}'s zone never drew {npc_type} in four thousand ticks",
+                );
+            }
+        }
+
+        // `SceneMetrics.NPCEventZoneRadius` is 4000 px (`SceneMetrics.cs:130`), so a pillar half a
+        // world away is not a zone: the ordinary surface roster answers instead.
+        let far = tower_spawns(&world, lunar::SOLAR, at, 5_000.0, 4_000);
+        assert!(!far.is_empty(), "the ordinary world stopped spawning too");
+        for npc_type in &far {
+            assert!(
+                lunar::belongs_to(*npc_type).is_none(),
+                "{npc_type} spawned five thousand pixels from its pillar",
+            );
+        }
+    }
+
     #[test]
     fn spawning_is_frequent_enough_to_matter() {
         // Picking a blind point and demanding it be the surface almost never works; scanning down
