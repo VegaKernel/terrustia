@@ -90,6 +90,69 @@ impl Projectile {
     }
 }
 
+/// `ProjectileID.PurificationPowder`. The only *client*-owned projectile this server has to know
+/// the flight of, because it is the only one whose whole effect is a server-side decision.
+pub const PURIFICATION_POWDER: u16 = 10;
+
+/// A Purification Powder cloud in flight, tracked apart from [`ProjectileStore`].
+///
+/// It is deliberately not a [`Projectile`] in the store. The store's contents are the server's own
+/// shots: they are stepped, they go dirty, they are broadcast, and they send a kill packet when
+/// they expire. A powder is somebody else's projectile, already on every client's screen from the
+/// thrower's own packet 27, so putting one in the store would draw a second cloud beside it and
+/// then kill a projectile the server does not own. All the server wants is where the cloud is.
+///
+/// Vanilla decides the powder's one real effect on the server (`Projectile.Damage_TryUsingPowders`
+/// runs under `Main.netMode != 1`, `Projectile.cs:14787-14808`), unlike ordinary weapon damage,
+/// which the owning client decides and reports. That is why this is tracked at all rather than
+/// trusting a client to say "I purified that": the game does not trust it either.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Powder {
+    /// Top-left, the same corner packet 27 carries and vanilla's `Damage_GetHitbox` reads
+    /// (`Projectile.cs:15040`: `new Rectangle((int)position.X, (int)position.Y, width, height)`).
+    pub position: (f32, f32),
+    pub velocity: (f32, f32),
+    /// `ai[0]`, the tick counter `aiStyle == 6` kills the cloud on.
+    pub age: f32,
+}
+
+/// How wide and tall a powder cloud is (`projectile_data.rs`'s own entry for type 10, four tiles
+/// square). Read once here rather than through `projectile_stats` so the hit test cannot silently
+/// become a point when a lookup fails.
+pub const POWDER_SIZE: (f32, f32) = (64.0, 64.0);
+/// `aiStyle == 6`: how much speed the cloud keeps each tick, and the tick it dies on.
+const POWDER_DRAG: f32 = 0.95;
+const POWDER_LIFE: f32 = 180.0;
+
+impl Powder {
+    /// One tick of `aiStyle == 6` (`Projectile.cs:24366-24372`):
+    ///
+    /// ```csharp
+    /// velocity *= 0.95f;
+    /// this.ai[0]++;
+    /// if (this.ai[0] == 180f) { Kill(); }
+    /// ```
+    ///
+    /// Returns `false` when the cloud is spent. Nothing here reads tiles: type 10 carries
+    /// `tileCollide = false`, so a cloud drifts through a wall rather than dying on one.
+    pub fn step(&mut self) -> bool {
+        self.velocity.0 *= POWDER_DRAG;
+        self.velocity.1 *= POWDER_DRAG;
+        self.age += 1.0;
+        self.position.0 += self.velocity.0;
+        self.position.1 += self.velocity.1;
+        self.age < POWDER_LIFE
+    }
+
+    /// Whether the cloud covers a box, the same overlap [`Projectile::overlaps`] uses.
+    pub fn overlaps(&self, position: (f32, f32), size: (f32, f32)) -> bool {
+        self.position.0 < position.0 + size.0
+            && self.position.0 + POWDER_SIZE.0 > position.0
+            && self.position.1 < position.1 + size.1
+            && self.position.1 + POWDER_SIZE.1 > position.1
+    }
+}
+
 /// Whether a tile stops a projectile.
 fn blocking(tiles: &impl TileView, x: i32, y: i32) -> bool {
     let tile = tiles.tile(x, y);

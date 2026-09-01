@@ -563,6 +563,7 @@ impl GameServer {
         self.tick_npcs();
         lap(&mut cost, Phase::Npcs);
         self.tick_projectiles();
+        self.tick_powders();
         lap(&mut cost, Phase::Projectiles);
         self.tick_contact_damage();
         lap(&mut cost, Phase::Damage);
