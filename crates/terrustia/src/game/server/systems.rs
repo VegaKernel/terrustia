@@ -5855,11 +5855,9 @@ impl GameServer {
 
     /// Age items, settle falling ones, and hand nearby ones to a player who can pick them up.
     pub(super) fn tick_items(&mut self) {
-        for index in self.items.tick() {
-            if let Ok(frame) = terrustia_proto::items::item_despawn(index) {
-                self.broadcast(frame, None);
-            }
-        }
+        // Ages items and lapses reservations. Nothing expires: a Terraria world item never
+        // vanishes with age, and the 400-slot table is bounded by the picker's recycling instead.
+        self.items.tick();
 
         // Falling items need their landing broadcast, but nothing in between: a client draws the
         // arc itself once it knows where the item started.

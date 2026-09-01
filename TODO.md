@@ -169,12 +169,20 @@ lands; each changes which slot it lands in, or how a removal is worded on the wi
   `WorldItem::age` doubles as the despawn clock, which vanilla has no equivalent of, so seeding it
   would silently shorten those items' lifetime; the offset only reorders eviction among junk in the
   deepest fallback.
-- A Terraria world item never expires with age (`WorldItem.cs:646-714`'s self-destructs are all
-  per-type). `DESPAWN_TICKS` is this project's own ten-minute cleanup, and it is the reason a client
-  sees a `151` from this server that a real one would not have sent. Vanilla words every other
-  server-side item destruction as a `21` carrying a zero stack (`WorldItem.TurnToAirAndSync`,
-  `WorldItem.cs:623`) rather than a `151`; the shimmer, decraft and voodoo-doll sites here use a
-  `151`, which clears the item on a client the same way but is not the packet vanilla would send.
+- Vanilla words every server-side item destruction as a `21` carrying a zero stack
+  (`WorldItem.TurnToAirAndSync`, `WorldItem.cs:623`) rather than a `151`; the shimmer, decraft and
+  voodoo-doll sites here use a `151`, which clears the item on a client the same way but is not the
+  packet vanilla would send.
+
+`DESPAWN_TICKS` was listed here too and has since been **deleted rather than disclosed**. A Terraria
+world item never expires with age (`WorldItem.cs:646-714`'s self-destructs are all per-type, plus
+lava and falling out of the world), and this server's own ten-minute cleanup was standing in for a
+mechanism it did not have yet. It has it now: what bounds vanilla's 400-slot table is
+`pick_slot`'s recycling, transcribed in the same lane that found the divergence. Keeping the timer
+would have meant a player dropping something valuable, returning a quarter of an hour later, and
+finding the real game still had it while this server had thrown it away. The worry it existed for,
+an idle server hoarding dropped dirt, is bounded exactly as vanilla bounds it: the 401st item
+recycles the oldest.
 
 Found while transcribing the picker and left open, because it cannot be transcribed faithfully yet:
 `WorldItem.TryCombiningIntoNearbyItems` (`WorldItem.cs:157-186`) merges two stacks of the same item

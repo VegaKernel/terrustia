@@ -8,17 +8,21 @@ use terrustia_proto::{
     items::{MAX_ITEMS, PICKUP_REPLACEMENT_TIME, SLOTS_RESERVED_BEFORE_RECYCLING},
 };
 
-/// How long an unclaimed item survives before it is cleaned up, in ticks at 60 Hz.
-///
-/// This server's own, not vanilla's: a Terraria world item never expires with age at all.
-/// `WorldItem.UpdateItem`'s only self-destructs are per-type (a Fallen Star at sunrise, a Mana
-/// Cloak star after 300 ticks, a Defender Medal outside the Old One's Army) plus lava and falling
-/// out of the world (`WorldItem.cs:646-714`). What keeps the 400-slot table from filling in the
-/// real game is [`ItemStore::pick_slot`]'s recycling, which is transcribed. This timer stays
-/// because a long-running server with nobody logged in has no reason to hold a decade of dropped
-/// dirt, but it is a divergence, and it is the reason a client sees a `151` from this server that
-/// a real one would not have sent.
-pub const DESPAWN_TICKS: u32 = 60 * 60 * 10;
+// A Terraria world item never expires with age, and neither does one here any more.
+//
+// This server used to clean an item up after ten minutes. That was its own invention, not the
+// game's: `WorldItem.UpdateItem`'s only self-destructs are per-type (a Fallen Star at sunrise, a
+// Mana Cloak star after 300 ticks, a Defender Medal outside the Old One's Army) plus lava and
+// falling out of the world (`WorldItem.cs:646-714`). What actually keeps vanilla's 400-slot table
+// from filling is [`ItemStore::pick_slot`]'s recycling, and that is now transcribed, so the timer
+// was standing in for a mechanism this server has.
+//
+// It was doing real harm in the meantime: drop something valuable, come back a quarter of an hour
+// later, and the real game still has it while this server had thrown it away. It also made this
+// server send a `151` for a reason no real one ever would.
+//
+// The obvious worry, an idle server hoarding dropped dirt forever, is bounded exactly as vanilla
+// bounds it: the table holds 400 items, and the 401st recycles the oldest.
 
 /// How long a reservation lasts before the item is offered to somebody else.
 pub const RESERVATION_TICKS: u32 = 100;
@@ -362,10 +366,14 @@ impl ItemStore {
             .filter_map(|(i, slot)| slot.as_mut().map(|item| (i as i16, item)))
     }
 
-    /// Age every item by one tick, returning the indices that have expired.
-    pub fn tick(&mut self) -> Vec<i16> {
-        let mut expired = Vec::new();
-        for (index, slot) in self.slots.iter_mut().enumerate() {
+    /// Age every item by one tick, and lapse any reservation that has run out.
+    ///
+    /// Nothing is removed here. `age` is vanilla's `timeSinceItemSpawned` (`WorldItem.cs:442-445`,
+    /// incremented once per update while the item is active) and its only reader is the slot
+    /// picker, which uses it to decide what to recycle when the table is full. See the note at the
+    /// top of this file for why the ten-minute cleanup that used to live here is gone.
+    pub fn tick(&mut self) {
+        for slot in self.slots.iter_mut() {
             let Some(item) = slot else { continue };
             item.age = item.age.saturating_add(1);
             item.reservation = item.reservation.saturating_sub(1);
@@ -374,14 +382,7 @@ impl ItemStore {
             if item.reservation == 0 && !item.instanced {
                 item.owner = NO_OWNER;
             }
-            if item.age >= DESPAWN_TICKS {
-                expired.push(index as i16);
-            }
         }
-        for index in &expired {
-            self.slots[*index as usize] = None;
-        }
-        expired
     }
 }
 
@@ -660,17 +661,30 @@ mod tests {
         assert_eq!(item.velocity.1, MAX_FALL_SPEED);
     }
 
+    /// A dropped item waits for whoever dropped it, however long that takes. This server used to
+    /// delete it after ten minutes, which the real game never does.
     #[test]
-    fn items_expire_and_are_reported_once() {
+    fn an_item_never_expires_with_age() {
         let mut store = ItemStore::new();
         let (index, _) = store.spawn(stack(), (0.0, 0.0)).unwrap();
-        store.get_mut(index).unwrap().age = DESPAWN_TICKS - 1;
-
-        assert_eq!(store.tick(), vec![index]);
-        assert!(store.get(index).is_none());
+        // A whole day of game time, six times the old ten-minute cleanup.
+        for _ in 0..(60 * 60 * 60) {
+            store.tick();
+        }
         assert!(
-            store.tick().is_empty(),
-            "an expired item is only reported once"
+            store.get(index).is_some(),
+            "an hour later it is still lying where it was dropped"
         );
+    }
+
+    /// What does age: the picker reads it to decide which slot to recycle when the table is full.
+    #[test]
+    fn ticking_ages_an_item_so_the_picker_can_rank_it() {
+        let mut store = ItemStore::new();
+        let (index, _) = store.spawn(stack(), (0.0, 0.0)).unwrap();
+        for _ in 0..500 {
+            store.tick();
+        }
+        assert_eq!(store.get(index).expect("still there").age, 500);
     }
 }
