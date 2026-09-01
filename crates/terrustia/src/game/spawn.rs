@@ -562,7 +562,10 @@ mod rate_tests {
             rate < forest,
             "a crater should be busier than the forest it fell on: {rate} vs {forest}"
         );
-        assert!(cap > forest_cap, "and hold more of them: {cap} vs {forest_cap}");
+        assert!(
+            cap > forest_cap,
+            "and hold more of them: {cap} vs {forest_cap}"
+        );
 
         // The evils take their own arm first, so a corrupted crater is corruption's rate, not the
         // crater's: vanilla's chain is `else if`, and this is the arm order rather than a tie.
@@ -3324,16 +3327,17 @@ pub fn try_spawn(
             // it. A sky spawn has no ground under it and so has no `tileType` at all.
             let ground_block = (!sky).then(|| world.tile(x, y + 1).block);
             let sandstorm_spot = sandstorm_zone
-                && ground_block
-                    .is_some_and(|g| SAND_CONVERSION.contains(&g) && sandstone_check(world, x, y + 1));
+                && ground_block.is_some_and(|g| {
+                    SAND_CONVERSION.contains(&g) && sandstone_check(world, x, y + 1)
+                });
             // `tileType == 70`, and nothing else: the whole Glowing Mushroom roster hangs off the
             // ground tile rather than off `ZoneGlowshroom` (`NPC.cs:3637`, `:3674`, and see
             // [`mushroom_pick`]).
             let mushroom_ground = ground_block == Some(MUSHROOM_GRASS);
             // The Spore pair's own gate, which wants the zone *and* the tile
             // (`NPC.cs:5110`, `:5209`).
-            let glowshroom_ground = zones.glowshroom
-                && matches!(ground_block, Some(MUSHROOM_GRASS | MUSHROOM_BLOCK));
+            let glowshroom_ground =
+                zones.glowshroom && matches!(ground_block, Some(MUSHROOM_GRASS | MUSHROOM_BLOCK));
             // An event owns the surface while it runs, and nothing below it. Except the sky:
             // vanilla's `skyMob` arm sits above every event arm in the same `else if` chain
             // (`NPC.cs:1383`), so a pumpkin moon does not reach up there.
@@ -5010,8 +5014,9 @@ mod tests {
         assert!(zones.glowshroom, "a floor of mushroom grass is the zone");
         assert_eq!(zones.biome, Biome::Forest, "and it is nobody else's biome");
 
-        let hard: std::collections::BTreeSet<u16> =
-            spawns_at(&world, true, px, py, 200_000).into_iter().collect();
+        let hard: std::collections::BTreeSet<u16> = spawns_at(&world, true, px, py, 200_000)
+            .into_iter()
+            .collect();
         for (npc_type, name) in [
             (374u16, "TruffleWorm"),
             (360, "GlowingSnail"),
@@ -5027,8 +5032,9 @@ mod tests {
 
         // Before hardmode the underground arm is shut, so the worm and the snail are gone and the
         // Spore pair - which has no progression gate at all - is not.
-        let classic: std::collections::BTreeSet<u16> =
-            spawns_at(&world, false, px, py, 200_000).into_iter().collect();
+        let classic: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
         assert!(
             !classic.contains(&374),
             "a Truffle Worm before hardmode: {classic:?}",
@@ -5041,8 +5047,9 @@ mod tests {
         // ...and the surface arm, which waits on nothing at all.
         let surface = flat_world_of(80, MUSHROOM_GRASS);
         assert_eq!(depth_at(&surface, 78), Depth::Surface);
-        let day: std::collections::BTreeSet<u16> =
-            spawns_at(&surface, false, px, 78, 200_000).into_iter().collect();
+        let day: std::collections::BTreeSet<u16> = spawns_at(&surface, false, px, 78, 200_000)
+            .into_iter()
+            .collect();
         for (npc_type, name) in [(254u16, "ZombieMushroom"), (255, "ZombieMushroomHat")] {
             assert!(
                 day.contains(&npc_type),
