@@ -1609,8 +1609,8 @@ impl EventSpawns<'_> {
 
     /// Which pillar's zone a point is inside, if any.
     ///
-    /// The order is vanilla's own `else if` chain — Nebula, Vortex, Stardust, Solar
-    /// (`NPC.cs:1297`, `:1321`, `:1347`, `:1356`) — so two overlapping zones resolve the way the
+    /// The order is vanilla's own `else if` chain (Nebula, Vortex, Stardust, Solar:
+    /// `NPC.cs:1297`, `:1321`, `:1347`, `:1356`), so two overlapping zones resolve the way the
     /// game resolves them rather than by whichever pillar happens to be nearer.
     fn tower_zone(&self, at: (f32, f32)) -> Option<u16> {
         use crate::game::lunar;
@@ -3821,8 +3821,8 @@ mod tests {
         seen
     }
 
-    /// Inside a pillar's zone, that pillar's escort is the only thing the world produces — and
-    /// outside it, none of the escort appears at all.
+    /// Inside a pillar's zone, that pillar's escort is the only thing the world produces, and
+    /// outside it none of the escort appears at all.
     ///
     /// This is the whole Lunar Apocalypse. A pillar's shield is a count of its own escort killed
     /// (`game/lunar.rs`) and a pillar takes no damage while the shield holds, so with nothing
