@@ -5324,7 +5324,10 @@ mod tests {
             world.set_tile(x, floor, terrustia_proto::Tile::block(368));
         }
         assert_eq!(depth_at(&world, floor - 1), Depth::Cavern);
-        assert_eq!(biome_at(&world, world.width() / 2, floor - 1), Biome::Forest);
+        assert_eq!(
+            biome_at(&world, world.width() / 2, floor - 1),
+            Biome::Forest
+        );
         assert!(
             spawns_of(&world, floor, &quiet(), 482, 4) > 0,
             "no GraniteGolem (482) in a granite cavern"
@@ -5460,9 +5463,10 @@ mod tests {
             "one row of snow is not a snow biome, which is the point of this test"
         );
 
-        let found: std::collections::BTreeSet<u16> = spawns_at_in(&world, true, false, px, py, 60_000)
-            .into_iter()
-            .collect();
+        let found: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, true, false, px, py, 60_000)
+                .into_iter()
+                .collect();
         for (npc_type, name) in [(169u16, "IceElemental"), (155, "Wolf")] {
             assert!(
                 found.contains(&npc_type),
@@ -5500,18 +5504,20 @@ mod tests {
     fn rain_puts_a_coat_on_the_zombies() {
         let (mut world, (px, py)) = night_world();
         world.raining = true;
-        let wet: std::collections::BTreeSet<u16> = spawns_at_in(&world, false, false, px, py, 60_000)
-            .into_iter()
-            .collect();
+        let wet: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
         assert!(
             wet.contains(&223),
             "no ZombieRaincoat (223) in the rain: {wet:?}"
         );
 
         world.raining = false;
-        let dry: std::collections::BTreeSet<u16> = spawns_at_in(&world, false, false, px, py, 60_000)
-            .into_iter()
-            .collect();
+        let dry: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
         assert!(!dry.contains(&223), "a raincoat on a dry night: {dry:?}");
     }
 
@@ -6980,8 +6986,12 @@ mod tests {
             let mut sink = 0u32;
             for _ in 0..n {
                 sink += u32::from(
-                    seasonal_night_pick(std::hint::black_box(at), std::hint::black_box(2), &mut rng)
-                        .unwrap_or(0),
+                    seasonal_night_pick(
+                        std::hint::black_box(at),
+                        std::hint::black_box(2),
+                        &mut rng,
+                    )
+                    .unwrap_or(0),
                 );
             }
             let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
