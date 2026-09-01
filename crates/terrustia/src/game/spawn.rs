@@ -1561,6 +1561,16 @@ fn choose_weighted(
 /// weather, season and time this server does not all model, so this returns the ordinary set for
 /// the place and lets the caller pick evenly among it. The underworld's lava-bait critters and the
 /// gold and gem variants are left out on purpose; they are cosmetic rolls on top of these.
+/// The whole of a graveyard's friendly draw (`NPC.cs:2101-2115`).
+///
+/// Not part of [`friendly_pool`], because vanilla's arm is not a variation on the ordinary one: it
+/// sits ahead of every other friendly branch and `return`s, so among tombstones there are no birds,
+/// no bunnies and no fireflies, only these two.
+pub const GRAVEYARD_VERMIN: [u16; 2] = [
+    606, // Maggot
+    610, // Rat
+];
+
 pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     use Biome::*;
     use Depth::*;
@@ -2898,7 +2908,18 @@ pub fn try_spawn(
                 // critter for it (the underworld), the attempt is dropped rather than turned into a
                 // monster the game would not have spawned here.
                 None if spawn_friendly => {
-                    let critters = friendly_pool(depth, player_biome, world.day_time);
+                    // A graveyard's friendly draw is its own and it is exactly two things
+                    // (`NPC.cs:2101-2115`): a Maggot or a Rat, on dry land, and nothing at all
+                    // standing in water. The arm sits ahead of every other friendly one, so no
+                    // bird, bunny or firefly is drawn among the tombstones.
+                    let critters = if seasonal.graveyard {
+                        if water_tile(world, x, y) {
+                            continue;
+                        }
+                        &GRAVEYARD_VERMIN[..]
+                    } else {
+                        friendly_pool(depth, player_biome, world.day_time)
+                    };
                     if critters.is_empty() {
                         continue;
                     }
@@ -3257,6 +3278,10 @@ mod tests {
                 }
             }
         }
+
+        // ...and what a friendly attempt draws in a graveyard, which is its own two-entry list
+        // rather than an arm of `friendly_pool`.
+        set.extend(GRAVEYARD_VERMIN);
 
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
@@ -3941,6 +3966,61 @@ mod tests {
             "no zombies in a daylit graveyard: {:?}",
             seen.iter().collect::<std::collections::BTreeSet<_>>()
         );
+    }
+
+    /// A town in a graveyard has vermin instead of songbirds: the friendly branch's own graveyard
+    /// arm (`NPC.cs:2101-2115`) sits ahead of every other, so a Maggot or a Rat is the *only* thing
+    /// a friendly attempt can draw there.
+    ///
+    /// Neutralised by dropping the `if seasonal.graveyard` fork in `try_spawn`'s friendly arm, so
+    /// both cases read `friendly_pool`: no Maggot or Rat is drawn in an hour of ticks and the first
+    /// assertion fails. The second assertion is what makes it a *replacement* rather than an
+    /// addition, and it fails the same way in reverse if the arm is made additive.
+    #[test]
+    fn a_town_among_the_tombstones_draws_vermin_and_nothing_else() {
+        const GUIDE: u16 = 22;
+        let (world, (px, py)) = forest_surface();
+        let mut npcs = NpcStore::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        // Three townsfolk right where the player stands, which is what turns `spawnFriendly` on.
+        for _ in 0..3 {
+            npcs.spawn(GUIDE, player.position);
+        }
+        let players = vec![Some(player)];
+
+        let mut rng = SmallRng::seed_from_u64(21);
+        let mut biomes = BiomeCache::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..20_000 {
+            for (npc_type, _) in try_spawn(
+                &world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut biomes,
+                &mut rng,
+            ) {
+                seen.insert(npc_type);
+            }
+        }
+        for vermin in GRAVEYARD_VERMIN {
+            assert!(
+                seen.contains(&vermin),
+                "no {vermin} in a graveyard: {seen:?}"
+            );
+        }
+        for songbird in friendly_pool(Depth::Surface, Biome::Forest, true) {
+            assert!(
+                !seen.contains(songbird),
+                "the ordinary critter {songbird} should not reach a graveyard: {seen:?}"
+            );
+        }
     }
 
     /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
