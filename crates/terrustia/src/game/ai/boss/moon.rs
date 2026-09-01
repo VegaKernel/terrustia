@@ -943,6 +943,14 @@ mod tests {
         q.ai[1] = ICE_QUEEN_MODE0_AT * 4.0;
         ice_queen(&mut q, &w, &mut rng);
         assert_eq!(q.ai[0], 0.0, "far off, the sweep keeps going");
+        // ...and it is the *same* sweep, not a fresh one the picker handed back: the counter is
+        // still climbing rather than reset. Without the range gate the mode would end here and the
+        // picker would return mode 0 anyway, which is why `ai[0]` alone proves nothing.
+        assert!(
+            q.ai[1] > ICE_QUEEN_MODE0_AT,
+            "the mode never ended, so its counter kept going: {}",
+            q.ai[1]
+        );
     }
 
     /// ICEQ-2: every mode's counter advances by one to three a tick (`NPC.cs:33801`), so a mode

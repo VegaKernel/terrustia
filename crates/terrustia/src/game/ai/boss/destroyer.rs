@@ -333,7 +333,6 @@ mod tests {
     /// already on course closes at `0.15 + 0.1` a tick, not at the shared style-6 rate of `0.1`.
     #[test]
     fn a_destroyer_already_on_course_trims_twice() {
-        use terrustia_proto::npc_params::{DESTROYER_TURN, DESTROYER_TURN_HARD};
         let tiles = buried();
         let w = night(&tiles, Some((4000.0, 4000.0)));
         let mut rng = SmallRng::seed_from_u64(3);
@@ -343,15 +342,15 @@ mod tests {
         destroyer(&mut head, &w, &mut rng);
         let across = head.velocity.0 - 1.0;
         let down = head.velocity.1 - 1.0;
+        // Vanilla's own figures, written out rather than read back from the constants under test:
+        // `num20 = 0.15f` then `num19 = 0.1f`, both applied.
         assert!(
-            (across - (DESTROYER_TURN + DESTROYER_TURN_HARD)).abs() < 1e-5,
-            "expected {} a tick across, got {across}",
-            DESTROYER_TURN + DESTROYER_TURN_HARD
+            (across - 0.25).abs() < 1e-5,
+            "expected 0.25 a tick across, got {across}"
         );
         assert!(
-            (down - (DESTROYER_TURN + DESTROYER_TURN_HARD)).abs() < 1e-5,
-            "expected {} a tick down, got {down}",
-            DESTROYER_TURN + DESTROYER_TURN_HARD
+            (down - 0.25).abs() < 1e-5,
+            "expected 0.25 a tick down, got {down}"
         );
     }
 
