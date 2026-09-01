@@ -371,8 +371,14 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // requested from the panel reaches this function at all.
     let world_switch = game_server.world_switch_handle();
     // `config` is about to be moved into the accept loop below; a relaunch only needs the address
-    // back, so that is all that is kept.
+    // back, and the console needs where to remember its own history, so that is all that is kept.
     let listen_addr = config.listen;
+    // Sibling to the world's save path, the same way the admin store is (`world.admin.toml`) —
+    // see `console::spawn`'s own doc comment. `None` when there is nowhere to save to at all,
+    // which just means history stays in-memory only for this run, as it always has.
+    let console_history_path = config
+        .save_target()
+        .map(|p| p.with_extension("console_history"));
     let mut game = tokio::spawn(game_server.run(events_rx));
 
     let accept = tokio::spawn(listener::run(listener, config, events_tx.clone(), recorder));
@@ -380,7 +386,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
     // Whoever has the terminal already has the world file, so the console is not gated. Reading
     // stdin has to be its own task: a blocking read would otherwise hold up the accept loop, and a
     // closed stdin (a service with no terminal) simply ends the task rather than the server.
-    let console = console::spawn(events_tx.clone(), args.headless);
+    let console = console::spawn(events_tx.clone(), args.headless, console_history_path);
 
     // Dropping the last sender is what tells the game task to stop. The handle is borrowed rather
     // than moved so it is still here afterwards to be waited on.

@@ -80,7 +80,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # `dep:crossterm_winapi`, which its `cfg(windows)` source files need to compile *at all* on that
 # platform. Missing until this project's first real Windows CI run — untestable from a macOS/Linux
 # session, and there was no CI running against a real repository until now.
-crossterm = { version = "0.28", default-features = false, features = ["events", "windows"] }
+# "bracketed-paste" turns on `Event::Paste`/`Enable/DisableBracketedPaste`, code that already ships
+# in this crate and is gated behind its own feature only because crossterm's `default-features`
+# are off. No new dependency: `console.rs` uses it so a paste into the sticky console arrives as
+# one string instead of a flood of individual key events, where an embedded newline would
+# otherwise submit whatever had been typed so far.
+crossterm = { version = "0.28", default-features = false, features = ["bracketed-paste", "events", "windows"] }
 # The web admin panel's HTTP/WebSocket surface. `ws` is the only extra needed — no macros
 # (routes are built by hand, matching this workspace's own preference for explicit code over
 # derive-heavy convenience), no multipart, no http2 (a localhost admin panel has no use for it).

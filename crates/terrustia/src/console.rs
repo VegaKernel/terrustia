@@ -16,11 +16,18 @@
 //! `term::redraw_prompt` and `term::write_line_coordinated` — so this module only ever needs to
 //! call `term::redraw_prompt` and never touches stdout directly.
 
-use std::{io::IsTerminal, time::Duration};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    terminal,
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
+    execute, terminal,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -70,13 +77,22 @@ const GROUP_ARG_COMMANDS: &[&str] = &["group"];
 /// Start the console. Sticky raw-mode editing when both ends of stdio are a real terminal and the
 /// operator did not ask for headless; otherwise the plain line reader, so a service started with no
 /// terminal, a piped `echo stop | terrustia`, or an explicit `--headless` keeps working unchanged.
-pub fn spawn(events: mpsc::Sender<ServerEvent>, headless: bool) -> tokio::task::JoinHandle<()> {
+///
+/// `history_path` is where command history is remembered across restarts, sibling to the world's
+/// save path the same way the admin store is (`world.admin.toml`), chosen by the caller before
+/// `Config` moves into the listener task. `None` when there is nowhere to put it (no save target
+/// at all), which just means history stays in-memory only for that run, as it always has.
+pub fn spawn(
+    events: mpsc::Sender<ServerEvent>,
+    headless: bool,
+    history_path: Option<PathBuf>,
+) -> tokio::task::JoinHandle<()> {
     if !headless && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         // `event::read()` blocks the OS thread it runs on waiting for a keypress; a tokio worker
         // thread must never be parked like that, which is exactly what `spawn_blocking` is for.
         // Sending the resulting `ServerEvent`s back onto the async side uses the blocking
         // variants of `mpsc`/`oneshot` built for calling from outside the runtime.
-        tokio::task::spawn_blocking(move || run_sticky(&events))
+        tokio::task::spawn_blocking(move || run_sticky(&events, history_path))
     } else {
         tokio::spawn(run_plain(events))
     }
@@ -118,16 +134,49 @@ struct Editor {
     /// What was being typed before the up-arrow was first pressed, so pressing down enough times
     /// returns to it rather than to an empty line.
     stash: String,
+    /// Where to remember `history` across restarts. `None` disables persistence entirely; nothing
+    /// here ever panics or reports an error over it, since a console still works perfectly well
+    /// without a memory of last time.
+    history_path: Option<PathBuf>,
+    /// Set while a Ctrl-R reverse search is running. `None` the rest of the time, which is most of
+    /// it, so ordinary typing pays nothing for a feature it is not using.
+    search: Option<Search>,
+}
+
+/// A Ctrl-R reverse history search in progress. Shaped like the one every shell has: type to
+/// narrow, Ctrl-R again to look further back, Enter or a printable key to accept the match into
+/// the line and stop searching, Escape or Ctrl-G to cancel back to what was being typed.
+///
+/// Enter deliberately does not submit here — it only accepts the found line into the buffer, the
+/// same as any other accepting key. Auto-submitting on the first Enter is how a shell's reverse
+/// search runs a command you only meant to look at; a second, ordinary Enter is a small enough
+/// price for a console where the found command might be `stop`.
+struct Search {
+    /// What has been typed into the search prompt so far.
+    query: String,
+    /// The most recent successful match, and how far back in `history` it was found — searching
+    /// again continues from just before this index, so repeated Ctrl-R walks steadily backward
+    /// rather than re-finding the same line.
+    matched_at: Option<usize>,
+    /// The buffer and cursor exactly as they stood before the search began, restored on cancel.
+    backup: Vec<char>,
+    backup_cursor: usize,
 }
 
 impl Editor {
-    fn new() -> Self {
+    fn new(history_path: Option<PathBuf>) -> Self {
+        let history = history_path
+            .as_deref()
+            .map(load_history)
+            .unwrap_or_default();
         Self {
             buf: Vec::new(),
             cursor: 0,
-            history: Vec::new(),
+            history,
             browsing: None,
             stash: String::new(),
+            history_path,
+            search: None,
         }
     }
 
@@ -135,9 +184,25 @@ impl Editor {
         self.buf.iter().collect()
     }
 
-    /// The exact text the prompt should show right now.
+    /// The exact text the prompt should show right now: the search prompt while a Ctrl-R search
+    /// is running, the ordinary one otherwise.
     fn rendered(&self) -> String {
-        format!("{PROMPT}{}", self.line())
+        match &self.search {
+            Some(search) => self.search_rendered(search),
+            None => format!("{PROMPT}{}", self.line()),
+        }
+    }
+
+    /// `(reverse-i-search)'query': matched-line`, the same shape every shell uses, so the muscle
+    /// memory transfers. `failed` only once something has actually been typed and not matched —
+    /// an empty query is not a failure, it just has not asked anything yet.
+    fn search_rendered(&self, search: &Search) -> String {
+        let label = if search.matched_at.is_some() || search.query.is_empty() {
+            "reverse-i-search"
+        } else {
+            "failed reverse-i-search"
+        };
+        format!("({label})`{}': {}", search.query, self.line())
     }
 
     /// How far back from the end of the *rendered* line the cursor sits, for positioning it after
@@ -150,6 +215,24 @@ impl Editor {
         self.buf.insert(self.cursor, c);
         self.cursor += 1;
         self.browsing = None;
+    }
+
+    /// A whole pasted string, inserted as one edit rather than one character at a time. Routes
+    /// into the search query while a Ctrl-R search is running, into the line being edited
+    /// otherwise — the same choice one typed character makes in [`dispatch`].
+    ///
+    /// `\r` and `\n` are dropped rather than inserted: every command this console takes is one
+    /// line, so a paste that carries a trailing newline (copying a whole line from somewhere else
+    /// is the ordinary way to end up with one) lands as exactly the text intended rather than a
+    /// newline character sitting inside a buffer nothing here can render as two lines.
+    fn type_str(&mut self, s: &str) {
+        for c in s.chars().filter(|&c| c != '\r' && c != '\n') {
+            if self.search.is_some() {
+                self.search_push(c);
+            } else {
+                self.insert(c);
+            }
+        }
     }
 
     fn backspace(&mut self) {
@@ -218,6 +301,90 @@ impl Editor {
         self.cursor = self.buf.len();
     }
 
+    /// Begin a Ctrl-R reverse search. A no-op with nothing to search — the empty-history case is
+    /// exactly the one where a search prompt could only ever fail.
+    fn start_search(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        self.search = Some(Search {
+            query: String::new(),
+            matched_at: None,
+            backup: self.buf.clone(),
+            backup_cursor: self.cursor,
+        });
+    }
+
+    /// One more character typed into the search query: widen it and search again from the most
+    /// recent history entry, since a longer query can only match what a shorter one already did
+    /// or something more specific past it — never something the shorter query had walked behind.
+    fn search_push(&mut self, c: char) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        search.query.push(c);
+        self.search_from_start();
+    }
+
+    /// Backspace inside the search query: narrow it and search again from the most recent entry,
+    /// since a shorter query can match something more recent than the longer one had walked past.
+    fn search_backspace(&mut self) {
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        search.query.pop();
+        self.search_from_start();
+    }
+
+    /// Re-run the current query against the whole of `history`, most recent first.
+    fn search_from_start(&mut self) {
+        let history_len = self.history.len();
+        self.search_apply(history_len);
+    }
+
+    /// Ctrl-R pressed again: keep the query, look further back for the next match before the one
+    /// currently shown. A query that matches nothing further back leaves the current match on
+    /// screen rather than losing it, the same as a shell's own failed incremental search does.
+    fn search_again(&mut self) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        let before = search.matched_at.unwrap_or(self.history.len());
+        self.search_apply(before);
+    }
+
+    /// The shared step behind [`Self::search_from_start`] and [`Self::search_again`]: search
+    /// `history` backward from `before` (exclusive) for the current query, and if found, show it.
+    fn search_apply(&mut self, before: usize) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        let query = search.query.clone();
+        let Some(at) = find_backward(&self.history, &query, before) else {
+            return;
+        };
+        self.buf = self.history[at].chars().collect();
+        self.cursor = self.buf.len();
+        if let Some(search) = &mut self.search {
+            search.matched_at = Some(at);
+        }
+    }
+
+    /// Stop searching, keeping whatever line is currently shown. Used by Enter and by every key
+    /// that is not part of searching itself — see [`Search`]'s own doc for why Enter only accepts
+    /// the match rather than also submitting it.
+    fn search_accept(&mut self) {
+        self.search = None;
+    }
+
+    /// Stop searching and restore the line exactly as it stood before the search began.
+    fn search_cancel(&mut self) {
+        if let Some(search) = self.search.take() {
+            self.buf = search.backup;
+            self.cursor = search.backup_cursor;
+        }
+    }
+
     /// Finish the line: record it in history (skipping blanks and exact repeats of the last
     /// entry, so scrollback is not a wall of the same command), reset editing state, and hand
     /// back what was typed.
@@ -229,10 +396,62 @@ impl Editor {
             if self.history.len() > HISTORY_CAP {
                 self.history.remove(0);
             }
+            self.save_history();
         }
         self.clear();
         line
     }
+
+    /// Write `history` out whole. Console commands are typed, not machine-generated, so this is
+    /// never more than a few hundred short lines and a full rewrite on every new entry costs
+    /// nothing worth avoiding — the same reasoning the audit log and the admin store already rely
+    /// on for their own per-mutation atomic writes.
+    ///
+    /// Silent on failure by design: a history file that could not be written is a worse night for
+    /// nobody, since the in-memory copy this call is about to keep using is already correct for
+    /// the rest of this run.
+    fn save_history(&self) {
+        let Some(path) = &self.history_path else {
+            return;
+        };
+        let text = self.history.join("\n");
+        let _ = crate::safe_write::write_atomic("writing console history", path, text.as_bytes());
+    }
+}
+
+/// The history a previous run left behind, oldest first, capped to the same [`HISTORY_CAP`] a
+/// live session enforces — a file grown by hand or across several versions should not hand back
+/// more than a fresh session would ever have held onto itself.
+///
+/// Never fails outward: a missing file is the ordinary case (nothing has been typed yet, or
+/// persistence just turned on), and a file this could not make sense of is worth starting fresh
+/// from rather than refusing the whole console over.
+fn load_history(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(str::to_string)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.len() > HISTORY_CAP {
+        lines.drain(0..lines.len() - HISTORY_CAP);
+    }
+    lines
+}
+
+/// The closest match to `query` in `history` at or before index `before` (exclusive), searching
+/// backward from there — the shared step behind both starting a Ctrl-R search and repeating one.
+/// An empty query matches nothing, the same as pressing Ctrl-R and typing nothing: there is
+/// nothing yet to narrow the whole of history down by.
+fn find_backward(history: &[String], query: &str, before: usize) -> Option<usize> {
+    if query.is_empty() {
+        return None;
+    }
+    history[..before.min(history.len())]
+        .iter()
+        .rposition(|line| line.contains(query))
 }
 
 /// Ask the game task who is connected and what the groups are called, for Tab completion.
@@ -322,7 +541,7 @@ fn complete(events: &mpsc::Sender<ServerEvent>, editor: &Editor) -> Option<Strin
 
 /// The raw-mode loop. Runs on a dedicated blocking thread — see `spawn` — and never returns while
 /// the process is meant to keep running.
-fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
+fn run_sticky(events: &mpsc::Sender<ServerEvent>, history_path: Option<PathBuf>) {
     if terminal::enable_raw_mode().is_err() {
         // Could not get raw mode despite looking like a terminal (rare — a terminal that lies
         // about being one, or one already in a mode this can't negotiate). Fall back rather than
@@ -341,38 +560,51 @@ fn run_sticky(events: &mpsc::Sender<ServerEvent>) {
     // The terminal is now in raw mode, so its own `\n` -> `\r\n` translation is off; tell `term` so
     // every line it prints carries its own carriage return until we leave raw mode below.
     term::set_raw_mode(true);
+    // Bracketed paste wraps a paste in its own escape sequences so it arrives as one
+    // `Event::Paste(String)` rather than a flood of `Event::Key`s. Without it, a multi-line paste
+    // is indistinguishable from someone typing very fast — including any `\r`/`\n` inside it, each
+    // of which would hit the ordinary `KeyCode::Enter` arm and submit whatever had been typed so
+    // far. Failure here is not worth stopping over: paste just falls back to looking like typing.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
 
-    let mut editor = Editor::new();
+    let mut editor = Editor::new(history_path);
     term::redraw_prompt(&editor.rendered(), editor.cursor_back());
 
     let result = (|| -> std::io::Result<()> {
         loop {
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            // Unix reports only presses; Windows also reports releases and, with the enhanced
-            // keyboard protocol, repeats. Only releases are worth ignoring — a repeat is a real
-            // keystroke and should act like one.
-            if key.kind == KeyEventKind::Release {
-                continue;
-            }
-
-            match dispatch(events, &mut editor, key) {
-                Dispatch::Continue => {}
-                Dispatch::Stop => {
-                    let _ = events.blocking_send(ServerEvent::Console {
-                        line: "stop".to_string(),
-                    });
-                    return Ok(());
+            match event::read()? {
+                Event::Key(key) => {
+                    // Unix reports only presses; Windows also reports releases and, with the
+                    // enhanced keyboard protocol, repeats. Only releases are worth ignoring — a
+                    // repeat is a real keystroke and should act like one.
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+                    match dispatch(events, &mut editor, key) {
+                        Dispatch::Continue => {}
+                        Dispatch::Stop => {
+                            let _ = events.blocking_send(ServerEvent::Console {
+                                line: "stop".to_string(),
+                            });
+                            return Ok(());
+                        }
+                        // A `stop` command was typed and already sent; leave the loop so the
+                        // footer comes down and the shutdown log prints on a clean, cooked-mode
+                        // terminal below.
+                        Dispatch::Exit => return Ok(()),
+                        Dispatch::Closed => return Ok(()),
+                    }
                 }
-                // A `stop` command was typed and already sent; leave the loop so the footer comes
-                // down and the shutdown log prints on a clean, cooked-mode terminal below.
-                Dispatch::Exit => return Ok(()),
-                Dispatch::Closed => return Ok(()),
+                Event::Paste(text) => {
+                    editor.type_str(&text);
+                    term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                }
+                _ => {}
             }
         }
     })();
 
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     term::clear_footer();
     let _ = terminal::disable_raw_mode();
     term::set_raw_mode(false);
@@ -396,7 +628,56 @@ enum Dispatch {
 /// should do next.
 fn dispatch(events: &mpsc::Sender<ServerEvent>, editor: &mut Editor, key: KeyEvent) -> Dispatch {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    if editor.search.is_some() {
+        match key.code {
+            KeyCode::Char('r') if ctrl => {
+                editor.search_again();
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            KeyCode::Char('g') if ctrl => {
+                editor.search_cancel();
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            KeyCode::Esc => {
+                editor.search_cancel();
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            KeyCode::Backspace => {
+                editor.search_backspace();
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            KeyCode::Char(c) if !ctrl => {
+                editor.search_push(c);
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            KeyCode::Enter => {
+                // Accept only — does not also submit. See `Search`'s own doc comment for why: a
+                // shell running a command the moment it is found is how a console ends up
+                // re-running `stop` from muscle memory.
+                editor.search_accept();
+                term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+                return Dispatch::Continue;
+            }
+            _ => {
+                // Any other key ends the search, keeping the line it found, and falls through to
+                // the ordinary handling below for this same keystroke — an arrow key both exits
+                // search and moves the cursor, in one press rather than two.
+                editor.search_accept();
+            }
+        }
+    }
+
     match key.code {
+        KeyCode::Char('r') if ctrl => {
+            editor.start_search();
+            term::redraw_prompt(&editor.rendered(), editor.cursor_back());
+        }
         KeyCode::Enter => {
             // Commit what was typed into the scrollback above the fresh prompt, the way a shell
             // leaves your command on screen, so a reply below it is not an answer to a question the
@@ -489,7 +770,7 @@ mod tests {
 
     #[test]
     fn typing_inserts_at_the_cursor_not_always_at_the_end() {
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         for c in "helo".chars() {
             e.insert(c);
         }
@@ -501,7 +782,7 @@ mod tests {
 
     #[test]
     fn backspace_and_delete_remove_on_the_correct_side_of_the_cursor() {
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         for c in "hello".chars() {
             e.insert(c);
         }
@@ -525,7 +806,7 @@ mod tests {
 
     #[test]
     fn home_and_end_move_to_the_edges() {
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         for c in "abc".chars() {
             e.insert(c);
         }
@@ -537,7 +818,7 @@ mod tests {
 
     #[test]
     fn history_scrolls_up_and_back_down_to_the_line_being_typed() {
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         for c in "first".chars() {
             e.insert(c);
         }
@@ -570,7 +851,7 @@ mod tests {
 
     #[test]
     fn a_blank_line_and_an_exact_repeat_are_not_recorded() {
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         e.submit(); // blank
         assert!(e.history.is_empty());
 
@@ -593,7 +874,7 @@ mod tests {
     fn ctrl_c_clears_a_line_rather_than_ending_it() {
         // Exercised through `dispatch` would need a real channel; the editor-level behaviour is
         // what actually matters and is what `dispatch` calls into, so it is tested directly here.
-        let mut e = Editor::new();
+        let mut e = Editor::new(None);
         for c in "half typed".chars() {
             e.insert(c);
         }
@@ -656,5 +937,219 @@ mod tests {
             listed.len()
         );
         assert!(listed.contains(&"mute"), "the parse dropped a real command");
+    }
+
+    // ---- history persistence -------------------------------------------------------------
+
+    #[test]
+    fn history_survives_being_written_and_read_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "terrustia-console-history-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.console_history");
+
+        let mut e = Editor::new(Some(path.clone()));
+        for line in ["first command", "second command"] {
+            for c in line.chars() {
+                e.insert(c);
+            }
+            e.submit();
+        }
+
+        let reloaded = Editor::new(Some(path));
+        assert_eq!(
+            reloaded.history,
+            vec!["first command".to_string(), "second command".to_string()],
+            "a fresh Editor pointed at the same file should remember what the last one typed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_history_path_means_no_file_and_nothing_remembered() {
+        let dir = std::env::temp_dir().join(format!(
+            "terrustia-console-history-test-none-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("would_be_history");
+
+        let mut e = Editor::new(None);
+        for c in "typed with no history path".chars() {
+            e.insert(c);
+        }
+        e.submit();
+
+        assert!(
+            !path.exists(),
+            "nothing here should have written a file nobody asked for"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_history_file_capped_by_size_keeps_only_the_most_recent_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "terrustia-console-history-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("world.console_history");
+        let lines: Vec<String> = (0..HISTORY_CAP + 50).map(|i| format!("cmd{i}")).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let loaded = load_history(&path);
+        assert_eq!(loaded.len(), HISTORY_CAP);
+        assert_eq!(
+            loaded.first().map(String::as_str),
+            Some("cmd50"),
+            "the oldest entries beyond the cap should be dropped, not the newest"
+        );
+        assert_eq!(
+            loaded.last().map(String::as_str),
+            Some(&*format!("cmd{}", HISTORY_CAP + 49))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- Ctrl-R reverse search -------------------------------------------------------------
+
+    fn editor_with_history(lines: &[&str]) -> Editor {
+        let mut e = Editor::new(None);
+        for line in lines {
+            for c in line.chars() {
+                e.insert(c);
+            }
+            e.submit();
+        }
+        e
+    }
+
+    #[test]
+    fn a_search_finds_the_most_recent_match_first() {
+        let mut e = editor_with_history(&["save", "kick alice", "ban bob", "kick carol"]);
+        e.start_search();
+        for c in "kick".chars() {
+            e.search_push(c);
+        }
+        assert_eq!(
+            e.line(),
+            "kick carol",
+            "the most recent match, not the first one typed"
+        );
+    }
+
+    #[test]
+    fn ctrl_r_again_walks_further_back_through_matches() {
+        let mut e = editor_with_history(&["save", "kick alice", "ban bob", "kick carol"]);
+        e.start_search();
+        for c in "kick".chars() {
+            e.search_push(c);
+        }
+        assert_eq!(e.line(), "kick carol");
+        e.search_again();
+        assert_eq!(
+            e.line(),
+            "kick alice",
+            "a second Ctrl-R should look further back"
+        );
+    }
+
+    #[test]
+    fn a_failed_search_leaves_the_last_good_match_on_screen() {
+        let mut e = editor_with_history(&["kick alice"]);
+        e.start_search();
+        e.search_push('k');
+        assert_eq!(e.line(), "kick alice");
+        // Narrows to something nothing matches; the display should not go blank.
+        for c in "zzz".chars() {
+            e.search_push(c);
+        }
+        assert_eq!(
+            e.line(),
+            "kick alice",
+            "a query that stops matching should not erase what was found a moment ago"
+        );
+    }
+
+    #[test]
+    fn escape_restores_the_line_being_typed_before_the_search_began() {
+        let mut e = editor_with_history(&["kick alice"]);
+        for c in "not yet sent".chars() {
+            e.insert(c);
+        }
+        e.start_search();
+        e.search_push('k');
+        assert_eq!(e.line(), "kick alice");
+        e.search_cancel();
+        assert_eq!(
+            e.line(),
+            "not yet sent",
+            "cancelling a search must restore exactly what was being typed"
+        );
+        assert!(e.search.is_none());
+    }
+
+    #[test]
+    fn accepting_a_search_keeps_the_match_editable_rather_than_submitting_it() {
+        let mut e = editor_with_history(&["kick alice"]);
+        e.start_search();
+        e.search_push('k');
+        e.search_accept();
+        assert!(e.search.is_none());
+        assert_eq!(
+            e.line(),
+            "kick alice",
+            "the match stays in the buffer, ready to edit or submit with an ordinary Enter"
+        );
+    }
+
+    #[test]
+    fn an_empty_history_has_nothing_to_search() {
+        let mut e = Editor::new(None);
+        e.start_search();
+        assert!(
+            e.search.is_none(),
+            "starting a search against no history at all should not open a search prompt"
+        );
+    }
+
+    // ---- bracketed paste --------------------------------------------------------------------
+
+    #[test]
+    fn a_paste_inserts_as_one_edit_and_drops_embedded_newlines() {
+        let mut e = Editor::new(None);
+        e.type_str("say hello\r\nworld");
+        assert_eq!(
+            e.line(),
+            "say helloworld",
+            "an embedded newline must not survive into the buffer, or land as two commands"
+        );
+    }
+
+    #[test]
+    fn a_paste_during_search_widens_the_query_not_the_line() {
+        let mut e = editor_with_history(&["kick alice"]);
+        e.start_search();
+        e.type_str("kick");
+        assert_eq!(
+            e.line(),
+            "kick alice",
+            "pasted text while searching should narrow the search, not edit the found line"
+        );
     }
 }
