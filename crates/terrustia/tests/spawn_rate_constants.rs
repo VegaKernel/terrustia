@@ -56,6 +56,7 @@ fn plain() -> Conditions {
         active_players: 1,
         in_tower_zone: false,
         graveyard: false,
+        meteor: false,
     }
 }
 

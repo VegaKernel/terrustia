@@ -68,11 +68,28 @@ fn plant_move<T: TileView>(
     out: &mut Growth,
 ) -> Outcome {
     // `ai[0..1]` hold the anchor tile. The game's world generator writes it when it places the
-    // plant; anything spawned without one takes root where it stands.
+    // plant, and so does the spawner, from the solid ground row it chose (`NPC.cs:3937` for the Man
+    // Eater, `:3649`, `:3653`, `:3688` and `:3692` for the Fungi Bulb pair, all of the shape
+    // `SpawnNPC(..., 43, 0, spawnTileX, spawnTileY)`). Anything that arrives without one takes root
+    // in the first solid tile under it.
+    //
+    // Under it, not the tile its own centre falls in. A spawned plant stands in open air by
+    // construction, so a centre-tile anchor is not active and the check below uproots it on its
+    // very first tick: every Man Eater this server put in a jungle died before it was drawn, and
+    // the Fungi Bulb pair would have done the same. Only the Giant Fungi Bulb happened to survive,
+    // and only because it is 36 pixels tall, so its centre fell into the ground tile by accident.
     if npc.ai[0] == 0.0 && npc.ai[1] == 0.0 {
-        let (cx, cy) = npc.center();
-        npc.ai[0] = (cx / TILE).floor();
-        npc.ai[1] = (cy / TILE).floor();
+        let (cx, _) = npc.center();
+        let column = (cx / TILE).floor() as i32;
+        let top = (npc.position.1 / TILE).floor() as i32;
+        // Its own rows plus one, which is where the ground is: the spawner puts a plant's top-left
+        // on the open row above the tile it chose.
+        let rows = (npc.height() / TILE).ceil() as i32 + 1;
+        let root = (top..=top + rows)
+            .find(|row| world.tiles.tile(column, *row).is_active())
+            .unwrap_or(top + 1);
+        npc.ai[0] = column as f32;
+        npc.ai[1] = root as f32;
     }
     let (anchor_x, anchor_y) = (npc.ai[0] as i32, npc.ai[1] as i32);
     if !world.tiles.tile(anchor_x, anchor_y).is_active() {
