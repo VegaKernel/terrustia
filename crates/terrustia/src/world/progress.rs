@@ -82,6 +82,21 @@ pub struct Progress {
     /// The two combat books, each of which permanently toughens the townsfolk.
     pub combat_book: bool,
     pub combat_book_two: bool,
+    /// The three bound town slimes, once each has been freed.
+    ///
+    /// These read backwards from every other flag here: they are what *stops* their bound form
+    /// spawning, not what starts it. `NPC.cs:2095`, `:1417` and `:5623` all test
+    /// `!unlockedSlime<X>Spawn`, so a world where nobody has freed the slime is the world that
+    /// offers it. Each is set once, permanently, by the freeing itself:
+    ///
+    /// * Old (685 -> 679): `NPC.TransformElderSlime` (`NPC.cs:19172-19193`), reached over the wire
+    ///   from a right-click holding Purification Powder.
+    /// * Purple (686 -> 680): `NPC.HitEffect` (`NPC.cs:82596-82627`), on the bound slime's death.
+    /// * Yellow (687 -> 683): `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14806-14824`), on
+    ///   a thrown cloud of Purification Powder touching it.
+    pub unlocked_slime_old: bool,
+    pub unlocked_slime_purple: bool,
+    pub unlocked_slime_yellow: bool,
 }
 
 impl Progress {

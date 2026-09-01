@@ -295,6 +295,7 @@ pub fn parse(bytes: &[u8]) -> Result<World> {
         combat_book_offset: offsets.late.combat_book,
         late_downed_run_offset: offsets.late.late_downed_run,
         combat_book_two_offset: offsets.late.combat_book_two,
+        slime_unlocks_offset: offsets.late.slime_unlocks,
         hardmode_ores_offset: offsets.late.hardmode_ores,
         banner_kills_offset: offsets.late.banner_kills,
         town_npcs_understood,
@@ -496,6 +497,12 @@ pub struct LateOffsets {
     pub late_downed_run: Option<usize>,
     /// The second combat book, after the run of unlocked town-NPC spawns.
     pub combat_book_two: Option<usize>,
+    /// `unlockedSlimeOldSpawn`, the head of the run old/purple/rainbow/red/yellow/copper.
+    ///
+    /// Recorded rather than derived because freeing a bound town slime is permanent world state:
+    /// a world that forgot it would offer the same slime again on the next launch, and the
+    /// resident already standing in a house would have a bound twin wandering the caves.
+    pub slime_unlocks: Option<usize>,
     /// The three hardmode ore tiers — cobalt, mythril, adamantite — as `i32`s.
     ///
     /// Recorded because smashing an altar picks these, and a choice that never reaches the file is
@@ -764,6 +771,22 @@ fn read_late_header(
     }
     offsets.combat_book_two = Some(r.position() - section_start);
     progress.combat_book_two = num(r.bool(), r)?;
+
+    // The Peddler's Satchel and the green slime, then the run of seven remaining slime unlocks
+    // (`WorldFile.cs:1414-1421`): green, old, purple, rainbow, red, yellow, copper. The offset is
+    // recorded at `unlockedSlimeOldSpawn`, which is where the three this server models begin.
+    for _ in 0..2 {
+        num(r.bool(), r)?;
+    }
+    offsets.slime_unlocks = Some(r.position() - section_start);
+    progress.unlocked_slime_old = num(r.bool(), r)?;
+    progress.unlocked_slime_purple = num(r.bool(), r)?;
+    // Rainbow and red, neither of which this server can produce or free: read past, and left
+    // untouched on save rather than written back as false.
+    for _ in 0..2 {
+        num(r.bool(), r)?;
+    }
+    progress.unlocked_slime_yellow = num(r.bool(), r)?;
 
     Ok(())
 }
@@ -1489,6 +1512,11 @@ mod tests {
             w.bool(false);
         }
         w.bool(false);
+        // The Peddler's Satchel and the green slime, then the run this reader keeps: old, purple,
+        // rainbow, red, yellow. Only the old and yellow slimes have been freed, which is what makes
+        // a reader that skipped the wrong number of bytes read purple or red as true instead.
+        w.bool(false).bool(false);
+        w.bool(true).bool(false).bool(false).bool(false).bool(true);
         w.into_bytes()
     }
 
@@ -1544,6 +1572,12 @@ mod tests {
             assert!(p.downed_queen_slime, "{version}: the queen");
             assert!(!p.downed_empress_of_light, "{version}: the empress");
             assert!(!p.downed_deerclops, "{version}: deerclops");
+            // The slime unlocks are the last thing in the header this reader keeps, so they are
+            // the field an off-by-one anywhere above lands on. Old and yellow freed, purple not,
+            // and the two unmodelled ones (rainbow, red) skipped rather than mistaken for these.
+            assert!(p.unlocked_slime_old, "{version}: the old slime");
+            assert!(!p.unlocked_slime_purple, "{version}: the purple slime");
+            assert!(p.unlocked_slime_yellow, "{version}: the yellow slime");
         }
     }
 

@@ -143,6 +143,8 @@ pub struct PreservedWorld {
     pub combat_book_offset: Option<usize>,
     pub late_downed_run_offset: Option<usize>,
     pub combat_book_two_offset: Option<usize>,
+    /// `unlockedSlimeOldSpawn`, the head of the slime-unlock run.
+    pub slime_unlocks_offset: Option<usize>,
     /// The three hardmode ore tiers, chosen when altars are smashed.
     pub hardmode_ores_offset: Option<usize>,
     /// Where the banner kill counts start, and how many the file has room for.

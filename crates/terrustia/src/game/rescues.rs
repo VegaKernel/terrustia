@@ -27,6 +27,14 @@ pub struct Rescue {
 /// Purification Powder rather than freed by talking, which is a different mechanic in a different
 /// place. It lives in `Server::tick_powders`, and it sets the same `saved_tax_collector` flag
 /// through [`remember`] below, which is why 441 has an arm there and no `Rescue` here.
+///
+/// The three bound town slimes are absent for the same reason, and each for a *different* reason:
+/// no two of them are freed the same way. The Old Slime (685) wants a right-click while holding
+/// Purification Powder, which reaches the server as packet 140 rather than as a talk
+/// (`Main.cs:43751-43775`, `NPC.TransformElderSlime` at `NPC.cs:19172-19193`); the Purple Slime
+/// (686) is freed by being *killed* (`NPC.HitEffect`, `NPC.cs:82596-82627`); the Yellow Slime (687)
+/// by a thrown cloud of the powder (`Projectile.cs:14806-14824`). All three set their flag through
+/// [`remember`], the same as the Tax Collector, so nothing else here has to know the difference.
 pub const RESCUES: &[Rescue] = &[
     Rescue {
         bound: 105,
@@ -84,6 +92,11 @@ pub fn remember(progress: &mut Progress, freed: u16) {
         550 => progress.saved_bartender = true,
         588 => progress.saved_golfer = true,
         441 => progress.saved_tax_collector = true,
+        // The three town slimes, keyed on what they become rather than on what they were, exactly
+        // like every arm above. Each flag is what shuts its bound form's spawn arm off for good.
+        679 => progress.unlocked_slime_old = true,
+        680 => progress.unlocked_slime_purple = true,
+        683 => progress.unlocked_slime_yellow = true,
         _ => {}
     }
 }
@@ -98,6 +111,10 @@ pub fn still_bound(progress: &Progress, bound: u16) -> bool {
         376 => !progress.saved_angler,
         579 => !progress.saved_bartender,
         589 => !progress.saved_golfer,
+        // `NPC.cs:2095`'s own `!unlockedSlimeOldSpawn`. The bound Old Slime is found in the same
+        // caverns as the Goblin Tinkerer and the Wizard, so it goes through the same underground
+        // find; the other two bound slimes are not found down here and have no arm.
+        685 => !progress.unlocked_slime_old,
         _ => false,
     }
 }
@@ -138,6 +155,42 @@ mod tests {
     #[test]
     fn a_guide_frees_nobody() {
         assert!(rescue_for(22).is_none());
+    }
+
+    /// The three bound town slimes each set their own unlock flag when freed, and none of them is
+    /// a talk rescue.
+    ///
+    /// Fails before the fix, when no unlock flag existed at all: `remember` had no arm for any of
+    /// the three, so freeing one changed nothing a world could remember and the caverns, the sky
+    /// and the jungle went on offering a bound slime beside the resident already in a house.
+    #[test]
+    fn freeing_a_town_slime_is_remembered() {
+        for (freed, read) in [
+            (679u16, (|p: &Progress| p.unlocked_slime_old) as fn(&Progress) -> bool),
+            (680, |p: &Progress| p.unlocked_slime_purple),
+            (683, |p: &Progress| p.unlocked_slime_yellow),
+        ] {
+            let mut progress = Progress::default();
+            assert!(!read(&progress), "{freed} starts out there to be found");
+            remember(&mut progress, freed);
+            assert!(read(&progress), "freeing {freed} must be remembered");
+        }
+
+        // None of the three is freed by talking, so none may be in the talk table: adding one
+        // there would let a player free it by opening a chat window with no powder and no fight.
+        for bound in [685u16, 686, 687] {
+            assert!(
+                rescue_for(bound).is_none(),
+                "{bound} is not freed by talking"
+            );
+        }
+
+        // The bound Old Slime is still the one of the three found by the underground bound path,
+        // so it needs a `still_bound` answer; the other two are found by their own producers.
+        let mut progress = Progress::default();
+        assert!(still_bound(&progress, 685));
+        remember(&mut progress, 679);
+        assert!(!still_bound(&progress, 685), "and is not found twice");
     }
 
     /// The bound Golfer (589) was missing entirely, so no world generated here could ever gain a

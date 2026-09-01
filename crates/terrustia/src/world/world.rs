@@ -869,6 +869,11 @@ impl World {
             // Advanced Combat Techniques, both volumes, which permanently toughen the townsfolk.
             (F::CombatBookUsed, p.combat_book),
             (F::CombatBookTwoUsed, p.combat_book_two),
+            // The three bound town slimes, once freed. A client that still believes the flag is
+            // false keeps offering the "free me" interaction for a slime that already moved in.
+            (F::UnlockedSlimeOldSpawn, p.unlocked_slime_old),
+            (F::UnlockedSlimePurpleSpawn, p.unlocked_slime_purple),
+            (F::UnlockedSlimeYellowSpawn, p.unlocked_slime_yellow),
             (F::Sandstorm, self.sandstorm),
             // Every real secret-seed flag with its own client-visible `WorldFlag` bit (this
             // project's own model has no bit for `NoTraps`/`Skyblock` — neither has a client-side

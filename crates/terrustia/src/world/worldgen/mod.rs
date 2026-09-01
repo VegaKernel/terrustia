@@ -1258,6 +1258,44 @@ mod tests {
         );
     }
 
+    /// Freeing a bound town slime survives a save, through both writer paths.
+    ///
+    /// These three are the only progress flags in the file that read backwards: a `true` is what
+    /// *stops* their bound form spawning (`NPC.cs:2095`, `:1417`, `:5623` all test the negation),
+    /// so a world that loses one does not merely forget a rescue, it puts a second bound slime back
+    /// into the caverns beside the resident already living in a house.
+    ///
+    /// Fails before the fix in both halves: the fresh-header writer wrote seven hard-coded `false`
+    /// bytes for the whole slime run, and the reader stopped at the second combat book and never
+    /// looked at them at all.
+    #[test]
+    fn freed_town_slimes_survive_a_save() {
+        use crate::world::{wld, wld_save};
+
+        let (mut world, _) = build(1200, 600, "town slimes", 6);
+        world.progress.unlocked_slime_old = true;
+        world.progress.unlocked_slime_purple = true;
+        world.progress.unlocked_slime_yellow = true;
+
+        let bytes = wld_save::serialize(&world).expect("it should save");
+        let back = wld::parse(&bytes).expect("it should load");
+        assert!(back.progress.unlocked_slime_old, "the old slime");
+        assert!(back.progress.unlocked_slime_purple, "the purple slime");
+        assert!(back.progress.unlocked_slime_yellow, "the yellow slime");
+
+        // ...and again through the preserved-header patch path, which is what every autosave after
+        // the first actually takes. Flip one back off to prove the patch writes false as well as
+        // true: a patch that only ever ORs bits in would pass the round trip above and still be
+        // unable to represent a world that has not freed the slime yet.
+        let mut second = back;
+        second.progress.unlocked_slime_purple = false;
+        let bytes = wld_save::serialize(&second).expect("the preserved path should save");
+        let again = wld::parse(&bytes).expect("it should load a second time");
+        assert!(again.progress.unlocked_slime_old);
+        assert!(!again.progress.unlocked_slime_purple);
+        assert!(again.progress.unlocked_slime_yellow);
+    }
+
     /// Chests hold something. An empty chest is worse than no chest.
     #[test]
     fn chests_are_not_empty() {

@@ -387,6 +387,14 @@ const OLD_SLIME: u16 = 679;
 /// The only slime an Old Slime can be made from.
 const OLD_SLIME_SOURCE: u16 = 685;
 
+/// The other two town slimes, each freed by something that is not a packet at all.
+///
+/// The Purple Slime is what its bound form becomes when killed (`NPC.HitEffect`,
+/// `NPC.cs:82596-82627`); the Yellow Slime is what its bound form becomes when a thrown cloud of
+/// Purification Powder touches it (`Projectile.cs:14806-14824`).
+const PURPLE_SLIME: u16 = 680;
+const YELLOW_SLIME: u16 = 683;
+
 /// Whether an NPC is one a fishing rod can bring up.
 ///
 /// Six types, all blood-moon catches: the Red Slime that unlocks itself, two hardmode fish and
