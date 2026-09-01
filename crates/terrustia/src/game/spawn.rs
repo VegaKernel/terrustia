@@ -1273,8 +1273,10 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
     // `TileID.Sets.IcesSnow` is `{161, 200, 163, 164, 147}` (`TileID.cs:297`) and the arm adds 162,
     // the thin ice, on its own line. These are tile ids: 163 and 164 here are Purple and Pink Ice,
     // not the two spiders.
-    const SNOW_GROUND: [u16; 6] = [147, 161, 162, 163, 164, 200];
-    if SNOW_GROUND.contains(&ground_block) {
+    // A `matches!` rather than a `[u16; 6]` and `contains`: every draw that gets past the werewolf
+    // reaches this, and on `measure_the_graveyard_and_the_seasonal_chain`'s ordinary night the
+    // linear array scan cost +3.8 ns against this form's +0.6 ns.
+    if matches!(ground_block, 147 | 161 | 162 | 163 | 164 | 200) {
         // NPC.cs:4657 and `:4661`. The Ice Elemental and the Wolf come from here and from one
         // other place each in the whole spawner (`:5232` is the caverns' own Ice Elemental, the
         // flying chain's snow arm), so without this arm both were unreachable. Note `!ZoneGraveyard`
@@ -5446,7 +5448,7 @@ mod tests {
     ///
     /// Neutralised arm by arm:
     ///
-    /// * deleting the `SNOW_GROUND.contains(&ground_block)` block: "no IceElemental (169) on ice".
+    /// * deleting the ice-and-snow `matches!` block: "no IceElemental (169) on ice".
     /// * dropping `!at.graveyard` from both hardmode arms: "a Wolf in a snowy graveyard".
     /// * dropping `at.hard_mode` from both: "an Ice Elemental before hardmode".
     /// * passing `2` instead of `world.tile(x, y + 1).block` in `try_spawn`: "no IceElemental (169)
@@ -6944,6 +6946,13 @@ mod tests {
     ///   player.
     /// * The same in a graveyard at Halloween with every arm live: 15.3 ns, which is the chain
     ///   actually rolling its dice rather than falling out of the first condition.
+    ///
+    /// The snow and rain arms (`NPC.cs:4655`, `:4675`) were added to that chain later and were
+    /// measured against the same build on the same machine rather than against the numbers above:
+    /// 4.89 ns before and 5.50 ns after on the ordinary night, and 17.95 against 16.68 in the
+    /// graveyard, so the two arms and the two rolls above them cost about 0.6 ns of a run that
+    /// happens at most once per *tick*. Written as an array of the six ice and snow tiles and
+    /// `contains` instead, the same measurement was 8.68 ns, which is why it is a `matches!`.
     #[test]
     #[ignore]
     fn measure_the_graveyard_and_the_seasonal_chain() {
