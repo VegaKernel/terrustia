@@ -852,6 +852,13 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     use Depth::*;
 
     match (depth, biome) {
+        // The dungeon answers for itself at every depth and adds nothing generic, because vanilla's
+        // `else if (ZoneDungeon)` (`NPC.cs:2629-2795`) returns down every path it has and never
+        // reaches the underground chain the arm below transcribes. Without this a hardmode dungeon
+        // grew Mimics, Rune Wizards and Black Recluses the game never puts in one. What hardmode
+        // really adds there is [`hard_dungeon_pick`], which is a chain rather than a pool; the same
+        // shape, and the same reason, as [`pool`]'s own `(_, Dungeon)` arm.
+        (_, Dungeon) => &[],
         // The two evils, which are the same shape with different names.
         (Surface, Corruption) => &[
             81,  // CorruptSlime
@@ -2151,6 +2158,120 @@ pub fn sandstorm_pick(
     (581, 0) // FlyingAntlion
 }
 
+/// The dungeon's slab walls, `WallID.BlueDungeonSlabUnsafe`, `PinkDungeonSlabUnsafe` and
+/// `GreenDungeonSlabUnsafe` (`WallID.cs:257`, `:261`, `:265`).
+const DUNGEON_SLAB_WALLS: [u16; 3] = [94, 96, 98];
+
+/// ...and its tile walls, `BlueDungeonTileUnsafe`, `PinkDungeonTileUnsafe` and
+/// `GreenDungeonTileUnsafe` (`WallID.cs:259`, `:263`, `:267`).
+const DUNGEON_TILE_WALLS: [u16; 3] = [95, 97, 99];
+
+/// `RollLuck(7) == 0` (`NPC.cs:2642-2645`): one attempt in seven ignores the wall it found and takes
+/// a style at random, which is what keeps a single-style room from being a single-enemy room.
+///
+/// `RollLuck` is `Luck.RollLuck(luck, range)` (`NPC.cs:5356-5359`), and with no luck effects that is
+/// `Main.rand.Next(range)`. This server models no luck at all, the same narrowing (and the same
+/// reasoning) as the `rate * 0.85` bonus [`rates`] declines to transcribe.
+const DUNGEON_STYLE_REROLL: u32 = 7;
+
+/// Which of the dungeon's three brick styles a spot is built from: `num40` (`NPC.cs:2631-2645`).
+///
+/// This is *not* the wall's colour, whatever the ids look like at a glance. 94, 96 and 98 are the
+/// blue, pink and green **slab** walls and 95, 97 and 99 the blue, pink and green **tile** walls
+/// (`WallID.cs:257-267`), so the game sorts a spot by the shape of its masonry and not by its
+/// colour: a blue slab corridor and a green slab corridor offer exactly the same enemies, and the
+/// plain brick walls (7, 8 and 9) and everything else fall through to 0.
+///
+/// Tile is checked after slab and so wins when a spot has one of each within its two rows, which is
+/// the game's own order rather than a preference of ours.
+///
+/// `y` is this server's spawn row, the one the NPC's feet occupy, so the game's `spawnTileY` is
+/// `y + 1` and its "or above" tile is `y`: the same one-row offset [`underground_desert_spot`]
+/// documents. Two tile reads, on a path that already reads several, and only where the caller has
+/// already decided it is standing in a hardmode dungeon.
+fn dungeon_brick_style(world: &World, x: i32, y: i32, rng: &mut SmallRng) -> u8 {
+    let mut style = 0;
+    let has = |walls: &[u16]| {
+        walls.contains(&world.tile(x, y + 1).wall) || walls.contains(&world.tile(x, y).wall)
+    };
+    if has(&DUNGEON_SLAB_WALLS) {
+        style = 1;
+    }
+    if has(&DUNGEON_TILE_WALLS) {
+        style = 2;
+    }
+    if rng.random_range(0..DUNGEON_STYLE_REROLL) == 0 {
+        style = rng.random_range(0..3u8);
+    }
+    style
+}
+
+/// The hardmode dungeon's own chain, `NPC.cs:2661-2722`.
+///
+/// `hardDungeon` is `downedPlantBoss && Main.hardMode` (`NPC.cs:381`), which the caller holds along
+/// with the zone. Every arm here returns from the game's spawn attempt the moment it fires, so this
+/// is a sequence of independent rolls and not a pool: folding it into [`pool`] would hand the
+/// Paladin a share of every dungeon draw instead of one attempt in thirty-five, and would lose the
+/// brick style entirely, since three quarters of the roster is chosen by it.
+///
+/// `None` means no arm answered and the caller should fall through to the ordinary dungeon pool, the
+/// way vanilla falls through to `:2723`. `Some(None)` is the one arm that answers with nothing: the
+/// caster at `:2691` returns whether or not its `!AnyNPCs` test lets it spawn (`:2703-2707`), so
+/// while one is alive a twentieth of the dungeon's attempts produce no NPC at all rather than an
+/// Angry Bones.
+fn hard_dungeon_pick(
+    style: u8,
+    alive: &dyn Fn(u16) -> bool,
+    rng: &mut SmallRng,
+) -> Option<Option<u16>> {
+    // `:2661`, the one arm that does not care which brick it is standing on.
+    if rng.random_range(0..30) == 0 {
+        return Some(Some(287)); // BoneLee
+    }
+    // `:2666-2680`. Three separate `if`s in the game, each testing its own `num40` before rolling,
+    // and `num40` is exactly one of the three: one roll happens, and it is this one.
+    let gunner = match style {
+        0 => 293, // SkeletonCommando
+        1 => 291, // SkeletonSniper
+        _ => 292, // TacticalSkeleton
+    };
+    if rng.random_range(0..15) == 0 {
+        return Some(Some(gunner));
+    }
+    // `:2681`, plain brick only, and never a second one. The game's own operand order: the census
+    // test comes before the style and before the roll.
+    if !alive(290) && style == 0 && rng.random_range(0..35) == 0 {
+        return Some(Some(290)); // Paladin
+    }
+    // `:2686`, slab and tile only.
+    if style != 0 && rng.random_range(0..30) == 0 {
+        return Some(Some(289)); // GiantCursedSkull
+    }
+    // `:2691-2708`, `num41`: 281 for slab, +2 for brick, +4 for tile, then one of the pair. The
+    // whole arm returns even when the census turns it away, which is what `Some(None)` carries.
+    if rng.random_range(0..20) == 0 {
+        let base = match style {
+            0 => 283, // Necromancer, NecromancerArmored
+            1 => 281, // RaggedCaster, RaggedCasterOpenCoat
+            _ => 285, // DiabolistRed, DiabolistWhite
+        };
+        let caster = base + rng.random_range(0..2u16);
+        return Some(if alive(caster) { None } else { Some(caster) });
+    }
+    // `:2709-2722`, `num42`: 269 for slab, +4 for brick, +8 for tile, then one of the four. Two
+    // attempts in three, which makes the armoured bones most of what a post-Plantera dungeon is.
+    if rng.random_range(0..3) != 0 {
+        let base = match style {
+            0 => 273, // BlueArmoredBones and its three variants
+            1 => 269, // RustyArmoredBones and its three variants
+            _ => 277, // HellArmoredBones and its three variants
+        };
+        let bones = base + rng.random_range(0..4u16);
+        return Some(Some(bones));
+    }
+    None
+}
+
 /// The Harpy (48), which is the whole reason the sky is a place.
 pub const HARPY: u16 = 48;
 /// The Wyvern's head (87). Its fourteen trailing segments grow from its own first AI tick, the way
@@ -3158,6 +3279,26 @@ pub fn try_spawn(
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
+                    // The dungeon's hardmode chain, which sits ahead of the dungeon's ordinary
+                    // fallthrough exactly as vanilla puts `NPC.cs:2661-2722` ahead of `:2723`. It
+                    // opens only once Plantera is down in a hardmode world, which is `hardDungeon`
+                    // (`NPC.cs:381`, `downedPlantBoss && Main.hardMode`), so it costs nothing at all
+                    // before then and two tile reads after it.
+                    if biome == Biome::Dungeon && events.hard_mode && events.downed_plantera {
+                        let alive =
+                            |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
+                        let style = dungeon_brick_style(world, x, y, rng);
+                        match hard_dungeon_pick(style, &alive, rng) {
+                            Some(Some(npc_type)) => {
+                                out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                                break;
+                            }
+                            // The caster arm fired and its one-at-a-time gate turned it away, which
+                            // vanilla answers by returning with nothing spawned.
+                            Some(None) => continue,
+                            None => {}
+                        }
+                    }
                     // A graveyard's daylight draws the *night* pool, for the same reason: with the
                     // daytime block skipped, the chain below `NPC.cs:4202` is the one that answers,
                     // and its fallthrough is the zombie (`NPC.cs:4770-4816`), not the day's slime.
@@ -3412,6 +3553,16 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+
+        // ...and the hardmode dungeon's, asked the same way. All three brick styles, because three
+        // quarters of that roster is chosen by which one a spot is built from, and with nothing
+        // alive, because two of its arms are gated on a census of themselves.
+        for style in 0..3u8 {
+            for seed in 0..4_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.extend(hard_dungeon_pick(style, &|_| false, &mut rng).flatten());
             }
         }
 
@@ -5091,6 +5242,100 @@ mod tests {
             assert!(
                 found.contains(&npc_type),
                 "no {name} ({npc_type}) in a cleared dungeon: {found:?}"
+            );
+        }
+    }
+
+    /// Paint one wall id across the whole dungeon pocket, so every candidate spot in it reads the
+    /// same brick style. The unsafe dungeon walls are deliberately not in `Main.wallHouse`
+    /// (`Main.cs`, which never sets 7, 8, 9 or 94 to 99), so painting them does not make the pocket
+    /// a house and does not disqualify it as a spawn spot.
+    fn paint_dungeon_wall(world: &mut World, cx: i32, cy: i32, wall: u16) {
+        for yy in (cy - 55)..=(cy + 55) {
+            for xx in (cx - 110)..=(cx + 110) {
+                let mut tile = world.tile(xx, yy);
+                tile.wall = wall;
+                world.set_tile(xx, yy, tile);
+            }
+        }
+    }
+
+    /// The hardmode dungeon is sorted by the *shape* of its masonry, not by its colour.
+    ///
+    /// `num40` (`NPC.cs:2631-2645`) reads 94, 96 and 98 (the blue, pink and green *slab* walls) as
+    /// one group and 95, 97 and 99 (their *tile* walls) as another, with plain brick and everything
+    /// else as a third (`WallID.cs:257-267`). Each group owns three quarters of the post-Plantera
+    /// roster (`NPC.cs:2661-2722`): slab gives the Rusty armoured bones, the Ragged Casters and the
+    /// Skeleton Sniper, tile the Hell armoured bones, the Diabolists and the Tactical Skeleton, and
+    /// brick the Blue armoured bones, the Necromancers, the Skeleton Commando and the Paladin. Bone
+    /// Lee is the one arm that ignores the wall.
+    ///
+    /// Neutralised twice. Removing the `hard_dungeon_pick` block from `try_spawn` leaves every one
+    /// of the twenty-five types missing and the first assertion fails on 269. Making
+    /// `dungeon_brick_style` answer a constant 0 makes the wall unreadable: the slab and tile phases
+    /// find none of their own roster and fail the same way, while the brick phase still passes,
+    /// which is exactly the shape of the bug this catches.
+    #[test]
+    fn the_hardmode_dungeon_is_sorted_by_its_masonry() {
+        let (mut world, (cx, cy)) = dungeon_world();
+        world.progress.downed_boss3 = true;
+        let npcs = NpcStore::new();
+        let players = dungeon_player(cx, cy);
+        let events = EventSpawns {
+            hard_mode: true,
+            downed_plantera: true,
+            ..quiet()
+        };
+
+        // The wall to paint, that style's own roster (its four armoured bones first), and one
+        // armoured bones id belonging to a different style.
+        for (wall, own, foreign) in [
+            (
+                94u16,
+                [269u16, 270, 271, 272, 281, 282, 289, 291].as_slice(),
+                273u16,
+            ),
+            (95, [277, 278, 279, 280, 285, 286, 289, 292].as_slice(), 273),
+            (7, [273, 274, 275, 276, 283, 284, 290, 293].as_slice(), 269),
+        ] {
+            paint_dungeon_wall(&mut world, cx, cy, wall);
+            let mut rng = SmallRng::seed_from_u64(11);
+            let mut counts = std::collections::BTreeMap::<u16, u32>::new();
+            // One cache for the phase rather than a fresh one per tick, which is what the server
+            // itself holds: the player never moves, so the scan it takes on the first tick stays
+            // good for all of them, and fifty thousand full biome scans become one.
+            let mut cache = BiomeCache::default();
+            for _ in 0..50_000 {
+                for (npc_type, _) in try_spawn(
+                    &world,
+                    &npcs,
+                    &players,
+                    &events,
+                    &JourneyPowers::default(),
+                    &mut cache,
+                    &mut rng,
+                ) {
+                    *counts.entry(npc_type).or_default() += 1;
+                }
+            }
+            for want in own {
+                assert!(
+                    counts.contains_key(want),
+                    "wall {wall}: no {want} among {counts:?}"
+                );
+            }
+            assert!(
+                counts.contains_key(&287),
+                "wall {wall}: no Bone Lee, who belongs to every style"
+            );
+            // The one-in-seven reroll (`NPC.cs:2642-2645`) still lets the other two styles through,
+            // so this is a skew and not an absence: a spot's own armoured bones should outnumber a
+            // foreign style's by roughly nineteen to one.
+            let mine: u32 = own[..4].iter().filter_map(|t| counts.get(t)).sum();
+            let theirs: u32 = (foreign..foreign + 4).filter_map(|t| counts.get(&t)).sum();
+            assert!(
+                mine > theirs * 3,
+                "wall {wall}: {mine} of its own armoured bones against {theirs} foreign"
             );
         }
     }
