@@ -11,9 +11,11 @@
 //! the "Don't Starve" seed. The zone chain, the `nearbyActiveNPCs` self-correction and the moon and
 //! dungeon overrides are all modelled and pinned here now. What remains genuinely out of scope is
 //! the set of branches whose *input* this server has no notion of: journey mode's slider (handled
-//! by the caller instead), `getGoodWorld`, `ZoneSandstorm`, `ZoneMeteor`, `ZoneLihzhardTemple`,
-//! `cloudAlpha`, the dual-dungeon seeds, the Wall of Flesh's underworld suppression, and every
-//! player-carried buff (candles, potions, the sunflower, the angler set).
+//! by the caller instead), `getGoodWorld`, `ZoneSandstorm`, `cloudAlpha`, the dual-dungeon seeds,
+//! the Wall of Flesh's underworld suppression, and every player-carried buff (candles, potions,
+//! the sunflower, the angler set). `ZoneMeteor` and `ZoneLihzhardTemple` used to be on that list
+//! and are not any more: both are zones this server now knows. The temple's own branch is pinned
+//! below; the meteor's (`NPC.cs:636-640`) is modelled in `rates` but has no pin here yet.
 //!
 //! `rates()` keeps the running rate and cap as `f32` throughout and casts once at the very end,
 //! where the game's own `GetSpawnRate` reassigns an `int` at every step and so truncates after each
@@ -57,6 +59,7 @@ fn plain() -> Conditions {
         in_tower_zone: false,
         graveyard: false,
         meteor: false,
+        lihzahrd_temple: false,
     }
 }
 
@@ -534,6 +537,47 @@ fn every_modelled_biome_carries_its_own_rate_and_cap() {
         }),
         one(plain()),
         "a surface hallow takes nothing: the branch is gated on the rock layer",
+    );
+}
+
+/// `NPC.cs:641-650`, the Lihzahrd Temple, a separate `if` sitting between the biome chain and the
+/// hallow's:
+/// ```csharp
+/// if (ZoneLihzhardTemple) {
+///     spawnRate = (int)((float)spawnRate * 0.8f);
+///     maxSpawns = (int)((float)maxSpawns * 1.2f);
+///     if (Main.remixWorld) { ... }
+/// }
+/// ```
+/// The `remixWorld` half is not modelled here. Because it is a separate `if` rather than another
+/// arm of the chain above it, it stacks on whatever the biome already took, which for a real temple
+/// is the jungle's: Lihzahrd brick is one of the game's own jungle zone tiles
+/// (`SceneMetrics.cs:613`), so a temple is a jungle as far as `GetSpawnRate` is concerned.
+#[test]
+fn the_lihzahrd_temple_is_08_times_the_rate_and_12_times_the_cap() {
+    let (rate, cap, _) = rates(
+        Conditions {
+            lihzahrd_temple: true,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(rate, (600.0f32 * 0.8) as u32, "NPC.cs:643");
+    assert_eq!(cap, 5.0 * 1.2, "NPC.cs:644");
+
+    // Stacked on the cavern jungle a real temple sits in: 600 * 0.4 * 0.4 * 0.8.
+    let (rate, _, _) = rates(
+        Conditions {
+            lihzahrd_temple: true,
+            biome: Biome::Jungle,
+            depth: Depth::Cavern,
+            ..plain()
+        },
+        &mut any_rng(),
+    );
+    assert_eq!(
+        rate, 76,
+        "NPC.cs:643 stacked on NPC.cs:612 and NPC.cs:504: 600 * 0.4 * 0.4 * 0.8"
     );
 }
 
