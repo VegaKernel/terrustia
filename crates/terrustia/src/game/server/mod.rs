@@ -190,6 +190,13 @@ const PYLON_RESIDENT_HOME_RANGE: f32 = 100.0;
 /// game's `0.35f` widens to; as an `f32` this is the same bit pattern.
 const BEACH_PYLON_SKY_LIMIT: f32 = 0.35;
 
+/// How close to the bottom of a remix world a Glowing Mushroom pylon stops working, in rows.
+///
+/// `TeleportPylonsSystem.cs:295-297`: `if (Main.remixWorld && Y >= Main.maxTilesY - 200) return
+/// false`. A remix world's surface is at the bottom, so its underworld-side mushroom fields are
+/// not what that network is for.
+const REMIX_MUSHROOM_PYLON_FLOOR: i32 = 200;
+
 /// `NPC.cs:785`, `spawnRate = 20` during an invasion: a one-in-twenty roll per player per tick,
 /// rather than a fixed cadence. An invasion arrives steadily rather than all at once, but it
 /// arrives at the game's own pace.
@@ -1512,14 +1519,21 @@ impl GameServer {
     /// refreshes that entry every tick for every active player, so the answer is the current one;
     /// a player with no entry yet (dead, or in their first tick) reads as plain forest.
     ///
-    /// Three disclosed narrowings. The game's zone flags are independent and several can be true
-    /// at once (`Player.ShoppingZone_AnyBiome`, `Player.cs:3807-3817`), while `biome_at` returns
-    /// the single first biome to cross its threshold, so at most one biome flag is ever set here.
-    /// The glowing mushroom biome is not modelled by this server at all, so `mushroom` is never
-    /// set and the Truffle never gets his one biome like. And the scan is centred on the player's
-    /// top-left corner rather than their centre, which is what every other caller here does.
+    /// Two disclosed narrowings. The game's zone flags are independent and several can be true at
+    /// once (`Player.ShoppingZone_AnyBiome`, `Player.cs:3807-3817`), and this sets every one the
+    /// scan answers independently (`desert` and `mushroom` are [`Zones`] flags of their own); the
+    /// remaining five are read off the single winner, so at most one of *those* is ever set. And
+    /// the scan is centred on the player's top-left corner rather than their centre, which is what
+    /// every other caller here does.
+    ///
+    /// `mushroom` used to be hardcoded `false` on the grounds that the server did not model the
+    /// glowing mushroom biome, which cost the Truffle his one biome like. It does model it:
+    /// `ZoneGlowshroom` is `EnoughTilesForGlowingMushroom` and nothing else (`SceneMetrics.cs:684`),
+    /// which is the count [`spawn::Zones::glowshroom`] already makes in this very scan.
     ///
     /// [`BiomeCache`]: crate::game::spawn::BiomeCache
+    /// [`Zones`]: crate::game::spawn::Zones
+    /// [`spawn::Zones::glowshroom`]: crate::game::spawn::Zones::glowshroom
     fn shopping_zones(&self, slot: u8) -> terrustia_proto::happiness::Zones {
         use crate::game::spawn::Biome;
         use terrustia_proto::happiness::Zones;
@@ -1528,17 +1542,16 @@ impl GameServer {
             return Zones::default();
         };
         let y = (position.1 / crate::game::npc::TILE) as i32;
-        let biome = self
-            .player_biomes
-            .last(usize::from(slot))
-            .unwrap_or(Biome::Forest);
+        // A player with no entry yet reads as plain forest: no winner but `Forest`, no flag set.
+        let zones = self.player_biomes.last(usize::from(slot));
+        let biome = zones.map_or(Biome::Forest, |z| z.biome);
         Zones {
             ocean: biome == Biome::Ocean,
             snow: biome == Biome::Snow,
-            desert: biome == Biome::Desert,
+            desert: zones.is_some_and(|z| z.desert),
             jungle: biome == Biome::Jungle,
             hallow: biome == Biome::Hallow,
-            mushroom: false,
+            mushroom: zones.is_some_and(|z| z.glowshroom),
             corruption: biome == Biome::Corruption,
             crimson: biome == Biome::Crimson,
             dungeon: biome == Biome::Dungeon,
@@ -1586,23 +1599,37 @@ impl GameServer {
     /// Whether a pylon's surroundings still match its network, the game's biome gate on travelling
     /// to it (`TeleportPylonsSystem.DoesPylonAcceptTeleportation`, TeleportPylonsSystem.cs:254-312).
     ///
-    /// The scan the game runs there is the same one the spawner uses (`spawn::biome_at`), so the
+    /// The scan the game runs there is the same one the spawner uses (`spawn::zones_at`), so the
     /// biome networks read straight across. The pylon kinds are the game's `TeleportPylonType`
-    /// values (TeleportPylonType.cs): 0 surface purity, 1 jungle, 2 hallow, 3 underground, 4 beach,
-    /// 5 desert, 6 snow, 7 glowing mushroom, 8 victory, 9 underworld, 10 shimmer.
+    /// values (TeleportPylonType.cs:5-15): 0 surface purity, 1 jungle, 2 hallow, 3 underground,
+    /// 4 beach, 5 desert, 6 snow, 7 glowing mushroom, 8 victory, 9 underworld, 10 shimmer.
     ///
-    /// Two disclosed narrowings from the game's own code. The game reads each biome's tile count
-    /// independently (`_sceneMetrics.EnoughTilesForJungle` and its siblings), so a spot can be over
-    /// several thresholds at once; `biome_at` returns the single first biome to cross, which is why
-    /// the surface-purity clause tests one biome rather than a set. And glowing mushroom (7) and
-    /// shimmer (10) are biomes this server does not model, so their pylons are accepted rather than
-    /// falsely refused, the same permissive stance the default arm of the game's switch would land
-    /// on for a type with no biome to check.
+    /// The game reads each biome's tile count independently (`_sceneMetrics.EnoughTilesForJungle`
+    /// and its siblings), so a spot can be over several thresholds at once. `spawn::Zones` answers
+    /// four of those independently (`desert`, `glowshroom`, `shimmer`, `meteor`) and collapses the
+    /// rest into one winner, so the four are read as flags here and the rest as the winner. That
+    /// collapse is the one remaining narrowing on this function's biome side: a surface-purity
+    /// pylon standing in, say, a snowfield that a corruption has already outvoted reads as
+    /// corruption, and either answer refuses it, so the surviving cases are all ones where two
+    /// clauses of the same `if` would have agreed anyway.
+    ///
+    /// Glowing mushroom (7) and shimmer (10) used to fall through to the permissive `_ => true`,
+    /// on the grounds that this server modelled neither zone. It models both:
+    /// `EnoughTilesForGlowingMushroom` is `MushroomTileCount >= 100` (`SceneMetrics.cs:52`, `:260`)
+    /// and `EnoughTilesForShimmer` is `ShimmerTileCount >= 300` (`:24`, `:252`), both counted in
+    /// the box this scan already walks. A mushroom or shimmer pylon dug out of its biome now stops
+    /// working, as it does in the game.
+    ///
+    /// Not transcribed: the `Main.remixWorld` branches on the surface-purity (:260-262) and beach
+    /// (:287-291) arms, which were already absent before this and are left so; the glowing
+    /// mushroom arm's own remix branch (:295-297) *is* transcribed, since that arm is written here
+    /// in full.
     fn pylon_accepts(&self, pylon: &net_module::Pylon) -> bool {
-        use crate::game::spawn::{Biome, Depth, biome_at, depth_at};
+        use crate::game::spawn::{Biome, Depth, depth_at, zones_at};
         let (x, y) = (i32::from(pylon.x), i32::from(pylon.y));
         let depth = depth_at(&self.world, y);
-        let biome = biome_at(&self.world, x, y);
+        let zones = zones_at(&self.world, x, y);
+        let biome = zones.biome;
         // The game's edge band (TeleportPylonsSystem.cs:265, :285): within 380 tiles of either side.
         let near_edge = x <= 380 || x >= self.world.width() - 380;
         match pylon.kind {
@@ -1613,15 +1640,18 @@ impl GameServer {
             5 => biome == Biome::Desert,
             6 => biome == Biome::Snow,
             // SurfacePurity: the plain surface, clear of the edge bands and of every special biome
-            // (TeleportPylonsSystem.cs:258-274).
+            // (TeleportPylonsSystem.cs:258-274). The game's exclusion list at :270 is Jungle, Snow,
+            // Desert, *GlowingMushroom*, Hallow, Crimson, Corruption; the mushroom term was missing
+            // here, so a surface purity pylon buried in a mushroom field kept working.
             0 => {
                 depth == Depth::Surface
                     && !near_edge
+                    && !zones.desert
+                    && !zones.glowshroom
                     && !matches!(
                         biome,
                         Biome::Jungle
                             | Biome::Snow
-                            | Biome::Desert
                             | Biome::Hallow
                             | Biome::Corruption
                             | Biome::Crimson
@@ -1640,8 +1670,20 @@ impl GameServer {
             3 => depth != Depth::Surface,
             // Underworld: the underworld layer (TeleportPylonsSystem.cs:305-306).
             9 => depth == Depth::Underworld,
-            // Victory (8, TeleportPylonsSystem.cs:303-304) travels from anywhere; glowing mushroom
-            // (7) and shimmer (10) are the unmodelled biomes noted in the doc comment.
+            // GlowingMushroom: enough mushroom tiles, and in a remix world never within 200 rows of
+            // the bottom, because that is where remix puts its surface (TeleportPylonsSystem.cs:
+            // 293-298).
+            7 => {
+                let remix_floor = self.world.secret_seeds.remix
+                    && y >= self.world.height() - REMIX_MUSHROOM_PYLON_FLOOR;
+                !remix_floor && zones.glowshroom
+            }
+            // Shimmer: enough shimmer, and nothing else. The game reads the raw
+            // `EnoughTilesForShimmer` here rather than `ZoneShimmer`, so its depth and dungeon
+            // terms do not apply (TeleportPylonsSystem.cs:307-308).
+            10 => zones.shimmer,
+            // Victory (8, TeleportPylonsSystem.cs:303-304) travels from anywhere, and so does
+            // anything past the enum, matching the game's own `default` (:309-310).
             _ => true,
         }
     }
@@ -3666,12 +3708,20 @@ mod announcements {
 
 /// The two pylon-travel gates that a biome scan made possible (L2-21): the destination must still
 /// sit in its network's biome (`DoesPylonAcceptTeleportation`) and a temple pylon stays sealed
-/// until Plantera falls (the `wall == 87` clause of `HandleTeleportRequest`).
+/// until Plantera falls (the `wall == 87` clause of `HandleTeleportRequest`). Also the other place
+/// the same scan is read as the game's independent zone flags rather than as one winning biome,
+/// `shopping_zones`, since a flag that is wrong there is wrong for the same reason.
 #[cfg(test)]
 mod pylon_gates {
     use super::*;
     use crate::config::Config;
-    use terrustia_proto::tile::Tile;
+    use terrustia_proto::tile::{Liquid, Tile};
+
+    /// Tile ids used by more than one test below, each a member of the `SceneMetrics` count named.
+    const MUSHROOM_GRASS: u16 = 70; // MushroomTileCount member (`SceneMetrics.cs:617`)
+    const SAND: u16 = 53; // SandTileCount member (`SceneMetrics.cs:620`)
+    const EBONSTONE: u16 = 23; // EvilTileCount member (`SceneMetrics.cs:614`)
+    const BLUE_DUNGEON_BRICK: u16 = 41; // DungeonTileCount member (`SceneMetrics.cs:619`)
 
     fn server() -> GameServer {
         let mut world = World::empty(1200, 400, "pylon gate probe");
@@ -3692,6 +3742,22 @@ mod pylon_gates {
                     .world
                     .set_tile(i32::from(x) + dx, i32::from(y) + dy, Tile::block(block));
             }
+        }
+    }
+
+    /// Flood exactly `count` tiles with a liquid, left to right and top to bottom from a corner.
+    ///
+    /// Liquid rather than blocks, because shimmer is the one zone the game counts off
+    /// `_liquidCounts` on the tiles its block counts skip (`SceneMetrics.cs:367-372`, `:601`), and
+    /// an exact count is what makes the 300-tile threshold testable at its edge.
+    fn pour(server: &mut GameServer, x: i16, y: i16, kind: Liquid, count: i32) {
+        for n in 0..count {
+            let (dx, dy) = (n % 40 - 20, n / 40 - 20);
+            server.world.set_tile(
+                i32::from(x) + dx,
+                i32::from(y) + dy,
+                Tile::AIR.with_liquid(kind, 255),
+            );
         }
     }
 
@@ -3777,6 +3843,201 @@ mod pylon_gates {
 
         // Victory (kind 8) travels from anywhere, biome or no biome.
         assert!(s.pylon_accepts(&pylon(net_module::Pylon::VICTORY, 600, 40)));
+    }
+
+    /// The Glowing Mushroom network (kind 7), which used to fall through to the permissive
+    /// `_ => true` because `Biome` has no mushroom variant to test.
+    ///
+    /// It never needed one. Vanilla reads `_sceneMetrics.EnoughTilesForGlowingMushroom`
+    /// (`TeleportPylonsSystem.cs:293-298`), an independent tile count
+    /// (`MushroomTileCount >= 100`, `SceneMetrics.cs:52`, `:260`, `:617`), which is exactly the
+    /// `Zones::glowshroom` flag the same scan already produced and this function threw away.
+    #[test]
+    fn a_mushroom_pylon_needs_its_mushrooms() {
+        let (mx, my) = (600i16, 150i16);
+        assert!(
+            !server().pylon_accepts(&pylon(7, mx, my)),
+            "a mushroom pylon in plain forest should be refused",
+        );
+
+        let mut grove = server();
+        paint(&mut grove, mx, my, MUSHROOM_GRASS, 6); // 144 tiles, over the 100 threshold
+        assert!(
+            grove.pylon_accepts(&pylon(7, mx, my)),
+            "a mushroom pylon in a real mushroom field should work",
+        );
+
+        // One tile short of the threshold is still not a biome: 9 rows of 11 is 99.
+        let mut sparse = server();
+        for dy in 0..9 {
+            for dx in 0..11 {
+                sparse.world.set_tile(
+                    i32::from(mx) + dx,
+                    i32::from(my) + dy,
+                    Tile::block(MUSHROOM_GRASS),
+                );
+            }
+        }
+        assert!(
+            !sparse.pylon_accepts(&pylon(7, mx, my)),
+            "99 mushroom tiles is one short of the 100 the game wants",
+        );
+
+        // `if (Main.remixWorld && Y >= Main.maxTilesY - 200) return false`
+        // (`TeleportPylonsSystem.cs:295-297`). The world is 400 tall, so that line is row 200.
+        let (deep_x, deep_y) = (600i16, 250i16);
+        let mut deep = server();
+        paint(&mut deep, deep_x, deep_y, MUSHROOM_GRASS, 6);
+        assert!(
+            deep.pylon_accepts(&pylon(7, deep_x, deep_y)),
+            "an ordinary world has no floor under its mushroom network",
+        );
+        deep.world.secret_seeds.remix = true;
+        assert!(
+            !deep.pylon_accepts(&pylon(7, deep_x, deep_y)),
+            "a remix world refuses a mushroom pylon in its bottom 200 rows",
+        );
+        // ...and only in those rows: the same seed leaves row 150's grove alone.
+        grove.world.secret_seeds.remix = true;
+        assert!(
+            grove.pylon_accepts(&pylon(7, mx, my)),
+            "row 150 is above the remix floor and stays accepted",
+        );
+    }
+
+    /// The Shimmer network (kind 10), the other arm that used to fall through to `_ => true`.
+    ///
+    /// Vanilla reads the raw `_sceneMetrics.EnoughTilesForShimmer`
+    /// (`TeleportPylonsSystem.cs:307-308`), which is `ShimmerTileCount >= 300`
+    /// (`SceneMetrics.cs:24`, `:252`) and `ShimmerTileCount = _liquidCounts[3]` (`:601`): shimmer
+    /// *liquid* on inactive tiles, not a block type. Deliberately not `ZoneShimmer` (`:711-712`),
+    /// whose extra depth and dungeon terms the pylon check does not apply.
+    #[test]
+    fn a_shimmer_pylon_needs_shimmer() {
+        let (sx, sy) = (600i16, 150i16);
+        assert!(
+            !server().pylon_accepts(&pylon(10, sx, sy)),
+            "a shimmer pylon in a dry cave should be refused",
+        );
+
+        let mut pool = server();
+        pour(&mut pool, sx, sy, Liquid::Shimmer, 300);
+        assert!(
+            pool.pylon_accepts(&pylon(10, sx, sy)),
+            "exactly 300 shimmer tiles reaches `ShimmerTileCount >= 300`",
+        );
+
+        let mut shallow = server();
+        pour(&mut shallow, sx, sy, Liquid::Shimmer, 299);
+        assert!(
+            !shallow.pylon_accepts(&pylon(10, sx, sy)),
+            "299 is one short of the threshold",
+        );
+
+        // The count is bucket 3 alone, not "any liquid": a lake of water is not a shimmer biome.
+        let mut lake = server();
+        pour(&mut lake, sx, sy, Liquid::Water, 600);
+        assert!(
+            !lake.pylon_accepts(&pylon(10, sx, sy)),
+            "water is `_liquidCounts[0]` and never reaches `ShimmerTileCount`",
+        );
+    }
+
+    /// Two more entries in the surface-purity pylon's exclusion list that were being missed,
+    /// both because it tested the single winning `Biome` where the game tests independent flags.
+    ///
+    /// Vanilla's list is `EnoughTilesForJungle || Snow || Desert || GlowingMushroom || Hallow ||
+    /// Crimson || Corruption` (`TeleportPylonsSystem.cs:270`). Glowing mushroom was absent
+    /// outright, and desert was read off the winner, so a place where a *higher-priority* biome
+    /// won the vote passed the desert clause however much sand it had.
+    #[test]
+    fn a_purity_pylon_is_refused_by_the_zones_no_biome_wins() {
+        let (px, py) = (600i16, 40i16); // above surface(100), clear of both 380-tile edge bands
+        assert!(
+            server().pylon_accepts(&pylon(0, px, py)),
+            "the plain surface still accepts a purity pylon",
+        );
+
+        // Glowing mushroom, which was not in the list at all.
+        let mut grove = server();
+        paint(&mut grove, px, py, MUSHROOM_GRASS, 6);
+        assert!(
+            !grove.pylon_accepts(&pylon(0, px, py)),
+            "a purity pylon buried in a mushroom field should be refused",
+        );
+
+        // Sand under a dungeon: `Biome::Dungeon` takes the vote and is not on the exclusion list,
+        // so reading the winner accepted this while `EnoughTilesForDesert` was plainly true. A
+        // dungeon entrance beside an ocean's sand is where this really happens.
+        let mut dungeon_beach = server();
+        paint(&mut dungeon_beach, px, py, SAND, 22); // 1936 sand, over the 1500 threshold
+        paint(&mut dungeon_beach, px, py, BLUE_DUNGEON_BRICK, 8); // 256 brick, over 250, on 256 sand
+        assert_eq!(
+            crate::game::spawn::biome_at(&dungeon_beach.world, i32::from(px), i32::from(py)),
+            crate::game::spawn::Biome::Dungeon,
+            "the dungeon wins the vote here, which is the whole point of the case",
+        );
+        assert!(
+            crate::game::spawn::zones_at(&dungeon_beach.world, i32::from(px), i32::from(py)).desert,
+            "...while the desert flag is independently true, as it is in the game",
+        );
+        assert!(
+            !dungeon_beach.pylon_accepts(&pylon(0, px, py)),
+            "a purity pylon standing on 1680 tiles of sand should be refused",
+        );
+    }
+
+    /// `shopping_zones` is the other reader of the same scan, and it was dropping the same two
+    /// flags: `mushroom` was hardcoded `false`, and `desert` was read off the winning `Biome`.
+    ///
+    /// The game's own set is independent (`Player.ShoppingZone_AnyBiome`, `Player.cs:3807-3817`),
+    /// and `mushroom` is `Player.ZoneGlowshroom`, which is `EnoughTilesForGlowingMushroom` and
+    /// nothing else (`SceneMetrics.cs:684`). Without it the Truffle never got his one biome like
+    /// (`happiness::Biome::Mushroom`), standing in the middle of his own biome.
+    #[test]
+    fn shopping_zones_report_the_flags_no_biome_wins() {
+        /// Seat a player, prime the biome cache for their slot the way a spawn pass would, and
+        /// read the shopping zones back.
+        fn zones_for(server: &mut GameServer, x: i16, y: i16) -> terrustia_proto::happiness::Zones {
+            let (out_tx, _out_rx) = mpsc::channel(64);
+            let mut player = Player::new(0, "127.0.0.1:1".parse().expect("test address"), out_tx);
+            player.position = (f32::from(x) * 16.0, f32::from(y) * 16.0);
+            server.players[0] = Some(player);
+            server
+                .player_biomes
+                .read(&server.world, 0, i32::from(x), i32::from(y))
+                .expect("a fresh cache has budget for the first scan");
+            server.shopping_zones(0)
+        }
+
+        let (px, py) = (600i16, 40i16);
+
+        let plain = zones_for(&mut server(), px, py);
+        assert!(!plain.mushroom && !plain.desert, "plain forest: {plain:?}");
+        assert!(plain.forest(), "...and it is `ShoppingZone_Forest`");
+
+        // The Truffle at home.
+        let mut grove = server();
+        paint(&mut grove, px, py, MUSHROOM_GRASS, 6);
+        let mushroom = zones_for(&mut grove, px, py);
+        assert!(
+            mushroom.mushroom,
+            "a mushroom field is `ZoneGlowshroom`: {mushroom:?}",
+        );
+        assert!(
+            !mushroom.forest(),
+            "...so it is no longer `ShoppingZone_Forest`",
+        );
+
+        // A corrupted desert is both at once in the game, and the corruption wins our vote.
+        let mut corrupt_desert = server();
+        paint(&mut corrupt_desert, px, py, SAND, 22); // 1936 sand
+        paint(&mut corrupt_desert, px, py, EBONSTONE, 9); // 324 evil, over 300, on 324 sand
+        let both = zones_for(&mut corrupt_desert, px, py);
+        assert!(
+            both.corruption && both.desert,
+            "a corrupted desert is both zones at once: {both:?}",
+        );
     }
 
     /// L2-21 check (5): a pylon standing on the Lihzahrd temple's own wall, below the surface, will
