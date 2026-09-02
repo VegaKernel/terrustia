@@ -68,11 +68,28 @@ fn plant_move<T: TileView>(
     out: &mut Growth,
 ) -> Outcome {
     // `ai[0..1]` hold the anchor tile. The game's world generator writes it when it places the
-    // plant; anything spawned without one takes root where it stands.
+    // plant, and so does the spawner, from the solid ground row it chose (`NPC.cs:3937` for the Man
+    // Eater, `:3649`, `:3653`, `:3688` and `:3692` for the Fungi Bulb pair, all of the shape
+    // `SpawnNPC(..., 43, 0, spawnTileX, spawnTileY)`). Anything that arrives without one takes root
+    // in the first solid tile under it.
+    //
+    // Under it, not the tile its own centre falls in. A spawned plant stands in open air by
+    // construction, so a centre-tile anchor is not active and the check below uproots it on its
+    // very first tick: every Man Eater this server put in a jungle died before it was drawn, and
+    // the Fungi Bulb pair would have done the same. Only the Giant Fungi Bulb happened to survive,
+    // and only because it is 36 pixels tall, so its centre fell into the ground tile by accident.
     if npc.ai[0] == 0.0 && npc.ai[1] == 0.0 {
-        let (cx, cy) = npc.center();
-        npc.ai[0] = (cx / TILE).floor();
-        npc.ai[1] = (cy / TILE).floor();
+        let (cx, _) = npc.center();
+        let column = (cx / TILE).floor() as i32;
+        let top = (npc.position.1 / TILE).floor() as i32;
+        // Its own rows plus one, which is where the ground is: the spawner puts a plant's top-left
+        // on the open row above the tile it chose.
+        let rows = (npc.height() / TILE).ceil() as i32 + 1;
+        let root = (top..=top + rows)
+            .find(|row| world.tiles.tile(column, *row).is_active())
+            .unwrap_or(top + 1);
+        npc.ai[0] = column as f32;
+        npc.ai[1] = root as f32;
     }
     let (anchor_x, anchor_y) = (npc.ai[0] as i32, npc.ai[1] as i32);
     if !world.tiles.tile(anchor_x, anchor_y).is_active() {
@@ -373,6 +390,42 @@ mod tests {
         assert!(!plant(&mut p, &world(&tiles, None), &mut rng()).uprooted);
         let bare = Jungle::default();
         assert!(plant(&mut p, &world(&bare, None), &mut rng()).uprooted);
+    }
+
+    /// A plant the spawner placed arrives with no anchor at all, and it has to root itself in the
+    /// ground under its feet rather than in the air its body occupies.
+    ///
+    /// Vanilla never has to decide this, because `NPC.Spawner` passes the ground row it chose
+    /// (`NPC.cs:3937` for the Man Eater, `:3649` and `:3688` for the Fungi Bulb pair). This server's
+    /// spawner has no ai arguments to pass, so the fallback is what stands in for it, and the
+    /// fallback used to be the tile the plant's own centre falls in. `try_spawn` puts a spawn on an
+    /// open row by construction, so that tile is never active: `plant` uprooted it on tick one and
+    /// every Man Eater the jungle produced died before a client ever drew it.
+    ///
+    /// Neutralised by restoring the centre-tile anchor (`npc.ai[1] = (cy / TILE).floor()`): both
+    /// the Man Eater and the Fungi Bulb assertions fail with "uprooted itself on its first tick".
+    #[test]
+    fn a_plant_spawned_with_no_anchor_roots_in_the_ground_under_it() {
+        // The spawner's own shape: solid floor at row 501, the plant's top-left on row 500.
+        let mut tiles = Jungle::default();
+        for x in 498..=503 {
+            tiles.0.insert((x, 501), Tile::block(1));
+        }
+        // 30x30, so its centre lands in the open row; and 20x20, likewise.
+        for npc_type in [43u16, 259] {
+            let mut p = Npc::new(npc_type, (500.0 * TILE, 500.0 * TILE), 1).expect("a plant");
+            assert_eq!(p.ai[0], 0.0, "the spawner passes no anchor");
+            assert!(
+                !plant(&mut p, &world(&tiles, None), &mut rng()).uprooted,
+                "{npc_type} uprooted itself on its first tick",
+            );
+            assert_eq!((p.ai[0], p.ai[1]), (500.0, 501.0), "{npc_type} anchor");
+        }
+        // And it is still the tile it rooted in that kills it, not merely any tile.
+        let mut p = Npc::new(43, (500.0 * TILE, 500.0 * TILE), 1).expect("a plant");
+        plant(&mut p, &world(&tiles, None), &mut rng());
+        tiles.0.remove(&(500, 501));
+        assert!(plant(&mut p, &world(&tiles, None), &mut rng()).uprooted);
     }
 
     #[test]
