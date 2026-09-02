@@ -2652,6 +2652,23 @@ impl GameServer {
     /// A Copper Slime and an Old Slime are each transformed from another slime, once per world,
     /// and the transformation is a permanent unlock. Both have to be the server's: the unlock is
     /// world state and the transformation is a roster change.
+    ///
+    /// `NPC.TransformElderSlime` (`NPC.cs:19172-19193`) is the whole of the Old Slime's half:
+    ///
+    /// ```csharp
+    /// else if (!unlockedSlimeOldSpawn && Main.npc.IndexInRange(npcIndex)) {
+    ///     NPC nPC = Main.npc[npcIndex];
+    ///     if (nPC.type == 685) {
+    ///         unlockedSlimeOldSpawn = true;
+    ///         NetMessage.SendData(7);
+    ///         nPC.Transform(679);
+    /// ```
+    ///
+    /// The `!unlockedSlimeOldSpawn` guard is the point: without it the packet is a free Old Slime
+    /// for every client that sends it, and the caverns keep offering a bound one for ever because
+    /// nothing ever shuts `NPC.cs:2095`'s arm. The powder the client spends (`Main.cs:43852-43869`,
+    /// `TryFreeingElderSlime`) is the client's own bookkeeping in vanilla too; the server checks
+    /// the type and the flag and nothing else, which is transcribed rather than tightened.
     fn on_misc_event_value(&mut self, slot: u8, payload: &[u8]) -> terrustia_proto::Result<()> {
         if !self.player(slot).is_some_and(Player::is_playing) {
             return Ok(());
@@ -2665,6 +2682,9 @@ impl GameServer {
 
         let (wanted, into) = match what {
             TRANSFORM_COPPER_SLIME => (None, COPPER_SLIME),
+            // `!unlockedSlimeOldSpawn` (`NPC.cs:19178`): once per world, and the flag is what keeps
+            // the caverns from offering a second bound one.
+            TRANSFORM_ELDER_SLIME if self.world.progress.unlocked_slime_old => return Ok(()),
             TRANSFORM_ELDER_SLIME => (Some(OLD_SLIME_SOURCE), OLD_SLIME),
             // Case 0 is the credits roll's clock, which only ever goes the other way.
             _ => return Ok(()),
@@ -2681,7 +2701,16 @@ impl GameServer {
             npc.become_type(into);
             npc.dirty = true;
         }
+        // `unlockedSlimeOldSpawn = true; NetMessage.SendData(7);` (`NPC.cs:19183-19184`). Nothing
+        // set this before, so a freed Old Slime was forgotten the moment the world was saved and
+        // the caverns went on offering bound ones beside the resident already in a house.
+        //
+        // The Copper Slime falls through this without effect and is meant to: its own
+        // `unlockedSlimeCopperSpawn` (`NPC.cs:19205`) gates nothing that spawns, since 684 appears
+        // in no ambient arm of `NPC.Spawner` at all, so there is no world state to keep.
+        crate::game::rescues::remember(&mut self.world.progress, into);
         self.broadcast_npc(index);
+        self.broadcast_world_data();
         Ok(())
     }
 
@@ -3838,22 +3867,28 @@ impl GameServer {
             return Ok(());
         }
         // Purification Powder is the one throw whose effect the *server* settles rather than the
-        // thrower: `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14808`) runs under
+        // thrower: `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14826`) runs under
         // `Main.netMode != 1`, so in a real game it is the server that watches the cloud and turns
-        // a Tortured Soul into the Tax Collector when it touches one. Nothing about that arrives
-        // as a claim from the client, which is why the cloud has to be followed here rather than
-        // waited for on some packet. See [`Server::tick_powders`].
+        // a Tortured Soul into the Tax Collector, or a bound Yellow Slime into a Yellow Slime, when
+        // it touches one. Nothing about that arrives as a claim from the client, which is why the
+        // cloud has to be followed here rather than waited for on some packet. See
+        // [`Server::tick_powders`].
         //
         // Followed only while there is something for it to change, which in a world that has ever
-        // had its Tax Collector is never: that keeps the cost of the whole mechanism at one NPC
-        // scan on a packet nobody ordinarily sends, and it is what bounds the list against a client
-        // that sends nothing else. The cap is the second half of that bound.
+        // had its Tax Collector and freed its Yellow Slime is never: that keeps the cost of the
+        // whole mechanism at one NPC scan on a packet nobody ordinarily sends, and it is what
+        // bounds the list against a client that sends nothing else. The cap is the second half of
+        // that bound. Both convertible types have to be named here: gating on the Tortured Soul
+        // alone would have made the Yellow Slime unpurifiable however well `tick_powders` handled
+        // it, because no cloud would ever have been followed in the first place.
         if sync.projectile_type == crate::game::projectile::PURIFICATION_POWDER as i16
             && self.powders.len() < MAX_TRACKED_POWDERS
-            && self
-                .npcs
-                .iter()
-                .any(|(_, n)| n.npc_type == crate::game::spawn::TORTURED_SOUL && n.is_alive())
+            && self.npcs.iter().any(|(_, n)| {
+                matches!(
+                    n.npc_type,
+                    crate::game::spawn::TORTURED_SOUL | crate::game::spawn::BOUND_TOWN_SLIME_YELLOW
+                ) && n.is_alive()
+            })
         {
             self.powders.push(crate::game::projectile::Powder {
                 position: sync.position,
@@ -6153,6 +6188,53 @@ mod untrusted_packets {
         );
 
         assert!(server.world.progress.combat_book);
+    }
+
+    /// Freeing the bound Old Slime is once per world, and the world has to remember it.
+    ///
+    /// `NPC.TransformElderSlime` (`NPC.cs:19172-19193`) is guarded on `!unlockedSlimeOldSpawn` and
+    /// sets it before transforming. Fails before the fix in both halves: nothing recorded the
+    /// unlock, so a saved world forgot the rescue and the caverns went on offering bound slimes,
+    /// and nothing refused a second packet, so any client could turn a fresh 685 into an Old Slime
+    /// for as long as the caverns kept producing them.
+    #[test]
+    fn freeing_the_bound_old_slime_is_once_per_world_and_is_remembered() {
+        use crate::game::server::{OLD_SLIME, OLD_SLIME_SOURCE, TRANSFORM_ELDER_SLIME};
+
+        let mut server = GameServer::new(Config::default(), world());
+        let _rx = connect(&mut server, 0, ConnState::Playing);
+        let index = server
+            .npcs
+            .spawn(OLD_SLIME_SOURCE, (100.0, 100.0))
+            .expect("a slot for the bound slime");
+
+        // Packet 140's payload: a one-byte case, then the NPC index as an `i32`.
+        let mut payload = vec![TRANSFORM_ELDER_SLIME];
+        payload.extend_from_slice(&i32::from(index).to_le_bytes());
+        server.handle_packet(0, frame(id::SET_MISC_EVENT_VALUES, &payload));
+
+        assert_eq!(
+            server.npcs.get(index).expect("still there").npc_type,
+            OLD_SLIME
+        );
+        assert!(
+            server.world.progress.unlocked_slime_old,
+            "the unlock is world state; without it the rescue is forgotten on the next save"
+        );
+
+        // A second one, on a fresh bound slime, must be refused outright.
+        let again = server
+            .npcs
+            .spawn(OLD_SLIME_SOURCE, (200.0, 100.0))
+            .expect("a slot for a second bound slime");
+        let mut payload = vec![TRANSFORM_ELDER_SLIME];
+        payload.extend_from_slice(&i32::from(again).to_le_bytes());
+        server.handle_packet(0, frame(id::SET_MISC_EVENT_VALUES, &payload));
+        assert_eq!(
+            server.npcs.get(again).expect("still there").npc_type,
+            OLD_SLIME_SOURCE,
+            "one Old Slime per world (`NPC.cs:19178`)"
+        );
     }
 
     /// M-02, fail-then-pass: packet 117 names its victim, and the relay used to overwrite that

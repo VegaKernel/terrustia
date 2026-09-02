@@ -1740,6 +1740,19 @@ pub const TORTURED_SOUL: u16 = 534;
 /// takes no house, joins no town, and leaves on the ordinary despawn timer when nobody is near.
 pub const SKELETON_MERCHANT: u16 = 453;
 
+/// The three bound town slimes (`NPCID.BoundTownSlimeOld`, `...Purple`, `...Yellow`), each of which
+/// becomes a resident pet once freed.
+///
+/// They are three finds in three different places rather than one roster: the Old Slime is a
+/// caverns find beside the Goblin Tinkerer and the Wizard (`NPC.cs:2095`), the Purple Slime is up
+/// in the sky with the Harpies (`NPC.cs:1417`), and the Yellow Slime is a jungle-grass critter
+/// draw (`NPC.SpawnFrog`, `NPC.cs:5621-5634`). What they share is the shape of their gate: every
+/// one of them is offered only while its own unlock flag is still false, so freeing one is what
+/// takes it out of the world's spawn table for good.
+pub const BOUND_TOWN_SLIME_OLD: u16 = 685;
+pub const BOUND_TOWN_SLIME_PURPLE: u16 = 686;
+pub const BOUND_TOWN_SLIME_YELLOW: u16 = 687;
+
 /// `Main.rand.Next(20)` on the Tortured Soul's branch (`NPC.cs:4877`).
 const TORTURED_SOUL_ODDS: u32 = 20;
 
@@ -1842,6 +1855,32 @@ pub const GRAVEYARD_VERMIN: [u16; 2] = [
     606, // Maggot
     610, // Rat
 ];
+
+/// The Frog (`NPCID.Frog`), which is not simply drawn: it is the last arm of a chain of its own.
+const FROG: u16 = 361;
+
+/// What a frog draw actually answers with (`NPC.SpawnFrog`, `NPC.cs:5621-5634`).
+///
+/// Vanilla never spawns a frog directly. Both jungle-grass friendly arms (`NPC.cs:2363` and
+/// `:3831`) call `SpawnFrog`, which is a three-arm chain with the plain frog last, so the bound
+/// Yellow Slime is only ever met by somebody wandering a jungle looking at frogs. It is the one
+/// bound town slime with no progression gate and no depth gate whatsoever.
+///
+/// The middle arm, `RollLuck(goldCritterChance) == 0` -> Gold Frog (445), is left out: the gold
+/// and gem critter variants are a class this server does not model at all, as [`friendly_pool`]
+/// already declares, and taking only the frog would leave the Gold Bunny and Gold Goldfish out
+/// while their sibling was in.
+fn spawn_frog(world: &World, alive: &dyn Fn(u16) -> bool, rng: &mut SmallRng) -> u16 {
+    // `RollLuck(30)` is `Main.rand.Next(30)` at luck zero (`Luck.cs:5-16`). The `alive` scan is
+    // last on purpose: `&&` short-circuits, so an ordinary frog draw never walks the NPC table.
+    if !world.progress.unlocked_slime_yellow
+        && rng.random_range(0..30) == 0
+        && !alive(BOUND_TOWN_SLIME_YELLOW)
+    {
+        return BOUND_TOWN_SLIME_YELLOW;
+    }
+    FROG
+}
 
 pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
     use Biome::*;
@@ -2612,15 +2651,12 @@ fn sky_behind_player(wall: u16) -> bool {
 /// An ordered chain, not a weighted draw, and its last arm is unconditional: the Harpy is what the
 /// sky is when nothing rarer wins. Transcribed with vanilla's own ordering and rolls.
 ///
-/// Three of the game's arms are deliberately absent, each because the thing it needs does not
-/// exist here:
+/// Two of the game's arms are deliberately absent, each because the thing it needs does not exist
+/// here:
 ///
 /// * `invaders && Main.invasionType == 4` -> Martian Drone (388). This server's invasion spawning
 ///   is a separate path that never reaches the sky branch, so a drone is a Martian Madness member
 ///   rather than a sky mob.
-/// * `!unlockedSlimePurpleSpawn && RollLuck(25) == 0` -> Bound Town Slime Purple (686). The bound
-///   town slimes are not among this server's rescues (`game/rescues.rs`), so there is nobody to
-///   free and nothing to become.
 /// * the two `ZoneWaterCandle` repeats at `:1409` and `:1418`, which are dead code in the game
 ///   itself: each repeats the condition of the arm immediately above it, so the earlier arm has
 ///   already answered whenever the later one could.
@@ -2651,6 +2687,16 @@ fn sky_pick(
     // burrowers out. A Wyvern is a worm, and `noWorms` is about worms wherever they fly.
     if hard_mode && !alive(WYVERN_HEAD) && !no_worms && rng.random_range(0..10) == 0 {
         return WYVERN_HEAD;
+    }
+    // `NPC.cs:1417`: one in twenty-five, one at a time, and only while nobody has freed it yet.
+    // No progression gate at all, so a Purple Slime is findable on a fresh world by anyone who
+    // gets high enough to be in the sky in the first place. `RollLuck(25)` is `Main.rand.Next(25)`
+    // at luck zero (`Luck.cs:5-16`), which is what this server models.
+    if !world.progress.unlocked_slime_purple
+        && rng.random_range(0..25) == 0
+        && !alive(BOUND_TOWN_SLIME_PURPLE)
+    {
+        return BOUND_TOWN_SLIME_PURPLE;
     }
     HARPY
 }
@@ -3017,6 +3063,13 @@ pub fn bound_gate(bound: u16, world: &World, depth: Depth, biome: Biome, spawn_y
         105 => p.downed_goblins && depth == Depth::Cavern,
         // Wizard: hardmode, same caverns band (`NPC.cs:2091`).
         106 => p.hard_mode && depth == Depth::Cavern,
+        // Bound Old Slime: Skeletron beaten, and the same caverns band as the two above
+        // (`NPC.cs:2095`: `downedBoss3 && deeperThanRockLayer && spawnTileY < maxTilesY - 210`).
+        // Its arm sits immediately after the Wizard's in the same `else if` chain, on the same
+        // three geometry tests, which is why it belongs in this gate rather than in a chain of its
+        // own. The `!unlockedSlimeOldSpawn` half is `rescues::still_bound`, as with every other
+        // find here; the `!AnyNPCs(685)` half is `pick_bound`'s own "not already standing about".
+        BOUND_TOWN_SLIME_OLD => p.downed_boss3 && depth == Depth::Cavern,
         // Mechanic: Skeletron beaten, below (worldSurface*4 + rockLayer)/5 (`NPC.cs:2656`).
         123 => {
             let threshold = (f64::from(world.surface) * 4.0 + f64::from(world.rock_layer)) / 5.0;
@@ -3051,6 +3104,10 @@ fn pick_bound(
     let waiting: Vec<u16> = crate::game::rescues::RESCUES
         .iter()
         .map(|r| r.bound)
+        // The bound Old Slime is found down here too but is not freed by talking, so it is not in
+        // the rescue table (see `rescues::RESCUES`). Its own gate is in `bound_gate`, and the two
+        // other bound slimes are absent from that gate, so chaining them in would find nothing.
+        .chain(std::iter::once(BOUND_TOWN_SLIME_OLD))
         .filter(|bound| crate::game::rescues::still_bound(&world.progress, *bound))
         .filter(|bound| bound_gate(*bound, world, depth, biome, spawn_y))
         .filter(|bound| {
@@ -3437,7 +3494,17 @@ pub fn try_spawn(
                         continue;
                     }
                     let critter = critters[rng.random_range(0..critters.len())];
-                    holiday_costume(critter, depth, seasonal, rng)
+                    // A frog is a chain rather than a draw, and vanilla runs that chain exactly
+                    // where this pool answers 361 (`NPC.cs:2363`, `:3831` -> `SpawnFrog`). No
+                    // holiday costume applies: `holiday_costume` only ever dresses a bunny or a
+                    // plain slime, and the jungle-grass arm is answered ahead of the case it reads.
+                    if critter == FROG {
+                        let alive =
+                            |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
+                        spawn_frog(world, &alive, rng)
+                    } else {
+                        holiday_costume(critter, depth, seasonal, rng)
+                    }
                 }
                 // Below the dungeon before Skeletron falls, the dungeon answers with the Dungeon
                 // Guardian instead of its ordinary residents (`NPC.cs:2646-2654`: `!downedBoss3` in
@@ -3916,9 +3983,23 @@ mod tests {
         // rather than an arm of `friendly_pool`.
         set.extend(GRAVEYARD_VERMIN);
 
+        // The frog's own chain, asked through itself for the same reason the sky is: it is where
+        // the bound Yellow Slime lives, and deleting its arm should show up here as a type that
+        // stopped being reachable rather than as nothing at all.
+        let jungle = World::empty(800, 600, "roster");
+        for seed in 0..200u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            set.insert(spawn_frog(&jungle, &|_| false, &mut rng));
+        }
+
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
         set.extend(rescues::RESCUES.iter().map(|r| r.bound));
+        // The bound Old Slime is found by the same underground path but is not a talk-rescue, so
+        // it is not in that table (`pick_bound` chains it in by hand, and `bound_gate` is what
+        // limits it to the caverns). The bound Purple Slime is not listed here at all: it comes
+        // out of `sky_pick` above, which is where it actually lives.
+        set.insert(BOUND_TOWN_SLIME_OLD);
         // The two `try_spawn` answers with a branch of their own rather than a pool entry: the
         // Tortured Soul the underworld offers once per world, and the Skeleton Merchant the caverns
         // offer one attempt in seventy. Both are asserted to be reachable by `try_spawn` itself in
@@ -6632,6 +6713,63 @@ mod tests {
         }
     }
 
+    /// What the bound town slimes cost the two chains they were added to.
+    ///
+    /// Neither adds a scan to the common path. `sky_pick` gains one bool read and, only when that
+    /// bool is false, one `rand` call; `spawn_frog` is a whole new function but sits behind a `u16`
+    /// compare on a draw that only ever happens in a jungle, and its `alive` closure (the one thing
+    /// here that walks the NPC table) is the last term of a `&&` chain, so it runs on roughly one
+    /// frog draw in thirty and never at all once the slime is freed.
+    ///
+    /// Measured on an M-series laptop, arguments behind a `black_box`:
+    ///
+    /// * `sky_pick`, fresh world: 2.49 ns. Freed (the arm short-circuits on the flag): 0.71 ns.
+    /// * `spawn_frog`, fresh world: 2.44 ns. Freed: 0.72 ns, the flag read and nothing else.
+    ///
+    /// The freed numbers are the steady state of any world past its rescues, and they are the flag
+    /// read alone: the arm costs nothing at all once the slime has moved in.
+    ///
+    /// Both are reached at most once per tick server-wide, after the rate roll has let an attempt
+    /// through and a tile has been settled on, so this is nanoseconds per *tick*, not per player.
+    #[test]
+    #[ignore]
+    fn measure_the_town_slime_arms() {
+        let mut fresh = World::empty(800, 600, "bench");
+        fresh.progress.downed_golem = true;
+        let mut freed = fresh.clone();
+        freed.progress.unlocked_slime_purple = true;
+        freed.progress.unlocked_slime_yellow = true;
+        let never = |_: u16| false;
+
+        for (name, world) in [("fresh", &fresh), ("freed", &freed)] {
+            let n = 10_000_000;
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(sky_pick(
+                    false,
+                    false,
+                    std::hint::black_box(world),
+                    false,
+                    &never,
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("sky_pick, {name}: {each:.2} ns/call (sink {sink})");
+
+            let mut rng = SmallRng::seed_from_u64(1);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(spawn_frog(std::hint::black_box(world), &never, &mut rng));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("spawn_frog, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {
@@ -6979,6 +7117,167 @@ mod tests {
             ) {
                 assert_eq!(bound, 354, "only the Stylist is a day-one cavern find");
             }
+        }
+    }
+
+    /// The bound Old Slime is a caverns find beside the Goblin Tinkerer and the Wizard, gated on
+    /// Skeletron and closed for good once it is freed (`NPC.cs:2095`).
+    ///
+    /// Fails before the fix, when 685 was in no producer at all: `pick_bound` read only the talk
+    /// rescue table and `bound_gate` had no arm for it, so the Old Slime was unreachable however
+    /// far a world progressed.
+    #[test]
+    fn the_caverns_offer_a_bound_old_slime_once_skeletron_is_down() {
+        let mut world = test_world();
+        world.progress = Default::default();
+        let y = i32::from(world.rock_layer) + 5;
+        assert_eq!(depth_at(&world, y), Depth::Cavern);
+
+        assert!(
+            !bound_gate(
+                BOUND_TOWN_SLIME_OLD,
+                &world,
+                Depth::Cavern,
+                Biome::Forest,
+                y
+            ),
+            "the Old Slime needs Skeletron down"
+        );
+        world.progress.downed_boss3 = true;
+        assert!(bound_gate(
+            BOUND_TOWN_SLIME_OLD,
+            &world,
+            Depth::Cavern,
+            Biome::Forest,
+            y
+        ));
+        assert!(
+            !bound_gate(
+                BOUND_TOWN_SLIME_OLD,
+                &world,
+                Depth::Underground,
+                Biome::Forest,
+                y
+            ),
+            "it is a caverns find, not a dirt-layer one"
+        );
+
+        // And it is actually offered: `pick_bound` has to reach it, which is the half a gate
+        // alone cannot prove.
+        let mut rng = SmallRng::seed_from_u64(11);
+        let offered = (0..2_000).any(|_| {
+            pick_bound(
+                &world,
+                &NpcStore::new(),
+                Depth::Cavern,
+                Biome::Forest,
+                y,
+                &mut rng,
+            ) == Some(BOUND_TOWN_SLIME_OLD)
+        });
+        assert!(offered, "a post-Skeletron cavern must be able to offer it");
+
+        // Freeing it shuts the arm: `!unlockedSlimeOldSpawn` is half of vanilla's condition, so a
+        // world with the resident in a house must never offer a second bound one.
+        world.progress.unlocked_slime_old = true;
+        let mut rng = SmallRng::seed_from_u64(11);
+        for _ in 0..2_000 {
+            assert_ne!(
+                pick_bound(
+                    &world,
+                    &NpcStore::new(),
+                    Depth::Cavern,
+                    Biome::Forest,
+                    y,
+                    &mut rng,
+                ),
+                Some(BOUND_TOWN_SLIME_OLD),
+                "a freed Old Slime must not be found again"
+            );
+        }
+    }
+
+    /// The sky offers a bound Purple Slime one attempt in twenty-five until somebody frees it
+    /// (`NPC.cs:1417`), and never once it is freed.
+    ///
+    /// Fails before the fix, when `sky_pick` had no arm for it at all and the sky was only ever a
+    /// probe, a Wyvern or a Harpy.
+    #[test]
+    fn the_sky_offers_a_bound_purple_slime_until_somebody_frees_it() {
+        let mut world = World::empty(800, 600, "sky slime");
+        let never = |_: u16| false;
+
+        let mut rng = SmallRng::seed_from_u64(3);
+        let seen = (0..2_000)
+            .filter(|_| {
+                sky_pick(false, false, &world, false, &never, &mut rng) == BOUND_TOWN_SLIME_PURPLE
+            })
+            .count();
+        assert!(
+            seen > 0,
+            "a fresh sky must be able to offer a bound Purple Slime"
+        );
+
+        // One at a time: `!AnyNPCs(686)` means a slime already up there stops a second.
+        let already = |ty: u16| ty == BOUND_TOWN_SLIME_PURPLE;
+        let mut rng = SmallRng::seed_from_u64(3);
+        for _ in 0..2_000 {
+            assert_ne!(
+                sky_pick(false, false, &world, false, &already, &mut rng),
+                BOUND_TOWN_SLIME_PURPLE,
+                "only one bound Purple Slime is ever in the sky at once"
+            );
+        }
+
+        world.progress.unlocked_slime_purple = true;
+        let mut rng = SmallRng::seed_from_u64(3);
+        for _ in 0..2_000 {
+            assert_ne!(
+                sky_pick(false, false, &world, false, &never, &mut rng),
+                BOUND_TOWN_SLIME_PURPLE,
+                "a freed Purple Slime must not be found again"
+            );
+        }
+    }
+
+    /// A frog draw is `NPC.SpawnFrog`'s chain, not a frog (`NPC.cs:5621-5634`): one in thirty is a
+    /// bound Yellow Slime until somebody purifies it.
+    ///
+    /// Fails before the fix, when the jungle's friendly pool answered 361 flat and 687 was in no
+    /// producer at all.
+    #[test]
+    fn a_frog_draw_can_be_a_bound_yellow_slime_until_it_is_freed() {
+        let mut world = World::empty(800, 600, "frog");
+        let never = |_: u16| false;
+
+        let mut rng = SmallRng::seed_from_u64(7);
+        let seen = (0..3_000)
+            .filter(|_| spawn_frog(&world, &never, &mut rng) == BOUND_TOWN_SLIME_YELLOW)
+            .count();
+        assert!(seen > 0, "a fresh jungle must be able to offer one");
+        assert!(
+            seen < 3_000 / 4,
+            "the plain frog is still the common answer, not the slime: {seen} of 3000"
+        );
+
+        let already = |ty: u16| ty == BOUND_TOWN_SLIME_YELLOW;
+        let mut rng = SmallRng::seed_from_u64(7);
+        for _ in 0..3_000 {
+            assert_eq!(
+                spawn_frog(&world, &already, &mut rng),
+                FROG,
+                "only one bound Yellow Slime is ever about at once"
+            );
+        }
+
+        world.progress.unlocked_slime_yellow = true;
+        let mut rng = SmallRng::seed_from_u64(7);
+        for _ in 0..3_000 {
+            assert_eq!(
+                spawn_frog(&world, &never, &mut rng),
+                FROG,
+                "a freed Yellow Slime must not be found again"
+            );
         }
     }
 

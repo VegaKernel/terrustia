@@ -1435,9 +1435,9 @@ impl GameServer {
         }
     }
 
-    /// Move the Purification Powder clouds in flight, and turn any Tortured Soul they cover.
+    /// Move the Purification Powder clouds in flight, and turn whatever they cover.
     ///
-    /// `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14808`):
+    /// `Projectile.Damage_TryUsingPowders` (`Projectile.cs:14787-14826`), both arms:
     ///
     /// ```csharp
     /// if (type == 10 && Main.netMode != 1) {
@@ -1446,21 +1446,26 @@ impl GameServer {
     ///         if (!nPC.active) continue;
     ///         if (nPC.type == 534) {
     ///             if (projRectangle.Intersects(nPC.Hitbox)) { nPC.Transform(441); }
-    ///         }
-    ///         ...
+    ///         } else {
+    ///             if (nPC.type != 687 || !projRectangle.Intersects(nPC.Hitbox)) continue;
+    ///             nPC.Transform(683);
+    ///             ... Utils.PoofOfSmoke(vector); ...
+    ///             if (!NPC.unlockedSlimeYellowSpawn) {
+    ///                 NPC.unlockedSlimeYellowSpawn = true;
+    ///                 if (Main.netMode == 2) { NetMessage.SendData(7); }
     /// ```
     ///
-    /// This is the whole recruitment: no cost beyond the powder the throw already spent, no second
-    /// interaction, no guard against re-purifying (there is nothing left to purify, the Tortured
-    /// Soul is gone), and no announcement, because `Transform` makes none. The Tax Collector is the
-    /// only townsperson in the game who arrives this way, which is why he sits in no rescue table.
+    /// This is the whole recruitment for both: no cost beyond the powder the throw already spent,
+    /// no second interaction, no guard against re-purifying (there is nothing left to purify, the
+    /// Tortured Soul is gone), and no announcement, because `Transform` makes none. The Tax
+    /// Collector and the Yellow Slime are the two townsfolk in the game who arrive this way, which
+    /// is why neither sits in the rescue table.
     ///
-    /// Two deliberate narrowings, both disclosed rather than papered over. The same routine also
-    /// turns a Slime Spiked Yellow (687) into a Yellow Slime (683) and unlocks its spawn; neither
-    /// type is anywhere in this server's spawn producers, so there is nothing here to convert.
-    /// And the cloud's own flight is followed rather than the client's word for where it went:
-    /// packet 27 arrives once, at the throw, so its 180 ticks of drift are what
-    /// [`crate::game::projectile::Powder::step`] reproduces.
+    /// Two deliberate narrowings, both disclosed rather than papered over. Vanilla's
+    /// `Utils.PoofOfSmoke` and its packet 106 are cosmetic and this server treats 106 as a
+    /// client-only packet, so the puff of smoke is not sent. And the cloud's own flight is followed
+    /// rather than the client's word for where it went: packet 27 arrives once, at the throw, so
+    /// its 180 ticks of drift are what [`crate::game::projectile::Powder::step`] reproduces.
     pub(super) fn tick_powders(&mut self) {
         if self.powders.is_empty() {
             return;
@@ -1468,34 +1473,45 @@ impl GameServer {
         self.powders
             .retain_mut(crate::game::projectile::Powder::step);
 
-        // Vanilla walks every NPC per powder; this walks the souls once and asks the powders, which
-        // is the same test with the loops the other way up. There is at most one Tortured Soul in a
-        // world (`NPC.cs:4877`'s own `!AnyNPCs(534)`), so this is nearly always an empty scan.
-        let turned: Vec<u8> =
+        // Vanilla walks every NPC per powder; this walks the two convertible types once and asks
+        // the powders, which is the same test with the loops the other way up. A world holds at
+        // most one Tortured Soul (`NPC.cs:4877`'s own `!AnyNPCs(534)`) and at most one bound
+        // Yellow Slime (`NPC.cs:5623`'s `!AnyNPCs(687)`), so this is nearly always an empty scan.
+        let turned: Vec<(u8, u16)> =
             self.npcs
                 .iter()
-                .filter(|(_, npc)| {
-                    npc.npc_type == crate::game::spawn::TORTURED_SOUL
-                        && npc.is_alive()
+                .filter_map(|(index, npc)| {
+                    let into = match npc.npc_type {
+                        crate::game::spawn::TORTURED_SOUL => TAX_COLLECTOR,
+                        crate::game::spawn::BOUND_TOWN_SLIME_YELLOW => YELLOW_SLIME,
+                        _ => return None,
+                    };
+                    let covered = npc.is_alive()
                         && self.powders.iter().any(|powder| {
                             powder.overlaps(npc.position, (npc.width(), npc.height()))
-                        })
+                        });
+                    covered.then_some((index, into))
                 })
-                .map(|(index, _)| index)
                 .collect();
 
-        for index in turned {
+        for (index, into) in turned {
             if let Some(npc) = self.npcs.get_mut(index) {
-                npc.become_type(TAX_COLLECTOR);
+                npc.become_type(into);
             }
             // `NPC.AI_007_TownEntities_UpdateSavedStates` (`NPC.cs:53489-53491`) sets
             // `savedTaxCollector` from the Tax Collector's own AI, on the first tick he runs one.
             // Setting it here instead is the same moment a tick earlier, and it is what shuts the
-            // underworld's spawn branch so a second Tortured Soul never appears.
-            crate::game::rescues::remember(&mut self.world.progress, TAX_COLLECTOR);
+            // underworld's spawn branch so a second Tortured Soul never appears. The Yellow Slime's
+            // own flag is set right here in vanilla too (`Projectile.cs:14818-14824`), and it is
+            // what shuts `SpawnFrog`'s first arm.
+            crate::game::rescues::remember(&mut self.world.progress, into);
             self.broadcast_npc(index);
             self.broadcast_world_data();
-            info!("a Tortured Soul was purified into the Tax Collector");
+            if into == TAX_COLLECTOR {
+                info!("a Tortured Soul was purified into the Tax Collector");
+            } else {
+                info!("a bound Yellow Slime was purified and moved in");
+            }
         }
     }
 
@@ -2299,6 +2315,11 @@ impl GameServer {
     /// a debuff can finish something off between two ticks, with no player credited, and every
     /// one of these still has to happen.
     pub(super) fn npc_died(&mut self, index: u8, npc_type: u16, center: (f32, f32), value: f32) {
+        // The bound Purple Slime does not die, whatever killed it. It is the one town slime freed
+        // by being beaten rather than talked to or powdered, so the death itself is the rescue.
+        if self.free_the_purple_slime(index, npc_type) {
+            return;
+        }
         // Named rather than three positional bools, because they are all `false` most of the time
         // and swapping two of them would be silent.
         // Read before the removal takes it: `Conditions.IsBloodMoonAndNotFromStatue` cares whether
@@ -2367,6 +2388,62 @@ impl GameServer {
         self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
         self.note_slime_rain_kill(npc_type, center);
+    }
+
+    /// A bound Purple Slime beaten to nothing, which is how that one is freed.
+    ///
+    /// `NPC.HitEffect` (`NPC.cs:82596-82627`), stripped of its gore:
+    ///
+    /// ```csharp
+    /// if (type == 686 && life <= 0) {
+    ///     ...
+    ///     if (Main.netMode != 1) {
+    ///         position = base.Bottom + new Vector2(0f, 48f);
+    ///         Transform(680);
+    ///         if (!unlockedSlimePurpleSpawn) {
+    ///             unlockedSlimePurpleSpawn = true;
+    ///             if (Main.netMode == 2) { NetMessage.SendData(7); }
+    /// ```
+    ///
+    /// Placed at the head of [`Self::npc_died`] rather than at any one hit path, because vanilla
+    /// runs `HitEffect` from `StrikeNPC` (`NPC.cs:82323`) before anything reaps the corpse, so
+    /// *every* way of running it out of life frees it: a player's swing, a townsperson's, a
+    /// debuff ticking between frames. There is no owner to credit and no loot to drop; the slime
+    /// simply stops being bound. It is worth nothing (`value: 0.0` in the table), so the coins and
+    /// the banner tally this skips would have been nothing anyway.
+    ///
+    /// `position = Bottom + (0, 48)` is transcribed exactly as vanilla writes it, quirk included:
+    /// `Bottom` is `(position.X + width / 2, position.Y + height)` and the result is assigned to
+    /// `position`, which is a top-left, so the freed slime lands half its own width to the right
+    /// and 48 pixels below where the bound one was. Vanilla's own `Transform` then keeps the feet
+    /// where they are (`NPC.cs:81919-81925`, `position.Y += height` around `SetDefaults`), which
+    /// [`Npc::become_type`] does not do; the two sizes are 20 by 20 and 18 by 20, so the height is
+    /// unchanged and only the two-pixel width differs.
+    ///
+    /// One disclosed divergence: vanilla's `Transform` carries life across proportionally
+    /// (`life = num2 * lifeMax / num3`, clamped up to 1), so a Purple Slime freed at zero life
+    /// arrives with exactly 1 of its 250 hit points and heals back through the town-NPC regen.
+    /// [`Npc::become_type`] gives the new form full life, which is this project's existing
+    /// behaviour for every transform it already has, and changing it here alone would make the
+    /// Golfer and the Mechanic disagree with the slime for no reason.
+    fn free_the_purple_slime(&mut self, index: u8, npc_type: u16) -> bool {
+        if npc_type != crate::game::spawn::BOUND_TOWN_SLIME_PURPLE {
+            return false;
+        }
+        let Some(npc) = self.npcs.get_mut(index) else {
+            return false;
+        };
+        npc.position = (
+            npc.position.0 + npc.width() / 2.0,
+            npc.position.1 + npc.height() + 48.0,
+        );
+        npc.become_type(PURPLE_SLIME);
+        npc.dirty = true;
+        crate::game::rescues::remember(&mut self.world.progress, PURPLE_SLIME);
+        self.broadcast_npc(index);
+        self.broadcast_world_data();
+        info!("a bound Purple Slime was beaten free and moved in");
+        true
     }
 
     /// Put the Golem's freed head into the world at the dead head's bottom centre.
@@ -10011,6 +10088,65 @@ mod boss_drop_table_fixes {
             );
         }
     }
+
+    /// The bound Purple Slime does not die when it runs out of life: it becomes a Purple Slime
+    /// where it stood (`NPC.HitEffect`, `NPC.cs:82596-82627`).
+    ///
+    /// The guard is at the head of `npc_died` rather than at one hit path because vanilla's own
+    /// `HitEffect` runs from `StrikeNPC` (`NPC.cs:82323`) before anything reaps the corpse, so
+    /// every way of running it out of life frees it. Fails before the fix, when 686 was reaped like
+    /// any other corpse: the slot came back empty, no resident appeared, and nothing was recorded.
+    #[test]
+    fn a_beaten_bound_purple_slime_becomes_a_resident_rather_than_a_corpse() {
+        use crate::game::spawn::BOUND_TOWN_SLIME_PURPLE;
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let at = (1_000.0, 500.0);
+        let index = server
+            .npcs
+            .spawn(BOUND_TOWN_SLIME_PURPLE, at)
+            .expect("a slot for the bound slime");
+        let (width, height) = {
+            let npc = server.npcs.get(index).expect("just spawned");
+            (npc.width(), npc.height())
+        };
+
+        server.npc_died(index, BOUND_TOWN_SLIME_PURPLE, at, 0.0);
+
+        let npc = server
+            .npcs
+            .get(index)
+            .expect("a freed slime is still in the world, not a removed corpse");
+        assert_eq!(npc.npc_type, crate::game::server::PURPLE_SLIME);
+        assert!(
+            npc.stats.town_npc,
+            "the freed form has to be a resident, or no house will ever take it"
+        );
+        // `position = base.Bottom + new Vector2(0f, 48f)` transcribed exactly, quirk included:
+        // `Bottom` carries the old half-width into what is then read as a top-left.
+        assert_eq!(npc.position, (at.0 + width / 2.0, at.1 + height + 48.0));
+        assert!(
+            server.world.progress.unlocked_slime_purple,
+            "without the flag the sky would keep offering another bound one"
+        );
+    }
+
+    /// Every other death still goes through the ordinary path. The guard above sits at the head of
+    /// the one function four different callers route deaths through, so a mistake in it would
+    /// quietly stop reaping the whole bestiary.
+    #[test]
+    fn an_ordinary_kill_is_still_reaped() {
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        let index = server
+            .npcs
+            .spawn(1, (0.0, 0.0))
+            .expect("a slot for a blue slime");
+        server.npc_died(index, 1, (0.0, 0.0), 0.0);
+        assert!(
+            server.npcs.get(index).is_none(),
+            "a slime is still a corpse"
+        );
+    }
 }
 
 /// Real server-side coverage for the numerator fix in `conditional_drops.rs`: `Conditional` used
@@ -11232,6 +11368,52 @@ mod purification_powder_turns_the_tortured_soul {
     /// no Tortured Soul in it, which is every world that has ever had its Tax Collector.
     #[test]
     fn no_soul_means_no_tracking_at_all() {
+        let (mut server, index, _out) = server_with_a_soul();
+        server.npcs.remove(index);
+        throw(&mut server, SOUL, (0.0, 0.0));
+        assert!(server.powders.is_empty());
+    }
+
+    /// The same cloud frees a bound Yellow Slime, which is the other half of vanilla's own routine
+    /// (`Projectile.cs:14806-14824`): `Transform(683)` and `unlockedSlimeYellowSpawn = true`.
+    ///
+    /// Fails before the fix twice over, and the second failure is the interesting one. The
+    /// transform did not exist, so 687 stayed 687; and even with a transform it would never have
+    /// run, because `on_client_projectile` only followed a cloud while a *Tortured Soul* was alive,
+    /// so no powder thrown at a slime was ever tracked in the first place.
+    #[test]
+    fn a_powder_thrown_at_a_bound_yellow_slime_frees_it() {
+        let (mut server, index, _out) = server_with_a_soul();
+        server.npcs.remove(index);
+        let slime = server
+            .npcs
+            .spawn(crate::game::spawn::BOUND_TOWN_SLIME_YELLOW, SOUL)
+            .expect("a bound Yellow Slime in the world");
+
+        let short = (SOUL.0 - POWDER_SIZE.0 - 20.0, SOUL.1 - 12.0);
+        throw(&mut server, short, (4.0, 0.0));
+        assert!(
+            !server.powders.is_empty(),
+            "a slime worth purifying must make the server follow the cloud"
+        );
+
+        for _ in 0..30 {
+            server.tick_powders();
+        }
+        assert_eq!(
+            server.npcs.get(slime).expect("still there").npc_type,
+            crate::game::server::YELLOW_SLIME,
+            "the drifting cloud never freed the slime"
+        );
+        assert!(
+            server.world.progress.unlocked_slime_yellow,
+            "without the flag every frog draw would keep offering another bound slime"
+        );
+    }
+
+    /// A world with nothing left to purify follows no cloud at all, slime included.
+    #[test]
+    fn a_freed_world_follows_nothing() {
         let (mut server, index, _out) = server_with_a_soul();
         server.npcs.remove(index);
         throw(&mut server, SOUL, (0.0, 0.0));

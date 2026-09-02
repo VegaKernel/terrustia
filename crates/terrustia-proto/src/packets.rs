@@ -482,6 +482,15 @@ pub enum WorldFlag {
     RemixWorld,
     UnlockedSlimeBlueSpawn,
     CombatBookTwoUsed,
+    /// The three bound town slimes, once each has been freed (`NetMessage.cs:363-369`).
+    ///
+    /// Each one is an *anti*-gate on its own bound form's spawning rather than a permission to
+    /// spawn: the game offers the bound slime only while its flag is still false. A client that is
+    /// never told keeps offering the "you can free me" cursor for a slime that is already a
+    /// resident, so these belong on the wire even though nothing the client draws depends on them.
+    UnlockedSlimeOldSpawn,
+    UnlockedSlimePurpleSpawn,
+    UnlockedSlimeYellowSpawn,
 }
 
 impl WorldFlag {
@@ -551,6 +560,12 @@ impl WorldFlag {
             RemixWorld => (7, 4),
             UnlockedSlimeBlueSpawn => (7, 5),
             CombatBookTwoUsed => (7, 6),
+            // Byte 8 is `bitsByte12` (`NetMessage.cs:362-374`), whose eight bits are the green,
+            // old, purple, rainbow, red, yellow and copper slime unlocks and then
+            // `fastForwardTimeToDusk`. Only the three this server models are named.
+            UnlockedSlimeOldSpawn => (8, 1),
+            UnlockedSlimePurpleSpawn => (8, 2),
+            UnlockedSlimeYellowSpawn => (8, 5),
         }
     }
 }

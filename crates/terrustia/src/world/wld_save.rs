@@ -292,6 +292,14 @@ fn patch_clock(header: &mut [u8], preserved: &super::objects::PreservedWorld, wo
         preserved.combat_book_two_offset,
         &[p.combat_book_two],
     );
+    // The slime unlocks (`WorldFile.cs:1416-1420`), written one at a time rather than as a run:
+    // the rainbow (+2) and red (+3) slimes are not modelled here, so their bytes stay exactly as
+    // the file had them instead of being flattened to false by a blanket write.
+    if let Some(at) = preserved.slime_unlocks_offset {
+        write(header, at, &[u8::from(p.unlocked_slime_old)]);
+        write(header, at + 1, &[u8::from(p.unlocked_slime_purple)]);
+        write(header, at + 4, &[u8::from(p.unlocked_slime_yellow)]);
+    }
     if let Some(at) = preserved.rain_offset {
         write(header, at, &[u8::from(world.raining)]);
         write(header, at + 1, &world.rain_time.to_le_bytes());
@@ -875,9 +883,15 @@ fn write_fresh_header(w: &mut Writer, world: &World) {
     }
     w.bool(p.combat_book_two);
     w.bool(false); // no peddler's satchel
-    for _ in 0..7 {
-        w.bool(false); // the seven slime spawns
-    }
+    // The seven remaining slime unlocks (`WorldFile.cs:1414-1421`): green, old, purple, rainbow,
+    // red, yellow, copper. Three of them are real world state here, and writing them as `false`
+    // regardless is how a freshly generated world forgot every town slime it had ever freed.
+    w.bool(false); // green
+    w.bool(p.unlocked_slime_old);
+    w.bool(p.unlocked_slime_purple);
+    w.bool(false).bool(false); // rainbow, red
+    w.bool(p.unlocked_slime_yellow);
+    w.bool(false); // copper
     w.bool(false).u8(0); // not fast-forwarding to dusk, no moondial cooldown
     w.bool(false).bool(false); // no forced holiday forever
     w.bool(false).bool(false); // vampire and infected seeds
@@ -1086,6 +1100,7 @@ mod tests {
             combat_book_offset: Some(810),
             late_downed_run_offset: Some(820),
             combat_book_two_offset: Some(830),
+            slime_unlocks_offset: Some(840),
             hardmode_ores_offset: Some(900),
             banner_kills_offset: Some((1000, 293)),
             town_npcs_understood: true,
@@ -1121,6 +1136,8 @@ mod tests {
         world.progress.combat_book = true;
         world.progress.downed_deerclops = true;
         world.progress.combat_book_two = true;
+        world.progress.unlocked_slime_old = true;
+        world.progress.unlocked_slime_yellow = true;
         world.ore_tiers[4] = 107;
         world.ore_tiers[5] = 108;
         world.ore_tiers[6] = 111;
@@ -1193,6 +1210,18 @@ mod tests {
         assert_eq!(header[820], 0, "the empress, still alive");
         assert_eq!(header[820 + 2], 1, "deerclops");
         assert_eq!(header[830], 1, "the second combat book");
+        // The slime unlocks: old, purple, rainbow, red, yellow. The two this server does not model
+        // (rainbow at +2, red at +3) must keep whatever the file had rather than be flattened to
+        // false, so they are checked to still hold the fixture's untouched filler byte.
+        assert_eq!(header[840], 1, "the old slime, freed");
+        assert_eq!(header[840 + 1], 0, "the purple slime, still bound");
+        assert_eq!(
+            header[840 + 2],
+            0xAA,
+            "the rainbow slime, not ours to write"
+        );
+        assert_eq!(header[840 + 3], 0xAA, "the red slime, not ours to write");
+        assert_eq!(header[840 + 4], 1, "the yellow slime, freed");
         // The hardmode ores an altar chose: three i32s, cobalt first.
         assert_eq!(
             i32::from_le_bytes(header[900..904].try_into().unwrap()),
