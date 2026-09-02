@@ -28,15 +28,20 @@ pub const WIND_APPROACH_RATE: f32 = 0.0015;
 /// Rain drives the wind harder: the target it heads for is multiplied by `1 + this * maxRaining`
 /// (`Main.cs:59740`), so a downpour blows past the ordinary [`WIND_LIMIT`].
 pub const RAIN_WIND_BOOST: f32 = 5.0 / 9.0;
-/// A day counts as windy past this, which is what several routines are actually asking.
-pub const WINDY: f32 = 0.4;
-
 /// `Main._minWind`/`_maxWind`/`_minRain`/`_maxRain` (`Main.cs:67642-67645`), the hysteresis band
-/// `UpdateWindyDayState` latches [`Weather::storming`] on and off with.
+/// `UpdateWindyDayState` latches [`Weather::storming`] and [`Weather::happy_windy_day`] on and off
+/// with. The two wind thresholds are shared: the same band decides both latches, and which one it
+/// is deciding is settled by whether it is raining (`Main.cs:13162`).
 const STORM_MIN_WIND: f32 = 0.34;
 const STORM_MAX_WIND: f32 = 0.4;
 const STORM_MIN_RAIN: f32 = 0.4;
 const STORM_MAX_RAIN: f32 = 0.5;
+
+/// The window of the day a windy day is allowed to be on in: `Main.time < 10800.0 || Main.time >
+/// 43200.0` turns it straight back off (`Main.cs:13165`). The day is 54,000 ticks long, so this is
+/// from a fifth of the way through the morning to four fifths of the way through the afternoon.
+const WINDY_DAY_EARLIEST: i32 = 10_800;
+const WINDY_DAY_LATEST: i32 = 43_200;
 
 /// The weather as the world keeps it between ticks.
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +86,13 @@ pub struct Weather {
     /// rain and the wind past their upper thresholds to come on, and either below its lower one to
     /// go off (`Main.UpdateWindyDayState`, `Main.cs:13160-13195`).
     pub storming: bool,
+    /// `Main._shouldUseWindyDayMusic`, which is what `Main.IsItAHappyWindyDay` returns
+    /// (`Main.cs:2999`) and so is the real predicate behind every "is it windy" test in the game.
+    ///
+    /// The other half of the same latch as [`Self::storming`], and dry weather's half of it: rain
+    /// turns this one off outright (`Main.cs:13195`) and hands the band over to the storm. Only the
+    /// dry branch has a time window, because only a *day* can be windy.
+    pub happy_windy_day: bool,
 }
 
 impl Default for Weather {
@@ -101,6 +113,7 @@ impl Default for Weather {
             weather_counter: 0,
             cloud_bg_active: 0.0,
             storming: false,
+            happy_windy_day: false,
         }
     }
 }
@@ -122,6 +135,11 @@ pub struct Sky {
     pub slime_rain: bool,
     /// How many clouds the sky is holding, which decides how hard a shower comes down.
     pub num_clouds: u16,
+    /// `Main.dayTime` and `Main.time`, which only [`Weather::happy_windy_day`]'s half of
+    /// `UpdateWindyDayState` reads (`Main.cs:13165`): a windy day is a time of day as much as it is
+    /// a wind speed.
+    pub day_time: bool,
+    pub time: i32,
 }
 
 /// How hard a shower comes down, rolled from how cloudy the sky already is: `Main.ChangeRain`'s own
@@ -166,7 +184,7 @@ impl Weather {
     ) -> u16 {
         // `UpdateWindyDayState` then `updateCloudLayer` then `UpdateWeather`, which is the order
         // `Main.Update` runs them in on a dedicated server (`Main.cs:17363-17403`).
-        self.tick_storm_latch();
+        self.tick_windy_day_state(sky);
         self.tick_cloud_layer(rng);
         // The wind's approach runs whatever the Journey power says: vanilla's
         // `FreezeWindDirectionAndStrength` gate is at `Main.cs:59762`, *after* the approach at
@@ -219,22 +237,48 @@ impl Weather {
         self.target = self.target.clamp(-WIND_LIMIT, WIND_LIMIT);
     }
 
-    /// `Main.UpdateWindyDayState` (`Main.cs:13160-13195`), the half of it a dedicated server runs.
+    /// `Main.UpdateWindyDayState` (`Main.cs:13160-13197`), the half of it a dedicated server runs.
     ///
     /// `cloudAlpha` is simply `maxRaining` on a server (`Main.cs:17366`), so this reads the rain
-    /// directly. Both thresholds have to be crossed together for the latch to come on, and either
-    /// one falling below its lower threshold turns it off, which is why it is state and not a
-    /// predicate.
-    fn tick_storm_latch(&mut self) {
+    /// directly, and it is what picks which of the two latches the wind band is deciding: dry
+    /// weather works [`Self::happy_windy_day`] and rain works [`Self::storming`]. Both thresholds
+    /// have to be crossed together for either latch to come on, and either one falling below its
+    /// lower threshold turns it off, which is why they are state and not predicates.
+    ///
+    /// Vanilla's `Main.remixWorld` branch (`:13189-13196`) is not modelled anywhere in this server,
+    /// so the rain arm always takes the ordinary side of it: rain turns the windy day off.
+    ///
+    /// This used to be the rain arm alone, with the dry arm's `_shouldUseWindyDayMusic` reduced to a
+    /// bare `wind.abs() >= 0.4` in [`Self::windy`]. That read the wind rather than its *target*, had
+    /// no hysteresis, ran at night and in a downpour, and so was not the flag anything in the game
+    /// actually asks for.
+    fn tick_windy_day_state(&mut self, sky: Sky) {
+        // `:13162`, `if (cloudAlpha == 0f)`.
         if self.max_rain == 0.0 {
             self.storming = false;
+            // `:13165-13169`: outside the middle of the day it goes off and the wind is not even
+            // consulted.
+            if sky.time < WINDY_DAY_EARLIEST || sky.time > WINDY_DAY_LATEST || !sky.day_time {
+                self.happy_windy_day = false;
+                return;
+            }
+            // `:13170-13177`. Two separate `if`s in the game rather than an `if`/`else`, which
+            // matters only in that a target inside the band leaves the latch exactly as it was.
+            if self.target.abs() < STORM_MIN_WIND {
+                self.happy_windy_day = false;
+            }
+            if self.target.abs() >= STORM_MAX_WIND {
+                self.happy_windy_day = true;
+            }
             return;
         }
+        // `:13181-13196`, the rain arm.
         if self.max_rain < STORM_MIN_RAIN || self.target.abs() < STORM_MIN_WIND {
             self.storming = false;
         } else if self.max_rain >= STORM_MAX_RAIN && self.target.abs() >= STORM_MAX_WIND {
             self.storming = true;
         }
+        self.happy_windy_day = false;
     }
 
     /// `Main.updateCloudLayer` (`Main.cs:13346-13400`) at `dayRate = 1`.
@@ -555,9 +599,11 @@ impl Weather {
         self.wind.abs() >= 0.6
     }
 
-    /// Whether it is windy enough for the things that need wind to do anything.
+    /// `Main.IsItAHappyWindyDay` (`Main.cs:2999`), which is what the things that need wind actually
+    /// ask: the dandelion's whole routine opens on it (`AI_119_Dandelion`, `NPC.cs:47498`) and so do
+    /// the two surface arms that spawn one (`NPC.cs:4494`, `:4498`).
     pub fn windy(&self) -> bool {
-        self.wind.abs() >= WINDY
+        self.happy_windy_day
     }
 }
 
@@ -774,13 +820,128 @@ mod tests {
         assert!(!weather.raining, "and it should not have rained");
     }
 
+    /// `IsItAHappyWindyDay` is a latch with a clock on it, not a wind speed
+    /// (`Main.UpdateWindyDayState`, `Main.cs:13160-13177`).
+    ///
+    /// Fails before the fix, when [`Weather::windy`] was a bare `wind.abs() >= 0.4` on the *current*
+    /// wind. That reported windy at night, reported windy in a downpour, chattered on and off across
+    /// the threshold with no hysteresis, and read the wind rather than the target the game reads.
+    /// Everything that asks the game "is it windy" asks this flag, so all four were wrong wherever
+    /// it was asked.
+    ///
+    /// Neutralised by deleting the time-window `return` at the head of the dry arm: the night and
+    /// the two edge-of-day assertions fail. Neutralised again by replacing the two threshold tests
+    /// with a single `>= STORM_MIN_WIND`: the hysteresis assertion fails, the latch coming on inside
+    /// the band. Neutralised a third way, by dropping the `happy_windy_day = false` at the foot of
+    /// the rain arm: the downpour assertion fails.
+    #[test]
+    fn a_happy_windy_day_is_a_latch_with_a_clock_on_it() {
+        let noon = Sky {
+            day_time: true,
+            time: (WINDY_DAY_EARLIEST + WINDY_DAY_LATEST) / 2,
+            ..Sky::default()
+        };
+        let latch = |mut w: Weather, sky: Sky| {
+            w.tick_windy_day_state(sky);
+            w.happy_windy_day
+        };
+        let blowing = |target: f32| Weather {
+            target,
+            ..Default::default()
+        };
+
+        // Past the upper threshold at noon in the dry: on.
+        assert!(latch(blowing(0.5), noon), "a gale at noon was not windy");
+        assert!(
+            latch(blowing(-0.5), noon),
+            "the latch reads a magnitude, so a westerly counts too"
+        );
+        // Below the lower one: off.
+        assert!(!latch(blowing(0.2), noon), "a breeze at noon was windy");
+
+        // The band between them holds whatever the latch already was, which is the whole of what
+        // makes it a latch: `Main.cs:13170-13177` is two separate `if`s and neither answers here.
+        let mid = (STORM_MIN_WIND + STORM_MAX_WIND) / 2.0;
+        assert!(
+            latch(
+                Weather {
+                    target: mid,
+                    happy_windy_day: true,
+                    ..Default::default()
+                },
+                noon
+            ),
+            "the latch dropped out inside its own hysteresis band"
+        );
+        assert!(
+            !latch(
+                Weather {
+                    target: mid,
+                    ..Default::default()
+                },
+                noon
+            ),
+            "the latch came on inside its own hysteresis band"
+        );
+
+        // The clock. The same gale is not a windy *day* at night, nor before the window opens, nor
+        // after it shuts, and each of those turns an already-latched day straight off.
+        for (sky, when) in [
+            (
+                Sky {
+                    day_time: false,
+                    ..noon
+                },
+                "at night",
+            ),
+            (
+                Sky {
+                    time: WINDY_DAY_EARLIEST - 1,
+                    ..noon
+                },
+                "before the window opens",
+            ),
+            (
+                Sky {
+                    time: WINDY_DAY_LATEST + 1,
+                    ..noon
+                },
+                "after the window shuts",
+            ),
+        ] {
+            assert!(
+                !latch(
+                    Weather {
+                        target: 0.5,
+                        happy_windy_day: true,
+                        ..Default::default()
+                    },
+                    sky
+                ),
+                "a gale {when} was still a happy windy day"
+            );
+        }
+
+        // Rain hands the band to the storm and turns this one off outright (`Main.cs:13195`), gale
+        // or no gale.
+        let mut storm = Weather {
+            target: 0.5,
+            max_rain: 0.6,
+            happy_windy_day: true,
+            ..Default::default()
+        };
+        storm.tick_windy_day_state(noon);
+        assert!(!storm.happy_windy_day, "a downpour was a happy windy day");
+        assert!(storm.storming, "...and it should have latched the storm");
+    }
+
     /// A windy day happens, and is rarer than a still one.
     #[test]
     fn windy_days_are_the_exception() {
         let (mut windy, mut total) = (0usize, 0usize);
         for seed in 0..8u64 {
             let (_, trace) = run(true, 200_000, seed);
-            windy += trace.iter().filter(|w| w.abs() >= WINDY).count();
+            windy += trace.iter().filter(|w| w.abs() >= STORM_MAX_WIND).count();
             total += trace.len();
         }
         assert!(windy > 0, "it should be windy sometimes");
