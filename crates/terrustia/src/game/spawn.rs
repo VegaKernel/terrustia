@@ -1090,10 +1090,14 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             170, // PigronCorruption
             473, // BigMimicCorruption
         ],
+        // Crimslime alone, and the Blood Feeder and Blood Jelly that used to sit beside it are gone
+        // on purpose. Each of 241 and 242 has exactly one `SpawnNPC` site in the whole of
+        // `NPC.Spawner`, and both are water: `NPC.cs:1772` and `:1776`, the two `Main.hardMode &&
+        // waterTile && ZoneCrimson` arms, now in [`water_pick`]. The crimson's own land arm
+        // (`:4066-4123`) never names either. Listing them here put a jellyfish on dry grass, where
+        // its own AI (`game::ai::swimmer`) has nothing to do but tumble and fall.
         (Surface, Crimson) => &[
             183, // Crimslime
-            241, // BloodFeeder
-            242, // BloodJelly
         ],
         (Underground | Cavern, Crimson) => &[
             174, // Herpling
@@ -1172,8 +1176,11 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
                 ]
             }
         }
+        // No Arapaima here, for the same reason the crimson arm above has no Blood Jelly: 157 has
+        // exactly one `SpawnNPC` site in `NPC.Spawner` and it is `NPC.cs:1768`, the `Main.hardMode
+        // && waterTile && ZoneJungle` arm, now in [`water_pick`]. The jungle's own land arm
+        // (`:3864-3912`) never names it. On land the fastest swimmer in the game just flops.
         (Underground | Cavern, Jungle) => &[
-            157, // Arapaima
             175, // AngryTrapper
             176, // MossHornet
             205, // Moth
@@ -2625,37 +2632,141 @@ fn check_to_spawn_rock_golem(
     !(-1..=1).any(|dx| solid_tile(world, x + dx, ground_y - ROCK_GOLEM_HEADROOM))
 }
 
+/// `WorldGen.oceanDistance` (`WorldGen.cs:4069`), how far in from either edge of the map the
+/// goldfish arm's own bounds test reaches (`NPC.cs:1999`).
+const OCEAN_DISTANCE: i32 = 250;
+
+/// `TileID.JungleGrass`, vanilla's `tileType == 60` on the Piranha arm (`NPC.cs:1932`).
+const JUNGLE_GRASS: u16 = 60;
+
 /// What a tile of water draws instead of the land pool.
 ///
 /// Vanilla keeps the water rosters in their own `waterTile` branches ahead of every land branch
-/// (`NPC.cs:1766-2000`), which is why a shark is never on the sand and a zombie is never in the sea.
-/// Two of those branches are transcribed here, being the two whose types this server already
-/// fields:
+/// (`NPC.cs:1766-2085`), which is why a shark is never on the sand and a zombie is never in the sea.
+/// This is that ladder, arm for arm and roll for roll.
 ///
-/// * the ocean, `waterTile && isOcean` (`NPC.cs:1798-1920`): Shark, Squid, Crab, Pink Jellyfish;
-/// * water below the surface line, `waterTile && spawnTileY > worldSurface` (`NPC.cs:1988-1997`):
-///   Blue Jellyfish.
+/// `None` means every arm of it declined. Vanilla's chain is a plain `else if` ladder, so a decline
+/// falls *through* to the land chain below rather than dropping the attempt, and the caller here
+/// does the same. The old `&'static [u16]` shape could not express that and got it backwards twice
+/// over: below the surface line it answered a Blue Jellyfish on every single attempt where the game
+/// rolls one in three and lets the other two reach land, and it had nowhere to put the seven arms
+/// that need hardmode, a ground tile or an evil biome to read. Those seven are the whole aquatic
+/// combat roster below the ocean: Arapaima, Blood Jelly, Blood Feeder, Piranha, Angler Fish, Green
+/// Jellyfish, and the two evils' goldfish.
 ///
-/// Deliberately not transcribed, because each would need an NPC this server has no AI for: the
-/// hardmode jungle's Arapaima (157), the hardmode crimson's water pair, the Piranha/Angler Fish
-/// branch at `NPC.cs:1932`, the corrupt and crimson goldfish at `:1999`, and the ocean's own Sea
-/// Snail (220) and Orca (692). An empty slice here means "no water roster for this place", and the
-/// caller falls back to the land pool rather than inventing one.
-pub fn water_pool(depth: Depth, biome: Biome) -> &'static [u16] {
-    match (depth, biome) {
-        (_, Biome::Ocean) => &[
-            65,  // Shark
-            221, // Squid
-            67,  // Crab
-            64,  // PinkJellyfish
-        ],
-        // `spawnTileY > Main.worldSurface`: anything below the surface line, which is every band
-        // this enum has except the surface itself.
-        (Depth::Surface, _) => &[],
-        (_, _) => &[
-            63, // BlueJellyfish
-        ],
+/// `ground_y` is the game's `spawnTileY`, the solid row itself, which this server's spawn row sits
+/// one above; the caller passes `y + 1`, the same convention as [`good_place_for_a_statue_mimic`],
+/// [`sandstone_check`] and [`check_to_spawn_rock_golem`].
+///
+/// Deliberately left out, each for a reason and none of them "no AI for it":
+///
+/// * **Every critter arm inside the chain**, because each one spawns at a *different row* from the
+///   candidate: vanilla scans up to the water's own surface (`num12`, `num14`, `num16`, `num17`,
+///   `num22`, `num25`) and puts the critter there, and this producer answers a type for the row it
+///   was asked about with nowhere to put a different one. That is the Seagull and the four-way
+///   group in the ocean (`NPC.cs:1855-1910`), the Jungle Turtle and the water striders at
+///   `:1935-1974`, and the turtle, grebe, pupfish and ducks at `:2009-2073`. Their rolls are not
+///   made here, so the combat types they sit above are slightly commoner than in the game and never
+///   rarer.
+/// * **The Angler (376)** at `:1778`, `:1801` and `:1928`, a rescue rather than a roster.
+/// * **The gold critter variants** (592 Gold Goldfish), a class this server does not model at all;
+///   [`spawn_frog`] carries the same disclosure for the Gold Frog.
+/// * **`SharkSpawnChance`** (`NPC.cs:5558-5576`) returns 10 unless a Chum Bucket projectile (type
+///   820) is floating in reach, and this server has no such projectile, so the constant is the
+///   whole of it.
+///
+/// One narrowing that is the caller's rather than this function's: vanilla's `spawnFriendly` arm
+/// sits at `:2099`, *below* every water arm, so in the game a friendly attempt standing in a
+/// hardmode jungle lake still draws an Arapaima. This server answers `spawn_friendly` above the
+/// water arm, so the four water arms that carry no `!spawnFriendly` of their own (`:1766`, `:1770`,
+/// `:1774`, `:1999`) are reached only on the monster path and are that much rarer here. The other
+/// arms are unaffected: `:1932` and `:1988` test `!spawnFriendly` themselves.
+#[allow(clippy::too_many_arguments)]
+pub fn water_pick(
+    world: &World,
+    x: i32,
+    ground_y: i32,
+    biome: Biome,
+    hard_mode: bool,
+    ground_block: Option<u16>,
+    rng: &mut SmallRng,
+) -> Option<u16> {
+    // The game's own two comparisons, written the way it writes them: `spawnTileY` against
+    // `Main.worldSurface` as a `double`, and `deeperThanRockLayer = spawnTileY >= Main.rockLayer`
+    // (`NPC.cs:1204`).
+    let surface = f64::from(world.surface);
+    let spawn_tile_y = f64::from(ground_y);
+    let deeper_than_rock_layer = ground_y >= i32::from(world.rock_layer);
+
+    // `NPC.cs:1766`. Two attempts in three, and the arm carries no depth gate whatsoever: a
+    // hardmode jungle's water is an arapaima's wherever in the column it sits.
+    if hard_mode && biome == Biome::Jungle && rng.random_range(0..3) != 0 {
+        return Some(157); // Arapaima
     }
+    // `NPC.cs:1770-1777`. Two consecutive arms with the identical condition, so the jelly takes two
+    // thirds and the feeder two thirds of the third that is left.
+    if hard_mode && biome == Biome::Crimson {
+        if rng.random_range(0..3) != 0 {
+            return Some(242); // BloodJelly
+        }
+        if rng.random_range(0..3) != 0 {
+            return Some(241); // BloodFeeder
+        }
+    }
+    // `NPC.cs:1798-1926`, the ocean's own chain, and it is terminal: every path through it spawns
+    // something, so an ocean never falls through to the arms below.
+    if biome == Biome::Ocean {
+        /// `SharkSpawnChance` with no chum in the water (`NPC.cs:5558-5576`).
+        const SHARK_CHANCE: u32 = 10;
+        if rng.random_range(0..SHARK_CHANCE) == 0 {
+            return Some(65); // Shark
+        }
+        if hard_mode && rng.random_range(0..SHARK_CHANCE) == 0 {
+            return Some(692); // Orca
+        }
+        if rng.random_range(0..40) == 0 {
+            return Some(220); // SeaSnail
+        }
+        if rng.random_range(0..18) == 0 {
+            return Some(221); // Squid
+        }
+        if rng.random_range(0..3) == 0 {
+            return Some(67); // Crab
+        }
+        return Some(64); // PinkJellyfish
+    }
+    // `NPC.cs:1932-1986`. Half of every attempt below the rock layer, and *every* attempt standing
+    // on jungle grass whatever the depth, which is what puts piranhas in a surface jungle pool.
+    if (deeper_than_rock_layer && rng.random_range(0..2) == 0) || ground_block == Some(JUNGLE_GRASS)
+    {
+        return Some(if hard_mode && rng.random_range(0..3) > 0 {
+            102 // AnglerFish
+        } else {
+            58 // Piranha
+        });
+    }
+    // `NPC.cs:1988-1997`. One attempt in three anywhere below the surface line; the other two fall
+    // through to the arm below it and then to land.
+    if spawn_tile_y > surface && rng.random_range(0..3) == 0 {
+        return Some(if hard_mode && rng.random_range(0..3) > 0 {
+            103 // GreenJellyfish
+        } else {
+            63 // BlueJellyfish
+        });
+    }
+    // `NPC.cs:1999-2085`, the goldfish arm, which is where both evils keep their own. The roll is
+    // made before the bounds test, as vanilla writes it.
+    if rng.random_range(0..4) == 0
+        && ((x > OCEAN_DISTANCE && x < world.width() - OCEAN_DISTANCE)
+            || spawn_tile_y > surface + 50.0)
+    {
+        return Some(match biome {
+            Biome::Corruption => 57, // CorruptGoldfish
+            Biome::Crimson => 465,   // CrimsonGoldfish
+            _ => 55,                 // Goldfish
+        });
+    }
+    None
 }
 
 /// The walls an underground desert is made of, `WallID.Sets.AllowsUndergroundDesertEnemiesToSpawn`
@@ -3230,13 +3341,20 @@ pub const MUSHROOM_BLOCK: u16 = 190;
 /// * `!Main.remixWorld || Main.getGoodWorld || spawnTileY < Main.maxTilesY - 360` at `:3674`. This
 ///   server generates neither seed, so the first disjunct is true and the line cannot fail.
 ///
-/// Deliberately left out with its place in the order kept, so nothing here is commoner than the
-/// game's: `NPC.cs:3633`, the Fungo Fish, whose arm needs `waterTile`. The caller answers standing
-/// water from [`water_pool`] before it ever reaches this, and that arm is missing vanilla's own
-/// `Main.rand.Next(3) == 0` gate (`NPC.cs:1988`), so nothing wet gets this far. 256 stays disclosed
-/// until the water chain is transcribed properly.
-pub fn mushroom_pick(surface: bool, hard_mode: bool, rng: &mut SmallRng) -> Option<u16> {
+/// `wet` is the game's `waterTile`, and it is what the first arm of the three reads: `Main.hardMode
+/// && tileType == 70 && waterTile` -> Fungo Fish (`NPC.cs:3633-3636`), ahead of both arms below it
+/// and with no roll of its own, so a hardmode mushroom cave's standing water is nothing but Fungo
+/// Fish. It sat unreachable until now for a reason worth recording: the caller used to answer any
+/// standing water below the surface line with a Blue Jellyfish on *every* attempt, missing vanilla's
+/// own `Main.rand.Next(3) == 0` gate at `:1988`, so nothing wet ever reached this function at all.
+/// [`water_pick`] declines properly now, and 256 is reachable.
+pub fn mushroom_pick(surface: bool, hard_mode: bool, wet: bool, rng: &mut SmallRng) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
+
+    // NPC.cs:3633. Above both arms below, and it takes the whole attempt when it holds.
+    if hard_mode && wet {
+        return Some(256); // FungoFish
+    }
 
     if surface {
         // NPC.cs:3637. `Main.rand.Next(3) != 0`, so one attempt in three declines the whole arm.
@@ -4113,6 +4231,10 @@ pub fn try_spawn(
             // `y` sits one above. Read once here rather than per branch, since three of them want
             // it. A sky spawn has no ground under it and so has no `tileType` at all.
             let ground_block = (!sky).then(|| world.tile(x, y + 1).block);
+            // The game's `waterTile` (`NPC.cs:1058`), read once here because two arms want it: the
+            // water chain itself and the Fungo Fish at the head of the Glowing Mushroom roster. A
+            // sky spawn has no ground and never reaches either.
+            let wet = !sky && water_tile(world, x, y);
             let sandstorm_spot = sandstorm_zone
                 && ground_block.is_some_and(|g| {
                     SAND_CONVERSION.contains(&g) && sandstone_check(world, x, y + 1)
@@ -4283,11 +4405,23 @@ pub fn try_spawn(
                     DUNGEON_GUARDIAN
                 }
                 // Standing in water draws the aquatic roster instead of the land one, which is how
-                // vanilla orders it: every `waterTile` branch (`NPC.cs:1766-2000`) sits ahead of
-                // every land branch, so the sea gets sharks and the beach gets zombies.
-                None if water_tile(world, x, y) && !water_pool(depth, player_biome).is_empty() => {
-                    let wet = water_pool(depth, player_biome);
-                    wet[rng.random_range(0..wet.len())]
+                // vanilla orders it: every `waterTile` branch (`NPC.cs:1766-2085`) sits ahead of
+                // every land branch, so the sea gets sharks and the beach gets zombies. The chain
+                // declining is not the same as there being no water roster here: vanilla's arms are
+                // an `else if` ladder, so a decline reaches the land branches below, which is why
+                // this is a guard that lets the match fall through rather than a `continue`.
+                None if wet
+                    && let Some(npc_type) = water_pick(
+                        world,
+                        x,
+                        y + 1,
+                        player_biome,
+                        events.hard_mode,
+                        ground_block,
+                        rng,
+                    ) =>
+                {
+                    npc_type
                 }
                 // A meteor crater, which answers with one thing and nothing else
                 // (`NPC.cs:2796-2799`). The arm sits where vanilla's does: below the water and the
@@ -4300,7 +4434,7 @@ pub fn try_spawn(
                 // underground before hardmode, and the ordinary chain below answers those.
                 None if mushroom_ground
                     && let Some(npc_type) =
-                        mushroom_pick(depth == Depth::Surface, events.hard_mode, rng) =>
+                        mushroom_pick(depth == Depth::Surface, events.hard_mode, wet, rng) =>
                 {
                     npc_type
                 }
@@ -4784,7 +4918,6 @@ mod tests {
                     set.extend(hardmode_pool(depth, biome, day));
                     set.extend(friendly_pool(depth, biome, day));
                 }
-                set.extend(water_pool(depth, biome));
             }
             for hard_mode in [true, false] {
                 set.extend(blood_moon_pool(depth, hard_mode));
@@ -4810,6 +4943,35 @@ mod tests {
                 }
             }
         }
+        // The water chain, asked through its own producer for the same reason: it is an `else if`
+        // ladder, not a pool, so an arm that stops answering shows up here as a type that stopped
+        // being reachable. Sampled across every input that changes what it can answer: the biome,
+        // hardmode, the ground tile underfoot, and three rows (above the surface line, below it,
+        // and below the rock layer).
+        let mut sea = World::empty(800, 600, "roster");
+        sea.surface = 200;
+        sea.rock_layer = 300;
+        for seed in 0..400u64 {
+            for biome in BIOMES {
+                for hard_mode in [false, true] {
+                    for ground_block in [None, Some(JUNGLE_GRASS)] {
+                        for ground_y in [150, 260, 350] {
+                            let mut rng = SmallRng::seed_from_u64(seed);
+                            set.extend(water_pick(
+                                &sea,
+                                400,
+                                ground_y,
+                                biome,
+                                hard_mode,
+                                ground_block,
+                                &mut rng,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         // The two desert chains, asked through their own producers for the same reason the sky and
         // the pillars are: deleting an arm of one shows up here as a type that stopped being
         // reachable, rather than as nothing at all. Both are sampled across every input that
@@ -4990,9 +5152,11 @@ mod tests {
         // hardmode-only and the surface one gives its snail a second chance before hardmode.
         for surface in [false, true] {
             for hard_mode in [false, true] {
-                for seed in 0..4_000u64 {
-                    let mut rng = SmallRng::seed_from_u64(seed);
-                    set.extend(mushroom_pick(surface, hard_mode, &mut rng));
+                for wet in [false, true] {
+                    for seed in 0..4_000u64 {
+                        let mut rng = SmallRng::seed_from_u64(seed);
+                        set.extend(mushroom_pick(surface, hard_mode, wet, &mut rng));
+                    }
                 }
             }
         }
@@ -6225,7 +6389,7 @@ mod tests {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    mushroom_pick(surface, hard_mode, &mut rng)
+                    mushroom_pick(surface, hard_mode, false, &mut rng)
                 })
                 .collect::<std::collections::BTreeSet<u16>>()
         };
@@ -6283,7 +6447,7 @@ mod tests {
         let declined = (0..40_000u64)
             .filter(|seed| {
                 let mut rng = SmallRng::seed_from_u64(*seed);
-                mushroom_pick(true, false, &mut rng).is_none()
+                mushroom_pick(true, false, false, &mut rng).is_none()
             })
             .count();
         assert!(
@@ -8117,27 +8281,74 @@ mod tests {
         );
     }
 
+    /// A world with a surface line at 100 and a rock layer at 200, for the water-chain tests: row
+    /// 80 is above the surface line, 150 below it, and 250 below the rock layer.
+    fn water_world() -> World {
+        let mut world = World::empty(800, 600, "water chain");
+        world.surface = 100;
+        world.rock_layer = 200;
+        world
+    }
+
+    /// Everything [`water_pick`] can answer with over 2000 seeds at one point in one world.
+    fn drawn_from_water(
+        world: &World,
+        x: i32,
+        ground_y: i32,
+        biome: Biome,
+        hard_mode: bool,
+        ground_block: Option<u16>,
+    ) -> std::collections::BTreeSet<Option<u16>> {
+        (0..2_000u64)
+            .map(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                water_pick(world, x, ground_y, biome, hard_mode, ground_block, &mut rng)
+            })
+            .collect()
+    }
+
     /// Water draws the aquatic roster and dry land does not (`NPC.cs:1798`, `:1988`).
     ///
     /// Fails before the fix twice over: the ocean roster was in the *land* pool, so sharks appeared
     /// on dry sand, and `has_room` refused the water they should actually have come from.
+    ///
+    /// The Sea Snail (220) and the hardmode Orca (692) are the two arms of the ocean chain that
+    /// were missing entirely: the old pool was a flat four-type slice drawn uniformly, so neither
+    /// existed and the other four were mis-weighted besides.
     #[test]
     fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand() {
-        let ocean_water = water_pool(Depth::Surface, Biome::Ocean);
-        assert!(
-            ocean_water.contains(&65) && ocean_water.contains(&221),
-            "the shark and the squid are the ocean's water roster: {ocean_water:?}",
+        let sea = water_world();
+        let ocean = |hard_mode| {
+            drawn_from_water(&sea, 100, 80, Biome::Ocean, hard_mode, None)
+                .into_iter()
+                .flatten()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        // `NPC.cs:1859-1926`. The ocean arm is terminal: every path through it spawns, so `None`
+        // never comes back out of it.
+        assert_eq!(
+            ocean(false),
+            std::collections::BTreeSet::from([
+                64,  // PinkJellyfish
+                65,  // Shark
+                67,  // Crab
+                220, // SeaSnail
+                221, // Squid
+            ]),
         );
-        for &wet in ocean_water {
+        // `NPC.cs:1863`: the orca is the one arm of the chain hardmode adds.
+        let mut with_orca = ocean(false);
+        with_orca.insert(692);
+        assert_eq!(ocean(true), with_orca);
+
+        for wet in ocean(true) {
             assert!(
                 !pool(Depth::Surface, Biome::Ocean, true).contains(&wet)
-                    && !pool(Depth::Surface, Biome::Ocean, false).contains(&wet),
+                    && !pool(Depth::Surface, Biome::Ocean, false).contains(&wet)
+                    && !hardmode_pool(Depth::Surface, Biome::Ocean, true).contains(&wet),
                 "{wet} is aquatic and must not be drawable from dry ocean sand",
             );
         }
-        // Below the surface, still water, a different roster.
-        assert_eq!(water_pool(Depth::Cavern, Biome::Forest), &[63]);
-        assert!(water_pool(Depth::Surface, Biome::Forest).is_empty());
 
         // And end to end: a player floating in a walled-off sea gets the water roster.
         let mut world = World::empty(800, 600, "sea");
@@ -8183,11 +8394,160 @@ mod tests {
                 continue;
             }
             assert!(
-                ocean_water.contains(npc_type),
+                ocean(false).contains(npc_type),
                 "the sea drew {npc_type} ({}), which is not in its water roster",
                 stats.name,
             );
         }
+    }
+
+    /// The three arms vanilla writes above every other water branch (`NPC.cs:1766-1777`): a
+    /// hardmode jungle's water is an Arapaima's, and a hardmode crimson's is a Blood Jelly's and
+    /// then a Blood Feeder's.
+    ///
+    /// All three used to sit in the *land* pools instead, which is worse than being missing: each
+    /// has exactly one `SpawnNPC` site in the whole of `NPC.Spawner` and all three are water, so
+    /// this server put swimmers on dry grass where their own AI has nothing to do but flop.
+    #[test]
+    fn the_hardmode_jungle_and_crimson_keep_their_swimmers_in_the_water() {
+        let sea = water_world();
+        // Two attempts in three, so both the arapaima and the fallthrough show up.
+        let jungle = drawn_from_water(&sea, 400, 150, Biome::Jungle, true, None);
+        assert!(
+            jungle.contains(&Some(157)),
+            "the hardmode jungle's arapaima"
+        );
+        assert!(
+            !drawn_from_water(&sea, 400, 150, Biome::Jungle, false, None).contains(&Some(157)),
+            "and never before hardmode",
+        );
+
+        let crimson = drawn_from_water(&sea, 400, 150, Biome::Crimson, true, None);
+        assert!(crimson.contains(&Some(242)), "the crimson's blood jelly");
+        assert!(crimson.contains(&Some(241)), "and its blood feeder");
+        let calm = drawn_from_water(&sea, 400, 150, Biome::Crimson, false, None);
+        assert!(!calm.contains(&Some(242)) && !calm.contains(&Some(241)));
+
+        // None of the three is drawable from dry ground anywhere, at any depth, day or night.
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for biome in [Biome::Jungle, Biome::Crimson, Biome::Forest, Biome::Ocean] {
+                for day in [true, false] {
+                    for &aquatic in &[157u16, 241, 242] {
+                        assert!(
+                            !pool(depth, biome, day).contains(&aquatic)
+                                && !hardmode_pool(depth, biome, day).contains(&aquatic),
+                            "{aquatic} is a water spawn and must not be in a land pool \
+                             ({depth:?}/{biome:?}/day={day})",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Piranha arm (`NPC.cs:1932-1986`) and the jellyfish arm (`:1988-1997`), each of which
+    /// swaps its type for a hardmode one and neither of which existed here.
+    ///
+    /// The Piranha arm's gate is the interesting half: half of every attempt below the rock layer,
+    /// *or* any attempt at all standing on jungle grass whatever the depth, which is what puts
+    /// piranhas in a surface jungle pool.
+    #[test]
+    fn the_piranha_and_jellyfish_arms_swap_their_type_for_a_hardmode_one() {
+        let sea = water_world();
+        // Below the rock layer: the piranha arm, half the time.
+        let deep = drawn_from_water(&sea, 400, 250, Biome::Forest, false, None);
+        assert!(deep.contains(&Some(58)), "the piranha");
+        let deep_hard = drawn_from_water(&sea, 400, 250, Biome::Forest, true, None);
+        assert!(deep_hard.contains(&Some(102)), "and the angler fish after");
+
+        // Jungle grass at the *surface*, where the rock-layer half cannot fire at all.
+        let pond = drawn_from_water(&sea, 400, 80, Biome::Jungle, false, Some(JUNGLE_GRASS));
+        assert_eq!(
+            pond,
+            std::collections::BTreeSet::from([Some(58)]),
+            "jungle grass takes the whole arm, with no roll of its own",
+        );
+
+        // Between the surface line and the rock layer: no piranha arm, so the jellyfish answers.
+        let mid = drawn_from_water(&sea, 400, 150, Biome::Forest, false, None);
+        assert!(mid.contains(&Some(63)), "the blue jellyfish");
+        assert!(
+            !mid.contains(&Some(58)),
+            "and no piranha above the rock layer"
+        );
+        let mid_hard = drawn_from_water(&sea, 400, 150, Biome::Forest, true, None);
+        assert!(mid_hard.contains(&Some(103)), "the green jellyfish");
+
+        // Above the surface line the jellyfish arm cannot fire either.
+        let shallow = drawn_from_water(&sea, 400, 80, Biome::Forest, true, None);
+        assert!(!shallow.contains(&Some(63)) && !shallow.contains(&Some(103)));
+    }
+
+    /// Both evils keep their own goldfish in the goldfish arm (`NPC.cs:1999-2008`), and the arm is
+    /// one attempt in four inside its bounds rather than a roster of the place.
+    #[test]
+    fn each_evil_keeps_its_own_goldfish_in_the_water() {
+        let sea = water_world();
+        // Inland, above the surface line: only the goldfish arm can answer here.
+        let corrupt = drawn_from_water(&sea, 400, 80, Biome::Corruption, false, None);
+        assert!(corrupt.contains(&Some(57)), "the corrupt goldfish");
+        let crimson = drawn_from_water(&sea, 400, 80, Biome::Crimson, false, None);
+        assert!(crimson.contains(&Some(465)), "the crimson goldfish");
+        assert!(
+            drawn_from_water(&sea, 400, 80, Biome::Forest, false, None).contains(&Some(55)),
+            "and a plain one everywhere else",
+        );
+
+        // `NPC.cs:1999`: within `oceanDistance` of the edge the arm needs depth instead, so a
+        // shallow pool out on the beach draws nothing from the water chain at all.
+        assert_eq!(
+            drawn_from_water(&sea, 100, 80, Biome::Corruption, false, None),
+            std::collections::BTreeSet::from([None]),
+        );
+    }
+
+    /// The whole point of `None`: vanilla's water branches are an `else if` ladder, so an attempt
+    /// every arm declines carries on into the land chain instead of spawning a jellyfish anyway.
+    ///
+    /// The old pool answered a Blue Jellyfish on *every* attempt below the surface line, missing
+    /// the `Main.rand.Next(3) == 0` at `NPC.cs:1988`, which is why nothing wet ever reached a land
+    /// arm and the Fungo Fish below was unreachable.
+    #[test]
+    fn an_attempt_every_water_arm_declines_falls_through_to_the_land_chain() {
+        let sea = water_world();
+        let mid = drawn_from_water(&sea, 400, 150, Biome::Forest, false, None);
+        assert!(
+            mid.contains(&None),
+            "two attempts in three past the jellyfish arm reach land: {mid:?}",
+        );
+        assert!(mid.contains(&Some(63)), "and the third is a jellyfish");
+    }
+
+    /// The Fungo Fish (`NPC.cs:3633-3636`), which needed the water chain to decline before it
+    /// could ever be reached, and then takes the whole attempt when it holds.
+    #[test]
+    fn a_hardmode_mushroom_cave_under_water_is_nothing_but_fungo_fish() {
+        let mut rng = SmallRng::seed_from_u64(1);
+        for surface in [false, true] {
+            for _ in 0..200 {
+                assert_eq!(mushroom_pick(surface, true, true, &mut rng), Some(256));
+            }
+        }
+        // Before hardmode the arm cannot fire, and dry mushroom grass is the ordinary roster.
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..2_000u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            seen.extend(mushroom_pick(true, false, true, &mut rng));
+        }
+        assert!(
+            !seen.contains(&256),
+            "no fungo fish before hardmode: {seen:?}"
+        );
     }
 
     /// A flat world with a floor to stand on, for the tower-zone tests below.
