@@ -215,8 +215,8 @@ fn build_agent() -> ureq::Agent {
 }
 
 /// `Ok(None)` when the repository genuinely has no release yet (`bybrooklyn/terrustia` does not,
-/// as of this writing — `plan.md`'s Block B still lists tagging v0.0.1 itself as open work), which
-/// is the ordinary case today and not an error to warn about on every boot.
+/// as of this writing — TODO.md's own Phase 2 qualification gates are still open, ahead of tagging
+/// v0.0.1 itself), which is the ordinary case today and not an error to warn about on every boot.
 fn fetch_latest_release(
     agent: &ureq::Agent,
     api_base: &str,
@@ -431,9 +431,11 @@ fn extract_archive(archive: &Path, dest_dir: &Path, _is_zip: bool) -> Result<(),
 
 /// Windows releases ship as `.zip`, not `.tar.gz`; Windows' own bundled `tar.exe` (bsdtar, shipped
 /// since Windows 10 1803 / Server 2019) auto-detects the format from content rather than the
-/// extension, so `-xf` without `-z` handles both — but this is untestable from this session's
-/// macOS/Linux environment, the same disclosed gap `plan.md`'s existing Windows rows already
-/// carry (e.g. the `ctrl_close`/`ctrl_shutdown` row).
+/// extension, so `-xf` without `-z` handles both. `aarch64-pc-windows-msvc` compiles for real on
+/// GitHub's native `windows-11-arm` runner (`ci.yml`'s cross-compile job, host-native there, not
+/// cross-compiled), but that job runs `cargo check`, not `cargo test`, so this function's actual
+/// runtime behavior on real Windows is still never executed anywhere in CI: disclosed here, and
+/// in `update.rs`'s other two `cfg(windows)` sites, rather than left implicit.
 #[cfg(windows)]
 fn extract_archive(archive: &Path, dest_dir: &Path, _is_zip: bool) -> Result<(), UpdateError> {
     let status = Command::new("tar")
@@ -477,10 +479,9 @@ fn install(new_binary: &Path, tag: &str, target: &Path) -> Result<ApplyOutcome, 
 
 /// Windows cannot overwrite its own running executable's file — this very process is that file,
 /// executing, while `terrustia update` runs. The verified binary is left beside it instead of
-/// guessing at a rename-out-from-under-itself trick this session has no way to test is safe; the
-/// operator finishes the swap once the server is stopped. Untestable from this session's
-/// macOS/Linux environment, disclosed in `plan.md` alongside this project's other Windows-only
-/// gaps.
+/// guessing at a rename-out-from-under-itself trick nothing here has a way to prove safe; the
+/// operator finishes the swap once the server is stopped. See `extract_archive`'s doc comment for
+/// what CI's `windows-11-arm` runner does and does not exercise of this module's Windows path.
 #[cfg(windows)]
 fn install(new_binary: &Path, tag: &str, target: &Path) -> Result<ApplyOutcome, UpdateError> {
     let beside = target.with_file_name("terrustia.exe.new");
