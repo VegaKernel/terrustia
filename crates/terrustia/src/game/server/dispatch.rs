@@ -4099,6 +4099,9 @@ impl GameServer {
         let amount = damage_taken(i32::from(hit.damage), npc.defense, hit.crit);
         // A crit shoves 1.4x harder (`NPC.cs:82251-82254`), so the knockback needs to know.
         let mut killed = npc.strike(amount, hit.knockback, hit.direction, hit.crit);
+        // `NPC.PlayerInteraction` (`NPC.cs:80756`), which on a server is reached from exactly this
+        // packet (`MessageBuffer.cs:1789`) and from nowhere else. See [`Npc::hit_by_player`].
+        npc.hit_by_player = true;
         // A statue's monster is worth nothing: the game zeroes its value on the way out of the
         // statue, which is what stops a wired statue being a coin printer.
         let value = if npc.from_statue {

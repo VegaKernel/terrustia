@@ -214,6 +214,19 @@ pub struct Npc {
     /// It is worth no coins and takes up no room in the spawn budget, which is the only reason a
     /// statue farm works: without it a wired statue would stop the world spawning anything else.
     pub from_statue: bool,
+    /// Whether a player has ever hurt this one, vanilla's `playerInteraction`
+    /// (`NPC.cs:80756-80880`, and `AnyInteractions` at `:79535`).
+    ///
+    /// Set only by a player's own blow: real vanilla writes it from `StrikeNPC`'s `owner`
+    /// (`NPC.cs:82095-82101`) and, on a server, from the client's damage packet
+    /// (`MessageBuffer.cs:1789`). A townsperson's swing does not set it and neither does anything
+    /// environmental, which is exactly the distinction the one thing that reads it needs: killing a
+    /// Prismatic Lacewing wakes the Empress of Light only `if (GetWereThereAnyInteractions())`
+    /// (`NPC.cs:80310`), so a critter cut down by a passing Guide is not a boss summon.
+    ///
+    /// Narrowed to a single flag rather than vanilla's 255-entry per-player array, because the one
+    /// reader asks "did anybody" and never "who".
+    pub hit_by_player: bool,
     /// What is currently burning, poisoning or cursing it.
     ///
     /// Kept on the NPC rather than in a side table because it is read every tick by the routine
@@ -321,6 +334,7 @@ impl Npc {
             follows_boss: None,
             follows: None,
             from_statue: false,
+            hit_by_player: false,
             buffs: super::buffs::Buffs::new(),
             buffs_dirty: false,
             net_spam: 0,

@@ -2167,14 +2167,11 @@ const BOOK_SEARCH_SPAN: i32 = 32;
 /// `Next(35)`), because nothing between them can spawn anything.
 const SKELETON_MERCHANT_ODDS: u32 = 70;
 
-/// The Prismatic Lacewing (`NPCID.EmpressButterfly`), which is not a critter you catch for a
-/// collection: killing one is the *only* way the Empress of Light is ever summoned
-/// (`NPC.cs:80309-80319`). With no arm spawning it, an entire boss, her fight and her whole drop
-/// table were unreachable.
-pub const PRISMATIC_LACEWING: u16 = 661;
-
-/// The Empress of Light (`NPCID.HallowBoss`), woken by the Lacewing's death and by nothing else.
-pub const EMPRESS_OF_LIGHT: u16 = 636;
+/// The Prismatic Lacewing, which is not a critter you catch for a collection: killing one is the
+/// *only* way the Empress of Light is ever summoned (`NPC.cs:80309-80319`). With no arm spawning
+/// it, an entire boss, her fight and her whole drop table were unreachable. The id itself lives in
+/// `npc_params` beside the rest of its routine's numbers, since its own AI reads it too.
+use terrustia_proto::npc_params::PRISMATIC_LACEWING;
 
 /// The hallow chain's four hallowed grounds, `tileType == 116 || 117 || 109 || 164`
 /// (`NPC.cs:4039`): Pearlsand, Pearlstone, HallowedGrass and HallowedIce.
