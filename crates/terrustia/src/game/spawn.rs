@@ -2036,6 +2036,37 @@ const SAND: u16 = 53;
 /// narrowing (and the same reasoning) as every other `Roll*Luck` call site in this file.
 const STATUE_MIMIC_ODDS: u32 = 25;
 
+/// The dungeon library's own two (`NPCID.WaterBoltMimic`, `NPCID.LibrarianSkeleton`), the only NPCs
+/// in the game that spawn on a *bookshelf* rather than on the tile the attempt found
+/// (`NPC.cs:2748-2766`).
+///
+/// Both already had their routines here and neither could ever run one. The mimic is a cursed skull
+/// that plays dead (`game::ai::skull`, `NPC.cs:21933-21998`) and the librarian a hardmode caster
+/// (`conjuring(693)` in `npc_params`, `NPC.cs:21323-21337`), and with no arm to spawn either,
+/// nothing this server could do put one in a world.
+pub const WATER_BOLT_MIMIC: u16 = 694;
+pub const LIBRARIAN_SKELETON: u16 = 693;
+
+/// Their two rolls, `Main.rand.Next(8)` and `Main.rand.Next(10)` (`NPC.cs:2749`, `:2758`).
+///
+/// The second is an `else if`, not a second independent chance: the librarian is offered only on the
+/// seven attempts in eight the mimic's roll turned down, so it is one in eight against roughly one
+/// in eleven rather than one in eight against one in ten.
+const WATER_BOLT_MIMIC_ODDS: u32 = 8;
+const LIBRARIAN_ODDS: u32 = 10;
+
+/// `TileID.Books` (`TileID.cs:537`), a dungeon shelf's single book tile.
+///
+/// Vanilla's test is `tile.type != 50` and nothing else (`NPC.cs:62972`), so neither `BooksEcho`
+/// (707, `TileID.cs:1851`) nor the ordinary `Bookcases` furniture is a shelf for this purpose.
+const BOOK_TILE: u16 = 50;
+
+/// The box the spawner looks for a book in: `new Point(spawnTileX - 16, spawnTileY - 16), 32, 32`
+/// (`NPC.cs:2752`, `:2761`). The offset is what makes the box surround the candidate rather than
+/// hang off one corner of it.
+const BOOK_SEARCH_BACK: i32 = 16;
+const BOOK_SEARCH_SPAN: i32 = 32;
+
 /// The Skeleton Merchant's two nested rolls collapsed (`NPC.cs:5004`'s `Next(2)` and `:5007`'s
 /// `Next(35)`), because nothing between them can spawn anything.
 const SKELETON_MERCHANT_ODDS: u32 = 70;
@@ -2927,6 +2958,84 @@ fn hard_dungeon_pick(
         return Some(Some(bones));
     }
     None
+}
+
+/// `NPC.AI_FindNearbyBook(searchPosition, 32, 32, out bookPosition, closestBook: true,
+/// checkPlayerScreenRanges: true)` (`NPC.cs:62954-63010`), the one shape the spawner ever asks for.
+///
+/// ```csharp
+/// for (int i = num5; i < num6; i++)
+///   for (int j = num3; j < num4; j++) {
+///     Tile tile = Main.tile[j, i];
+///     if (!tile.active() || tile.type != 50) continue;
+///     Vector2 vector3 = new Vector2(j, i);
+///     if (checkPlayerScreenRanges && !Spawner.CheckNotSpawningOnScreen((int)vector3.X, (int)vector3.Y))
+///         continue;
+///     float num8 = vector3.Distance(vector2);
+///     if (closestBook && num8 < num7) { num7 = num8; vector = vector3; continue; }
+///     ...
+///   }
+/// ```
+///
+/// Two things about it read as bugs and are the game's, so both are kept:
+///
+/// * the distance is measured from `vector2`, which is `searchPosition` itself, the box's **top
+///   left corner** and not the candidate tile in the middle of it. The shelf that wins is therefore
+///   the one nearest that corner, which is up and to the left of where the attempt was made.
+/// * "found nothing" and "found a book on the corner tile" are the same answer. `vector` starts as
+///   the anchor and the tail (`:62995-63003`) returns false while the winner still equals it, so a
+///   book sitting exactly on the corner is reported as no book at all.
+///
+/// `from` is that corner in tile coordinates and `player` the tile the attempt's own player stands
+/// on. Two halves of the game's function are deliberately not transcribed, and neither can change
+/// what this returns:
+///
+/// * the `closestBook: false` path, which fills a twenty-slot buffer and picks from it at random.
+///   The spawner never asks for it. Its one caller is the Librarian's own spell placement
+///   (`NPC.cs:21323-21337`, a 20-by-30 box), which is AI rather than spawning.
+/// * that buffer's `if (num2 >= num) break` (`:62989-62992`), which cuts a row short once twenty
+///   books that were *not* closer have gone into it. It cannot lose the winner: inside one row `j`
+///   only increases and so does the distance from the corner, so the first book in a row that fails
+///   to beat the running best is followed only by books that also fail. (The same monotonicity is
+///   why the game gets away with it. On this path the buffer is written and never read, and a
+///   twenty-first non-closest book would index one past the end of `_nearbyBooks`, which is
+///   `new Point[20]` at `NPC.cs:6608`.)
+///
+/// `checkPlayerScreenRanges` is [`SAFE_RANGE_X`]/[`SAFE_RANGE_Y`] here, the same box [`try_spawn`]
+/// already keeps its candidate tiles out of. Vanilla's `CheckNotSpawningOnScreen`
+/// (`NPC.cs:5444-5462`) is a screen plus a safe range around *every* active player, which works out
+/// at roughly 64 by 36 tiles against this server's 62 by 35 around the one player the attempt
+/// belongs to. That is the narrowing the candidate test already carries, reused rather than widened
+/// for one branch.
+pub fn find_nearby_book(world: &World, from: (i32, i32), player: (i32, i32)) -> Option<(i32, i32)> {
+    // `num3`..`num6`, the box clipped to the map.
+    let left = from.0.max(0);
+    let right = (from.0 + BOOK_SEARCH_SPAN).min(world.width());
+    let top = from.1.max(0);
+    let bottom = (from.1 + BOOK_SEARCH_SPAN).min(world.height());
+    // `num7`, the running best, and `vector`, which starts as the anchor `vector2` itself.
+    let mut best = i32::MAX;
+    let mut found = from;
+    for y in top..bottom {
+        for x in left..right {
+            let tile = world.tile(x, y);
+            if !tile.is_active() || tile.block != BOOK_TILE {
+                continue;
+            }
+            if (x - player.0).abs() < SAFE_RANGE_X && (y - player.1).abs() < SAFE_RANGE_Y {
+                continue;
+            }
+            // Squared, which orders identically to the game's own `Vector2.Distance` and costs no
+            // square root. The box is 32 tiles across, so nothing here can overflow.
+            let (dx, dy) = (x - from.0, y - from.1);
+            let distance = dx * dx + dy * dy;
+            if distance < best {
+                best = distance;
+                found = (x, y);
+            }
+        }
+    }
+    (found != from).then_some(found)
 }
 
 /// Mushroom grass, `TileID.MushroomGrass` (`TileID.cs:577`).
@@ -4313,6 +4422,64 @@ pub fn try_spawn(
                             None => {}
                         }
                     }
+                    // The dungeon library, `NPC.cs:2748-2771`:
+                    //
+                    // ```csharp
+                    // bool flag13 = false;
+                    // if (Main.rand.Next(8) == 0) {
+                    //     Point bookPosition = Point.Zero;
+                    //     if (AI_FindNearbyBook(new Point(spawnTileX - 16, spawnTileY - 16), 32, 32,
+                    //             out bookPosition, closestBook: true, checkPlayerScreenRanges: true)) {
+                    //         SpawnNPC(bookPosition.X * 16 + 8, bookPosition.Y * 16, 694, 0, 0f, 0f, 0f, 3f);
+                    //         flag13 = true;
+                    //     }
+                    // } else if (Main.rand.Next(10) == 0) {
+                    //     ...same, 693, and no ai...
+                    // }
+                    // int num43 = Main.rand.Next(5);
+                    // if (flag13) return;
+                    // ```
+                    //
+                    // Neither of the two is placed where the attempt found ground: both stand on the
+                    // shelf, wherever in the box it turned out to be, which is why this pushes its
+                    // own position rather than falling through to the draw below. With no shelf in
+                    // the box `flag13` stays false and the attempt goes on to the ordinary
+                    // fallthrough, so a corridor with no library in it is unaffected.
+                    //
+                    // The mimic's `3f` is its dormant state and is seeded by `NpcStore::spawn`,
+                    // which is this server's `NewNPC` and the one door every NPC comes through.
+                    //
+                    // Two things about the placement are disclosed rather than matched. Vanilla
+                    // draws `num43` before it reads `flag13`, which costs a roll off its own stream
+                    // and nothing else; this server's `rng` is not that stream, so the dead draw is
+                    // not reproduced. And the arm sits ahead of five rolls that vanilla makes first
+                    // (`:2723-2747`: the Dungeon Slime, the two traps, the Cursed Skull and the Dark
+                    // Caster) which this server folded into [`pool`]'s dungeon arm rather than
+                    // keeping as a chain. So the library pair is met a little sooner here than in
+                    // the game, where roughly three attempts in ten are taken before the roll is
+                    // ever made. Never anywhere the game would not put them: the shelf test is what
+                    // decides that, and it is exact.
+                    if biome == Biome::Dungeon {
+                        let library = if rng.random_ratio(1, WATER_BOLT_MIMIC_ODDS) {
+                            Some(WATER_BOLT_MIMIC)
+                        } else if rng.random_ratio(1, LIBRARIAN_ODDS) {
+                            Some(LIBRARIAN_SKELETON)
+                        } else {
+                            None
+                        };
+                        // `spawnTileY` is the ground tile, which is this server's `y + 1`: the same
+                        // one-row offset every other tile test in this module carries.
+                        if let Some(npc_type) = library
+                            && let Some((bx, by)) = find_nearby_book(
+                                world,
+                                (x - BOOK_SEARCH_BACK, y + 1 - BOOK_SEARCH_BACK),
+                                (px, py),
+                            )
+                        {
+                            out.push((npc_type, (bx as f32 * 16.0, by as f32 * 16.0)));
+                            break;
+                        }
+                    }
                     // A graveyard's daylight draws the *night* pool, for the same reason: with the
                     // daytime block skipped, the chain below `NPC.cs:4202` is the one that answers,
                     // and its fallthrough is the zombie (`NPC.cs:4770-4816`), not the day's slime.
@@ -4685,6 +4852,12 @@ mod tests {
         // so listing them here cannot drift into a claim the branch still makes good.
         set.insert(LIHZAHRD);
         set.insert(FLYING_SNAKE);
+        // ...and the dungeon library's pair, which are a branch rather than a pool entry for a
+        // reason no other arm has: neither stands where the attempt found ground, they stand on the
+        // bookshelf `find_nearby_book` picked (`NPC.cs:2748-2766`). Both are asserted reachable
+        // through `try_spawn` itself by this module's own tests.
+        set.insert(WATER_BOLT_MIMIC);
+        set.insert(LIBRARIAN_SKELETON);
         // ...and the Meteor Head, whose branch has no roll and no roster at all: standing in a
         // crater, it is the one thing that comes (`NPC.cs:2796-2799`). `try_spawn` reaching it is
         // asserted by this module's own tests, so listing it here cannot drift into a claim the
@@ -6860,6 +7033,157 @@ mod tests {
         }
     }
 
+    /// Lay a shelf of `TileID.Books` (50) across one row of a dungeon pocket.
+    ///
+    /// Books are frame-important (`tile_sets::frame_important`) and not solid
+    /// (`tile_solid::solid(50)` is false), so a row of them neither blocks [`open_space`] three
+    /// rows above the floor nor gives anything a place to stand: the only thing it changes is what
+    /// [`find_nearby_book`] can see.
+    fn shelve_books(world: &mut World, cx: i32, row: i32) {
+        for xx in (cx - 110)..=(cx + 110) {
+            world.set_tile(xx, row, terrustia_proto::Tile::framed(BOOK_TILE, 0, 0));
+        }
+    }
+
+    /// The dungeon library, `NPC.cs:2748-2766`: one attempt in eight is a Water Bolt Mimic and one
+    /// of the rest in ten a Librarian Skeleton, and both of them only where the box around the
+    /// candidate holds a bookshelf, and both of them standing *on the shelf* rather than on the
+    /// floor the attempt found.
+    ///
+    /// Fails before the fix on every count: 693 and 694 were in no pool and no branch, so neither
+    /// the mimic's play-dead routine (`game::ai::skull`) nor the librarian's caster entry
+    /// (`conjuring(693)`) could ever run in a real world.
+    ///
+    /// Neutralised three ways. Deleting the `if biome == Biome::Dungeon` library block from
+    /// `try_spawn` fails the first assertion, "a dungeon library produced no Water Bolt Mimic".
+    /// Dropping the `tile.block != BOOK_TILE` half of `find_nearby_book`'s tile test makes every
+    /// solid tile a shelf and fails the bookless-dungeon assertion instead. Dropping the
+    /// `SAFE_RANGE_X` clause from its screen test fails the shelf loop, "694 spawned on a shelf
+    /// the player is looking at"; note that
+    /// `spawns_appear_outside_the_safe_zone_and_on_solid_ground` does *not* catch that one, since
+    /// its world has no bookshelf in it, so the assertion here is the only guard on it.
+    #[test]
+    fn the_dungeon_library_stands_its_pair_on_a_bookshelf() {
+        let (mut world, (cx, cy)) = dungeon_world();
+        world.progress.downed_boss3 = true;
+        // Three rows above the walk level, which is inside the 32-tall box (`spawnTileY - 16`) and
+        // clear of `open_space`'s own three rows.
+        let shelf = cy - 3;
+        let bookless = world.clone();
+        shelve_books(&mut world, cx, shelf);
+        assert_eq!(
+            biome_at(&world, cx, cy),
+            Biome::Dungeon,
+            "a row of shelves must not stop the pocket reading as a dungeon"
+        );
+
+        let library = |world: &World, ticks: u32| {
+            spawns_with(world, &quiet(), cx, cy, ticks)
+                .into_iter()
+                .filter(|(ty, _)| *ty == WATER_BOLT_MIMIC || *ty == LIBRARIAN_SKELETON)
+                .collect::<Vec<_>>()
+        };
+
+        // One in eight and one in eleven of a dungeon's attempts, so this wants a long run: the
+        // pre-Skeletron flat rate of 10 (`NPC.cs:787-790`) is gone once `downedBoss3` is set and
+        // the dungeon is back on the ordinary rate. This one measures 657 mimics and 474
+        // librarians, which is the 8-to-11 split the two `else if` rolls predict.
+        const TICKS: u32 = 400_000;
+        let found = library(&world, TICKS);
+        assert!(
+            found.iter().any(|(ty, _)| *ty == WATER_BOLT_MIMIC),
+            "a dungeon library produced no Water Bolt Mimic"
+        );
+        assert!(
+            found.iter().any(|(ty, _)| *ty == LIBRARIAN_SKELETON),
+            "a dungeon library produced no Librarian Skeleton"
+        );
+
+        // Every one of them stands on the shelf row, not on the floor the candidate was found on
+        // (`SpawnNPC(bookPosition.X * 16 + 8, bookPosition.Y * 16, ...)`), and outside the box the
+        // player can see (`checkPlayerScreenRanges: true`).
+        for (ty, (bx, by)) in &found {
+            assert_eq!(
+                (by / 16.0) as i32,
+                shelf,
+                "{ty} spawned off the shelf at ({bx}, {by})"
+            );
+            assert!(
+                ((bx / 16.0) as i32 - cx).abs() >= SAFE_RANGE_X,
+                "{ty} spawned on a shelf the player is looking at"
+            );
+        }
+
+        // The same dungeon with nothing to read has neither of them: the shelf is the whole gate,
+        // and `AI_FindNearbyBook` returning false is what makes the attempt fall through.
+        assert!(
+            library(&bookless, TICKS).is_empty(),
+            "a dungeon with no bookshelf produced the library pair anyway"
+        );
+
+        // ...and so does a cavern lined with shelves, because the arm is inside `else if
+        // (ZoneDungeon)` (`NPC.cs:2629`) and a bookcase in a cave is not a library.
+        let floor = 300;
+        let mut cave = hall_world(floor);
+        assert_eq!(biome_at(&cave, 400, floor - 1), Biome::Forest);
+        shelve_books(&mut cave, 400, floor - 4);
+        assert!(
+            spawns_with(&cave, &quiet(), 400, floor - 1, TICKS)
+                .into_iter()
+                .all(|(ty, _)| ty != WATER_BOLT_MIMIC && ty != LIBRARIAN_SKELETON),
+            "a bookshelf outside the dungeon produced the library pair"
+        );
+    }
+
+    /// `AI_FindNearbyBook` on its own (`NPC.cs:62954-63010`), asked the way the spawner asks it.
+    #[test]
+    fn the_nearest_book_is_nearest_the_corner_of_the_box() {
+        let mut world = flat_world(300);
+        // Far enough from the "player" that nothing here is inside the screen box.
+        let player = (10_000, 10_000);
+        let corner = (400, 200);
+        let book = |world: &mut World, x: i32, y: i32| {
+            world.set_tile(x, y, terrustia_proto::Tile::framed(BOOK_TILE, 0, 0));
+        };
+
+        // Nothing to find, and `tile.type != 50` means exactly that: a box full of ordinary stone
+        // is a box with no shelf in it.
+        assert_eq!(find_nearby_book(&world, corner, player), None);
+        let mut stone = flat_world(300);
+        stone.set_tile(425, 225, terrustia_proto::Tile::block(1));
+        assert_eq!(find_nearby_book(&stone, corner, player), None);
+
+        // One book anywhere in the 32-by-32 box is found; one outside it is not.
+        book(&mut world, 425, 225);
+        assert_eq!(find_nearby_book(&world, corner, player), Some((425, 225)));
+        let mut outside = flat_world(300);
+        book(&mut outside, 432, 225);
+        assert_eq!(find_nearby_book(&outside, corner, player), None);
+
+        // `vector2` is `searchPosition`, the box's top-left corner, so the winner is the book
+        // nearest *that* and not the one nearest the middle of the box where the candidate stood.
+        // (416, 216) is the middle; (405, 205) is far from it and much closer to the corner.
+        book(&mut world, 405, 205);
+        assert_eq!(find_nearby_book(&world, corner, player), Some((405, 205)));
+
+        // A book sitting exactly on the corner reads as no book at all: `vector` never moves off
+        // `vector2`, and the tail returns false (`:62998-63002`).
+        let mut on_corner = flat_world(300);
+        book(&mut on_corner, corner.0, corner.1);
+        assert_eq!(find_nearby_book(&on_corner, corner, player), None);
+
+        // `checkPlayerScreenRanges: true`: a shelf the player can see is skipped and the next one
+        // out wins instead. The test is `|dx| < 62 && |dy| < 35`, so a player at (363, 205) has
+        // (405, 205) inside the box (42 across) and (425, 225) exactly on its edge (62), and only
+        // the first is hidden.
+        let near = (425 - SAFE_RANGE_X, 205);
+        assert_eq!(
+            find_nearby_book(&world, corner, near),
+            Some((425, 225)),
+            "the close book should have been hidden by the player's own screen"
+        );
+    }
+
     /// Paint one wall id across the whole dungeon pocket, so every candidate spot in it reads the
     /// same brick style. The unsafe dungeon walls are deliberately not in `Main.wallHouse`
     /// (`Main.cs`, which never sets 7, 8, 9 or 94 to 99), so painting them does not make the pocket
@@ -7880,6 +8204,112 @@ mod tests {
         }
         let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
         println!("good_place_for_a_statue_mimic, plinth: {each:.2} ns/call (sink {sink})");
+    }
+
+    /// What the dungeon library's bookshelf scan costs, since it is by far the widest per-candidate
+    /// tile read this module has: 32 by 32 is 1024 tiles against the plinth check's eight.
+    ///
+    /// It is behind `ZoneDungeon` and then a one-in-eight roll (or one in eleven), so nowhere but a
+    /// dungeon reaches it at all and a dungeon reaches it on about one candidate in five. The scan
+    /// has no early exit, by design: vanilla's has none either, and a shelf found early cannot end
+    /// the search because a later row can still hold one closer to the corner.
+    ///
+    /// Measured on this machine, release, walking the anchor so no read is served from the previous
+    /// call's cache line. The honest reading of the four numbers below is a ratio and a count, not a
+    /// wall clock: other lanes share this machine and the same build measured 2.97 us and 62 us for
+    /// the same 1024 reads twenty minutes apart. What does hold in every run is that
+    /// `find_nearby_book` costs what its 1024 `World::tile` reads cost and no more (the two lines
+    /// track each other within a third across five runs, in both directions), and that the empty box
+    /// and the shelved box cost the same, because the tile fetch dominates and it is taken on all
+    /// 1024 either way. On the quietest run the scan was 2.97 us, which is 2.9 ns a tile read: the
+    /// same per-read figure `measure_the_statue_mimic_plinth_check` arrived at independently.
+    ///
+    /// The number that decides whether that matters is the last one, and it is exact rather than
+    /// timed: over 2,000,000 `try_spawn` calls on a dungeon with a shelf running through it, the
+    /// scan ran 5,405 times, one call in 370. At 2.97 us that is 8 ns amortised onto a `try_spawn`
+    /// that measured 499 ns on the same quiet run, so about 1.6% of it, and nothing at all outside a
+    /// dungeon.
+    #[test]
+    #[ignore]
+    fn measure_the_bookshelf_scan() {
+        let empty = flat_world(300);
+        let shelved = {
+            let mut world = empty.clone();
+            for x in 0..world.width() {
+                world.set_tile(x, 210, terrustia_proto::Tile::framed(BOOK_TILE, 0, 0));
+            }
+            world
+        };
+
+        for (name, world) in [("empty", &empty), ("shelved", &shelved)] {
+            let n = 200_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                sink += u32::from(
+                    find_nearby_book(
+                        std::hint::black_box(world),
+                        (200 + (i % 128), 200),
+                        (10_000, 10_000),
+                    )
+                    .is_some(),
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("find_nearby_book, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // The same 1024 reads with nothing but the tile fetch, so the scan's own arithmetic can be
+        // told apart from what `World::tile` costs.
+        let n = 200_000;
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for i in 0..n {
+            let left = 200 + (i % 128);
+            for y in 200..232 {
+                for x in left..left + 32 {
+                    sink += u32::from(std::hint::black_box(&shelved).tile(x, y).is_active());
+                }
+            }
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("bare 1024 World::tile reads: {each:.2} ns/call (sink {sink})");
+
+        // ...and what a whole `try_spawn` costs on a dungeon that has a library in it, which is the
+        // number that actually matters: the scan is behind a rate roll and then a one-in-five.
+        let (mut dungeon, (cx, cy)) = dungeon_world();
+        dungeon.progress.downed_boss3 = true;
+        shelve_books(&mut dungeon, cx, cy - 3);
+        let npcs = NpcStore::new();
+        let players = player_standing_at(cx, cy);
+        let mut rng = SmallRng::seed_from_u64(7);
+        let mut biomes = BiomeCache::default();
+        let n = 2_000_000;
+        let start = std::time::Instant::now();
+        let (mut sink, mut scans) = (0usize, 0usize);
+        for _ in 0..n {
+            for (npc_type, _) in try_spawn(
+                std::hint::black_box(&dungeon),
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut biomes,
+                &mut rng,
+            ) {
+                sink += 1;
+                // In this world a scan never comes back empty: the shelf spans the whole pocket, so
+                // every candidate's box holds one outside the player's screen box. So a library
+                // spawn is a scan, and the count of them is the count of scans.
+                scans += usize::from(npc_type == WATER_BOLT_MIMIC || npc_type == LIBRARIAN_SKELETON);
+            }
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!(
+            "try_spawn in a shelved dungeon: {each:.2} ns/call ({sink} spawned, {scans} scans, \
+             one scan per {:.0} calls)",
+            f64::from(n) / scans as f64
+        );
     }
 
     #[test]
