@@ -732,6 +732,9 @@ pub enum ServerEvent {
     Join {
         addr: SocketAddr,
         out: mpsc::Sender<Bytes>,
+        /// Ends this connection without waiting for `out` to drain: see
+        /// [`crate::net::connection::Closer`], and [`GameServer::disconnect`] for who fires it.
+        close: crate::net::connection::Closer,
         /// Receives the assigned `(slot, epoch)`, or `None` when the server is full.
         ///
         /// `epoch` is [`GameServer::allocate_slot`]'s per-connection generation counter (see
@@ -2442,8 +2445,13 @@ impl GameServer {
 
     fn handle_event(&mut self, event: ServerEvent) {
         match event {
-            ServerEvent::Join { addr, out, slot } => {
-                let assigned = self.allocate_slot(addr, out);
+            ServerEvent::Join {
+                addr,
+                out,
+                close,
+                slot,
+            } => {
+                let assigned = self.allocate_slot(addr, out, close);
                 let _ = slot.send(assigned);
             }
             ServerEvent::Packet { slot, epoch, frame } => {
@@ -2769,10 +2777,17 @@ impl GameServer {
 
     // ---------------------------------------------------------------- players
 
-    fn allocate_slot(&mut self, addr: SocketAddr, out: mpsc::Sender<Bytes>) -> Option<(u8, u32)> {
+    fn allocate_slot(
+        &mut self,
+        addr: SocketAddr,
+        out: mpsc::Sender<Bytes>,
+        close: crate::net::connection::Closer,
+    ) -> Option<(u8, u32)> {
         let slot = self.players.iter().position(Option::is_none)?;
         let slot = u8::try_from(slot).ok()?;
-        self.players[slot as usize] = Some(Player::new(slot, addr, out));
+        let mut player = Player::new(slot, addr, out);
+        player.close = Some(close);
+        self.players[slot as usize] = Some(player);
         // Wrapping, not saturating: a slot would need to cycle through u32::MAX connections
         // inside one process lifetime before this repeats, and if it somehow did, the result is
         // only ever this same race reopening for one ghost - never worse than the bug this
@@ -2829,14 +2844,31 @@ impl GameServer {
     /// were - `slot_epochs[slot]` has not moved - and only start being discarded once somebody new
     /// actually occupies the slot, which is the one moment they were ever wrong.
     fn remove_player(&mut self, slot: u8) {
+        self.disconnect(slot, None);
+    }
+
+    /// [`Self::remove_player`], plus one last frame to put on the wire on the way out.
+    ///
+    /// The farewell does not go through the outbound queue, and that is the point. Everything
+    /// still queued for a connection the server has just decided to end is backlog from before
+    /// that decision - up to about a million frames on a full server - and a kick notice appended
+    /// to the end of it arrives at the far side of however long that takes to read, if the client
+    /// has not given up by then. It rides [`crate::net::connection::Closer`] instead, which ends
+    /// the connection *now* and writes this one frame first. See that type's doc comment.
+    fn disconnect(&mut self, slot: u8, farewell: Option<Bytes>) {
         // Before the early return, not after it. A client that disconnects mid-check would
         // otherwise hold one of the server's few hashing slots until its worker happened to
         // finish — and one doing it deliberately, repeatedly, would hold all of them.
         self.auth_in_flight.remove(&slot);
 
-        let Some(player) = self.players.get_mut(slot as usize).and_then(Option::take) else {
+        let Some(mut player) = self.players.get_mut(slot as usize).and_then(Option::take) else {
             return;
         };
+        // Fired here, with the player already out of the slot, so that nothing this function goes
+        // on to broadcast can be queued for a connection that is no longer taking any.
+        if let Some(close) = player.close.take() {
+            let _ = close.send(farewell);
+        }
         info!(slot, name = %player.name, "player disconnected");
         // A session is not state: whoever reuses this slot starts as nobody.
         self.admin.sign_out(slot);
@@ -3036,10 +3068,10 @@ impl GameServer {
 
     fn kick(&mut self, slot: u8, reason: &str) {
         debug!(slot, reason, "kicking");
-        if let Ok(frame) = packets::kick(&NetworkText::literal(reason)) {
-            self.send(slot, frame);
-        }
-        self.remove_player(slot);
+        let notice = packets::kick(&NetworkText::literal(reason))
+            .ok()
+            .map(Bytes::from);
+        self.disconnect(slot, notice);
     }
 }
 
@@ -3337,7 +3369,11 @@ mod ghost_connection_epoch {
 
         let (tx1, _rx1) = mpsc::channel(16);
         let (old_slot, old_epoch) = server
-            .allocate_slot("127.0.0.1:6000".parse().expect("a literal"), tx1)
+            .allocate_slot(
+                "127.0.0.1:6000".parse().expect("a literal"),
+                tx1,
+                oneshot::channel().0,
+            )
             .expect("a free slot");
         // Stands in for `/kick`, the handshake reaper, or a full outbound queue: the player is
         // gone, but nothing told the ghost's `read_loop` that.
@@ -3345,7 +3381,11 @@ mod ghost_connection_epoch {
 
         let (tx2, _rx2) = mpsc::channel(16);
         let (new_slot, new_epoch) = server
-            .allocate_slot("127.0.0.1:6001".parse().expect("a literal"), tx2)
+            .allocate_slot(
+                "127.0.0.1:6001".parse().expect("a literal"),
+                tx2,
+                oneshot::channel().0,
+            )
             .expect("the freed slot must be available again");
         assert_eq!(
             old_slot, new_slot,
@@ -3388,13 +3428,21 @@ mod ghost_connection_epoch {
 
         let (tx1, _rx1) = mpsc::channel(16);
         let (old_slot, old_epoch) = server
-            .allocate_slot("127.0.0.1:6100".parse().expect("a literal"), tx1)
+            .allocate_slot(
+                "127.0.0.1:6100".parse().expect("a literal"),
+                tx1,
+                oneshot::channel().0,
+            )
             .expect("a free slot");
         server.remove_player(old_slot);
 
         let (tx2, _rx2) = mpsc::channel(16);
         let (new_slot, new_epoch) = server
-            .allocate_slot("127.0.0.1:6101".parse().expect("a literal"), tx2)
+            .allocate_slot(
+                "127.0.0.1:6101".parse().expect("a literal"),
+                tx2,
+                oneshot::channel().0,
+            )
             .expect("the freed slot must be available again");
         assert_eq!(old_slot, new_slot);
         assert_ne!(old_epoch, new_epoch);

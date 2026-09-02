@@ -808,7 +808,11 @@ mod handshake_reaper {
     fn join(server: &mut GameServer, state: ConnState) -> (u8, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(16);
         let (slot, _epoch) = server
-            .allocate_slot("127.0.0.1:5000".parse().expect("a literal"), tx)
+            .allocate_slot(
+                "127.0.0.1:5000".parse().expect("a literal"),
+                tx,
+                tokio::sync::oneshot::channel().0,
+            )
             .expect("a free slot");
         server.player_mut(slot).expect("the slot just taken").state = state;
         (slot, rx)
@@ -942,7 +946,11 @@ mod handshake_reaper {
         let (tx, _rx) = mpsc::channel(16);
         assert!(
             server
-                .allocate_slot("127.0.0.1:5001".parse().expect("a literal"), tx)
+                .allocate_slot(
+                    "127.0.0.1:5001".parse().expect("a literal"),
+                    tx,
+                    tokio::sync::oneshot::channel().0,
+                )
                 .is_none(),
             "the one-slot server should be full while the stalled connection holds it"
         );
@@ -953,7 +961,11 @@ mod handshake_reaper {
         let (tx, _rx) = mpsc::channel(16);
         assert!(
             server
-                .allocate_slot("127.0.0.1:5001".parse().expect("a literal"), tx)
+                .allocate_slot(
+                    "127.0.0.1:5001".parse().expect("a literal"),
+                    tx,
+                    tokio::sync::oneshot::channel().0,
+                )
                 .is_some(),
             "a real player must be able to have the slot back"
         );
