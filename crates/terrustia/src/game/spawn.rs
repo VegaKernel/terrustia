@@ -1840,9 +1840,12 @@ pub fn zones_at(world: &World, x: i32, y: i32) -> Zones {
                 // `if (!tile.active()) { if (tile.liquid > 0) _liquidCounts[tile.liquidType()]++;
                 // continue; }` (`SceneMetrics.cs:367-372`). Only bucket 3 is ever read as a zone
                 // (`ShimmerTileCount = _liquidCounts[3]`, `:601`), so only bucket 3 is counted.
+                // A tile the block counts skip is exactly where the game counts its liquids:
+                // `if (!tile.active()) { if (tile.liquid > 0) _liquidCounts[tile.liquidType()]++;
+                // continue; }` (`SceneMetrics.cs:367-372`). Only bucket 3 is ever read as a zone
+                // (`ShimmerTileCount = _liquidCounts[3]`, `:601`), so only bucket 3 is counted.
                 shimmer += i32::from(
-                    tile.liquid > 0
-                        && tile.liquid_kind == terrustia_proto::tile::Liquid::Shimmer,
+                    tile.liquid > 0 && tile.liquid_kind == terrustia_proto::tile::Liquid::Shimmer,
                 );
                 continue;
             }
@@ -8750,6 +8753,83 @@ mod tests {
         }
         let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
         println!("hallow_ground_pick, full night: {each:.2} ns/call (sink {sink})");
+    }
+
+    /// What [`Zones::shimmer`] costs the per-tick scan, since it put work on the one arm of the
+    /// 169-by-124 loop that used to do nothing but `continue`.
+    ///
+    /// Short samples, many of them, reported as the minimum. On a machine with sibling lanes
+    /// building on it (load average 6 on four performance cores) a single long sample measures the
+    /// scheduler: whole-test reruns of this scan spread 30 to 40 us, several times the effect
+    /// being looked for, and the spread swamped even the *sign* of the delta. A millisecond-ish
+    /// sample is short enough that some repeat lands between preemptions, and the minimum is that
+    /// one. Validated by running the identical loop against itself, which reported a 0.00 to
+    /// 0.18 us delta: that is this measurement's resolution.
+    ///
+    /// Three worlds, because the branch is taken once per *inactive* tile: all air is its worst
+    /// case (20,956 of 20,956 tiles), a shimmer lake is where the count also accumulates, and
+    /// solid stone is the floor, where it is never reached at all.
+    ///
+    /// To read the delta, put `false &&` in front of the `tile.liquid > 0` in [`zones_at`] and run
+    /// this again. Measured that way, as the minimum of three whole-test runs each side:
+    ///
+    /// | box                       | without | with  | delta |
+    /// |---------------------------|---------|-------|-------|
+    /// | all air, 20,956 inactive  | 47.66   | 53.23 | +5.57 |
+    /// | a shimmer lake            | 47.85   | 55.59 | +7.74 |
+    /// | solid stone, none inactive| 90.73   | 94.00 | +3.27 |
+    ///
+    /// Microseconds a scan. Solid stone never reaches the branch, so its +3.27 is the register
+    /// pressure of one more accumulator in the *active*-tile path rather than work: read the real
+    /// per-inactive-tile cost as the 2 to 4 us above it. The worst case is 7.74 us on a scan
+    /// [`BiomeCache::BUDGET`] allows eight of a tick, so 62 us of a 16.67 ms frame, 0.37%.
+    /// Nothing on this path reads [`Zones::shimmer`]; the pylon check does, off the same cached
+    /// entry, which is why it is counted here rather than scanned for separately.
+    #[test]
+    #[ignore]
+    fn measure_the_shimmer_count() {
+        let air = World::empty(800, 600, "shimmer bench: all air");
+
+        let mut stone = World::empty(800, 600, "shimmer bench: solid");
+        for y in 0..600 {
+            for x in 0..800 {
+                stone.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+
+        let mut lake = World::empty(800, 600, "shimmer bench: a real lake");
+        for y in 250..350 {
+            for x in 350..450 {
+                lake.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Shimmer, 255),
+                );
+            }
+        }
+
+        for (name, world) in [
+            ("all air", &air),
+            ("a lake", &lake),
+            ("solid stone", &stone),
+        ] {
+            let (n, repeats) = (10, 400);
+            let mut best = f64::MAX;
+            for _ in 0..repeats {
+                let start = std::time::Instant::now();
+                let mut sink = 0u32;
+                for i in 0..n {
+                    let at = std::hint::black_box((400 + i % 4, 300));
+                    let zones =
+                        std::hint::black_box(zones_at(std::hint::black_box(world), at.0, at.1));
+                    sink += u32::from(zones.shimmer) + u32::from(zones.glowshroom);
+                }
+                std::hint::black_box(sink);
+                best = best.min(start.elapsed().as_secs_f64() / f64::from(n) * 1e6);
+            }
+            println!("zones_at, {name}: {best:.2} us/scan");
+        }
     }
 
     #[test]
