@@ -1004,9 +1004,29 @@ pub struct Zones {
     /// `ZoneMeteor = EnoughTilesForMeteor` (`SceneMetrics.cs:685`), which is
     /// `MeteorTileCount >= 75` (`:56`, `:268`).
     pub meteor: bool,
+    /// `SceneMetrics.EnoughTilesForShimmer` (`:252`), which is `ShimmerTileCount >= 300`
+    /// (`:24`) and `ShimmerTileCount = _liquidCounts[3]` (`:601`, `LiquidID.Shimmer = 3`).
+    ///
+    /// The only one of these counted off *liquid* rather than off blocks, which is why it is the
+    /// one flag the scan's `!is_active()` arm has to look at rather than skip.
+    ///
+    /// Deliberately the raw tile-count flag and not `SceneMetrics.ZoneShimmer`, which is
+    /// `EnoughTilesForShimmer && UndergroundForShimmering && !ZoneDungeon` (`:711-712`). The one
+    /// thing that reads this today is the shimmer pylon, and vanilla's pylon check reads the raw
+    /// flag (`TeleportPylonsSystem.cs:307-308`), not the zone. Anything wanting the full
+    /// `ZoneShimmer` has to add the other two terms itself.
+    pub shimmer: bool,
 }
 
 /// Which biome the surrounding tiles say we are in.
+///
+/// Deliberately without a glowing-mushroom or shimmer variant, and it is not an oversight to fix
+/// later. This is the ambient spawn pool's *single winner*, and neither of those is one in the
+/// game either: a mushroom cave sits on mud, so vanilla's own roster for it hangs off the ground
+/// tile (`tileType == 70`, `NPC.cs:3637`, `:3674`) rather than off a biome, and shimmer has no
+/// ambient roster at all. Both are independent `SceneMetrics` flags, so they live on [`Zones`]
+/// beside `desert` and `meteor`; giving either one a `Biome` seat would make it *displace* a real
+/// pool (a mushroom cave in the snow would stop being snow), which is a spawn bug, not a fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Biome {
     Forest,
@@ -1739,6 +1759,7 @@ const DESERT_THRESHOLD: i32 = 1500; // DesertTileNormalThreshold
 const DUNGEON_THRESHOLD: i32 = 250; // DungeonTileThreshold
 const MUSHROOM_THRESHOLD: i32 = 100; // MushroomTileThreshold (`SceneMetrics.cs:52`)
 const METEOR_THRESHOLD: i32 = 75; // MeteorTileThreshold (`SceneMetrics.cs:56`)
+const SHIMMER_THRESHOLD: i32 = 300; // ShimmerTileThreshold (`SceneMetrics.cs:24`)
 
 /// Work out the biome from the tiles around a point, the way the game counts zone tiles.
 ///
@@ -1770,7 +1791,8 @@ pub fn biome_at(world: &World, x: i32, y: i32) -> Biome {
 /// `ZoneGlowshroom` and `ZoneMeteor` are here for the same reason and at the same price: neither is
 /// ever a `Biome` (a glowing mushroom cave sits on mud and reads as forest; a crater sits in
 /// whatever it fell on), both are a plain tile count in the box this already walks, and each is the
-/// only gate on a spawn branch of its own.
+/// only gate on a spawn branch of its own. [`Zones::shimmer`] joins them for the same reason,
+/// counted off the liquid on the tiles the block counts skip.
 pub fn zones_at(world: &World, x: i32, y: i32) -> Zones {
     // The ocean is defined by position rather than tiles.
     if x < 250 || x > world.width() - 250 {
@@ -1779,6 +1801,7 @@ pub fn zones_at(world: &World, x: i32, y: i32) -> Zones {
             desert: false,
             glowshroom: false,
             meteor: false,
+            shimmer: false,
         };
     }
 
@@ -1808,11 +1831,19 @@ pub fn zones_at(world: &World, x: i32, y: i32) -> Zones {
     // Raw tile counts, before the game's evil/hallow reconciliation.
     let (mut evil, mut blood, mut holy, mut jungle, mut snow, mut sand, mut dungeon) =
         (0, 0, 0, 0, 0, 0, 0);
-    let (mut mushroom, mut meteor) = (0, 0);
+    let (mut mushroom, mut meteor, mut shimmer) = (0, 0, 0);
     for dy in -BIOME_SCAN_Y_UP..=BIOME_SCAN_Y_DOWN {
         for dx in -BIOME_SCAN_X..=BIOME_SCAN_X {
             let tile = world.tile(x + dx, y + dy);
             if !tile.is_active() {
+                // A tile the block counts skip is exactly where the game counts its liquids:
+                // `if (!tile.active()) { if (tile.liquid > 0) _liquidCounts[tile.liquidType()]++;
+                // continue; }` (`SceneMetrics.cs:367-372`). Only bucket 3 is ever read as a zone
+                // (`ShimmerTileCount = _liquidCounts[3]`, `:601`), so only bucket 3 is counted.
+                shimmer += i32::from(
+                    tile.liquid > 0
+                        && tile.liquid_kind == terrustia_proto::tile::Liquid::Shimmer,
+                );
                 continue;
             }
             let b = tile.block;
@@ -1848,6 +1879,7 @@ pub fn zones_at(world: &World, x: i32, y: i32) -> Zones {
         desert: sand >= DESERT_THRESHOLD,
         glowshroom: mushroom >= MUSHROOM_THRESHOLD,
         meteor: meteor >= METEOR_THRESHOLD,
+        shimmer: shimmer >= SHIMMER_THRESHOLD,
     };
     if dungeon >= DUNGEON_THRESHOLD {
         return Zones {
@@ -3682,12 +3714,10 @@ impl BiomeCache {
     /// it, and a hundred such pairs in a tick is 7.8 ms of a 16.67 ms budget bought with two
     /// packets. The spawn pass already refreshes this every tick for every active player, so this
     /// is the same answer [`Self::read`] would give in all but the first tick of a session.
-    pub fn last(&self, slot: usize) -> Option<Biome> {
-        self.entries
-            .get(slot)
-            .copied()
-            .flatten()
-            .map(|(_, _, _, zones)| zones.biome)
+    /// Hands back the whole [`Zones`], not just its winning [`Biome`]: the entry already holds it,
+    /// and the caller's question (a shopping zone set) is the game's own independent-flag one.
+    pub fn last(&self, slot: usize) -> Option<Zones> {
+        self.entries.get(slot).copied().flatten().map(|e| e.3)
     }
 
     /// This player's zone, scanning only when the last answer has gone stale and this tick still
@@ -7925,7 +7955,7 @@ mod tests {
             let _ = cache.read(&world, slot, 10, y);
         }
         let moved = (0..255)
-            .filter(|s| cache.last(*s) == Some(Biome::Ocean))
+            .filter(|s| cache.last(*s).map(|z| z.biome) == Some(Biome::Ocean))
             .count();
         assert!(
             moved <= BiomeCache::BUDGET as usize,
