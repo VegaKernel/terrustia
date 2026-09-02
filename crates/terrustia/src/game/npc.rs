@@ -1091,6 +1091,19 @@ impl Default for NpcStore {
     }
 }
 
+/// The Water Bolt Mimic (`NPCID.WaterBoltMimic`), which enters the world asleep.
+///
+/// Its one spawn in the whole game passes `ai3: 3f` (`NPC.cs:2754`, the dungeon library's own arm,
+/// and the only `SpawnNPC`/`NewNPC` of 694 anywhere in the source). That value is the dormant state
+/// its routine reads (`NPC.cs:21666-21690`, `game::ai::skull`): it sits perfectly still, takes no
+/// notice of anybody, and only wakes and hunts once something has hit it.
+///
+/// Seeded here rather than at the spawner because this is the one door every NPC in this server
+/// comes through, which is also where vanilla's own `ai3` argument lands (`NewNPC`, called from
+/// `SpawnNPC` at `NPC.cs:5263`).
+const WATER_BOLT_MIMIC: u16 = 694;
+const MIMIC_DORMANT: f32 = 3.0;
+
 impl NpcStore {
     pub fn new() -> Self {
         Self {
@@ -1170,6 +1183,9 @@ impl NpcStore {
         let generation = self.next_generation_for(index);
         let mut npc = Npc::new(npc_type, position, generation)?;
         npc.scale_stats(self.scaling);
+        if npc_type == WATER_BOLT_MIMIC {
+            npc.ai[3] = MIMIC_DORMANT;
+        }
         self.slots[index] = Some(npc);
         u8::try_from(index).ok()
     }
@@ -1479,6 +1495,29 @@ mod tests {
 
     fn zombie_at(x: f32, y: f32) -> Npc {
         Npc::new(3, (x, y), 1).expect("zombie stats")
+    }
+
+    /// A Water Bolt Mimic enters the world asleep, and nothing else does.
+    ///
+    /// `NPC.cs:2754` is the only spawn of 694 in the game and it passes `ai3: 3f`, which is the
+    /// dormant state `game::ai::skull` reads (`NPC.cs:21666-21690`, and
+    /// `a_water_bolt_mimic_plays_dead_until_it_is_hit` next door, which is what proves 3 means
+    /// asleep). Without the seed a mimic that the dungeon library placed on a shelf would run the
+    /// ordinary cursed-skull routine and come straight at the player, which is the opposite of the
+    /// whole trap.
+    ///
+    /// Neutralised by deleting the `if npc_type == WATER_BOLT_MIMIC` guard from `NpcStore::spawn`:
+    /// the first assertion fails with `0.0` against `3.0`.
+    #[test]
+    fn a_water_bolt_mimic_is_born_asleep() {
+        let mut store = NpcStore::new();
+        let mimic = store.spawn(WATER_BOLT_MIMIC, (0.0, 0.0)).expect("a slot");
+        assert_eq!(store.get(mimic).expect("the mimic").ai[3], MIMIC_DORMANT);
+
+        // The seed is that one type's and not the style's: an ordinary Cursed Skull runs the same
+        // routine (ai_style 10) and hunts from the moment it appears.
+        let skull = store.spawn(34, (0.0, 0.0)).expect("a slot");
+        assert_eq!(store.get(skull).expect("the skull").ai[3], 0.0);
     }
 
     /// One flag decides whether a hit lands, because vanilla has one flag.
