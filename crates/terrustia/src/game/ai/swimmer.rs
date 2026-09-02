@@ -407,7 +407,7 @@ mod tests {
         assert!(j.velocity.0 > 0.0, "and toward them");
     }
 
-    /// `NPC.cs:24551-24567`. The game multiplies every jellyfish's velocity by 0.98 and only then
+    /// `NPC.cs:24410-24438`. The game multiplies every jellyfish's velocity by 0.98 and only then
     /// applies the per-type extra, so a squid's real drag is 0.98 * 0.99 and a blood jelly's is
     /// 0.98 * 0.995. Reading the extra as the whole drag made a squid coast to its trigger in
     /// about 194 ticks instead of 64.

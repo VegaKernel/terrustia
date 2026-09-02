@@ -3,12 +3,8 @@
 # hand-edited: rerun the tool and review the diff, as with the other generated tables.
 # id	name
 52	DoctorBones
-57	CorruptGoldfish
-58	Piranha
 70	SpikeBall
 72	BlazingWheel
-102	AnglerFish
-103	GreenJellyfish
 132	BaldZombie
 186	PincushionZombie
 187	SlimedZombie
@@ -21,7 +17,6 @@
 217	CochinealBeetle
 218	CyanBeetle
 219	LacBeetle
-220	SeaSnail
 224	FlyingFish
 225	UmbrellaSlime
 230	GoldfishWalker
@@ -30,7 +25,6 @@
 233	HornetLeafy
 234	HornetSpikey
 235	HornetStingy
-256	FungoFish
 300	Mouse
 357	Worm
 358	LightningBug
@@ -52,7 +46,6 @@
 450	BoneThrowingSkeleton2
 451	BoneThrowingSkeleton3
 452	BoneThrowingSkeleton4
-465	CrimsonGoldfish
 484	EnchantedNightcrawler
 538	SquirrelRed
 539	SquirrelGold
@@ -101,6 +94,5 @@
 669	Stinkbug
 688	Pufferfish
 691	MossZombie
-692	Orca
 695	PalworldCattivaDistressed
 696	PalworldFoxsparksDistressed
