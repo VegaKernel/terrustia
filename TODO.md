@@ -720,7 +720,7 @@ not one window went over budget at all; four passed *half* budget, and the worst
 any of them was `phase_us=6431` against the uncapped run's 40322. **The p99 clause is met**, between
 a quarter and a half of the budget with the cap and at two and a half times the budget without it.
 
-**Two things the same runs turned up, both open.**
+**Two things the same runs turned up. The first is now closed; the second is still open.**
 
 **The retention clause could not fail for the reason a real server sheds players.** It counted client
 exit codes, and a shed client cannot see that it was shed: `send_bytes` removes the player from the
@@ -734,13 +734,28 @@ controlled experiment rather than deduction: rebuilt with a 9,212-frame queue, t
 reports `the server closed the connection` within a second, because the backlog it has to drain
 first is small enough to clear.
 
-The *server* half of that is not fixed. A shed client should be disconnected when the server decides
-to shed it, not after replaying a half-hour-old backlog at whatever rate it can read. Dropping the
-`Sender` cannot do it, because `mpsc` still hands the buffered frames to `write_loop` before `recv`
-returns `None`. The shape of a fix is a shutdown signal created in `serve` before the `Join` event,
-carried on `Player`, selected on inside `write_loop`, and fired by `remove_player`, which would also
-close the same hole for `/kick` and `reap_stalled_handshakes`. Left un-attempted deliberately: it is
-a production disconnect-behaviour change and does not move any gate clause.
+**The server half of that is now fixed.** A shed client is disconnected when the server decides to
+shed it, not after replaying a half-hour-old backlog at whatever rate it can read. Dropping the
+`Sender` could never do it, because `mpsc` still hands the buffered frames to `write_loop` before
+`recv` returns `None`, so the decision travels on its own channel instead: `net::connection::Closer`,
+a `oneshot` created in `serve`, carried on `Player`, selected on inside `write_loop` (`biased`, the
+close first), and fired by `GameServer::disconnect` with the player already out of its slot. Every
+path that removes a player gets it, not just the backpressure shed: `/kick`, the panel's kick and
+ban, and `reap_stalled_handshakes`.
+
+Two properties of that are load-bearing and pinned by tests in `net/connection.rs`. Its payload is
+the one frame a closed connection is still owed, so `kick` no longer queues its notice *behind* the
+backlog (where a client a million frames down would read it half an hour late, if at all) and puts
+it on the wire ahead of it instead. And dropping the closer without firing it is deliberately not
+the same thing: that is what the game task's own shutdown does, and `/stop` and the rollback path
+both announce to everybody before they stop, so those frames are still owed and `write_loop` drains
+for them exactly as it always did.
+
+What it does not close: the decision is noticed between writes, not during one, so a client that has
+stopped reading its socket altogether still holds `write_all` for as long as the kernel will wait.
+Cancelling a write mid-frame would fix that and cost every kick notice its readable stream, so the
+bound is one `WRITE_BATCH` (64 KiB) rather than nothing at all - against the million-frame backlog
+this exists for, one batch is the difference between seconds and half an hour.
 
 **The memory ceiling and the retention bar are in tension at this queue depth.** Run 2 breached the
 1 GiB ceiling at 1536 MiB, and the mechanism is the same million-frame queue. `queue_peak` reports
