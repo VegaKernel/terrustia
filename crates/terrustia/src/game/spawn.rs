@@ -1438,10 +1438,6 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
 ///
 /// * `NPC.cs:5007` the Skeleton Merchant, who already has his own branch in [`try_spawn`] with the
 ///   two conditions this signature cannot see (standing water, and one alive at a time).
-/// * `NPC.cs:5013` the Lost Girl. Reachable in one line here, but she is a decoration until
-///   something turns her into a Nymph, and nothing does: `Npc::become_type(196)` exists and has a
-///   test, no caller triggers it. Spawning a permanently idle prop is worse than the honest gap, so
-///   195 stays in `docs/spawn-gaps.tsv` until the transformation has a lane.
 /// * `NPC.cs:5017` the Rune Wizard, already carried by [`hardmode_pool`].
 /// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
 ///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
@@ -1489,6 +1485,23 @@ pub fn cavern_seasonal_pick(
             return Some(634); // SporeBat
         }
         return None;
+    }
+    // NPC.cs:5012-5015, `if (Main.rand.Next(80) == 0)`, one arm below the Skeleton Merchant the
+    // caller answers and one above the Rune Wizard [`hardmode_pool`] carries. No progression gate
+    // and no depth gate beyond the cavern chain she lives in: she is found at any point in a
+    // world's life.
+    //
+    // She is not a prop. `NPC.aiStyle = 42` (`NPC.cs:11524`) is the disguise, and its routine
+    // (`NPC.cs:30360-30389`) drops it: within two hundred pixels of a player it can see, or on
+    // being moved or hurt at all, it counts twenty-one ticks and calls `Transform(196)`. All of
+    // that was already here and already tested (`game::ai::ambush::lost_girl`, dispatched at ai
+    // style 42, whose `Some(NYMPH)` becomes [`crate::game::npc::Npc::become_type`] through
+    // `Effects::transform`), so this one missing arm was the only reason either 195 or 196 had a
+    // path into a world. An earlier reading of this file recorded the transformation as the
+    // missing half and left the arm out on that basis; the transformation is present, and it was
+    // the spawn that was missing.
+    if one_in(rng, 80) {
+        return Some(195); // LostGirl
     }
     // NPC.cs:5021. `offensiveToTim` (a second, likelier one in fifty for a player carrying a magic
     // weapon) is not read here, so Tim is very slightly rarer than the game's, never commoner.
@@ -5691,16 +5704,18 @@ mod tests {
             );
         }
 
-        // An ordinary cavern in the upper stone answers nothing here at all, which is what makes
-        // every type above the season's doing rather than the chain's.
-        assert!(
-            set(sample(plain, false, false)).is_empty(),
-            "an ordinary cavern answered the seasonal chain"
+        // An ordinary cavern in the upper stone answers one thing and one only, the Lost Girl
+        // (`NPC.cs:5012`), who carries no season and no progression gate. Everything else above is
+        // therefore the season's doing rather than the chain's.
+        assert_eq!(
+            set(sample(plain, false, false)),
+            std::collections::BTreeSet::from([195u16]),
+            "an ordinary cavern answered more than the Lost Girl"
         );
-        // ...and the bottom half of the stone answers exactly one thing: Tim (`NPC.cs:5021`).
+        // ...and the bottom half of the stone adds exactly one more: Tim (`NPC.cs:5021`).
         assert_eq!(
             set(sample(plain, false, true)),
-            std::collections::BTreeSet::from([45u16]),
+            std::collections::BTreeSet::from([45u16, 195]),
             "the lower caverns should add Tim and nothing else"
         );
 
@@ -5765,6 +5780,36 @@ mod tests {
                 "{npc_type} turned up in an ordinary cavern: {ordinary:?}"
             );
         }
+    }
+
+    /// The caverns hand out a Lost Girl one attempt in eighty (`NPC.cs:5012-5015`), and she is the
+    /// only path into the Nymph there has ever been.
+    ///
+    /// Both halves are asserted, because either one alone would be a half-wired lane: `try_spawn`
+    /// really puts a 195 in a cavern, and the routine she arrives with really turns her into a 196
+    /// (`game::ai::ambush::lost_girl`, `NPC.cs:30360-30389`). Vanilla's own ambient spawning never
+    /// produces a 196 by any other route either, which is why 196 is not in `docs/spawn-gaps.tsv`
+    /// while 195 was.
+    ///
+    /// The transformation half is `game::ai::ambush`'s own three tests, which already drive the
+    /// routine through all three of vanilla's tells and assert it hands back a 196; this is the
+    /// spawn half, which was the missing one.
+    ///
+    /// Neutralised by deleting the `one_in(rng, 80)` arm from [`cavern_seasonal_pick`]: "no Lost
+    /// Girl in the caverns", 195 never appearing among the 200,000 attempts.
+    #[test]
+    fn the_caverns_hand_out_a_lost_girl() {
+        let world = flat_world(250);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+
+        let found: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            found.contains(&195),
+            "no Lost Girl in the caverns: {found:?}"
+        );
     }
 
     /// A meteor crater answers with Meteor Heads and with nothing else at all (`NPC.cs:2796-2799`).
