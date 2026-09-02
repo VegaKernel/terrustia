@@ -9115,6 +9115,84 @@ mod tests {
         println!("hallow_ground_pick, full night: {each:.2} ns/call (sink {sink})");
     }
 
+    /// What the water chain costs, both halves of it.
+    ///
+    /// Two things moved. [`water_tile`] is now hoisted out of its own match guard and read once per
+    /// candidate, so a candidate that never reaches the water arm (a friendly attempt, say) pays
+    /// for it where it used not to; and [`water_pick`] replaced a slice index with a ladder of
+    /// rolls. Neither adds a scan: `water_tile` is the same three tile reads it always was, and the
+    /// ladder's own gates are a `u16` compare, two bools and an `i32` compare before any roll.
+    ///
+    /// Measured on this machine, release build, arguments behind a `black_box`:
+    ///
+    /// * `water_tile` on dry ground: 3.35 ns, which is what the hoist actually costs a candidate
+    ///   that used not to reach it. `try_spawn` as a whole measures 242-527 ns a call
+    ///   ([`tests::measure_the_statue_mimic_plinth_check`]), so it is under one and a half percent
+    ///   of one attempt, once per candidate.
+    /// * `water_pick` in an inland pool above the rock layer, classic mode, which is the ladder
+    ///   running all the way to `None`: 7.33 ns. In a cavern pool in hardmode: 9.74 ns. In an
+    ///   ocean: 7.94 ns. On jungle grass in hardmode, which the third arm answers early: 6.26 ns.
+    ///
+    /// That is against roughly two nanoseconds for the old slice index, and it is reached at most
+    /// once per *tick* server-wide, after the rate roll has let an attempt through, a tile has been
+    /// settled on and that tile has turned out to be underwater.
+    #[test]
+    #[ignore]
+    fn measure_the_water_chain() {
+        let n = 10_000_000;
+        let mut sea = World::empty(800, 600, "bench");
+        sea.surface = 100;
+        sea.rock_layer = 200;
+
+        // The hoisted read, on dry ground: what every candidate now pays.
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..n {
+            sink += u32::from(water_tile(
+                std::hint::black_box(&sea),
+                std::hint::black_box(400),
+                std::hint::black_box(150),
+            ));
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("water_tile, dry ground: {each:.2} ns/call (sink {sink})");
+
+        // The ladder, at the three points that exercise different amounts of it.
+        for (name, x, ground_y, biome, hard_mode, ground) in [
+            ("inland pool, classic", 400, 150, Biome::Forest, false, None),
+            ("cavern pool, hardmode", 400, 250, Biome::Forest, true, None),
+            ("ocean, hardmode", 100, 80, Biome::Ocean, true, None),
+            (
+                "jungle grass, hardmode",
+                400,
+                80,
+                Biome::Jungle,
+                true,
+                Some(JUNGLE_GRASS),
+            ),
+        ] {
+            let mut rng = SmallRng::seed_from_u64(7);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(
+                    water_pick(
+                        std::hint::black_box(&sea),
+                        std::hint::black_box(x),
+                        std::hint::black_box(ground_y),
+                        std::hint::black_box(biome),
+                        std::hint::black_box(hard_mode),
+                        std::hint::black_box(ground),
+                        &mut rng,
+                    )
+                    .unwrap_or(0),
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("water_pick, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     /// What [`Zones::shimmer`] costs the per-tick scan, since it put work on the one arm of the
     /// 169-by-124 loop that used to do nothing but `continue`.
     ///
