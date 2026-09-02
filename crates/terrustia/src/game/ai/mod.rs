@@ -1120,7 +1120,9 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         }
         16 => fish::update(npc, target, world.wet, world.target_wet),
         24 => {
-            npc.no_gravity = !bird::update(npc, target, world.was_hurt);
+            let out = bird::update(npc, world);
+            npc.no_gravity = !out.wants_gravity;
+            effects.transform = out.became;
         }
         50 => {
             let hit_something = npc.collide_x || npc.collide_y;
