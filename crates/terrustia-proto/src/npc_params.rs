@@ -1306,7 +1306,7 @@ pub fn jelly(npc_type: u16) -> Jelly {
             trigger: 0.6,
             lunge: 9.0,
         },
-        // A squid goes off at the slightest excuse. `NPC.cs:24551-24567` applies `velocity *= 0.98f`
+        // A squid goes off at the slightest excuse. `NPC.cs:24410-24438` applies `velocity *= 0.98f`
         // to every type first and only then the per-type extra, so the drag here is the product of
         // the two, not the extra on its own.
         221 => Jelly {
