@@ -4208,9 +4208,24 @@ impl GameServer {
 
     /// Packets 63 and 64: a player painted a tile or a wall.
     ///
-    /// The paint is kept rather than only relayed, because it goes into the save and into every
-    /// section a client asks for afterwards. A tile that is not there cannot be painted, which is
-    /// what stops a crafted packet colouring in the empty sky.
+    /// `WorldGen.paintTile`/`paintWall` (`WorldGen.cs:44514`, `:44634`): both refuse an absent
+    /// target (`!tile.active()`, `tile.wall == 0`, matching `real` below) and both write straight
+    /// into the tile's own color byte, which is what makes this correct to keep rather than only
+    /// relay: it goes into the save and into every section a client asks for afterwards, so a tile
+    /// that is not there cannot be painted, which is what stops a crafted packet colouring in the
+    /// empty sky.
+    ///
+    /// Two narrowings, both cosmetic: vanilla's own `paintEffect` dust burst on a successful paint
+    /// is not sent (no gameplay effect, purely a visual cue the vanilla client would already be
+    /// showing itself from the relayed packet); and vanilla's early return when the new color
+    /// equals the old one (`byte b = tile.color(); if (b == color) return false;`, saving a
+    /// broadcast) is not replicated, so a same-color repaint here still writes and rebroadcasts
+    /// where vanilla would have skipped both. Neither changes what a client ends up seeing.
+    ///
+    /// A coating (`paintCoatTile`/`paintCoatWall`, `WorldGen.cs:44538`, a switch on id 0
+    /// [invisible/fullbright toggle] and id 1 [illuminant]) is relayed only, not modelled server
+    /// side: both flags are purely visual and this server has no lighting or fullbright rendering
+    /// of its own to keep consistent with them.
     pub(super) fn on_paint(
         &mut self,
         slot: u8,

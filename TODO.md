@@ -247,9 +247,12 @@ parity one.** An audit lane counted the sites rather than estimating them:
   implemented (the Wall of Flesh pace, the lunar pillar surface clamp, `DESTROYER_SEGMENTS_GOOD`),
   five more are explicitly disclosed as absent at their sites, and **roughly 71 are silently
   absent**, including all eleven of the Eye of Cthulhu's and all nine of the Twins'.
-- **`Main.remixWorld`: 85 sites, zero consumed.** The seed is detected, persisted, and
-  **advertised to clients** (`world.rs:788`, `F::RemixWorld`), while no AI reads it.
-  `world/hardmode.rs:602-603` still says "this project has no remix seed", which is stale twice over.
+- **`Main.remixWorld`: 85 sites, zero consumed by AI.** The seed is detected, persisted, and
+  **advertised to clients** (`world.rs:788`, `F::RemixWorld`), and worldgen consumes it in at least
+  one place (`hardmode.rs::can_chlorophyte_grow` switches town-NPC happiness off for a remix world),
+  but no AI reads it. `world/hardmode.rs:602-608`'s own comment was fixed to say this correctly; the
+  radii/caps `can_chlorophyte_grow` itself computes still do not adjust for a remix seed, which is
+  the real gap left at that site.
 - **`WorldGen.Skyblock.lowTiles`: about 20 sites, zero consumed.** Detected and persisted, unread.
 
 The parity gap is ordinary deferred work. The **disclosure** gap is not: the server currently tells a
@@ -274,7 +277,7 @@ unhandled (a public server that honours it can be rewritten by anyone); host mig
 (`SpectatePlayer` 150, `HostToken` 161) not applicable to a dedicated server; `ShopOverride` (104)
 unimplemented and classified rather than faked.
 
-### Lane E: the admin overhaul
+### Lane E: the admin overhaul (done)
 
 - **E1, namespaced permissions**: per-command leaves with dotted families and wildcards
   (`server.kick`, `server.ban`, `server.mute`, `world.time`, `panel.console`; `server.*`, `*`),
@@ -294,22 +297,23 @@ unimplemented and classified rather than faked.
   panel view), and size-based rotation with generous configurable caps.
 - **E5, moderation**: real `mute` (chat suppression, duration, persistence, permission-gated,
   audited) plus temp-mute escalation, shadow-mute (the muted player sees their own messages echoed,
-  staff see them flagged) and per-account chat cooldowns. All off by default: a fresh server feels
-  exactly like vanilla until the operator opts in.
+  staff see them flagged) and per-connection chat cooldowns (`Player::last_chat`, deliberately reset
+  on reconnect and independent of sign-in: this session's own pace, not a persistent account
+  record). All off by default: a fresh server feels exactly like vanilla until the operator opts in.
 
 Out of scope for v0.0.1, planned after: regions and spawn protection, warps, item/tile/projectile
 restrictions, general policy machinery, server-side characters, stronger anti-cheat (today the
 server trusts client health/mana and has no stack validation or ban lists; the audit trail's
 detail is preserved under Phase 3).
 
-### Lane F: plaintext-transport hardening
+### Lane F: plaintext-transport hardening (done)
 
-Document the plaintext transport plainly; keep Argon2; guarantee passwords are never logged; add
+Document the plaintext transport plainly; keep Argon2; guarantee passwords are never logged;
 login-attempt throttling (per-IP and per-account exponential backoff with jitter, in-memory, reset
 on success, no lockout, so brute force is impractical and account-name lockout-griefing is
-impossible); never treat the Terraria UUID as proof of identity. From the P0 verification:
-constant-time comparison for the claim token (both the console and panel paths still compare with
-plain `!=`) and an fsync in the admin store's save.
+impossible, `admin::Throttle`); never treat the Terraria UUID as proof of identity. From the P0
+verification: constant-time comparison for the claim token (`admin::constant_time_eq`, used at both
+the console and panel paths) and an fsync in the admin store's save.
 
 ### Lane G: platforms
 
@@ -337,13 +341,16 @@ both generators to emit exactly what is committed rather than touching either ta
 ### Cross-cutting through Phase 1
 
 - **Dense-file splits**, paired with panic-clearing and idiomatic cleanup in the same visit.
-  Measured in **production lines**, with `#[cfg(test)]` bodies excluded (re-measured 2026-08-31;
-  the earlier list counted total lines and so listed ten files that were never dense):
-  `game/server/systems.rs` (6,573), `game/server/dispatch.rs` (4,943), `game/server/mod.rs`
-  (2,788), `panel/mod.rs` (2,139, no tests at all), `world/wiring.rs` (1,690 production against
-  1,627 test, not the 2,575 total this list used to quote), `game/spawn.rs` (1,644),
-  `world/wld.rs` (1,364), `game/ai/mod.rs` (1,237), `game/npc.rs` (1,186), `world/wld_save.rs`
-  (1,053). The generated proto tables are excluded: codegen output, never hand-edited, size is
+  Measured in **production lines**, with `#[cfg(test)]` bodies excluded (re-measured 2026-08-31,
+  refreshed 2026-09-01; the earlier list counted total lines and so listed ten files that were
+  never dense): `game/server/systems.rs` (6,573 -> **6,976**), `game/server/dispatch.rs` (4,943 ->
+  **5,489**, now growing faster than systems.rs, +11% since the last measurement, and not on this
+  watch list until now), `game/server/mod.rs` (2,788 -> **3,042**), `panel/mod.rs` (2,139 ->
+  **2,250**; it gained its first `#[cfg(test)]` module, `panel/mod.rs:2251`, so "no tests at all"
+  no longer holds), `world/wiring.rs` (1,690 production against 1,627 test, not the 2,575 total
+  this list used to quote), `game/spawn.rs` (1,644), `world/wld.rs` (1,364), `game/ai/mod.rs`
+  (1,237), `game/npc.rs` (1,186), `world/wld_save.rs` (1,053). The generated proto tables are
+  excluded: codegen output, never hand-edited, size is
   fine. So are `crates/terrustia/tests/*.rs`, which carry no `#[cfg(test)]` and are test files
   entire (`gameplay.rs` would otherwise rank first at 6,907 lines).
 
@@ -409,14 +416,19 @@ both generators to emit exactly what is committed rather than touching either ta
   and the roughly 140 lines of orchestration currently scattered across five ranges of `systems.rs`,
   which the `systems.rs` split below delivers properly.
 
-  Three splits proposed, in order: `panel/mod.rs` (2,139 production lines, no in-file tests, not
-  transcribed code) by resource, **before** Lane E adds its views; `game/{housing,arrivals,rescues}.rs`
-  into `game/town/`, **before** the newly-gated happiness and pricing work needs a home; and
-  `systems.rs` into `game/server/systems/` along its already-contiguous feature bands, **after** the
-  parity lanes let go of it. Explicitly do not touch: `wiring.rs` (one algorithm from `Wiring.cs`),
-  `wld.rs` and `wld_save.rs` (sequential readers in the file format's own order), `npc_params.rs`
-  (banded by AI style on purpose, which is exactly why its Martian constants sit 2,300 lines apart),
-  `game/spawn.rs`, and all of `game/ai/`.
+  Three splits proposed, in order: `panel/mod.rs` (2,250 production lines as of 2026-09-01, now
+  with one in-file `#[cfg(test)]` module at `panel/mod.rs:2251`, still not transcribed code) by
+  resource — its stated trigger, "before Lane E adds its views", has already passed (Lane E is
+  done) without the split happening, so the window is still open but no longer urgent the way it
+  was; `game/{housing,arrivals,rescues}.rs` into `game/town/`, **before** the newly-gated happiness
+  and pricing work needs a home; and `systems.rs` into `game/server/systems/` along its
+  already-contiguous feature bands, **after** the parity lanes let go of it — checked 2026-09-01
+  and **not yet met**: `systems.rs` grew 6,573 -> 6,976 production lines and took 18 commits since
+  the last measurement, mostly the spawn-roster and boss-parity work still actively landing there,
+  which is the opposite of the lanes having let go of it. Explicitly do not touch: `wiring.rs` (one
+  algorithm from `Wiring.cs`), `wld.rs` and `wld_save.rs` (sequential readers in the file format's
+  own order), `npc_params.rs` (banded by AI style on purpose, which is exactly why its Martian
+  constants sit 2,300 lines apart), `game/spawn.rs`, and all of `game/ai/`.
   Scheduled in-campaign but not a release gate; its worst failure is a boot convenience that
   already falls back to a logged manual-port-forward message.
 - **The autosave snapshot is the most expensive thing an idle server does, and it is on the tick

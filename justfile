@@ -230,9 +230,10 @@ check-mutants *ARGS:
 # Part of release-candidate qualification, run locally against the decompiled tree: CI can never
 # hold decompiled game source, so these deliberately never run there.
 #
-# `check-dead-writes` runs last on purpose: it is the one that currently fails (21 fields written in
-# production and read by nothing), and `just` stops a chain at the first failure. Putting it at the
-# end means the three that pass still report before it does.
+# `check-dead-writes` runs last on purpose: it was for a while the one that failed (21 fields
+# written in production and read by nothing, since fixed to 0), and `just` stops a chain at the
+# first failure. Putting it at the end means the others still report first if a future regression
+# reintroduces one.
 #
 # Every data cross-check in one go: the tables, the citations, the dead writes, and the checkers
 check-data: check-drops check-recipes check-parity check-spawn-reach check-mutants check-dead-writes
