@@ -5844,7 +5844,7 @@ mod tests {
         let (mut world, (cx, cy)) = dungeon_world();
         world.progress.downed_boss3 = true;
         let npcs = NpcStore::new();
-        let players = dungeon_player(cx, cy);
+        let players = player_standing_at(cx, cy);
         let events = EventSpawns {
             hard_mode: true,
             downed_plantera: true,
