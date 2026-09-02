@@ -1855,8 +1855,33 @@ pub const BOUND_TOWN_SLIME_OLD: u16 = 685;
 pub const BOUND_TOWN_SLIME_PURPLE: u16 = 686;
 pub const BOUND_TOWN_SLIME_YELLOW: u16 = 687;
 
+/// The Goblin Scout (`NPCID.GoblinScout`), the game's only source of Tattered Cloth (item 362,
+/// `npc_drops.rs`), which is the only ingredient of the Goblin Battle Standard, which is the only
+/// way anybody summons a goblin army. Nothing else in the game drops that cloth.
+pub const GOBLIN_SCOUT: u16 = 73;
+
+/// The Statue Mimic (`NPCID.StatueMimic`), which stands among the tombstones pretending to be a
+/// statue on a plinth until somebody walks close enough (`game::ai::mimic`).
+pub const STATUE_MIMIC: u16 = 690;
+
 /// `Main.rand.Next(20)` on the Tortured Soul's branch (`NPC.cs:4877`).
 const TORTURED_SOUL_ODDS: u32 = 20;
+
+/// The Goblin Scout's two rolls (`NPC.cs:4482`), which are OR'd rather than exclusive: one attempt
+/// in fifteen wherever the distance gate is open, and a second, better chance on top of it while a
+/// shadow orb has been smashed and the world is still waiting for its first goblin army.
+const GOBLIN_SCOUT_ODDS: u32 = 15;
+const GOBLIN_SCOUT_ORB_ODDS: u32 = 7;
+
+/// Plain Sand (`TileID.Sand`), the one ground the Goblin Scout is never found on: vanilla's three
+/// `tileType == 53` arms (`NPC.cs:4390`, `:4474`, `:4478`) answer every dry sand tile before the
+/// chain reaches him.
+const SAND: u16 = 53;
+
+/// `RollBadLuckExtreme(25)` on the Statue Mimic's branch (`NPC.cs:1571`), which at luck zero is a
+/// plain `Main.rand.Next(25)` (`Luck.cs:40-51`) and so is what this server models, the same
+/// narrowing (and the same reasoning) as every other `Roll*Luck` call site in this file.
+const STATUE_MIMIC_ODDS: u32 = 25;
 
 /// The Skeleton Merchant's two nested rolls collapsed (`NPC.cs:5004`'s `Next(2)` and `:5007`'s
 /// `Next(35)`), because nothing between them can spawn anything.
@@ -2126,6 +2151,68 @@ fn water_tile(world: &World, x: i32, y: i32) -> bool {
     feet.liquid > 0
         && world.tile(x, y - 1).liquid > 0
         && feet.liquid_kind == terrustia_proto::tile::Liquid::Water
+}
+
+/// `TileID.Sets.Platforms` (`TileID.cs:243`), which is exactly seven tiles and is *not* the same
+/// set as `Main.tileSolidTop` ([`terrustia_proto::tile_solid::solid_top`], which has far more in
+/// it). Only [`solid_tile2`] needs the distinction.
+const PLATFORMS: [u16; 7] = [19, 427, 435, 436, 437, 438, 439];
+
+/// `WorldGen.SolidTile2(i, j)` (`WorldGen.cs:71031-71048`), the looser of the game's two
+/// "is this solid" tests:
+///
+/// ```csharp
+/// if (Main.tile[i, j].active() && Main.tileSolid[Main.tile[i, j].type]
+///     && ((TileID.Sets.Platforms[Main.tile[i, j].type]
+///          && (Main.tile[i, j].halfBrick() || Main.tile[i, j].topSlope()))
+///         || Main.tile[i, j].slope() == 0)
+///     && !Main.tile[i, j].halfBrick() && !Main.tile[i, j].inActive())
+/// ```
+///
+/// Where `SolidTile` throws every platform out (`!Main.tileSolidTop[...]`, and see
+/// `worldgen::traps`'s copy of it), this one keeps a platform that has been hammered into a top
+/// slope. The trailing `!halfBrick()` makes the `halfBrick()` inside the platform clause dead, so
+/// that clause reduces to "a platform with a top slope"; `topSlope()` is `slope() == 1 || slope()
+/// == 2` (`Tile.cs:292-298`), and `inActive()` is the actuated bit.
+///
+/// The game's own `Main.tile[i, j] == null` arm returns *true*, counting off the map as solid.
+/// `World::tile` answers off the map with bare air instead, which is the opposite answer; nothing
+/// reaches it, because [`try_spawn`] drops any candidate within ten tiles of an edge long before
+/// this is asked.
+fn solid_tile2(world: &World, x: i32, y: i32) -> bool {
+    let tile = world.tile(x, y);
+    tile.is_active()
+        && solid(tile.block)
+        && (tile.slope == 0 || (PLATFORMS.contains(&tile.block) && matches!(tile.slope, 1 | 2)))
+        && !tile.flags.has(terrustia_proto::TileFlags::HALF_BRICK)
+        && !tile.flags.has(terrustia_proto::TileFlags::ACTUATED)
+}
+
+/// `NPC.IsThisAGoodPlaceForAStatueMimic(x, y)` (`NPC.cs:43891-43898`): two solid tiles side by side
+/// with three clear rows above both of them, which is the shape of the plinth a statue stands on.
+///
+/// ```csharp
+/// if (WorldGen.SolidTile2(x, y) && WorldGen.SolidTile2(x + 1, y)
+///     && !Main.tile[x, y - 1].active() && !Main.tile[x, y - 2].active()
+///     && !Main.tile[x, y - 3].active() && !Main.tile[x + 1, y - 1].active()
+///     && !Main.tile[x + 1, y - 2].active() && !Main.tile[x + 1, y - 3].active())
+/// ```
+///
+/// It is the same function the mimic's own AI uses to pick where to reappear
+/// (`AI_126_StatueMimic`, `NPC.cs:43994`), which is why it wants two columns rather than one: the
+/// thing is 28 pixels wide and has to look like it was always there.
+///
+/// `ground_y` is the game's own `spawnTileY`, the solid row itself, which this server's spawn row
+/// sits one above; the caller passes `y + 1`, the same convention as [`sandstone_check`]. The air
+/// test is `active()` rather than `nactive()`, so an actuated tile still counts as being in the
+/// way, which is transcribed as-is.
+pub fn good_place_for_a_statue_mimic(world: &World, x: i32, ground_y: i32) -> bool {
+    solid_tile2(world, x, ground_y)
+        && solid_tile2(world, x + 1, ground_y)
+        && (1..=3).all(|dy| {
+            !world.tile(x, ground_y - dy).is_active()
+                && !world.tile(x + 1, ground_y - dy).is_active()
+        })
 }
 
 /// What a tile of water draws instead of the land pool.
@@ -3598,6 +3685,36 @@ pub fn try_spawn(
                         |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
                 }
+                // A graveyard's Statue Mimic (`NPC.cs:1571-1574`):
+                //
+                // ```csharp
+                // else if (downedBoss3 && ZoneGraveyard && !noWorms && RollBadLuckExtreme(25) == 0
+                //     && !AnyNPCs(690) && IsThisAGoodPlaceForAStatueMimic(spawnTileX, spawnTileY))
+                // ```
+                //
+                // The arm sits this high in vanilla's chain too: one below the invasions, and above
+                // the spider nest, both deserts, all the water, the dungeon, the meteor and every
+                // biome pool. So it carries no depth and no biome gate of its own, and none is
+                // invented here: a graveyard is a graveyard wherever the tombstones are.
+                //
+                // Its AI and its immortal-until-provoked pose were already built and tested
+                // (`game::ai::mimic`, and `IMMORTAL_TYPE` in `game::server`); the spawn was the one
+                // missing half, so nothing this server could do put one in a world.
+                //
+                // The conditions are in vanilla's own order, which is also cheapest-first: the two
+                // free bools, then `noWorms`, then a one-in-twenty-five roll, and only then the
+                // store scan and the eight tile reads of the plinth check.
+                None if world.progress.downed_boss3
+                    && seasonal.graveyard
+                    && !no_worms
+                    && rng.random_range(0..STATUE_MIMIC_ODDS) == 0
+                    && !npcs
+                        .iter()
+                        .any(|(_, n)| n.npc_type == STATUE_MIMIC && n.is_alive())
+                    && good_place_for_a_statue_mimic(world, x, y + 1) =>
+                {
+                    STATUE_MIMIC
+                }
                 // A spider nest, which owns its own arm the way the desert below owns its
                 // (`NPC.cs:1662`), one row above it in vanilla's chain and therefore one arm above
                 // it here. The wall is read on the game's own `spawnTileY`, the solid ground tile,
@@ -3764,6 +3881,55 @@ pub fn try_spawn(
                 }
                 None => {
                     let biome = player_biome;
+                    // The surface *day* has a chain of its own too, and out at the edges of the map
+                    // it holds the one thing in it that is not a critter (`NPC.cs:4482-4485`,
+                    // inside `if (!ZoneGraveyard && Main.dayTime)` at `:4202`):
+                    //
+                    // ```csharp
+                    // else if (!waterTile && (num45 > Main.maxTilesX / 3 || Main.remixWorld)
+                    //     && (Main.rand.Next(15) == 0
+                    //         || (!downedGoblins && WorldGen.shadowOrbSmashed
+                    //             && Main.rand.Next(7) == 0)))
+                    // ```
+                    //
+                    // `num45` is `Math.Abs(spawnTileX - Main.spawnTileX)` (`NPC.cs:4204`), the
+                    // distance from the *world's* spawn point rather than from the player: a scout
+                    // is something met out at the edges, never in the back garden. Both rolls sit
+                    // under that one distance gate and are OR'd rather than exclusive, so a smashed
+                    // shadow orb adds a second chance on top of the first rather than replacing it.
+                    //
+                    // Without this the Goblin Scout was in no pool and no branch, so Tattered Cloth
+                    // never dropped, so the Goblin Battle Standard could not be crafted, so the
+                    // goblin army could not be summoned: the recipe (`recipes.rs`), the drop
+                    // (`npc_drops.rs`) and the invasion (`on_summon`'s `-1`) were all already here
+                    // and all three were unreachable behind this one missing arm.
+                    //
+                    // Three narrowings, each disclosed rather than invented. `Main.remixWorld` is
+                    // not modelled anywhere in this server, so the distance gate is the whole gate.
+                    // The sand exclusion stands in for vanilla's three `tileType == 53` arms above
+                    // this one, which answer every dry sand tile first, so a beach and a desert keep
+                    // their own daytime residents. And the critter arms above it are not modelled at
+                    // all, which only makes him slightly more common here than in the game, exactly
+                    // as with the Skeleton Merchant's arm below.
+                    let surface_day = depth == Depth::Surface
+                        && world.day_time
+                        && !seasonal.graveyard
+                        && !matches!(
+                            biome,
+                            Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
+                        );
+                    if surface_day
+                        && ground_block != Some(SAND)
+                        && !water_tile(world, x, y)
+                        && (x - i32::from(world.spawn_x)).abs() > world.width() / 3
+                        && (rng.random_range(0..GOBLIN_SCOUT_ODDS) == 0
+                            || (!world.progress.downed_goblins
+                                && world.progress.shadow_orb_smashed
+                                && rng.random_range(0..GOBLIN_SCOUT_ORB_ODDS) == 0))
+                    {
+                        out.push((GOBLIN_SCOUT, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
                     // The surface night has a chain of its own ahead of the pool, and a graveyard
                     // reaches it in daylight too (`NPC.cs:4202`). It answers only where vanilla's
                     // `else if (surfaceSpawn)` (`NPC.cs:4168`) is reached: the corruption, the
@@ -4192,6 +4358,13 @@ mod tests {
         // have stopped making good.
         set.insert(TORTURED_SOUL);
         set.insert(SKELETON_MERCHANT);
+        // ...and the two more with a branch of their own: the Goblin Scout the surface day offers
+        // out past a third of the map from spawn, and the Statue Mimic a graveyard offers on a
+        // plinth once Skeletron is down. Both are asserted reachable through `try_spawn` itself by
+        // this module's own tests, so listing them here cannot drift into a claim that their
+        // branches still make good.
+        set.insert(GOBLIN_SCOUT);
+        set.insert(STATUE_MIMIC);
         // ...and the Meteor Head, whose branch has no roll and no roster at all: standing in a
         // crater, it is the one thing that comes (`NPC.cs:2796-2799`). `try_spawn` reaching it is
         // asserted by this module's own tests, so listing it here cannot drift into a claim the
@@ -7154,6 +7327,54 @@ mod tests {
         }
     }
 
+    /// What the Statue Mimic's plinth check costs, since it is the one new per-candidate thing in
+    /// [`try_spawn`] that reads tiles rather than bools.
+    ///
+    /// It is behind `downedBoss3 && ZoneGraveyard && !noWorms` and then a one-in-twenty-five roll,
+    /// so an ordinary world never reaches it at all and a graveyard reaches it once in twenty-five
+    /// candidates. Measured on this machine, release, with the column walked so no read is served
+    /// from the last call's line: 23.14 ns on a plinth (all eight reads taken) and 4.52 ns on a
+    /// floor of half bricks, where the first `solid_tile2` shuts it.
+    ///
+    /// The number that matters is not that one but how often anything reaches it. Both this lane's
+    /// arms sit *inside* the candidate loop, which `try_spawn` enters only after the rate roll lets
+    /// an attempt through: over 2,000,000 calls on an ordinary forest day the loop resolved 5,223
+    /// times, one call in 383. So the whole addition is amortised over that, and it is below what
+    /// wall-clock timing can resolve here: `try_spawn` measured 242-527 ns a call with these arms
+    /// and 213-290 ns with both cut out, four runs each, the two ranges overlapping and neither
+    /// reproducible to better than a third of itself while other lanes share the machine. The
+    /// arithmetic is the answer where the clock is not.
+    #[test]
+    #[ignore]
+    fn measure_the_statue_mimic_plinth_check() {
+        let floor = 90;
+        let plinth = flat_world(floor);
+        let half_bricks = {
+            let mut world = plinth.clone();
+            for x in 0..world.width() {
+                let mut tile = terrustia_proto::Tile::block(1);
+                tile.flags.set(terrustia_proto::TileFlags::HALF_BRICK, true);
+                world.set_tile(x, floor, tile);
+            }
+            world
+        };
+
+        for (name, world) in [("plinth", &plinth), ("half bricks", &half_bricks)] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                sink += u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(world),
+                    200 + (i % 128),
+                    floor,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("good_place_for_a_statue_mimic, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {
@@ -7772,6 +7993,240 @@ mod tests {
             0,
             "the underworld spawned a Skeleton Merchant"
         );
+    }
+
+    /// The surface offers a Goblin Scout by day, and only out past a third of the map from the
+    /// world's spawn point (`NPC.cs:4482-4485`).
+    ///
+    /// Fails before the fix, when 73 was in no pool and no branch. That silence reached further
+    /// than one missing enemy: he is the game's only source of Tattered Cloth, the cloth is the
+    /// only ingredient of the Goblin Battle Standard, and the standard is the only way anybody
+    /// summons a goblin army. All three of those were already written here and all three were
+    /// unreachable.
+    ///
+    /// Neutralised by deleting the `out.push((GOBLIN_SCOUT, ...))` block from `try_spawn`: the
+    /// first and last assertions fail ("a surface day far from spawn offered no Goblin Scout").
+    /// Neutralised again by dropping the `(x - world.spawn_x).abs() > world.width() / 3` clause:
+    /// the near-spawn assertion fails instead, scouts appearing in the back garden.
+    #[test]
+    fn the_surface_day_offers_a_goblin_scout_out_past_a_third_of_the_map() {
+        // Long enough that the two rolls are told apart by their counts rather than by luck. The
+        // run measures 69 scouts on the plain roll and 226 with a shadow orb smashed, against the
+        // 3.0x the two rates predict (1/15 against 1/15 + 14/15 * 1/7); the assertions below leave
+        // that a wide berth. The whole test is about a second.
+        const TICKS: u32 = 400_000;
+        let scouts = |world: &World, (px, py): (i32, i32)| {
+            spawns_at(world, false, px, py, TICKS)
+                .into_iter()
+                .filter(|ty| *ty == GOBLIN_SCOUT)
+                .count()
+        };
+
+        // `World::empty` puts the spawn point at the middle of the map, which is where these tests
+        // stand their player, so every candidate tile is inside the spawn box and the gate is shut.
+        let (near_spawn, at) = forest_surface();
+        assert_eq!(
+            scouts(&near_spawn, at),
+            0,
+            "a Goblin Scout turned up within a third of the map of the world spawn"
+        );
+
+        // The same world with the spawn point moved to the far edge: now every candidate is more
+        // than `width / 3` away from it, which is the whole of vanilla's `num45` gate.
+        let mut world = near_spawn.clone();
+        world.spawn_x = 0;
+        assert!(
+            (at.0 - i32::from(world.spawn_x)).abs() - SPAWN_RANGE_X > world.width() / 3,
+            "the whole spawn box has to be outside the gate for this to test the gate"
+        );
+        let baseline = scouts(&world, at);
+        assert!(
+            baseline > 0,
+            "a surface day far from spawn offered no Goblin Scout"
+        );
+
+        // `!ZoneGraveyard && Main.dayTime` (`NPC.cs:4202`): the whole block he lives in is daytime
+        // only, and a graveyard skips it even in daylight.
+        let mut night = world.clone();
+        night.day_time = false;
+        assert_eq!(
+            scouts(&night, at),
+            0,
+            "the surface night offered a Goblin Scout"
+        );
+        assert_eq!(
+            spawns_at_in(&world, false, true, at.0, at.1, TICKS)
+                .into_iter()
+                .filter(|ty| *ty == GOBLIN_SCOUT)
+                .count(),
+            0,
+            "a graveyard offered a Goblin Scout in daylight"
+        );
+
+        // `!waterTile`: standing in the sea is not standing on the ground. `water_tile` reads the
+        // spawn row and the one above it, which for a floor at `at.1 + 2` are `at.1 + 1` and `at.1`.
+        let mut flooded = world.clone();
+        for x in 0..flooded.width() {
+            for y in at.1..=(at.1 + 1) {
+                flooded.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Water, 255),
+                );
+            }
+        }
+        assert_eq!(
+            scouts(&flooded, at),
+            0,
+            "a flooded surface offered a Goblin Scout"
+        );
+
+        // The second roll (`!downedGoblins && WorldGen.shadowOrbSmashed && rand.Next(7) == 0`) is
+        // OR'd onto the first rather than replacing it, so a smashed shadow orb takes him from one
+        // attempt in fifteen to roughly one in five. Well over double either way, which is what
+        // makes this an assertion rather than a coin toss.
+        let mut hunted = world.clone();
+        hunted.progress.shadow_orb_smashed = true;
+        let raised = scouts(&hunted, at);
+        assert!(
+            raised > baseline * 2,
+            "a smashed shadow orb barely changed the Goblin Scout rate: {baseline} -> {raised}"
+        );
+
+        // ...and it closes for good once the world has had its goblin army.
+        hunted.progress.downed_goblins = true;
+        let after = scouts(&hunted, at);
+        assert!(
+            after > 0 && after < raised / 2,
+            "a downed goblin army left the shadow-orb rate up: {raised} -> {after}"
+        );
+    }
+
+    /// A graveyard stands a Statue Mimic on a plinth once Skeletron is down
+    /// (`NPC.cs:1571-1574`), and only where there is a plinth to stand it on
+    /// (`IsThisAGoodPlaceForAStatueMimic`, `NPC.cs:43891-43898`).
+    ///
+    /// Fails before the fix: the AI (`game::ai::mimic`) and the immortal-until-provoked pose
+    /// (`IMMORTAL_TYPE`) were both already built and tested, and 690 was in no pool and no branch,
+    /// so none of that work could ever run in a real world.
+    ///
+    /// Neutralised by deleting the `None if world.progress.downed_boss3 && seasonal.graveyard ...`
+    /// arm from `try_spawn`: the first assertion fails, "a graveyard after Skeletron offered no
+    /// Statue Mimic". Neutralised again by making `good_place_for_a_statue_mimic` return `true` on
+    /// its first line: the half-brick assertion fails instead, a mimic standing on a floor no
+    /// statue could stand on.
+    #[test]
+    fn a_graveyard_stands_a_statue_mimic_on_a_plinth() {
+        // He is a one-in-twenty-five draw off a surface spawn rate of 600, so a short run sees none
+        // of him by luck alone rather than by any rule. This one measures 37.
+        const TICKS: u32 = 400_000;
+        let mimics = |world: &World, graveyard: bool, (px, py): (i32, i32)| {
+            spawns_at_in(world, false, graveyard, px, py, TICKS)
+                .into_iter()
+                .filter(|ty| *ty == STATUE_MIMIC)
+                .count()
+        };
+
+        let (mut world, at) = forest_surface();
+        world.progress.downed_boss3 = true;
+        assert!(
+            mimics(&world, true, at) > 0,
+            "a graveyard after Skeletron offered no Statue Mimic"
+        );
+
+        // `downedBoss3`: the arm's first clause, so a world that has not beaten Skeletron never
+        // reaches it.
+        let mut fresh = world.clone();
+        fresh.progress.downed_boss3 = false;
+        assert_eq!(
+            mimics(&fresh, true, at),
+            0,
+            "a graveyard before Skeletron offered a Statue Mimic"
+        );
+
+        // `ZoneGraveyard`: he is a graveyard spawn and nothing else. Ordinary ground has no arm for
+        // him at any depth, at any time of day, at any progression.
+        assert_eq!(
+            mimics(&world, false, at),
+            0,
+            "an ordinary forest offered a Statue Mimic"
+        );
+
+        // `IsThisAGoodPlaceForAStatueMimic`: the floor has to read as `SolidTile2`, which a half
+        // brick does not. Everything else about this world is unchanged, and `has_room` still
+        // accepts the floor (it asks only whether the block type is solid), so this isolates the
+        // plinth check on its own.
+        let mut half_bricks = world.clone();
+        for x in 0..half_bricks.width() {
+            let mut tile = terrustia_proto::Tile::block(1);
+            tile.flags.set(terrustia_proto::TileFlags::HALF_BRICK, true);
+            half_bricks.set_tile(x, at.1 + 1, tile);
+        }
+        assert_eq!(
+            mimics(&half_bricks, true, at),
+            0,
+            "a Statue Mimic stood on a floor of half bricks"
+        );
+    }
+
+    /// `IsThisAGoodPlaceForAStatueMimic` (`NPC.cs:43891-43898`) on its own: two solid columns and
+    /// three clear rows above both of them.
+    #[test]
+    fn a_statue_mimic_wants_two_solid_tiles_and_three_clear_rows() {
+        let floor = 90;
+        let plinth = flat_world(floor);
+        assert!(good_place_for_a_statue_mimic(&plinth, 400, floor));
+
+        // `SolidTile2(x + 1, y)`: one column of plinth is not enough, and the check is asked at
+        // `x` and `x + 1` rather than either side of `x`.
+        let mut gapped = plinth.clone();
+        gapped.set_tile(401, floor, terrustia_proto::Tile::AIR);
+        assert!(!good_place_for_a_statue_mimic(&gapped, 400, floor));
+        assert!(good_place_for_a_statue_mimic(&gapped, 398, floor));
+
+        // The three clear rows, over both columns: six tiles, each of which alone shuts it.
+        for dx in 0..2 {
+            for dy in 1..=3 {
+                let mut blocked = plinth.clone();
+                blocked.set_tile(400 + dx, floor - dy, terrustia_proto::Tile::block(1));
+                assert!(
+                    !good_place_for_a_statue_mimic(&blocked, 400, floor),
+                    "a block at ({dx}, -{dy}) left the spot good"
+                );
+            }
+        }
+
+        // `SolidTile2`'s own three exclusions: a half brick, an actuated tile, and a slope. Vanilla
+        // keeps exactly one kind of sloped tile, a platform hammered to a *top* slope, and this is
+        // the only spawn check in the game that cares.
+        let sloped = |slope: u8, block: u16, half: bool, actuated: bool| {
+            let mut world = plinth.clone();
+            for x in 400..402 {
+                // Platforms are frame-important, so they cannot go through `Tile::block`.
+                let mut tile = terrustia_proto::Tile::framed(block, 0, 0);
+                tile.slope = slope;
+                tile.flags.set(terrustia_proto::TileFlags::HALF_BRICK, half);
+                tile.flags
+                    .set(terrustia_proto::TileFlags::ACTUATED, actuated);
+                world.set_tile(x, floor, tile);
+            }
+            good_place_for_a_statue_mimic(&world, 400, floor)
+        };
+        assert!(sloped(0, 1, false, false), "plain stone is a plinth");
+        assert!(!sloped(0, 1, true, false), "a half brick is not a plinth");
+        assert!(
+            !sloped(0, 1, false, true),
+            "an actuated tile is not a plinth"
+        );
+        assert!(!sloped(1, 1, false, false), "sloped stone is not a plinth");
+        // A platform (19) is in `Main.tileSolid`, so it passes on a top slope (1 and 2) and on no
+        // slope at all, and fails on a bottom slope (3 and 4).
+        assert!(sloped(0, PLATFORMS[0], false, false));
+        assert!(sloped(1, PLATFORMS[0], false, false));
+        assert!(sloped(2, PLATFORMS[0], false, false));
+        assert!(!sloped(3, PLATFORMS[0], false, false));
+        assert!(!sloped(4, PLATFORMS[0], false, false));
     }
 
     /// A spider nest is the only place either spider comes from (`NPC.cs:1662-1680`), and the arm
