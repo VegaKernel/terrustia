@@ -4895,7 +4895,15 @@ mod tests {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    cavern_seasonal_pick(at, no_worms, lower_caverns, 1, false, &|_| false, &mut rng)
+                    cavern_seasonal_pick(
+                        at,
+                        no_worms,
+                        lower_caverns,
+                        1,
+                        false,
+                        &|_| false,
+                        &mut rng,
+                    )
                 })
                 .collect::<Vec<u16>>()
         };
