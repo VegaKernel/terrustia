@@ -38,8 +38,10 @@ const STORM_MIN_RAIN: f32 = 0.4;
 const STORM_MAX_RAIN: f32 = 0.5;
 
 /// The window of the day a windy day is allowed to be on in: `Main.time < 10800.0 || Main.time >
-/// 43200.0` turns it straight back off (`Main.cs:13165`). The day is 54,000 ticks long, so this is
-/// from a fifth of the way through the morning to four fifths of the way through the afternoon.
+/// 43200.0` turns it straight back off (`Main.cs:13165`). The day is 54,000 ticks long
+/// (`Main.dayLength`, `Main.cs:1250`) and `Main.time` runs from nought at dawn, so the window opens
+/// a fifth of the way through it and shuts four fifths of the way through: mid-morning to
+/// mid-afternoon, never at first light and never at dusk.
 const WINDY_DAY_EARLIEST: i32 = 10_800;
 const WINDY_DAY_LATEST: i32 = 43_200;
 

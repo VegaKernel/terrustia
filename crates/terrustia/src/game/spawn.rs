@@ -10548,10 +10548,7 @@ mod tests {
         // ring and clear of the safe box. And the anchor is `ai[1]`/`ai[2]`, not the ball's own
         // position, so it is seeded here the way its first tick seeds it.
         const ANCHOR_OUT: i32 = 70;
-        assert!(
-            ANCHOR_OUT > SAFE_RANGE_X && ANCHOR_OUT < SPAWN_RANGE_X,
-            "the anchor has to sit where candidates actually are"
-        );
+        const { assert!(ANCHOR_OUT > SAFE_RANGE_X && ANCHOR_OUT < SPAWN_RANGE_X) };
         let (anchor_x, anchor_y) = ((cx + ANCHOR_OUT) * 16, cy * 16);
         let mut crowded = NpcStore::new();
         let slot = crowded

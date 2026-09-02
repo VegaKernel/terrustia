@@ -3,8 +3,6 @@
 # hand-edited: rerun the tool and review the diff, as with the other generated tables.
 # id	name
 52	DoctorBones
-70	SpikeBall
-72	BlazingWheel
 132	BaldZombie
 186	PincushionZombie
 187	SlimedZombie
@@ -17,8 +15,6 @@
 217	CochinealBeetle
 218	CyanBeetle
 219	LacBeetle
-224	FlyingFish
-225	UmbrellaSlime
 230	GoldfishWalker
 231	HornetFatty
 232	HornetHoney
@@ -57,7 +53,6 @@
 591	ArmedTorchZombie
 592	GoldGoldfish
 593	GoldGoldfishWalker
-594	WindyBalloon
 601	GoldDragonfly
 602	Seagull
 604	LadyBug
@@ -73,7 +68,6 @@
 625	SeaTurtle
 626	Seahorse
 627	GoldSeahorse
-628	Dandelion
 639	GemSquirrelAmethyst
 640	GemSquirrelTopaz
 641	GemSquirrelSapphire
