@@ -9395,6 +9395,92 @@ mod tests {
         println!("good_place_for_a_statue_mimic, plinth: {each:.2} ns/call (sink {sink})");
     }
 
+    /// What the three new weather and dungeon arms cost the per-candidate loop.
+    ///
+    /// Two of the three add nothing measurable: the rain arms are a bool and a roll, and the windy
+    /// pair's two wall reads sit behind `events.happy_windy_day`, which is false on most days and
+    /// every night. The one that is paid on every attempt is the dungeon's, where
+    /// `dungeon_brick_style` moved out from under `hard_mode && downed_plantera` so the ordinary
+    /// chain can read it too, exactly as vanilla reads `num40` once for the whole `ZoneDungeon`
+    /// block (`NPC.cs:2631-2645`). That is two wall reads and a roll a pre-Plantera dungeon did not
+    /// used to make.
+    ///
+    /// Measured in release, ten million calls each: `spawn_wall_type` 9.3 ns,
+    /// `dungeon_brick_style` 17.7 ns, `dungeon_pick` 5.3 ns on plain brick and 6.8 ns on slab,
+    /// against 20.2 ns for the plinth check this loop already carries and accepts as cheap. The
+    /// reference reproduces at 20.7 ns in `measure_the_rock_golem_gate`'s own run in the same
+    /// build, which is what says the boxed closure this bench calls through is not what is being
+    /// measured.
+    ///
+    /// So a dungeon attempt pays about 23 ns it did not, or a little over one plinth check, on a
+    /// path that has already walked a ground column to get there. Some of that is not new at all:
+    /// `dungeon_brick_style` was already run on every post-Plantera hardmode attempt, and
+    /// `dungeon_pick` takes work off the weighted draw below it, whose dungeon pool went from seven
+    /// entries to four.
+    ///
+    /// `near_spike_ball` is left out of the numbers because it is not a fixed cost: it walks the
+    /// live NPC table, and it runs on one slab attempt in three after the Dungeon Slime's roll
+    /// declines, so roughly a ninth of dungeon attempts on a third of dungeon walls.
+    #[test]
+    #[ignore]
+    fn measure_the_weather_and_dungeon_arms() {
+        const N: u32 = 10_000_000;
+        let bench = |name: &str, mut body: Box<dyn FnMut(i32) -> u32 + '_>| {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..N {
+                sink = sink.wrapping_add(body(200 + (i as i32 % 128)));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("{name}: {each:.2} ns/call (sink {sink})");
+        };
+
+        let surface = flat_world(90);
+        bench(
+            "spawn_wall_type",
+            Box::new(|x| u32::from(spawn_wall_type(std::hint::black_box(&surface), x, 88))),
+        );
+
+        let (dungeon, (_, cy)) = dungeon_world();
+        let mut rng = SmallRng::seed_from_u64(70);
+        bench(
+            "dungeon_brick_style",
+            Box::new(|x| {
+                u32::from(dungeon_brick_style(
+                    std::hint::black_box(&dungeon),
+                    x,
+                    cy,
+                    &mut rng,
+                ))
+            }),
+        );
+        for style in [0u8, 1] {
+            let mut rng = SmallRng::seed_from_u64(72);
+            bench(
+                &format!("dungeon_pick, style {style}"),
+                Box::new(|_| {
+                    u32::from(
+                        dungeon_pick(std::hint::black_box(style), &|| false, &mut rng)
+                            .unwrap_or_default(),
+                    )
+                }),
+            );
+        }
+
+        // The reference, in the same run and the same build.
+        let plinth = flat_world(90);
+        bench(
+            "good_place_for_a_statue_mimic",
+            Box::new(|x| {
+                u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(&plinth),
+                    x,
+                    90,
+                ))
+            }),
+        );
+    }
+
     /// What the dungeon library's bookshelf scan costs, since it is by far the widest per-candidate
     /// tile read this module has: 32 by 32 is 1024 tiles against the plinth check's eight.
     ///
