@@ -1467,9 +1467,10 @@ mod tests {
     /// place the game's own `<=` is observable. That is vanilla's arithmetic too, not a divergence
     /// introduced here.
     ///
-    /// Neutralised by deleting the `splits_into` block from the `3 =>` arm of [`run`]: every
-    /// "splits" assertion fails. Neutralised again by changing `<=` to `<`: the exactly-at-the-line
-    /// assertion fails on its own.
+    /// Neutralised by forcing `splits_into` to `None` in the `3 =>` arm of [`run`]: "Lihzahrd
+    /// splits at 20%: left None, right Some(199)". Neutralised again by changing `<=` to `<`, which
+    /// leaves that one passing and fires the boundary instead: "Lihzahrd splits at exactly 55% of
+    /// 20: left None, right Some(199)".
     #[test]
     fn a_wounded_lihzahrd_and_a_wounded_nutcracker_split_at_55_percent() {
         let mut tiles = Flat::default();

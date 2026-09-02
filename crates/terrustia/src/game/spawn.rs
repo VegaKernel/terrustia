@@ -909,8 +909,9 @@ mod rate_tests {
     /// The temple is busier than the jungle it is buried in, and it stacks (`NPC.cs:641-650` is a
     /// separate `if` below the biome chain, not another arm of it).
     ///
-    /// Neutralised by deleting the `if at.lihzahrd_temple` block in [`rates`]: all three assertions
-    /// fail and the temple settles for the surrounding rock's own numbers.
+    /// Neutralised by turning the `if at.lihzahrd_temple` block in [`rates`] off: the first
+    /// assertion fires, "spawnRate x0.8: left 300, right 240", the temple settling for the
+    /// surrounding rock's own numbers.
     #[test]
     fn the_temple_quickens_the_jungle_it_is_buried_in() {
         // A plain underground band first, where neither clamp is anywhere near, so the two factors
@@ -4052,6 +4053,14 @@ pub fn try_spawn(
                 // player out of the temple before Plantera, and anybody who gets in early meets the
                 // residents. The zone is the player's (a Lihzahrd brick wall at their own tile) and
                 // the ground is the candidate's, which is exactly how the game splits it.
+                //
+                // One disclosed narrowing, the same one the Goblin Scout and Skeleton Merchant arms
+                // carry: two arms above this one in vanilla's chain are not modelled here at all and
+                // so never decline in this server's favour. `:3802`'s Grasshopper is the only critter
+                // arm up there a temple can reach (it excludes snow, both evils and the hallow, but
+                // not the jungle a temple reads as), and `:3737`'s one-in-seventy-five souls arm has
+                // no biome gate at all in hardmode. The effect is that these two are very slightly
+                // commoner here than in the game, never rarer.
                 None if temple_zone
                     && matches!(ground_block, Some(LIHZAHRD_BRICK | WOODEN_SPIKES)) =>
                 {
@@ -6323,11 +6332,14 @@ mod tests {
     /// like a pass: a temple wall over ordinary stone is not the temple, and Lihzahrd brick with no
     /// temple wall behind the player is a Lihzahrd brick floor somebody built.
     ///
-    /// Neutralised three ways, each rerun:
-    /// * deleting the whole `None if temple_zone` arm: "no Lihzahrd (198) in the temple" and "no
-    ///   FlyingSnake (226) in the temple" both fail, and the ordinary cavern pool answers instead.
-    /// * dropping `temple_zone` from the arm's guard: the two "outside a temple" assertions fail.
-    /// * dropping the `ground_block` half: the "temple wall over plain stone" assertion fails.
+    /// Neutralised three ways, each rerun (an assertion failure stops the test, so each line names
+    /// the one that fires first):
+    /// * turning the whole `None if temple_zone` arm off: "no Lihzahrd (198) in the temple:
+    ///   {42, 43, 51, 56, 354}", the ordinary cavern pool answering in its place.
+    /// * dropping `temple_zone` from the arm's guard: "the temple roster reached a brick floor
+    ///   outside a temple: {198, 226, 354}".
+    /// * dropping the `ground_block` half: "the temple roster reached a stone floor:
+    ///   {198, 226, 354}".
     #[test]
     fn the_lihzahrd_temple_has_a_roster_of_its_own() {
         let world = temple(TEMPLE_WALL, LIHZAHRD_BRICK);
