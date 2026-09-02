@@ -8301,7 +8301,8 @@ mod tests {
                 // In this world a scan never comes back empty: the shelf spans the whole pocket, so
                 // every candidate's box holds one outside the player's screen box. So a library
                 // spawn is a scan, and the count of them is the count of scans.
-                scans += usize::from(npc_type == WATER_BOLT_MIMIC || npc_type == LIBRARIAN_SKELETON);
+                scans +=
+                    usize::from(npc_type == WATER_BOLT_MIMIC || npc_type == LIBRARIAN_SKELETON);
             }
         }
         let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
