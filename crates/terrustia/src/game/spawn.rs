@@ -2324,6 +2324,48 @@ pub const GRAVEYARD_VERMIN: [u16; 2] = [
 /// The Frog (`NPCID.Frog`), which is not simply drawn: it is the last arm of a chain of its own.
 const FROG: u16 = 361;
 
+/// The night Owl (`NPCID.Owl`), which like the frog is a chain rather than a draw.
+const OWL: u16 = 611;
+
+/// ...and what the chain's rare arm answers with instead (`NPCID.OwlMimic`).
+pub const OWL_MIMIC: u16 = 689;
+
+/// `RollBadLuckExtreme(100)` on the owl's own arm (`NPC.cs:2442`), a plain `Main.rand.Next(100)` at
+/// luck zero (`Luck.cs:40-51`) and so what this server models, the same narrowing as
+/// [`STATUE_MIMIC_ODDS`] and every other `Roll*Luck` call site in this file.
+const OWL_MIMIC_ODDS: u32 = 100;
+
+/// What an owl draw actually answers with (`NPC.cs:2439-2449`):
+///
+/// ```csharp
+/// if ((!raining && !Main.dayTime && Main.rand.Next(5) == 0) & flag10)
+/// {
+///     if (RollBadLuckExtreme(100) == 0) { SpawnNPC(..., 689); }
+///     else { SpawnNPC(..., 611); }
+///     break;
+/// }
+/// ```
+///
+/// The mimic is not a standalone arm anywhere in vanilla's chain, and there is no biome or
+/// progression gate anywhere near it. It is one branch of the ordinary grass critter switch
+/// (`case 2`/`109`/`477`/`492`, the four grasses that [`friendly_pool`]'s surface forest arm already
+/// stands for), sitting between the firefly arm above it and the daytime songbird arm below. So the
+/// Owl Mimic is not something found in a place of its own: it is one owl in a hundred on an
+/// ordinary clear night, and the other ninety-nine are harmless.
+///
+/// The `!raining` half is redundant where vanilla writes it. The whole case opens with
+/// `if (raining && spawnTileY <= Main.UnderworldLayer)`, whose every arm ends in `break`
+/// (`NPC.cs:2381-2407`), so control cannot reach here in the rain and the explicit test is belt and
+/// braces. [`friendly_pool`] already declares that it does not model weather, so no gate of our own
+/// is invented for it.
+fn spawn_owl(rng: &mut SmallRng) -> u16 {
+    if rng.random_range(0..OWL_MIMIC_ODDS) == 0 {
+        OWL_MIMIC
+    } else {
+        OWL
+    }
+}
+
 /// What a frog draw actually answers with (`NPC.SpawnFrog`, `NPC.cs:5621-5634`).
 ///
 /// Vanilla never spawns a frog directly. Both jungle-grass friendly arms (`NPC.cs:2363` and
@@ -2387,9 +2429,9 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         (_, Jungle) => &[
             361, // Frog
         ],
-        // The ordinary surface: birds, a bunny, a squirrel and butterflies by day; fireflies by
-        // night (`NPC.cs:2414`,`2452-2552`). The evils and the hallow borrow it, as their own
-        // critter rolls fall back to the same set in the game.
+        // The ordinary surface: birds, a bunny, a squirrel and butterflies by day; fireflies and
+        // owls by night (`NPC.cs:2414`,`2439-2449`,`2452-2552`). The evils and the hallow borrow
+        // it, as their own critter rolls fall back to the same set in the game.
         (Surface, Forest | Corruption | Crimson | Hallow) => {
             if day {
                 &[
@@ -2403,6 +2445,7 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             } else {
                 &[
                     355, // Firefly
+                    OWL, // ...and the owl, which is a chain: see `spawn_owl`
                 ]
             }
         }
@@ -4270,6 +4313,11 @@ pub fn try_spawn(
                         let alive =
                             |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                         spawn_frog(world, &alive, rng)
+                    } else if critter == OWL {
+                        // The owl is the other chain in this pool, for the same reason
+                        // (`NPC.cs:2442-2448` -> `spawn_owl`): one draw in a hundred is the Owl
+                        // Mimic instead. No holiday costume applies here either.
+                        spawn_owl(rng)
                     } else {
                         holiday_costume(critter, depth, seasonal, rng)
                     }
@@ -5028,6 +5076,13 @@ mod tests {
         for seed in 0..200u64 {
             let mut rng = SmallRng::seed_from_u64(seed);
             set.insert(spawn_frog(&jungle, &|_| false, &mut rng));
+        }
+
+        // ...and the owl's, for the same reason again: it is where the Owl Mimic lives, and at one
+        // draw in a hundred it needs more seeds than the frog before the rare arm comes up at all.
+        for seed in 0..2_000u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            set.insert(spawn_owl(&mut rng));
         }
 
         // The dungeon's doorman, and the residents found tied up underground.
@@ -5801,6 +5856,87 @@ mod tests {
                 "the ordinary critter {songbird} should not reach a graveyard: {seen:?}"
             );
         }
+    }
+
+    /// What a friendly attempt draws with a town around it, which is the only way to reach
+    /// [`friendly_pool`] at all: three townsfolk standing on the player is what sets
+    /// `spawnFriendly`.
+    fn friendly_draws_at(
+        world: &World,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> std::collections::BTreeSet<u16> {
+        const GUIDE: u16 = 22;
+        let mut npcs = NpcStore::new();
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
+        player.state = crate::game::ConnState::Playing;
+        player.position = (px as f32 * 16.0, py as f32 * 16.0);
+        // No zone bytes, deliberately: `1 << 6` on byte 4 is the graveyard flag, whose friendly arm
+        // answers ahead of every other one and would leave this reading vermin instead.
+        for _ in 0..3 {
+            npcs.spawn(GUIDE, player.position);
+        }
+        let players = vec![Some(player)];
+
+        let mut rng = SmallRng::seed_from_u64(689);
+        let mut biomes = BiomeCache::default();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..ticks {
+            for (npc_type, _) in try_spawn(
+                world,
+                &npcs,
+                &players,
+                &quiet(),
+                &JourneyPowers::default(),
+                &mut biomes,
+                &mut rng,
+            ) {
+                seen.insert(npc_type);
+            }
+        }
+        seen
+    }
+
+    /// The surface night's owls, and the one in a hundred that is not an owl (`NPC.cs:2439-2449`).
+    ///
+    /// Both were unreachable: `friendly_pool`'s night arm held the Firefly and nothing else, so no
+    /// Owl had a producer anywhere in this server and the Owl Mimic, which exists only as a branch
+    /// of the Owl's own draw, could not be met by any means at all. The mimic's routine did not
+    /// exist either; the base flight AI (`game::ai::bird`, style 24) did, and what it was missing
+    /// was every branch vanilla writes for these two types specifically.
+    ///
+    /// Neutralised by replacing `spawn_owl`'s body with a bare `OWL`: the Owl Mimic is drawn zero
+    /// times in two hundred thousand ticks and the second assertion fails, while the Owl keeps
+    /// coming and the first still passes. Dropping `OWL` from `friendly_pool`'s night arm instead
+    /// fails both.
+    #[test]
+    fn the_surface_night_draws_owls_and_one_of_them_is_a_mimic() {
+        let (world, (px, py)) = night_world();
+        let seen = friendly_draws_at(&world, px, py, 200_000);
+        assert!(seen.contains(&OWL), "no Owl on a surface night: {seen:?}");
+        assert!(
+            seen.contains(&OWL_MIMIC),
+            "no Owl Mimic in two hundred thousand ticks: {seen:?}"
+        );
+    }
+
+    /// ...and it is a *night* draw. `NPC.cs`'s owl arm carries `!Main.dayTime`, and the daytime
+    /// songbird arm below it is what answers instead.
+    #[test]
+    fn nothing_draws_an_owl_by_day() {
+        let (world, (px, py)) = forest_surface();
+        assert!(world.day_time);
+        let seen = friendly_draws_at(&world, px, py, 200_000);
+        // The songbirds first, so this cannot pass by drawing nothing friendly at all.
+        assert!(
+            seen.contains(&74),
+            "no daytime songbird, so this proves nothing: {seen:?}"
+        );
+        assert!(!seen.contains(&OWL), "an owl in broad daylight: {seen:?}");
+        assert!(!seen.contains(&OWL_MIMIC), "and a mimic too: {seen:?}");
     }
 
     /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
