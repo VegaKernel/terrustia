@@ -63,6 +63,7 @@ fn main() -> ExitCode {
         crimson: world.crimson,
         jungle: false,
         snow: false,
+        hallow: false,
         surface_y: f32::from(world.surface) * 16.0,
         expert: world.game_mode >= 1,
         hardmode: world.progress.hard_mode,

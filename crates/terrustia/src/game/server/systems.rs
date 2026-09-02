@@ -2340,6 +2340,9 @@ impl GameServer {
                 .is_some_and(|npc| matches!(npc.ai[3] as i32, 2 | 3));
         // Midas (`NPC.cs:80448`) multiplies the coin drop; read off this exact NPC before it goes.
         let midas = removed.as_ref().is_some_and(|npc| npc.buffs.flags.midas);
+        // `GetWereThereAnyInteractions()`, off this exact corpse before it goes, for the one death
+        // event that asks it (`NPC.cs:80310`).
+        let hit_by_player = removed.as_ref().is_some_and(|npc| npc.hit_by_player);
         // GOL-1: the Golem's head comes off when it dies and flies on its own
         // (`NPC.cs:85913-85918`, `HitEffect`'s `type == 246` branch). Nothing in production ever
         // spawned type 249, so the whole style-48 free-head routine was unreachable code. Read off
@@ -2385,9 +2388,77 @@ impl GameServer {
         self.note_moon_kill(npc_type);
         self.lunar.note_kill(npc_type);
         self.split_on_death(npc_type, center);
+        self.wake_the_empress(npc_type, center, hit_by_player);
         self.note_banner_kill(npc_type, center);
         self.note_boss_kill(npc_type);
         self.note_slime_rain_kill(npc_type, center);
+    }
+
+    /// The Empress of Light's only summon: a Prismatic Lacewing killed by a player
+    /// (`NPC.cs:80309-80319`, the `case 661` of `DoDeathEvents`).
+    ///
+    /// ```csharp
+    /// case 661:
+    ///     if (Main.netMode != 1 && GetWereThereAnyInteractions())
+    ///     {
+    ///         int num = 636;
+    ///         if (!AnyNPCs(num))
+    ///         {
+    ///             Vector2 vector = base.Center + new Vector2(0f, -200f)
+    ///                 + Main.rand.NextVector2Circular(50f, 50f);
+    ///             SpawnBoss((int)vector.X, (int)vector.Y, num, closestPlayer.whoAmI);
+    ///         }
+    ///     }
+    ///     break;
+    /// ```
+    ///
+    /// There is no summon item, no altar and no other route: the Lacewing's death is the whole of
+    /// it, which is why the missing spawn arm took the entire boss with it. *Catching* one is not a
+    /// summon either (it has a `catchItem`, `NPC.cs:17397`) - only killing it counts, and only if a
+    /// player did the killing, which is what [`Npc::hit_by_player`] answers.
+    ///
+    /// `NextVector2Circular(50f, 50f)` is `NextVector2Unit() * (50, 50) * NextFloat()`
+    /// (`Utils.cs:1301-1304`): a random direction at a radius scaled linearly rather than by an
+    /// area-uniform square root, so the scatter is denser near the middle. Transcribed as written.
+    ///
+    /// Two disclosed narrowings, both against `SpawnBoss` (`NPC.cs:81485-81520`) rather than against
+    /// this case: `timeLeft *= 20` is not applied, because no boss-summon path in this server
+    /// applies it, and the target player index is not carried onto the new NPC, because this
+    /// server's routines pick their own target every tick. Neither changes who or where she is.
+    fn wake_the_empress(&mut self, npc_type: u16, center: (f32, f32), hit_by_player: bool) {
+        use rand::Rng;
+        use terrustia_proto::npc_params::{EMPRESS_OF_LIGHT, PRISMATIC_LACEWING};
+
+        if npc_type != PRISMATIC_LACEWING || !hit_by_player {
+            return;
+        }
+        if self
+            .npcs
+            .iter()
+            .any(|(_, n)| n.npc_type == EMPRESS_OF_LIGHT && n.is_alive())
+        {
+            return;
+        }
+        let angle = self.rng.random::<f32>() * std::f32::consts::TAU;
+        let radius = self.rng.random::<f32>() * 50.0;
+        let at = (
+            center.0 + angle.cos() * radius,
+            center.1 - 200.0 + angle.sin() * radius,
+        );
+        let Some(index) = self.spawn_at_bottom(EMPRESS_OF_LIGHT, at) else {
+            return;
+        };
+        // The same keyed name every other boss-summon path builds: our own names are the game's
+        // `NPCName.*` keys, so the two line up without a translation table.
+        let name = self
+            .npcs
+            .get(index)
+            .map(|n| n.stats.name)
+            .unwrap_or("Something");
+        let who = NetworkText::key(format!("NPCName.{name}"), Vec::new());
+        self.announce_key("Announcement.HasAwoken", vec![who]);
+        self.broadcast_npc(index);
+        info!(x = at.0, y = at.1, "a Prismatic Lacewing woke the Empress");
     }
 
     /// A bound Purple Slime beaten to nothing, which is how that one is freed.
@@ -5420,6 +5491,7 @@ impl GameServer {
             crimson: self.world.crimson,
             snow: biome == crate::game::spawn::Biome::Snow,
             jungle: biome == crate::game::spawn::Biome::Jungle,
+            hallow: biome == crate::game::spawn::Biome::Hallow,
             wind: self.weather.wind,
             desert: biome == crate::game::spawn::Biome::Desert,
             sandstorm: self.weather.sandstorm,
@@ -10061,6 +10133,79 @@ mod boss_drop_table_fixes {
         // 0 is an ordinary night fight, 1 the same after the turn. Neither is the daylight fight.
         assert!(!dropped_with(0.0), "a night fight does not");
         assert!(!dropped_with(1.0), "nor a night fight past its turn");
+    }
+
+    /// Killing a Prismatic Lacewing is the Empress of Light's only summon
+    /// (`NPC.cs:80309-80319`), and it is what makes her reachable at all: with the spawn arm and
+    /// this event both absent, nothing this server could do put a 636 in a world by itself.
+    ///
+    /// The three gates are asserted separately because each one is a different failure. Vanilla's
+    /// `GetWereThereAnyInteractions()` is [`Npc::hit_by_player`], so a Lacewing a townsperson cut
+    /// down is not a summon; `!AnyNPCs(636)` stops a second Lacewing stacking a second Empress; and
+    /// the type gate stops every other corpse in the world doing it.
+    ///
+    /// Neutralised arm by arm, each run and each failing its own assertion:
+    ///
+    /// * deleting the `wake_the_empress` call from `npc_died`: "a killed Lacewing woke no Empress".
+    /// * dropping `|| !hit_by_player`: "a Lacewing nobody hit woke the Empress".
+    /// * dropping the `AnyNPCs` guard: "a second Lacewing stacked a second Empress: 2".
+    #[test]
+    fn a_killed_prismatic_lacewing_wakes_the_empress() {
+        use terrustia_proto::npc_params::{EMPRESS_OF_LIGHT, PRISMATIC_LACEWING};
+
+        let empresses = |server: &GameServer| {
+            server
+                .npcs
+                .iter()
+                .filter(|(_, n)| n.npc_type == EMPRESS_OF_LIGHT)
+                .count()
+        };
+        let kill = |server: &mut GameServer, hit_by_player: bool| {
+            let at = (5_000.0, 2_000.0);
+            let index = server
+                .npcs
+                .spawn(PRISMATIC_LACEWING, at)
+                .expect("a slot for the Lacewing");
+            server
+                .npcs
+                .get_mut(index)
+                .expect("just spawned")
+                .hit_by_player = hit_by_player;
+            server.npc_died(index, PRISMATIC_LACEWING, at, 0.0);
+        };
+
+        let mut server = GameServer::new(Config::default(), tiny_world());
+        kill(&mut server, true);
+        assert_eq!(empresses(&server), 1, "a killed Lacewing woke no Empress");
+
+        // ...and only one of her, however many Lacewings die.
+        kill(&mut server, true);
+        assert_eq!(
+            empresses(&server),
+            1,
+            "a second Lacewing stacked a second Empress: {}",
+            empresses(&server)
+        );
+
+        // A Lacewing that no player ever touched is not a summon.
+        let mut untouched = GameServer::new(Config::default(), tiny_world());
+        kill(&mut untouched, false);
+        assert_eq!(
+            empresses(&untouched),
+            0,
+            "a Lacewing nobody hit woke the Empress"
+        );
+
+        // ...and nothing else does it at all.
+        let mut other = GameServer::new(Config::default(), tiny_world());
+        let index = other.npcs.spawn(1, (5_000.0, 2_000.0)).expect("a slot");
+        other
+            .npcs
+            .get_mut(index)
+            .expect("just spawned")
+            .hit_by_player = true;
+        other.npc_died(index, 1, (5_000.0, 2_000.0), 0.0);
+        assert_eq!(empresses(&other), 0, "a slime woke the Empress");
     }
 
     /// The control case: an ordinary Skeletron kill (`ai[3]` left at its default) must not carry

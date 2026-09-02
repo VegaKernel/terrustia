@@ -1427,6 +1427,29 @@ pub const GIANT_SKULL_RELEASE: f32 = 20.0;
 pub const GIANT_SKULL_SHOT_SPEED: f32 = 6.0;
 pub const GIANT_SKULL_SHOT_DAMAGE: i32 = 25;
 
+/// The Prismatic Lacewing (`NPCID.EmpressButterfly`) and what killing one wakes
+/// (`NPCID.HallowBoss`). Killing a Lacewing is the only summon the Empress of Light has
+/// (`NPC.cs:80309-80319`).
+pub const PRISMATIC_LACEWING: u16 = 661;
+pub const EMPRESS_OF_LIGHT: u16 = 636;
+
+/// The Lacewing's own half of style 65 (`NPC.cs:45387-45445`), which is where it stops behaving
+/// like an ordinary butterfly.
+///
+/// `ai[2]` is a fade counter rather than the variety an ordinary butterfly keeps there (vanilla's
+/// own variety roll is guarded `type != 661`). It climbs by one every tick the nearest player is
+/// invalid or further off than [`LACEWING_KEEP_RANGE`], falls by one otherwise, and is clamped to
+/// [`LACEWING_FADE_CAP`] while that player is standing in the hallow. At [`LACEWING_FADE_GONE`] the
+/// Lacewing simply goes, which only the raised cap (leaving the hallow lifts it to
+/// [`LACEWING_FADE_GONE`]) can ever reach: wandering out of range alone makes it fade and turn
+/// untouchable, but it stays.
+pub const LACEWING_KEEP_RANGE: f32 = 300.0;
+pub const LACEWING_FADE_GONE: f32 = 60.0;
+pub const LACEWING_FADE_CAP: f32 = 50.0;
+/// It also looks around for danger half again as often as an ordinary butterfly
+/// (`NPC.cs:45549-45553`, `localAI[1] = 10f` rather than `15f`).
+pub const LACEWING_FEAR_INTERVAL: f32 = 10.0;
+
 /// How long a butterfly holds a heading before picking another, as an inclusive-exclusive range.
 pub const BUTTERFLY_REPLAN: (u32, u32) = (90, 240);
 /// How gently it eases onto that heading: one sixtieth of the difference per tick.

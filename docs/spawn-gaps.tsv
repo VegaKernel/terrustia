@@ -7,7 +7,6 @@
 58	Piranha
 70	SpikeBall
 72	BlazingWheel
-86	Unicorn
 102	AnglerFish
 103	GreenJellyfish
 132	BaldZombie
@@ -15,7 +14,6 @@
 187	SlimedZombie
 188	SwampZombie
 189	TwiggyZombie
-195	LostGirl
 200	FemaleZombie
 201	HeadacheSkeleton
 202	MisassembledSkeleton
@@ -32,7 +30,6 @@
 233	HornetLeafy
 234	HornetSpikey
 235	HornetStingy
-244	RainbowSlime
 256	FungoFish
 300	Mouse
 357	Worm
@@ -102,7 +99,6 @@
 653	HellButterfly
 654	Lavafly
 655	MagmaSnail
-661	EmpressButterfly
 669	Stinkbug
 688	Pufferfish
 689	OwlMimic

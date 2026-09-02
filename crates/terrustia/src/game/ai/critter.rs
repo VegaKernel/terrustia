@@ -15,7 +15,8 @@ use super::{Shot, World};
 use crate::game::npc::{Npc, TILE, TileView};
 use terrustia_proto::npc_params::{
     BUTTERFLY_EASE, BUTTERFLY_FEAR_INTERVAL, BUTTERFLY_HOMING_RANGE, BUTTERFLY_PANIC_SPEED,
-    BUTTERFLY_REPLAN,
+    BUTTERFLY_REPLAN, LACEWING_FADE_CAP, LACEWING_FADE_GONE, LACEWING_FEAR_INTERVAL,
+    LACEWING_KEEP_RANGE, PRISMATIC_LACEWING,
 };
 use terrustia_proto::tile_solid::solid;
 
@@ -329,16 +330,74 @@ pub fn dandelion<T: TileView>(
     seeds
 }
 
-/// Drive one butterfly for a tick.
+/// Drive one butterfly for a tick, returning whether it wants to be gone.
 ///
 /// A butterfly's heading lives in `ai[0..1]` as a velocity it eases toward over a full second, so
 /// its path is all long curves and no corners. Every couple of seconds it picks a new one: while it
 /// is more than seven hundred pixels from anyone it heads back toward them, and the first time it
 /// finds itself closer than that it stops homing for good and wanders freely from then on.
-pub fn butterfly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) {
+///
+/// The Prismatic Lacewing shares the style and diverges inside it (`NPC.cs:45387-45445`), which is
+/// what the return value is for: it is the one butterfly that can take itself out of the world.
+pub fn butterfly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng) -> bool {
+    // The Lacewing's own half of the routine, ahead of everything else exactly as vanilla puts it:
+    //
+    // ```csharp
+    // int num3 = 60;
+    // bool flag = false;
+    // int num4 = 50;
+    // NPCAimedTarget targetData = GetTargetData();
+    // if (targetData.Invalid || targetData.Center.Distance(base.Center) >= 300f) flag = true;
+    // if (!Main.remixWorld && !targetData.Invalid && targetData.Type == NPCTargetType.Player
+    //     && !Main.player[target].ZoneHallow) { num4 = num3; flag = true; }
+    // ai[2] = MathHelper.Clamp(ai[2] + (float)flag.ToDirectionInt(), 0f, num4);
+    // if (ai[2] >= (float)num3) { active = false; ...; return; }
+    // Opacity = Utils.GetLerpValue(num3, (float)num4 / 2f, ai[2], clamped: true);
+    // ...
+    // dontTakeDamage = ai[2] >= (float)(num4 / 2);
+    // ```
+    //
+    // `flag.ToDirectionInt()` is `+1` when set and `-1` when not, so `ai[2]` is a fade counter that
+    // climbs while nobody is near and unwinds while somebody is. Which is why the variety roll
+    // below carries vanilla's own `type != 661`: for this one, `ai[2]` is not the variety at all,
+    // and rolling a 1-to-8 into it would leave it permanently half faded and untouchable.
+    //
+    // Note what the two ceilings do. Out of range alone clamps at fifty, which never reaches sixty,
+    // so a Lacewing you merely walk away from fades and turns untouchable but stays put; it is
+    // *leaving the hallow* that raises the ceiling to sixty and lets it go. That is the whole rule
+    // players know it by.
+    //
+    // Two disclosed narrowings. `ZoneHallow` is read off the nearest player rather than off this
+    // one's own target, the same stand-in `Conditions`' `crimson`, `jungle`, `snow` and `desert`
+    // already make; and `Main.remixWorld` is not modelled anywhere in this server, so that half of
+    // the second gate drops. `Opacity` is left out as pure drawing: it is a pure function of `ai[2]`
+    // and `num4`, both of which a client already has, and nothing server-side reads it back.
+    if npc.npc_type == PRISMATIC_LACEWING {
+        let (cx, cy) = npc.center();
+        let far = world.target.is_none_or(|t| {
+            let (dx, dy) = (t.center.0 - cx, t.center.1 - cy);
+            (dx * dx + dy * dy).sqrt() >= LACEWING_KEEP_RANGE
+        });
+        let mut cap = LACEWING_FADE_CAP;
+        let mut fading = far;
+        if world.target.is_some() && !world.conditions.hallow {
+            cap = LACEWING_FADE_GONE;
+            fading = true;
+        }
+        npc.ai[2] = (npc.ai[2] + if fading { 1.0 } else { -1.0 }).clamp(0.0, cap);
+        npc.dirty = true;
+        if npc.ai[2] >= LACEWING_FADE_GONE {
+            return true;
+        }
+        // Integer division, as vanilla writes it: twenty-five at the ordinary ceiling, thirty once
+        // it has been raised.
+        npc.invulnerable = npc.ai[2] >= ((cap as i32) / 2) as f32;
+    }
+
     // `ai[2]` is which of the eight varieties it is — the game rolls it once to decide what lands
-    // in your net — and `ai[3]` is its size.
-    if npc.ai[2] == 0.0 {
+    // in your net — and `ai[3]` is its size. The Lacewing is excluded from the variety roll and
+    // from it alone; everything below this line it does share.
+    if npc.ai[2] == 0.0 && npc.npc_type != PRISMATIC_LACEWING {
         let roll = rng.random_range(0..100);
         npc.ai[2] = 1.0
             + match roll {
@@ -425,7 +484,12 @@ pub fn butterfly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut Sma
     if npc.local_ai[1] > 0.0 {
         npc.local_ai[1] -= 1.0;
     } else {
-        npc.local_ai[1] = BUTTERFLY_FEAR_INTERVAL;
+        // `NPC.cs:45549-45553`: the Lacewing looks around half again as often as the rest.
+        npc.local_ai[1] = if npc.npc_type == PRISMATIC_LACEWING {
+            LACEWING_FEAR_INTERVAL
+        } else {
+            BUTTERFLY_FEAR_INTERVAL
+        };
         let (fx, fy) = world.crowding;
         if fx != 0.0 || fy != 0.0 {
             npc.velocity.0 += fx * 2.0;
@@ -453,6 +517,7 @@ pub fn butterfly<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut Sma
         npc.direction = 1;
     }
     npc.dirty = true;
+    false
 }
 
 #[cfg(test)]
@@ -713,6 +778,104 @@ mod tests {
             "one sixtieth of the way there, got {}",
             b.velocity.0
         );
+    }
+
+    /// The Lacewing keeps a fade counter in `ai[2]` where an ordinary butterfly keeps its variety
+    /// (`NPC.cs:45387-45414`), which is why vanilla's variety roll carries `type != 661`.
+    ///
+    /// Neutralised by dropping the `&& npc.npc_type != PRISMATIC_LACEWING` from the variety roll:
+    /// "a Lacewing rolled a variety into its fade counter: 6", and the Lacewing arrives already a
+    /// tenth of the way faded and, one tick later than that, untouchable.
+    #[test]
+    fn a_lacewing_keeps_a_fade_counter_where_a_butterfly_keeps_its_variety() {
+        let tiles = Air::default();
+        let mut b = at(PRISMATIC_LACEWING, 500, 400);
+        let (cx, cy) = b.center();
+        let close = Some(Target {
+            slot: 0,
+            center: (cx + 50.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let mut w = world(&tiles, close);
+        w.conditions.hallow = true;
+        butterfly(&mut b, &w, &mut rng());
+        assert_eq!(
+            b.ai[2], 0.0,
+            "a Lacewing rolled a variety into its fade counter: {}",
+            b.ai[2]
+        );
+        assert!(!b.invulnerable, "and it should still be killable");
+    }
+
+    /// Walking away from a Lacewing fades it and makes it untouchable, and leaves it there: the
+    /// counter clamps at fifty and the exit is at sixty (`NPC.cs:45389-45409`).
+    ///
+    /// Neutralised by raising the clamp to `LACEWING_FADE_GONE` unconditionally: "it should still be
+    /// here", the Lacewing vanishing from simple distance instead of from leaving the hallow.
+    #[test]
+    fn a_lacewing_left_alone_in_the_hallow_fades_but_stays() {
+        let tiles = Air::default();
+        let mut b = at(PRISMATIC_LACEWING, 500, 400);
+        let mut w = world(&tiles, None);
+        w.conditions.hallow = true;
+        for _ in 0..200 {
+            assert!(
+                !butterfly(&mut b, &w, &mut rng()),
+                "it should still be here"
+            );
+        }
+        assert_eq!(b.ai[2], LACEWING_FADE_CAP, "and be as faded as it can get");
+        assert!(b.invulnerable, "and untouchable while it is");
+
+        // Come back and it unwinds, one a tick, and can be hurt again.
+        let (cx, cy) = b.center();
+        let close = Some(Target {
+            slot: 0,
+            center: (cx + 50.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        let mut near = world(&tiles, close);
+        near.conditions.hallow = true;
+        for _ in 0..(LACEWING_FADE_CAP as i32) {
+            butterfly(&mut b, &near, &mut rng());
+        }
+        assert_eq!(b.ai[2], 0.0, "should have come all the way back");
+        assert!(!b.invulnerable, "and be killable again");
+    }
+
+    /// Leaving the hallow is what actually ends it: the second gate raises the ceiling to sixty,
+    /// which is the only value that reaches the exit (`NPC.cs:45400-45409`).
+    ///
+    /// Neutralised by deleting the `!world.conditions.hallow` arm: "a Lacewing outside the hallow
+    /// never left", the counter sitting at fifty for ever.
+    #[test]
+    fn a_lacewing_goes_when_the_player_leaves_the_hallow() {
+        let tiles = Air::default();
+        let mut b = at(PRISMATIC_LACEWING, 500, 400);
+        let (cx, cy) = b.center();
+        let close = Some(Target {
+            slot: 0,
+            center: (cx + 50.0, cy),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        // Standing right next to it, but no longer in the hallow.
+        let w = world(&tiles, close);
+        assert!(!w.conditions.hallow);
+        let mut ticks = 0;
+        loop {
+            ticks += 1;
+            if butterfly(&mut b, &w, &mut rng()) {
+                break;
+            }
+            assert!(
+                ticks <= LACEWING_FADE_GONE as i32 + 5,
+                "a Lacewing outside the hallow never left"
+            );
+        }
+        assert_eq!(ticks, LACEWING_FADE_GONE as i32, "one tick per count");
     }
 
     #[test]

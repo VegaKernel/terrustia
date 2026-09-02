@@ -77,6 +77,10 @@ pub struct Conditions {
     pub jungle: bool,
     /// ...and whether they are in the snow, which is where Deerclops hunts.
     pub snow: bool,
+    /// ...and whether they are in the hallow, which is the only place a Prismatic Lacewing will
+    /// stay: `!Main.player[target].ZoneHallow` is what lets its own fade counter run all the way to
+    /// the end and take it out of the world (`NPC.cs:45400-45412`).
+    pub hallow: bool,
     /// Wind speed, signed: positive blows east.
     pub wind: f32,
     /// Whether the nearest player is standing in a desert, which is the only place a tumbleweed
@@ -127,6 +131,7 @@ impl Default for Conditions {
             crimson: false,
             jungle: false,
             snow: false,
+            hallow: false,
             wind: 0.0,
             desert: false,
             sandstorm: false,
@@ -1078,7 +1083,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             effects.carry = Some(balloon::carry_point(npc));
         }
         114 => dragonfly::update(npc, world, rng),
-        65 => critter::butterfly(npc, world, rng),
+        65 => effects.expired = critter::butterfly(npc, world, rng),
         // One hit in six knocks it down, and only in expert (`NPC.cs:39016`).
         91 => granite::update(
             npc,

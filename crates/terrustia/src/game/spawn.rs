@@ -1438,10 +1438,6 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
 ///
 /// * `NPC.cs:5007` the Skeleton Merchant, who already has his own branch in [`try_spawn`] with the
 ///   two conditions this signature cannot see (standing water, and one alive at a time).
-/// * `NPC.cs:5013` the Lost Girl. Reachable in one line here, but she is a decoration until
-///   something turns her into a Nymph, and nothing does: `Npc::become_type(196)` exists and has a
-///   test, no caller triggers it. Spawning a permanently idle prop is worse than the honest gap, so
-///   195 stays in `docs/spawn-gaps.tsv` until the transformation has a lane.
 /// * `NPC.cs:5017` the Rune Wizard, already carried by [`hardmode_pool`].
 /// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
 ///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
@@ -1489,6 +1485,23 @@ pub fn cavern_seasonal_pick(
             return Some(634); // SporeBat
         }
         return None;
+    }
+    // NPC.cs:5012-5015, `if (Main.rand.Next(80) == 0)`, one arm below the Skeleton Merchant the
+    // caller answers and one above the Rune Wizard [`hardmode_pool`] carries. No progression gate
+    // and no depth gate beyond the cavern chain she lives in: she is found at any point in a
+    // world's life.
+    //
+    // She is not a prop. `NPC.aiStyle = 42` (`NPC.cs:11524`) is the disguise, and its routine
+    // (`NPC.cs:30360-30389`) drops it: within two hundred pixels of a player it can see, or on
+    // being moved or hurt at all, it counts twenty-one ticks and calls `Transform(196)`. All of
+    // that was already here and already tested (`game::ai::ambush::lost_girl`, dispatched at ai
+    // style 42, whose `Some(NYMPH)` becomes [`crate::game::npc::Npc::become_type`] through
+    // `Effects::transform`), so this one missing arm was the only reason either 195 or 196 had a
+    // path into a world. An earlier reading of this file recorded the transformation as the
+    // missing half and left the arm out on that basis; the transformation is present, and it was
+    // the spawn that was missing.
+    if one_in(rng, 80) {
+        return Some(195); // LostGirl
     }
     // NPC.cs:5021. `offensiveToTim` (a second, likelier one in fifty for a player carrying a magic
     // weapon) is not read here, so Tim is very slightly rarer than the game's, never commoner.
@@ -1570,6 +1583,89 @@ pub fn cavern_seasonal_pick(
         // SkeletonTopHat, SkeletonAstonaut, SkeletonAlien
         return Some(322 + rng.random_range(0..3));
     }
+    None
+}
+
+/// What hallowed ground offers ahead of the hallow pool (`NPC.cs:4039-4061`).
+///
+/// The whole arm, and its outer gate, is:
+///
+/// ```csharp
+/// else if (((Main.hardMode && underGround) || (Main.remixWorld && Main.rand.Next(2) == 0))
+///     && !waterTile && (tileType == 116 || tileType == 117 || tileType == 109 || tileType == 164))
+/// {
+///     if (downedPlantBoss && (Main.remixWorld || (!Main.dayTime && Main.time < 16200.0))
+///         && surfaceSpawn && RollLuck(10) == 0 && !AnyNPCs(661))          661;
+///     else if (raining && !AnyNPCs(244) && RollLuck(10) == 0)             244;
+///     else if (!Main.dayTime && Main.rand.Next(2) == 0)                   122;
+///     else if (Main.rand.Next(10) == 0 || (ZoneWaterCandle && Main.rand.Next(10) == 0)) 86;
+///     else                                                                75;
+/// }
+/// ```
+///
+/// It is an ordered chain rather than a pool, which is the point: it is the only source in the whole
+/// of `NPC.Spawner` for three of its five members. The Prismatic Lacewing (661) is the Empress of
+/// Light's only summon, so with this arm missing an entire boss was unreachable; the Rainbow Slime
+/// (244) and the Unicorn (86) come from here and nowhere else either, and all three sat in
+/// `docs/spawn-gaps.tsv` together for exactly one reason.
+///
+/// `underGround` is `spawnTileY <= Main.rockLayer` (`NPC.cs:1144`), the *dirt* layer and above, so
+/// the caller's gate is [`Depth::Surface`] or [`Depth::Underground`]; `surfaceSpawn` is
+/// `spawnTileY <= Main.worldSurface` (`:1203`), which is [`Depth::Surface`] alone. The two are not
+/// alternatives: hallowed grass in daylight is both at once, which is why the Lacewing's own arm can
+/// carry `surfaceSpawn` inside a branch already gated on `underGround`.
+///
+/// Two leaves hand the draw back rather than answering, the same way [`cavern_seasonal_pick`] hands
+/// back every arm [`pool`] already carries: the Gastropod (122) and the Pixie (75) are both in
+/// [`hardmode_pool`]'s hallow entry at every depth this is reached from. Their rolls are still made,
+/// in vanilla's own order, so the three arms above them land at the game's odds rather than at
+/// inflated ones. The visible difference is that a hallow night here can also answer with an
+/// Illuminant Bat or Slime where vanilla's `else` would have said Pixie.
+///
+/// Three narrowings, each disclosed rather than invented:
+///
+/// * `Main.remixWorld` is not modelled anywhere in this server, so the outer gate's second half
+///   drops and the Lacewing's `(remixWorld || night)` collapses to the night half. Same treatment,
+///   and same reason, as the Goblin Scout's arm in [`try_spawn`].
+/// * `ZoneWaterCandle` is not modelled either (see [`sky_pick`], where its two arms are dead code in
+///   the game itself), so the Unicorn's second chance drops and its gate is the plain one in ten.
+/// * `RollLuck(10)` is `Main.rand.Next(10)` at luck zero (`Luck.cs:5-16`).
+///
+/// `alive` is vanilla's `AnyNPCs`. Both uses of it are real gates rather than politeness: one
+/// Lacewing at a time is what stops a hallow night raining Empresses.
+pub fn hallow_ground_pick(
+    downed_plant_boss: bool,
+    day_time: bool,
+    time: i32,
+    surface_spawn: bool,
+    raining: bool,
+    alive: &dyn Fn(u16) -> bool,
+    rng: &mut SmallRng,
+) -> Option<u16> {
+    // NPC.cs:4041.
+    if downed_plant_boss
+        && !day_time
+        && time < LACEWING_LATEST
+        && surface_spawn
+        && rng.random_range(0..LACEWING_ODDS) == 0
+        && !alive(PRISMATIC_LACEWING)
+    {
+        return Some(PRISMATIC_LACEWING);
+    }
+    // NPC.cs:4045.
+    if raining && !alive(244) && rng.random_range(0..RAINBOW_SLIME_ODDS) == 0 {
+        return Some(244); // RainbowSlime
+    }
+    // NPC.cs:4049, the Gastropod, which [`hardmode_pool`] already carries: the roll is made and the
+    // draw handed back.
+    if !day_time && rng.random_ratio(1, 2) {
+        return None;
+    }
+    // NPC.cs:4053.
+    if rng.random_range(0..UNICORN_ODDS) == 0 {
+        return Some(86); // Unicorn
+    }
+    // NPC.cs:4059's `else` is the Pixie, which [`hardmode_pool`] carries too.
     None
 }
 
@@ -2070,6 +2166,29 @@ const BOOK_SEARCH_SPAN: i32 = 32;
 /// The Skeleton Merchant's two nested rolls collapsed (`NPC.cs:5004`'s `Next(2)` and `:5007`'s
 /// `Next(35)`), because nothing between them can spawn anything.
 const SKELETON_MERCHANT_ODDS: u32 = 70;
+
+/// The Prismatic Lacewing, which is not a critter you catch for a collection: killing one is the
+/// *only* way the Empress of Light is ever summoned (`NPC.cs:80309-80319`). With no arm spawning
+/// it, an entire boss, her fight and her whole drop table were unreachable. The id itself lives in
+/// `npc_params` beside the rest of its routine's numbers, since its own AI reads it too.
+use terrustia_proto::npc_params::PRISMATIC_LACEWING;
+
+/// The hallow chain's four hallowed grounds, `tileType == 116 || 117 || 109 || 164`
+/// (`NPC.cs:4039`): Pearlsand, Pearlstone, HallowedGrass and HallowedIce.
+const HALLOW_GROUND: [u16; 4] = [116, 117, 109, 164];
+
+/// The night is 32,400 ticks long, so `Main.time < 16200.0` (`NPC.cs:4041`) is its first half: a
+/// Lacewing is found between dusk and midnight and never after it.
+const LACEWING_LATEST: i32 = 16_200;
+
+/// `RollLuck(10)` on the Lacewing's arm and again on the Rainbow Slime's (`NPC.cs:4041`, `:4045`),
+/// which at luck zero is a plain `Main.rand.Next(10)` (`Luck.cs:5-16`), the same narrowing as every
+/// other `Roll*Luck` call site in this file.
+const LACEWING_ODDS: u32 = 10;
+const RAINBOW_SLIME_ODDS: u32 = 10;
+
+/// `Main.rand.Next(10)` on the Unicorn's arm (`NPC.cs:4053`).
+const UNICORN_ODDS: u32 = 10;
 
 /// How often a hostile type is drawn relative to the others sharing its pool, the game's own
 /// per-type spawn rate reduced to one number.
@@ -4200,6 +4319,39 @@ pub fn try_spawn(
                     out.push((npc_type, (x as f32 * 16.0, (y + drop) as f32 * 16.0)));
                     break;
                 }
+                // Hallowed ground, which has a chain of its own ahead of the hallow pool
+                // (`NPC.cs:4039-4061`, and see [`hallow_ground_pick`] for the whole of it). It sits
+                // here because that is where vanilla puts it: below the sandstorm and the four sand
+                // conversions, above the two evils' own tile arms and above `else if (surfaceSpawn)`.
+                //
+                // Keyed on the tile underfoot rather than on [`Biome::Hallow`], because vanilla's is:
+                // the gate is `tileType == 116 || 117 || 109 || 164` with no `ZoneHallow` anywhere in
+                // it, so a single pearlstone ledge in an otherwise ordinary cavern roof is hallowed
+                // ground for this purpose and a hallowed biome floored in plain stone is not.
+                // `underGround` (`NPC.cs:1144`) is the dirt layer and above, so the caverns are out.
+                //
+                // One disclosed reorder: vanilla tests `!waterTile` before the four tile types, and
+                // this tests the tiles first. Both are pure, so the branch taken is the same; the
+                // order is chosen so the array scan shuts the gate before `water_tile`'s own tile
+                // read is made. Measured at 0.89 ns a candidate on ordinary stone and 16.85 ns for
+                // the whole chain on the one night it can answer with everything
+                // ([`tests::measure_the_hallowed_ground_arm`]).
+                None if events.hard_mode
+                    && matches!(depth, Depth::Surface | Depth::Underground)
+                    && ground_block.is_some_and(|g| HALLOW_GROUND.contains(&g))
+                    && !water_tile(world, x, y)
+                    && let Some(npc_type) = hallow_ground_pick(
+                        world.progress.downed_plantera,
+                        world.day_time,
+                        world.time,
+                        depth == Depth::Surface,
+                        world.raining,
+                        &|ty| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive()),
+                        rng,
+                    ) =>
+                {
+                    npc_type
+                }
                 // The underworld arm's own first branch (`NPC.cs:4877`):
                 //
                 // ```csharp
@@ -4759,6 +4911,31 @@ mod tests {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ...and hallowed ground's own chain, asked the same way. Every flag it reads opens an arm
+        // the others do not: Plantera down and the first half of the night for the Lacewing, rain
+        // for the Rainbow Slime, and the surface for the Lacewing again. With nothing alive, since
+        // two of its arms are gated on a census of themselves.
+        for downed_plantera in [false, true] {
+            for day_time in [false, true] {
+                for raining in [false, true] {
+                    for surface_spawn in [false, true] {
+                        for seed in 0..4_000u64 {
+                            let mut rng = SmallRng::seed_from_u64(seed);
+                            set.extend(hallow_ground_pick(
+                                downed_plantera,
+                                day_time,
+                                0,
+                                surface_spawn,
+                                raining,
+                                &|_| false,
+                                &mut rng,
+                            ));
                         }
                     }
                 }
@@ -5691,16 +5868,18 @@ mod tests {
             );
         }
 
-        // An ordinary cavern in the upper stone answers nothing here at all, which is what makes
-        // every type above the season's doing rather than the chain's.
-        assert!(
-            set(sample(plain, false, false)).is_empty(),
-            "an ordinary cavern answered the seasonal chain"
+        // An ordinary cavern in the upper stone answers one thing and one only, the Lost Girl
+        // (`NPC.cs:5012`), who carries no season and no progression gate. Everything else above is
+        // therefore the season's doing rather than the chain's.
+        assert_eq!(
+            set(sample(plain, false, false)),
+            std::collections::BTreeSet::from([195u16]),
+            "an ordinary cavern answered more than the Lost Girl"
         );
-        // ...and the bottom half of the stone answers exactly one thing: Tim (`NPC.cs:5021`).
+        // ...and the bottom half of the stone adds exactly one more: Tim (`NPC.cs:5021`).
         assert_eq!(
             set(sample(plain, false, true)),
-            std::collections::BTreeSet::from([45u16]),
+            std::collections::BTreeSet::from([45u16, 195]),
             "the lower caverns should add Tim and nothing else"
         );
 
@@ -5765,6 +5944,180 @@ mod tests {
                 "{npc_type} turned up in an ordinary cavern: {ordinary:?}"
             );
         }
+    }
+
+    /// The caverns hand out a Lost Girl one attempt in eighty (`NPC.cs:5012-5015`), and she is the
+    /// only path into the Nymph there has ever been.
+    ///
+    /// Both halves are asserted, because either one alone would be a half-wired lane: `try_spawn`
+    /// really puts a 195 in a cavern, and the routine she arrives with really turns her into a 196
+    /// (`game::ai::ambush::lost_girl`, `NPC.cs:30360-30389`). Vanilla's own ambient spawning never
+    /// produces a 196 by any other route either, which is why 196 is not in `docs/spawn-gaps.tsv`
+    /// while 195 was.
+    ///
+    /// The transformation half is `game::ai::ambush`'s own three tests, which already drive the
+    /// routine through all three of vanilla's tells and assert it hands back a 196; this is the
+    /// spawn half, which was the missing one.
+    ///
+    /// Neutralised by deleting the `one_in(rng, 80)` arm from [`cavern_seasonal_pick`]: "no Lost
+    /// Girl in the caverns", 195 never appearing among the 200,000 attempts.
+    #[test]
+    fn the_caverns_hand_out_a_lost_girl() {
+        let world = flat_world(250);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+
+        let found: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            found.contains(&195),
+            "no Lost Girl in the caverns: {found:?}"
+        );
+    }
+
+    /// Hallowed ground's own chain (`NPC.cs:4039-4061`), arm by arm.
+    ///
+    /// Three of its five are found nowhere else in `NPC.Spawner` at all, and the first of them is
+    /// the Empress of Light's only summon, so the whole of that boss hung off this one branch.
+    ///
+    /// Neutralised arm by arm, each run and each failing its own assertion:
+    ///
+    /// * dropping `downed_plant_boss` from `:4041`: "a Lacewing before Plantera".
+    /// * dropping `time < LACEWING_LATEST`: "a Lacewing after midnight".
+    /// * dropping `surface_spawn`: "a Lacewing underground".
+    /// * dropping `!day_time`: "a Lacewing in daylight".
+    /// * dropping `!alive(661)`: "a second Lacewing while one is already up".
+    /// * dropping `raining` from `:4045`: "a Rainbow Slime in the dry".
+    /// * dropping `!alive(244)`: "a second Rainbow Slime while one is already up".
+    /// * deleting the `:4053` arm: "no Unicorn on hallowed ground: {}".
+    #[test]
+    fn hallowed_ground_has_a_chain_of_its_own() {
+        let sample = |downed: bool, day: bool, time: i32, surface: bool, raining: bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    hallow_ground_pick(downed, day, time, surface, raining, &|_| false, &mut rng)
+                })
+                .collect::<std::collections::BTreeSet<u16>>()
+        };
+
+        // Plantera down, the first half of a dry night, on the surface: the Lacewing's own window.
+        let window = sample(true, false, 0, true, false);
+        assert!(
+            window.contains(&PRISMATIC_LACEWING),
+            "no Lacewing in its own window: {window:?}"
+        );
+        // ...and the Unicorn, which waits on nothing but the ground it stands on.
+        assert!(
+            window.contains(&86),
+            "no Unicorn on hallowed ground: {window:?}"
+        );
+
+        // Each of the Lacewing's four world conditions, taken away one at a time.
+        assert!(
+            !sample(false, false, 0, true, false).contains(&PRISMATIC_LACEWING),
+            "a Lacewing before Plantera"
+        );
+        assert!(
+            !sample(true, false, LACEWING_LATEST, true, false).contains(&PRISMATIC_LACEWING),
+            "a Lacewing after midnight"
+        );
+        assert!(
+            !sample(true, false, 0, false, false).contains(&PRISMATIC_LACEWING),
+            "a Lacewing underground"
+        );
+        assert!(
+            !sample(true, true, 0, true, false).contains(&PRISMATIC_LACEWING),
+            "a Lacewing in daylight"
+        );
+
+        // `!AnyNPCs(661)`: one at a time, which is what stops a hallow night raining Empresses.
+        let crowded = (0..40_000u64)
+            .filter_map(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                hallow_ground_pick(
+                    true,
+                    false,
+                    0,
+                    true,
+                    false,
+                    &|ty| ty == PRISMATIC_LACEWING,
+                    &mut rng,
+                )
+            })
+            .collect::<std::collections::BTreeSet<u16>>();
+        assert!(
+            !crowded.contains(&PRISMATIC_LACEWING),
+            "a second Lacewing while one is already up: {crowded:?}"
+        );
+
+        // The Rainbow Slime wants rain and one of itself, and nothing else.
+        assert!(
+            sample(false, true, 0, false, true).contains(&244),
+            "no Rainbow Slime in the rain"
+        );
+        assert!(
+            !sample(false, true, 0, false, false).contains(&244),
+            "a Rainbow Slime in the dry"
+        );
+        let wet = (0..40_000u64)
+            .filter_map(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                hallow_ground_pick(false, true, 0, false, true, &|ty| ty == 244, &mut rng)
+            })
+            .collect::<std::collections::BTreeSet<u16>>();
+        assert!(
+            !wet.contains(&244),
+            "a second Rainbow Slime while one is already up: {wet:?}"
+        );
+    }
+
+    /// The same chain through `try_spawn`, which is what proves it is wired to hallowed ground
+    /// rather than merely written, and that it reads the tile underfoot rather than the biome.
+    ///
+    /// Neutralised by changing the arm's `HALLOW_GROUND.contains(&g)` to `g == SAND`, so the chain
+    /// is still written and still called but no longer reaches pearlstone: "no Prismatic Lacewing
+    /// (661) on hallowed ground", and no Unicorn either.
+    #[test]
+    fn hallowed_ground_reaches_the_lacewing_through_try_spawn() {
+        const HALLOWED_GRASS: u16 = 109;
+        let mut world = flat_world_of(80, HALLOWED_GRASS);
+        let (px, py) = (400, 78);
+        assert_eq!(depth_at(&world, py), Depth::Surface);
+        world.progress.downed_plantera = true;
+        world.day_time = false;
+        world.time = 0;
+        world.raining = true;
+
+        let found: std::collections::BTreeSet<u16> = spawns_at(&world, true, px, py, 200_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [
+            (PRISMATIC_LACEWING, "Prismatic Lacewing"),
+            (244u16, "Rainbow Slime"),
+            (86, "Unicorn"),
+        ] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) on hallowed ground: {found:?}"
+            );
+        }
+
+        // The same night on plain stone, which no amount of hallow in the air makes hallowed
+        // ground: vanilla's gate is the tile, and there is no `ZoneHallow` anywhere in it.
+        let mut stone = flat_world_of(80, 1);
+        stone.progress.downed_plantera = true;
+        stone.day_time = false;
+        stone.time = 0;
+        stone.raining = true;
+        let ordinary: std::collections::BTreeSet<u16> = spawns_at(&stone, true, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            !ordinary.contains(&PRISMATIC_LACEWING),
+            "a Lacewing on plain stone: {ordinary:?}"
+        );
     }
 
     /// A meteor crater answers with Meteor Heads and with nothing else at all (`NPC.cs:2796-2799`).
@@ -8311,6 +8664,62 @@ mod tests {
              one scan per {:.0} calls)",
             f64::from(n) / scans as f64
         );
+    }
+
+    /// What hallowed ground's own arm costs a candidate that is not standing on it, which is every
+    /// candidate in most worlds.
+    ///
+    /// The gate reads no tiles of its own: `events.hard_mode` is a bool, the depth was resolved a
+    /// dozen lines above, and `HALLOW_GROUND.contains` scans four `u16` against the ground tile the
+    /// candidate loop already read for the sandstorm and mushroom arms. Only once all three pass
+    /// does anything else happen, and the store scan behind `alive` is behind four more conditions
+    /// and a one-in-ten roll on top of that.
+    ///
+    /// One deliberate reorder against vanilla, disclosed because it is a reorder: `NPC.cs:4039`
+    /// tests `!waterTile` before the four tile types, and this tests the tile types first. Both are
+    /// pure, so the branch it takes is identical; the order is chosen so the array scan shuts the
+    /// gate before `water_tile`'s own tile read is ever made.
+    ///
+    /// Measured on this machine, release build, the numbers printed by this test.
+    #[test]
+    #[ignore]
+    fn measure_the_hallowed_ground_arm() {
+        let n = 10_000_000;
+
+        // The gate, on ordinary stone: what a non-hallowed world pays per candidate.
+        for (name, ground) in [("stone", 1u16), ("pearlstone", 117u16)] {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(
+                    HALLOW_GROUND.contains(std::hint::black_box(&ground))
+                        && matches!(std::hint::black_box(Depth::Surface), Depth::Surface),
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("hallow gate, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // ...and the chain itself, on the one night it can answer with everything it has.
+        let mut rng = SmallRng::seed_from_u64(7);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..n {
+            sink += u32::from(
+                hallow_ground_pick(
+                    std::hint::black_box(true),
+                    std::hint::black_box(false),
+                    std::hint::black_box(0),
+                    std::hint::black_box(true),
+                    std::hint::black_box(true),
+                    &|_| false,
+                    &mut rng,
+                )
+                .is_some(),
+            );
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("hallow_ground_pick, full night: {each:.2} ns/call (sink {sink})");
     }
 
     #[test]
