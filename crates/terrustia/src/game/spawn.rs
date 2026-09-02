@@ -7327,6 +7327,54 @@ mod tests {
         }
     }
 
+    /// What the Statue Mimic's plinth check costs, since it is the one new per-candidate thing in
+    /// [`try_spawn`] that reads tiles rather than bools.
+    ///
+    /// It is behind `downedBoss3 && ZoneGraveyard && !noWorms` and then a one-in-twenty-five roll,
+    /// so an ordinary world never reaches it at all and a graveyard reaches it once in twenty-five
+    /// candidates. Measured on this machine, release, with the column walked so no read is served
+    /// from the last call's line: 23.14 ns on a plinth (all eight reads taken) and 4.52 ns on a
+    /// floor of half bricks, where the first `solid_tile2` shuts it.
+    ///
+    /// The number that matters is not that one but how often anything reaches it. Both this lane's
+    /// arms sit *inside* the candidate loop, which `try_spawn` enters only after the rate roll lets
+    /// an attempt through: over 2,000,000 calls on an ordinary forest day the loop resolved 5,223
+    /// times, one call in 383. So the whole addition is amortised over that, and it is below what
+    /// wall-clock timing can resolve here: `try_spawn` measured 242-527 ns a call with these arms
+    /// and 213-290 ns with both cut out, four runs each, the two ranges overlapping and neither
+    /// reproducible to better than a third of itself while other lanes share the machine. The
+    /// arithmetic is the answer where the clock is not.
+    #[test]
+    #[ignore]
+    fn measure_the_statue_mimic_plinth_check() {
+        let floor = 90;
+        let plinth = flat_world(floor);
+        let half_bricks = {
+            let mut world = plinth.clone();
+            for x in 0..world.width() {
+                let mut tile = terrustia_proto::Tile::block(1);
+                tile.flags.set(terrustia_proto::TileFlags::HALF_BRICK, true);
+                world.set_tile(x, floor, tile);
+            }
+            world
+        };
+
+        for (name, world) in [("plinth", &plinth), ("half bricks", &half_bricks)] {
+            let n = 10_000_000;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                sink += u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(world),
+                    200 + (i % 128),
+                    floor,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("good_place_for_a_statue_mimic, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {
