@@ -820,7 +820,10 @@ mod tests {
         let mut w = world(&tiles, None);
         w.conditions.hallow = true;
         for _ in 0..200 {
-            assert!(!butterfly(&mut b, &w, &mut rng()), "it should still be here");
+            assert!(
+                !butterfly(&mut b, &w, &mut rng()),
+                "it should still be here"
+            );
         }
         assert_eq!(b.ai[2], LACEWING_FADE_CAP, "and be as faded as it can get");
         assert!(b.invulnerable, "and untouchable while it is");

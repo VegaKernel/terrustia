@@ -10199,7 +10199,11 @@ mod boss_drop_table_fixes {
         // ...and nothing else does it at all.
         let mut other = GameServer::new(Config::default(), tiny_world());
         let index = other.npcs.spawn(1, (5_000.0, 2_000.0)).expect("a slot");
-        other.npcs.get_mut(index).expect("just spawned").hit_by_player = true;
+        other
+            .npcs
+            .get_mut(index)
+            .expect("just spawned")
+            .hit_by_player = true;
         other.npc_died(index, 1, (5_000.0, 2_000.0), 0.0);
         assert_eq!(empresses(&other), 0, "a slime woke the Empress");
     }

@@ -4330,8 +4330,12 @@ pub fn try_spawn(
                 // ground for this purpose and a hallowed biome floored in plain stone is not.
                 // `underGround` (`NPC.cs:1144`) is the dirt layer and above, so the caverns are out.
                 //
-                // Costs one array scan of four `u16` on a candidate that already read its own ground
-                // tile, and only reaches the rolls behind a hardmode check that is free.
+                // One disclosed reorder: vanilla tests `!waterTile` before the four tile types, and
+                // this tests the tiles first. Both are pure, so the branch taken is the same; the
+                // order is chosen so the array scan shuts the gate before `water_tile`'s own tile
+                // read is made. Measured at 0.89 ns a candidate on ordinary stone and 16.85 ns for
+                // the whole chain on the one night it can answer with everything
+                // ([`tests::measure_the_hallowed_ground_arm`]).
                 None if events.hard_mode
                     && matches!(depth, Depth::Surface | Depth::Underground)
                     && ground_block.is_some_and(|g| HALLOW_GROUND.contains(&g))
@@ -8660,6 +8664,62 @@ mod tests {
              one scan per {:.0} calls)",
             f64::from(n) / scans as f64
         );
+    }
+
+    /// What hallowed ground's own arm costs a candidate that is not standing on it, which is every
+    /// candidate in most worlds.
+    ///
+    /// The gate reads no tiles of its own: `events.hard_mode` is a bool, the depth was resolved a
+    /// dozen lines above, and `HALLOW_GROUND.contains` scans four `u16` against the ground tile the
+    /// candidate loop already read for the sandstorm and mushroom arms. Only once all three pass
+    /// does anything else happen, and the store scan behind `alive` is behind four more conditions
+    /// and a one-in-ten roll on top of that.
+    ///
+    /// One deliberate reorder against vanilla, disclosed because it is a reorder: `NPC.cs:4039`
+    /// tests `!waterTile` before the four tile types, and this tests the tile types first. Both are
+    /// pure, so the branch it takes is identical; the order is chosen so the array scan shuts the
+    /// gate before `water_tile`'s own tile read is ever made.
+    ///
+    /// Measured on this machine, release build, the numbers printed by this test.
+    #[test]
+    #[ignore]
+    fn measure_the_hallowed_ground_arm() {
+        let n = 10_000_000;
+
+        // The gate, on ordinary stone: what a non-hallowed world pays per candidate.
+        for (name, ground) in [("stone", 1u16), ("pearlstone", 117u16)] {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink += u32::from(
+                    HALLOW_GROUND.contains(std::hint::black_box(&ground))
+                        && matches!(std::hint::black_box(Depth::Surface), Depth::Surface),
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("hallow gate, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // ...and the chain itself, on the one night it can answer with everything it has.
+        let mut rng = SmallRng::seed_from_u64(7);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..n {
+            sink += u32::from(
+                hallow_ground_pick(
+                    std::hint::black_box(true),
+                    std::hint::black_box(false),
+                    std::hint::black_box(0),
+                    std::hint::black_box(true),
+                    std::hint::black_box(true),
+                    &|_| false,
+                    &mut rng,
+                )
+                .is_some(),
+            );
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("hallow_ground_pick, full night: {each:.2} ns/call (sink {sink})");
     }
 
     #[test]
