@@ -8,11 +8,9 @@
 70	SpikeBall
 72	BlazingWheel
 86	Unicorn
-101	Clinger
 102	AnglerFish
 103	GreenJellyfish
 132	BaldZombie
-175	AngryTrapper
 186	PincushionZombie
 187	SlimedZombie
 188	SwampZombie
@@ -23,7 +21,6 @@
 201	HeadacheSkeleton
 202	MisassembledSkeleton
 203	PantlessSkeleton
-204	SpikedJungleSlime
 217	CochinealBeetle
 218	CyanBeetle
 219	LacBeetle
@@ -90,7 +87,6 @@
 626	Seahorse
 627	GoldSeahorse
 628	Dandelion
-631	RockGolem
 639	GemSquirrelAmethyst
 640	GemSquirrelTopaz
 641	GemSquirrelSapphire

@@ -7553,6 +7553,88 @@ mod tests {
         }
     }
 
+    /// What the Rock Golem's gate costs, since it is this lane's one new per-candidate thing in
+    /// [`try_spawn`] that does more than look at a pool.
+    ///
+    /// Its ground tile is [`try_spawn`]'s own `ground_block`, already read for the sandstorm, the
+    /// mushroom arms and the Goblin Scout, so the branch adds no tile read of its own before the
+    /// roll. The shape is cheapest-first, and each rung of it is measured here: a non-stone floor
+    /// (dirt) leaves after three comparisons, plain stone spends a `SmallRng` draw and leaves
+    /// forty-nine times in fifty, and only the fiftieth pays for three [`solid_tile`] reads.
+    ///
+    /// It is measured against [`good_place_for_a_statue_mimic`] in the same run, that being the
+    /// nearest thing already in this loop and already accepted as cheap enough for it. Both
+    /// numbers below are the `dev` profile (which this workspace has optimised, with debuginfo)
+    /// rather than `--release`: the machine had no disk left for a release build with three other
+    /// lanes sharing it, and the ratio is the point either way.
+    ///
+    /// The ground column is walked so no read is served from the last call's cache line. Measured:
+    /// 5.32 ns on dirt, 6.56 ns on stone under open sky, 6.54 ns on stone under a ceiling, against
+    /// 99.41 ns for the plinth check in the same run. The two stone figures agree because the
+    /// ceiling reads only happen on the one attempt in fifty that gets past the roll (the sink
+    /// counts 200,037 of 10,000,000, which is that fiftieth).
+    ///
+    /// So the branch costs about a fifteenth of a check this loop already carries, and only when
+    /// `depth == Depth::Cavern`, on a `ground_block` [`try_spawn`] had already read.
+    #[test]
+    #[ignore]
+    fn measure_the_rock_golem_gate() {
+        let floor = 300;
+        let stone = flat_world_of(floor, STONE);
+        let dirt = flat_world_of(floor, 0);
+        let roofed = {
+            let mut world = stone.clone();
+            for x in 0..world.width() {
+                world.set_tile(
+                    x,
+                    floor - ROCK_GOLEM_HEADROOM,
+                    terrustia_proto::Tile::block(1),
+                );
+            }
+            world
+        };
+
+        for (name, world, block) in [
+            ("dirt", &dirt, 0u16),
+            ("stone, open", &stone, STONE),
+            ("stone, roofed", &roofed, STONE),
+        ] {
+            let n = 10_000_000;
+            let mut rng = SmallRng::seed_from_u64(631);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                sink += u32::from(check_to_spawn_rock_golem(
+                    std::hint::black_box(world),
+                    200 + (i % 128),
+                    floor,
+                    block,
+                    true,
+                    false,
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("check_to_spawn_rock_golem, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // The reference, in the same run and the same build: an eight-tile-read check that is
+        // already in this loop and already accepted as cheap enough for it.
+        let plinth = flat_world(90);
+        let n = 10_000_000;
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for i in 0..n {
+            sink += u32::from(good_place_for_a_statue_mimic(
+                std::hint::black_box(&plinth),
+                200 + (i % 128),
+                90,
+            ));
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("good_place_for_a_statue_mimic, plinth: {each:.2} ns/call (sink {sink})");
+    }
+
     #[test]
     #[ignore]
     fn measure_the_tower_zone_test() {
