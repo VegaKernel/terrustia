@@ -10538,42 +10538,79 @@ mod tests {
 
         // `NearSpikeBall` (`NPC.cs:91002-91017`): a ball already anchored within 300 pixels of a
         // candidate shuts that candidate's arm, which is what stops a corridor filling up with
-        // them. It is a box around the *candidate*, not around the player, so a spawn box far wider
-        // than 600 pixels still produces balls at its edges: the claim is that none of them lands
-        // inside the box, not that none lands at all. The anchor is `ai[1]`/`ai[2]` and not the
-        // ball's own position, so it is seeded here the way its first tick seeds it.
+        // them. It is a box around the *candidate*, not around the player, so most of a spawn ring
+        // 84 tiles wide is well outside it and keeps producing balls: the claim is that none lands
+        // inside the box, not that none lands at all.
+        //
+        // The anchor has to sit in the ring rather than on the player. `SAFE_RANGE_X` is 62 tiles,
+        // so nothing ever spawns within 992 pixels of where the player stands and a box only 300
+        // pixels wide around them could never have caught anything. Seventy tiles out is inside the
+        // ring and clear of the safe box. And the anchor is `ai[1]`/`ai[2]`, not the ball's own
+        // position, so it is seeded here the way its first tick seeds it.
+        const ANCHOR_OUT: i32 = 70;
+        assert!(
+            ANCHOR_OUT > SAFE_RANGE_X && ANCHOR_OUT < SPAWN_RANGE_X,
+            "the anchor has to sit where candidates actually are"
+        );
+        let (anchor_x, anchor_y) = ((cx + ANCHOR_OUT) * 16, cy * 16);
         let mut crowded = NpcStore::new();
         let slot = crowded
-            .spawn(SPIKE_BALL, (cx as f32 * 16.0, cy as f32 * 16.0))
+            .spawn(SPIKE_BALL, (anchor_x as f32, anchor_y as f32))
             .expect("a spike ball");
         {
             let ball = crowded.get_mut(slot).expect("the ball");
-            ball.ai[1] = cx as f32 * 16.0;
-            ball.ai[2] = cy as f32 * 16.0;
+            ball.ai[1] = anchor_x as f32;
+            ball.ai[2] = anchor_y as f32;
         }
-        let players = player_standing_at(cx, cy);
-        let mut rng = SmallRng::seed_from_u64(20260902);
-        let mut biomes = BiomeCache::default();
-        let (mut balls, mut crowding) = (0, 0);
-        for _ in 0..60_000 {
-            for (ty, (sx, sy)) in try_spawn(
-                &slab,
-                &crowded,
-                &players,
-                &quiet(),
-                &JourneyPowers::default(),
-                &mut biomes,
-                &mut rng,
-            ) {
-                if ty != SPIKE_BALL {
-                    continue;
-                }
-                balls += 1;
-                if near_spike_ball(&crowded, sx as i32 / 16, sy as i32 / 16 + 1) {
-                    crowding += 1;
+        // The box is spelled out here rather than asked of `near_spike_ball`, deliberately: a test
+        // that checks production with the very function production used passes just as happily with
+        // that function stubbed out to `false`, which is how this assertion was first written and
+        // what neutralising it caught. This is `Rectangle.Intersects` on
+        // `(x * 16 - 300, y * 16 - 300, 600, 600)` against `(ai[1], ai[2], 20, 20)`, straight off
+        // `NPC.cs:91004-91010`, with vanilla's `spawnTileY` written out as this server's `y + 1`.
+        let inside_the_box = |sx: f32, sy: f32| {
+            let (left, top) = (sx as i32 - 300, sy as i32 + 16 - 300);
+            anchor_x < left + 600
+                && left < anchor_x + 20
+                && anchor_y < top + 600
+                && top < anchor_y + 20
+        };
+        let in_the_box = |npcs: &NpcStore| {
+            let players = player_standing_at(cx, cy);
+            let mut rng = SmallRng::seed_from_u64(20260902);
+            let mut biomes = BiomeCache::default();
+            let (mut balls, mut crowding) = (0, 0);
+            for _ in 0..60_000 {
+                for (ty, (sx, sy)) in try_spawn(
+                    &slab,
+                    npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                ) {
+                    if ty != SPIKE_BALL {
+                        continue;
+                    }
+                    balls += 1;
+                    if inside_the_box(sx, sy) {
+                        crowding += 1;
+                    }
                 }
             }
-        }
+            (balls, crowding)
+        };
+
+        // With nothing there, the box is a place balls really do land, which is what stops the
+        // assertion below from being vacuously true.
+        let (loose_balls, loose_inside) = in_the_box(&empty);
+        assert!(
+            loose_inside > 0,
+            "an empty dungeon put none of its {loose_balls} Spike Balls where the anchor will be, \
+             so the crowding test below would prove nothing"
+        );
+        let (balls, crowding) = in_the_box(&crowded);
         assert!(balls > 0, "the crowded run produced no Spike Ball at all");
         assert_eq!(
             crowding, 0,

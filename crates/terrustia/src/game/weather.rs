@@ -829,8 +829,9 @@ mod tests {
     /// Everything that asks the game "is it windy" asks this flag, so all four were wrong wherever
     /// it was asked.
     ///
-    /// Neutralised by deleting the time-window `return` at the head of the dry arm: the night and
-    /// the two edge-of-day assertions fail. Neutralised again by replacing the two threshold tests
+    /// Neutralised by widening the time-window `return` at the head of the dry arm so it never
+    /// trips: the first of the three clock assertions fails, "a gale at night was still a happy
+    /// windy day". Neutralised again by replacing the two threshold tests
     /// with a single `>= STORM_MIN_WIND`: the hysteresis assertion fails, the latch coming on inside
     /// the band. Neutralised a third way, by dropping the `happy_windy_day = false` at the foot of
     /// the rain arm: the downpour assertion fails.
