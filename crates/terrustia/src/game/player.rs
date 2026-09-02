@@ -31,6 +31,12 @@ pub struct Player {
     pub slot: u8,
     pub addr: SocketAddr,
     pub out: mpsc::Sender<Bytes>,
+    /// Ends this player's connection now, instead of at the far end of whatever `out` still holds.
+    ///
+    /// See [`crate::net::connection::Closer`] for why the queue running dry is the wrong signal.
+    /// `None` for a player who has no real socket behind them, which is every test that seats one
+    /// directly; firing it is `GameServer::disconnect`'s job and nobody else's.
+    pub close: Option<crate::net::connection::Closer>,
     pub state: ConnState,
     pub name: String,
     /// The client's own self-reported identifier (packet 68). **Never proof of identity**: an
@@ -205,6 +211,7 @@ impl Player {
             slot,
             addr,
             out,
+            close: None,
             state: ConnState::Greeting,
             name: format!("Player {slot}"),
             uuid: None,

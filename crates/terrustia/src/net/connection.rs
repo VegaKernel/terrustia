@@ -94,6 +94,34 @@ pub fn outbound_queue(max_players: usize) -> usize {
     OUTBOUND_BASE + max_players * OUTBOUND_PER_PLAYER
 }
 
+/// How the game task ends a connection without waiting for its outbound queue to drain.
+///
+/// Dropping a [`crate::game::player::Player`] drops the last `mpsc::Sender` for its queue, and that
+/// is *not* enough on its own: `mpsc::Receiver::recv` keeps handing out everything already buffered
+/// before it returns `None`, so `write_loop` goes on feeding a closed connection until the backlog
+/// runs dry. At `outbound_queue(255)` that backlog is about a million frames, and a client shed for
+/// being too slow is by definition one that takes a long time to read them - half an hour, in the
+/// 255-player soak this was found in (`TODO.md`, "the retention clause"). It reads a stale world
+/// the whole time and only learns it was dropped at the end of it.
+///
+/// So the decision travels on its own channel rather than being inferred from the queue running
+/// out. Firing it says "this connection is over and whatever is still queued no longer matters";
+/// `Some(frame)` carries the one frame that does still matter, a kick notice, which goes on the
+/// wire *ahead* of the abandoned backlog instead of behind it.
+///
+/// Dropping the sender without firing it is deliberately not the same thing: that is what happens
+/// when the game task itself goes away, and those clients are still owed what they have already
+/// been queued (`/stop` and the rollback path both announce before they stop). `write_loop` treats
+/// that case exactly as it always did, by draining.
+///
+/// **What this does not close.** `write_loop` notices the decision between writes, not during one,
+/// so a client that has stopped reading its socket altogether still holds `write_all` for as long
+/// as the kernel will wait, exactly as it did before. Cancelling a write mid-frame would fix that
+/// and cost every kick notice its readable stream, so the bound here is one `WRITE_BATCH` (64 KiB)
+/// rather than nothing at all: against the million-frame backlog this exists for, one batch is the
+/// difference between seconds and half an hour.
+pub type Closer = oneshot::Sender<Option<Bytes>>;
+
 /// Starting read buffer. Section packets are large, so a bigger buffer avoids repeated growth.
 const READ_BUFFER: usize = 16 * 1024;
 
@@ -139,11 +167,15 @@ pub async fn serve(
 
     let (out_tx, out_rx) = mpsc::channel::<Bytes>(outbound_queue);
     let (slot_tx, slot_rx) = oneshot::channel();
+    // See [`Closer`]: the game task's way of ending this connection now rather than at the far end
+    // of whatever it has already queued.
+    let (close_tx, close_rx) = oneshot::channel::<Option<Bytes>>();
 
     if events
         .send(ServerEvent::Join {
             addr,
             out: out_tx,
+            close: close_tx,
             slot: slot_tx,
         })
         .await
@@ -171,7 +203,13 @@ pub async fn serve(
         }
     };
 
-    let writer = tokio::spawn(write_loop(out_rx, write_half, slot, recorder.clone()));
+    let writer = tokio::spawn(write_loop(
+        out_rx,
+        close_rx,
+        write_half,
+        slot,
+        recorder.clone(),
+    ));
     let reason = read_loop(
         &mut read_half,
         slot,
@@ -184,7 +222,9 @@ pub async fn serve(
     .await;
     debug!(%addr, slot, epoch, %reason, "connection closed");
 
-    // Dropping the player closes the outbound channel, which ends the write task.
+    // Removing the player fires this connection's [`Closer`], which ends the write task without
+    // it having to drain first. The abort is still here for the case that does not reach: a game
+    // task that never gets to handle this `Leave` at all.
     let _ = events.send(ServerEvent::Leave { slot, epoch }).await;
     writer.abort();
 }
@@ -203,12 +243,45 @@ const WRITE_BATCH: usize = 64 * 1024;
 
 async fn write_loop(
     mut out: mpsc::Receiver<Bytes>,
+    mut close: oneshot::Receiver<Option<Bytes>>,
     mut sink: tokio::net::tcp::OwnedWriteHalf,
     slot: u8,
     recorder: Option<record::Recorder>,
 ) {
     let mut batch: Vec<u8> = Vec::with_capacity(WRITE_BATCH);
-    while let Some(frame) = out.recv().await {
+    // The last frame this connection is owed, if the game task named one when it closed us.
+    let mut farewell: Option<Bytes> = None;
+    // Cleared once `close` has produced something, so its branch is never polled again. Only the
+    // `Err` arm below leaves the loop running, and it must not be re-polled after completing.
+    let mut watch_close = true;
+    loop {
+        let frame = tokio::select! {
+            // Biased, and the close first, so that the decision beats the queue whenever both are
+            // ready. It always is both: this exists for a connection whose queue is *full*, and a
+            // fair select against a never-empty queue is a coin toss per iteration rather than an
+            // answer. Nothing legitimate can be queued after the close is fired either, because
+            // the game task removes the player in the same `&mut self` call that fires it and
+            // `send_bytes` finds no player after that - so everything still in the queue at this
+            // point is, by construction, backlog from before the decision.
+            biased;
+            closed = &mut close, if watch_close => match closed {
+                Ok(last) => {
+                    farewell = last;
+                    break;
+                }
+                // The game task went away without deciding anything (its own shutdown drops every
+                // `Player`). Those clients are still owed what they were queued, so this drains
+                // exactly as it did before the closer existed.
+                Err(_) => {
+                    watch_close = false;
+                    continue;
+                }
+            },
+            frame = out.recv() => match frame {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
         batch.clear();
         batch.extend_from_slice(&frame);
         // Everything else already queued goes out in the same write. `try_recv` never waits, so
@@ -227,6 +300,14 @@ async fn write_loop(
         if sink.write_all(&batch).await.is_err() {
             break;
         }
+    }
+    // Ahead of the backlog rather than behind it, which is the whole point: a kicked client that
+    // was a million frames behind used to be told why at the far end of those million frames.
+    if let Some(frame) = farewell {
+        if let Some(recorder) = &recorder {
+            recorder.chunk(record::Direction::Outbound, slot, &frame);
+        }
+        let _ = sink.write_all(&frame).await;
     }
     let _ = sink.shutdown().await;
 }
@@ -316,5 +397,171 @@ async fn read_loop(
             Err(_) if still_handshaking => continue,
             Err(_) => return "idle timeout",
         }
+    }
+}
+
+/// What [`Closer`] is for, over a real socket: a connection the game task has finished with stops
+/// writing where it stands, and one whose game task merely went away still gets what it was owed.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// One kilobyte of filler. Static so a test can queue thousands of them for nothing.
+    static FILLER: [u8; 1024] = [7; 1024];
+    /// Stands in for a kick notice: the one frame a closed connection is still owed.
+    static NOTICE: [u8; 6] = *b"kicked";
+
+    /// A connected pair: the client end, and the server end already split the way `serve` splits
+    /// it. The read half is handed back only to be held: dropping it is harmless, but keeping it
+    /// alive makes these tests a socket rather than a half of one.
+    async fn pair() -> (
+        TcpStream,
+        tokio::net::tcp::OwnedReadHalf,
+        tokio::net::tcp::OwnedWriteHalf,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("a port");
+        let addr = listener.local_addr().expect("the bound address");
+        let client = TcpStream::connect(addr).await.expect("connecting");
+        let (server, _) = listener.accept().await.expect("accepting");
+        let (read, write) = server.into_split();
+        (client, read, write)
+    }
+
+    /// Everything the client can read before the server closes on it, with a ceiling on how long
+    /// this may take so a regression fails the test instead of hanging the suite.
+    async fn read_to_end(client: &mut TcpStream) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 16 * 1024];
+        timeout(Duration::from_secs(30), async {
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+        })
+        .await
+        .expect("the server must close its end rather than write for ever");
+        seen
+    }
+
+    /// The bug this whole mechanism exists for: a client shed under backpressure used to go on
+    /// being fed its stale backlog, and only learned it had been dropped once the backlog ran out.
+    /// Four megabytes of it here; at `outbound_queue(255)` the real thing is a million frames.
+    ///
+    /// The decision is taken before the writer is spawned, which is exactly the shape of the real
+    /// one: `send_bytes` fires it from inside a tick, while the write task is between polls.
+    #[tokio::test]
+    async fn a_closed_connection_abandons_its_backlog_instead_of_draining_it() {
+        let (mut client, _read, sink) = pair().await;
+        let (out_tx, out_rx) = mpsc::channel::<Bytes>(4096);
+        for _ in 0..4096 {
+            out_tx
+                .try_send(Bytes::from_static(&FILLER))
+                .expect("the queue was sized for exactly this");
+        }
+        // So that a write loop which ignored the closer would still reach an end and fail the
+        // assertion below, rather than blocking on `recv` for ever and hanging the suite.
+        drop(out_tx);
+
+        let (close_tx, close_rx) = oneshot::channel();
+        close_tx.send(None).expect("the write task is still there");
+        tokio::spawn(write_loop(out_rx, close_rx, sink, 0, None));
+
+        assert!(
+            read_to_end(&mut client).await.is_empty(),
+            "a shed connection must not deliver a single frame of the backlog it was dropped for"
+        );
+    }
+
+    /// The other half of the same decision: the notice rides the closer, so it goes out *ahead* of
+    /// the abandoned backlog. Queued behind it, as `kick` used to, it would arrive at the far end
+    /// of four megabytes the client no longer has any reason to read.
+    #[tokio::test]
+    async fn a_kick_notice_goes_out_ahead_of_the_abandoned_backlog() {
+        let (mut client, _read, sink) = pair().await;
+        let (out_tx, out_rx) = mpsc::channel::<Bytes>(4096);
+        for _ in 0..4096 {
+            out_tx.try_send(Bytes::from_static(&FILLER)).expect("room");
+        }
+        drop(out_tx);
+
+        let (close_tx, close_rx) = oneshot::channel();
+        close_tx
+            .send(Some(Bytes::from_static(&NOTICE)))
+            .expect("the write task is still there");
+        tokio::spawn(write_loop(out_rx, close_rx, sink, 0, None));
+
+        // Length first, so a regression reports a number rather than printing four megabytes of
+        // filler at whoever ran the suite.
+        let seen = read_to_end(&mut client).await;
+        assert_eq!(
+            seen.len(),
+            NOTICE.len(),
+            "the notice and nothing else: the backlog behind it is stale by definition"
+        );
+        assert_eq!(seen, NOTICE.to_vec());
+    }
+
+    /// The same decision taken against a writer that is already running and already draining,
+    /// which is the ordering `biased` in the `select!` is there for. Sixteen megabytes is far more
+    /// than any socket buffer holds, so a writer that ran to the end of the queue would deliver
+    /// all of it; the fix bounds what escapes at whatever is already in flight plus one batch.
+    #[tokio::test]
+    async fn closing_a_connection_that_is_already_draining_stops_it_where_it_stands() {
+        let (mut client, _read, sink) = pair().await;
+        let queued = 16 * 1024;
+        let (out_tx, out_rx) = mpsc::channel::<Bytes>(queued);
+        for _ in 0..queued {
+            out_tx.try_send(Bytes::from_static(&FILLER)).expect("room");
+        }
+        drop(out_tx);
+
+        let (close_tx, close_rx) = oneshot::channel();
+        tokio::spawn(write_loop(out_rx, close_rx, sink, 0, None));
+
+        // Read once first: the writer cannot have got this far without being under way, so the
+        // close below lands on a loop that is already in the middle of the backlog.
+        let mut buf = [0u8; 16 * 1024];
+        let first = timeout(Duration::from_secs(30), client.read(&mut buf))
+            .await
+            .expect("the writer must start writing")
+            .expect("a readable socket");
+        assert!(first > 0, "the writer should have begun draining");
+
+        close_tx.send(None).expect("the write task is still there");
+        let rest = read_to_end(&mut client).await.len();
+
+        let delivered = first + rest;
+        assert!(
+            delivered < 4 * 1024 * 1024,
+            "a closed connection must stop where it stands, not finish the queue: \
+             {delivered} bytes of {} went out",
+            queued * FILLER.len()
+        );
+    }
+
+    /// And the case that must *not* change. The game task's own shutdown drops every `Player`,
+    /// which drops both ends of this with nothing decided - and `/stop` and the rollback path both
+    /// announce to everybody before they do it. Those frames are owed, so the queue still drains.
+    #[tokio::test]
+    async fn a_closer_dropped_without_a_decision_still_drains_what_was_queued() {
+        let (mut client, _read, sink) = pair().await;
+        let (out_tx, out_rx) = mpsc::channel::<Bytes>(64);
+        for _ in 0..64 {
+            out_tx.try_send(Bytes::from_static(&FILLER)).expect("room");
+        }
+        drop(out_tx);
+
+        let (close_tx, close_rx) = oneshot::channel::<Option<Bytes>>();
+        drop(close_tx);
+        tokio::spawn(write_loop(out_rx, close_rx, sink, 0, None));
+
+        assert_eq!(
+            read_to_end(&mut client).await.len(),
+            64 * FILLER.len(),
+            "a shutting-down server still owes its clients what it has already queued for them"
+        );
     }
 }
