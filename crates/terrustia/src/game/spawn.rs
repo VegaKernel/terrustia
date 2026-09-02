@@ -977,11 +977,26 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             121, // Slimer
             94,  // Corruptor
         ],
+        // The Clinger is a *corruption* enemy rather than a jungle one, whatever its place in a
+        // "hardmode underground jungle" roster suggests: the arm it lives in is the two evils'
+        // shared one, `tileType == 22 && ZoneCorrupt || 23 || 25 || 112 || 163 || 661`
+        // (`NPC.cs:4125`), and 661 is Corrupt Jungle Grass, which is what puts one in a corrupted
+        // jungle and nowhere else in a jungle at all. Its own branch is `(Main.hardMode & flag16)
+        // && Main.rand.Next(3) == 0 && Main.tile[x, y].type == tileType` (`:4136-4139`), and it is
+        // anchored to that tile the same way a Man Eater is (`SpawnNPC(..., 101, 0, spawnTileX,
+        // spawnTileY)`); `game::ai::rooted` roots a plant that arrives without an anchor in the
+        // solid tile under it, so the plumbing is already here.
+        //
+        // `flag16` is `spawnTileY >= Main.rockLayer` (`:4127`), which is this server's `Cavern`
+        // alone. It is listed on the `Underground | Cavern` arm anyway, exactly as the Cursed
+        // Hammer above it already is (`:4132`, the same `flag16`), so the two share one disclosed
+        // narrowing rather than each getting its own depth split.
         (Underground | Cavern, Corruption) => &[
             81,  // CorruptSlime
             83,  // CursedHammer
             94,  // Corruptor
             98,  // SeekerHead — a world feeder
+            101, // Clinger
             170, // PigronCorruption
             473, // BigMimicCorruption
         ],
@@ -1039,22 +1054,37 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             206, // IcyMerman
             629, // IceMimic
         ],
-        // The jungle.
+        // The jungle. The Angry Trapper is the one member of vanilla's hardmode jungle-grass arm
+        // (`tileType == 60 && Main.hardMode && Main.rand.Next(3) != 0`, `NPC.cs:3864-3912`) that
+        // was in no pool at all, so every other branch of that arm was here and its rooted one was
+        // not: `else if (Main.rand.Next(3) == 0 && Main.tile[x, y].type == tileType)` at
+        // `:3905-3908`.
+        //
+        // It is on both depth arms because vanilla reaches it at both. Its branch sits below the
+        // arm's two `surfaceSpawn` ones (152 at `:3866`, 177 at `:3870`) and its three
+        // `spawnTileY > Main.worldSurface` ones (205, 236 and the Moss Hornet at `:3874-3904`), and
+        // `surfaceSpawn` is `spawnTileY <= Main.worldSurface` (`NPC.cs:1203`), so above the surface
+        // line the three middle branches cannot fire and the trapper is what answers when the two
+        // surface rolls decline. The arm's own fallthrough, the Giant Tortoise, is already on both
+        // arms here for the same reason.
         (Surface, Jungle) => {
             if day {
                 &[
                     177, // Derpling
                     153, // GiantTortoise
+                    175, // AngryTrapper
                 ]
             } else {
                 &[
                     152, // GiantFlyingFox
                     153, // GiantTortoise
+                    175, // AngryTrapper
                 ]
             }
         }
         (Underground | Cavern, Jungle) => &[
             157, // Arapaima
+            175, // AngryTrapper
             176, // MossHornet
             205, // Moth
             236, // JungleCreeper
@@ -1744,11 +1774,19 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             42, // Hornet
             51, // JungleBat
         ],
+        // The Spiked Jungle Slime is *not* a hardmode enemy, whatever a summary of the underground
+        // jungle roster suggests: its arm is `tileType == 60 && spawnTileY > (worldSurface +
+        // rockLayer) / 2.0` (`NPC.cs:3929`) with a one-in-four roll inside it (`:3931-3934`), and
+        // `Main.hardMode` appears nowhere in either. It sits in the same arm as the Man Eater
+        // (`:3935-3938`) and takes the same depth gate, so it is treated the same way this pool
+        // already treats 43: the arm's own "bottom half of the underground layer and everything
+        // below" is narrowed to "not the surface", which is the depth granularity [`Depth`] has.
         (_, Jungle) => &[
-            42, // Hornet
-            43, // ManEater
-            56, // Snatcher
-            51, // JungleBat
+            42,  // Hornet
+            43,  // ManEater
+            56,  // Snatcher
+            51,  // JungleBat
+            204, // SpikedJungleSlime
         ],
         (Surface, Snow) => {
             if day {
@@ -1863,6 +1901,22 @@ pub const GOBLIN_SCOUT: u16 = 73;
 /// The Statue Mimic (`NPCID.StatueMimic`), which stands among the tombstones pretending to be a
 /// statue on a plinth until somebody walks close enough (`game::ai::mimic`).
 pub const STATUE_MIMIC: u16 = 690;
+
+/// The Rock Golem (`NPCID.RockGolem`), the hardmode caverns' heavy: 1000 life and 85 damage out of
+/// the plain stone, which is more than anything else a cave holds.
+pub const ROCK_GOLEM: u16 = 631;
+
+/// `Main.rand.Next(50)` in `CheckToSpawnRockGolem` (`NPC.cs:5809`).
+const ROCK_GOLEM_ODDS: u32 = 50;
+
+/// Plain Stone (`TileID.Stone`), one of the two grounds a Rock Golem is cut from; the other is
+/// every colour of moss ([`terrustia_proto::tile_sets::is_moss`]).
+const STONE: u16 = 1;
+
+/// How far above the ground row the Rock Golem's headroom check reads (`NPC.cs:5813`,
+/// `spawnTileY - 4`). A golem is 48 pixels tall and stands 1.1x scaled, so it wants a taller hole
+/// than the three rows [`open_space`] already asked for.
+const ROCK_GOLEM_HEADROOM: i32 = 4;
 
 /// `Main.rand.Next(20)` on the Tortured Soul's branch (`NPC.cs:4877`).
 const TORTURED_SOUL_ODDS: u32 = 20;
@@ -2213,6 +2267,78 @@ pub fn good_place_for_a_statue_mimic(world: &World, x: i32, ground_y: i32) -> bo
             !world.tile(x, ground_y - dy).is_active()
                 && !world.tile(x + 1, ground_y - dy).is_active()
         })
+}
+
+/// `WorldGen.SolidTile(i, j, noDoors = false)` (`WorldGen.cs:70650-70671`), the stricter of the
+/// game's two "is this solid" tests:
+///
+/// ```csharp
+/// if (Main.tile[i, j].active() && Main.tileSolid[Main.tile[i, j].type]
+///     && !Main.tileSolidTop[Main.tile[i, j].type] && !Main.tile[i, j].halfBrick()
+///     && Main.tile[i, j].slope() == 0 && !Main.tile[i, j].inActive())
+/// ```
+///
+/// Where [`solid_tile2`] keeps a platform that has been hammered into a top slope, this one throws
+/// every platform out outright, and it refuses any slope rather than only a non-top one. `noDoors`
+/// is false at the one call site here ([`check_to_spawn_rock_golem`]), so the door carve-out is not
+/// transcribed. `worldgen::smooth` has its own copy of the same function for its own pass; this is
+/// a second one rather than a shared helper because that one is `pub(super)` inside `worldgen`.
+///
+/// The game's `Main.tile[i, j] == null` arm returns *true*, counting off the map as solid;
+/// `World::tile` answers off the map with bare air, the opposite. Nothing reaches it, for the same
+/// reason [`solid_tile2`] does not: [`try_spawn`] drops any candidate within ten tiles of an edge.
+fn solid_tile(world: &World, x: i32, y: i32) -> bool {
+    let tile = world.tile(x, y);
+    tile.is_active()
+        && solid(tile.block)
+        && !terrustia_proto::tile_solid::solid_top(tile.block)
+        && !tile.flags.has(terrustia_proto::TileFlags::HALF_BRICK)
+        && tile.slope == 0
+        && !tile.flags.has(terrustia_proto::TileFlags::ACTUATED)
+}
+
+/// `NPC.CheckToSpawnRockGolem(spawnTileX, spawnTileY, spawnTileType)` (`NPC.cs:5803-5818`):
+///
+/// ```csharp
+/// if (!Main.hardMode || (spawnTileType != 1 && !TileID.Sets.Conversion.Moss[spawnTileType]) || ZoneSnow)
+///     return false;
+/// if (Main.rand.Next(50) != 0)
+///     return false;
+/// if (WorldGen.SolidTile(spawnTileX - 1, spawnTileY - 4) || WorldGen.SolidTile(spawnTileX, spawnTileY - 4) || WorldGen.SolidTile(spawnTileX + 1, spawnTileY - 4))
+///     return false;
+/// return true;
+/// ```
+///
+/// Four clauses and no state: hardmode, plain stone or any moss underfoot, not in the snow, one
+/// attempt in fifty, and three tiles of clear ceiling four rows up so there is somewhere for a
+/// thing this tall to stand. `TileID.Sets.Conversion.Moss` (`TileID.cs:38`) is
+/// [`terrustia_proto::tile_sets::is_moss`], which already holds all eleven of its entries.
+///
+/// The clause order is the game's own, which is also cheapest-first: three comparisons, then the
+/// roll, and only then the three tile reads.
+///
+/// `ground_y` is the game's `spawnTileY`, the solid row itself, which this server's spawn row sits
+/// one above; the caller passes `y + 1`, the same convention as [`good_place_for_a_statue_mimic`]
+/// and [`sandstone_check`].
+fn check_to_spawn_rock_golem(
+    world: &World,
+    x: i32,
+    ground_y: i32,
+    ground_block: u16,
+    hard_mode: bool,
+    snow: bool,
+    rng: &mut SmallRng,
+) -> bool {
+    if !hard_mode
+        || (ground_block != STONE && !terrustia_proto::tile_sets::is_moss(ground_block))
+        || snow
+    {
+        return false;
+    }
+    if rng.random_range(0..ROCK_GOLEM_ODDS) != 0 {
+        return false;
+    }
+    !(-1..=1).any(|dx| solid_tile(world, x + dx, ground_y - ROCK_GOLEM_HEADROOM))
 }
 
 /// What a tile of water draws instead of the land pool.
@@ -3850,6 +3976,53 @@ pub fn try_spawn(
                 {
                     TORTURED_SOUL
                 }
+                // The caverns' Rock Golem (`NPC.cs:4921-4924`):
+                //
+                // ```csharp
+                // else if (CheckToSpawnRockGolem(spawnTileX, spawnTileY, tileType))
+                // {
+                //     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 631);
+                // }
+                // ```
+                //
+                // A branch rather than a pool entry, because its gate is a *tile* gate with a
+                // ceiling check on it ([`check_to_spawn_rock_golem`]) rather than anything a
+                // depth-and-biome pool can express: a golem comes out of the plain stone or out of
+                // moss, and only where there is a hole tall enough to hold one.
+                //
+                // It sits exactly where vanilla puts it. The arm is reached only once `underGround`
+                // (`spawnTileY <= Main.rockLayer`, `NPC.cs:1144`) and the underworld arm at
+                // `:4871` have both declined, which is this server's `Cavern` and nothing else, and
+                // it is one row above the whole cavern chain the two arms below transcribe
+                // (`:4925` onward, and `:5004`'s Skeleton Merchant). No biome exclusion beyond
+                // vanilla's own `ZoneSnow`: the two evils and the jungle divert on their *tiles*
+                // (`:4066`, `:4125`, `:3929-3948`) rather than their zones, and plain stone in a
+                // corrupted cavern really does grow golems in the game. The dungeon is the one
+                // exception, because `else if (ZoneDungeon)` (`:2629`) returns long before this.
+                //
+                // `ZoneSnow` is read here as `player_biome == Biome::Snow`, a narrowing this file
+                // makes everywhere: the game's zones are independent flags and [`Biome`] picks one
+                // winner, so a snowy place that reads as something else still grows golems here.
+                //
+                // 631's AI is already wired: it is `ai_style` 3, so `game::ai::fighter` walks it,
+                // chases and hits. What is not transcribed is its own stand-and-throw block inside
+                // `AI_003_Fighters` (`NPC.cs:56866-56931`, projectile 909), which is an AI-lane gap
+                // rather than a spawn one and is left named rather than half-built.
+                None if depth == Depth::Cavern
+                    && player_biome != Biome::Dungeon
+                    && let Some(ground) = ground_block
+                    && check_to_spawn_rock_golem(
+                        world,
+                        x,
+                        y + 1,
+                        ground,
+                        events.hard_mode,
+                        player_biome == Biome::Snow,
+                        rng,
+                    ) =>
+                {
+                    ROCK_GOLEM
+                }
                 // The cavern chain's rare wanderer (`NPC.cs:5004-5010`):
                 //
                 // ```csharp
@@ -4365,6 +4538,11 @@ mod tests {
         // branches still make good.
         set.insert(GOBLIN_SCOUT);
         set.insert(STATUE_MIMIC);
+        // ...and the Rock Golem the hardmode caverns cut out of stone or moss, whose gate is a tile
+        // and a ceiling rather than a pool. Asserted reachable through `try_spawn` itself by this
+        // module's own tests, so listing it here cannot drift into a claim its branch still makes
+        // good.
+        set.insert(ROCK_GOLEM);
         // ...and the Meteor Head, whose branch has no roll and no roster at all: standing in a
         // crater, it is the one thing that comes (`NPC.cs:2796-2799`). `try_spawn` reaching it is
         // asserted by this module's own tests, so listing it here cannot drift into a claim the
@@ -8227,6 +8405,249 @@ mod tests {
         assert!(sloped(2, PLATFORMS[0], false, false));
         assert!(!sloped(3, PLATFORMS[0], false, false));
         assert!(!sloped(4, PLATFORMS[0], false, false));
+    }
+
+    /// Everything drawn over `ticks` attempts standing at `at`, as a set.
+    fn roster_at(
+        world: &World,
+        hard_mode: bool,
+        at: (i32, i32),
+        ticks: u32,
+    ) -> std::collections::BTreeSet<u16> {
+        spawns_at(world, hard_mode, at.0, at.1, ticks)
+            .into_iter()
+            .collect()
+    }
+
+    /// The underground jungle's own two, both of which were in no pool at all.
+    ///
+    /// The Angry Trapper (175) is the hardmode jungle-grass arm's rooted branch
+    /// (`NPC.cs:3905-3908`, inside `tileType == 60 && Main.hardMode && Main.rand.Next(3) != 0` at
+    /// `:3864`), and it is reached above the surface line too: the three branches between it and
+    /// the two `surfaceSpawn` ones all want `spawnTileY > Main.worldSurface`, which is the exact
+    /// negation of `surfaceSpawn` (`NPC.cs:1203`).
+    ///
+    /// The Spiked Jungle Slime (204) is *not* a hardmode enemy. Its arm is `tileType == 60 &&
+    /// spawnTileY > (Main.worldSurface + Main.rockLayer) / 2.0` (`NPC.cs:3929`) with a one-in-four
+    /// roll inside it (`:3931`), and `Main.hardMode` appears in neither, so a fresh world's
+    /// underground jungle has them from the first day.
+    ///
+    /// `game::ai::rooted` already drives the trapper, down to its own reach, pull and speed cap
+    /// (`npc_params::rooted`'s `175` arm), and `game::ai::slime` already drives the slime: the
+    /// spawn was the only missing half of both.
+    ///
+    /// Neutralised by deleting `175` from both `hardmode_pool` jungle arms: the two trapper
+    /// assertions fail ("a hardmode underground jungle offered no Angry Trapper", then the surface
+    /// one). Neutralised again by deleting `204` from `pool`'s `(_, Jungle)` arm: the
+    /// pre-hardmode assertion fails instead.
+    #[test]
+    fn the_underground_jungle_has_a_roster_of_its_own() {
+        const TICKS: u32 = 200_000;
+
+        // A cavern floor of jungle grass, which is what the biome scan counts (`JUNGLE_TILES`).
+        let floor = 300;
+        let deep = flat_world_of(floor, 60);
+        let at = (400, floor - 1);
+        assert_eq!(biome_at(&deep, at.0, at.1), Biome::Jungle);
+        assert_eq!(depth_at(&deep, at.1), Depth::Cavern);
+
+        let early = roster_at(&deep, false, at, TICKS);
+        assert!(
+            early.contains(&204),
+            "a pre-hardmode underground jungle offered no Spiked Jungle Slime"
+        );
+        assert!(
+            !early.contains(&175),
+            "a pre-hardmode jungle offered an Angry Trapper"
+        );
+
+        let late = roster_at(&deep, true, at, TICKS);
+        assert!(
+            late.contains(&175),
+            "a hardmode underground jungle offered no Angry Trapper"
+        );
+
+        // ...and the trapper again up in the canopy, where the arm's three
+        // `spawnTileY > Main.worldSurface` branches cannot fire at all.
+        let surface_floor = 90;
+        let top = flat_world_of(surface_floor, 60);
+        let up = (400, surface_floor - 1);
+        assert_eq!(biome_at(&top, up.0, up.1), Biome::Jungle);
+        assert_eq!(depth_at(&top, up.1), Depth::Surface);
+        let sun = roster_at(&top, true, up, TICKS);
+        assert!(
+            sun.contains(&175),
+            "a hardmode jungle surface offered no Angry Trapper"
+        );
+        // 204's own arm carries a depth gate the surface never satisfies.
+        assert!(
+            !sun.contains(&204),
+            "the jungle surface offered a Spiked Jungle Slime"
+        );
+    }
+
+    /// A corrupt cavern grows a Clinger once the wall is down (`NPC.cs:4136-4139`), and never
+    /// before it.
+    ///
+    /// The Clinger belongs to the two evils' shared arm (`NPC.cs:4125`) rather than to the jungle:
+    /// what puts one in a *jungle* is tile 661, Corrupt Jungle Grass, in that same list. Its AI is
+    /// already built and parameterised, ichor shot and all (`game::ai::rooted`, and
+    /// `npc_params::rooted`'s `101` arm); 101 was simply in no pool.
+    ///
+    /// Neutralised by deleting `101` from `hardmode_pool`'s `(Underground | Cavern, Corruption)`
+    /// arm: the second assertion fails, "a hardmode corrupt cavern offered no Clinger".
+    #[test]
+    fn a_corrupt_cavern_grows_a_clinger_in_hardmode() {
+        const TICKS: u32 = 200_000;
+        let floor = 300;
+        // Ebonstone, which is in the scan's `EVIL_TILES`.
+        let world = flat_world_of(floor, 25);
+        let at = (400, floor - 1);
+        assert_eq!(biome_at(&world, at.0, at.1), Biome::Corruption);
+        assert_eq!(depth_at(&world, at.1), Depth::Cavern);
+
+        assert!(
+            !roster_at(&world, false, at, TICKS).contains(&101),
+            "a pre-hardmode corruption offered a Clinger"
+        );
+        assert!(
+            roster_at(&world, true, at, TICKS).contains(&101),
+            "a hardmode corrupt cavern offered no Clinger"
+        );
+    }
+
+    /// The hardmode caverns cut a Rock Golem out of the stone (`NPC.cs:4921-4924`, gated by
+    /// `CheckToSpawnRockGolem` at `:5803-5818`).
+    ///
+    /// It is a *cavern* enemy, not a jungle one: its arm is reached only once `underGround`
+    /// (`spawnTileY <= Main.rockLayer`, `NPC.cs:1144`) and the underworld arm at `:4871` have both
+    /// declined, and its ground is plain stone or moss rather than mud.
+    ///
+    /// Fails before the fix, when 631 was in no pool and no branch, so the single hardest thing an
+    /// ordinary cave holds (1000 life, 85 damage) could not be met however long a world was played.
+    ///
+    /// Neutralised by deleting the `None if depth == Depth::Cavern && ... check_to_spawn_rock_golem`
+    /// arm from `try_spawn`: the stone and moss assertions both fail ("a hardmode stone cavern cut
+    /// no Rock Golem"). Neutralised again by dropping the `|| snow` clause from
+    /// `check_to_spawn_rock_golem`: the snow assertion fails instead, golems coming out of a
+    /// snow-bound cavern.
+    #[test]
+    fn the_hardmode_caverns_cut_a_rock_golem_out_of_stone_and_moss() {
+        const TICKS: u32 = 200_000;
+        let floor = 300;
+        let golems = |world: &World, hard_mode: bool| {
+            spawns_at(world, hard_mode, 400, floor - 1, TICKS)
+                .into_iter()
+                .filter(|ty| *ty == ROCK_GOLEM)
+                .count()
+        };
+
+        let stone = flat_world_of(floor, STONE);
+        assert_eq!(depth_at(&stone, floor - 1), Depth::Cavern);
+        assert_eq!(biome_at(&stone, 400, floor - 1), Biome::Forest);
+        assert_eq!(
+            golems(&stone, false),
+            0,
+            "a pre-hardmode cavern cut a Rock Golem"
+        );
+        assert!(
+            golems(&stone, true) > 0,
+            "a hardmode stone cavern cut no Rock Golem"
+        );
+
+        // `TileID.Sets.Conversion.Moss` counts as stone here, and dirt does not.
+        let moss = flat_world_of(floor, 179);
+        assert!(
+            golems(&moss, true) > 0,
+            "a hardmode moss cavern cut no Rock Golem"
+        );
+        let dirt = flat_world_of(floor, 0);
+        assert_eq!(golems(&dirt, true), 0, "a dirt floor cut a Rock Golem");
+
+        // `ZoneSnow`. The floor stays stone, so only the zone moves: the snow goes *under* it,
+        // which is the one way to change the scan's answer without changing the tile the check
+        // itself reads.
+        let mut snowy = stone.clone();
+        for x in 0..snowy.width() {
+            for y in (floor + 1)..(floor + 13) {
+                snowy.set_tile(x, y, terrustia_proto::Tile::block(147));
+            }
+        }
+        assert_eq!(biome_at(&snowy, 400, floor - 1), Biome::Snow);
+        assert_eq!(golems(&snowy, true), 0, "a snowy cavern cut a Rock Golem");
+
+        // The ceiling, which is four rows above the ground row and so is a row `open_space`'s three
+        // never reach. It is made of dirt so that a candidate landing on the ceiling itself is
+        // turned away by the tile gate rather than passing this one.
+        let mut low = stone.clone();
+        for x in 0..low.width() {
+            low.set_tile(
+                x,
+                floor - ROCK_GOLEM_HEADROOM,
+                terrustia_proto::Tile::block(0),
+            );
+        }
+        assert_eq!(
+            golems(&low, true),
+            0,
+            "a Rock Golem stood up under a four-row ceiling"
+        );
+    }
+
+    /// `CheckToSpawnRockGolem` (`NPC.cs:5803-5818`) on its own, clause by clause.
+    #[test]
+    fn check_to_spawn_rock_golem_wants_stone_or_moss_under_a_clear_ceiling() {
+        let floor = 300;
+        let world = flat_world_of(floor, STONE);
+        // One attempt in fifty, so each case is asked enough times to tell "never" from "rarely":
+        // an open gate passes about eight of these four hundred draws, a shut one none.
+        let passes = |world: &World, block: u16, hard_mode: bool, snow: bool| {
+            let mut rng = SmallRng::seed_from_u64(631);
+            (0..400)
+                .filter(|_| {
+                    check_to_spawn_rock_golem(world, 400, floor, block, hard_mode, snow, &mut rng)
+                })
+                .count()
+        };
+
+        assert!(passes(&world, STONE, true, false) > 0, "plain stone");
+        assert_eq!(passes(&world, STONE, false, false), 0, "!Main.hardMode");
+        assert_eq!(passes(&world, STONE, true, true), 0, "ZoneSnow");
+        assert_eq!(passes(&world, 0, true, false), 0, "dirt is not stone");
+        // All eleven of `TileID.Sets.Conversion.Moss` (`TileID.cs:38`).
+        for moss in [179u16, 180, 181, 182, 183, 381, 534, 536, 539, 625, 627] {
+            assert!(
+                passes(&world, moss, true, false) > 0,
+                "moss {moss} was refused"
+            );
+        }
+
+        // `SolidTile(x - 1, y - 4) || SolidTile(x, y - 4) || SolidTile(x + 1, y - 4)`: any one of
+        // the three shuts it, and the row is four above the ground row rather than three.
+        for dx in -1..=1 {
+            let mut low = world.clone();
+            low.set_tile(
+                400 + dx,
+                floor - ROCK_GOLEM_HEADROOM,
+                terrustia_proto::Tile::block(1),
+            );
+            assert_eq!(
+                passes(&low, STONE, true, false),
+                0,
+                "a block at dx={dx} left the spot good"
+            );
+            // One row lower is not the row it reads.
+            let mut lower = world.clone();
+            lower.set_tile(
+                400 + dx,
+                floor - ROCK_GOLEM_HEADROOM - 1,
+                terrustia_proto::Tile::block(1),
+            );
+            assert!(
+                passes(&lower, STONE, true, false) > 0,
+                "a block at dx={dx} five rows up shut the spot"
+            );
+        }
     }
 
     /// A spider nest is the only place either spider comes from (`NPC.cs:1662-1680`), and the arm
