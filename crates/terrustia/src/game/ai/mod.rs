@@ -673,6 +673,32 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             if action != fighter::Action::None {
                 effects.doors.push(action);
             }
+            // The two type splits `AI_003_Fighters` makes on its own life (`NPC.cs:57603-57610`),
+            // both unconditional and both the server's (`Main.netMode != 1`):
+            //
+            // ```csharp
+            // if (Main.netMode != 1 && type == 198 && (double)life <= (double)lifeMax * 0.55) Transform(199);
+            // if (Main.netMode != 1 && type == 348 && (double)life <= (double)lifeMax * 0.55) Transform(349);
+            // ```
+            //
+            // A Lihzahrd cracks open into a Lihzahrd Crawler, which is the whole reason 199 exists:
+            // nothing in `NPC.Spawner` ever spawns one, so it arrives only this way. A wounded
+            // Nutcracker starts spinning, the same 55% and the same `aiStyle` 3, so the pair stays
+            // together here as it does there. The comparison is vanilla's own `double` one.
+            const LIHZAHRD: u16 = 198;
+            const LIHZAHRD_CRAWLER: u16 = 199;
+            const NUTCRACKER: u16 = 348;
+            const NUTCRACKER_SPINNING: u16 = 349;
+            let splits_into = match npc.npc_type {
+                LIHZAHRD => Some(LIHZAHRD_CRAWLER),
+                NUTCRACKER => Some(NUTCRACKER_SPINNING),
+                _ => None,
+            };
+            if let Some(into) = splits_into
+                && f64::from(npc.life) <= f64::from(npc.life_max) * 0.55
+            {
+                effects.transform = Some(into);
+            }
         }
         9 => effects.died = orb::update(npc, world, rng),
         19 => {
@@ -1392,6 +1418,95 @@ mod tests {
             unwired.is_empty(),
             "styles claiming parity with no routine wired up: {unwired:?}"
         );
+    }
+
+    /// A fighter standing on solid ground with somebody just out of reach.
+    fn fighter_world(tiles: &Flat) -> World<'_, Flat> {
+        World {
+            tiles,
+            target: Some(Target {
+                slot: 0,
+                center: (3200.0, 11_100.0),
+                velocity: (0.0, 0.0),
+                alive: true,
+            }),
+            wet: false,
+            target_wet: false,
+            conditions: Conditions::default(),
+            was_hurt: false,
+            target_velocity: (0.0, 0.0),
+            hostile: None,
+            census: &[],
+            parent: None,
+            parent_state: 0.0,
+            parent_health: 1.0,
+            crowding: (0.0, 0.0),
+            avoid: &[],
+            target_taken: false,
+            hooks: None,
+            hook_anchors: &[],
+            body_tentacles: 0,
+            kin_moving: false,
+            sockets_open: 0,
+            army: ArmyView::default(),
+            treasure: None,
+            mage: Default::default(),
+            slot: 0,
+        }
+    }
+
+    /// `AI_003_Fighters` splits two of its own types open at 55% life (`NPC.cs:57603-57610`): a
+    /// Lihzahrd becomes a Lihzahrd Crawler and a wounded Nutcracker starts spinning.
+    ///
+    /// The Lihzahrd's half matters most: nothing in `NPC.Spawner` spawns a Lihzahrd Crawler, so
+    /// this is the only way one ever exists.
+    ///
+    /// The exact boundary is pinned at a life max of 20 rather than a round 100, and deliberately:
+    /// `100.0 * 0.55` is `55.00000000000001` in `f64`, so a life of 55 is strictly under it and
+    /// `<` and `<=` cannot be told apart there. `20.0 * 0.55` is exactly `11.0`, which is the one
+    /// place the game's own `<=` is observable. That is vanilla's arithmetic too, not a divergence
+    /// introduced here.
+    ///
+    /// Neutralised by forcing `splits_into` to `None` in the `3 =>` arm of [`run`]: "Lihzahrd
+    /// splits at 20%: left None, right Some(199)". Neutralised again by changing `<=` to `<`, which
+    /// leaves that one passing and fires the boundary instead: "Lihzahrd splits at exactly 55% of
+    /// 20: left None, right Some(199)".
+    #[test]
+    fn a_wounded_lihzahrd_and_a_wounded_nutcracker_split_at_55_percent() {
+        let mut tiles = Flat::default();
+        for x in 0..400 {
+            for y in 700..710 {
+                tiles.0.insert((x, y), Tile::block(1));
+            }
+        }
+        let world = fighter_world(&tiles);
+        let split = |npc_type: u16, life_max: i32, life: i32| {
+            let mut npc = Npc::new(npc_type, (3000.0, 11_100.0), 1).expect("spawnable");
+            npc.life_max = life_max;
+            npc.life = life;
+            let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+            run(&mut npc, &world, &mut rng).transform
+        };
+
+        for (npc_type, into, name) in [(198u16, 199u16, "Lihzahrd"), (348, 349, "Nutcracker")] {
+            assert_eq!(split(npc_type, 100, 56), None, "{name} above 55% is unhurt");
+            assert_eq!(split(npc_type, 100, 20), Some(into), "{name} splits at 20%");
+            // The one life max where `lifeMax * 0.55` lands on a whole number, so the game's `<=`
+            // is the difference between splitting and not.
+            assert_eq!(
+                split(npc_type, 20, 12),
+                None,
+                "{name} at 12 of 20 is unhurt"
+            );
+            assert_eq!(
+                split(npc_type, 20, 11),
+                Some(into),
+                "{name} splits at exactly 55% of 20"
+            );
+        }
+
+        // ...and nothing else in the style does, however badly hurt: a Zombie stays a Zombie.
+        assert_eq!(split(3, 100, 1), None, "a Zombie turned into something");
     }
 
     #[test]

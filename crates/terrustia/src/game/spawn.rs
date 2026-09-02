@@ -18,8 +18,8 @@ use crate::world::World;
 /// inventory or buffs, so it cannot know them. Everything here is world state the server owns.
 ///
 /// Also absent, and for the same reason (the server has no notion of the thing they test):
-/// `ZoneSandstorm`, `ZoneLihzhardTemple`, `cloudAlpha`'s snow-in-a-storm bonus, the dual-dungeon
-/// seeds, `getGoodWorld`, and the Wall of Flesh's underworld suppression (`NPC.cs:662-666`).
+/// `ZoneSandstorm`, `cloudAlpha`'s snow-in-a-storm bonus, the dual-dungeon seeds, `getGoodWorld`,
+/// and the Wall of Flesh's underworld suppression (`NPC.cs:662-666`).
 /// Journey mode's slider is real and is applied by the caller, where the power lives, rather than
 /// threaded through here.
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +104,17 @@ pub struct Conditions {
     /// the exclusions on town suppression (`NPC.cs:800`). A meteor crater is meant to be dangerous
     /// however many people live beside it.
     pub meteor: bool,
+    /// `Player.ZoneLihzhardTemple`: whether the player is standing in front of a Lihzahrd brick wall.
+    ///
+    /// Not a tile count and not a [`Biome`]: `SceneMetrics.cs:693` is the whole of it,
+    /// `ZoneLihzhardTemple = tileSafely.wall == 87`, one wall read at the player's own tile, the
+    /// same shape as `ZoneGranite`, `ZoneMarble` and `ZoneHive` beside it. The wall it reads is
+    /// already read here for [`Self::behind_a_house_wall`], so the flag costs nothing.
+    ///
+    /// A temple also reads as [`Biome::Jungle`], because Lihzahrd brick is one of the game's own
+    /// jungle zone tiles (`SceneMetrics.cs:613`), so this rate modifier stacks on the jungle's
+    /// exactly as vanilla's does: `NPC.cs:641-650` is a separate `if` below the biome chain.
+    pub lihzahrd_temple: bool,
 }
 
 /// Which rate band a *player* is in, which is not the same question [`depth_at`] answers.
@@ -192,9 +203,9 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
     }
 
     // The biome block, `NPC.cs:591-660`. It is one `if`/`else if` chain in the game, so a dungeon
-    // takes its own modifier and none of the others; only the hallow's is a separate `if`. Four
-    // branches of that chain are absent here because this server has no notion of the zone they
-    // test: `ZoneSandstorm`, `ZoneLihzhardTemple`, `inDualDungeon` and
+    // takes its own modifier and none of the others; the hallow's and the temple's are separate
+    // `if`s below it. Three branches of that chain are absent here because this server has no
+    // notion of the zone they test: `ZoneSandstorm`, `inDualDungeon` and
     // `tresspassingDualDungeon`. `ZoneUndergroundDesert` is real vanilla's
     // "desert + below the surface + a sandstone or hardened-sand wall that is not a house wall"
     // (`SceneMetrics.cs:699`), narrowed here to the first two, since the server does not track
@@ -234,6 +245,14 @@ pub fn rates(at: Conditions, rng: &mut SmallRng) -> (u32, f32, bool) {
             max *= 1.1;
         }
         _ => {}
+    }
+    // NPC.cs:641-650, a separate `if` sitting between the biome chain and the hallow's: the temple
+    // is busier than the jungle it is buried in, and it stacks on the jungle's own modifier rather
+    // than replacing it, because Lihzahrd brick makes the place read as jungle too. The
+    // `Main.remixWorld` half of the branch (`:645-649`) is not modelled anywhere in this server.
+    if at.lihzahrd_temple {
+        rate *= 0.8;
+        max *= 1.2;
     }
     // NPC.cs:656-660, a separate `if`: the hallow is busier only below the rock layer.
     if at.biome == Biome::Hallow && matches!(at.depth, Depth::Cavern | Depth::Underworld) {
@@ -474,6 +493,7 @@ mod rate_tests {
             in_tower_zone: false,
             graveyard: false,
             meteor: false,
+            lihzahrd_temple: false,
         }
     }
 
@@ -884,6 +904,56 @@ mod rate_tests {
         );
         assert!(worst.0 >= (SPAWN_RATE as f32 * 0.1) as u32, "{worst:?}");
         assert!(worst.1 <= MAX_SPAWNS * 3.0, "{worst:?}");
+    }
+
+    /// The temple is busier than the jungle it is buried in, and it stacks (`NPC.cs:641-650` is a
+    /// separate `if` below the biome chain, not another arm of it).
+    ///
+    /// Neutralised by turning the `if at.lihzahrd_temple` block in [`rates`] off: the first
+    /// assertion fires, "spawnRate x0.8: left 300, right 240", the temple settling for the
+    /// surrounding rock's own numbers.
+    #[test]
+    fn the_temple_quickens_the_jungle_it_is_buried_in() {
+        // A plain underground band first, where neither clamp is anywhere near, so the two factors
+        // can be read off exactly.
+        let plain_band = Conditions {
+            depth: Depth::Underground,
+            ..plain()
+        };
+        let (base_rate, base_cap, _) = rates(plain_band, &mut any_rng());
+        let (rate, cap, _) = rates(
+            Conditions {
+                lihzahrd_temple: true,
+                ..plain_band
+            },
+            &mut any_rng(),
+        );
+        assert_eq!(rate, (base_rate as f32 * 0.8) as u32, "spawnRate x0.8");
+        assert!(
+            (cap - base_cap * 1.2).abs() < 1e-4,
+            "maxSpawns x1.2: {base_cap} -> {cap}"
+        );
+
+        // ...and it stacks on the jungle rather than replacing it, which is what makes a temple
+        // busier than the jungle it is buried in. The cap is already at its own ceiling down there
+        // (`MAX_SPAWNS * 3`), so the rate is what shows it.
+        let jungle = Conditions {
+            depth: Depth::Cavern,
+            biome: Biome::Jungle,
+            ..plain()
+        };
+        let (jungle_rate, _, _) = rates(jungle, &mut any_rng());
+        let (temple_rate, _, _) = rates(
+            Conditions {
+                lihzahrd_temple: true,
+                ..jungle
+            },
+            &mut any_rng(),
+        );
+        assert!(
+            temple_rate < jungle_rate,
+            "the temple stacks on the jungle: {jungle_rate} -> {temple_rate}"
+        );
     }
 }
 
@@ -1917,6 +1987,35 @@ const STONE: u16 = 1;
 /// `spawnTileY - 4`). A golem is 48 pixels tall and stands 1.1x scaled, so it wants a taller hole
 /// than the three rows [`open_space`] already asked for.
 const ROCK_GOLEM_HEADROOM: i32 = 4;
+
+/// The Lihzahrd Temple's whole ambient roster (`NPC.cs:3914-3924`):
+///
+/// ```csharp
+/// else if (((tileType == 226 || tileType == 232) && ZoneLihzhardTemple) || (Main.remixWorld && ZoneLihzhardTemple))
+/// {
+///     if (Main.rand.Next(3) == 0) SpawnNPC(..., 226); else SpawnNPC(..., 198);
+/// }
+/// ```
+///
+/// Both are unreachable anywhere else in `NPC.Spawner`, so before this the post-Plantera temple -
+/// the one place in the game a player farms for Solar Tablet fragments and Lihzahrd Power Cells -
+/// spawned nothing at all. The `Main.remixWorld` half of the gate is not modelled here, so the two
+/// ground tiles are the whole of it.
+const LIHZAHRD: u16 = 198;
+const FLYING_SNAKE: u16 = 226;
+
+/// `Main.rand.Next(3)` on the temple's own fork (`NPC.cs:3916`): a Flying Snake one draw in three,
+/// a Lihzahrd the other two.
+const FLYING_SNAKE_ODDS: u32 = 3;
+
+/// The two ground tiles the temple arm accepts (`TileID.LihzahrdBrick`, `TileID.WoodenSpikes`).
+const LIHZAHRD_BRICK: u16 = 226;
+const WOODEN_SPIKES: u16 = 232;
+
+/// `WallID.LihzahrdBrickUnsafe`, which is the entire definition of `ZoneLihzhardTemple`
+/// (`SceneMetrics.cs:693`). It is an unsafe wall, so `Main.wallHouse[87]` is false
+/// (`Main.cs:9880-10745` never sets it) and a temple does not suppress its own spawns.
+const TEMPLE_WALL: u16 = 87;
 
 /// `Main.rand.Next(20)` on the Tortured Soul's branch (`NPC.cs:4877`).
 const TORTURED_SOUL_ODDS: u32 = 20;
@@ -3581,6 +3680,16 @@ pub fn try_spawn(
         // `zones.desert` rather than `player_biome == Desert`: a corrupt, crimson or hallowed desert
         // is both zones at once in the game, and it is where three of the four sandsharks live.
         let sandstorm_zone = events.sandstorm && zones.desert && py <= i32::from(world.surface);
+        // The wall at the player's own tile, read once: three player zones hang off it here, the
+        // same three the game reads off its one `Framing.GetTileSafely(TileCenter)`
+        // (`SceneMetrics.cs:670-693`). `noWorms` wants `Main.wallHouse[]` of it (`NPC.cs:411`),
+        // `ZoneLihzhardTemple` wants it to be exactly 87, and the sky's own probe gate wants to
+        // know whether there is open air behind the player.
+        let player_wall = world.tile(px, py).wall;
+        // `Player.ZoneLihzhardTemple` (`SceneMetrics.cs:693`), a player zone like the rest and so
+        // answered here rather than per candidate tile: only the brick underfoot is decided down
+        // in the loop.
+        let temple_zone = player_wall == TEMPLE_WALL;
         let near = nearby_active_npcs(npcs, player.position);
 
         // The rate and cap are the player's own, not one number for the world: two people in the
@@ -3602,11 +3711,12 @@ pub fn try_spawn(
             below_dirt_midline: py > (i32::from(world.surface) + i32::from(world.rock_layer)) / 2,
             downed_boss3: world.progress.downed_boss3,
             // `NPC.cs:411`, read at the player's own tile.
-            behind_a_house_wall: terrustia_proto::housing::wall_encloses(world.tile(px, py).wall),
+            behind_a_house_wall: terrustia_proto::housing::wall_encloses(player_wall),
             active_players,
             in_tower_zone: tower.is_some(),
             graveyard: player.in_graveyard(),
             meteor: zones.meteor,
+            lihzahrd_temple: temple_zone,
         };
         // The season and the graveyard, read once per player per attempt: two bools off the world
         // and one bit off the zone packet this player last sent, so nothing here walks a tile.
@@ -3805,7 +3915,7 @@ pub fn try_spawn(
                     // already going on.
                     let half = world.width() / 2;
                     let probe_gate = (x - half).abs() as f32 / half as f32 > 0.33
-                        && sky_behind_player(world.tile(px, py).wall)
+                        && sky_behind_player(player_wall)
                         && !events.any_danger;
                     let alive =
                         |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
@@ -3932,6 +4042,33 @@ pub fn try_spawn(
                         mushroom_pick(depth == Depth::Surface, events.hard_mode, rng) =>
                 {
                     npc_type
+                }
+                // The Lihzahrd Temple, which answers with its own two and nothing else
+                // (`NPC.cs:3914-3924`, see [`LIHZAHRD`]). The arm sits exactly where vanilla puts
+                // it: below the Glowing Mushroom arm at `:3637` and above the sandstorm at `:3952`,
+                // inside the same fallthrough both of those live in.
+                //
+                // No progression gate of any kind, and none is invented here: vanilla's arm never
+                // reads `downedPlantBoss`. The Lihzahrd Power Cell door is what actually keeps a
+                // player out of the temple before Plantera, and anybody who gets in early meets the
+                // residents. The zone is the player's (a Lihzahrd brick wall at their own tile) and
+                // the ground is the candidate's, which is exactly how the game splits it.
+                //
+                // One disclosed narrowing, the same one the Goblin Scout and Skeleton Merchant arms
+                // carry: two arms above this one in vanilla's chain are not modelled here at all and
+                // so never decline in this server's favour. `:3802`'s Grasshopper is the only critter
+                // arm up there a temple can reach (it excludes snow, both evils and the hallow, but
+                // not the jungle a temple reads as), and `:3737`'s one-in-seventy-five souls arm has
+                // no biome gate at all in hardmode. The effect is that these two are very slightly
+                // commoner here than in the game, never rarer.
+                None if temple_zone
+                    && matches!(ground_block, Some(LIHZAHRD_BRICK | WOODEN_SPIKES)) =>
+                {
+                    if rng.random_range(0..FLYING_SNAKE_ODDS) == 0 {
+                        FLYING_SNAKE
+                    } else {
+                        LIHZAHRD
+                    }
                 }
                 // A sandstorm over the desert, which owns the surface while it blows
                 // (`NPC.cs:3952-4022`). It sits after the water and the dungeon, as vanilla's does,
@@ -4543,6 +4680,11 @@ mod tests {
         // module's own tests, so listing it here cannot drift into a claim its branch still makes
         // good.
         set.insert(ROCK_GOLEM);
+        // ...and the temple's two, whose branch is a one-in-three fork with no roster behind it
+        // (`NPC.cs:3914-3924`). `try_spawn` reaching both is asserted by this module's own tests,
+        // so listing them here cannot drift into a claim the branch still makes good.
+        set.insert(LIHZAHRD);
+        set.insert(FLYING_SNAKE);
         // ...and the Meteor Head, whose branch has no roll and no roster at all: standing in a
         // crater, it is the one thing that comes (`NPC.cs:2796-2799`). `try_spawn` reaching it is
         // asserted by this module's own tests, so listing it here cannot drift into a claim the
@@ -6153,6 +6295,111 @@ mod tests {
         }
         assert!(!seen.contains(&524), "the plain ghoul in a corrupt desert");
         assert!(!seen.contains(&530), "the scorpion in a corrupt desert");
+    }
+
+    /// A room of the Lihzahrd Temple: open air behind Lihzahrd brick walls, floored in Lihzahrd
+    /// brick every eight rows.
+    ///
+    /// Both halves of vanilla's gate are here on purpose and are separable: `wall` is what the
+    /// *player* stands in front of (`ZoneLihzhardTemple`, `SceneMetrics.cs:693`) and `floor` is the
+    /// `tileType` under the candidate (`NPC.cs:3914`). Rows 295 to 400 put every candidate in the
+    /// caverns, below `rock_layer`, which is where a real temple sits.
+    fn temple(wall: u16, floor: u16) -> World {
+        use terrustia_proto::tile::Tile;
+        let mut world = test_world();
+        world.surface = 200;
+        world.rock_layer = 300;
+        for y in 295i32..400 {
+            for x in 250..550 {
+                let mut tile = if y % 8 == 0 {
+                    Tile::block(floor)
+                } else {
+                    Tile::AIR
+                };
+                tile.wall = wall;
+                world.set_tile(x, y, tile);
+            }
+        }
+        world
+    }
+
+    /// The temple's whole ambient roster, which had no arm at all before this: the Lihzahrd and the
+    /// Flying Snake come from `NPC.cs:3914-3924` and from nowhere else in `NPC.Spawner`, so the
+    /// post-Plantera temple - the room players farm for Solar Tablet fragments and Power Cells -
+    /// was silent on this server.
+    ///
+    /// Both halves of the gate get their own assertion, because either one alone would have looked
+    /// like a pass: a temple wall over ordinary stone is not the temple, and Lihzahrd brick with no
+    /// temple wall behind the player is a Lihzahrd brick floor somebody built.
+    ///
+    /// Neutralised three ways, each rerun (an assertion failure stops the test, so each line names
+    /// the one that fires first):
+    /// * turning the whole `None if temple_zone` arm off: "no Lihzahrd (198) in the temple:
+    ///   {42, 43, 51, 56, 354}", the ordinary cavern pool answering in its place.
+    /// * dropping `temple_zone` from the arm's guard: "the temple roster reached a brick floor
+    ///   outside a temple: {198, 226, 354}".
+    /// * dropping the `ground_block` half: "the temple roster reached a stone floor:
+    ///   {198, 226, 354}".
+    #[test]
+    fn the_lihzahrd_temple_has_a_roster_of_its_own() {
+        let world = temple(TEMPLE_WALL, LIHZAHRD_BRICK);
+        assert_eq!(depth_at(&world, 350), Depth::Cavern);
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, 400, 350, 20_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [(LIHZAHRD, "Lihzahrd"), (FLYING_SNAKE, "FlyingSnake")] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) in the temple: {seen:?}"
+            );
+        }
+        // The arm answers for the whole spot, as vanilla's does: nothing from the cavern pool.
+        // A bound resident is the one other thing that can turn up, because that branch sits above
+        // every biome arm in the game too (`NPC.cs:1658-1697`, `:2087-2098`, all of them above the
+        // fallthrough the temple arm lives in), so it is subtracted rather than asserted away.
+        let bound: std::collections::BTreeSet<u16> = crate::game::rescues::RESCUES
+            .iter()
+            .map(|r| r.bound)
+            .chain([BOUND_TOWN_SLIME_OLD])
+            .collect();
+        let wild: std::collections::BTreeSet<u16> = seen.difference(&bound).copied().collect();
+        assert_eq!(
+            wild,
+            [LIHZAHRD, FLYING_SNAKE].into_iter().collect(),
+            "something other than the temple's own two got in: {seen:?}"
+        );
+
+        // Wooden Spikes are the second ground tile the arm accepts (`NPC.cs:3914`).
+        let spiked: std::collections::BTreeSet<u16> =
+            spawns_at(&temple(TEMPLE_WALL, WOODEN_SPIKES), false, 400, 350, 20_000)
+                .into_iter()
+                .collect();
+        assert!(
+            spiked.contains(&LIHZAHRD) && spiked.contains(&FLYING_SNAKE),
+            "the spike floor is a temple floor too: {spiked:?}"
+        );
+
+        // The zone is the player's wall: Lihzahrd brick with no temple wall behind them is just a
+        // floor, and the caverns answer for it.
+        let unwalled: std::collections::BTreeSet<u16> =
+            spawns_at(&temple(0, LIHZAHRD_BRICK), false, 400, 350, 20_000)
+                .into_iter()
+                .collect();
+        assert!(
+            !unwalled.contains(&LIHZAHRD) && !unwalled.contains(&FLYING_SNAKE),
+            "the temple roster reached a brick floor outside a temple: {unwalled:?}"
+        );
+        assert!(!unwalled.is_empty(), "the caverns answered for it instead");
+
+        // ...and the ground is the candidate's: a temple wall over ordinary stone is not a temple.
+        let stone_floor: std::collections::BTreeSet<u16> =
+            spawns_at(&temple(TEMPLE_WALL, 1), false, 400, 350, 20_000)
+                .into_iter()
+                .collect();
+        assert!(
+            !stone_floor.contains(&LIHZAHRD) && !stone_floor.contains(&FLYING_SNAKE),
+            "the temple roster reached a stone floor: {stone_floor:?}"
+        );
     }
 
     /// A surface desert with a sandstorm blowing over it, deep enough sand for
