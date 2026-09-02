@@ -13,9 +13,6 @@
 102	AnglerFish
 103	GreenJellyfish
 132	BaldZombie
-155	Wolf
-164	WallCreeper
-169	IceElemental
 175	AngryTrapper
 186	PincushionZombie
 187	SlimedZombie
@@ -32,7 +29,6 @@
 218	CyanBeetle
 219	LacBeetle
 220	SeaSnail
-223	ZombieRaincoat
 224	FlyingFish
 225	UmbrellaSlime
 226	FlyingSnake
@@ -66,10 +62,6 @@
 451	BoneThrowingSkeleton3
 452	BoneThrowingSkeleton4
 465	CrimsonGoldfish
-480	Medusa
-481	GreekSkeleton
-482	GraniteGolem
-483	GraniteFlyer
 484	EnchantedNightcrawler
 538	SquirrelRed
 539	SquirrelGold

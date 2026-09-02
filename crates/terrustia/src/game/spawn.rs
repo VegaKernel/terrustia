@@ -1086,14 +1086,15 @@ pub fn hardmode_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
                 ]
             }
         }
-        // ...and everything under it.
+        // ...and everything under it. No Black Recluse (163): `NPC.Spawner` reaches it from exactly
+        // one place, the spider nest's own arm (`NPC.cs:1673`, see [`spider_pick`]), so listing it
+        // here put recluses in every hardmode cave instead of in the nests they belong to.
         (Underground | Cavern, _) => &[
             77,  // ArmoredSkeleton
             85,  // Mimic
             93,  // GiantBat
             110, // SkeletonArcher
             141, // ToxicSludge
-            163, // BlackRecluse
             172, // RuneWizard
         ],
     }
@@ -1142,6 +1143,10 @@ pub struct Seasonal {
     /// `Main.moonPhase`. `Terraria.Enums.MoonPhase` names them: 0 is `Full` and 4 is `Empty`, the
     /// new moon, which is the darkest night and the one that doubles the demon eyes.
     pub moon_phase: u8,
+    /// `Main.raining` (`NPC.cs:1287`, `raining = Main.raining`), for the surface night's own rain
+    /// arm (`NPC.cs:4675`). It is here rather than on [`Conditions`] for the same reason the rest
+    /// of this struct is: rain changes what turns up, not how fast.
+    pub raining: bool,
 }
 
 /// The surface night chain's own arms, ahead of the ordinary pool: `NPC.cs:4539-4740`.
@@ -1160,11 +1165,16 @@ pub struct Seasonal {
 /// Deliberately left to the pools and to other lanes, each with its place in the order below kept
 /// so the arms that *are* here land at vanilla's own odds:
 ///
-/// * `NPC.cs:4620` the blood-moon Clown, `:4636` the Possessed Armor and `:4640` the Blood Zombie
+/// * `NPC.cs:4618` the blood-moon Clown, `:4638` the Possessed Armor and `:4643` the Blood Zombie
 ///   and Drippler. All three already have a home in [`hardmode_pool`] and [`blood_moon_pool`];
-///   taking them here as well would give each of them two sources.
-/// * `NPC.cs:4655-4670` the snow arm and `:4677-4690` the rain arm, which belong to the biome and
-///   weather pools rather than to the season.
+///   taking them here as well would give each of them two sources. The last two now make their
+///   rolls and hand the draw back, which is what the promise above is worth: without them a snowy
+///   hardmode night would answer with a Wolf where the game had already answered with an armour.
+///   (The line numbers here were `:4636` and `:4640` and named the wrong arm; both are corrected.)
+/// * `NPC.cs:4665` the Armed Zombie Eskimo, whose gate is `Main.expertMode` and nothing this
+///   signature can see. It is the third branch of the snow arm below, so skipping it hands its
+///   share to the arm's own fallthrough, which is 161 and already in [`pool`]'s snow night. 431
+///   stays disclosed.
 /// * `NPC.cs:4691-4711` the Skyblock arm, for a world shape this server does not generate.
 /// * `NPC.cs:4712` the Moss Zombie, which is gated on `RollOnlyBadLuckExtreme(30) == 0`. That
 ///   returns `-1` for any player whose luck is not negative (`Luck.cs:53-60`), and this server
@@ -1174,12 +1184,16 @@ pub struct Seasonal {
 /// * `NPC.cs:4722` the Torch Zombie and `:4743` the armed and styled zombies, which are the
 ///   ordinary zombie's own variants rather than a season's.
 ///
-/// The negative ids vanilla spawns alongside three of these arms (`-38` to `-43`, `NPC.cs:4569`,
-/// `:4581-4610`) are not types: `NPCID.FromNetId` (`NPCID.cs:12478`) maps them back onto the very
-/// same NPC with a size multiplier (`NPC.cs:8080-8137`). `tools/check_spawn_reach.py` drops them
-/// from vanilla's roster for that reason, and nothing here models NPC scale, so they are dropped
-/// here too.
-pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
+/// The negative ids vanilla spawns alongside four of these arms (`-38` to `-43`, `NPC.cs:4569`,
+/// `:4581-4610`, and `-54`/`-55` in the rain arm) are not types: `NPCID.FromNetId`
+/// (`NPCID.cs:12478`) maps them back onto the very same NPC with a size multiplier
+/// (`NPC.cs:8080-8137`), so `SmallRainZombie` and `BigRainZombie` are both 223.
+/// `tools/check_spawn_reach.py` drops them from vanilla's roster for that reason, and nothing here
+/// models NPC scale, so they are dropped here too.
+///
+/// `ground_block` is the tile the spawn stands on, the game's own `spawnTileY` (`NPC.cs:329`), which
+/// is this server's `y + 1`. Only the snow arm reads it.
+pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
 
     // NPC.cs:4539. The Raven is the season's own bird, and a graveyard has one whether or not it is
@@ -1239,6 +1253,50 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
     if !at.day_time && at.moon_phase == 0 && at.hard_mode && !one_in(rng, 3) {
         return Some(104); // Werewolf
     }
+    // NPC.cs:4638, the Possessed Armor, and `:4643`, the Blood Zombie and the Drippler. Both are
+    // already carried by [`hardmode_pool`] and [`blood_moon_pool`], so both rolls are made and the
+    // draw is handed straight back: they sit above the snow and rain arms below, and without them a
+    // hardmode or blood-moon night would reach those arms every time instead of two thirds and
+    // three fifths of the time.
+    if !at.day_time && at.hard_mode && one_in(rng, 3) {
+        return None;
+    }
+    // `Main.rand.Next(5) < 2`, which is not a `one_in`.
+    if at.blood_moon && rng.random_range(0..5) < 2 {
+        return None;
+    }
+    // NPC.cs:4655, the snow arm. It keys on the tile underfoot rather than on the player's zone, so
+    // a patch of ice in a forest answers here too, and it `return`s: a snowy graveyard has no Maggot
+    // Zombies and a snowy October no costumed ones, because vanilla never reaches those arms with
+    // ice under the spawn.
+    //
+    // `TileID.Sets.IcesSnow` is `{161, 200, 163, 164, 147}` (`TileID.cs:297`) and the arm adds 162,
+    // the thin ice, on its own line. These are tile ids: 163 and 164 here are Purple and Pink Ice,
+    // not the two spiders.
+    // A `matches!` rather than a `[u16; 6]` and `contains`: every draw that gets past the werewolf
+    // reaches this, and on `measure_the_graveyard_and_the_seasonal_chain`'s ordinary night the
+    // linear array scan cost +3.8 ns against this form's +0.6 ns.
+    if matches!(ground_block, 147 | 161 | 162 | 163 | 164 | 200) {
+        // NPC.cs:4657 and `:4661`. The Ice Elemental and the Wolf come from here and from one
+        // other place each in the whole spawner (`:5232` is the caverns' own Ice Elemental, the
+        // flying chain's snow arm), so without this arm both were unreachable. Note `!ZoneGraveyard`
+        // on both: a graveyard in the snow gets neither.
+        if !at.graveyard && at.hard_mode && one_in(rng, 4) {
+            return Some(169); // IceElemental
+        }
+        if !at.graveyard && at.hard_mode && one_in(rng, 3) {
+            return Some(155); // Wolf
+        }
+        // NPC.cs:4665's expert Armed Zombie Eskimo and `:4671`'s plain Zombie Eskimo, which is the
+        // arm's fallthrough and already in [`pool`]'s snow night. Handed back rather than answered.
+        return None;
+    }
+    // NPC.cs:4675, the rain arm. All three of its outcomes are NPC 223 (`-54` and `-55` are the
+    // small and big Rain Zombie, the same type at a different scale), so the inner `Next(3)` and
+    // `Next(2)` collapse away.
+    if at.raining && one_in(rng, 2) {
+        return Some(223); // ZombieRaincoat
+    }
     // NPC.cs:4717: the graveyard's own zombie. `maggotZombieChance` is 20 and nothing in
     // `GetZombieSettings` (`NPC.cs:5595-5619`) ever moves it.
     if at.graveyard && one_in(rng, 20) {
@@ -1271,6 +1329,10 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
 /// (`NPC.cs:5021`), the bottom half of the stone, which is a different line from
 /// [`Conditions::below_dirt_midline`]'s `(worldSurface + rockLayer) / 2`.
 ///
+/// `ground_block` is the tile the spawn stands on, the game's own `spawnTileY` (`NPC.cs:329`:
+/// `FindSpawnTile` walks down to the first solid tile, so its `spawnTileY` is this server's
+/// `y + 1`). It is here for the two stone arms below and nothing else.
+///
 /// Deliberately left out, each with its place in the order kept so the arms that *are* here land at
 /// vanilla's own odds:
 ///
@@ -1281,10 +1343,6 @@ pub fn seasonal_night_pick(at: Seasonal, rng: &mut SmallRng) -> Option<u16> {
 ///   test, no caller triggers it. Spawning a permanently idle prop is worse than the honest gap, so
 ///   195 stays in `docs/spawn-gaps.tsv` until the transformation has a lane.
 /// * `NPC.cs:5017` the Rune Wizard, already carried by [`hardmode_pool`].
-/// * `NPC.cs:5027` the marble arm (Medusa, Greek Skeleton) and `:5038` the granite one (Granite
-///   Golem, Granite Flyer). Both key on `nearMarble`/`nearGranite`, which vanilla fills from its
-///   own tile scan around the spot (`NPC.cs:1100-1143`); this server models neither micro-biome and
-///   will not add a second per-tile scan to the spawn path for them. 480-483 stay disclosed.
 /// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
 ///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
 ///   so a snow cavern never sees a Halloween skeleton.
@@ -1306,7 +1364,9 @@ pub fn cavern_seasonal_pick(
     at: Seasonal,
     no_worms: bool,
     lower_caverns: bool,
+    ground_block: u16,
     glowshroom_ground: bool,
+    alive: &dyn Fn(u16) -> bool,
     rng: &mut SmallRng,
 ) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
@@ -1334,6 +1394,48 @@ pub fn cavern_seasonal_pick(
     // weapon) is not read here, so Tim is very slightly rarer than the game's, never commoner.
     if lower_caverns && one_in(rng, 200) {
         return Some(45); // Tim
+    }
+    // NPC.cs:5027 and `:5039`, the marble and granite arms:
+    //
+    // ```csharp
+    // if (nearMarble && Main.rand.Next(4) != 0)
+    // {
+    //     if (Main.rand.Next(6) != 0 && !AnyNPCs(480) && Main.hardMode) 480; else 481;
+    //     return;
+    // }
+    // if (nearGranite && Main.rand.Next(5) != 0)
+    // {
+    //     if (Main.rand.Next(6) != 0 && !AnyNPCs(483)) 483; else 482;
+    //     return;
+    // }
+    // ```
+    //
+    // All four types come from here and nowhere else in `NPC.Spawner`, which is why all four were
+    // unreachable. Note what the gates actually say: only the Medusa is hardmode, so a granite
+    // pocket has its golems and flyers on day one, and a marble one has its Greek Skeletons.
+    //
+    // `nearMarble`/`nearGranite` are narrowed to the ground tile itself (`NPC.cs:1059-1065`, the
+    // first two of the flag's four branches). The other two are the player's own tile and a pair of
+    // random box sweeps up to 61 tiles across (`NPC.cs:1067-1143`), left out for the same reason
+    // `underground_desert_spot` and [`spider_pick`] leave out their equivalents: a real marble or
+    // granite pocket is floored in its own stone, so the tile test finds the biome from inside it,
+    // and the sweeps only widen the arm to spots outside one. The effect is that the four start a
+    // little further in than the game's do, never that they turn up in ordinary rock.
+    const MARBLE: u16 = 367;
+    const GRANITE: u16 = 368;
+    if ground_block == MARBLE && !one_in(rng, 4) {
+        return Some(if !one_in(rng, 6) && !alive(480) && at.hard_mode {
+            480 // Medusa
+        } else {
+            481 // GreekSkeleton
+        });
+    }
+    if ground_block == GRANITE && !one_in(rng, 5) {
+        return Some(if !one_in(rng, 6) && !alive(483) {
+            483 // GraniteFlyer
+        } else {
+            482 // GraniteGolem
+        });
     }
     // NPC.cs:5051, `if (Main.hardMode && Main.rand.Next(10) != 0)`: nine hardmode draws in ten
     // never reach the rest of this chain at all. Its own answers (Armored Viking, Armored Skeleton,
@@ -2125,6 +2227,48 @@ fn check_underground(world: &World, x: i32, y: i32) -> bool {
         }
     }
     f64::from(closed) >= f64::from(WIDTH * ROWS) * 0.8
+}
+
+/// `WallID.SpiderUnsafe`, the wall a spider nest is lined with and the only thing that puts one on
+/// the spawn path (`NPC.cs:1662`).
+pub const SPIDER_WALL: u16 = 62;
+
+/// The spider nest's roster, `NPC.cs:1662-1680`:
+///
+/// ```csharp
+/// else if ((Main.tile[spawnTileX, spawnTileY].wall == 62 || spawnSpider) && CheckToSpawnSpider(...))
+/// {
+///     ...
+///     else if (Main.hardMode && Main.rand.Next(10) != 0) 163;
+///     else                                               164;
+/// }
+/// ```
+///
+/// The Wall Creeper and the Black Recluse have no other ambient spawn in the game at all: 163 and
+/// 164 are the only two ids `NPC.Spawner` reaches from this arm, so with no arm the Wall Creeper was
+/// unreachable outright and the Black Recluse was only reachable because [`hardmode_pool`] carried
+/// it in the generic cavern list, which put recluses in every hardmode cave rather than in nests.
+///
+/// `CheckToSpawnSpider` (`NPC.cs:5790-5801`) is `true` outside the "not the bees" for-the-worthy
+/// seed, so it is not transcribed.
+///
+/// Two things left to the caller, both disclosed:
+///
+/// * `|| spawnSpider` (`NPC.cs:1145-1176`), which widens the arm to spots merely *near* a spider
+///   wall by sweeping a box of radius 5 to 15 one attempt in three. Left out for the same reason
+///   `underground_desert_spot` leaves out its twin: it is up to 900 tile reads on the per-candidate
+///   path to reach spots the wall test itself misses anyway, and a real nest is walled throughout.
+/// * `NPC.cs:1669`, the Stylist at one dry nest tile in eight below the rock layer. She already has
+///   a path here, [`bound_gate`], which reaches her through the same rescue table as every other
+///   bound resident; giving her a second one would mean two mechanisms racing for the same
+///   townsperson. The effect of skipping the branch is that 163 and 164 take that eighth as well,
+///   in the window before she is rescued.
+fn spider_pick(hard_mode: bool, rng: &mut SmallRng) -> u16 {
+    if hard_mode && !rng.random_ratio(1, 10) {
+        163 // BlackRecluse
+    } else {
+        164 // WallCreeper
+    }
 }
 
 /// Whether a candidate spot is in the underground desert, `NPC.cs:1682`:
@@ -3261,6 +3405,8 @@ pub fn try_spawn(
             blood_moon: world.blood_moon,
             day_time: world.day_time,
             moon_phase: world.moon_phase,
+            // `NPC.cs:372`, `raining = Main.raining`.
+            raining: world.raining,
         };
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
@@ -3452,6 +3598,14 @@ pub fn try_spawn(
                         |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     sky_pick(events.hard_mode, probe_gate, world, no_worms, &alive, rng)
                 }
+                // A spider nest, which owns its own arm the way the desert below owns its
+                // (`NPC.cs:1662`), one row above it in vanilla's chain and therefore one arm above
+                // it here. The wall is read on the game's own `spawnTileY`, the solid ground tile,
+                // which is this server's `y + 1`; it carries no depth or biome gate of its own,
+                // because vanilla's does not either.
+                None if world.tile(x, y + 1).wall == SPIDER_WALL => {
+                    spider_pick(events.hard_mode, rng)
+                }
                 // The underground desert, which is its own chain and answers for everything in it
                 // (`NPC.cs:1682-1765`). It sits here because that is where vanilla puts it: ahead of
                 // every water branch, ahead of `spawnFriendly`, ahead of `ZoneDungeon` and ahead of
@@ -3621,7 +3775,10 @@ pub fn try_spawn(
                             biome,
                             Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
                         );
-                    if seasonal_ground && let Some(npc_type) = seasonal_night_pick(seasonal, rng) {
+                    if seasonal_ground
+                        && let Some(npc_type) =
+                            seasonal_night_pick(seasonal, world.tile(x, y + 1).block, rng)
+                    {
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
@@ -3630,8 +3787,9 @@ pub fn try_spawn(
                     // exclusions are vanilla's own diversions above it: the two evils and the
                     // jungle answer at `NPC.cs:4066`, `:4125` and `:3929-3948` on their tiles, the
                     // dungeon has its own arm, and the snow's `:5088`/`:5100` both return before
-                    // the season is ever asked. Nothing here reads a tile, so this costs three
-                    // comparisons and at most six `rng` draws on a path that already made several.
+                    // the season is ever asked. One tile read (the stone underfoot, for the marble
+                    // and granite arms) plus three comparisons and at most six `rng` draws, on a
+                    // path that already made several.
                     let cavern_chain = depth == Depth::Cavern
                         && !matches!(
                             biome,
@@ -3643,12 +3801,16 @@ pub fn try_spawn(
                         );
                     // `NPC.cs:5021`, the bottom half of the stone.
                     let lower_caverns = y > (i32::from(world.rock_layer) + world.height()) / 2;
+                    let alive =
+                        |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                     if cavern_chain
                         && let Some(npc_type) = cavern_seasonal_pick(
                             seasonal,
                             no_worms,
                             lower_caverns,
+                            world.tile(x, y + 1).block,
                             glowshroom_ground,
+                            &alive,
                             rng,
                         )
                     {
@@ -3875,28 +4037,45 @@ mod tests {
                 }
             }
         }
+        // The spider nest's two, asked through their own producer for the same reason: it is the
+        // only place in the game either of them comes from.
+        for hard_mode in [false, true] {
+            for seed in 0..200u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.insert(spider_pick(hard_mode, &mut rng));
+            }
+        }
         // The surface night's own chain, asked through itself for the same reason the sky is:
         // deleting an arm shows up here as a type that stopped being reachable. Every combination
-        // of the five flags it reads, since each one opens arms the others do not, and both moon
-        // phases it names.
+        // of the flags it reads, since each one opens arms the others do not, both moon phases it
+        // names, and two floors, because the snow arm keys on the tile underfoot.
         for halloween in [false, true] {
             for xmas in [false, true] {
                 for graveyard in [false, true] {
                     for hard_mode in [false, true] {
                         for blood_moon in [false, true] {
-                            for moon_phase in [0u8, 4] {
-                                let at = Seasonal {
-                                    halloween,
-                                    xmas,
-                                    graveyard,
-                                    hard_mode,
-                                    blood_moon,
-                                    day_time: false,
-                                    moon_phase,
-                                };
-                                for seed in 0..4_000u64 {
-                                    let mut rng = SmallRng::seed_from_u64(seed);
-                                    set.extend(seasonal_night_pick(at, &mut rng));
+                            for raining in [false, true] {
+                                for moon_phase in [0u8, 4] {
+                                    let at = Seasonal {
+                                        halloween,
+                                        xmas,
+                                        graveyard,
+                                        hard_mode,
+                                        blood_moon,
+                                        day_time: false,
+                                        moon_phase,
+                                        raining,
+                                    };
+                                    for ground_block in [2u16, 147] {
+                                        for seed in 0..4_000u64 {
+                                            let mut rng = SmallRng::seed_from_u64(seed);
+                                            set.extend(seasonal_night_pick(
+                                                at,
+                                                ground_block,
+                                                &mut rng,
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3906,6 +4085,8 @@ mod tests {
         }
         // ...and the caverns' own chain, asked the same way. Both `no_worms` states, because the
         // Ghost's arm is gated on one of them, and both halves of the stone, because Tim's is.
+        // Three floors, because two of the arms key on the stone underfoot: plain rock, marble
+        // (367) and granite (368).
         for halloween in [false, true] {
             for graveyard in [false, true] {
                 for hard_mode in [false, true] {
@@ -3920,15 +4101,19 @@ mod tests {
                             // Both halves of the chain have a glowshroom arm, and each is the only
                             // source of its own Spore, so the flag is sampled like the rest.
                             for glowshroom in [false, true] {
-                                for seed in 0..4_000u64 {
-                                    let mut rng = SmallRng::seed_from_u64(seed);
-                                    set.extend(cavern_seasonal_pick(
-                                        at,
-                                        no_worms,
-                                        lower_caverns,
-                                        glowshroom,
-                                        &mut rng,
-                                    ));
+                                for ground_block in [1u16, 367, 368] {
+                                    for seed in 0..4_000u64 {
+                                        let mut rng = SmallRng::seed_from_u64(seed);
+                                        set.extend(cavern_seasonal_pick(
+                                            at,
+                                            no_worms,
+                                            lower_caverns,
+                                            ground_block,
+                                            glowshroom,
+                                            &|_| false,
+                                            &mut rng,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -4786,11 +4971,20 @@ mod tests {
     ///   6879 vs 6879".
     #[test]
     fn the_caverns_have_a_season_of_their_own() {
+        // Plain stone underfoot: the two arms that key on the floor are the stone test below.
         let sample = |at: Seasonal, no_worms: bool, lower_caverns: bool| {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    cavern_seasonal_pick(at, no_worms, lower_caverns, false, &mut rng)
+                    cavern_seasonal_pick(
+                        at,
+                        no_worms,
+                        lower_caverns,
+                        1,
+                        false,
+                        &|_| false,
+                        &mut rng,
+                    )
                 })
                 .collect::<Vec<u16>>()
         };
@@ -5062,7 +5256,15 @@ mod tests {
             (0..40_000u64)
                 .filter_map(|seed| {
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    cavern_seasonal_pick(Seasonal::default(), false, false, glowshroom, &mut rng)
+                    cavern_seasonal_pick(
+                        Seasonal::default(),
+                        false,
+                        false,
+                        1,
+                        glowshroom,
+                        &|_| false,
+                        &mut rng,
+                    )
                 })
                 .collect::<std::collections::BTreeSet<u16>>()
         };
@@ -5137,6 +5339,90 @@ mod tests {
                 "no {name} ({npc_type}) on a surface mushroom patch: {day:?}",
             );
         }
+    }
+
+    /// Marble and granite are the only home the four of them have (`NPC.cs:5027-5050`), and only
+    /// the Medusa waits for hardmode: a granite pocket has its golems and flyers on day one.
+    ///
+    /// Neutralised arm by arm, each failing its own assertion:
+    ///
+    /// * deleting the `NPC.cs:5027` marble arm: "no GreekSkeleton (481) on a marble floor: {}".
+    /// * deleting `:5039`'s granite arm: "no GraniteFlyer (483) on a granite floor: {}".
+    /// * dropping `&& at.hard_mode` from `:5029`: "a Medusa turned up before hardmode".
+    /// * dropping `!alive(483)` from `:5041`: "a second Granite Flyer while one is already up".
+    /// * dropping the `world.tile(x, y + 1).block` argument in `try_spawn` for a literal `1`: "no
+    ///   GraniteGolem (482) in a granite cavern", the arm written but wired to nothing.
+    #[test]
+    fn marble_and_granite_are_where_those_four_live() {
+        let stone = |ground_block: u16, hard_mode: bool, alive: &dyn Fn(u16) -> bool| {
+            (0..40_000u64)
+                .filter_map(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    cavern_seasonal_pick(
+                        Seasonal {
+                            hard_mode,
+                            ..Seasonal::default()
+                        },
+                        false,
+                        false,
+                        ground_block,
+                        false,
+                        alive,
+                        &mut rng,
+                    )
+                })
+                .collect::<std::collections::BTreeSet<u16>>()
+        };
+
+        // Pre-hardmode marble is the Greek Skeleton alone: `NPC.cs:5029` ends `&& Main.hardMode`.
+        let marble = stone(367, false, &|_| false);
+        assert!(
+            marble.contains(&481),
+            "no GreekSkeleton (481) on a marble floor: {marble:?}"
+        );
+        assert!(!marble.contains(&480), "a Medusa turned up before hardmode");
+        assert!(
+            stone(367, true, &|_| false).contains(&480),
+            "no Medusa on a hardmode marble floor"
+        );
+
+        // Granite has no such gate, and its two split on `!AnyNPCs(483)` (`NPC.cs:5041`).
+        let granite = stone(368, false, &|_| false);
+        for (npc_type, name) in [(483u16, "GraniteFlyer"), (482, "GraniteGolem")] {
+            assert!(
+                granite.contains(&npc_type),
+                "no {name} ({npc_type}) on a granite floor: {granite:?}"
+            );
+        }
+        assert!(
+            !stone(368, false, &|ty| ty == 483).contains(&483),
+            "a second Granite Flyer while one is already up"
+        );
+
+        // Ordinary stone answers none of the four, which is what makes the pocket the reason.
+        let plain = stone(1, true, &|_| false);
+        for npc_type in [480u16, 481, 482, 483] {
+            assert!(
+                !plain.contains(&npc_type),
+                "{npc_type} turned up on plain rock: {plain:?}"
+            );
+        }
+
+        // ...and it is wired to the caverns rather than merely written: a granite-floored hall.
+        let floor = 300;
+        let mut world = hall_world(floor);
+        for x in 0..world.width() {
+            world.set_tile(x, floor, terrustia_proto::Tile::block(368));
+        }
+        assert_eq!(depth_at(&world, floor - 1), Depth::Cavern);
+        assert_eq!(
+            biome_at(&world, world.width() / 2, floor - 1),
+            Biome::Forest
+        );
+        assert!(
+            spawns_of(&world, floor, &quiet(), 482, 4) > 0,
+            "no GraniteGolem (482) in a granite cavern"
+        );
     }
 
     /// Christmas puts two zombies in seasonal knitwear (`NPC.cs:4739`,
@@ -5226,7 +5512,7 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(99);
             (0..200_000)
                 .filter(|_| {
-                    matches!(seasonal_night_pick(at, &mut rng), Some(ty) if (190..=194).contains(&ty))
+                    matches!(seasonal_night_pick(at, 2, &mut rng), Some(ty) if (190..=194).contains(&ty))
                 })
                 .count()
         };
@@ -5239,6 +5525,91 @@ mod tests {
             new_moon > full * 3,
             "the new moon should be thick with eyes: {new_moon} against {full}"
         );
+    }
+
+    /// Ice underfoot on a surface night is the Ice Elemental's and the Wolf's only home outside the
+    /// caverns' flying chain (`NPC.cs:4655-4673`), and the arm keys on the *tile* rather than on the
+    /// player's zone: 169 was in no producer at all and 155 in none either.
+    ///
+    /// The floor is snow in a world the zone scan still calls a forest (169 snow tiles in a
+    /// 169-by-124 box, against a `SnowTileNormalThreshold` of 1500), which is what makes this a
+    /// test of the tile and not of the biome.
+    ///
+    /// Neutralised arm by arm:
+    ///
+    /// * deleting the ice-and-snow `matches!` block: "no IceElemental (169) on ice".
+    /// * dropping `!at.graveyard` from both hardmode arms: "a Wolf in a snowy graveyard".
+    /// * dropping `at.hard_mode` from both: "an Ice Elemental before hardmode".
+    /// * passing `2` instead of `world.tile(x, y + 1).block` in `try_spawn`: "no IceElemental (169)
+    ///   on ice", the arm written but wired to nothing.
+    #[test]
+    fn ice_underfoot_brings_the_wolves_out() {
+        let (mut world, (px, py)) = night_world();
+        for x in 0..world.width() {
+            world.set_tile(x, 90, terrustia_proto::Tile::block(147)); // SnowBlock
+        }
+        assert_eq!(
+            biome_at(&world, px, py),
+            Biome::Forest,
+            "one row of snow is not a snow biome, which is the point of this test"
+        );
+
+        let found: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, true, false, px, py, 60_000)
+                .into_iter()
+                .collect();
+        for (npc_type, name) in [(169u16, "IceElemental"), (155, "Wolf")] {
+            assert!(
+                found.contains(&npc_type),
+                "no {name} ({npc_type}) on ice: {found:?}"
+            );
+        }
+
+        // `!ZoneGraveyard` on both arms (`NPC.cs:4657`, `:4661`): tombstones in the snow get neither.
+        let haunted: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, true, true, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(!haunted.contains(&155), "a Wolf in a snowy graveyard");
+        assert!(
+            !haunted.contains(&169),
+            "an Ice Elemental in a snowy graveyard"
+        );
+
+        // ...and `Main.hardMode` on both, so a fresh world's snow is just cold.
+        let early: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(!early.contains(&169), "an Ice Elemental before hardmode");
+        assert!(!early.contains(&155), "a Wolf before hardmode");
+    }
+
+    /// Rain on a surface night is the Zombie Raincoat's only home (`NPC.cs:4675-4689`), and all
+    /// three of vanilla's outcomes there are the same 223 at different scales.
+    ///
+    /// Neutralised by deleting the `at.raining` arm: "no ZombieRaincoat (223) in the rain".
+    /// Neutralised the other way, by dropping `at.raining` from the condition so it fires dry: the
+    /// second assertion fails instead.
+    #[test]
+    fn rain_puts_a_coat_on_the_zombies() {
+        let (mut world, (px, py)) = night_world();
+        world.raining = true;
+        let wet: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(
+            wet.contains(&223),
+            "no ZombieRaincoat (223) in the rain: {wet:?}"
+        );
+
+        world.raining = false;
+        let dry: std::collections::BTreeSet<u16> =
+            spawns_at_in(&world, false, false, px, py, 60_000)
+                .into_iter()
+                .collect();
+        assert!(!dry.contains(&223), "a raincoat on a dry night: {dry:?}");
     }
 
     /// A world whose surface line is at 200, so the sky line (`worldSurface * 0.35`) is row 70 and
@@ -6664,6 +7035,13 @@ mod tests {
     ///   player.
     /// * The same in a graveyard at Halloween with every arm live: 15.3 ns, which is the chain
     ///   actually rolling its dice rather than falling out of the first condition.
+    ///
+    /// The snow and rain arms (`NPC.cs:4655`, `:4675`) were added to that chain later and were
+    /// measured against the same build on the same machine rather than against the numbers above:
+    /// 4.89 ns before and 5.50 ns after on the ordinary night, and 17.95 against 16.68 in the
+    /// graveyard, so the two arms and the two rolls above them cost about 0.6 ns of a run that
+    /// happens at most once per *tick*. Written as an array of the six ice and snow tiles and
+    /// `contains` instead, the same measurement was 8.68 ns, which is why it is a `matches!`.
     #[test]
     #[ignore]
     fn measure_the_graveyard_and_the_seasonal_chain() {
@@ -6705,8 +7083,14 @@ mod tests {
             let start = std::time::Instant::now();
             let mut sink = 0u32;
             for _ in 0..n {
-                sink +=
-                    u32::from(seasonal_night_pick(std::hint::black_box(at), &mut rng).unwrap_or(0));
+                sink += u32::from(
+                    seasonal_night_pick(
+                        std::hint::black_box(at),
+                        std::hint::black_box(2),
+                        &mut rng,
+                    )
+                    .unwrap_or(0),
+                );
             }
             let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
             println!("seasonal_night_pick, {name}: {each:.2} ns/call (sink {sink})");
@@ -7387,6 +7771,59 @@ mod tests {
             spawns_of(&hell, hell_floor, &quiet(), SKELETON_MERCHANT, 9),
             0,
             "the underworld spawned a Skeleton Merchant"
+        );
+    }
+
+    /// A spider nest is the only place either spider comes from (`NPC.cs:1662-1680`), and the arm
+    /// keys on the nest's own wall rather than on a depth or a biome.
+    ///
+    /// Neutralised by deleting the `None if world.tile(x, y + 1).wall == SPIDER_WALL` arm from
+    /// `try_spawn`: the first assertion fails with "a spider nest produced no Wall Creeper", and
+    /// the hardmode one with "a hardmode nest produced no Black Recluse". Neutralised again by
+    /// putting `163` back in `hardmode_pool`'s generic `(Underground | Cavern, _)` list: the last
+    /// assertion fails, an ordinary walled-off hardmode cavern producing recluses.
+    #[test]
+    fn a_spider_nest_is_where_the_spiders_are() {
+        let floor = 300;
+        let nest = {
+            let mut world = hall_world(floor);
+            assert!(
+                !terrustia_proto::housing::wall_encloses(SPIDER_WALL),
+                "a nest wall must not read as a house wall, or nothing would spawn in one"
+            );
+            for x in 0..world.width() {
+                let mut tile = terrustia_proto::Tile::block(1);
+                tile.wall = SPIDER_WALL;
+                world.set_tile(x, floor, tile);
+            }
+            world
+        };
+        assert_eq!(depth_at(&nest, floor - 1), Depth::Cavern);
+
+        // Pre-hardmode the arm answers with the Wall Creeper alone (`NPC.cs:1677-1680`).
+        assert!(
+            spawns_of(&nest, floor, &quiet(), 164, 3) > 0,
+            "a spider nest produced no Wall Creeper"
+        );
+        let mut hard = quiet();
+        hard.hard_mode = true;
+        assert!(
+            spawns_of(&nest, floor, &hard, 163, 3) > 0,
+            "a hardmode nest produced no Black Recluse"
+        );
+
+        // ...and the same cavern without the wall has neither, which is what makes the nest the
+        // reason they came rather than the depth (`NPC.cs:1673`, the only `163` in the spawner).
+        let plain = hall_world(floor);
+        assert_eq!(
+            spawns_of(&plain, floor, &hard, 164, 3),
+            0,
+            "a Wall Creeper turned up in a cavern with no nest"
+        );
+        assert_eq!(
+            spawns_of(&plain, floor, &hard, 163, 3),
+            0,
+            "a Black Recluse turned up in a cavern with no nest"
         );
     }
 }
