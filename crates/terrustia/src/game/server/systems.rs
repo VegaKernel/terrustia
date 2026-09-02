@@ -4239,6 +4239,8 @@ impl GameServer {
             next_night_is_lantern_night: self.lantern_night.next_night_guaranteed,
             slime_rain: self.slime_rain.is_active(),
             num_clouds: u16::from(self.world.num_clouds),
+            day_time: self.world.day_time,
+            time: self.world.time,
         };
         let clouds = self.weather.tick(
             strong_enough,
@@ -6200,6 +6202,9 @@ impl GameServer {
             eclipse: self.world.eclipse,
             // `Sandstorm.Happening`, which the weather tick already keeps.
             sandstorm: self.weather.sandstorm,
+            // ...and so are both halves of the windy day: the latch and the target it latched on.
+            happy_windy_day: self.weather.happy_windy_day,
+            wind_target: self.weather.target,
             downed_plantera: progress.downed_plantera,
             hard_mode: progress.hard_mode,
             downed_mech_any: progress.downed_mech_any,

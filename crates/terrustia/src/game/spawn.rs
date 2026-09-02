@@ -1941,14 +1941,16 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         // (`:2784-2795`, where `-14` and `-13` are size variants of that same 31 rather than types
         // of their own). Three fifths of what a pre-Skeletron-cleared dungeon actually throws at a
         // player was therefore missing, and the dungeon was correspondingly softer than the game's.
+        //
+        // This is the `num43` draw and nothing above it. The Dungeon Slime, the two traps, the
+        // Cursed Skull and the Dark Caster used to be listed here too, flattened out of the chain
+        // that really offers them; they are [`dungeon_pick`] now, which is where their odds and
+        // their brick-style gates live.
         (_, Dungeon) => &[
             31,  // AngryBones
             294, // AngryBonesBig
             295, // AngryBonesBigMuscle
             296, // AngryBonesBigHelmet
-            32,  // DarkCaster
-            34,  // CursedSkull
-            71,  // DungeonSlime
         ],
         // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
         // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
@@ -2169,6 +2171,91 @@ const GOBLIN_SCOUT_ORB_ODDS: u32 = 7;
 /// chain reaches him.
 const SAND: u16 = 53;
 
+/// The two enemies the surface day only has while it is raining (`NPC.cs:4486-4493`), sitting in the
+/// same chain as the Goblin Scout and immediately below him:
+///
+/// ```csharp
+/// else if (raining && Main.rand.Next(4) == 0)
+/// {
+///     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 224);
+/// }
+/// else if (!waterTile && raining && Main.rand.Next(2) == 0)
+/// {
+///     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 225);
+/// }
+/// ```
+///
+/// The Flying Fish is the one arm in the whole daytime chain with no `!waterTile` on it: it is a
+/// fish, and a flooded tile in the rain is exactly where one belongs. The Umbrella Slime keeps its
+/// dry ground. Neither had an arm anywhere in this server, so a rainy afternoon on the surface was
+/// the ordinary blue-slime day with wetter graphics.
+pub const FLYING_FISH: u16 = 224;
+pub const UMBRELLA_SLIME: u16 = 225;
+const FLYING_FISH_ODDS: u32 = 4;
+const UMBRELLA_SLIME_ODDS: u32 = 2;
+
+/// ...and the two the surface day only has on a windy one (`NPC.cs:4494-4501`), the next two arms
+/// down:
+///
+/// ```csharp
+/// else if (!waterTile && wallType == 0 && Main.IsItAHappyWindyDay && isSpawningInWindDirection
+///          && Main.rand.Next(3) != 0)
+/// {
+///     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 594);
+/// }
+/// else if (!waterTile && wallType == 0 && (tileType == 2 || tileType == 477)
+///          && Main.IsItAHappyWindyDay && isSpawningInWindDirection && Main.rand.Next(10) != 0
+///          && Main.tile[spawnTileX, spawnTileY].type == tileType)
+/// {
+///     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 628);
+/// }
+/// ```
+///
+/// Both rolls are `!= 0`, not `== 0`: on a windy day out in the open these are the *likely* outcome,
+/// two attempts in three and nine in ten of what is left. A windy day is rare, and while one is
+/// blowing it owns the surface.
+///
+/// The Dandelion is the reason this arm matters beyond a count. Its routine is already here in full
+/// (`game::ai::critter::dandelion`, `AI_119_Dandelion`), it opens on `Main.IsItAHappyWindyDay`, and
+/// with no arm to spawn one nothing this server could do put a Dandelion in a world.
+pub const WINDY_BALLOON: u16 = 594;
+pub const DANDELION: u16 = 628;
+const WINDY_BALLOON_ODDS: u32 = 3;
+const DANDELION_ODDS: u32 = 10;
+
+/// The Dandelion's two grounds: `TileID.Grass` and `TileID.GolfGrass` (`NPC.cs:4498`). The Windy
+/// Balloon above it takes any ground at all.
+const GRASS: u16 = 2;
+const GOLF_GRASS: u16 = 477;
+
+/// `WallID.LivingWoodUnsafe` (`WallID.cs:557`), the one wall `GetSpawnWallType` reports in place of
+/// whatever is actually behind the spawn tile (`NPC.cs:1016-1019`). It is why the inside of a living
+/// tree never counts as open sky for the two windy-day arms, which want `wallType == 0`.
+const LIVING_WOOD_WALL: u16 = 244;
+
+/// `NPC.GetSpawnWallType` (`NPC.cs:1013-1021`):
+///
+/// ```csharp
+/// int result = Main.tile[spawnTileX, spawnTileY - 1].wall;
+/// if (Main.tile[spawnTileX, spawnTileY - 2].wall == 244 || Main.tile[spawnTileX, spawnTileY].wall == 244)
+/// {
+///     result = 244;
+/// }
+/// return result;
+/// ```
+///
+/// Vanilla's `spawnTileY` is the ground tile, which is this server's `y + 1` (see [`try_spawn`]'s
+/// own note on `tileType`), so the row it reports on is `y` and the two it checks for living wood
+/// are `y - 1` and `y + 1`.
+fn spawn_wall_type(world: &World, x: i32, y: i32) -> u16 {
+    if world.tile(x, y - 1).wall == LIVING_WOOD_WALL
+        || world.tile(x, y + 1).wall == LIVING_WOOD_WALL
+    {
+        return LIVING_WOOD_WALL;
+    }
+    world.tile(x, y).wall
+}
+
 /// `RollBadLuckExtreme(25)` on the Statue Mimic's branch (`NPC.cs:1571`), which at luck zero is a
 /// plain `Main.rand.Next(25)` (`Luck.cs:40-51`) and so is what this server models, the same
 /// narrowing (and the same reasoning) as every other `Roll*Luck` call site in this file.
@@ -2208,6 +2295,30 @@ const BOOK_SEARCH_SPAN: i32 = 32;
 /// The Skeleton Merchant's two nested rolls collapsed (`NPC.cs:5004`'s `Next(2)` and `:5007`'s
 /// `Next(35)`), because nothing between them can spawn anything.
 const SKELETON_MERCHANT_ODDS: u32 = 70;
+
+/// The five the ordinary dungeon chain offers ahead of its pool, and the rolls that offer them
+/// (`NPC.cs:2723-2747`, transcribed in [`dungeon_pick`]).
+///
+/// The two traps are the reason this chain exists here at all. Both are dungeon furniture with a
+/// routine of their own already written and tested (`game::ai::track::spike_ball` and
+/// `::wheel`), and neither was in any pool or any branch, so no world this server ran could hold
+/// one. The Spike Ball is slab-wall only and the Blazing Wheel tile-wall only, so both are also a
+/// reason the brick style has to reach this chain rather than being spent on the hardmode one above
+/// it.
+const SPIKE_BALL: u16 = 70;
+const BLAZING_WHEEL: u16 = 72;
+const DUNGEON_SLIME: u16 = 71;
+const CURSED_SKULL: u16 = 34;
+const DARK_CASTER: u16 = 32;
+const DUNGEON_SLIME_ODDS: u32 = 35;
+const SPIKE_BALL_ODDS: u32 = 3;
+const BLAZING_WHEEL_ODDS: u32 = 5;
+const CURSED_SKULL_ODDS: u32 = 7;
+const DARK_CASTER_ODDS: u32 = 7;
+
+/// `aiStyle == 20`, which is the only thing `NearSpikeBall` matches on: it is a property of the
+/// routine and not of the type, so it would catch anything else driven by the same one.
+const SPIKE_BALL_AI_STYLE: i32 = 20;
 
 /// The Prismatic Lacewing, which is not a critter you catch for a collection: killing one is the
 /// *only* way the Empress of Light is ever summoned (`NPC.cs:80309-80319`). With no arm spawning
@@ -3268,6 +3379,97 @@ fn hard_dungeon_pick(
     None
 }
 
+/// The dungeon's ordinary chain, `NPC.cs:2723-2747`, which every dungeon runs and which
+/// [`hard_dungeon_pick`] falls through into:
+///
+/// ```csharp
+/// if (RollLuck(35) == 0)                        { 71; return; }
+/// if (num40 == 1 && Main.rand.Next(3) == 0 && !NearSpikeBall(spawnTileX, spawnTileY))
+///                                               { 70; return; }
+/// if (num40 == 2 && Main.rand.Next(5) == 0)     { 72; return; }
+/// if (num40 == 0 && Main.rand.Next(7) == 0)     { 34; return; }
+/// if (Main.rand.Next(7) == 0)                   { 32; return; }
+/// ```
+///
+/// `None` means no arm answered and the caller goes on to the library and then to the pool, the way
+/// vanilla falls through to `:2748`.
+///
+/// These five used to be flattened into [`pool`]'s dungeon arm, which cost three things. The two
+/// traps were dropped outright, so the Spike Ball and the Blazing Wheel were unreachable even though
+/// both routines are here in full and tested (`game::ai::track`) and a dungeon corridor with nothing
+/// running down it is not the dungeon. The brick style stopped mattering, when it decides two of the
+/// five: no Cursed Skull is ever found on slab or tile, and no Spike Ball anywhere but slab. And the
+/// odds were levelled, when they are not level at all: a Dungeon Slime is one attempt in
+/// thirty-five, a Dark Caster one in seven of what is left, and each of the three preceding rolls
+/// takes its share off the ones below it.
+///
+/// The three fifths of `num43` below this chain that fall to the plain Angry Bones remain the pool's
+/// business (`:2767-2795`), because that is a draw rather than a chain.
+fn dungeon_pick(style: u8, near_spike_ball: &dyn Fn() -> bool, rng: &mut SmallRng) -> Option<u16> {
+    // `:2723`. `RollLuck(35)` is a plain `Main.rand.Next(35)` at luck zero (`Luck.cs:5-16`), the
+    // same narrowing every other `Roll*Luck` call site in this file takes.
+    if rng.random_range(0..DUNGEON_SLIME_ODDS) == 0 {
+        return Some(DUNGEON_SLIME);
+    }
+    // `:2728`, slab only. `NearSpikeBall` is asked last because `&&` short-circuits and it is the
+    // one operand that walks the NPC table: the scan happens on one slab attempt in three and never
+    // otherwise, which is vanilla's own operand order rather than a rearrangement for speed.
+    if style == 1 && rng.random_range(0..SPIKE_BALL_ODDS) == 0 && !near_spike_ball() {
+        return Some(SPIKE_BALL);
+    }
+    // `:2733`, tile only.
+    if style == 2 && rng.random_range(0..BLAZING_WHEEL_ODDS) == 0 {
+        return Some(BLAZING_WHEEL);
+    }
+    // `:2738`, plain brick only.
+    if style == 0 && rng.random_range(0..CURSED_SKULL_ODDS) == 0 {
+        return Some(CURSED_SKULL);
+    }
+    // `:2743`, whatever the brick.
+    if rng.random_range(0..DARK_CASTER_ODDS) == 0 {
+        return Some(DARK_CASTER);
+    }
+    None
+}
+
+/// `NPC.NearSpikeBall(x, y)` (`NPC.cs:91002-91017`):
+///
+/// ```csharp
+/// Rectangle rectangle = new Rectangle(x * 16 - 300, y * 16 - 300, 600, 600);
+/// for (int i = 0; i < Main.maxNPCs; i++)
+///   if (Main.npc[i].active && Main.npc[i].aiStyle == 20) {
+///     Rectangle rectangle2 = new Rectangle((int)Main.npc[i].ai[1], (int)Main.npc[i].ai[2], 20, 20);
+///     if (rectangle.Intersects(rectangle2)) return true;
+///   }
+/// return false;
+/// ```
+///
+/// It is what stops a corridor filling up with spike balls, and it is deliberately not a distance to
+/// the ball itself: `ai[1]`/`ai[2]` are the ceiling point the ball dropped out of and stays anchored
+/// to (`game::ai::track::spike_ball` seeds them on its first tick), so a ball that has swung a long
+/// way from home still holds its spot. A ball that has not ticked yet carries `(0, 0)` and so anchors
+/// at the top-left corner of the world, exactly as it does in the game.
+///
+/// `x`/`y` are vanilla's `spawnTileX`/`spawnTileY`, and its `spawnTileY` is this server's `y + 1`.
+/// Both boxes are integer `Rectangle`s in the game and `Rectangle.Intersects` is a strict
+/// four-way overlap, so the arithmetic is kept in `i32` with the same `(int)` truncation of the
+/// anchor rather than being redone in floats at the edges.
+fn near_spike_ball(npcs: &NpcStore, x: i32, y: i32) -> bool {
+    /// `x * 16 - 300`, and a span of `600`.
+    const REACH: i32 = 300;
+    const SPAN: i32 = 600;
+    /// The anchor's own box, `new Rectangle(ai[1], ai[2], 20, 20)`.
+    const ANCHOR: i32 = 20;
+    let (left, top) = (x * 16 - REACH, y * 16 - REACH);
+    npcs.iter().any(|(_, n)| {
+        if !n.is_alive() || n.stats.ai_style != SPIKE_BALL_AI_STYLE {
+            return false;
+        }
+        let (ax, ay) = (n.ai[1] as i32, n.ai[2] as i32);
+        ax < left + SPAN && left < ax + ANCHOR && ay < top + SPAN && top < ay + ANCHOR
+    })
+}
+
 /// `NPC.AI_FindNearbyBook(searchPosition, 32, 32, out bookPosition, closestBook: true,
 /// checkPlayerScreenRanges: true)` (`NPC.cs:62954-63010`), the one shape the spawner ever asks for.
 ///
@@ -3600,6 +3802,15 @@ pub struct EventSpawns<'a> {
     /// `ZoneDesert && SurfaceAtmospherics && Sandstorm.Happening`); the other two halves are the
     /// player's biome and height, which [`try_spawn`] has to hand.
     pub sandstorm: bool,
+    /// `Main.IsItAHappyWindyDay` (`Main.cs:2999`), which `game/weather.rs` latches alongside the
+    /// storm from the same hysteresis band. Two of the surface day's arms are gated on it and on
+    /// nothing else about the weather (`NPC.cs:4494`, `:4498`).
+    pub happy_windy_day: bool,
+    /// `Main.windSpeedTarget`, for `isSpawningInWindDirection` (`NPC.cs:1202`). The *target* and not
+    /// the wind itself, which is what the game reads there: the two differ only while a gust is
+    /// still turning around, and on that tick the game asks where the wind is going rather than
+    /// where it has got to.
+    pub wind_target: f32,
     pub downed_plantera: bool,
     pub downed_all_mechs: bool,
     /// Whether the field already holds as many event bosses as it will take.
@@ -4716,6 +4927,63 @@ pub fn try_spawn(
                         out.push((GOBLIN_SCOUT, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
+                    // ...and immediately below him in that same chain, the four the surface day only
+                    // has in weather: two in the rain (`NPC.cs:4486-4493`) and two on a windy day
+                    // (`:4494-4501`). See [`FLYING_FISH`] and [`WINDY_BALLOON`] for the arms
+                    // themselves. All four sit under `surface_day`, so they carry its gate and its
+                    // three already-disclosed narrowings unchanged.
+                    //
+                    // `wet` is the `waterTile` read the attempt already made further up, not a
+                    // second one: the whole of what these arms add to a spawn scan is at most two
+                    // wall reads and four rolls, and only on a tile that got past every arm above.
+                    if surface_day && world.raining && rng.random_range(0..FLYING_FISH_ODDS) == 0 {
+                        out.push((FLYING_FISH, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
+                    if surface_day
+                        && !wet
+                        && world.raining
+                        && rng.random_range(0..UMBRELLA_SLIME_ODDS) == 0
+                    {
+                        out.push((UMBRELLA_SLIME, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
+                    // `isSpawningInWindDirection` (`NPC.cs:1202`):
+                    //
+                    // ```csharp
+                    // isSpawningInWindDirection = (float)(pX - spawnTileX) * Main.windSpeedTarget > 0f;
+                    // ```
+                    //
+                    // `pX` is the player's own tile column, so this is "the wind blows from the
+                    // spawn tile toward the player" and nothing else. A balloon and a dandelion's
+                    // seeds only ever reach somebody downwind, which is why both arms ask.
+                    //
+                    // `&&` short-circuits, so the two wall reads behind `wallType` happen only on a
+                    // windy day at a dry surface tile that got this far, which is a small fraction
+                    // of a small fraction of attempts. Every other tick pays one bool test.
+                    let open_sky = surface_day
+                        && !wet
+                        && events.happy_windy_day
+                        && (px - x) as f32 * events.wind_target > 0.0
+                        && spawn_wall_type(world, x, y) == 0;
+                    if open_sky && rng.random_range(0..WINDY_BALLOON_ODDS) != 0 {
+                        out.push((WINDY_BALLOON, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
+                    // Vanilla's last clause here, `Main.tile[spawnTileX, spawnTileY].type ==
+                    // tileType`, is a re-read of the tile `tileType` was taken from and so is a
+                    // no-op except where `FindGroundTile` walked a row down first (`NPC.cs:5882`).
+                    // It does that for exactly the two tiles in
+                    // `TileID.Sets.InheritTypeOfTileBelowForNPCSpawning` (`TileID.cs:355`: 421 and
+                    // 422, the two conveyor belts), which this server does not model, so the clause
+                    // is not transcribed rather than being transcribed as something it is not.
+                    if open_sky
+                        && matches!(ground_block, Some(GRASS | GOLF_GRASS))
+                        && rng.random_range(0..DANDELION_ODDS) != 0
+                    {
+                        out.push((DANDELION, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
                     // The surface night has a chain of its own ahead of the pool, and a graveyard
                     // reaches it in daylight too (`NPC.cs:4202`). It answers only where vanilla's
                     // `else if (surfaceSpawn)` (`NPC.cs:4168`) is reached: the corruption, the
@@ -4769,24 +5037,36 @@ pub fn try_spawn(
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
                     }
-                    // The dungeon's hardmode chain, which sits ahead of the dungeon's ordinary
-                    // fallthrough exactly as vanilla puts `NPC.cs:2661-2722` ahead of `:2723`. It
-                    // opens only once Plantera is down in a hardmode world, which is `hardDungeon`
-                    // (`NPC.cs:381`, `downedPlantBoss && Main.hardMode`), so it costs nothing at all
-                    // before then and two tile reads after it.
-                    if biome == Biome::Dungeon && events.hard_mode && events.downed_plantera {
+                    // The dungeon's two chains, which sit ahead of its pool exactly as vanilla puts
+                    // `NPC.cs:2661-2722` and then `:2723-2747` ahead of `:2748`. The brick style is
+                    // read once for both, as vanilla reads `num40` once at `:2631-2645` for the
+                    // whole `ZoneDungeon` block: it costs a roll of its own, so asking for it twice
+                    // would be a second one.
+                    //
+                    // The hardmode half opens only once Plantera is down in a hardmode world, which
+                    // is `hardDungeon` (`NPC.cs:381`, `downedPlantBoss && Main.hardMode`); the
+                    // ordinary half runs in every dungeon there has ever been.
+                    if biome == Biome::Dungeon {
                         let alive =
                             |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
                         let style = dungeon_brick_style(world, x, y, rng);
-                        match hard_dungeon_pick(style, &alive, rng) {
-                            Some(Some(npc_type)) => {
-                                out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
-                                break;
+                        if events.hard_mode && events.downed_plantera {
+                            match hard_dungeon_pick(style, &alive, rng) {
+                                Some(Some(npc_type)) => {
+                                    out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                                    break;
+                                }
+                                // The caster arm fired and its one-at-a-time gate turned it away,
+                                // which vanilla answers by returning with nothing spawned.
+                                Some(None) => continue,
+                                None => {}
                             }
-                            // The caster arm fired and its one-at-a-time gate turned it away, which
-                            // vanilla answers by returning with nothing spawned.
-                            Some(None) => continue,
-                            None => {}
+                        }
+                        if let Some(npc_type) =
+                            dungeon_pick(style, &|| near_spike_ball(npcs, x, y + 1), rng)
+                        {
+                            out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
+                            break;
                         }
                     }
                     // The dungeon library, `NPC.cs:2748-2771`:
@@ -4816,16 +5096,12 @@ pub fn try_spawn(
                     // The mimic's `3f` is its dormant state and is seeded by `NpcStore::spawn`,
                     // which is this server's `NewNPC` and the one door every NPC comes through.
                     //
-                    // Two things about the placement are disclosed rather than matched. Vanilla
-                    // draws `num43` before it reads `flag13`, which costs a roll off its own stream
-                    // and nothing else; this server's `rng` is not that stream, so the dead draw is
-                    // not reproduced. And the arm sits ahead of five rolls that vanilla makes first
-                    // (`:2723-2747`: the Dungeon Slime, the two traps, the Cursed Skull and the Dark
-                    // Caster) which this server folded into [`pool`]'s dungeon arm rather than
-                    // keeping as a chain. So the library pair is met a little sooner here than in
-                    // the game, where roughly three attempts in ten are taken before the roll is
-                    // ever made. Never anywhere the game would not put them: the shelf test is what
-                    // decides that, and it is exact.
+                    // One thing about the placement is disclosed rather than matched: vanilla draws
+                    // `num43` before it reads `flag13`, which costs a roll off its own stream and
+                    // nothing else, and this server's `rng` is not that stream, so the dead draw is
+                    // not reproduced. The five rolls vanilla makes ahead of this one (`:2723-2747`)
+                    // are [`dungeon_pick`] directly above, so the library is now reached at the same
+                    // point in the chain the game reaches it.
                     if biome == Biome::Dungeon {
                         let library = if rng.random_ratio(1, WATER_BOLT_MIMIC_ODDS) {
                             Some(WATER_BOLT_MIMIC)
@@ -5195,6 +5471,16 @@ mod tests {
             }
         }
 
+        // ...and the ordinary dungeon's, asked the same way and for the same reason: the brick style
+        // decides three of its five, and with no spike ball anywhere near, since that is the one
+        // arm gated on a scan of the world rather than on a roll.
+        for style in 0..3u8 {
+            for seed in 0..4_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.extend(dungeon_pick(style, &|| false, &mut rng));
+            }
+        }
+
         // The Glowing Mushroom roster, asked through its own chain for the same reason the sky and
         // the deserts are. Both arms, and both progression states, since the underground one is
         // hardmode-only and the surface one gives its snail a second chance before hardmode.
@@ -5271,6 +5557,14 @@ mod tests {
         // branches still make good.
         set.insert(GOBLIN_SCOUT);
         set.insert(STATUE_MIMIC);
+        // ...and the four the same surface day offers in weather rather than in a pool: two in the
+        // rain and two on a windy day (`NPC.cs:4486-4501`). All four are asserted reachable through
+        // `try_spawn` itself by this module's own tests, so listing them here cannot drift into a
+        // claim that their arms still make good.
+        set.insert(FLYING_FISH);
+        set.insert(UMBRELLA_SLIME);
+        set.insert(WINDY_BALLOON);
+        set.insert(DANDELION);
         // ...and the Rock Golem the hardmode caverns cut out of stone or moss, whose gate is a tile
         // and a ceiling rather than a pool. Asserted reachable through `try_spawn` itself by this
         // module's own tests, so listing it here cannot drift into a claim its branch still makes
@@ -5385,6 +5679,8 @@ mod tests {
             moon: None,
             eclipse: false,
             sandstorm: false,
+            happy_windy_day: false,
+            wind_target: 0.0,
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
@@ -7665,8 +7961,19 @@ mod tests {
                 if stats.friendly {
                     continue;
                 }
+                // A dungeon regular is the `num43` pool *or* one of the five the chain ahead of it
+                // offers ([`dungeon_pick`], `NPC.cs:2723-2747`), which are residents just as much
+                // as the Angry Bones are.
+                let chain = [
+                    DUNGEON_SLIME,
+                    SPIKE_BALL,
+                    BLAZING_WHEEL,
+                    CURSED_SKULL,
+                    DARK_CASTER,
+                ];
                 assert!(
-                    pool(depth_at(&world, cy), Biome::Dungeon, world.day_time).contains(&npc_type),
+                    pool(depth_at(&world, cy), Biome::Dungeon, world.day_time).contains(&npc_type)
+                        || chain.contains(&npc_type),
                     "post-Skeletron dungeon spawned {npc_type}, not a dungeon regular",
                 );
                 after += 1;
@@ -9088,6 +9395,92 @@ mod tests {
         println!("good_place_for_a_statue_mimic, plinth: {each:.2} ns/call (sink {sink})");
     }
 
+    /// What the three new weather and dungeon arms cost the per-candidate loop.
+    ///
+    /// Two of the three add nothing measurable: the rain arms are a bool and a roll, and the windy
+    /// pair's two wall reads sit behind `events.happy_windy_day`, which is false on most days and
+    /// every night. The one that is paid on every attempt is the dungeon's, where
+    /// `dungeon_brick_style` moved out from under `hard_mode && downed_plantera` so the ordinary
+    /// chain can read it too, exactly as vanilla reads `num40` once for the whole `ZoneDungeon`
+    /// block (`NPC.cs:2631-2645`). That is two wall reads and a roll a pre-Plantera dungeon did not
+    /// used to make.
+    ///
+    /// Measured in release, ten million calls each: `spawn_wall_type` 9.3 ns,
+    /// `dungeon_brick_style` 17.7 ns, `dungeon_pick` 5.3 ns on plain brick and 6.8 ns on slab,
+    /// against 20.2 ns for the plinth check this loop already carries and accepts as cheap. The
+    /// reference reproduces at 20.7 ns in `measure_the_rock_golem_gate`'s own run in the same
+    /// build, which is what says the boxed closure this bench calls through is not what is being
+    /// measured.
+    ///
+    /// So a dungeon attempt pays about 23 ns it did not, or a little over one plinth check, on a
+    /// path that has already walked a ground column to get there. Some of that is not new at all:
+    /// `dungeon_brick_style` was already run on every post-Plantera hardmode attempt, and
+    /// `dungeon_pick` takes work off the weighted draw below it, whose dungeon pool went from seven
+    /// entries to four.
+    ///
+    /// `near_spike_ball` is left out of the numbers because it is not a fixed cost: it walks the
+    /// live NPC table, and it runs on one slab attempt in three after the Dungeon Slime's roll
+    /// declines, so roughly a ninth of dungeon attempts on a third of dungeon walls.
+    #[test]
+    #[ignore]
+    fn measure_the_weather_and_dungeon_arms() {
+        const N: u32 = 10_000_000;
+        let bench = |name: &str, mut body: Box<dyn FnMut(i32) -> u32 + '_>| {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..N {
+                sink = sink.wrapping_add(body(200 + (i as i32 % 128)));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("{name}: {each:.2} ns/call (sink {sink})");
+        };
+
+        let surface = flat_world(90);
+        bench(
+            "spawn_wall_type",
+            Box::new(|x| u32::from(spawn_wall_type(std::hint::black_box(&surface), x, 88))),
+        );
+
+        let (dungeon, (_, cy)) = dungeon_world();
+        let mut rng = SmallRng::seed_from_u64(70);
+        bench(
+            "dungeon_brick_style",
+            Box::new(|x| {
+                u32::from(dungeon_brick_style(
+                    std::hint::black_box(&dungeon),
+                    x,
+                    cy,
+                    &mut rng,
+                ))
+            }),
+        );
+        for style in [0u8, 1] {
+            let mut rng = SmallRng::seed_from_u64(72);
+            bench(
+                &format!("dungeon_pick, style {style}"),
+                Box::new(|_| {
+                    u32::from(
+                        dungeon_pick(std::hint::black_box(style), &|| false, &mut rng)
+                            .unwrap_or_default(),
+                    )
+                }),
+            );
+        }
+
+        // The reference, in the same run and the same build.
+        let plinth = flat_world(90);
+        bench(
+            "good_place_for_a_statue_mimic",
+            Box::new(|x| {
+                u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(&plinth),
+                    x,
+                    90,
+                ))
+            }),
+        );
+    }
+
     /// What the dungeon library's bookshelf scan costs, since it is by far the widest per-candidate
     /// tile read this module has: 32 by 32 is 1024 tiles against the plinth check's eight.
     ///
@@ -10131,6 +10524,387 @@ mod tests {
         assert!(
             after > 0 && after < raised / 2,
             "a downed goblin army left the shadow-orb rate up: {raised} -> {after}"
+        );
+    }
+
+    /// The dungeon's own chain offers its two traps, and the brick decides which one
+    /// (`NPC.cs:2723-2747`).
+    ///
+    /// Fails before the fix. `game::ai::track` holds both routines in full, with their own tests,
+    /// and 70 and 72 were in no pool and no branch, so no dungeon this server ever built had a spike
+    /// ball or a blazing wheel in it. The three that *were* in the pool were there flattened: a
+    /// Cursed Skull turning up on slab and tile walls it is never found on, and all five sharing a
+    /// draw instead of taking their own rolls in order.
+    ///
+    /// Neutralised by deleting the `SPIKE_BALL` and `BLAZING_WHEEL` arms from `dungeon_pick`: their
+    /// two "offered no" assertions fail. Neutralised again by dropping the `style ==` test from each
+    /// of the four gated arms: the three "on the wrong brick" assertions fail instead. Neutralised a
+    /// third way, by making `near_spike_ball` return `false` unconditionally: the crowding assertion
+    /// fails, a second ball dropping beside the first.
+    #[test]
+    fn a_dungeon_hangs_its_traps_on_the_brick_they_belong_to() {
+        /// `WallID.BlueDungeonSlabUnsafe` and `WallID.BlueDungeonTileUnsafe` (`NPC.cs:2634`,
+        /// `:2638`): one of each of the two sets `dungeon_brick_style` reads.
+        const SLAB_WALL: u16 = 94;
+        const TILE_WALL: u16 = 95;
+
+        let (base, (cx, cy)) = dungeon_world();
+        let walled = |wall: u16| {
+            let mut world = base.clone();
+            world.progress.downed_boss3 = true;
+            if wall != 0 {
+                for xx in (cx - 110)..=(cx + 110) {
+                    for yy in (cy - 55)..=(cy + 55) {
+                        let tile = world.tile(xx, yy).with_wall(wall);
+                        world.set_tile(xx, yy, tile);
+                    }
+                }
+            }
+            world
+        };
+        let found = |world: &World, npcs: &NpcStore, wanted: u16| {
+            let players = player_standing_at(cx, cy);
+            let mut rng = SmallRng::seed_from_u64(20260902);
+            let mut seen = 0;
+            let mut biomes = BiomeCache::default();
+            for _ in 0..60_000 {
+                seen += try_spawn(
+                    world,
+                    npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                )
+                .into_iter()
+                .filter(|(ty, _)| *ty == wanted)
+                .count();
+            }
+            seen
+        };
+
+        let empty = NpcStore::new();
+        let (slab, tiled, plain) = (walled(SLAB_WALL), walled(TILE_WALL), walled(0));
+
+        // A slab dungeon has spike balls and no wheels and no cursed skulls; a tile dungeon has
+        // wheels and neither of the others; plain brick has cursed skulls and no trap at all.
+        // `dungeon_brick_style` rerolls one attempt in seven (`NPC.cs:2642-2645`), so "the wrong
+        // brick" is a rate rather than a bar, and each of these is comfortably the wrong side of it.
+        assert!(
+            found(&slab, &empty, SPIKE_BALL) > 0,
+            "a slab-walled dungeon hung no Spike Ball"
+        );
+        assert!(
+            found(&tiled, &empty, BLAZING_WHEEL) > 0,
+            "a tile-walled dungeon ran no Blazing Wheel"
+        );
+        assert!(
+            found(&plain, &empty, CURSED_SKULL) > 0,
+            "a plain-brick dungeon offered no Cursed Skull"
+        );
+        let stray_wheel = found(&slab, &empty, BLAZING_WHEEL);
+        let stray_ball = found(&tiled, &empty, SPIKE_BALL);
+        let stray_skull = found(&slab, &empty, CURSED_SKULL);
+        let ball = found(&slab, &empty, SPIKE_BALL);
+        assert!(
+            stray_wheel * 4 < ball && stray_ball * 4 < ball && stray_skull * 4 < ball,
+            "the brick style barely moved what a dungeon hangs on it: \
+             ball {ball}, stray wheel {stray_wheel}, stray ball {stray_ball}, \
+             stray skull {stray_skull}"
+        );
+
+        // The Dark Caster's arm has no brick test at all, so it answers on every wall.
+        for (world, name) in [(&slab, "slab"), (&tiled, "tile"), (&plain, "plain")] {
+            assert!(
+                found(world, &empty, DARK_CASTER) > 0,
+                "a {name}-walled dungeon offered no Dark Caster, and its arm has no brick gate"
+            );
+        }
+
+        // `NearSpikeBall` (`NPC.cs:91002-91017`): a ball already anchored within 300 pixels of a
+        // candidate shuts that candidate's arm, which is what stops a corridor filling up with
+        // them. It is a box around the *candidate*, not around the player, so most of a spawn ring
+        // 84 tiles wide is well outside it and keeps producing balls: the claim is that none lands
+        // inside the box, not that none lands at all.
+        //
+        // The anchor has to sit in the ring rather than on the player. `SAFE_RANGE_X` is 62 tiles,
+        // so nothing ever spawns within 992 pixels of where the player stands and a box only 300
+        // pixels wide around them could never have caught anything. Seventy tiles out is inside the
+        // ring and clear of the safe box. And the anchor is `ai[1]`/`ai[2]`, not the ball's own
+        // position, so it is seeded here the way its first tick seeds it.
+        const ANCHOR_OUT: i32 = 70;
+        const { assert!(ANCHOR_OUT > SAFE_RANGE_X && ANCHOR_OUT < SPAWN_RANGE_X) };
+        let (anchor_x, anchor_y) = ((cx + ANCHOR_OUT) * 16, cy * 16);
+        let mut crowded = NpcStore::new();
+        let slot = crowded
+            .spawn(SPIKE_BALL, (anchor_x as f32, anchor_y as f32))
+            .expect("a spike ball");
+        {
+            let ball = crowded.get_mut(slot).expect("the ball");
+            ball.ai[1] = anchor_x as f32;
+            ball.ai[2] = anchor_y as f32;
+        }
+        // The box is spelled out here rather than asked of `near_spike_ball`, deliberately: a test
+        // that checks production with the very function production used passes just as happily with
+        // that function stubbed out to `false`, which is how this assertion was first written and
+        // what neutralising it caught. This is `Rectangle.Intersects` on
+        // `(x * 16 - 300, y * 16 - 300, 600, 600)` against `(ai[1], ai[2], 20, 20)`, straight off
+        // `NPC.cs:91004-91010`, with vanilla's `spawnTileY` written out as this server's `y + 1`.
+        let inside_the_box = |sx: f32, sy: f32| {
+            let (left, top) = (sx as i32 - 300, sy as i32 + 16 - 300);
+            anchor_x < left + 600
+                && left < anchor_x + 20
+                && anchor_y < top + 600
+                && top < anchor_y + 20
+        };
+        let in_the_box = |npcs: &NpcStore| {
+            let players = player_standing_at(cx, cy);
+            let mut rng = SmallRng::seed_from_u64(20260902);
+            let mut biomes = BiomeCache::default();
+            let (mut balls, mut crowding) = (0, 0);
+            for _ in 0..60_000 {
+                for (ty, (sx, sy)) in try_spawn(
+                    &slab,
+                    npcs,
+                    &players,
+                    &quiet(),
+                    &JourneyPowers::default(),
+                    &mut biomes,
+                    &mut rng,
+                ) {
+                    if ty != SPIKE_BALL {
+                        continue;
+                    }
+                    balls += 1;
+                    if inside_the_box(sx, sy) {
+                        crowding += 1;
+                    }
+                }
+            }
+            (balls, crowding)
+        };
+
+        // With nothing there, the box is a place balls really do land, which is what stops the
+        // assertion below from being vacuously true.
+        let (loose_balls, loose_inside) = in_the_box(&empty);
+        assert!(
+            loose_inside > 0,
+            "an empty dungeon put none of its {loose_balls} Spike Balls where the anchor will be, \
+             so the crowding test below would prove nothing"
+        );
+        let (balls, crowding) = in_the_box(&crowded);
+        assert!(balls > 0, "the crowded run produced no Spike Ball at all");
+        assert_eq!(
+            crowding, 0,
+            "{crowding} of {balls} Spike Balls dropped inside another one's box"
+        );
+        // ...and the ball's arm is the only one the crowding shuts.
+        assert!(
+            found(&slab, &crowded, DARK_CASTER) > 0,
+            "one spike ball emptied the whole dungeon chain"
+        );
+    }
+
+    /// A rainy surface day has a Flying Fish and an Umbrella Slime in it and a dry one has neither
+    /// (`NPC.cs:4486-4493`).
+    ///
+    /// Fails before the fix, when 224 and 225 were in no pool and no branch: rain changed the spawn
+    /// rate here and nothing else, so the two enemies a shower is actually *for* could not be met.
+    ///
+    /// The other half of the claim is the water gate, which the two arms do not share: the Flying
+    /// Fish's is the one arm in the whole daytime chain written without `!waterTile`, and a flooded
+    /// surface is exactly where a fish belongs.
+    ///
+    /// Neutralised by dropping `world.raining` from both arms: the dry assertions fail, fish and
+    /// slimes turning up in clear weather. Neutralised the other way, by deleting the two
+    /// `out.push` blocks: the two rain assertions fail instead.
+    #[test]
+    fn a_rainy_surface_day_brings_flying_fish_and_umbrella_slimes() {
+        const TICKS: u32 = 200_000;
+        let seen = |world: &World, at: (i32, i32), wanted: u16| {
+            spawns_at(world, false, at.0, at.1, TICKS)
+                .into_iter()
+                .filter(|ty| *ty == wanted)
+                .count()
+        };
+
+        let (dry, at) = forest_surface();
+        assert!(dry.day_time, "the arm is a daytime one");
+        for (npc_type, name) in [
+            (FLYING_FISH, "Flying Fish"),
+            (UMBRELLA_SLIME, "Umbrella Slime"),
+        ] {
+            assert_eq!(
+                seen(&dry, at, npc_type),
+                0,
+                "a dry surface day offered a {name}"
+            );
+        }
+
+        let mut wet_day = dry.clone();
+        wet_day.raining = true;
+        assert!(
+            seen(&wet_day, at, FLYING_FISH) > 0,
+            "a rainy surface day offered no Flying Fish"
+        );
+        assert!(
+            seen(&wet_day, at, UMBRELLA_SLIME) > 0,
+            "a rainy surface day offered no Umbrella Slime"
+        );
+
+        // `!waterTile` on the Umbrella Slime's arm and nowhere on the Flying Fish's: flood the two
+        // rows `water_tile` reads and only one of the two should still turn up.
+        let mut flooded = wet_day.clone();
+        for x in 0..flooded.width() {
+            for y in at.1..=(at.1 + 1) {
+                flooded.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Water, 255),
+                );
+            }
+        }
+        assert!(
+            seen(&flooded, at, FLYING_FISH) > 0,
+            "a flooded rainy surface offered no Flying Fish, and its arm has no water gate"
+        );
+        assert_eq!(
+            seen(&flooded, at, UMBRELLA_SLIME),
+            0,
+            "a flooded rainy surface offered an Umbrella Slime"
+        );
+
+        // ...and the night is a different chain entirely (`NPC.cs:4202`).
+        let mut night = wet_day.clone();
+        night.day_time = false;
+        assert_eq!(
+            seen(&night, at, UMBRELLA_SLIME),
+            0,
+            "a rainy surface night offered an Umbrella Slime"
+        );
+    }
+
+    /// A windy surface day blows a Windy Balloon and a Dandelion toward whoever is downwind of them
+    /// (`NPC.cs:4494-4501`), and a still one blows neither.
+    ///
+    /// Fails before the fix. The Dandelion is the one that matters: `game::ai::critter::dandelion`
+    /// is a full transcription of `AI_119_Dandelion` with its own tests, it opens on
+    /// `Main.IsItAHappyWindyDay`, and 628 was in no pool and no branch, so none of that could ever
+    /// run in a real world. The flag it reads was not `IsItAHappyWindyDay` either, which is the
+    /// other half of this fix and lives in `game::weather`.
+    ///
+    /// Neutralised by deleting the `out.push((DANDELION, ...))` and `out.push((WINDY_BALLOON, ...))`
+    /// blocks: the two windy assertions fail. Neutralised again by dropping
+    /// `events.happy_windy_day` from `open_sky`: the still-air assertions fail instead, both turning
+    /// up in dead calm. Neutralised a third way, by dropping the `(px - x) * wind_target > 0.0`
+    /// clause: the upwind assertion fails, a balloon arriving from the wrong side of the player.
+    #[test]
+    fn a_windy_surface_day_blows_a_balloon_and_a_dandelion_downwind() {
+        const TICKS: u32 = 100_000;
+        // Grass, because the Dandelion's arm is `tileType == 2 || tileType == 477` and the balloon
+        // above it takes any ground at all. The floor is four rows from `flat_world_of`, so the
+        // player stands at `floor - 2` exactly as `forest_surface` does.
+        let world = flat_world_of(90, GRASS);
+        let at = (400, 88);
+        assert_eq!(biome_at(&world, at.0, at.1), Biome::Forest);
+        assert_eq!(depth_at(&world, at.1), Depth::Surface);
+
+        let blowing = |world: &World, wind: f32, windy: bool, wanted: u16| {
+            let events = EventSpawns {
+                happy_windy_day: windy,
+                wind_target: wind,
+                ..quiet()
+            };
+            spawns_with(world, &events, at.0, at.1, TICKS)
+                .into_iter()
+                .filter(|(ty, _)| *ty == wanted)
+                .count()
+        };
+
+        // Dead calm: the latch is off and the target is zero, and neither arm opens.
+        for (npc_type, name) in [(WINDY_BALLOON, "Windy Balloon"), (DANDELION, "Dandelion")] {
+            assert_eq!(
+                blowing(&world, 0.0, false, npc_type),
+                0,
+                "a still surface day offered a {name}"
+            );
+        }
+
+        // A windy day, blowing east. The spawn box straddles the player, so `(px - x)` is positive
+        // for every candidate west of them and negative for every one east: with the wind positive
+        // the western half of the box is what answers, and both arms fire from it.
+        assert!(
+            blowing(&world, 0.5, true, WINDY_BALLOON) > 0,
+            "a windy surface day offered no Windy Balloon"
+        );
+        assert!(
+            blowing(&world, 0.5, true, DANDELION) > 0,
+            "a windy surface day offered no Dandelion"
+        );
+
+        // The same wind speed with the latch off is still air as far as the game is concerned:
+        // `IsItAHappyWindyDay` is a latch and not a speed, which is the point of the weather half of
+        // this fix.
+        assert_eq!(
+            blowing(&world, 0.5, false, DANDELION),
+            0,
+            "a Dandelion turned up on a day the wind latch never came on"
+        );
+
+        // Only somebody downwind gets one. Standing the player at the far *west* edge puts every
+        // candidate east of them, so `(px - x)` is negative throughout and an east wind cannot
+        // reach anybody.
+        let upwind = |wind: f32, wanted: u16| {
+            let events = EventSpawns {
+                happy_windy_day: true,
+                wind_target: wind,
+                ..quiet()
+            };
+            spawns_with(&world, &events, 40, at.1, TICKS)
+                .into_iter()
+                .filter(|(ty, _)| *ty == wanted)
+                .count()
+        };
+        assert!(
+            upwind(-0.5, WINDY_BALLOON) > 0,
+            "a west wind reached nobody at the west edge, so the direction test is inverted"
+        );
+        assert_eq!(
+            upwind(0.5, WINDY_BALLOON),
+            0,
+            "an east wind reached a player with nothing but map east of them"
+        );
+
+        // `wallType == 0`: inside a living tree is not open sky. `GetSpawnWallType` reports 244 for
+        // the whole column when either neighbour row carries it (`NPC.cs:1016-1019`), so painting
+        // the spawn row alone is enough to shut both arms.
+        let mut indoors = world.clone();
+        for x in 0..indoors.width() {
+            for y in (at.1 - 4)..=(at.1 + 1) {
+                let tile = indoors.tile(x, y).with_wall(LIVING_WOOD_WALL);
+                indoors.set_tile(x, y, tile);
+            }
+        }
+        for (npc_type, name) in [(WINDY_BALLOON, "Windy Balloon"), (DANDELION, "Dandelion")] {
+            assert_eq!(
+                blowing(&indoors, 0.5, true, npc_type),
+                0,
+                "a {name} grew inside a living tree"
+            );
+        }
+
+        // ...and the Dandelion wants grass under it where the balloon does not.
+        let stone = flat_world_of(90, 1);
+        assert_eq!(
+            blowing(&stone, 0.5, true, DANDELION),
+            0,
+            "a Dandelion grew out of bare stone"
+        );
+        assert!(
+            blowing(&stone, 0.5, true, WINDY_BALLOON) > 0,
+            "a Windy Balloon needs no particular ground and found none over stone"
         );
     }
 
