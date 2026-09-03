@@ -3627,6 +3627,20 @@ impl GameServer {
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
+            for (bx, by) in fired.boulder_statues {
+                self.fire_boulder_statue(bx, by);
+            }
+            // A sundial or moondial the current reached jumps the world clock, through the same
+            // `skip_to` a player right-clicking one already goes through (packet 51, actions 3 and
+            // 6, `dispatch.rs`'s own `on_misc_data`). Both dials on one circuit is not a
+            // contradiction to resolve: vanilla runs them in the order the flood found them and the
+            // last one wins, which is what doing them in this order does.
+            if fired.sundial {
+                self.skip_to(true);
+            }
+            if fired.moondial {
+                self.skip_to(false);
+            }
             // L3-05: each colour's teleporter pair is jumped separately, in the colour order the
             // flood collected them.
             for (a, b) in fired.teleport_pairs {
@@ -3915,6 +3929,33 @@ impl GameServer {
                 };
                 self.broadcast_tile_square(&square, None);
             }
+        }
+    }
+
+    /// Drop a boulder out of a Boulder Statue: `Wiring.cs:1998-2017`.
+    ///
+    /// Not part of [`Self::run_statue`]'s table, because tile 531 is not tile 105 and produces no
+    /// NPC and no item. It is closer to a trap: one `CheckMech(anchor, 900)` on the statue's own
+    /// anchor, then a still boulder (projectile 99, 70 damage, 10 knockback) dropped from the middle
+    /// of its base, twenty-eight pixels down.
+    fn fire_boulder_statue(&mut self, x: i32, y: i32) {
+        /// `ProjectileID.Boulder`.
+        const BOULDER: u16 = 99;
+        /// `CheckMech(num90, num91, 900)` — fifteen seconds between boulders.
+        const BOULDER_COOLDOWN: i32 = 900;
+
+        if self.mech_cooldown.contains_key(&(x, y)) {
+            return;
+        }
+        // Taken whether or not a projectile slot was free, exactly as `fire_trap` does and for the
+        // same reason: the statue has gone off, and should not retry every tick.
+        self.mech_cooldown.insert((x, y), BOULDER_COOLDOWN);
+        let position = ((x + 1) as f32 * 16.0, y as f32 * 16.0 + 28.0);
+        if let Some(index) = self
+            .projectiles
+            .launch(BOULDER, position, (0.0, 0.0), 70, 0)
+        {
+            self.broadcast_projectile(index);
         }
     }
 
@@ -7726,6 +7767,113 @@ mod wired_mines_and_doors {
             .projectiles
             .iter()
             .any(|(_, p)| p.projectile_type == projectile_type)
+    }
+
+    /// A Boulder Statue the current reached drops its boulder, and then does not drop another until
+    /// its nine-hundred-frame `CheckMech` runs out (`Wiring.cs:1998-2017`).
+    ///
+    /// Fails before the fix: `Fired` had no `boulder_statues` at all and `apply_circuit` had nothing
+    /// to read, so tile 531 was inert.
+    #[test]
+    fn a_wired_boulder_statue_drops_one_boulder_and_then_waits() {
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.boulder_statues.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            threw(&server, 99),
+            "a Boulder Statue should throw a boulder"
+        );
+        let after_one = server.projectiles.iter().count();
+
+        let mut fired = Fired::default();
+        fired.boulder_statues.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert_eq!(
+            server.projectiles.iter().count(),
+            after_one,
+            "and not another one while it is still cooling down"
+        );
+    }
+
+    /// A sundial and a moondial the current reached jump the world clock, through the same
+    /// `skip_to` a direct click already goes through (`Wiring.cs:1137-1176`).
+    ///
+    /// Fails before the fix: `Fired` had no `sundial`/`moondial` flags, so a wired dial did nothing
+    /// at all and the clock stayed where it was.
+    #[test]
+    fn a_wired_sundial_and_moondial_jump_the_clock() {
+        let mut server = server();
+        server.world.day_time = false;
+        server.world.time = 12_345;
+        let mut fired = Fired::default();
+        fired.sundial = true;
+        server.apply_circuit(fired, (100, 100));
+        assert!(server.world.day_time, "the sundial should bring the day");
+        assert_eq!(server.world.time, 0, "and start it at dawn");
+
+        server.world.time = 6_789;
+        let mut fired = Fired::default();
+        fired.moondial = true;
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            !server.world.day_time,
+            "the moondial should bring the night"
+        );
+        assert_eq!(server.world.time, 0, "and start it at dusk");
+    }
+
+    /// The real world hands the flood its own surface line and Plantera flag, so
+    /// `actuation_allowed`'s Lihzahrd guard actually lifts once the boss is down.
+    ///
+    /// Fails before the fix: `impl WiredWorld for World` implemented only the four required methods
+    /// and took the trait's own deliberately-conservative defaults for the other two (surface at row
+    /// zero, Plantera never down). The guard was therefore permanently shut on every real server: a
+    /// temple wall stayed unactuatable for ever, including long after Plantera had fallen. The
+    /// trait's doc had said all along that a real implementation should override them; the only real
+    /// implementation never did.
+    #[test]
+    fn a_real_world_lifts_the_lihzahrd_guard_once_plantera_is_down() {
+        /// `TileID.LihzahrdBrick`.
+        const LIHZAHRD_BRICK: u16 = 226;
+
+        let mut server = server();
+        // Well below the surface, which a real world reports and a defaulted one calls row zero.
+        let y = i32::from(server.world.surface) + 20;
+        let lay = |server: &mut GameServer| {
+            server.world.set_tile(100, y, wiring_switch());
+            for x in 101..105 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                server.world.set_tile(x, y, wire);
+            }
+            let mut wall = Tile::block(LIHZAHRD_BRICK);
+            wall.flags.set(TileFlags::WIRE_RED, true);
+            wall.flags.set(TileFlags::ACTUATOR, true);
+            server.world.set_tile(105, y, wall);
+        };
+
+        lay(&mut server);
+        crate::world::wiring::hit_switch(&mut server.world, 100, y);
+        assert!(
+            !server.world.tile(105, y).flags.has(TileFlags::ACTUATED),
+            "the temple's wall should hold while Plantera is up"
+        );
+
+        server.world.progress.downed_plantera = true;
+        lay(&mut server);
+        crate::world::wiring::hit_switch(&mut server.world, 100, y);
+        assert!(
+            server.world.tile(105, y).flags.has(TileFlags::ACTUATED),
+            "and give way once she is down"
+        );
+    }
+
+    /// A plain red-wired Switch (tile 136), which is what every board here starts a circuit with.
+    fn wiring_switch() -> Tile {
+        let mut switch = Tile::framed(136, 0, 0);
+        switch.flags.set(TileFlags::WIRE_RED, true);
+        switch
     }
 
     #[test]

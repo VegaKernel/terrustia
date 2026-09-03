@@ -242,6 +242,20 @@ pub struct Fired {
     pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
+    /// Boulder Statues the current reached, by their top-left tile (`Wiring.cs:1998-2017`).
+    ///
+    /// Kept apart from `statues`: tile 531 is not tile 105 and does not go through the statue
+    /// table at all. It throws a boulder (projectile 99) on a nine-hundred-frame `CheckMech`, which
+    /// is the caller's `mech_cooldown`, so all this side reports is where.
+    pub boulder_statues: Vec<(i32, i32)>,
+    /// Whether the current reached an Enchanted Sundial (`Wiring.cs:1137-1156`)...
+    ///
+    /// A `bool` rather than a list of positions for the same reason `party_monolith` is: every
+    /// sundial in the world reflects one world-level clock, so a circuit through two of them is a
+    /// circuit through one.
+    pub sundial: bool,
+    /// ...or an Enchanted Moondial (`Wiring.cs:1157-1176`).
+    pub moondial: bool,
     /// The teleporter pair each colour's flood joined, in colour order — one entry per colour that
     /// reached two distinct teleporters (L3-05).
     ///
@@ -587,7 +601,7 @@ fn trip(world: &mut impl WiredWorld, colour: Wire, seeds: Vec<(i32, i32)>, out: 
             break;
         }
         out.reached += 1;
-        act(world, x, y, out);
+        act(world, x, y, colour, out);
 
         // A junction or pixel box is never itself acted on (no case for it in `act`), so its frame
         // here is still whatever it was before the line above.
@@ -671,7 +685,11 @@ fn junction_lets_through(frame_x: i16, arrived_via: u8, leaving_via: u8) -> bool
 ///
 /// A tile with nothing to do is not an error and does not stop the current: the flood is over
 /// connectedness, not over things that respond.
-fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
+///
+/// `colour` is vanilla's own `_currentWireColor` (set once per flood, `Wiring.cs:848`). Exactly one
+/// tile in the whole table reads it — the Wire Bulb, whose four colours each own a bit of its frame
+/// (see [`toggle_frame_device`]'s own arm for it) — so it is threaded through rather than derived.
+fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fired) {
     if out.skipped.contains(&(x, y)) {
         return;
     }
@@ -788,6 +806,12 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
     if tile.is_active() && toggle_light(world, x, y, tile, out) {
         return;
     }
+    // ...and so does everything else in the table whose whole reaction is a frame shift over its own
+    // footprint: the machines, the volcanoes, the monoliths, the music box, the water fountain.
+    // Same shape as the lights above and terminal for the same reason (L3-24).
+    if tile.is_active() && toggle_frame_device(world, x, y, tile, colour, out) {
+        return;
+    }
     if tile.is_active() && matches!(tile.block, TRAPS | GEYSER) {
         out.traps.push((x, y));
     }
@@ -824,6 +848,37 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
             world.set_tile(x, y, flipped);
             out.changed.push((x, y));
         }
+        return;
+    }
+    // A gemspark block swaps between its lit and unlit twin — `Wiring.cs:1034-1050`, a plain type
+    // swap seven apart (the seven unlit types 255-261 sit directly below the seven lit ones,
+    // 262-268, in the same gem order). Guarded by the actuator exactly as the conveyor belt above
+    // is, and terminal whether or not the guard let the swap through, matching vanilla's own
+    // unconditional `return` at the end of the block.
+    if tile.is_active() && (GEMSPARK_UNLIT_FIRST..=GEMSPARK_LIT_LAST).contains(&tile.block) {
+        if !tile.flags.has(TileFlags::ACTUATOR) {
+            let mut swapped = world.tile(x, y);
+            swapped.block = if tile.block >= GEMSPARK_LIT_FIRST {
+                tile.block - GEMSPARK_SPAN
+            } else {
+                tile.block + GEMSPARK_SPAN
+            };
+            world.set_tile(x, y, swapped);
+            out.changed.push((x, y));
+        }
+        return;
+    }
+    // A grate opens and shuts by swapping type, with no guard of any kind —
+    // `Wiring.cs:2550-2559`.
+    if tile.is_active() && matches!(tile.block, GRATE_OPEN | GRATE_CLOSED) {
+        let mut swapped = world.tile(x, y);
+        swapped.block = if tile.block == GRATE_OPEN {
+            GRATE_CLOSED
+        } else {
+            GRATE_OPEN
+        };
+        world.set_tile(x, y, swapped);
+        out.changed.push((x, y));
         return;
     }
     // Active Stone Block hides itself; Inactive Stone Block always comes back solid —
@@ -868,6 +923,15 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         out.gates.push((x, y));
     }
     if tile.is_active() && tile.block == TELEPORTER {
+        // The dungeon's own teleporters are dead until Plantera falls: a teleporter set in
+        // Lihzahrd brick wall, below the surface, with the boss still up is passed over entirely
+        // (`Wiring.cs:1554-1557`) — the same gate `actuation_allowed` puts on the temple's bricks,
+        // and for the same reason, since a working teleporter pad through a temple wall would walk
+        // straight past it. Reading `wall` rather than the block is deliberate and is what vanilla
+        // does: the pad sits *in front of* the wall, so its own block is the teleporter.
+        if tile.wall == LIHZAHRD_BRICK_WALL && y > world.surface_y() && !world.downed_plantera() {
+            return;
+        }
         // A teleporter is three tiles wide and the anchor is its left one. Only the first two
         // distinct ones matter: they are the pair the circuit joins.
         let anchor = (x - i32::from(tile.frame_x) / 18, y);
@@ -917,6 +981,86 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, out: &mut Fired) {
         if !out.statues.contains(&anchor) {
             out.statues.push(anchor);
         }
+    }
+    // A Boulder Statue drops a boulder rather than summoning anything, so it is a different tile
+    // from every other statue and takes a different path: `Wiring.cs:1998-2017`, two wide by three
+    // tall, throwing projectile 99 on a nine-hundred-frame `CheckMech`. Reported by its anchor for
+    // the caller, which owns both the cooldown table and the projectile store.
+    if tile.is_active() && tile.block == BOULDER_STATUE {
+        let anchor = (
+            x - i32::from(tile.frame_x) % 36 / 18,
+            y - i32::from(tile.frame_y) % 54 / 18,
+        );
+        if !out.boulder_statues.contains(&anchor) {
+            out.boulder_statues.push(anchor);
+        }
+        return;
+    }
+    // The Enchanted Sundial and Moondial: two wide by three tall, every cell skipped for this
+    // colour, and then a world-level clock jump the caller makes (`Wiring.cs:1137-1176`). Vanilla
+    // guards the jump on `!Main.fastForwardTimeToDawn && Main.sundialCooldown == 0`; neither piece
+    // of state exists on this server (the clock is jumped outright rather than fast-forwarded, the
+    // same simplification the Journey time-skip powers already run on), so the guard is the
+    // caller's to make or not, and the flood only says the current got there. Disclosed rather than
+    // silently dropped: a sundial wired to a fast timer here skips a day per pulse where vanilla
+    // would refuse for the next eight.
+    if tile.is_active() && matches!(tile.block, SUNDIAL | MOONDIAL) {
+        let ax = x - i32::from(tile.frame_x) % 36 / 18;
+        let ay = y - i32::from(tile.frame_y) % 54 / 18;
+        for cell in rect(ax, ay, 2, 3) {
+            out.skipped.insert(cell);
+        }
+        if tile.block == SUNDIAL {
+            out.sundial = true;
+        } else {
+            out.moondial = true;
+        }
+    }
+}
+
+/// `frame / 18`, then reduced back into `[0, n)` — a cell's own offset within its fixture.
+///
+/// This is vanilla's own `for (num = frame / 18; num >= N; num -= N) {}` idiom, which appears in
+/// nearly every multi-tile arm of `HitWireSingle` and of the `WorldGen.Switch*` helpers it calls.
+fn within(frame: i16, n: i32) -> i32 {
+    let mut m = i32::from(frame) / 18;
+    while m >= n {
+        m -= n;
+    }
+    m
+}
+
+/// The cells of a `w` by `h` block anchored at its top-left, in vanilla's own row-inside-column
+/// order.
+fn rect(ax: i32, ay: i32, w: i32, h: i32) -> Vec<(i32, i32)> {
+    let mut cells = Vec::with_capacity((w * h) as usize);
+    for cx in ax..ax + w {
+        for cy in ay..ay + h {
+            cells.push((cx, cy));
+        }
+    }
+    cells
+}
+
+/// Flip `frame_x` (or `frame_y`) by `delta` on every listed cell, skip it for this colour, and
+/// report it changed.
+fn flip(
+    world: &mut impl WiredWorld,
+    cells: &[(i32, i32)],
+    axis_y: bool,
+    delta: i16,
+    out: &mut Fired,
+) {
+    for &(cx, cy) in cells {
+        out.skipped.insert((cx, cy));
+        let mut t = world.tile(cx, cy);
+        if axis_y {
+            t.frame_y += delta;
+        } else {
+            t.frame_x += delta;
+        }
+        world.set_tile(cx, cy, t);
+        out.changed.push((cx, cy));
     }
 }
 
@@ -968,36 +1112,6 @@ fn is_2x2_light(block: u16) -> bool {
 /// (they are one tile, so nothing to guard); marking them skipped anyway is a harmless no-op, since a
 /// one-tile fixture is already reached only once per colour by the flood's own visited set.
 fn toggle_light(world: &mut impl WiredWorld, x: i32, y: i32, tile: Tile, out: &mut Fired) -> bool {
-    // `frame / 18`, then reduced back into `[0, n)` — a cell's own offset within its fixture.
-    fn within(frame: i16, n: i32) -> i32 {
-        let mut m = i32::from(frame) / 18;
-        while m >= n {
-            m -= n;
-        }
-        m
-    }
-    // Flip `frame_x` (or `frame_y`) by `delta` on every listed cell, skip it for this colour, and
-    // report it changed.
-    fn flip(
-        world: &mut impl WiredWorld,
-        cells: &[(i32, i32)],
-        axis_y: bool,
-        delta: i16,
-        out: &mut Fired,
-    ) {
-        for &(cx, cy) in cells {
-            out.skipped.insert((cx, cy));
-            let mut t = world.tile(cx, cy);
-            if axis_y {
-                t.frame_y += delta;
-            } else {
-                t.frame_x += delta;
-            }
-            world.set_tile(cx, cy, t);
-            out.changed.push((cx, cy));
-        }
-    }
-
     let fx = tile.frame_x;
     let fy = tile.frame_y;
     match tile.block {
@@ -1140,6 +1254,322 @@ fn toggle_light(world: &mut impl WiredWorld, x: i32, y: i32, tile: Tile, out: &m
                         out.changed.push((k, l));
                     }
                 }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `TileID.Chimney` — three by three, cycling `frameY` through three states.
+const CHIMNEY: u16 = 406;
+/// `TileID.SillyBalloonMachine` — three by three, toggling `frameX`.
+const SILLY_BALLOON_MACHINE: u16 = 452;
+/// `TileID.BubbleMachine` — three wide, two tall.
+const BUBBLE_MACHINE: u16 = 244;
+/// `TileID.FogMachine` — two by two.
+const FOG_MACHINE: u16 = 565;
+/// `TileID.WireBulb` — the one tile in the whole table whose reaction depends on *which colour*
+/// reached it. See [`toggle_frame_device`]'s own arm.
+const WIRE_BULB: u16 = 429;
+/// `TileID.VolcanoSmall` — one tile.
+const VOLCANO_SMALL: u16 = 593;
+/// `TileID.VolcanoLarge` — two by two.
+const VOLCANO_LARGE: u16 = 594;
+/// `TileID.MushroomStatue` — two wide, three tall. Not a statue in the `STATUE` sense: it has its
+/// own tile type and its own arm, and it is what a Mushroom Statue *becomes* when tile 105's own
+/// style 34 fires ([`super::super::game::server`]'s `Statue::Becomes`), so without this arm the
+/// transformation was one-way.
+const MUSHROOM_STATUE: u16 = 349;
+/// `TileID.CatBast` — two wide, three tall, and the one arm here that validates its whole footprint
+/// before touching any of it.
+const CAT_BAST: u16 = 506;
+/// `TileID.WaterFountain` — two wide, four tall, toggled on `frameY`.
+const WATER_FOUNTAIN: u16 = 207;
+/// `TileID.Grate` and `TileID.GrateClosed` — swapped for each other, with no guard at all.
+const GRATE_OPEN: u16 = 546;
+const GRATE_CLOSED: u16 = 557;
+/// The seven unlit gemspark blocks (`TileID.AmethystGemsparkOff` = 255 through
+/// `TileID.AmberGemsparkOff` = 261)...
+const GEMSPARK_UNLIT_FIRST: u16 = 255;
+/// ...and the seven lit ones (`TileID.AmethystGemspark` = 262 through `TileID.AmberGemspark` =
+/// 268), which sit exactly [`GEMSPARK_SPAN`] above their own unlit twin in the same gem order.
+const GEMSPARK_LIT_FIRST: u16 = 262;
+const GEMSPARK_LIT_LAST: u16 = 268;
+/// How far apart a gemspark block's two states are, which is the whole of `Wiring.cs:1038-1045`.
+const GEMSPARK_SPAN: u16 = 7;
+/// `TileID.BoulderStatue` — throws a boulder rather than summoning, so it is not tile 105.
+const BOULDER_STATUE: u16 = 531;
+/// `TileID.Sundial` and `TileID.Moondial` — two wide, three tall, and a world-level clock jump.
+const SUNDIAL: u16 = 356;
+const MOONDIAL: u16 = 663;
+/// `WallID.LihzahrdBrickUnsafe` — the temple's own wall, which gates the dungeon teleporters the
+/// way [`actuation_allowed`]'s own check gates its bricks (`Wiring.cs:1554-1557`).
+const LIHZAHRD_BRICK_WALL: u16 = 87;
+
+/// `TileID.Jackolanterns` and `TileID.MusicBoxes`, which `WorldGen.SwitchMB` treats as one thing.
+fn is_music_box(block: u16) -> bool {
+    matches!(block, 35 | 139)
+}
+
+/// The monoliths `HitWireSingle` sends to `WorldGen.SwitchMonolith` (`Wiring.cs:2025-2035`):
+/// Lunar, Blood Moon, Void, Echo, Shimmer, CRT, Retro, Noir and the Radio Thing.
+fn is_monolith(block: u16) -> bool {
+    matches!(block, 410 | 480 | 509 | 657 | 658 | 720 | 721 | 725 | 733)
+}
+
+/// `TileID.ShimmerMonolith`, the one monolith with three states rather than two.
+const SHIMMER_MONOLITH: u16 = 658;
+/// `TileID.RadioThingMonolith`, the one monolith three tiles wide rather than two.
+const RADIO_MONOLITH: u16 = 733;
+
+/// How far one monolith's `frameY` moves between states (`WorldGen.cs:51493-51591`). The Lunar
+/// Monolith is the odd one out at 56; every other is 54.
+fn monolith_step(block: u16) -> Option<i16> {
+    match block {
+        410 => Some(56),
+        480 | 509 | 657 | SHIMMER_MONOLITH | 720 | 721 | 725 | RADIO_MONOLITH => Some(54),
+        _ => None,
+    }
+}
+
+/// Toggle a wired device whose whole reaction is a frame shift over its own footprint, returning
+/// whether the tile was one at all.
+///
+/// This is [`toggle_light`]'s sibling, and every arm has the same three steps vanilla's do: recover
+/// the device's anchor from whichever cell the flood happened to reach, read the *anchor's* frame to
+/// decide which way to move, then shift the whole footprint together and mark every cell skipped for
+/// this colour. Splitting these out from the lights is a filing decision, not a behavioural one:
+/// they sit in a different part of `HitWireSingle`'s dispatch but do the same kind of work.
+///
+/// Three arms reach outside `Wiring.cs` for their body, because vanilla's dispatch does: the music
+/// box, the water fountain and the monoliths are `WorldGen.SwitchMB` (`WorldGen.cs:51413-51457`),
+/// `WorldGen.SwitchFountain` (`:51607-51655`) and `WorldGen.SwitchMonolith` (`:51459-51605`). Those
+/// three check each cell's own type before moving it rather than trusting the anchor, so they are
+/// written out rather than going through [`flip`].
+///
+/// **Disclosed narrowing.** The two volcanoes and the Mushroom Statue additionally play a temporary
+/// animation (`Animation.NewTemporaryAnimation` plus `NetMessage.SendTemporaryAnimation`,
+/// `Wiring.cs:1707-1708`, `:1741-1742`, `:2513`). That is a client-side flourish on a packet this
+/// server does not speak yet; the frame change, which is the authoritative half, is here.
+fn toggle_frame_device(
+    world: &mut impl WiredWorld,
+    x: i32,
+    y: i32,
+    tile: Tile,
+    colour: Wire,
+    out: &mut Fired,
+) -> bool {
+    let fx = tile.frame_x;
+    let fy = tile.frame_y;
+    match tile.block {
+        // Three by three on `frameY`, and the only device here with three states rather than two:
+        // `54`, `54`, then `-108` back to the start (`Wiring.cs:1071-1092`).
+        CHIMNEY => {
+            let ax = x - i32::from(fx) % 54 / 18;
+            let ay = y - i32::from(fy) % 54 / 18;
+            let delta = if world.tile(ax, ay).frame_y >= 108 {
+                -108
+            } else {
+                54
+            };
+            flip(world, &rect(ax, ay, 3, 3), true, delta, out);
+            true
+        }
+        // Three by three on `frameX` (`Wiring.cs:1093-1114`).
+        SILLY_BALLOON_MACHINE => {
+            let ax = x - i32::from(fx) % 54 / 18;
+            let ay = y - i32::from(fy) % 54 / 18;
+            let delta = if world.tile(ax, ay).frame_x >= 54 {
+                -54
+            } else {
+                54
+            };
+            flip(world, &rect(ax, ay, 3, 3), false, delta, out);
+            true
+        }
+        // A Detonator a *wire* reaches is only pressed, never released: unlike the direct click
+        // ([`hit_switch`]'s own case) this arm registers no `CheckMech(_, _, 60)`, so nothing pops
+        // it back up (`Wiring.cs:1115-1136`). That asymmetry is vanilla's, not a gap here.
+        DETONATOR => {
+            let ax = x - i32::from(fx) % 36 / 18;
+            let ay = y - i32::from(fy) % 36 / 18;
+            let delta = if world.tile(ax, ay).frame_x >= 36 {
+                -36
+            } else {
+                36
+            };
+            flip(world, &rect(ax, ay, 2, 2), false, delta, out);
+            true
+        }
+        // Three wide by two tall, but its anchor is recovered with a *three*-step reduction on both
+        // axes, not a two-step one on the short side (`Wiring.cs:1631-1637`). Transcribed as
+        // written: the sprite sheet stacks three rows even though only two are placed.
+        BUBBLE_MACHINE => {
+            let ax = x - within(fx, 3);
+            let ay = y - within(fy, 3);
+            let delta = if world.tile(ax, ay).frame_x >= 54 {
+                -54
+            } else {
+                54
+            };
+            flip(world, &rect(ax, ay, 3, 2), false, delta, out);
+            true
+        }
+        // Two by two (`Wiring.cs:1656-1683`).
+        FOG_MACHINE => {
+            let ax = x - within(fx, 2);
+            let ay = y - within(fy, 2);
+            let delta = if world.tile(ax, ay).frame_x >= 36 {
+                -36
+            } else {
+                36
+            };
+            flip(world, &rect(ax, ay, 2, 2), false, delta, out);
+            true
+        }
+        // The Wire Bulb is the one tile whose reaction depends on which colour reached it
+        // (`Wiring.cs:1586-1624`). Its `frameX / 18` is a four-bit field, one bit per colour, and a
+        // signal *toggles its own bit* and leaves the other three alone — which is what lets one
+        // bulb show four circuits at once. The bit weights are red 1, green 2, blue 4, yellow 8
+        // (vanilla's `_currentWireColor` cases 1, 3, 2, 4 in that order, with the shifts 18, 36, 72
+        // and 144 that are exactly `18 * weight`).
+        WIRE_BULB => {
+            let style = i32::from(fx) / 18;
+            let weight: i16 = match colour {
+                Wire::Red => 1,
+                Wire::Green => 2,
+                Wire::Blue => 4,
+                Wire::Yellow => 8,
+            };
+            let already_lit = style % (2 * i32::from(weight)) >= i32::from(weight);
+            let delta = 18 * weight * if already_lit { -1 } else { 1 };
+            flip(world, &[(x, y)], false, delta, out);
+            true
+        }
+        // One tile (`Wiring.cs:1697-1710`).
+        VOLCANO_SMALL => {
+            flip(world, &[(x, y)], false, if fx != 0 { -18 } else { 18 }, out);
+            true
+        }
+        // Two by two (`Wiring.cs:1711-1744`).
+        VOLCANO_LARGE => {
+            let ay = y - within(fy, 2);
+            let mut col = i32::from(fx) / 18;
+            if col > 1 {
+                col -= 2;
+            }
+            let ax = x - col;
+            let delta = if world.tile(ax, ay).frame_x != 0 {
+                -36
+            } else {
+                36
+            };
+            flip(world, &rect(ax, ay, 2, 2), false, delta, out);
+            true
+        }
+        // Two wide by three tall, and the largest shift in the table at 216 (`Wiring.cs:2485-2515`).
+        MUSHROOM_STATUE => {
+            let ay = y - i32::from(fy) / 18 % 3;
+            let ax = x - within(fx, 2);
+            let delta = if world.tile(ax, ay).frame_x != 0 {
+                -216
+            } else {
+                216
+            };
+            flip(world, &rect(ax, ay, 2, 3), false, delta, out);
+            true
+        }
+        // Two wide by three tall, refused outright unless every one of its six cells is really an
+        // active Cat Bast — `WorldGen.ValidateTileSquareIsActiveAndOfType`, checked *before* any
+        // `SkipWire`, so a half-broken one is left alone rather than half-shifted
+        // (`Wiring.cs:2516-2549`).
+        CAT_BAST => {
+            let ay = y - i32::from(fy) / 18 % 3;
+            let ax = x - within(fx, 2);
+            let cells = rect(ax, ay, 2, 3);
+            for &(cx, cy) in &cells {
+                let t = world.tile(cx, cy);
+                if !t.is_active() || t.block != CAT_BAST {
+                    return true;
+                }
+            }
+            let delta = if world.tile(ax, ay).frame_x >= 72 {
+                -72
+            } else {
+                72
+            };
+            flip(world, &cells, false, delta, out);
+            true
+        }
+        // `WorldGen.SwitchMB` (`WorldGen.cs:51413-51457`): two by two, and each cell decides its own
+        // direction from its own `frameX` rather than from the anchor's, which is why this does not
+        // go through [`flip`]. Cells that are not a music box are skipped but not moved.
+        b if is_music_box(b) => {
+            let ay = y - within(fy, 2);
+            let mut col = i32::from(fx) / 18;
+            if col >= 2 {
+                col -= 2;
+            }
+            let ax = x - col;
+            for (cx, cy) in rect(ax, ay, 2, 2) {
+                out.skipped.insert((cx, cy));
+                let mut t = world.tile(cx, cy);
+                if t.is_active() && is_music_box(t.block) {
+                    t.frame_x += if t.frame_x < 36 { 36 } else { -36 };
+                    world.set_tile(cx, cy, t);
+                    out.changed.push((cx, cy));
+                }
+            }
+            true
+        }
+        // `WorldGen.SwitchFountain` (`WorldGen.cs:51607-51655`): two wide by four tall, on `frameY`,
+        // per cell like the music box.
+        WATER_FOUNTAIN => {
+            let ax = x - within(fx, 2);
+            let mut row = i32::from(fy) / 18;
+            if row >= 4 {
+                row -= 4;
+            }
+            let ay = y - row;
+            for (cx, cy) in rect(ax, ay, 2, 4) {
+                out.skipped.insert((cx, cy));
+                let mut t = world.tile(cx, cy);
+                if t.is_active() && t.block == WATER_FOUNTAIN {
+                    t.frame_y += if t.frame_y < 72 { 72 } else { -72 };
+                    world.set_tile(cx, cy, t);
+                    out.changed.push((cx, cy));
+                }
+            }
+            true
+        }
+        // `WorldGen.SwitchMonolith` (`WorldGen.cs:51459-51605`): three tall, two wide except the
+        // Radio Thing at three, and each cell moved by its own type's own step — see
+        // [`monolith_step`]. The Shimmer Monolith is the one that cycles three ways rather than
+        // two (`WorldGen.cs:51537-51547`).
+        b if is_monolith(b) => {
+            let w = if b == RADIO_MONOLITH { 3 } else { 2 };
+            let ax = x - within(fx, w);
+            let ay = y - within(fy, 3);
+            for (cx, cy) in rect(ax, ay, w, 3) {
+                out.skipped.insert((cx, cy));
+                let mut t = world.tile(cx, cy);
+                if !t.is_active() {
+                    continue;
+                }
+                let Some(step) = monolith_step(t.block) else {
+                    continue;
+                };
+                if t.block == SHIMMER_MONOLITH {
+                    t.frame_y += step;
+                    if t.frame_y >= step * 3 {
+                        t.frame_y -= step * 3;
+                    }
+                } else {
+                    t.frame_y += if t.frame_y < step { step } else { -step };
+                }
+                world.set_tile(cx, cy, t);
+                out.changed.push((cx, cy));
             }
             true
         }
@@ -3313,5 +3743,396 @@ mod tests {
         board.set_tile(100, 100, wired(136, Wire::Red));
         let fired = hit_switch(&mut board, 100, 100);
         assert!(!fired.party_monolith);
+    }
+
+    /// Lay a `w` by `h` framed device with its anchor at `(105, 100)`, and feed the current into its
+    /// *bottom-right* cell from the east.
+    ///
+    /// Entering at the far corner rather than the anchor is the point: every arm of
+    /// [`toggle_frame_device`] has to recover the anchor from whichever cell the flood happened to
+    /// reach, on both axes, and a test that wired the anchor would pass with that recovery deleted.
+    /// Returns the switch to hit.
+    fn far_corner_fed(board: &mut Board, block: u16, w: i32, h: i32) -> (i32, i32) {
+        let (ax, ay) = (105i32, 100i32);
+        for dx in 0..w {
+            for dy in 0..h {
+                let mut cell = Tile::framed(block, (dx * 18) as i16, (dy * 18) as i16);
+                if dy == h - 1 {
+                    cell.flags.set(TileFlags::WIRE_RED, true);
+                }
+                board.set_tile(ax + dx, ay + dy, cell);
+            }
+        }
+        let row = ay + h - 1;
+        let switch_x = ax + w + 4;
+        board.set_tile(switch_x, row, wired(136, Wire::Red));
+        for x in ax + w..switch_x {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, row, wire);
+        }
+        (switch_x, row)
+    }
+
+    /// Every cell of the device anchored at `(105, 100)` that carries the given frame offset.
+    fn frames(board: &Board, w: i32, h: i32, axis_y: bool) -> Vec<i16> {
+        let mut out = Vec::new();
+        for dx in 0..w {
+            for dy in 0..h {
+                let t = board.tile(105 + dx, 100 + dy);
+                out.push(if axis_y { t.frame_y } else { t.frame_x });
+            }
+        }
+        out
+    }
+
+    /// The frame-shift family of `HitWireSingle`: a machine, a volcano or a Mushroom Statue moves
+    /// its whole footprint by one delta and comes back on the next pulse.
+    ///
+    /// Table-driven because the arms differ only in footprint, axis and delta; each row is one
+    /// vanilla case, cited on [`toggle_frame_device`]'s own arm for it. The Chimney is the one with
+    /// three states rather than two, so it gets its own test below.
+    ///
+    /// Fails before the fix: none of these tiles had an arm at all, so a wire signal reaching one
+    /// changed nothing and every `assert_eq!` on the shifted frame saw the frame it started with.
+    #[test]
+    fn the_frame_shift_devices_move_their_whole_footprint_and_come_back() {
+        // block, width, height, whether the shift is on frame_y, and the delta.
+        let table: [(u16, i32, i32, bool, i16); 6] = [
+            (SILLY_BALLOON_MACHINE, 3, 3, false, 54),
+            (BUBBLE_MACHINE, 3, 2, false, 54),
+            (FOG_MACHINE, 2, 2, false, 36),
+            (VOLCANO_LARGE, 2, 2, false, 36),
+            (MUSHROOM_STATUE, 2, 3, false, 216),
+            (DETONATOR, 2, 2, false, 36),
+        ];
+        for (block, w, h, axis_y, delta) in table {
+            let mut board = Board(HashMap::new());
+            let switch = far_corner_fed(&mut board, block, w, h);
+            let before = frames(&board, w, h, axis_y);
+
+            hit_switch(&mut board, switch.0, switch.1);
+            let after = frames(&board, w, h, axis_y);
+            for (i, (was, now)) in before.iter().zip(&after).enumerate() {
+                assert_eq!(*now, *was + delta, "{block}: cell {i} did not shift");
+            }
+
+            hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(
+                frames(&board, w, h, axis_y),
+                before,
+                "{block}: a second pulse should put it back"
+            );
+        }
+    }
+
+    /// The Chimney is the one frame-shift device with three states: `+54`, `+54`, then `-108` back
+    /// to where it started (`Wiring.cs:1077-1081`). A two-state transcription would put it back on
+    /// the second pulse instead of the third.
+    ///
+    /// Fails before the fix: tile 406 had no arm, so the frame never moved at all.
+    #[test]
+    fn a_wired_chimney_cycles_through_three_states() {
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, CHIMNEY, 3, 3);
+        let start = frames(&board, 3, 3, true);
+
+        hit_switch(&mut board, switch.0, switch.1);
+        let once: Vec<i16> = start.iter().map(|f| f + 54).collect();
+        assert_eq!(frames(&board, 3, 3, true), once, "first state");
+
+        hit_switch(&mut board, switch.0, switch.1);
+        let twice: Vec<i16> = start.iter().map(|f| f + 108).collect();
+        assert_eq!(
+            frames(&board, 3, 3, true),
+            twice,
+            "second state, not back to the start"
+        );
+
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(frames(&board, 3, 3, true), start, "and round to the start");
+    }
+
+    /// A gemspark block swaps between its unlit and lit twin, seven types apart, and an actuated one
+    /// does not swap at all (`Wiring.cs:1034-1050`).
+    ///
+    /// Fails before the fix: the 255-268 range had no arm, so a wired gemspark block stayed unlit
+    /// forever.
+    #[test]
+    fn a_wired_gemspark_block_lights_and_an_actuated_one_does_not() {
+        for (unlit, lit) in [(255u16, 262u16), (261, 268)] {
+            let mut board = Board(HashMap::new());
+            board.set_tile(100, 100, wired(136, Wire::Red));
+            for x in 101..105 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                board.set_tile(x, 100, wire);
+            }
+            board.set_tile(105, 100, wired(unlit, Wire::Red));
+
+            hit_switch(&mut board, 100, 100);
+            assert_eq!(board.tile(105, 100).block, lit, "{unlit} should have lit");
+            hit_switch(&mut board, 100, 100);
+            assert_eq!(board.tile(105, 100).block, unlit, "and gone out again");
+
+            // The same block with an actuator on it is left alone: the actuator is what the signal
+            // acts on instead.
+            let mut with_actuator = wired(unlit, Wire::Red);
+            with_actuator.flags.set(TileFlags::ACTUATOR, true);
+            board.set_tile(105, 100, with_actuator);
+            hit_switch(&mut board, 100, 100);
+            assert_eq!(
+                board.tile(105, 100).block,
+                unlit,
+                "an actuated gemspark block does not swap type"
+            );
+        }
+    }
+
+    /// A grate opens and shuts by swapping type, with no guard of any kind (`Wiring.cs:2550-2559`).
+    ///
+    /// Fails before the fix: neither 546 nor 557 had an arm, so a wired grate never moved.
+    #[test]
+    fn a_wired_grate_opens_and_shuts() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        for x in 101..105 {
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, wire);
+        }
+        board.set_tile(105, 100, wired(GRATE_OPEN, Wire::Red));
+
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, GRATE_CLOSED);
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(board.tile(105, 100).block, GRATE_OPEN);
+    }
+
+    /// The Wire Bulb is the one tile whose reaction depends on which colour reached it: its frame is
+    /// a four-bit field and a signal toggles only its own colour's bit (`Wiring.cs:1586-1624`).
+    ///
+    /// Red is worth 1 (a shift of 18) and green 2 (a shift of 36), so a bulb lit by red and then by
+    /// green stands at 54, and a second red pulse takes it back to 36 rather than to 0.
+    ///
+    /// Fails before the fix: tile 429 had no arm and the flood did not know its own colour at all,
+    /// so the frame never moved whichever wire was pulled.
+    #[test]
+    fn a_wire_bulb_owns_one_frame_bit_per_colour() {
+        let mut board = Board(HashMap::new());
+        // One switch carrying both colours, wired straight into the bulb.
+        let mut switch = wired(136, Wire::Red);
+        switch.flags.set(TileFlags::WIRE_GREEN, true);
+        board.set_tile(100, 100, switch);
+        let mut bulb = Tile::framed(WIRE_BULB, 0, 0);
+        bulb.flags.set(TileFlags::WIRE_RED, true);
+        board.set_tile(101, 100, bulb);
+
+        // Both colours run in one trip, so the bulb ends with only red's bit set: green never
+        // reaches it, because the bulb carries no green wire.
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(101, 100).frame_x,
+            18,
+            "red's own bit, and only it"
+        );
+
+        // Give it green as well and pull again: red toggles back off, green comes on.
+        let mut both = board.tile(101, 100);
+        both.flags.set(TileFlags::WIRE_GREEN, true);
+        board.set_tile(101, 100, both);
+        hit_switch(&mut board, 100, 100);
+        assert_eq!(
+            board.tile(101, 100).frame_x,
+            36,
+            "red off (18 - 18) and green on (+36)"
+        );
+    }
+
+    /// The monoliths all toggle their whole footprint on `frameY`, but not all by the same step: the
+    /// Lunar Monolith moves by 56 where the rest move by 54, the Radio Thing is three tiles wide
+    /// rather than two, and the Shimmer Monolith cycles three ways rather than two
+    /// (`WorldGen.cs:51459-51605`).
+    ///
+    /// Fails before the fix: none of the nine had an arm, so every wired monolith was inert.
+    #[test]
+    fn wired_monoliths_toggle_each_by_its_own_step() {
+        for (block, w, step) in [(410u16, 2i32, 56i16), (480, 2, 54), (RADIO_MONOLITH, 3, 54)] {
+            let mut board = Board(HashMap::new());
+            let switch = far_corner_fed(&mut board, block, w, 3);
+            let start = frames(&board, w, 3, true);
+
+            hit_switch(&mut board, switch.0, switch.1);
+            let lit: Vec<i16> = start.iter().map(|f| f + step).collect();
+            assert_eq!(frames(&board, w, 3, true), lit, "{block} did not light");
+            hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(frames(&board, w, 3, true), start, "{block} did not go back");
+        }
+
+        // The Shimmer Monolith has three states, so the third pulse is what returns it.
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, SHIMMER_MONOLITH, 2, 3);
+        let start = frames(&board, 2, 3, true);
+        hit_switch(&mut board, switch.0, switch.1);
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_ne!(
+            frames(&board, 2, 3, true),
+            start,
+            "the shimmer monolith has a third state"
+        );
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(frames(&board, 2, 3, true), start, "and rounds on the third");
+    }
+
+    /// The music box and the water fountain move each cell by *its own* frame rather than by the
+    /// anchor's, and leave any cell that is not really one of them alone
+    /// (`WorldGen.cs:51413-51457`, `:51607-51655`).
+    ///
+    /// Fails before the fix: neither had an arm, so a wired music box never started playing and a
+    /// wired water fountain never changed its water.
+    #[test]
+    fn a_wired_music_box_and_water_fountain_toggle() {
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, 139, 2, 2);
+        let start = frames(&board, 2, 2, false);
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(
+            frames(&board, 2, 2, false),
+            start.iter().map(|f| f + 36).collect::<Vec<_>>(),
+            "the music box did not switch on"
+        );
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(frames(&board, 2, 2, false), start, "nor back off");
+
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, WATER_FOUNTAIN, 2, 4);
+        let start = frames(&board, 2, 4, true);
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(
+            frames(&board, 2, 4, true),
+            start.iter().map(|f| f + 72).collect::<Vec<_>>(),
+            "the fountain did not switch on"
+        );
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(frames(&board, 2, 4, true), start, "nor back off");
+    }
+
+    /// The Cat Bast is the one arm that validates its whole footprint before touching any of it, so
+    /// a half-broken one is left exactly as it is rather than half-shifted (`Wiring.cs:2526-2529`,
+    /// `WorldGen.ValidateTileSquareIsActiveAndOfType`).
+    ///
+    /// Fails before the fix: tile 506 had no arm at all, so the intact case never shifted either.
+    #[test]
+    fn a_wired_cat_bast_refuses_a_broken_footprint() {
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, CAT_BAST, 2, 3);
+        let start = frames(&board, 2, 3, false);
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(
+            frames(&board, 2, 3, false),
+            start.iter().map(|f| f + 72).collect::<Vec<_>>(),
+            "an intact one shifts"
+        );
+
+        // Knock one cell out and the whole thing stops moving.
+        let mut board = Board(HashMap::new());
+        let switch = far_corner_fed(&mut board, CAT_BAST, 2, 3);
+        let start = frames(&board, 2, 3, false);
+        let mut broken = board.tile(106, 100);
+        broken.flags.set(TileFlags::ACTIVE, false);
+        board.set_tile(106, 100, broken);
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(
+            frames(&board, 2, 3, false),
+            start,
+            "a broken footprint is left alone"
+        );
+    }
+
+    /// A sundial, a moondial and a Boulder Statue are reported to the caller by their anchor: the
+    /// clock and the projectile store are the caller's, not the flood's (`Wiring.cs:1137-1176`,
+    /// `:1998-2017`).
+    ///
+    /// Fails before the fix: none of the three tiles had an arm, so a wired sundial never skipped a
+    /// day and a wired Boulder Statue never dropped anything.
+    #[test]
+    fn a_wired_sundial_moondial_and_boulder_statue_are_reported() {
+        for (block, want_sun, want_moon, want_boulder) in [
+            (SUNDIAL, true, false, false),
+            (MOONDIAL, false, true, false),
+            (BOULDER_STATUE, false, false, true),
+        ] {
+            let mut board = Board(HashMap::new());
+            let switch = far_corner_fed(&mut board, block, 2, 3);
+            let fired = hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(fired.sundial, want_sun, "{block}: sundial");
+            assert_eq!(fired.moondial, want_moon, "{block}: moondial");
+            assert_eq!(
+                fired.boulder_statues.contains(&(105, 100)),
+                want_boulder,
+                "{block}: boulder statue, reported once by its anchor"
+            );
+            if want_boulder {
+                assert_eq!(
+                    fired.boulder_statues.len(),
+                    1,
+                    "six cells, one report: the anchor is deduplicated"
+                );
+            }
+        }
+    }
+
+    /// A teleporter set in Lihzahrd brick wall below the surface is dead until Plantera falls
+    /// (`Wiring.cs:1554-1557`), the same gate the temple's own bricks get.
+    ///
+    /// Fails before the fix: the teleporter arm had no wall check at all, so a pair of pads through
+    /// a temple wall paired up and jumped, walking straight past the boss meant to gate the place.
+    #[test]
+    fn a_dungeon_teleporter_is_dead_until_plantera_falls() {
+        /// A board whose surface is above the pads and whose Plantera flag is what the test sets.
+        struct Temple(HashMap<(i32, i32), Tile>, bool);
+        impl WiredWorld for Temple {
+            fn tile(&self, x: i32, y: i32) -> Tile {
+                self.0.get(&(x, y)).copied().unwrap_or(Tile::AIR)
+            }
+            fn set_tile(&mut self, x: i32, y: i32, tile: Tile) {
+                self.0.insert((x, y), tile);
+            }
+            fn width(&self) -> i32 {
+                500
+            }
+            fn height(&self) -> i32 {
+                500
+            }
+            fn surface_y(&self) -> i32 {
+                50
+            }
+            fn downed_plantera(&self) -> bool {
+                self.1
+            }
+        }
+
+        for downed in [false, true] {
+            let mut board = Temple(HashMap::new(), downed);
+            board.0.insert((100, 100), wired(136, Wire::Red));
+            for x in 101..140 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                board.0.insert((x, 100), wire);
+            }
+            // Two pads far enough apart to be a useful pair, both set in temple wall.
+            for at in [105i32, 135] {
+                let mut pad = wired(TELEPORTER, Wire::Red);
+                pad.wall = LIHZAHRD_BRICK_WALL;
+                board.0.insert((at, 100), pad);
+            }
+
+            let fired = hit_switch(&mut board, 100, 100);
+            assert_eq!(
+                fired.teleport_pairs.len(),
+                usize::from(downed),
+                "downed_plantera = {downed}: the temple pads should only pair afterwards"
+            );
+        }
     }
 }
