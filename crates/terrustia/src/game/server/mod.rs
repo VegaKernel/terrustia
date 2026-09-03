@@ -1079,6 +1079,15 @@ pub struct GameServer {
     /// back up. The `UpdateMech` reset that makes the button momentary (`Wiring.cs:219-244`), timed
     /// here because it fires outside any circuit trip (L3-26).
     detonator_resets: HashMap<(i32, i32), i32>,
+    /// The three cannon lockouts, which are *world*-level rather than per-tile: vanilla keeps them
+    /// as three plain counters beside the `CheckMech` table (`Wiring.cs:69-73`) and winds each down
+    /// once a frame in `UpdateMech` (`:147-158`). They stack with each cannon's own `CheckMech`
+    /// window rather than replacing it, so a battery of cannons on one circuit fires in sequence
+    /// instead of all at once: the plain Cannon takes 120 frames off every other Cannon in the
+    /// world (`:1335`), the Bunny Cannon 480 (`:1338`), and the Snowball Launcher 15 (`:1393`).
+    cannon_cooldown: i32,
+    bunny_cannon_cooldown: i32,
+    snowball_cannon_cooldown: i32,
     /// A save being written on another thread, if one is.
     ///
     /// Kept so that shutdown can wait for it and so that two never run at once.
@@ -1333,6 +1342,9 @@ impl GameServer {
             running_timers,
             mech_cooldown: HashMap::new(),
             detonator_resets: HashMap::new(),
+            cannon_cooldown: 0,
+            bunny_cannon_cooldown: 0,
+            snowball_cannon_cooldown: 0,
             tile_entity_anchors: HashMap::new(),
             saving: None,
             pending_save: None,

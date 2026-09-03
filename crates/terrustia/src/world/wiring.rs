@@ -242,6 +242,16 @@ pub struct Fired {
     pub gates: Vec<(i32, i32)>,
     /// Statues the current reached, by their top-left tile.
     pub statues: Vec<(i32, i32)>,
+    /// Cannons the current reached and that should *fire*, by their top-left tile
+    /// (`Wiring.cs:1237-1343`).
+    ///
+    /// A cannon hit on an aiming column has already moved here and is not listed: aiming and firing
+    /// are the same case in vanilla but never happen on the same pulse, so what reaches the caller
+    /// is only the shots.
+    pub cannons: Vec<(i32, i32)>,
+    /// Snowball Launchers the current reached and that should fire, the same way
+    /// (`Wiring.cs:1345-1419`).
+    pub snowball_launchers: Vec<(i32, i32)>,
     /// Boulder Statues the current reached, by their top-left tile (`Wiring.cs:1998-2017`).
     ///
     /// Kept apart from `statues`: tile 531 is not tile 105 and does not go through the statue
@@ -981,6 +991,85 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
         if !out.statues.contains(&anchor) {
             out.statues.push(anchor);
         }
+    }
+    // The Cannon is four wide by three tall and does two different things depending on which column
+    // the current reached (`Wiring.cs:1237-1343`): the two outer columns *aim* it a notch up or
+    // down, and the two inner ones *fire* it. The two are mutually exclusive, so one pulse either
+    // moves a cannon or shoots it, never both, and aiming skips the whole footprint for this colour
+    // so the muzzle cannot also go off on the way past.
+    if tile.is_active() && tile.block == CANNON {
+        let col = i32::from(tile.frame_x) % 72 / 18;
+        let row = i32::from(tile.frame_y) % 54 / 18;
+        let (ax, ay) = (x - col, y - row);
+        let angle = i32::from(tile.frame_y) / 54;
+        let variant = i32::from(tile.frame_x) / 72;
+
+        // The left column raises the barrel and the right lowers it, and neither goes past an end
+        // of the nine-notch arc.
+        let mut aim: i16 = match col {
+            0 => 54,
+            3 => -54,
+            _ => 0,
+        };
+        if angle >= 8 && aim > 0 {
+            aim = 0;
+        }
+        if angle == 0 && aim < 0 {
+            aim = 0;
+        }
+        if aim != 0 {
+            flip(world, &rect(ax, ay, 4, 3), true, aim, out);
+        }
+        let muzzle = matches!(col, 1 | 2);
+        // Cannon styles 3 and 4 turn round instead of firing when the current reaches their top two
+        // rows, which is the whole of vanilla's `flag2` as well: those two rows never shoot.
+        //
+        // Disclosed narrowing: vanilla reaches its `CheckMech(anchor, time) & flag2` even here, and
+        // `&` is not `&&`, so a turned-round cannon still *registers* a cooldown it then does not
+        // shoot through. Returning instead skips that registration. The only way to tell the two
+        // apart is to hit the same cannon's top row and then its bottom row inside thirty frames,
+        // which no contraption does, so the entry is dropped rather than carried.
+        if matches!(variant, 3 | 4) && muzzle && row < 2 {
+            let facing: i16 = if variant == 3 { 72 } else { -72 };
+            flip(world, &rect(ax, ay, 4, 3), false, facing, out);
+            return;
+        }
+        if !muzzle {
+            return;
+        }
+        if !out.cannons.contains(&(ax, ay)) {
+            out.cannons.push((ax, ay));
+        }
+        return;
+    }
+    // The Snowball Launcher is the same idea one size down: three by three, the outer columns turn
+    // it to face left or right and the middle one fires it (`Wiring.cs:1345-1419`).
+    if tile.is_active() && tile.block == SNOWBALL_LAUNCHER {
+        let col = i32::from(tile.frame_x) % 54 / 18;
+        let row = i32::from(tile.frame_y) % 54 / 18;
+        let (ax, ay) = (x - col, y - row);
+        let facing = i32::from(tile.frame_x) / 54;
+        let mut turn: i16 = match col {
+            0 => -54,
+            2 => 54,
+            _ => 0,
+        };
+        if facing >= 1 && turn > 0 {
+            turn = 0;
+        }
+        if facing == 0 && turn < 0 {
+            turn = 0;
+        }
+        if turn != 0 {
+            flip(world, &rect(ax, ay, 3, 3), false, turn, out);
+        }
+        if col != 1 {
+            return;
+        }
+        if !out.snowball_launchers.contains(&(ax, ay)) {
+            out.snowball_launchers.push((ax, ay));
+        }
+        return;
     }
     // A Boulder Statue drops a boulder rather than summoning anything, so it is a different tile
     // from every other statue and takes a different path: `Wiring.cs:1998-2017`, two wide by three
@@ -1993,6 +2082,12 @@ pub struct Shot {
     /// Where the cooldown is recorded, which is not always the tile that fired: a geyser is two
     /// tiles wide and both halves share one.
     pub cools_at: (i32, i32),
+    /// `ai[0]` and `ai[1]` the projectile is launched carrying.
+    ///
+    /// Zero for every trap, which is what `Projectile.NewProjectile`'s own defaulted `ai0`/`ai1`
+    /// arguments give them. Only the cannon sets either (`WorldGen.cs:51065-51074`): the second
+    /// portal-bolt style rides on `ai[0]`, and the Bunny Cannon carries its firer in `ai[1]`.
+    pub ai: [f32; 2],
 }
 
 /// What a trap tile throws, given its frame.
@@ -2017,6 +2112,7 @@ pub fn trap_shot(tile: Tile, x: i32, y: i32, rng: &mut impl rand::Rng) -> Option
             damage: 20,
             cooldown: 200,
             cools_at: (anchor_x, y),
+            ai: [0.0; 2],
         });
     }
 
@@ -2048,6 +2144,7 @@ pub fn trap_shot(tile: Tile, x: i32, y: i32, rng: &mut impl rand::Rng) -> Option
                 damage,
                 cooldown: 200,
                 cools_at,
+                ai: [0.0; 2],
             })
         }
         // The spiky ball, which is thrown with a spread rather than aimed.
@@ -2065,6 +2162,7 @@ pub fn trap_shot(tile: Tile, x: i32, y: i32, rng: &mut impl rand::Rng) -> Option
                 damage: 40,
                 cooldown: 300,
                 cools_at,
+                ai: [0.0; 2],
             })
         }
         // The spear, which is the only one that reaches back out of the wall it is set in.
@@ -2077,9 +2175,122 @@ pub fn trap_shot(tile: Tile, x: i32, y: i32, rng: &mut impl rand::Rng) -> Option
                 damage: 60,
                 cooldown: 90,
                 cools_at,
+                ai: [0.0; 2],
             })
         }
         _ => None,
+    }
+}
+
+/// `TileID.Cannon` — four wide by three tall, aimed by the outer columns and fired by the inner
+/// two. `frameY / 54` is the barrel's elevation (nine notches, 0 through 8) and `frameX / 72` is
+/// which of the five cannons it is.
+const CANNON: u16 = 209;
+/// `TileID.SnowballLauncher` — three by three, turned by the outer columns and fired by the middle
+/// one. `frameX / 54` is which way it faces.
+const SNOWBALL_LAUNCHER: u16 = 212;
+
+/// What a cannon throws, given its anchor tile.
+///
+/// `WorldGen.ShootFromCannon` (`WorldGen.cs:51041-51156`) for the projectile, the speed and the
+/// nine-notch aim table; `Wiring.cs:1306-1341` for the damage and the `CheckMech` window, which
+/// live in `HitWireSingle` rather than in the shooting function. `ammo` there is this `variant + 1`,
+/// which is why the numbering below looks one off from `frameX / 72`.
+///
+/// Returns `None` for an elevation outside the nine notches, which a hand-edited world can hold and
+/// the game itself cannot: vanilla would leave the direction at `(0, 0)` and normalise by zero.
+///
+/// The knockback vanilla passes (8 for the two big cannons) is not carried: this project's
+/// projectile store takes knockback from the type's own stats table rather than per shot, the same
+/// as every trap here already does.
+pub fn cannon_shot(anchor: Tile, ax: i32, ay: i32) -> Option<Shot> {
+    /// `Wiring.CurrentUser` (`Wiring.cs:67`), which is 255 for a circuit nobody is standing at
+    /// (`UpdateMech`'s own `SetCurrentUser()`, `:159`) and the firing player's slot for one a click
+    /// started. This server does not carry the clicking player down into the flood, so every wired
+    /// cannon fires as 255. Disclosed: in vanilla a player-tripped Bunny Cannon would put that
+    /// player's own slot here instead.
+    const CURRENT_USER: f32 = 255.0;
+
+    let angle = i32::from(anchor.frame_y) / 54;
+    let variant = i32::from(anchor.frame_x) / 72;
+    // `HitWireSingle`'s own `switch (num36)`: only the first two cannons hurt, and the rest carry a
+    // thirty-frame window with no damage at all.
+    let (damage, cooldown) = match variant {
+        0 => (300, 480),
+        1 => (350, 3600),
+        _ => (0, 30),
+    };
+    let ammo = variant + 1;
+    // `ShootFromCannon`'s own type and speed table.
+    let (projectile_type, speed) = match ammo {
+        2 => (281u16, 14.0f32),
+        3 => (178, 14.0),
+        4 | 5 => (601, 3.0),
+        _ => (162, 14.0),
+    };
+    let ai = [
+        if ammo == 5 { 1.0 } else { 0.0 },
+        if ammo == 2 { CURRENT_USER + 1.0 } else { 0.0 },
+    ];
+    // The nine notches of the barrel's arc, from level-right through straight-up to level-left.
+    let (dx, dy) = match angle {
+        0 => (10.0f32, 0.0f32),
+        1 => (7.5, -2.5),
+        2 => (5.0, -5.0),
+        3 => (2.75, -6.0),
+        4 => (0.0, -10.0),
+        5 => (-2.75, -6.0),
+        6 => (-5.0, -5.0),
+        7 => (-7.5, -2.5),
+        8 => (-10.0, 0.0),
+        _ => return None,
+    };
+    let mut position = (((ax + 2) * 16) as f32, ((ay + 2) * 16) as f32);
+    if ammo == 4 || ammo == 5 {
+        if angle == 4 {
+            position.0 += 5.0;
+        }
+        position.1 += 5.0;
+    }
+    // The aim vector is a direction, not a speed: it is renormalised to the cannon's own muzzle
+    // velocity, which is what makes every notch throw equally hard.
+    let scale = speed / (dx * dx + dy * dy).sqrt();
+    Some(Shot {
+        projectile_type,
+        position,
+        velocity: (dx * scale, dy * scale),
+        damage,
+        cooldown,
+        cools_at: (ax, ay),
+        ai,
+    })
+}
+
+/// What a Snowball Launcher throws (`Wiring.cs:1391-1417`).
+///
+/// Unlike the cannon this one has no aim table: the direction is rolled fresh every shot, which is
+/// why a launcher wired to a timer sprays rather than repeating. `frameX / 54` decides which side
+/// the muzzle is on and mirrors the roll.
+pub fn snowball_shot(anchor: Tile, ax: i32, ay: i32, rng: &mut impl rand::Rng) -> Shot {
+    let speed = 12.0 + rng.random_range(0..450) as f32 * 0.01;
+    let mut dx = rng.random_range(85..105) as f32;
+    let dy = rng.random_range(-35..11) as f32;
+    let mut position = (((ax + 2) * 16 - 8) as f32, ((ay + 2) * 16 - 8) as f32);
+    if i32::from(anchor.frame_x) / 54 == 0 {
+        dx *= -1.0;
+        position.0 -= 12.0;
+    } else {
+        position.0 += 12.0;
+    }
+    let scale = speed / (dx * dx + dy * dy).sqrt();
+    Shot {
+        projectile_type: 166,
+        position,
+        velocity: (dx * scale, dy * scale),
+        damage: 35,
+        cooldown: 60,
+        cools_at: (ax, ay),
+        ai: [0.0; 2],
     }
 }
 
@@ -4079,6 +4290,254 @@ mod tests {
                     "six cells, one report: the anchor is deduplicated"
                 );
             }
+        }
+    }
+
+    /// Lay a cannon-shaped device at `(105, 100)` and wire only the cell in column `col`, row `row`,
+    /// with a lead running in from `from` (the unit step *towards* the device).
+    ///
+    /// The lead has to stay outside the device's own footprint, which is why the direction is the
+    /// caller's to pick: the left column is fed from the left, the right column from the right, the
+    /// top row from above and the bottom row from below. A cannon's *interior* cell has no such
+    /// approach, here or in a real world: any wire that reaches one has already crossed another cell
+    /// of the same cannon, which acts first and (for the aiming and turning columns) skips the rest
+    /// of the footprint behind it.
+    fn cannon_board(
+        block: u16,
+        style: i16,
+        aim: i16,
+        col: i32,
+        row: i32,
+        from: (i32, i32),
+    ) -> (Board, (i32, i32)) {
+        // Both devices are three tall; the width and the style stride are the tile's own, not the
+        // caller's to get wrong.
+        let (w, stride): (i32, i16) = if block == CANNON { (4, 72) } else { (3, 54) };
+        let mut board = Board(HashMap::new());
+        let (ax, ay) = (105i32, 100i32);
+        for dx in 0..w {
+            for dy in 0..3 {
+                let mut cell = Tile::framed(
+                    block,
+                    style * stride + (dx * 18) as i16,
+                    aim * 54 + (dy * 18) as i16,
+                );
+                if dx == col && dy == row {
+                    cell.flags.set(TileFlags::WIRE_RED, true);
+                }
+                board.set_tile(ax + dx, ay + dy, cell);
+            }
+        }
+        let target = (ax + col, ay + row);
+        let back = |n: i32| (target.0 - from.0 * n, target.1 - from.1 * n);
+        let switch = back(5);
+        board.set_tile(switch.0, switch.1, wired(136, Wire::Red));
+        for n in 1..5 {
+            let at = back(n);
+            let mut wire = Tile::AIR;
+            wire.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(at.0, at.1, wire);
+        }
+        (board, switch)
+    }
+
+    /// The Cannon's outer columns aim it and its inner two fire it, and the two never happen on the
+    /// same pulse (`Wiring.cs:1237-1343`). The arc stops at both ends rather than wrapping.
+    ///
+    /// Fails before the fix: tile 209 had no arm, so a wired cannon neither moved nor fired.
+    #[test]
+    fn a_wired_cannon_aims_from_its_outer_columns_and_fires_from_its_inner_ones() {
+        // The left column raises the barrel a notch, over the whole four-by-three footprint.
+        let (mut board, switch) = cannon_board(CANNON, 0, 3, 0, 1, (1, 0));
+        let fired = hit_switch(&mut board, switch.0, switch.1);
+        for dx in 0..4 {
+            for dy in 0..3 {
+                assert_eq!(
+                    board.tile(105 + dx, 100 + dy).frame_y,
+                    4 * 54 + (dy * 18) as i16,
+                    "cell ({dx},{dy}) should have gone up a notch"
+                );
+            }
+        }
+        assert!(fired.cannons.is_empty(), "aiming is not firing");
+
+        // The right column lowers it.
+        let (mut board, switch) = cannon_board(CANNON, 0, 3, 3, 1, (-1, 0));
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(
+            board.tile(105, 100).frame_y,
+            2 * 54,
+            "and back down a notch"
+        );
+
+        // Both ends of the arc hold: at notch 8 the left column does nothing, at notch 0 the right
+        // column does nothing.
+        let (mut board, switch) = cannon_board(CANNON, 0, 8, 0, 1, (1, 0));
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(board.tile(105, 100).frame_y, 8 * 54, "the top of the arc");
+        let (mut board, switch) = cannon_board(CANNON, 0, 0, 3, 1, (-1, 0));
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(board.tile(105, 100).frame_y, 0, "and the bottom of it");
+
+        // A muzzle column fires and leaves the barrel where it was.
+        for col in [1, 2] {
+            let (mut board, switch) = cannon_board(CANNON, 0, 3, col, 2, (0, -1));
+            let fired = hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(
+                fired.cannons,
+                vec![(105, 100)],
+                "column {col} should fire, reported by the anchor"
+            );
+            assert_eq!(board.tile(105, 100).frame_y, 3 * 54, "and not move it");
+        }
+    }
+
+    /// Cannon styles 3 and 4 turn round instead of firing when the current reaches their top two
+    /// rows, and fire from the bottom row like any other (`Wiring.cs:1280-1305`).
+    ///
+    /// Only the top row and the bottom row are driven here: the middle row shares the top's branch
+    /// (`num37 < 2`) and, as [`cannon_board`]'s own doc sets out, no wire can reach a cannon's
+    /// interior cell first in any case.
+    ///
+    /// Fails before the fix: no arm at all, so neither half happened.
+    #[test]
+    fn the_turning_cannon_styles_face_about_instead_of_firing() {
+        for (style, delta) in [(3i16, 72i16), (4, -72)] {
+            let (mut board, switch) = cannon_board(CANNON, style, 3, 1, 0, (0, 1));
+            let fired = hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(
+                board.tile(105, 100).frame_x,
+                style * 72 + delta,
+                "style {style}'s top row should turn it round"
+            );
+            assert!(fired.cannons.is_empty(), "and not fire");
+
+            let (mut board, switch) = cannon_board(CANNON, style, 3, 1, 2, (0, -1));
+            let fired = hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(
+                board.tile(105, 100).frame_x,
+                style * 72,
+                "the bottom row does not turn it"
+            );
+            assert_eq!(fired.cannons, vec![(105, 100)], "it fires");
+        }
+    }
+
+    /// The shot leaves at the notch the barrel is on, at the same speed whichever notch that is, and
+    /// with the projectile and damage its own style carries (`WorldGen.cs:51043-51143`,
+    /// `Wiring.cs:1306-1341`).
+    #[test]
+    fn a_cannon_shot_leaves_at_its_own_notch() {
+        let at = |style: i16, aim: i16| {
+            cannon_shot(Tile::framed(CANNON, style * 72, aim * 54), 105, 100).expect("a real notch")
+        };
+
+        // Notch 0 is level to the right, notch 4 straight up, notch 8 level to the left, and every
+        // one of them leaves at 14 pixels a tick.
+        let level_right = at(0, 0);
+        assert_eq!(level_right.velocity, (14.0, 0.0));
+        assert_eq!(at(0, 4).velocity, (0.0, -14.0));
+        assert_eq!(at(0, 8).velocity, (-14.0, 0.0));
+        let slanted = at(0, 2);
+        let speed = (slanted.velocity.0.powi(2) + slanted.velocity.1.powi(2)).sqrt();
+        assert!(
+            (speed - 14.0).abs() < 0.001,
+            "a slanted notch throws just as hard: {speed}"
+        );
+
+        // The muzzle is the middle of the four-by-three, two tiles in and two down.
+        assert_eq!(level_right.position, (107.0 * 16.0, 102.0 * 16.0));
+
+        // Each style has its own shell, damage and window.
+        assert_eq!(
+            (
+                level_right.projectile_type,
+                level_right.damage,
+                level_right.cooldown
+            ),
+            (162, 300, 480),
+            "the plain Cannon"
+        );
+        let bunny = at(1, 0);
+        assert_eq!(
+            (bunny.projectile_type, bunny.damage, bunny.cooldown),
+            (281, 350, 3600),
+            "the Bunny Cannon"
+        );
+        assert_eq!(bunny.ai[1], 256.0, "which carries its firer in ai[1]");
+        let confetti = at(2, 0);
+        assert_eq!(
+            (confetti.projectile_type, confetti.damage, confetti.cooldown),
+            (178, 0, 30),
+            "the Confetti Cannon hurts nobody"
+        );
+        // The two bolt styles are slow, offset, and the second is marked in ai[0].
+        let bolt = at(3, 4);
+        assert_eq!(bolt.projectile_type, 601);
+        assert_eq!(bolt.position, (107.0 * 16.0 + 5.0, 102.0 * 16.0 + 5.0));
+        assert!((bolt.velocity.1 + 3.0).abs() < 0.001, "three, not fourteen");
+        assert_eq!(bolt.ai[0], 0.0);
+        assert_eq!(at(4, 4).ai[0], 1.0, "the second bolt style is marked");
+    }
+
+    /// The Snowball Launcher's outer columns turn it and its middle column fires it
+    /// (`Wiring.cs:1345-1419`). It cannot be turned the way it is already facing.
+    ///
+    /// Fails before the fix: tile 212 had no arm, so a wired launcher neither turned nor fired.
+    #[test]
+    fn a_wired_snowball_launcher_turns_from_its_edges_and_fires_from_the_middle() {
+        // Facing left (style 0), the right-hand column turns it right.
+        let (mut board, switch) = cannon_board(SNOWBALL_LAUNCHER, 0, 0, 2, 1, (-1, 0));
+        let fired = hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(board.tile(105, 100).frame_x, 54, "turned to face right");
+        assert!(fired.snowball_launchers.is_empty(), "turning is not firing");
+
+        // ...and the left-hand column cannot turn it further left than it already is.
+        let (mut board, switch) = cannon_board(SNOWBALL_LAUNCHER, 0, 0, 0, 1, (1, 0));
+        hit_switch(&mut board, switch.0, switch.1);
+        assert_eq!(board.tile(105, 100).frame_x, 0, "already facing left");
+
+        // The middle column fires, from the rows a wire can actually reach.
+        for (row, step) in [(0, (0, 1)), (2, (0, -1))] {
+            let (mut board, switch) = cannon_board(SNOWBALL_LAUNCHER, 0, 0, 1, row, step);
+            let fired = hit_switch(&mut board, switch.0, switch.1);
+            assert_eq!(
+                fired.snowball_launchers,
+                vec![(105, 100)],
+                "row {row} should fire"
+            );
+        }
+    }
+
+    /// A snowball leaves on the side the launcher faces, and always at the speed its own roll picked
+    /// (`Wiring.cs:1394-1416`).
+    #[test]
+    fn a_snowball_leaves_on_the_side_the_launcher_faces() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for (style, sign, offset) in [(0i16, -1.0f32, -12.0f32), (1, 1.0, 12.0)] {
+            let shot = snowball_shot(
+                Tile::framed(SNOWBALL_LAUNCHER, style * 54, 0),
+                105,
+                100,
+                &mut rng,
+            );
+            assert_eq!(shot.projectile_type, 166);
+            assert_eq!(shot.damage, 35);
+            assert_eq!(
+                shot.position.0,
+                (107 * 16 - 8) as f32 + offset,
+                "style {style} muzzle offset"
+            );
+            assert!(
+                shot.velocity.0 * sign > 0.0,
+                "style {style} should throw that way, not {:?}",
+                shot.velocity
+            );
+            let speed = (shot.velocity.0.powi(2) + shot.velocity.1.powi(2)).sqrt();
+            assert!(
+                (12.0..=16.5).contains(&speed),
+                "the rolled speed stays in its band: {speed}"
+            );
         }
     }
 
