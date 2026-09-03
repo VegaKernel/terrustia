@@ -3,6 +3,7 @@
    assets and the panel never depends on a network fetch to render correctly. */
 
 :root {
+  /* Surfaces and borders, darkest to lightest. */
   --bg: #0a0d10;
   --bg-raised: #10151a;
   --border: #1f2a30;
@@ -14,6 +15,21 @@
   --danger: #e0645a;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas, "Liberation Mono",
     Menlo, monospace;
+
+  /* Spacing scale, a 4px grid. Every margin/padding/gap in the panel is one of these six steps;
+     see `web-panel/README.md`'s token table before adding a seventh. */
+  --sp-1: 0.25rem; /* 4px  - tight inline gaps (an icon-less badge's own padding) */
+  --sp-2: 0.5rem; /* 8px  - a control's own padding, a row's internal gap */
+  --sp-3: 0.75rem; /* 12px - gap between cards/stats in a grid */
+  --sp-4: 1rem; /* 16px - a panel's inner padding, a section's top margin */
+  --sp-5: 1.5rem; /* 24px - a view's outer padding */
+  --sp-6: 2rem; /* 32px - between major sections */
+
+  /* Radius scale, three steps mapped to component kind: controls and inputs get the smallest,
+     small pills/badges the middle, cards/dialogs/panels the largest. */
+  --radius-sm: 2px; /* buttons, inputs, table-row chips */
+  --radius-md: 3px; /* small badges, hover labels, hint chips */
+  --radius-lg: 4px; /* cards, dialogs, chart/stat panels */
 }
 
 * {
@@ -52,8 +68,8 @@ input {
 input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 2px;
-  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) 0.6rem;
 }
 
 input:focus {
@@ -73,8 +89,8 @@ button {
   background: var(--accent-dim);
   border: 1px solid var(--accent);
   color: var(--accent);
-  border-radius: 2px;
-  padding: 0.5rem 1rem;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2) var(--sp-4);
   cursor: pointer;
 }
 
@@ -101,4 +117,11 @@ button:disabled {
 
 .warn {
   color: var(--warn);
+}
+
+/* Every wide table in the panel (players, accounts, backups, audit, worlds) wraps in this rather
+   than letting an overflowing table widen the whole page — see `web-panel/README.md`'s token
+   table for the narrow-viewport rules this belongs to. */
+.table-scroll {
+  overflow-x: auto;
 }

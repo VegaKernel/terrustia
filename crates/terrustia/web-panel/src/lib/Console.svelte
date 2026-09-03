@@ -56,7 +56,9 @@
 </script>
 
 <div class="console">
-  <div class="log" bind:this={logEl} onscroll={onScroll}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -- a scrollable log region needs to be
+       focusable to be scrolled with arrow keys, which is exactly what `role="log"` describes. -->
+  <div class="log" bind:this={logEl} onscroll={onScroll} tabindex="0" role="log">
     {#if lines.length === 0}
       <p class="dim">
         {live ? "waiting for output…" : "not connected."} lines appear here from the moment this
@@ -67,6 +69,11 @@
       <div class="line {kindClass(line)}">{line.text}</div>
     {/each}
   </div>
+
+  <!-- Shown regardless of line count: once the log holds lines, a dropped socket used to look
+       identical to a quiet server, since the disconnected message above only rendered while the
+       log was still empty. -->
+  {#if !live && lines.length > 0}<p class="warn">not connected — showing the last lines received.</p>{/if}
 
   {#if error}<p class="danger">{error}</p>{/if}
 
@@ -103,7 +110,7 @@
     overflow-y: auto;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.75rem 0.9rem;
     font-size: 0.82rem;
   }
@@ -139,7 +146,7 @@
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.5rem;
     font-family: inherit;
   }

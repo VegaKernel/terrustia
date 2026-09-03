@@ -106,8 +106,8 @@
     });
   }
 
-  function signOut() {
-    logout();
+  async function signOut() {
+    await logout(session);
     onLoggedOut();
   }
 
@@ -234,7 +234,7 @@
     color: var(--danger);
     font-size: 0.8rem;
     border: 1px solid var(--danger);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.15rem 0.5rem;
   }
 
@@ -269,7 +269,7 @@
 
   main {
     flex: 1;
-    padding: 1.5rem;
+    padding: var(--sp-5);
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -277,6 +277,23 @@
 
   main.no-pad {
     padding: 0;
+  }
+
+  @media (max-width: 640px) {
+    main {
+      padding: var(--sp-3);
+    }
+
+    header {
+      padding: var(--sp-2) var(--sp-3);
+    }
+
+    nav {
+      margin-left: 0;
+      width: 100%;
+      order: 10;
+      overflow-x: auto;
+    }
   }
 
   .grid {
@@ -289,7 +306,7 @@
   .card {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.9rem 1rem;
     display: flex;
     flex-direction: column;
@@ -302,7 +319,6 @@
 
   .label {
     font-size: 0.72rem;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-dim);
   }

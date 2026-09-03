@@ -27,6 +27,13 @@
     other: "#4a4a54",
   };
 
+  // A canvas 2D context needs a real colour string, not a `var(--x)` reference — see the same
+  // helper in `Metrics.svelte`. The PvP-red and default-text colours below read `app.css`'s own
+  // `--danger`/`--text` rather than a second hardcoded copy of them.
+  function cssVar(name: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
   let tiles = $state<WorldTiles | null>(null);
   let players = $state<Player[]>([]);
   let hoverName = $state<string | null>(null);
@@ -123,7 +130,7 @@
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = p.pvp ? "#e0645a" : "rgba(215,221,225,0.85)";
+    ctx.strokeStyle = p.pvp ? cssVar("--danger") : "rgba(215,221,225,0.85)";
     ctx.stroke();
 
     // Equipped-gear accents: small dots arced beneath the avatar, one per worn item.
@@ -151,7 +158,7 @@
     const ly = y - r - 9;
     ctx.fillStyle = "rgba(10,13,16,0.72)";
     ctx.fillRect(lx - half, ly - 11, tw + padX * 2, 16);
-    ctx.fillStyle = p.pvp ? "#e0645a" : "#d7dde1";
+    ctx.fillStyle = p.pvp ? cssVar("--danger") : cssVar("--text");
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
     ctx.fillText(label, lx, ly);
@@ -229,9 +236,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #000;
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     overflow: hidden;
   }
 
@@ -248,7 +255,7 @@
     background: var(--bg-raised);
     border: 1px solid var(--danger);
     color: var(--danger);
-    border-radius: 3px;
+    border-radius: var(--radius-md);
     padding: 0.3rem 0.55rem;
     font-size: 0.78rem;
     pointer-events: none;
@@ -260,7 +267,7 @@
     left: 0.5rem;
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-md);
     padding: 0.3rem 0.55rem;
     font-size: 0.78rem;
     pointer-events: none;

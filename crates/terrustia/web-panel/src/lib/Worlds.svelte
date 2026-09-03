@@ -125,6 +125,7 @@
   {:else if worlds.length === 0}
     <p class="dim">no worlds found in the Terraria world directory on this machine yet.</p>
   {:else}
+    <div class="table-scroll">
     <table>
       <thead>
         <tr>
@@ -150,6 +151,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 
   <section class="create">
@@ -236,7 +238,6 @@
   h3 {
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 500;
   }
@@ -262,7 +263,6 @@
   th {
     color: var(--text-dim);
     font-weight: 500;
-    text-transform: uppercase;
     font-size: 0.72rem;
     letter-spacing: 0.06em;
   }
@@ -305,7 +305,7 @@
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.5rem 0.4rem;
     font-family: inherit;
   }
@@ -314,7 +314,7 @@
     border: 1px solid var(--border);
     border-left: 3px solid var(--warn);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.7rem 0.85rem;
     display: flex;
     flex-direction: column;
@@ -342,7 +342,6 @@
   }
 
   .job-status {
-    text-transform: uppercase;
     font-size: 0.7rem;
     letter-spacing: 0.06em;
     color: var(--text-dim);
@@ -351,7 +350,7 @@
   .bar {
     height: 6px;
     background: var(--bg);
-    border-radius: 3px;
+    border-radius: var(--radius-md);
     overflow: hidden;
   }
 
@@ -360,7 +359,7 @@
     height: 100%;
     width: 35%;
     background: var(--warn);
-    border-radius: 3px;
+    border-radius: var(--radius-md);
     animation: sweep 1.2s ease-in-out infinite;
   }
 
@@ -386,9 +385,9 @@
   .dialog {
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 1.25rem;
-    width: 380px;
+    width: min(380px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -396,7 +395,6 @@
 
   .dialog h3 {
     margin: 0;
-    text-transform: none;
     letter-spacing: 0;
     font-size: 1rem;
   }

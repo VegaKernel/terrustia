@@ -41,6 +41,7 @@
   {#if entries.length === 0}
     <p class="dim">no audit events recorded yet.</p>
   {:else}
+    <div class="table-scroll">
     <table>
       <thead>
         <tr>
@@ -63,6 +64,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 {:else}
   <p class="dim">loading…</p>
@@ -103,7 +105,6 @@
   th {
     color: var(--text-dim);
     font-weight: 500;
-    text-transform: uppercase;
     font-size: 0.7rem;
     letter-spacing: 0.06em;
   }
@@ -113,7 +114,7 @@
     font-size: 0.72rem;
     color: var(--accent);
     border: 1px solid var(--accent-dim);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.05rem 0.4rem;
   }
 </style>

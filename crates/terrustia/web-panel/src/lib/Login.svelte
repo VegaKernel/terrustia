@@ -72,7 +72,7 @@
     width: min(360px, 100%);
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 1.5rem;
     display: flex;
     flex-direction: column;

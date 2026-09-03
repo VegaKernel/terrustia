@@ -172,6 +172,7 @@
     {#if view.accounts.length === 0}
       <p class="dim">no accounts yet.</p>
     {:else}
+      <div class="table-scroll">
       <table>
         <thead>
           <tr>
@@ -211,6 +212,7 @@
           {/each}
         </tbody>
       </table>
+      </div>
     {/if}
   </section>
 
@@ -255,13 +257,13 @@
       <!-- What actually happens: `PanelAuthorize` resolves through `account_hash_and_group`, which
            returns nothing for a deleted account, so every panel request under that session is
            refused from the next one onwards. In-game, `Admin::group_of` falls back to `default` for
-           an unknown account, so those privileges go too. The one thing that survives is a
-           WebSocket that was already open when the account went, because both sockets are
-           authorized at upgrade and never re-checked. -->
+           an unknown account, so those privileges go too. Both live sockets (status, world) now
+           re-check the session on every tick (`status::stream_status`, `worlds::stream_world`), so
+           an already-open live view closes within a few seconds rather than surviving indefinitely. -->
       <p class="dim">
         this removes the account permanently. every panel request under it is refused from the next
-        one onwards, and in game it drops to the default group. a live feed already open in a
-        browser keeps streaming until that socket drops.
+        one onwards, and in game it drops to the default group. a live view already open in a
+        browser closes within a few seconds.
       </p>
       <div class="dialog-actions">
         <button onclick={() => (deleteTarget = null)}>cancel</button>
@@ -281,7 +283,6 @@
   h3 {
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 500;
   }
@@ -304,7 +305,7 @@
   .group {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.7rem 0.8rem;
     display: flex;
     flex-wrap: wrap;
@@ -323,11 +324,10 @@
 
   .badge {
     font-size: 0.62rem;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--bg);
     background: var(--accent);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.05rem 0.35rem;
   }
 
@@ -342,7 +342,7 @@
     font-size: 0.72rem;
     color: var(--text-dim);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.05rem 0.4rem;
   }
 
@@ -409,7 +409,6 @@
   th {
     color: var(--text-dim);
     font-weight: 500;
-    text-transform: uppercase;
     font-size: 0.72rem;
     letter-spacing: 0.06em;
   }
@@ -418,7 +417,7 @@
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.35rem 0.4rem;
     font-family: inherit;
     font-size: 0.85rem;
@@ -475,9 +474,9 @@
   .dialog {
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 1.25rem;
-    width: 380px;
+    width: min(380px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
