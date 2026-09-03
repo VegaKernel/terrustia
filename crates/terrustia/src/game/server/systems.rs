@@ -3113,9 +3113,10 @@ impl GameServer {
         let saved = std::mem::take(&mut self.world.town_npcs);
         let mut restored = 0usize;
         for npc in &saved {
-            let Ok(npc_type) = u16::try_from(npc.net_id.max(0)) else {
+            let Ok(net_id) = i16::try_from(npc.net_id) else {
                 continue;
             };
+            let npc_type = terrustia_proto::npc_data::from_net_id(net_id);
             let Some(index) = self.npcs.spawn(npc_type, npc.position) else {
                 break; // out of slots
             };

@@ -46,7 +46,7 @@ pub struct SyncNpc {
 impl SyncNpc {
     /// The positive type this NPC really is, resolving a variant's negative net id through
     /// `NPCID.FromNetId`. Vanilla's own packet-23 writer indexes by exactly this
-    /// (`NetMessage.cs:694`, `NetMessage.cs:758`).
+    /// (`NetMessage.cs:694`, `NetMessage.cs:762`).
     pub fn npc_type(&self) -> u16 {
         from_net_id(self.net_id)
     }

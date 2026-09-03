@@ -13338,7 +13338,7 @@ const NET_ID_MAP: [u16; 65] = [
 ///
 /// That distinction is the whole reason packet 23 needs this: vanilla's own writer sends `netID`
 /// as a signed short but indexes `NPCID.Sets.SyncAnchor` and `Main.npcCatchable` by the resolved
-/// `type` (`NetMessage.cs:694`, `NetMessage.cs:758`). Clamping the net id to zero instead would
+/// `type` (`NetMessage.cs:694`, `NetMessage.cs:762`). Clamping the net id to zero instead would
 /// answer `NPCID.None` for every variant in the game.
 ///
 /// A negative past the end of the map has no base type; it answers 0, the same `NPCID.None` an
