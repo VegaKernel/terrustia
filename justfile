@@ -45,6 +45,12 @@ dev: web-build
 web:
     cd {{WEB}} && bun install --frozen-lockfile && bun run dev
 
+# Dev loop against your real Terraria save, read-only (saves go to a .terrustia.wld copy)
+dev-live: web-build
+    cargo run -p terrustia --features embed-web -- \
+        --world "$HOME/Library/Application Support/Terraria/Worlds/The_Successful_Excrement.wld" \
+        --save "$HOME/Library/Application Support/Terraria/Worlds/The_Successful_Excrement.terrustia.wld"
+
 # ─────────────────────────────────────────
 # BUILD
 # ─────────────────────────────────────────
