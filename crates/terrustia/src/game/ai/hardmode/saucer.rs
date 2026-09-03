@@ -24,7 +24,7 @@ use terrustia_proto::npc_params::{
 };
 use terrustia_proto::projectile::ids::{SAUCER_DEATHRAY, SAUCER_LASER, SAUCER_MISSILE};
 
-use crate::game::ai::{Shot, World};
+use crate::game::ai::{Shot, World, unit};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -358,16 +358,6 @@ fn last_stand(
 /// since then. Everything here is a small whole number, so the equality is exact.
 fn due(at: f32, from: f32, period: f32) -> bool {
     at >= from && ((at - from) as i32) % (period as i32) == 0
-}
-
-/// A vector of length `speed` along `v`, or nothing when `v` has no direction.
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 /// Where a mirrored pair of guns sits either side of the core, reusing the same offsets the

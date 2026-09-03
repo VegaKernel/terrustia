@@ -30,7 +30,7 @@ use terrustia_proto::npc_params::{
 };
 
 use super::drifters::Outcome;
-use crate::game::ai::{World, can_see, face};
+use crate::game::ai::{World, can_see, face, unit};
 use crate::game::npc::{Npc, TILE, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -430,15 +430,6 @@ fn bounce(npc: &mut Npc) {
 fn ease(velocity: &mut (f32, f32), wanted: (f32, f32), smooth: f32) {
     velocity.0 = (velocity.0 * (smooth - 1.0) + wanted.0) / smooth;
     velocity.1 = (velocity.1 * (smooth - 1.0) + wanted.1) / smooth;
-}
-
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 fn boxed(tiles: &impl TileView, npc: &Npc) -> bool {

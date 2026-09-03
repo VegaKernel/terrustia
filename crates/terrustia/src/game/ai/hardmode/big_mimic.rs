@@ -30,7 +30,7 @@ use terrustia_proto::npc_params::{
 };
 
 use super::drifters::Outcome;
-use crate::game::ai::{PLAYER_HEIGHT, World, can_see, face};
+use crate::game::ai::{PLAYER_HEIGHT, World, can_see, face, unit};
 use crate::game::npc::{Npc, TileView};
 
 /// The states, as `ai[0]` numbers them.
@@ -353,16 +353,6 @@ pub fn big_mimic(
         }
     }
     out
-}
-
-/// A vector of length `speed` along `v`.
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 /// Whether the NPC's box overlaps solid tiles.

@@ -262,6 +262,22 @@ pub fn steer(npc: &mut Npc, s: FlierSteering) {
     steer_axis(&mut npc.velocity.1, npc.direction_y, s.y);
 }
 
+/// A vector of length `speed` along `v`, or nothing when `v` has no direction.
+///
+/// Eight routines wrote this identically before it moved here: the Twins, Plantera, the Golem,
+/// Mothron, the Big Mimic, the Hunter, the Charger and the Saucer. Vanilla spells the same thing
+/// out at each of its own call sites, dividing by the length it just measured; the guard on a zero
+/// or non-finite length is this server's, and was already in all eight copies, because a divide by
+/// a zero length would put a NaN into a velocity that then never recovers.
+pub fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
+    let length = v.0.hypot(v.1);
+    if length <= 0.0 || !length.is_finite() {
+        (0.0, 0.0)
+    } else {
+        (v.0 / length * speed, v.1 / length * speed)
+    }
+}
+
 /// Bounce off terrain, keeping enough speed to clear whatever was hit.
 ///
 /// The reflection uses the velocity from *before* the move, because collision has already zeroed

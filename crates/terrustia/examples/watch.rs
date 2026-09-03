@@ -108,8 +108,7 @@ async fn main() -> ExitCode {
                         let near = (npc.position.0 - here.0).abs() < NEARBY
                             && (npc.position.1 - here.1).abs() < NEARBY;
                         if near && known.insert(npc.index) {
-                            let name = npc_stats(npc.net_id.max(0) as u16)
-                                .map_or("?", |s| s.name);
+                            let name = npc_stats(npc.npc_type()).map_or("?", |s| s.name);
                             *seen.entry(name).or_default() += 1;
                         }
                     }
