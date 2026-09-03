@@ -345,14 +345,20 @@ both generators to emit exactly what is committed rather than touching either ta
   refreshed 2026-09-01; the earlier list counted total lines and so listed ten files that were
   never dense): `game/server/systems.rs` (6,573 -> **6,976**), `game/server/dispatch.rs` (4,943 ->
   **5,489**, now growing faster than systems.rs, +11% since the last measurement, and not on this
-  watch list until now), `game/server/mod.rs` (2,788 -> **3,042**), `panel/mod.rs` (2,139 ->
-  **2,250**; it gained its first `#[cfg(test)]` module, `panel/mod.rs:2251`, so "no tests at all"
-  no longer holds), `world/wiring.rs` (1,690 production against 1,627 test, not the 2,575 total
+  watch list until now), `game/server/mod.rs` (2,788 -> **3,042**), `world/wiring.rs` (1,690 production against 1,627 test, not the 2,575 total
   this list used to quote), `game/spawn.rs` (1,644), `world/wld.rs` (1,364), `game/ai/mod.rs`
   (1,237), `game/npc.rs` (1,186), `world/wld_save.rs` (1,053). The generated proto tables are
   excluded: codegen output, never hand-edited, size is
   fine. So are `crates/terrustia/tests/*.rs`, which carry no `#[cfg(test)]` and are test files
   entire (`gameplay.rs` would otherwise rank first at 6,907 lines).
+
+  `panel/mod.rs` (2,139 -> 2,250, off this list as of 2026-09-03) is split: the proposal three
+  entries below sat unactioned past its own stated trigger for two days, so it is done now rather
+  than staying an open item. `mod.rs` (481 lines) keeps `PanelState`, `run`/`supervise`, static
+  asset serving and the shared `ask`/`err`/`send_ws`/`auth_lookup` plumbing every sibling reuses;
+  `auth.rs` (377), `status.rs` (181), `players.rs` (369), `worlds.rs` (430), `settings.rs` (374)
+  and `accounts.rs` (320) hold one resource apiece, each exposing a `router()` the coordinator
+  merges — the same shape `game/server/`'s own split settled into.
 
   Off the list, all under 1,000 production lines: `world/worldgen/traps.rs` (989),
   `world/worldgen/structures.rs` (950), `term.rs` (929), `world/world.rs` (916), `game/army.rs`
@@ -416,11 +422,9 @@ both generators to emit exactly what is committed rather than touching either ta
   and the roughly 140 lines of orchestration currently scattered across five ranges of `systems.rs`,
   which the `systems.rs` split below delivers properly.
 
-  Three splits proposed, in order: `panel/mod.rs` (2,250 production lines as of 2026-09-01, now
-  with one in-file `#[cfg(test)]` module at `panel/mod.rs:2251`, still not transcribed code) by
-  resource — its stated trigger, "before Lane E adds its views", has already passed (Lane E is
-  done) without the split happening, so the window is still open but no longer urgent the way it
-  was; `game/{housing,arrivals,rescues}.rs` into `game/town/`, **before** the newly-gated happiness
+  Two splits remain proposed, in order (`panel/mod.rs` was the third; it split by resource on
+  2026-09-03 during the panel consistency pass, see the dense-file entry above for the resulting
+  layout): `game/{housing,arrivals,rescues}.rs` into `game/town/`, **before** the newly-gated happiness
   and pricing work needs a home; and `systems.rs` into `game/server/systems/` along its
   already-contiguous feature bands, **after** the parity lanes let go of it — checked 2026-09-01
   and **not yet met**: `systems.rs` grew 6,573 -> 6,976 production lines and took 18 commits since
