@@ -36,7 +36,7 @@ use terrustia_proto::npc_params::{
 use terrustia_proto::projectile::ids::{GOLEM_FIREBALL, GOLEM_LASER};
 
 use super::skeletron::Parent;
-use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, Shot, World, face, sight, target_box};
+use crate::game::ai::{PLAYER_HEIGHT, PLAYER_WIDTH, Shot, World, face, sight, target_box, unit};
 use crate::game::npc::{Npc, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -642,15 +642,6 @@ pub fn free_head(
         }
     }
     out
-}
-
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 fn boxed(tiles: &impl TileView, npc: &Npc) -> bool {

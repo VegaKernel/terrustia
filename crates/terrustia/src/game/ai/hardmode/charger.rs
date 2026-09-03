@@ -19,7 +19,7 @@ use terrustia_proto::npc_params::{
 };
 
 use super::drifters::Outcome;
-use crate::game::ai::{World, can_see};
+use crate::game::ai::{World, can_see, unit};
 use crate::game::npc::{Npc, TileView};
 
 /// The phases, numbered as the game numbers them in `ai[0]`.
@@ -220,16 +220,6 @@ pub fn charger(npc: &mut Npc, world: &World<'_, impl TileView>, rng: &mut SmallR
         }
     }
     out
-}
-
-/// A vector of length `speed` in the direction of `v`, or nothing when `v` has no direction.
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 #[cfg(test)]

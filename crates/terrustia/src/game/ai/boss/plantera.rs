@@ -38,7 +38,7 @@ use terrustia_proto::npc_params::{
 use terrustia_proto::projectile::ids::{PLANTERA_SEED, PLANTERA_SPIKY, PLANTERA_THORN_BALL};
 
 use super::skeletron::Parent;
-use crate::game::ai::{Shot, World, can_see};
+use crate::game::ai::{Shot, World, can_see, unit};
 use crate::game::npc::{Npc, TILE, TileView};
 use crate::game::npc_ai::Spawn;
 
@@ -570,15 +570,6 @@ pub fn tentacle(
         npc.rotation = dy.atan2(dx) + std::f32::consts::PI;
     }
     out
-}
-
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use terrustia_proto::npc_params::{
 };
 
 use super::drifters::Outcome;
-use crate::game::ai::{PLAYER_HEIGHT, World, sight};
+use crate::game::ai::{PLAYER_HEIGHT, World, sight, unit};
 use crate::game::npc::{Npc, TileView};
 
 /// The phases of style 85, as `ai[0]` numbers them.
@@ -443,16 +443,6 @@ pub fn mothron_spawn(npc: &mut Npc, world: &World<'_, impl TileView>) -> Outcome
 fn ease(velocity: &mut (f32, f32), wanted: (f32, f32), smooth: f32) {
     velocity.0 = (velocity.0 * (smooth - 1.0) + wanted.0) / smooth;
     velocity.1 = (velocity.1 * (smooth - 1.0) + wanted.1) / smooth;
-}
-
-/// A vector of length `speed` along `v`, or nothing when `v` has no direction.
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
-    }
 }
 
 /// The deadly sphere's chase speed, which is the base the other two vary from.

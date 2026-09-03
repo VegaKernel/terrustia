@@ -23,7 +23,7 @@ use terrustia_proto::npc_params::{
     TWIN_SPIN_CAP, TWIN_SPIN_RATE, TWIN_SPIN_TICKS, TWIN_TRANSFORM_AT, Twin,
 };
 
-use crate::game::ai::{Shot, World, can_see};
+use crate::game::ai::{Shot, World, can_see, unit};
 use crate::game::npc::{Npc, TileView};
 
 /// Which form an eye is in, from `ai[0]`.
@@ -480,15 +480,6 @@ fn coast(npc: &mut Npc) {
     }
     if npc.velocity.1.abs() < 0.1 {
         npc.velocity.1 = 0.0;
-    }
-}
-
-fn unit(v: (f32, f32), speed: f32) -> (f32, f32) {
-    let length = v.0.hypot(v.1);
-    if length <= 0.0 || !length.is_finite() {
-        (0.0, 0.0)
-    } else {
-        (v.0 / length * speed, v.1 / length * speed)
     }
 }
 
