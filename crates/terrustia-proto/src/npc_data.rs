@@ -13316,6 +13316,44 @@ pub fn catchable(npc_type: u16) -> bool {
     )
 }
 
+/// `NetIdMap`, the base type behind each negative net id (`NPCID.cs:10451-10459`).
+///
+/// Indexed by `-net_id - 1`, so entry 0 is net id `-1` and entry 64 is net id `-65`
+/// (`NPCID.NegativeIDCount` is `-66`, `NPCID.cs:10939`).
+const NET_ID_MAP: [u16; 65] = [
+    81, 81, 1, 1, 1, 1, 1, 1, 1, 1, 6, 6, 31, 31, 77, 42, 42, 176, 176, 176, 176, 173, 173, 183,
+    183, 3, 3, 132, 132, 186, 186, 187, 187, 188, 188, 189, 189, 190, 191, 192, 193, 194, 2, 200,
+    200, 21, 21, 201, 201, 202, 202, 203, 203, 223, 223, 231, 231, 232, 232, 233, 233, 234, 234,
+    235, 235,
+];
+
+/// The real NPC type behind a net id (`NPCID.FromNetId`, `NPCID.cs:12478-12484`).
+///
+/// A negative net id is not a type at all: it names a *variant* of a positive one, which is how
+/// the coloured slimes, the small and big zombies and skeletons, and the hornet families all ride
+/// on one base type each. `NPC.SetDefaults` routes a negative straight to `SetDefaultsFromNetId`
+/// (`NPC.cs:8460-8463`), which resolves the base with this map, calls `SetDefaults` on it (so
+/// `NPC.type` ends up positive) and only then puts the negative back in `NPC.netID`
+/// (`NPC.cs:7681-7684`, `NPC.cs:8363`).
+///
+/// That distinction is the whole reason packet 23 needs this: vanilla's own writer sends `netID`
+/// as a signed short but indexes `NPCID.Sets.SyncAnchor` and `Main.npcCatchable` by the resolved
+/// `type` (`NetMessage.cs:694`, `NetMessage.cs:758`). Clamping the net id to zero instead would
+/// answer `NPCID.None` for every variant in the game.
+///
+/// A negative past the end of the map has no base type; it answers 0, the same `NPCID.None` an
+/// unknown positive would. Vanilla would index out of bounds and throw, which a decoder reading
+/// bytes off a socket must not do.
+pub fn from_net_id(net_id: i16) -> u16 {
+    if net_id >= 0 {
+        return net_id as u16;
+    }
+    NET_ID_MAP
+        .get((-i32::from(net_id) - 1) as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Packet 23 sends the position offset by the type's sync anchor times its size.
 ///
 /// Every type anchors at zero except King Slime, whose sprite grows as it loses health.

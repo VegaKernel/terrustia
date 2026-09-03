@@ -485,7 +485,13 @@ Physics constants are the game's own: gravity 0.3, terminal fall speed 10.
 
 The coloured slimes — Green, Purple, Jungle and the rest — are **negative net ids**, variants of
 Blue Slime rather than types of their own. Packet 23 carries `netId` as a signed short for exactly
-this reason, so a decoder must not clamp it to zero when deriving the base type.
+this reason, so a decoder must not clamp it to zero when deriving the base type. They are not alone
+in it: 65 negative ids cover the slimes, the Eaters and Crimera, the big and small zombies and
+skeletons, the six extra Demon Eyes and the whole hornet roster. `npc_data::from_net_id` is
+`NPCID.FromNetId`, and `SyncNpc::npc_type` goes through it, because vanilla's own writer sends
+`netID` signed but indexes the sync anchor and the catchable table by the resolved positive type.
+The per-variant stat overrides (`NPC.SetDefaultsFromNetId`, which rescales life, damage and defence
+around the base) are not transcribed: this server never spawns a variant, so nothing reads them yet.
 
 ## Projectiles (packets 27 and 29)
 

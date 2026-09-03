@@ -7,7 +7,7 @@
 use crate::{
     error::Result,
     id,
-    npc_data::{catchable, npc_stats, sync_anchor},
+    npc_data::{catchable, from_net_id, npc_stats, sync_anchor},
     reader::PacketReader,
     writer::PacketWriter,
 };
@@ -44,8 +44,11 @@ pub struct SyncNpc {
 }
 
 impl SyncNpc {
+    /// The positive type this NPC really is, resolving a variant's negative net id through
+    /// `NPCID.FromNetId`. Vanilla's own packet-23 writer indexes by exactly this
+    /// (`NetMessage.cs:694`, `NetMessage.cs:758`).
     pub fn npc_type(&self) -> u16 {
-        self.net_id.max(0) as u16
+        from_net_id(self.net_id)
     }
 
     /// The position as it travels on the wire: the top-left shifted by the type's sync anchor.
@@ -62,7 +65,7 @@ impl SyncNpc {
 
     /// Undo [`Self::anchored_position`] when reading a packet back.
     fn unanchor(position: (f32, f32), net_id: i16) -> (f32, f32) {
-        let npc_type = net_id.max(0) as u16;
+        let npc_type = from_net_id(net_id);
         let (ax, ay) = sync_anchor(npc_type);
         if ax == 0.0 && ay == 0.0 {
             return position;
@@ -180,7 +183,7 @@ impl SyncNpc {
         // At full health the packet carries no health at all, because the receiver already knows
         // the type's maximum. Resolving it here rather than leaving a sentinel means callers never
         // have to special-case it.
-        let npc_type = net_id.max(0) as u16;
+        let npc_type = from_net_id(net_id);
         let life_max = npc_stats(npc_type).map_or(1, |s| s.life_max);
         let at_full_health = flags1 & 0x80 != 0;
         let life = if at_full_health {
@@ -359,6 +362,47 @@ mod tests {
         let frame = bunny.encode().unwrap();
         assert_eq!(payload(&frame).len(), 24 + 1);
         assert_eq!(SyncNpc::decode(payload(&frame)).unwrap().release_owner, 2);
+    }
+
+    #[test]
+    fn a_variant_resolves_to_its_base_type_rather_than_clamping_to_none() {
+        // The coloured slimes are not types of their own: they are variants of the Blue Slime
+        // riding on a negative net id (`NPCID.cs:11055-11061`), which `NPCID.FromNetId` resolves
+        // through `NetIdMap` (`NPCID.cs:10451-10459`, `NPCID.cs:12478-12484`). Clamping the net id
+        // to zero instead answers `NPCID.None` for the entire family, and everything keyed off the
+        // type - the stats, the name, the catchable byte, the sync anchor - goes with it.
+        let mut green = sample();
+        green.net_id = -3; // NPCID.GreenSlime
+        let decoded = SyncNpc::decode(payload(&green.encode().unwrap())).unwrap();
+        assert_eq!(decoded.net_id, -3, "the variant itself survives the wire");
+        assert_eq!(decoded.npc_type(), 1, "and names the Blue Slime behind it");
+        assert_eq!(
+            npc_stats(decoded.npc_type()).map(|s| s.name),
+            Some("BlueSlime")
+        );
+        assert_eq!(
+            decoded.life_max, 25,
+            "so a full-health packet resolves the base type's maximum, not the unknown-type 1"
+        );
+
+        // The hornets sit at the far end of the map, one past which there is no base type at all.
+        let mut hornet = sample();
+        hornet.net_id = -65; // NPCID.BigHornetStingy
+        assert_eq!(
+            SyncNpc::decode(payload(&hornet.encode().unwrap()))
+                .unwrap()
+                .npc_type(),
+            235
+        );
+        let mut past_the_end = sample();
+        past_the_end.net_id = -66; // NPCID.NegativeIDCount, which is not itself an id
+        assert_eq!(
+            SyncNpc::decode(payload(&past_the_end.encode().unwrap()))
+                .unwrap()
+                .npc_type(),
+            0,
+            "an id past the map answers None rather than panicking on a socket's bytes"
+        );
     }
 
     #[test]
