@@ -3627,6 +3627,26 @@ impl GameServer {
             for (sx, sy) in fired.statues {
                 self.run_statue(sx, sy);
             }
+            for (bx, by) in fired.boulder_statues {
+                self.fire_boulder_statue(bx, by);
+            }
+            for (cx, cy) in fired.cannons {
+                self.fire_cannon(cx, cy);
+            }
+            for (sx, sy) in fired.snowball_launchers {
+                self.fire_snowball_launcher(sx, sy);
+            }
+            // A sundial or moondial the current reached jumps the world clock, through the same
+            // `skip_to` a player right-clicking one already goes through (packet 51, actions 3 and
+            // 6, `dispatch.rs`'s own `on_misc_data`). Both dials on one circuit is not a
+            // contradiction to resolve: vanilla runs them in the order the flood found them and the
+            // last one wins, which is what doing them in this order does.
+            if fired.sundial {
+                self.skip_to(true);
+            }
+            if fired.moondial {
+                self.skip_to(false);
+            }
             // L3-05: each colour's teleporter pair is jumped separately, in the colour order the
             // flood collected them.
             for (a, b) in fired.teleport_pairs {
@@ -3918,6 +3938,164 @@ impl GameServer {
         }
     }
 
+    /// Drop a boulder out of a Boulder Statue: `Wiring.cs:1998-2017`.
+    ///
+    /// Not part of [`Self::run_statue`]'s table, because tile 531 is not tile 105 and produces no
+    /// NPC and no item. It is closer to a trap: one `CheckMech(anchor, 900)` on the statue's own
+    /// anchor, then a still boulder (projectile 99, 70 damage, 10 knockback) dropped from the middle
+    /// of its base, twenty-eight pixels down.
+    fn fire_boulder_statue(&mut self, x: i32, y: i32) {
+        /// `ProjectileID.Boulder`.
+        const BOULDER: u16 = 99;
+        /// `CheckMech(num90, num91, 900)` - fifteen seconds between boulders.
+        const BOULDER_COOLDOWN: i32 = 900;
+
+        if self.mech_cooldown.contains_key(&(x, y)) {
+            return;
+        }
+        // Taken whether or not a projectile slot was free, exactly as `fire_trap` does and for the
+        // same reason: the statue has gone off, and should not retry every tick.
+        self.mech_cooldown.insert((x, y), BOULDER_COOLDOWN);
+        let position = ((x + 1) as f32 * 16.0, y as f32 * 16.0 + 28.0);
+        if let Some(index) = self
+            .projectiles
+            .launch(BOULDER, position, (0.0, 0.0), 70, 0)
+        {
+            self.broadcast_projectile(index);
+        }
+    }
+
+    /// Fire one wired cannon: `Wiring.cs:1306-1342` for the gates, `WorldGen.ShootFromCannon`
+    /// (`WorldGen.cs:51041-51156`) for the shot itself.
+    ///
+    /// Three gates, in vanilla's own order. The world-level lockout for this cannon's own kind comes
+    /// first and returns outright; then the cannon's own `CheckMech` window on its anchor; then, for
+    /// the Bunny Cannon alone, the population check that stops a wired one filling the world with
+    /// explosive bunnies.
+    fn fire_cannon(&mut self, x: i32, y: i32) {
+        /// `Wiring.cs:1335` and `:1338`: what firing takes off every other cannon of that kind.
+        const CANNON_LOCKOUT: i32 = 120;
+        const BUNNY_LOCKOUT: i32 = 480;
+
+        let anchor = self.world.tile(x, y);
+        let variant = i32::from(anchor.frame_x) / 72;
+        // Checked before `CheckMech`, and a plain early return: a cannon inside its world lockout
+        // has not fired at all and takes no window of its own.
+        match variant {
+            0 if self.cannon_cooldown > 0 => return,
+            1 if self.bunny_cannon_cooldown > 0 => return,
+            _ => {}
+        }
+        let Some(shot) = crate::world::wiring::cannon_shot(anchor, x, y) else {
+            return;
+        };
+        if self.mech_cooldown.contains_key(&shot.cools_at) {
+            return;
+        }
+        self.mech_cooldown.insert(shot.cools_at, shot.cooldown);
+        // `BunnyCannonCanFire` (`WorldGen.cs:51158-51199`) runs inside the shooting function, after
+        // the window has already been taken, which is why it is checked here and not above.
+        if variant == 1 && !self.bunny_cannon_can_fire() {
+            return;
+        }
+        match variant {
+            0 => self.cannon_cooldown = CANNON_LOCKOUT,
+            1 => self.bunny_cannon_cooldown = BUNNY_LOCKOUT,
+            _ => {}
+        }
+        if let Some(index) = self.projectiles.launch(
+            shot.projectile_type,
+            shot.position,
+            shot.velocity,
+            shot.damage,
+            0,
+        ) {
+            if let Some(projectile) = self.projectiles.get_mut(index) {
+                projectile.ai[0] = shot.ai[0];
+                projectile.ai[1] = shot.ai[1];
+            }
+            self.broadcast_projectile(index);
+        }
+    }
+
+    /// `WorldGen.BunnyCannonCanFire` (`WorldGen.cs:51158-51199`).
+    ///
+    /// Two ceilings at once, both counted over vanilla's own first hundred NPC slots: no more than
+    /// four Explosive Bunnies (NPC 614 and projectile 281 together) may be about, and there must be
+    /// at least one free slot left over once each live bunny projectile has claimed one. The odd
+    /// shape is vanilla's: the free-slot count is decremented by the *projectiles*, because each one
+    /// is about to become an NPC.
+    fn bunny_cannon_can_fire(&self) -> bool {
+        /// `NPCID.ExplosiveBunny`.
+        const EXPLOSIVE_BUNNY: u16 = 614;
+        /// `ProjectileID.ExplosiveBunny`.
+        const BUNNY_SHOT: u16 = 281;
+        /// Vanilla counts over `Main.npc[0..100]`, not the whole table.
+        const SLOTS: u8 = 100;
+        const MOST_BUNNIES: i32 = 4;
+
+        let mut free = 0i32;
+        let mut bunnies = 0i32;
+        for slot in 0..SLOTS {
+            match self.npcs.get(slot) {
+                Some(npc) if npc.is_alive() => {
+                    if npc.npc_type == EXPLOSIVE_BUNNY {
+                        bunnies += 1;
+                        if bunnies >= MOST_BUNNIES {
+                            return false;
+                        }
+                    }
+                }
+                _ => free += 1,
+            }
+        }
+        for _ in self
+            .projectiles
+            .iter()
+            .filter(|(_, p)| p.projectile_type == BUNNY_SHOT)
+        {
+            bunnies += 1;
+            if bunnies >= MOST_BUNNIES {
+                return false;
+            }
+            free -= 1;
+            if free <= 0 {
+                return false;
+            }
+        }
+        free >= 1
+    }
+
+    /// Fire one wired Snowball Launcher (`Wiring.cs:1391-1417`).
+    ///
+    /// Two gates like the cannon's, but the world-level one is checked as `== 0` rather than `> 0`
+    /// and sits *alongside* the `CheckMech` rather than in front of it, so a launcher inside its
+    /// fifteen-frame lockout takes no window either.
+    fn fire_snowball_launcher(&mut self, x: i32, y: i32) {
+        /// `Wiring.cs:1393`.
+        const SNOWBALL_LOCKOUT: i32 = 15;
+
+        if self.snowball_cannon_cooldown != 0 {
+            return;
+        }
+        if self.mech_cooldown.contains_key(&(x, y)) {
+            return;
+        }
+        let anchor = self.world.tile(x, y);
+        let shot = crate::world::wiring::snowball_shot(anchor, x, y, &mut self.rng);
+        self.mech_cooldown.insert(shot.cools_at, shot.cooldown);
+        self.snowball_cannon_cooldown = SNOWBALL_LOCKOUT;
+        if let Some(index) = self.projectiles.launch(
+            shot.projectile_type,
+            shot.position,
+            shot.velocity,
+            shot.damage,
+            0,
+        ) {
+            self.broadcast_projectile(index);
+        }
+    }
+
     /// Swap everything standing on one teleporter with everything standing on the other.
     ///
     /// It is a swap rather than a one-way trip: whatever is on each pad moves by the vector to
@@ -4065,6 +4243,17 @@ impl GameServer {
             *ticks -= 1;
             *ticks > 0
         });
+        // The three world-level cannon lockouts wind down beside the per-tile table, exactly as
+        // `UpdateMech` winds them down beside its own (`Wiring.cs:147-158`).
+        for lockout in [
+            &mut self.cannon_cooldown,
+            &mut self.bunny_cannon_cooldown,
+            &mut self.snowball_cannon_cooldown,
+        ] {
+            if *lockout > 0 {
+                *lockout -= 1;
+            }
+        }
     }
 
     /// Count down every pressed Detonator and pop the ones whose window has run out back up.
@@ -7726,6 +7915,206 @@ mod wired_mines_and_doors {
             .projectiles
             .iter()
             .any(|(_, p)| p.projectile_type == projectile_type)
+    }
+
+    /// A Boulder Statue the current reached drops its boulder, and then does not drop another until
+    /// its nine-hundred-frame `CheckMech` runs out (`Wiring.cs:1998-2017`).
+    ///
+    /// Fails before the fix: `Fired` had no `boulder_statues` at all and `apply_circuit` had nothing
+    /// to read, so tile 531 was inert.
+    #[test]
+    fn a_wired_boulder_statue_drops_one_boulder_and_then_waits() {
+        let mut server = server();
+        let mut fired = Fired::default();
+        fired.boulder_statues.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            threw(&server, 99),
+            "a Boulder Statue should throw a boulder"
+        );
+        let after_one = server.projectiles.iter().count();
+
+        let mut fired = Fired::default();
+        fired.boulder_statues.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert_eq!(
+            server.projectiles.iter().count(),
+            after_one,
+            "and not another one while it is still cooling down"
+        );
+    }
+
+    /// A wired cannon fires its shell, and then takes *two* lockouts at once: the world-level one
+    /// that stops every other Cannon in the world for 120 frames (`Wiring.cs:1335`), and its own
+    /// 480-frame `CheckMech` window (`:1318`).
+    ///
+    /// Both matter and they are different: without the world lockout a bank of cannons on one
+    /// circuit fires as a single volley instead of in sequence.
+    ///
+    /// Fails before the fix: `Fired` had no `cannons`, so tile 209 was inert; and with only the
+    /// per-tile window, the second cannon here fires alongside the first.
+    #[test]
+    fn a_wired_cannon_locks_out_every_other_cannon_in_the_world() {
+        let mut server = server();
+        // Two plain Cannons (style 0) aimed level to the right, far apart.
+        for ax in [100i32, 140] {
+            for dx in 0..4 {
+                for dy in 0..3 {
+                    server.world.set_tile(
+                        ax + dx,
+                        100 + dy,
+                        Tile::framed(209, (dx * 18) as i16, (dy * 18) as i16),
+                    );
+                }
+            }
+        }
+        let mut fired = Fired::default();
+        fired.cannons.push((100, 100));
+        server.apply_circuit(fired, (100, 100));
+        assert_eq!(
+            server.projectiles.iter().count(),
+            1,
+            "the first cannon should fire a cannonball"
+        );
+        assert!(threw(&server, 162), "and it should be projectile 162");
+
+        // The other cannon, which has its own untouched `CheckMech` window, is still locked out by
+        // the world-level counter.
+        let mut fired = Fired::default();
+        fired.cannons.push((140, 100));
+        server.apply_circuit(fired, (140, 100));
+        assert_eq!(
+            server.projectiles.iter().count(),
+            1,
+            "the second cannon is inside the world lockout"
+        );
+
+        // Wind the world lockout out and it fires; the first one is still inside its own window.
+        for _ in 0..130 {
+            server.tick_mech_cooldowns();
+        }
+        let mut fired = Fired::default();
+        fired.cannons.push((140, 100));
+        server.apply_circuit(fired, (140, 100));
+        assert_eq!(
+            server.projectiles.iter().count(),
+            2,
+            "and fires once the world lockout has run out"
+        );
+    }
+
+    /// The Bunny Cannon stops at four Explosive Bunnies about, counting live ones and shells still
+    /// in the air together (`WorldGen.BunnyCannonCanFire`, `WorldGen.cs:51158-51199`).
+    ///
+    /// Without it a Bunny Cannon on a timer fills the world; it is the only cannon with a population
+    /// check of its own rather than only a clock.
+    ///
+    /// Fails before the fix: nothing called it, so a wired Bunny Cannon fired regardless.
+    #[test]
+    fn a_bunny_cannon_stops_at_four_bunnies() {
+        /// `NPCID.ExplosiveBunny`.
+        const EXPLOSIVE_BUNNY: u16 = 614;
+
+        let mut server = server();
+        assert!(
+            server.bunny_cannon_can_fire(),
+            "an empty world lets one through"
+        );
+        for n in 0..3 {
+            server
+                .npcs
+                .spawn(EXPLOSIVE_BUNNY, (1000.0 + n as f32 * 32.0, 1000.0))
+                .expect("a free slot");
+        }
+        assert!(
+            server.bunny_cannon_can_fire(),
+            "three is still under the ceiling"
+        );
+        server
+            .npcs
+            .spawn(EXPLOSIVE_BUNNY, (1200.0, 1000.0))
+            .expect("a free slot");
+        assert!(!server.bunny_cannon_can_fire(), "four is the ceiling");
+    }
+
+    /// A sundial and a moondial the current reached jump the world clock, through the same
+    /// `skip_to` a direct click already goes through (`Wiring.cs:1137-1176`).
+    ///
+    /// Fails before the fix: `Fired` had no `sundial`/`moondial` flags, so a wired dial did nothing
+    /// at all and the clock stayed where it was.
+    #[test]
+    fn a_wired_sundial_and_moondial_jump_the_clock() {
+        let mut server = server();
+        server.world.day_time = false;
+        server.world.time = 12_345;
+        let mut fired = Fired::default();
+        fired.sundial = true;
+        server.apply_circuit(fired, (100, 100));
+        assert!(server.world.day_time, "the sundial should bring the day");
+        assert_eq!(server.world.time, 0, "and start it at dawn");
+
+        server.world.time = 6_789;
+        let mut fired = Fired::default();
+        fired.moondial = true;
+        server.apply_circuit(fired, (100, 100));
+        assert!(
+            !server.world.day_time,
+            "the moondial should bring the night"
+        );
+        assert_eq!(server.world.time, 0, "and start it at dusk");
+    }
+
+    /// The real world hands the flood its own surface line and Plantera flag, so
+    /// `actuation_allowed`'s Lihzahrd guard actually lifts once the boss is down.
+    ///
+    /// Fails before the fix: `impl WiredWorld for World` implemented only the four required methods
+    /// and took the trait's own deliberately-conservative defaults for the other two (surface at row
+    /// zero, Plantera never down). The guard was therefore permanently shut on every real server: a
+    /// temple wall stayed unactuatable for ever, including long after Plantera had fallen. The
+    /// trait's doc had said all along that a real implementation should override them; the only real
+    /// implementation never did.
+    #[test]
+    fn a_real_world_lifts_the_lihzahrd_guard_once_plantera_is_down() {
+        /// `TileID.LihzahrdBrick`.
+        const LIHZAHRD_BRICK: u16 = 226;
+
+        let mut server = server();
+        // Well below the surface, which a real world reports and a defaulted one calls row zero.
+        let y = i32::from(server.world.surface) + 20;
+        let lay = |server: &mut GameServer| {
+            server.world.set_tile(100, y, wiring_switch());
+            for x in 101..105 {
+                let mut wire = Tile::AIR;
+                wire.flags.set(TileFlags::WIRE_RED, true);
+                server.world.set_tile(x, y, wire);
+            }
+            let mut wall = Tile::block(LIHZAHRD_BRICK);
+            wall.flags.set(TileFlags::WIRE_RED, true);
+            wall.flags.set(TileFlags::ACTUATOR, true);
+            server.world.set_tile(105, y, wall);
+        };
+
+        lay(&mut server);
+        crate::world::wiring::hit_switch(&mut server.world, 100, y);
+        assert!(
+            !server.world.tile(105, y).flags.has(TileFlags::ACTUATED),
+            "the temple's wall should hold while Plantera is up"
+        );
+
+        server.world.progress.downed_plantera = true;
+        lay(&mut server);
+        crate::world::wiring::hit_switch(&mut server.world, 100, y);
+        assert!(
+            server.world.tile(105, y).flags.has(TileFlags::ACTUATED),
+            "and give way once she is down"
+        );
+    }
+
+    /// A plain red-wired Switch (tile 136), which is what every board here starts a circuit with.
+    fn wiring_switch() -> Tile {
+        let mut switch = Tile::framed(136, 0, 0);
+        switch.flags.set(TileFlags::WIRE_RED, true);
+        switch
     }
 
     #[test]

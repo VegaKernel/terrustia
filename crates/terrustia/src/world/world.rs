@@ -1481,6 +1481,20 @@ impl crate::world::wiring::WiredWorld for World {
     fn height(&self) -> i32 {
         World::height(self)
     }
+
+    // The trait defaults for these two are deliberately conservative (surface at row zero, Plantera
+    // never down), which is the right answer for a bare test board and the wrong one for a real
+    // world: left unoverridden they froze `actuation_allowed`'s Lihzahrd guard permanently shut, so
+    // a temple wall stayed unactuatable *after* Plantera fell, and they would do the same to the
+    // dungeon teleporter guard (`Wiring.cs:1554-1557`) that reads them next door. The real world has
+    // both values already; it simply never handed them over.
+    fn surface_y(&self) -> i32 {
+        i32::from(self.surface)
+    }
+
+    fn downed_plantera(&self) -> bool {
+        self.progress.downed_plantera
+    }
 }
 
 #[cfg(test)]
