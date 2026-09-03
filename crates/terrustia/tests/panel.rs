@@ -1012,6 +1012,135 @@ async fn moderator_and_default_sessions_are_scoped_by_permission() {
     assert_eq!(status, 200, "{body}");
 }
 
+/// `/api/logout` (`panel::auth::logout`) revokes a session outright, and the two long-lived
+/// sockets (`status::stream_status`, `worlds::stream_world`) now re-check their session on every
+/// tick rather than only once at connect (`panel::auth::authorized_token`, called again in each
+/// socket's own interval arm). Before both of those existed: "sign out" only cleared the browser's
+/// own `localStorage` (there was no `/api/logout` route at all), so a captured token kept working
+/// against every route including the sockets until the whole panel process restarted, and a socket
+/// already open when an account was demoted or deleted kept serving it forever.
+///
+/// This is the fail-then-pass case for both: reverting either fix (deleting the `/api/logout`
+/// route, or reverting the sockets' interval-arm reauth back to only checking permission once at
+/// upgrade) makes this test hang until its own timeouts, then fail.
+#[tokio::test]
+async fn logout_revokes_the_session_and_closes_its_open_sockets() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let panel_addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    let config = Config {
+        world_width: 800,
+        world_height: 600,
+        motd: String::new(),
+        panel_enabled: true,
+        panel_listen: panel_addr,
+        ..Config::default()
+    };
+    let world = worldgen::generate(config.world_width, config.world_height, "logout", 11);
+    let (tx, rx) = mpsc::channel::<ServerEvent>(1024);
+    tokio::spawn(GameServer::new(config.clone(), world).run(rx));
+    let _panel = panel::run(config, tx.clone()).await.unwrap();
+
+    let base = format!("http://{panel_addr}");
+    let client = reqwest_lite::Client::new();
+
+    let (reply, token_rx) = oneshot::channel();
+    tx.send(ServerEvent::PanelAuthLookup {
+        name: String::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let token = token_rx.await.unwrap().claim_token.unwrap();
+    let (status, body) = client
+        .post_json(
+            &format!("{base}/api/login"),
+            &format!(
+                r#"{{"name":"owner","password":"correcthorsebatterystaple","claim_token":"{token}"}}"#
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let session = extract_session(&body);
+
+    // A session's owner may always sign themselves out, whatever else is true of the request —
+    // `/api/logout` needs no permission and never fails on a missing/unknown token.
+    let (status, _) = client.post_json(&format!("{base}/api/logout"), "").await;
+    assert_eq!(
+        status, 200,
+        "logging out with no session at all must not be an error"
+    );
+
+    let (status, body) = client
+        .get_status(&format!("{base}/api/status"), Some(&session))
+        .await;
+    assert_eq!(status, 200, "the real session must still be good: {body}");
+
+    // Open both live sockets before revoking, exactly as an operator's browser tab would already
+    // have them open.
+    let mut status_feed =
+        ws_lite::WsClient::connect(panel_addr, &format!("/api/ws?session={session}")).await;
+    status_feed
+        .recv_text(std::time::Duration::from_secs(5))
+        .await
+        .expect("the status socket's first frame should arrive promptly");
+    let mut world_feed =
+        ws_lite::WsClient::connect(panel_addr, &format!("/api/ws/world?session={session}")).await;
+    world_feed
+        .recv_text(std::time::Duration::from_secs(5))
+        .await
+        .expect("the world socket's first frame should arrive promptly");
+
+    let (status, body) = client
+        .post_json_auth(&format!("{base}/api/logout"), "", &session)
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    // The token is gone from the session map immediately: an ordinary request refuses right away.
+    let (status, body) = client
+        .get_status(&format!("{base}/api/status"), Some(&session))
+        .await;
+    assert_eq!(
+        status, 401,
+        "a revoked session must be refused like any other invalid one: {body}"
+    );
+
+    // Both sockets were already open, so they only find out on their own next tick — up to 2s for
+    // the status socket, 0.5s for the world socket — but they must find out, and close, rather
+    // than going on serving a live feed to a token `/api/logout` just revoked.
+    let budget = std::time::Duration::from_secs(10);
+    let status_closed = recv_until_closed(&mut status_feed, budget).await;
+    assert!(
+        status_closed,
+        "the status socket should close once its session is revoked"
+    );
+    let world_closed = recv_until_closed(&mut world_feed, budget).await;
+    assert!(
+        world_closed,
+        "the world socket should close once its session is revoked"
+    );
+}
+
+/// Reads frames off `feed` until it closes (`recv_text` returns `None`), bounded by `overall` wall
+/// time rather than a fixed number of reads: `console_feed()` (`crate::term`) is one broadcast
+/// channel shared by the whole test binary, so under `cargo test`'s default parallelism this
+/// socket's console branch can be kept busy by *other* tests' unrelated log lines faster than the
+/// 2-second status tick that actually re-checks the session arrives — a fixed attempt count could
+/// exhaust itself on nothing but that cross-test log traffic and never reach the tick that closes
+/// the socket. A wall-clock deadline waits through as much of that traffic as it takes.
+async fn recv_until_closed(feed: &mut ws_lite::WsClient, overall: std::time::Duration) -> bool {
+    tokio::time::timeout(overall, async {
+        loop {
+            if feed.recv_text(overall).await.is_none() {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
 /// The group-permission editor: an `admin.groups` holder (`owner`) may grant/revoke a permission on
 /// a group, but only within its own reach — and the reach guard applies to *itself* too, not just
 /// to account/group reassignment. Also proves an `admin.accounts`-only account (no `admin.groups`)
@@ -1678,65 +1807,67 @@ mod ws_lite {
             Self { stream }
         }
 
-        /// The next text frame's payload, or `None` if nothing arrived within `timeout`. Anything
-        /// that is not a text frame (a ping, most likely) is read and discarded rather than
-        /// returned, so a caller never has to know this protocol detail exists.
+        /// The next text frame's payload, or `None` if nothing arrived within `timeout` *or* the
+        /// server closed the connection (a real close frame, or the TCP connection dropping
+        /// outright — `stream_status`/`stream_world` do the latter, since axum's `WebSocket` closes
+        /// its transport on drop rather than sending a close frame first). Both read as "nothing
+        /// more is coming", which is exactly what a test asserting a socket closed wants to check.
         pub async fn recv_text(&mut self, timeout: Duration) -> Option<String> {
             tokio::time::timeout(timeout, self.read_one_text_frame())
                 .await
                 .ok()
+                .flatten()
         }
 
-        async fn read_one_text_frame(&mut self) -> String {
+        async fn read_one_text_frame(&mut self) -> Option<String> {
             loop {
                 let mut header = [0u8; 2];
-                self.stream
-                    .read_exact(&mut header)
-                    .await
-                    .expect("read a frame header");
+                if self.stream.read_exact(&mut header).await.is_err() {
+                    return None;
+                }
                 let opcode = header[0] & 0x0F;
                 let masked = header[1] & 0x80 != 0;
                 let mut len = u64::from(header[1] & 0x7F);
                 if len == 126 {
                     let mut ext = [0u8; 2];
-                    self.stream
-                        .read_exact(&mut ext)
-                        .await
-                        .expect("extended length");
+                    if self.stream.read_exact(&mut ext).await.is_err() {
+                        return None;
+                    }
                     len = u64::from(u16::from_be_bytes(ext));
                 } else if len == 127 {
                     let mut ext = [0u8; 8];
-                    self.stream
-                        .read_exact(&mut ext)
-                        .await
-                        .expect("extended length");
+                    if self.stream.read_exact(&mut ext).await.is_err() {
+                        return None;
+                    }
                     len = u64::from_be_bytes(ext);
                 }
                 let mask = if masked {
                     let mut key = [0u8; 4];
-                    self.stream.read_exact(&mut key).await.expect("mask key");
+                    if self.stream.read_exact(&mut key).await.is_err() {
+                        return None;
+                    }
                     Some(key)
                 } else {
                     None
                 };
                 let mut payload = vec![0u8; len as usize];
-                self.stream
-                    .read_exact(&mut payload)
-                    .await
-                    .expect("frame payload");
+                if self.stream.read_exact(&mut payload).await.is_err() {
+                    return None;
+                }
                 if let Some(key) = mask {
                     for (i, byte) in payload.iter_mut().enumerate() {
                         *byte ^= key[i % 4];
                     }
                 }
-                // 0x1 = text. Everything else (ping/pong/binary/close) is not what this test reads
-                // for, so it is consumed and the loop tries again.
-                if opcode == 0x1 {
-                    return String::from_utf8_lossy(&payload).to_string();
-                }
+                // A close frame (0x8) means the same thing an EOF does here: nothing more is
+                // coming.
                 if opcode == 0x8 {
-                    // A close frame: nothing more will ever arrive.
-                    return String::new();
+                    return None;
+                }
+                // 0x1 = text. Everything else (ping/pong/binary) is not what this test reads for,
+                // so it is consumed and the loop tries again.
+                if opcode == 0x1 {
+                    return Some(String::from_utf8_lossy(&payload).to_string());
                 }
             }
         }
