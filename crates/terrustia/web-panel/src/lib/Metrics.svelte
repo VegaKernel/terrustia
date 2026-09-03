@@ -255,7 +255,7 @@
     <div class="chart">
       <div class="chart-head">
         <span>tick wall time</span>
-        <span class="dim">µs — includes time spent waiting, not just processor use</span>
+        <span class="dim">µs — wall clock, not just cpu</span>
       </div>
       <canvas bind:this={wallCanvas}></canvas>
     </div>
@@ -361,9 +361,20 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    gap: var(--sp-2);
     font-size: 0.75rem;
     margin-bottom: 0.4rem;
     color: var(--text);
+  }
+
+  /* The title must never be the one that shrinks to make room for a longer caption next to it —
+     that is what let "tick wall time" collapse into three stacked lines. */
+  .chart-head > span:first-child {
+    flex-shrink: 0;
+  }
+
+  .chart-head .dim {
+    text-align: right;
   }
 
   .budget-key {
