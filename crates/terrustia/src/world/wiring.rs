@@ -42,8 +42,8 @@
 //! needs to start a new circuit, which cannot happen from inside the one that is running; a door,
 //! trapdoor or tall gate needs the real function that reshapes it, which lives elsewhere in this
 //! module tree (doors, by way of [`super::doors`]; trapdoors and tall gates, by way of
-//! [`super::trapdoors`] — see [`Fired::trapdoors`] and [`Fired::gates`]). All of that lives on the
-//! caller, so the flood hands back which tiles it reached and the caller does the work —
+//! [`super::trapdoors`] - see [`Fired::trapdoors`] and [`Fired::gates`]). All of that lives on the
+//! caller, so the flood hands back which tiles it reached and the caller does the work -
 //! [`trap_shot`], [`cannon_shot`], [`snowball_shot`] and [`check_logic_gate`] are the tables it
 //! calls.
 //!
@@ -705,8 +705,8 @@ fn junction_lets_through(frame_x: i16, arrived_via: u8, leaving_via: u8) -> bool
 /// connectedness, not over things that respond.
 ///
 /// `colour` is vanilla's own `_currentWireColor` (set once per flood, `Wiring.cs:848`). Exactly one
-/// tile in the whole table reads it — the Wire Bulb, whose four colours each own a bit of its frame
-/// (see [`toggle_frame_device`]'s own arm for it) — so it is threaded through rather than derived.
+/// tile in the whole table reads it - the Wire Bulb, whose four colours each own a bit of its frame
+/// (see [`toggle_frame_device`]'s own arm for it) - so it is threaded through rather than derived.
 fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fired) {
     if out.skipped.contains(&(x, y)) {
         return;
@@ -868,7 +868,7 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
         }
         return;
     }
-    // A gemspark block swaps between its lit and unlit twin — `Wiring.cs:1034-1050`, a plain type
+    // A gemspark block swaps between its lit and unlit twin - `Wiring.cs:1034-1050`, a plain type
     // swap seven apart (the seven unlit types 255-261 sit directly below the seven lit ones,
     // 262-268, in the same gem order). Guarded by the actuator exactly as the conveyor belt above
     // is, and terminal whether or not the guard let the swap through, matching vanilla's own
@@ -886,7 +886,7 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
         }
         return;
     }
-    // A grate opens and shuts by swapping type, with no guard of any kind —
+    // A grate opens and shuts by swapping type, with no guard of any kind -
     // `Wiring.cs:2550-2559`.
     if tile.is_active() && matches!(tile.block, GRATE_OPEN | GRATE_CLOSED) {
         let mut swapped = world.tile(x, y);
@@ -904,6 +904,11 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
     // something above it unsupported (`CanKillTile`, and a `PreventsActuationUnder` check on the
     // tile directly above); this project has neither piece of machinery yet, so it only checks
     // that there is *something* above to stand on, which is the common case that check exists for.
+    // Known gap, not fixed here: `tile` is the caller's stale snapshot, not a fresh read. An
+    // actuated Active Stone Block (toggled by an earlier arm on the same flood) loses that toggle
+    // when it lands here, since `hidden`/`shown` below are built from the stale copy rather than
+    // `world.tile(x, y)`. The two new arms above this one deliberately re-read instead of copying
+    // this pattern.
     if tile.is_active() && tile.block == ACTIVE_STONE {
         if !out.skipped.insert((x, y)) {
             return;
@@ -943,7 +948,7 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
     if tile.is_active() && tile.block == TELEPORTER {
         // The dungeon's own teleporters are dead until Plantera falls: a teleporter set in
         // Lihzahrd brick wall, below the surface, with the boss still up is passed over entirely
-        // (`Wiring.cs:1554-1557`) — the same gate `actuation_allowed` puts on the temple's bricks,
+        // (`Wiring.cs:1554-1557`) - the same gate `actuation_allowed` puts on the temple's bricks,
         // and for the same reason, since a working teleporter pad through a temple wall would walk
         // straight past it. Reading `wall` rather than the block is deliberate and is what vanilla
         // does: the pad sits *in front of* the wall, so its own block is the teleporter.
@@ -1115,7 +1120,7 @@ fn act(world: &mut impl WiredWorld, x: i32, y: i32, colour: Wire, out: &mut Fire
     }
 }
 
-/// `frame / 18`, then reduced back into `[0, n)` — a cell's own offset within its fixture.
+/// `frame / 18`, then reduced back into `[0, n)` - a cell's own offset within its fixture.
 ///
 /// This is vanilla's own `for (num = frame / 18; num >= N; num -= N) {}` idiom, which appears in
 /// nearly every multi-tile arm of `HitWireSingle` and of the `WorldGen.Switch*` helpers it calls.
@@ -1358,32 +1363,32 @@ fn toggle_light(world: &mut impl WiredWorld, x: i32, y: i32, tile: Tile, out: &m
     }
 }
 
-/// `TileID.Chimney` — three by three, cycling `frameY` through three states.
+/// `TileID.Chimney` - three by three, cycling `frameY` through three states.
 const CHIMNEY: u16 = 406;
-/// `TileID.SillyBalloonMachine` — three by three, toggling `frameX`.
+/// `TileID.SillyBalloonMachine` - three by three, toggling `frameX`.
 const SILLY_BALLOON_MACHINE: u16 = 452;
-/// `TileID.BubbleMachine` — three wide, two tall.
+/// `TileID.BubbleMachine` - three wide, two tall.
 const BUBBLE_MACHINE: u16 = 244;
-/// `TileID.FogMachine` — two by two.
+/// `TileID.FogMachine` - two by two.
 const FOG_MACHINE: u16 = 565;
-/// `TileID.WireBulb` — the one tile in the whole table whose reaction depends on *which colour*
+/// `TileID.WireBulb` - the one tile in the whole table whose reaction depends on *which colour*
 /// reached it. See [`toggle_frame_device`]'s own arm.
 const WIRE_BULB: u16 = 429;
-/// `TileID.VolcanoSmall` — one tile.
+/// `TileID.VolcanoSmall` - one tile.
 const VOLCANO_SMALL: u16 = 593;
-/// `TileID.VolcanoLarge` — two by two.
+/// `TileID.VolcanoLarge` - two by two.
 const VOLCANO_LARGE: u16 = 594;
-/// `TileID.MushroomStatue` — two wide, three tall. Not a statue in the `STATUE` sense: it has its
+/// `TileID.MushroomStatue` - two wide, three tall. Not a statue in the `STATUE` sense: it has its
 /// own tile type and its own arm, and it is what a Mushroom Statue *becomes* when tile 105's own
 /// style 34 fires ([`super::super::game::server`]'s `Statue::Becomes`), so without this arm the
 /// transformation was one-way.
 const MUSHROOM_STATUE: u16 = 349;
-/// `TileID.CatBast` — two wide, three tall, and the one arm here that validates its whole footprint
+/// `TileID.CatBast` - two wide, three tall, and the one arm here that validates its whole footprint
 /// before touching any of it.
 const CAT_BAST: u16 = 506;
-/// `TileID.WaterFountain` — two wide, four tall, toggled on `frameY`.
+/// `TileID.WaterFountain` - two wide, four tall, toggled on `frameY`.
 const WATER_FOUNTAIN: u16 = 207;
-/// `TileID.Grate` and `TileID.GrateClosed` — swapped for each other, with no guard at all.
+/// `TileID.Grate` and `TileID.GrateClosed` - swapped for each other, with no guard at all.
 const GRATE_OPEN: u16 = 546;
 const GRATE_CLOSED: u16 = 557;
 /// The seven unlit gemspark blocks (`TileID.AmethystGemsparkOff` = 255 through
@@ -1395,12 +1400,12 @@ const GEMSPARK_LIT_FIRST: u16 = 262;
 const GEMSPARK_LIT_LAST: u16 = 268;
 /// How far apart a gemspark block's two states are, which is the whole of `Wiring.cs:1038-1045`.
 const GEMSPARK_SPAN: u16 = 7;
-/// `TileID.BoulderStatue` — throws a boulder rather than summoning, so it is not tile 105.
+/// `TileID.BoulderStatue` - throws a boulder rather than summoning, so it is not tile 105.
 const BOULDER_STATUE: u16 = 531;
-/// `TileID.Sundial` and `TileID.Moondial` — two wide, three tall, and a world-level clock jump.
+/// `TileID.Sundial` and `TileID.Moondial` - two wide, three tall, and a world-level clock jump.
 const SUNDIAL: u16 = 356;
 const MOONDIAL: u16 = 663;
-/// `WallID.LihzahrdBrickUnsafe` — the temple's own wall, which gates the dungeon teleporters the
+/// `WallID.LihzahrdBrickUnsafe` - the temple's own wall, which gates the dungeon teleporters the
 /// way [`actuation_allowed`]'s own check gates its bricks (`Wiring.cs:1554-1557`).
 const LIHZAHRD_BRICK_WALL: u16 = 87;
 
@@ -1527,7 +1532,7 @@ fn toggle_frame_device(
         }
         // The Wire Bulb is the one tile whose reaction depends on which colour reached it
         // (`Wiring.cs:1586-1624`). Its `frameX / 18` is a four-bit field, one bit per colour, and a
-        // signal *toggles its own bit* and leaves the other three alone — which is what lets one
+        // signal *toggles its own bit* and leaves the other three alone - which is what lets one
         // bulb show four circuits at once. The bit weights are red 1, green 2, blue 4, yellow 8
         // (vanilla's `_currentWireColor` cases 1, 3, 2, 4 in that order, with the shifts 18, 36, 72
         // and 144 that are exactly `18 * weight`).
@@ -1578,7 +1583,7 @@ fn toggle_frame_device(
             true
         }
         // Two wide by three tall, refused outright unless every one of its six cells is really an
-        // active Cat Bast — `WorldGen.ValidateTileSquareIsActiveAndOfType`, checked *before* any
+        // active Cat Bast - `WorldGen.ValidateTileSquareIsActiveAndOfType`, checked *before* any
         // `SkipWire`, so a half-broken one is left alone rather than half-shifted
         // (`Wiring.cs:2516-2549`).
         CAT_BAST => {
@@ -1641,7 +1646,7 @@ fn toggle_frame_device(
             true
         }
         // `WorldGen.SwitchMonolith` (`WorldGen.cs:51459-51605`): three tall, two wide except the
-        // Radio Thing at three, and each cell moved by its own type's own step — see
+        // Radio Thing at three, and each cell moved by its own type's own step - see
         // [`monolith_step`]. The Shimmer Monolith is the one that cycles three ways rather than
         // two (`WorldGen.cs:51537-51547`).
         b if is_monolith(b) => {
@@ -2190,11 +2195,11 @@ pub fn trap_shot(tile: Tile, x: i32, y: i32, rng: &mut impl rand::Rng) -> Option
     }
 }
 
-/// `TileID.Cannon` — four wide by three tall, aimed by the outer columns and fired by the inner
+/// `TileID.Cannon` - four wide by three tall, aimed by the outer columns and fired by the inner
 /// two. `frameY / 54` is the barrel's elevation (nine notches, 0 through 8) and `frameX / 72` is
 /// which of the five cannons it is.
 const CANNON: u16 = 209;
-/// `TileID.SnowballLauncher` — three by three, turned by the outer columns and fired by the middle
+/// `TileID.SnowballLauncher` - three by three, turned by the outer columns and fired by the middle
 /// one. `frameX / 54` is which way it faces.
 const SNOWBALL_LAUNCHER: u16 = 212;
 

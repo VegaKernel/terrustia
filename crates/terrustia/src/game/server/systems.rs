@@ -3947,7 +3947,7 @@ impl GameServer {
     fn fire_boulder_statue(&mut self, x: i32, y: i32) {
         /// `ProjectileID.Boulder`.
         const BOULDER: u16 = 99;
-        /// `CheckMech(num90, num91, 900)` — fifteen seconds between boulders.
+        /// `CheckMech(num90, num91, 900)` - fifteen seconds between boulders.
         const BOULDER_COOLDOWN: i32 = 900;
 
         if self.mech_cooldown.contains_key(&(x, y)) {
