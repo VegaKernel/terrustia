@@ -4301,6 +4301,46 @@ mod tests {
         }
     }
 
+    /// What the reaction table costs the flood's own per-tile path.
+    ///
+    /// [`act`] runs once per tile per colour per circuit, and this lane added about two dozen arms
+    /// to it. The worst case is not bare wire (every `is_active()` short-circuits at once) but wire
+    /// laid *through* solid blocks, where every arm's type comparison actually runs before falling
+    /// out the bottom.
+    ///
+    /// Measured on this machine at `--release`, 1000 wired stone tiles per flood, this same
+    /// benchmark grafted onto the pre-lane sources for the other side, six runs each with the cold
+    /// first run discarded (medians):
+    /// * before this lane's arms: 30.1 ns per tile acted on
+    /// * after: 31.1 ns
+    ///
+    /// So about two dozen new arms cost roughly 1 ns a tile, three per cent of a step that is
+    /// mostly the flood's own queue and visited-set work rather than the table. It is paid only
+    /// when a circuit actually fires, not once a tick: a circuit at the [`MAX_CIRCUIT`] ceiling
+    /// pays about twenty microseconds more for it, once, on the tick it is tripped.
+    #[test]
+    #[ignore]
+    fn measure_what_the_reaction_table_costs_the_flood() {
+        let mut board = Board(HashMap::new());
+        board.set_tile(100, 100, wired(136, Wire::Red));
+        // Wire run through solid stone, so no arm can short-circuit on `is_active()`.
+        let tiles = 1000;
+        for x in 101..101 + tiles {
+            let mut stone = Tile::block(1);
+            stone.flags.set(TileFlags::WIRE_RED, true);
+            board.set_tile(x, 100, stone);
+        }
+
+        let runs = 2000;
+        let start = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..runs {
+            sink += std::hint::black_box(hit_switch(&mut board, 100, 100)).reached;
+        }
+        let each = start.elapsed().as_secs_f64() / (runs * tiles) as f64 * 1e9;
+        println!("act, wire through stone: {each:.2} ns per tile acted on (sink {sink})");
+    }
+
     /// Lay a cannon-shaped device at `(105, 100)` and wire only the cell in column `col`, row `row`,
     /// with a lead running in from `from` (the unit step *towards* the device).
     ///
