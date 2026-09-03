@@ -29,7 +29,6 @@ pub mod sgr {
     pub const YELLOW: &str = "\x1b[33m";
     pub const BLUE: &str = "\x1b[34m";
     pub const MAGENTA: &str = "\x1b[35m";
-    pub const CYAN: &str = "\x1b[36m";
     pub const WHITE: &str = "\x1b[37m";
     pub const BRIGHT_RED: &str = "\x1b[91m";
     pub const BRIGHT_GREEN: &str = "\x1b[92m";
@@ -37,6 +36,17 @@ pub mod sgr {
     pub const BRIGHT_BLUE: &str = "\x1b[94m";
     pub const BRIGHT_CYAN: &str = "\x1b[96m";
     pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
+
+    /// The banner's cyan-into-blue gradient, one 256-colour escape per row of the ASCII art. Named
+    /// here rather than left as bare literals at the call site, so every colour this module ever
+    /// prints has one name and one place it is defined.
+    pub const BANNER_RAMP: [&str; 5] = [
+        "\x1b[38;5;51m",
+        "\x1b[38;5;45m",
+        "\x1b[38;5;39m",
+        "\x1b[38;5;33m",
+        "\x1b[38;5;27m",
+    ];
 }
 
 /// Whether this process should emit colour, decided once at startup.
@@ -214,6 +224,18 @@ impl TermLayer {
         line.push_str(p.off());
         line.push(' ');
 
+        // A one-column severity bar, reserved for every level so the tag column always starts at
+        // the same place, but only ever coloured in for WARN/ERROR — a scrolling log's problems
+        // should catch the eye at a glance, not require reading the tag text.
+        if matches!(level, Level::WARN | Level::ERROR) {
+            line.push_str(p.on(colour));
+            line.push('▎');
+            line.push_str(p.off());
+        } else {
+            line.push(' ');
+        }
+        line.push(' ');
+
         line.push_str(p.on(colour));
         line.push_str(p.on(sgr::BOLD));
         line.push_str(tag);
@@ -233,7 +255,7 @@ impl TermLayer {
             line.push_str(name);
             line.push('=');
             line.push_str(p.off());
-            line.push_str(p.on(sgr::CYAN));
+            line.push_str(p.on(sgr::BRIGHT_CYAN));
             line.push_str(value);
             line.push_str(p.off());
         }
@@ -274,7 +296,7 @@ impl TermLayer {
             line.push_str(name);
             line.push('=');
             line.push_str(p.off());
-            line.push_str(p.on(sgr::CYAN));
+            line.push_str(p.on(sgr::BRIGHT_CYAN));
             line.push_str(value);
             line.push_str(p.off());
         }
@@ -387,12 +409,12 @@ fn newline() -> &'static str {
     }
 }
 
-/// The visible column an ordinary log line's message begins at: the width of the timestamp, level
-/// tag and target columns [`TermLayer::render`] lays down before it (12 + 1 + 5 + 1 + 18 + 1). A
-/// wrapped log line indents its continuation rows to here so the message reads as one block rather
-/// than sprawling back to column 0. Tied to `render`'s layout by
-/// `the_message_column_matches_render`.
-const MESSAGE_COL: usize = 38;
+/// The visible column an ordinary log line's message begins at: the width of the timestamp,
+/// severity bar, level tag and target columns [`TermLayer::render`] lays down before it
+/// (12 + 1 + 1 + 1 + 5 + 1 + 18 + 1). A wrapped log line indents its continuation rows to here so
+/// the message reads as one block rather than sprawling back to column 0. Tied to `render`'s layout
+/// by `the_message_column_matches_render`.
+const MESSAGE_COL: usize = 40;
 
 /// The same, for a chat line, which carries only a timestamp and a `CHAT` tag (12 + 1 + 5 + 1).
 const CHAT_COL: usize = 19;
@@ -565,6 +587,12 @@ fn line_rows(line: &str, cols: usize) -> usize {
     visible_len(line).div_ceil(cols).max(1)
 }
 
+/// A dim horizontal rule, `cols` wide, separating the scrolled log above from the live status and
+/// prompt below — the one part of the screen that never moves. Always exactly one row.
+fn status_rule(cols: usize) -> String {
+    Palette::detect().paint(sgr::DIM, &"─".repeat(cols))
+}
+
 /// Physical rows the whole footer (the status line, if any, above the prompt) takes at this width.
 fn footer_rows(f: &Footer, cols: usize) -> usize {
     if f.prompt.is_empty() {
@@ -572,7 +600,8 @@ fn footer_rows(f: &Footer, cols: usize) -> usize {
     }
     let mut rows = line_rows(&f.prompt, cols);
     if !f.status.is_empty() {
-        rows += line_rows(&f.status, cols);
+        // +1 for the separating rule, always exactly one row regardless of width.
+        rows += line_rows(&f.status, cols) + 1;
     }
     rows
 }
@@ -602,6 +631,8 @@ fn draw_seq(f: &Footer, cols: usize) -> String {
     }
     let mut s = String::new();
     if !f.status.is_empty() {
+        s.push_str(&status_rule(cols));
+        s.push_str("\r\n");
         s.push_str(&f.status);
         s.push_str("\r\n");
     }
@@ -773,17 +804,9 @@ pub fn banner(palette: Palette, version: &str, game: &str, protocol: u32) -> Str
     // Cyan fading into blue down the rows. 256-colour is thirty years old and universal enough
     // that a plain-colour fallback would only ever be a fallback nobody sees; `NO_COLOR` and a
     // pipe are the cases that actually matter, and those get no escapes at all.
-    let ramp = [
-        "\x1b[38;5;51m",
-        "\x1b[38;5;45m",
-        "\x1b[38;5;39m",
-        "\x1b[38;5;33m",
-        "\x1b[38;5;27m",
-    ];
-
     let mut out = String::new();
     out.push('\n');
-    for (line, colour) in art.iter().zip(ramp) {
+    for (line, colour) in art.iter().zip(sgr::BANNER_RAMP) {
         let _ = writeln!(out, "  {}{line}{}", p.on(colour), p.off());
     }
     let _ = writeln!(
@@ -961,7 +984,10 @@ pub fn info_block(palette: Palette, rows: &[(&str, String)]) -> String {
 /// The card, laid out for a terminal `cols` wide. Split from [`info_block`] so the wrapping can be
 /// tested at a width, rather than only at whatever the machine running the tests happens to have.
 ///
-/// The card's rows are a fixed four-space margin, a key column, three spaces, then the value. On a
+/// The card's rows are a fixed four-space margin, a key column, three spaces, then the value. Every
+/// other line this module prints (a stage spinner, a ✓ line, the status footer) is a bare glyph
+/// with a two-space margin instead; the extra two spaces here are what a key column needs to sit
+/// clear of that glyph column, not a second, unrelated convention. On a
 /// terminal narrower than that plus the value (measured: the art is 55 columns, the tagline 69, and
 /// the `saves to` row 74 with a realistic world name) the value wrapped back to column 0 and the
 /// alignment the card exists for was gone. `wrap_ansi` already knows how to carry a value down
@@ -1193,8 +1219,8 @@ mod tests {
         };
         assert_eq!(
             footer_rows(&f, 40),
-            4,
-            "status wraps to 3 rows, prompt fits on 1"
+            5,
+            "status wraps to 3 rows, plus the separating rule, plus a prompt that fits on 1"
         );
     }
 
@@ -1218,7 +1244,10 @@ mod tests {
             cursor_back: 3,
             drawn_rows: 0,
         };
-        assert_eq!(draw_seq(&f, 80), "● 3 online\r\n❯ kick bri\x1b[3D");
+        assert_eq!(
+            draw_seq(&f, 80),
+            format!("{}\r\n● 3 online\r\n❯ kick bri\x1b[3D", "─".repeat(80))
+        );
         let bare = Footer {
             status: String::new(),
             prompt: "❯ ".into(),

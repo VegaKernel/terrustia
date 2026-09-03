@@ -65,7 +65,7 @@ async fn run(palette: Palette) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.list_worlds {
-        print_worlds();
+        print_worlds(palette);
         return Ok(());
     }
 
@@ -667,14 +667,15 @@ mod relaunch_tests {
 /// Enough to pick one by name without opening a file manager: the size the header claims, and how
 /// recently it was played. Reading each header is a few hundred bytes and worth it, since a list of
 /// bare filenames does not tell you which of three saves is the one you want.
-fn print_worlds() {
+fn print_worlds(palette: Palette) {
+    let p = palette;
     let dir = terrustia::worlds::worlds_dir();
     let worlds = terrustia::worlds::list();
     if worlds.is_empty() {
         println!("no worlds in {} yet", dir.display());
         return;
     }
-    println!("{}\n", dir.display());
+    println!("{}\n", p.paint(term::sgr::DIM, &dir.display().to_string()));
     for path in worlds {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
@@ -684,7 +685,12 @@ fn print_worlds() {
             Ok(w) => format!("{} x {}", w.width(), w.height()),
             Err(_) => "unreadable".to_string(),
         };
-        println!("  {name:<32} {dims:>12}   {:>6} MB", size / 1_048_576);
+        println!(
+            "  {} {}   {}",
+            p.paint(term::sgr::BOLD, &format!("{name:<32}")),
+            p.paint(term::sgr::DIM, &format!("{dims:>12}")),
+            p.paint(term::sgr::DIM, &format!("{:>6} MB", size / 1_048_576)),
+        );
     }
     println!("\nserve one with:  terrustia --world <name>");
 }

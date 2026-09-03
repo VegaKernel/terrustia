@@ -187,6 +187,16 @@ impl GameServer {
         } else {
             sgr::DIM
         };
+        // Coloured by the same worst-sample budget check `note_tick_cost` warns on below, so the
+        // footer and the warning agree about what "a lot of the budget" means: green under half,
+        // yellow up to the full budget, red once a tick has actually gone over it.
+        let tick_colour = if high * 2 <= TICK {
+            sgr::DIM
+        } else if high <= TICK {
+            sgr::BRIGHT_YELLOW
+        } else {
+            sgr::BRIGHT_RED
+        };
         // A failing save is the one condition an operator has to notice, and it was the one the
         // terminal made easiest to miss: a single `error!` that scrolls away behind ordinary log
         // traffic, while the panel pins it twice (a header badge and an overview card). The
@@ -198,7 +208,7 @@ impl GameServer {
             p.paint(dot_colour, "●"),
             p.paint(sgr::BOLD, &online.to_string()),
             p.paint(sgr::DIM, &format!("up {h:02}:{m:02}:{s:02}")),
-            p.paint(sgr::DIM, &tick),
+            p.paint(tick_colour, &tick),
         );
         crate::term::set_status(&status);
     }
