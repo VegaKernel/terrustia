@@ -14,14 +14,19 @@
 //! * **Actuators**, which toggle their block between solid and passable.
 //! * **Junction boxes**, which route the current through by frame rather than in every direction,
 //!   which is what lets two circuits cross the same tile without joining into one.
-//! * **Conveyor belts** and **Active/Inactive Stone Blocks**, which swap between their two states.
+//! * **Conveyor belts**, **Active/Inactive Stone Blocks**, **gemspark blocks** and **grates**,
+//!   which swap between their two states by becoming a different tile type altogether.
 //! * **Traps** — darts, flames, spears, spiky balls and geysers — which hurt.
 //! * **Land mines**, which explode on the spot rather than joining a circuit at all.
-//! * **Statues**, which produce monsters, items or a fetched townsperson.
+//! * **Statues**, which produce monsters, items or a fetched townsperson, and the **Boulder
+//!   Statue**, which is none of those and drops a boulder.
+//! * **Cannons** and the **Snowball Launcher**, which are two devices in one: the outer columns of
+//!   the footprint aim or turn the piece, and the inner ones set it off.
 //! * **Doors, trapdoors and tall gates**, which change the world's shape — a shut door becomes a
 //!   wider, different tile rather than merely a different frame of the same one.
 //! * **Teleporters**, which swap whoever is standing on one pad with whoever is on the other.
 //! * **Pumps**, which move liquid from every inlet cell a circuit reaches to every outlet.
+//! * **The Enchanted Sundial and Moondial**, which jump the world's clock.
 //! * **Timers**, the one thing here that starts a circuit with nobody touching it.
 //! * **Logic gates**, which read a stack of lamps, decide, and start a circuit of their own.
 //!
@@ -29,21 +34,24 @@
 //! contraption anybody builds runs off a timer, and almost every interesting one has a gate in
 //! it; a server that only ran a circuit when a player hit a switch would run hardly any of them.
 //!
-//! Only the actuator, the junction box, the conveyor belt, the stone block, the pump, the lamp
-//! and the timer are handled inside the flood, because they need nothing but the tiles. The rest
-//! are *reported*: firing a trap needs a die roll, a cooldown and the projectile store; a statue
-//! needs the NPC table; a teleporter needs the players; a gate needs to start a new circuit, which
-//! cannot happen from inside the one that is running; a door, trapdoor or tall gate needs the real
-//! function that reshapes it, which lives elsewhere in this module tree (doors, by way of
-//! [`super::doors`]; trapdoors and tall gates, by way of [`super::trapdoors`] — see
-//! [`Fired::trapdoors`] and [`Fired::gates`]). All of that lives on the caller, so the flood hands back which tiles it
-//! reached and the caller does the work — [`trap_shot`] and [`check_logic_gate`] are the tables it
+//! Anything the tiles alone can settle is handled inside the flood: the actuator, the junction box,
+//! the conveyor belt, the stone block, the gemspark block, the grate, the pump, the lamp, the timer,
+//! and the whole frame-shift family ([`toggle_light`] and [`toggle_frame_device`]). The rest are
+//! *reported*: firing a trap or a cannon needs a die roll, a cooldown and the projectile store; a
+//! statue needs the NPC table; a teleporter needs the players; a dial needs the world clock; a gate
+//! needs to start a new circuit, which cannot happen from inside the one that is running; a door,
+//! trapdoor or tall gate needs the real function that reshapes it, which lives elsewhere in this
+//! module tree (doors, by way of [`super::doors`]; trapdoors and tall gates, by way of
+//! [`super::trapdoors`] — see [`Fired::trapdoors`] and [`Fired::gates`]). All of that lives on the
+//! caller, so the flood hands back which tiles it reached and the caller does the work —
+//! [`trap_shot`], [`cannon_shot`], [`snowball_shot`] and [`check_logic_gate`] are the tables it
 //! calls.
 //!
-//! What is left looks cosmetic but is not the client's to decide: candles, chandeliers, torches and
-//! the other wired lights change only a frame, but on a dedicated server that frame is authoritative,
-//! so the flood toggles it here and broadcasts it rather than leaving a wired light dark for everyone
-//! but the player who tripped it (L3-24, [`toggle_light`]).
+//! What is left looks cosmetic but is not the client's to decide: candles, chandeliers, torches, the
+//! other wired lights, and the machines and monoliths beside them change only a frame, but on a
+//! dedicated server that frame is authoritative, so the flood toggles it here and broadcasts it
+//! rather than leaving a wired light dark for everyone but the player who tripped it (L3-24,
+//! [`toggle_light`]).
 //!
 //! A tile the flood cannot act on still passes the current along, so a circuit through one is not
 //! broken by it. A tile the circuit *started* from is not acted on at all, which is what stops a
