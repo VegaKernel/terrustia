@@ -102,6 +102,25 @@ cpu_seconds() { # cpu_seconds <pid>
 
 rss_kb() { ps -o rss= -p "$1" 2>/dev/null | tr -d ' '; }
 
+# The pid actually doing the work, which is not always the pid a launcher's `&` gave us. Steam's
+# macOS build ships the real server behind a MonoKickstart wrapper
+# (`Terraria.app/Contents/MacOS/TerrariaServer`, a bash script) that runs
+# `./TerrariaServer.bin.osx $@` as a plain child - no `exec` - so the wrapper's own pid sits idle
+# for the server's whole life while the child does everything. Measuring the wrapper reads as a
+# server using ~0% CPU and a couple of megabytes of RAM regardless of load, which is wrong rather
+# than merely approximate. Walk to the deepest live child; a launcher that already execs into the
+# real binary (Linux, or terrustia's own single process) has no child and this returns the pid
+# unchanged.
+descendant_pid() { # descendant_pid <pid>
+  local pid="$1" child
+  while true; do
+    child="$(pgrep -P "$pid" 2>/dev/null | head -1)"
+    [ -n "$child" ] || break
+    pid="$child"
+  done
+  echo "$pid"
+}
+
 # Bytes sent by this pid, summed over its sockets. `nettop` is per-process and present on every
 # mac; it is sampled twice and differenced rather than trusted as a total.
 #
@@ -184,11 +203,12 @@ VSRV=$!
 exec 8> "$WORK/vfifo"
 wait_for "$WORK/vanilla.log" "Server started" 600 "$VSRV" || exit 1
 VREADY="$(awk -v a="$VSTART" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }')"
-read -r VCPU VRSS VNET <<<"$(watch_idle "$VSRV")"
+VMPID="$(descendant_pid "$VSRV")"
+read -r VCPU VRSS VNET <<<"$(watch_idle "$VMPID")"
 echo exit >&8
 sleep 2
 exec 8>&-
-kill "$VSRV" 2>/dev/null; wait "$VSRV" 2>/dev/null; VSRV=""
+kill "$VMPID" 2>/dev/null; kill "$VSRV" 2>/dev/null; wait "$VSRV" 2>/dev/null; VSRV=""
 
 # ---------------------------------------------------------------- terrustia, idle, same world
 
