@@ -7277,7 +7277,7 @@ mod tests {
     /// "no Hell Butterfly (653) in the underworld by day: {24, 39, 59, 60, 62, 654, 655}", the
     /// other two now present. Neutralised a third time by putting the friendly arm's underworld
     /// branch back above its graveyard fork: "no graveyard vermin in an underworld graveyard:
-    /// {24, 39, 59, 60, 62, 653, 655}".
+    /// {59, 60, 62, 654, 655}".
     #[test]
     fn the_underworld_has_lava_bait_critters() {
         use terrustia_proto::tile::Tile;
