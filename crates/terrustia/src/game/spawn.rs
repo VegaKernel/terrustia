@@ -12064,6 +12064,120 @@ mod tests {
         println!("hallow_ground_pick, full night: {each:.2} ns/call (sink {sink})");
     }
 
+    /// What the friendly chain and the two gnome arms cost the per-candidate loop.
+    ///
+    /// Three things are new on a path that already runs, and only two of them are paid by an
+    /// ordinary attempt:
+    ///
+    /// * `spawn_wall_type`, three tile reads, now on every dry surface candidate rather than only
+    ///   on a windy day. It is the Living Tree gnome arm's gate and it sits behind two free tests.
+    /// * [`underground_gnome`], on every candidate that gets past the water and the meteor. Its
+    ///   first act is a one-in-ten roll, so nine candidates in ten pay a roll and nothing else.
+    /// * [`friendly_chain`], which only a friendly attempt reaches, and at most once per tick
+    ///   server-wide.
+    ///
+    /// Measured on this machine, release build, arguments behind a `black_box`. The numbers this
+    /// prints:
+    ///
+    /// * `spawn_wall_type` on plain grass: 10.05 ns, the three tile reads. `try_spawn` as a whole
+    ///   measures 242-527 ns a call ([`tests::measure_the_statue_mimic_plinth_check`]), and the
+    ///   match this sits in runs once or twice an attempt, so it is two to four percent of one.
+    /// * `underground_gnome` declining on unwalled ground: 2.54 ns, which is the roll and nothing
+    ///   else nine times in ten.
+    /// * `friendly_chain` on a dry beach: 11.06 ns, the arm answering at once with a Seagull. In
+    ///   inland water: 136.80 ns, which is almost all the water-surface scan (up to 49 rows, four
+    ///   tile reads each). In the rain over grass, still air, no cattail within reach: 4582.61 ns,
+    ///   and that one is the cattail sweep.
+    ///
+    /// Only the last is worth a second look, and it is 2501 tile reads by construction
+    /// (`FindCattailTop`, `NPC.cs:81004-81043`). It is reached on a rainy daytime friendly attempt
+    /// over grass or sand, in still air, at one attempt in two, and a friendly attempt is at most
+    /// one a tick server-wide: 4.6 us against a 16.67 ms frame is 0.03% of one, on the rainiest
+    /// afternoon a world can have.
+    #[test]
+    #[ignore]
+    fn measure_the_friendly_chain() {
+        let n = 10_000_000;
+        let mut world = World::empty(1200, 600, "bench");
+        world.surface = 260;
+        world.rock_layer = 350;
+        world.day_time = true;
+        for x in 0..1200 {
+            for y in 190..202 {
+                world.set_tile(x, y, terrustia_proto::Tile::block(GRASS));
+            }
+            for y in 150..190 {
+                world.set_tile(
+                    x,
+                    y,
+                    terrustia_proto::Tile::AIR
+                        .with_liquid(terrustia_proto::tile::Liquid::Water, 255),
+                );
+            }
+        }
+
+        // The Living Tree gnome arm's gate, on ground that is not one.
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for i in 0..n {
+            sink += u32::from(
+                spawn_wall_type(
+                    std::hint::black_box(&world),
+                    std::hint::black_box(600 + i % 4),
+                    90,
+                ) == LIVING_WOOD_WALL,
+            );
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("spawn_wall_type, plain stone: {each:.2} ns/call (sink {sink})");
+
+        // ...and the underground gnome, declining.
+        let mut rng = SmallRng::seed_from_u64(7);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for i in 0..n {
+            sink += u32::from(underground_gnome(
+                std::hint::black_box(&world),
+                std::hint::black_box(600 + i % 4),
+                std::hint::black_box(190),
+                std::hint::black_box(true),
+                &|_| 0,
+                &mut rng,
+            ));
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+        println!("underground_gnome, unwalled: {each:.2} ns/call (sink {sink})");
+
+        // The chain itself: a dry beach, inland water, and the rain over grass with no cattail
+        // anywhere, which is the sweep's worst case.
+        for (name, calls, x, wet, raining) in [
+            ("dry beach", n, 100, false, false),
+            ("inland water", n, 700, true, false),
+            ("rain over grass", 200_000, 700, false, true),
+        ] {
+            world.raining = raining;
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..calls {
+                sink += u32::from(
+                    friendly_chain(
+                        std::hint::black_box(&world),
+                        std::hint::black_box(x + i % 4),
+                        std::hint::black_box(190),
+                        std::hint::black_box(GRASS),
+                        std::hint::black_box(wet),
+                        std::hint::black_box(false),
+                        std::hint::black_box(0.0),
+                        &mut rng,
+                    )
+                    .is_some(),
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(calls) * 1e9;
+            println!("friendly_chain, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     /// What the water chain costs, both halves of it.
     ///
     /// Two things moved. [`water_tile`] is now hoisted out of its own match guard and read once per
