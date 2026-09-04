@@ -638,6 +638,15 @@ over effort; the first three are roughly a day each.
    copy, which `tests/bare_server_boot.rs` already does for a different reason and has never flaked.
    Full write-up in `.scratch/audit-2026-08-30/FLAKE-new-world-cli.md`.
 
+   `tests/shutdown_signal.rs::sigterm_stops_the_server_and_saves_within_a_bounded_window` belongs to
+   the same class, found and measured 2026-09-04: it fails "the server should have reached its main
+   loop by now" in well under a second rather than timing out at its real 30s budget, which is
+   `wait_for_line`'s `Err(_) => return false` firing on a disconnected channel, not a slow boot. A
+   git-worktree bisection wrongly pointed at that day's web-panel merge on single-shot evidence
+   before five-run measurements at both that commit and the true pre-session base showed the same
+   1-in-5 failure rate at each: pre-existing, not a regression, and any single-run A/B on this test
+   will falsely implicate whatever commit happens to be under test. Same open next step as above.
+
 **Explicitly not on this list: another audit pass by reading.** The C3 pass found 99 findings and
 still missed Bone and the absent upward wake in `Liquid.Update`, both of which turned up during
 fixing, and both of which were found by building an instrument rather than reading harder. Reading
