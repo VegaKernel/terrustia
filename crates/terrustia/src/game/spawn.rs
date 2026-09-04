@@ -4787,8 +4787,9 @@ pub fn try_spawn(
                         // plain slime, and the jungle-grass arm is answered ahead of the case it
                         // reads.
                         if critter == FROG {
-                            let alive =
-                                |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
+                            let alive = |ty: u16| {
+                                npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive())
+                            };
                             spawn_frog(world, &alive, rng)
                         } else if critter == OWL {
                             // The owl is the other chain in this pool, for the same reason
@@ -6627,7 +6628,10 @@ mod tests {
         let at = (400, 148);
         assert_eq!(depth_at(&world, at.1), Depth::Underground);
         let seen = friendly_draws_at(&world, at.0, at.1, 20_000);
-        assert!(seen.contains(&BUNNY), "no bunny in the dirt layer: {seen:?}");
+        assert!(
+            seen.contains(&BUNNY),
+            "no bunny in the dirt layer: {seen:?}"
+        );
         for ty in GEM_SQUIRREL..=GEM_BUNNY + 6 {
             assert!(
                 !seen.contains(&ty),
@@ -9741,6 +9745,70 @@ mod tests {
                 ))
             }),
         );
+    }
+
+    /// What the friendly tail costs the candidate loop, which is the only place it runs.
+    ///
+    /// It is deliberately not a scan and adds none: [`deep_friendly_pick`] reads no tile, no wall
+    /// and no NPC, and it is reached only after `spawnFriendly` has already decided this attempt
+    /// belongs to a critter, which wants a populated base standing on the player. What it replaced
+    /// was a bounds-checked index into a two-entry slice plus a [`holiday_costume`] call, so both
+    /// sides of the change are a couple of `random_range` calls and the point of measuring is to say
+    /// that as a number.
+    ///
+    /// Measured with the depth behind a `black_box` so the branch cannot be folded away. This
+    /// machine was carrying other lanes at the time and the wall clock says so: the same run put
+    /// `seasonal_night_pick` on an ordinary night at 15.20 ns against the 4.2 ns
+    /// [`measure_the_graveyard_and_the_seasonal_chain`] recorded on a quiet one, so read these as a
+    /// ratio against the reference in their own run and not as absolute nanoseconds.
+    ///
+    /// * caverns 25.1 ns: the fork, the one-in-five gate, and the gem ladder on the fifth of runs
+    ///   that get past it. Three `random_range` calls where one hits.
+    /// * dirt layer 13.3 ns and surface 12.6 ns: the fork alone, and then a constant or nothing.
+    /// * the two-entry pool draw this replaced, same run and same build: 6.6 ns. One
+    ///   `random_range`, and a `holiday_costume` that makes no roll at all out of season.
+    ///
+    /// So the caverns cost about four `random_range` calls where the old draw cost one, and the
+    /// whole tail is 1.65 times `seasonal_night_pick`'s ordinary night in the same run. It reads no
+    /// tile, and the arm above it that used to do the work read none either, so nothing was added to
+    /// the per-candidate tile budget at all. The loop can reach it twenty times in a tick, but only
+    /// for a player whose rate roll has already come up and who is standing in a town big enough to
+    /// have quieted the wild, so the worst case is a fully staffed cavern base at half a microsecond
+    /// of a 16.67 ms tick.
+    #[test]
+    #[ignore]
+    fn measure_the_deep_friendly_tail() {
+        const N: u32 = 10_000_000;
+        for depth in [Depth::Cavern, Depth::Underground, Depth::Surface] {
+            let mut rng = SmallRng::seed_from_u64(646);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink = sink.wrapping_add(u32::from(
+                    deep_friendly_pick(std::hint::black_box(depth), &mut rng).unwrap_or_default(),
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("deep_friendly_pick, {depth:?}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // The reference: what this replaced, in the same run and the same build. A two-entry pool,
+        // indexed, then dressed for the season the way every other friendly draw still is.
+        let pool: &[u16] = &[BUNNY, 299];
+        let mut rng = SmallRng::seed_from_u64(646);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..N {
+            let critter = pool[rng.random_range(0..pool.len())];
+            sink = sink.wrapping_add(u32::from(holiday_costume(
+                critter,
+                std::hint::black_box(Depth::Cavern),
+                Seasonal::default(),
+                &mut rng,
+            )));
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+        println!("the two-entry pool draw it replaced: {each:.2} ns/call (sink {sink})");
     }
 
     /// What the dungeon library's bookshelf scan costs, since it is by far the widest per-candidate
