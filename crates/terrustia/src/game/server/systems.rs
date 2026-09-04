@@ -12415,4 +12415,63 @@ mod fallen_log_scan {
         let each = start.elapsed().as_secs_f64() / f64::from(SWEEPS) * 1e3;
         println!("scan_for_fallen_logs, no log in a large world: {each:.3} ms/sweep");
     }
+
+    /// What the pal wiring costs a tick of the whole NPC table.
+    ///
+    /// Four things were added to the per-NPC path and none of them is a scan:
+    ///
+    /// * `own_escorts` is `npc.stats.ai_style == 127`, and the two-handle unpack behind it runs
+    ///   only for a pal, of which a world holds at most one.
+    /// * the `parent` resolution gained an `or_else` that runs only when `follows_boss` is `None`
+    ///   and is then `npc.npc_type == 111 && npc.ai[3] < 0.0`.
+    /// * the style-3 arm gained `npc.npc_type == 111`, paid only by fighters.
+    /// * `ai_out.reward.take()`, one `Option` read, beside the twenty that were already there.
+    ///
+    /// The claim being measured is that this is not visible against the tick it sits in, which
+    /// already runs a zone scan, a physics step and a routine per NPC. Two hundred slots filled with
+    /// ordinary fighters, release build, a thousand ticks, three runs of each arm:
+    ///
+    /// * with the wiring in place: 58.8, 59.2, 62.3 us/tick
+    /// * with all four removed by hand and rerun in the same build: 57.5, 58.0, 61.4 us/tick
+    ///
+    /// The gap between the two medians is 1.2 us and the spread *within* each arm is 3.5, so the
+    /// honest reading is "no measurable cost" rather than any number. Against a 16.67 ms frame the
+    /// whole two-hundred-NPC tick is a third of one per cent.
+    #[test]
+    #[ignore]
+    fn measure_what_the_pal_wiring_costs_a_tick() {
+        let mut world = crate::world::World::empty(2000, 800, "npc tick bench");
+        world.surface = 200;
+        for x in 0..world.width() {
+            for y in 300..world.height() {
+                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+        let mut server = GameServer::new(Config::default(), world);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4096);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().expect("loopback"), out_tx);
+        player.state = ConnState::Playing;
+        player.position = (1000.0 * 16.0, 299.0 * 16.0);
+        server.players[0] = Some(player);
+
+        // Zombies: `ai_style` 3, which is the arm the guard branch was added to.
+        let mut filled = 0;
+        while server
+            .npcs
+            .spawn(3, ((900 + filled % 200) as f32 * 16.0, 299.0 * 16.0))
+            .is_some()
+        {
+            filled += 1;
+        }
+
+        const TICKS: u32 = 1_000;
+        // One pass to warm whatever the first tick builds, then the measured run.
+        server.tick_npcs();
+        let start = std::time::Instant::now();
+        for _ in 0..TICKS {
+            server.tick_npcs();
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(TICKS) * 1e6;
+        println!("tick_npcs, {filled} fighters: {each:.1} us/tick");
+    }
 }

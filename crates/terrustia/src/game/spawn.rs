@@ -12815,6 +12815,101 @@ mod tests {
         );
     }
 
+    /// What the Palworld arm costs the per-candidate loop.
+    ///
+    /// The part paid on every surface-day attempt is four scalar tests: a bool already computed
+    /// (`surface_day`), another already computed (`wet`), one subtraction and compare for the
+    /// distance gate, and a four-way `matches!` on a tile id that was read once further up. There
+    /// is nothing to measure there and the two calls below are what the arm actually adds.
+    ///
+    /// Both sit behind `Main.rand.Next(160) == 0`, which is vanilla's own ordering
+    /// (`NPC.cs:4374-4375`: the roll comes before `AnyNPCs` and before `HasItem`), so an attempt
+    /// pays them once in a hundred and sixty and only after every clause above them has passed.
+    ///
+    /// Measured in release, ten million calls each, against the plinth check the loop already
+    /// carries and accepts as cheap:
+    ///
+    /// * `pal_type`, empty inventory: 6.99 ns
+    /// * `pal_type`, a full 58-slot inventory holding neither pet: 89.06 ns
+    /// * the `AnyNPCs` pair over a full 200-slot NPC table: 82.48 ns
+    /// * `good_place_for_a_statue_mimic`, the reference, in the same run: 20.95 ns
+    ///
+    /// So the worst case is about 172 ns, or eight plinth checks, on one attempt in a hundred and
+    /// sixty, on a path that has already walked a ground column to reach it: 1.1 ns amortised over
+    /// every attempt that gets as far as this line. Both worst cases are pessimistic on purpose. A
+    /// real player's inventory is not fifty-eight full slots of things that are not the pet, and
+    /// the `AnyNPCs` pair returns at the first pet it finds, which is the case where the arm
+    /// declines and the whole cost stops being paid.
+    #[test]
+    #[ignore]
+    fn measure_the_palworld_arm() {
+        const N: u32 = 10_000_000;
+        let bench = |name: &str, mut body: Box<dyn FnMut() -> u32 + '_>| {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink = sink.wrapping_add(body());
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("{name}: {each:.2} ns/call (sink {sink})");
+        };
+
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let bare = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx.clone());
+        // The worst case `Player.HasItem` can be given: every one of the fifty-eight slots it scans
+        // full, and neither pet among them, so both scans run to the end.
+        let mut loaded = Player::new(1, "127.0.0.1:2".parse().unwrap(), out_tx);
+        for slot in 0..58u16 {
+            loaded.inventory.insert(
+                slot,
+                terrustia_proto::inventory::SyncEquipment {
+                    player: 1,
+                    slot,
+                    item: terrustia_proto::item::ItemStack::new(i32::from(slot) + 1, 1, 0),
+                    favorited: false,
+                    blocked: false,
+                },
+            );
+        }
+
+        for (name, player) in [("empty", &bare), ("full inventory", &loaded)] {
+            let mut rng = SmallRng::seed_from_u64(1601);
+            bench(
+                &format!("pal_type, {name}"),
+                Box::new(|| u32::from(pal_type(std::hint::black_box(player), &mut rng))),
+            );
+        }
+
+        // `!AnyNPCs(696) && !AnyNPCs(695)`, over a table with no pet in it and every slot taken,
+        // which is the only shape where both scans run to the end.
+        let mut npcs = NpcStore::new();
+        while npcs.spawn(1, (1000.0, 1000.0)).is_some() {}
+        bench(
+            "AnyNPCs pair, full table",
+            Box::new(|| {
+                u32::from(!std::hint::black_box(&npcs).iter().any(|(_, n)| {
+                    matches!(n.npc_type, PAL_CATTIVA | PAL_FOXSPARKS) && n.is_alive()
+                }))
+            }),
+        );
+
+        // The reference, in the same run and the same build.
+        let plinth = flat_world(90);
+        let mut x = 200;
+        bench(
+            "good_place_for_a_statue_mimic",
+            Box::new(|| {
+                x = 200 + (x + 1) % 128;
+                u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(&plinth),
+                    x,
+                    90,
+                ))
+            }),
+        );
+    }
+
     /// What the friendly tail costs the candidate loop, which is the only place it runs.
     ///
     /// It is deliberately not a scan and adds none: [`deep_friendly_pick`] reads no tile, no wall
