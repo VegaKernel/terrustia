@@ -2492,6 +2492,11 @@ const LAVA_BAIT_ODDS: u32 = 8;
 /// one bool, so this arm costs one bool test on an ordinary night.
 ///
 /// `RollLuck(2)` is a plain `Main.rand.Next(2)` at luck zero (`Luck.cs:5-16`).
+///
+/// It carries [`friendly_pool`]'s own standing narrowing and no new one: the arm lives inside
+/// vanilla's `case 2`/`109`/`477`/`492`, the four grasses, and this server keys the friendly draw
+/// on the player's biome rather than on the tile underfoot. So a stone-floored forest surface
+/// answers here where the game would have fallen through the tile switch and drawn nothing.
 const ENCHANTED_NIGHTCRAWLER: u16 = 484;
 const ENCHANTED_NIGHTCRAWLER_ODDS: u32 = 2;
 
@@ -4983,40 +4988,41 @@ pub fn try_spawn(
                 // critter for it, the attempt is dropped rather than turned into a monster the game
                 // would not have spawned here.
                 None if spawn_friendly => {
-                    // The underworld's friendly draw is not a pool at all: vanilla's grass case
-                    // hands every spawn below `Main.UnderworldLayer` straight to
-                    // `SpawnLavaBaitCritters` (`NPC.cs:2562-2578`), which is the same chain the
-                    // underworld's ordinary arm calls further down. So this is answered here rather
-                    // than through [`friendly_pool`], whose underworld entry is empty for exactly
-                    // that reason.
-                    if depth == Depth::Underworld {
-                        out.push((
-                            lava_bait_pick(world.day_time, rng),
-                            (x as f32 * 16.0, y as f32 * 16.0),
-                        ));
-                        break;
-                    }
-                    // The Enchanted Nightcrawler, at the head of the grass chain
-                    // (`NPC.cs:2409-2413`, see [`ENCHANTED_NIGHTCRAWLER`]): half of every friendly
-                    // surface attempt on a clear meteor-shower night, ahead of the firefly, the owl
-                    // and every bird. Without it 484 was in no pool and no branch.
-                    if events.starfall_night
-                        && !world.day_time
-                        && depth == Depth::Surface
-                        && rng.random_range(0..ENCHANTED_NIGHTCRAWLER_ODDS) == 0
-                    {
-                        out.push((ENCHANTED_NIGHTCRAWLER, (x as f32 * 16.0, y as f32 * 16.0)));
-                        break;
-                    }
                     // A graveyard's friendly draw is its own and it is exactly two things
                     // (`NPC.cs:2101-2115`): a Maggot or a Rat, on dry land, and nothing at all
-                    // standing in water. The arm sits ahead of every other friendly one, so no
-                    // bird, bunny or firefly is drawn among the tombstones.
+                    // standing in water. The arm sits ahead of every other friendly one and
+                    // `return`s, so no bird, bunny, firefly, nightcrawler or lava-bait critter is
+                    // drawn among the tombstones. That is why the two branches below it are below
+                    // it: tombstones in the underworld really do answer with a Rat in the game.
                     let critters = if seasonal.graveyard {
                         if water_tile(world, x, y) {
                             continue;
                         }
                         &GRAVEYARD_VERMIN[..]
+                    } else if depth == Depth::Underworld {
+                        // The underworld's friendly draw is not a pool at all: vanilla's grass case
+                        // hands every spawn below `Main.UnderworldLayer` straight to
+                        // `SpawnLavaBaitCritters` (`NPC.cs:2562-2578`), which is the same chain the
+                        // underworld's ordinary arm calls further down. So this is answered here
+                        // rather than through [`friendly_pool`], whose underworld entry is empty
+                        // for exactly that reason.
+                        out.push((
+                            lava_bait_pick(world.day_time, rng),
+                            (x as f32 * 16.0, y as f32 * 16.0),
+                        ));
+                        break;
+                    } else if events.starfall_night
+                        && !world.day_time
+                        && depth == Depth::Surface
+                        && rng.random_range(0..ENCHANTED_NIGHTCRAWLER_ODDS) == 0
+                    {
+                        // The Enchanted Nightcrawler, at the head of the grass chain
+                        // (`NPC.cs:2409-2413`, see [`ENCHANTED_NIGHTCRAWLER`]): half of every
+                        // friendly surface attempt on a clear meteor-shower night, ahead of the
+                        // firefly, the owl and every bird. Without it 484 was in no pool and no
+                        // branch.
+                        out.push((ENCHANTED_NIGHTCRAWLER, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
                     } else {
                         friendly_pool(depth, player_biome, world.day_time)
                     };
@@ -6931,6 +6937,19 @@ mod tests {
         py: i32,
         ticks: u32,
     ) -> std::collections::BTreeSet<u16> {
+        friendly_draws_in(world, events, false, px, py, ticks)
+    }
+
+    /// ...and the same again for a player standing among tombstones, whose friendly arm is its own
+    /// and answers ahead of every other one.
+    fn friendly_draws_in(
+        world: &World,
+        events: &EventSpawns<'_>,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> std::collections::BTreeSet<u16> {
         const GUIDE: u16 = 22;
         let mut npcs = NpcStore::new();
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
@@ -6938,8 +6957,12 @@ mod tests {
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
         player.position = (px as f32 * 16.0, py as f32 * 16.0);
-        // No zone bytes, deliberately: `1 << 6` on byte 4 is the graveyard flag, whose friendly arm
-        // answers ahead of every other one and would leave this reading vermin instead.
+        // `1 << 6` on byte 4 is the graveyard flag, whose friendly arm answers ahead of every other
+        // one; unset by default, so a caller that does not ask for tombstones reads the ordinary
+        // pool rather than vermin.
+        if graveyard {
+            player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        }
         for _ in 0..3 {
             npcs.spawn(GUIDE, player.position);
         }
@@ -7252,7 +7275,9 @@ mod tests {
     /// underworld by day: {24, 39, 59, 60, 62}", none of the three drawn in twenty thousand ticks.
     /// Neutralised again by dropping `lava_bait_pick`'s `day_time` fork so it always answers 654:
     /// "no Hell Butterfly (653) in the underworld by day: {24, 39, 59, 60, 62, 654, 655}", the
-    /// other two now present.
+    /// other two now present. Neutralised a third time by putting the friendly arm's underworld
+    /// branch back above its graveyard fork: "no graveyard vermin in an underworld graveyard:
+    /// {24, 39, 59, 60, 62, 653, 655}".
     #[test]
     fn the_underworld_has_lava_bait_critters() {
         use terrustia_proto::tile::Tile;
@@ -7297,6 +7322,19 @@ mod tests {
         assert!(
             !by_night.contains(&653),
             "the Hell Butterfly is the day's: {by_night:?}"
+        );
+
+        // A graveyard's friendly arm sits ahead of the underworld's and `return`s
+        // (`NPC.cs:2101-2115`), so tombstones in hell answer with a Maggot or a Rat rather than a
+        // Lavafly. Only the friendly branch is governed by it: the ordinary chain's own lava-bait
+        // arm at `:4881` has no graveyard test, and neither does this server's, which is why this
+        // asserts what a graveyard *does* draw rather than what it does not.
+        let among_tombstones = friendly_draws_in(&world, &quiet(), true, 400, 455, 20_000);
+        assert!(
+            GRAVEYARD_VERMIN
+                .iter()
+                .any(|v| among_tombstones.contains(v)),
+            "no graveyard vermin in an underworld graveyard: {among_tombstones:?}"
         );
     }
 
