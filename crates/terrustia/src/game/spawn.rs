@@ -5843,14 +5843,7 @@ pub fn try_spawn(
                                 && n.ai[2] > 1.0
                         })
                     };
-                    underground_fairy(
-                        world,
-                        events.fairy_log,
-                        events.hard_mode,
-                        y + 1,
-                        &busy,
-                        rng,
-                    )
+                    underground_fairy(world, events.fairy_log, events.hard_mode, y + 1, &busy, rng)
                 } =>
                 {
                     FAIRY_CRITTER_PINK + rng.random_range(0..3u16)
@@ -9013,9 +9006,15 @@ mod tests {
                 underground_fairy(&cave, true, false, ground_y, &|| false, &mut rng)
             })
         };
-        assert!(!window(149), "a fairy above the surface-to-rock halfway line");
+        assert!(
+            !window(149),
+            "a fairy above the surface-to-rock halfway line"
+        );
         assert!(window(150), "no fairy on the halfway line itself");
-        assert!(window(299), "no fairy one row above the bottom three hundred");
+        assert!(
+            window(299),
+            "no fairy one row above the bottom three hundred"
+        );
         assert!(!window(300), "a fairy in the bottom three hundred rows");
 
         // ...and one already out keeps the next away (`NPC.AnyHelpfulFairies`, `NPC.cs:5843`).

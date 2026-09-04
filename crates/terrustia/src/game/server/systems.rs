@@ -12105,11 +12105,8 @@ mod fallen_log_scan {
     fn place_log(world: &mut crate::world::World, x: i32, y: i32) {
         for dx in 0..3i32 {
             for dy in 0..2i32 {
-                let tile = terrustia_proto::Tile::framed(
-                    FALLEN_LOG,
-                    (dx * 18) as i16,
-                    (dy * 18) as i16,
-                );
+                let tile =
+                    terrustia_proto::Tile::framed(FALLEN_LOG, (dx * 18) as i16, (dy * 18) as i16);
                 world.set_tile(x + dx, y + dy, tile);
             }
         }
