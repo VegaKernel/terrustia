@@ -1320,6 +1320,11 @@ pub struct ZombieSettings {
 /// fresh character has exactly 100, so on an ordinary server the torch zombie's odds start at one
 /// in five rather than one in twelve, and a crowd sharpens them further.
 ///
+/// The caller reads it off `Player::life_max`, which is the same number: packet 16's second field
+/// is assigned straight to `statLifeMax` (`MessageBuffer.cs:1106`), the base maximum rather than
+/// `statLifeMax2`, which is what carries a player's equipment bonuses and is what `NPC.cs:416`
+/// deliberately does not read.
+///
 /// `active_players` is `numberOfActivePlayers` (`NPC.cs:266`), the same count [`Conditions`]
 /// already carries.
 pub fn zombie_settings(
