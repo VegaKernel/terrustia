@@ -257,6 +257,16 @@ def helper_types(spawner: str, name: str) -> set[int]:
         found.add(int(literal))
     for low, high in re.findall(r"Main\.rand\.Next\((-?\d+),\s*(-?\d+)\)", body):
         found |= set(range(int(low), int(high)))
+    # `Main.rand.NextFromList(new short[3] { 595, 598, 600 })`, which is how `RollDragonflyType`
+    # writes its two answers and how nothing else in `NPC.Spawner` writes anything. Without this
+    # the helper reads as answering nothing at all, and the six ordinary dragonflies were missing
+    # from vanilla's side of the diff entirely: they never appeared as a gap while they were one,
+    # and once this server could spawn them they turned up in the "reachable here and not from
+    # `NPC.Spawner`" list instead, which is the opposite of the truth.
+    for values in re.findall(r"NextFromList\((?:new \w+\[\d*\]\s*)?\{([^{}]*)\}\)", body):
+        parts = [CAST.sub("", v.strip()).strip() for v in split_args(values)]
+        if parts and all(LITERAL.match(p) for p in parts):
+            found |= {int(p) for p in parts}
     return found
 
 
@@ -367,6 +377,7 @@ SELF_TEST = """
 				SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, type8);
 				SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, Main.rand.Next(305, 308));
 				SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, GetGemBunnyToSpawn());
+				SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, RollDragonflyType(tileType));
 				SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, mysteryValue);
 			}
 		}
@@ -380,16 +391,28 @@ SELF_TEST = """
 			}
 			return 46;
 		}
+
+		private static int RollDragonflyType(int tileType = 2)
+		{
+			if (tileType == 53)
+			{
+				return Main.rand.NextFromList(new short[2] { 700, 701 });
+			}
+			return Main.rand.NextFromList(new short[1] { 702 });
+		}
 	}
 """
 
 
 def self_test() -> None:
     found, unresolved = roster_of(class_body(SELF_TEST, "public class Spawner"))
-    expected = {48, 424, 420, 3, 132, 305, 306, 307, 651, 46}
+    expected = {48, 424, 420, 3, 132, 305, 306, 307, 651, 46, 700, 701, 702}
     assert found == expected, f"{sorted(found)} != {sorted(expected)}"
     assert unresolved == {"mysteryValue"}, unresolved
-    print("self-test ok: literals, SelectRandom lists, locals, rand ranges and helpers all read")
+    print(
+        "self-test ok: literals, SelectRandom and NextFromList lists, locals, rand ranges and "
+        "helpers all read"
+    )
 
 
 # ---------------------------------------------------------------------------- main
