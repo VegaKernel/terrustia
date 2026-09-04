@@ -9027,8 +9027,10 @@ mod tests {
     /// The assertion is "one of the twins turned up", not "the Gold Bunny turned up", and the tick
     /// count is what makes that a claim rather than a coin toss. Half a million ticks of a forest
     /// surface yield about thirteen hundred friendly draws, roughly a thousand of them types with a
-    /// twin, so at one in four hundred the expected haul is two or three gold critters and pinning
-    /// the test to one *named* twin was a one-in-three chance of failing on any given rng stream.
+    /// twin, so at one in four hundred the expected haul is two or three gold critters overall but
+    /// well under one of any single *named* twin, and pinning the test to the Gold Bunny alone was
+    /// closer to a two-in-three chance of failing on any given rng stream (measured: 5 of 12 fresh
+    /// seeds passed at this tick count).
     /// It passed on this seed until an unrelated arm above it drew one more number and reshuffled
     /// everything downstream, which is exactly the shape of a test that was measuring luck.
     /// [`gold_variant`]'s own test above already pins each of the nine individually and exactly;
@@ -9185,7 +9187,9 @@ mod tests {
     /// in a logged world".
     #[test]
     fn a_fallen_log_is_what_puts_fairies_underground() {
-        const TICKS: u32 = 200_000;
+        // 200,000 was a 1-in-3 coin toss for seeing all three colours (mean 2.5 draws at a 1/1000
+        // gate); a merge-verifier's multi-seed probe found 1,000,000 gives 12/12 fresh streams.
+        const TICKS: u32 = 1_000_000;
         // `flat_world_of` puts the surface at 100 and the rock layer at 200 in a world 600 rows
         // deep, so the gate's window is row 150 (their halfway line) up to row 299, exclusive.
         let floor = 255;
@@ -9498,9 +9502,10 @@ mod tests {
     /// was simply absent.
     ///
     /// Neutralised by returning `None` instead of the closing `Some(match zombie.style ...)`: the
-    /// six style assertions fail with "{2, 3, 590}", the pool's own night plus the torch arm above
-    /// it. Neutralised the other way, by deleting the `NPC.cs:4722` arm, the torch assertion fails
-    /// on its own and the styles keep coming.
+    /// six style assertions fail (the observed set is "{2, 3, 190, 191, 192, 193, 194, 590}", the
+    /// pool's own night, the coloured eyes' own arm above the tail, and the torch arm above that).
+    /// Neutralised the other way, by deleting the `NPC.cs:4722` arm, the torch assertion fails on
+    /// its own and the styles keep coming.
     #[test]
     fn an_ordinary_night_hands_out_torches_and_all_seven_zombies() {
         let (world, (px, py)) = night_world();

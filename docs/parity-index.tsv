@@ -1828,7 +1828,7 @@ crates/terrustia/src/game/slime_rain.rs	impl SlimeRainState :: fn roll	Main.cs	1
 crates/terrustia/src/game/slime_rain.rs	impl SlimeRainState :: fn roll	Main.cs	65906	dfc952dd9dd9	29d8f36ab23b
 crates/terrustia/src/game/slime_rain.rs	impl SlimeRainState :: fn roll	Main.cs	65906-65929	98877d2c26bd	29d8f36ab23b
 crates/terrustia/src/game/slime_rain.rs	impl SlimeRainState :: fn tick	Main.cs	65828-65843	687c13266eb6	2f828b670905
-crates/terrustia/src/game/spawn.rs	(file)	NPC.cs	80309-80319	0b090b2dce41	1bddc1b106c5
+crates/terrustia/src/game/spawn.rs	(file)	NPC.cs	80309-80319	0b090b2dce41	6873013b396c
 crates/terrustia/src/game/spawn.rs	const ACTIVE_RANGE_X	NPC.cs	78706	97685afa123a	94252dde6941
 crates/terrustia/src/game/spawn.rs	const BEACH_DISTANCE	NPC.cs	1206	aa98f627787f	b94e02a32ea8
 crates/terrustia/src/game/spawn.rs	const BEACH_DISTANCE	WorldGen.cs	4071	fc558271d06a	b94e02a32ea8
@@ -1846,6 +1846,8 @@ crates/terrustia/src/game/spawn.rs	const CRITTER_FLOOR	NPC.cs	3780	1a72c3ed9432	
 crates/terrustia/src/game/spawn.rs	const CRITTER_FLOOR	NPC.cs	3791	7628c16d4f00	dc5796d15f54
 crates/terrustia/src/game/spawn.rs	const DESERT_SPAWN_WALLS	NPC.cs	1682	1a97790ea238	3d436249391f
 crates/terrustia/src/game/spawn.rs	const DESERT_SPAWN_WALLS	WallID.cs	42	72a9bd3ee5f1	3d436249391f
+crates/terrustia/src/game/spawn.rs	const DOCTOR_BONES	Luck.cs	5-16	b5c6475a946f	45de5e023b72
+crates/terrustia/src/game/spawn.rs	const DOCTOR_BONES	NPC.cs	3772-3775	2c97e6587d74	45de5e023b72
 crates/terrustia/src/game/spawn.rs	const DUNGEON_SLAB_WALLS	WallID.cs	257	aff24bc4e604	24d6d2a3ec7e
 crates/terrustia/src/game/spawn.rs	const DUNGEON_SLAB_WALLS	WallID.cs	261	e3f4b37edcc5	24d6d2a3ec7e
 crates/terrustia/src/game/spawn.rs	const DUNGEON_SLAB_WALLS	WallID.cs	265	e1a9ce3fd64d	24d6d2a3ec7e
@@ -1954,35 +1956,38 @@ crates/terrustia/src/game/spawn.rs	fn bound_gate	NPC.cs	2087	87dd0eb77fbf	f46ab3
 crates/terrustia/src/game/spawn.rs	fn bound_gate	NPC.cs	2091	432ace05c708	f46ab35f5947
 crates/terrustia/src/game/spawn.rs	fn bound_gate	NPC.cs	2095	dfd83a501593	f46ab35f5947
 crates/terrustia/src/game/spawn.rs	fn bound_gate	NPC.cs	2656	b169efc52990	f46ab35f5947
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	1144	3516f82c9d1d	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	11524	bac01de37206	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	30360-30389	66a5fa33fda0	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	329	3f5b56282cf3	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	4544	4bd03aff4c52	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	4818	f86a55dbc647	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5005	8ec514d56bc1	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5005-5199	fdc70a1a6f1f	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5007	af5c6705dd85	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5012-5015	414405781dc4	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5017	e746ff255a84	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5021	0ba026ffd5b4	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5051	96fa05c2c58e	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5078	8c631b05a4d9	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5083	f30126ac963f	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5088	319b2c90e291	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5100	58c38cd05b12	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5105	3e182b55b428	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5110	967f81b0e210	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5115	d289c1f457aa	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5120	498fb0636d0f	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5145-5198	58f023c5e228	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5201	251dfd212349	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5205	2972a45175f0	2d41367a6316
-crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5209	e86aa8f7c550	2d41367a6316
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	1144	3516f82c9d1d	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	11524	bac01de37206	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	30360-30389	66a5fa33fda0	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	329	3f5b56282cf3	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	4544	4bd03aff4c52	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	4818	f86a55dbc647	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5005	8ec514d56bc1	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5005-5199	fdc70a1a6f1f	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5007	af5c6705dd85	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5012-5015	414405781dc4	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5017	e746ff255a84	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5021	0ba026ffd5b4	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5051	96fa05c2c58e	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5078	8c631b05a4d9	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5083	f30126ac963f	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5088	319b2c90e291	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5100	58c38cd05b12	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5105	3e182b55b428	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5110	967f81b0e210	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5115	d289c1f457aa	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5120-5139	04613795062e	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5127-5134	016439a95146	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5141-5199	e1f7328b7ebe	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5201	251dfd212349	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5205	2972a45175f0	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPC.cs	5209	e86aa8f7c550	5455db649fb1
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick	NPCID.cs	10451-10460	836014b98cc7	5455db649fb1
 crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick :: const MARBLE	NPC.cs	1059-1065	8dbea4ba975a	0aac582ede44
 crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick :: const MARBLE	NPC.cs	1067-1143	5e1450cc8ba0	0aac582ede44
 crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick :: const MARBLE	NPC.cs	5027	021f4442aeb2	0aac582ede44
 crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick :: const MARBLE	NPC.cs	5039	fc185e8ac55a	0aac582ede44
+crates/terrustia/src/game/spawn.rs	fn cavern_seasonal_pick :: const SKELETONS	NPC.cs	5141-5199	e1f7328b7ebe	6e86814a6cfb
 crates/terrustia/src/game/spawn.rs	fn check_to_spawn_rock_golem	NPC.cs	5803-5818	bedcf3ef5093	ab802665b115
 crates/terrustia/src/game/spawn.rs	fn check_to_spawn_rock_golem	TileID.cs	38	09b88a69f294	ab802665b115
 crates/terrustia/src/game/spawn.rs	fn check_underground	WorldGen.cs	10099-10144	a2978e40d28a	ba2f4922a36d
@@ -2200,46 +2205,50 @@ crates/terrustia/src/game/spawn.rs	fn sandstorm_pick	SceneMetrics.cs	706	3f51501
 crates/terrustia/src/game/spawn.rs	fn sandstorm_pick	TileID.cs	333	8a5545c09e63	43fc8209ba9a
 crates/terrustia/src/game/spawn.rs	fn sandstorm_pick	TileID.cs	341	129b1d978b01	43fc8209ba9a
 crates/terrustia/src/game/spawn.rs	fn sandstorm_pick	TileID.cs	351	cef18dfba1cd	43fc8209ba9a
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	Luck.cs	31-37	a68ae01c16a6	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	Luck.cs	53-60	7313c71475a7	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	329	3f5b56282cf3	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4168	6ac0dcf5eee6	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4202	79270df541b7	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4539	b987ef793279	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4539-4740	28249b777d8c	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4544	4bd03aff4c52	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4549	a1aa192f1d7b	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4554	6c8f1ac69d25	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4556	ea8cf23400ba	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4561	6df23720c6ba	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4566	5f9655c82b68	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4569	1a1ae472ca8f	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4581-4610	e3c082a81763	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4618	df6427812570	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4623	5d56a4cfd797	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4633	643ad8ee236f	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4636	b5d70e240b21	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4638	e8c710daa5df	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4640	f1da974dc3f8	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4643	0a4ce3543f72	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4655	127b2d6d28a2	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4657	2bba7b98f18c	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4661	d7499fc733ef	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4665	cca7c2aebca1	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4671	358542dfdde2	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4675	34ef1e4adc81	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4691-4711	0bab462f4cae	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4712	1169a7437716	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4717	ddec64ee1a19	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4722	2e70eebc0e81	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4734	d289c1f457aa	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4739	eaec7de21ff9	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4743	0ba026ffd5b4	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	5232	b6f6160244ad	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	5595-5619	8553b169523e	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	8080-8137	fc3daf07423b	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPCID.cs	12478	aa194f953e47	3e9b054a3011
-crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	TileID.cs	297	c650266fdef3	3e9b054a3011
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	Luck.cs	31-37	a68ae01c16a6	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	Luck.cs	53-60	7313c71475a7	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	329	3f5b56282cf3	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4168	6ac0dcf5eee6	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4202	79270df541b7	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4539	b987ef793279	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4539-4740	28249b777d8c	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4544	4bd03aff4c52	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4549	a1aa192f1d7b	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4554	6c8f1ac69d25	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4556	ea8cf23400ba	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4561	6df23720c6ba	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4566	5f9655c82b68	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4569	1a1ae472ca8f	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4581-4610	e3c082a81763	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4618	df6427812570	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4623	5d56a4cfd797	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4633	643ad8ee236f	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4636	b5d70e240b21	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4638	e8c710daa5df	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4640	f1da974dc3f8	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4643	0a4ce3543f72	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4655	127b2d6d28a2	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4657	2bba7b98f18c	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4661	d7499fc733ef	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4665	cca7c2aebca1	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4671	358542dfdde2	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4675	34ef1e4adc81	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4691-4711	0bab462f4cae	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4712	1169a7437716	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4717	ddec64ee1a19	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4722	2e70eebc0e81	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4734	d289c1f457aa	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4739	eaec7de21ff9	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4744-4769	e365557f93f5	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4771-4816	3f805efb1e2c	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	4772-4815	c7500270d326	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	5232	b6f6160244ad	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	5595-5619	8553b169523e	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPC.cs	8080-8137	fc3daf07423b	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPCID.cs	10451-10460	836014b98cc7	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPCID.cs	12478	aa194f953e47	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	NPCID.cs	4812-4815	54a8b7866a97	d1af5f0f3c45
+crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick	TileID.cs	297	c650266fdef3	d1af5f0f3c45
 crates/terrustia/src/game/spawn.rs	fn seasonal_night_pick :: const EYES	NPC.cs	4577-4612	86bc2be55f33	d5d3bd22ee32
 crates/terrustia/src/game/spawn.rs	fn sky_behind_player	NPC.cs	413	0c04ac8013cd	7f52730ae2d8
 crates/terrustia/src/game/spawn.rs	fn sky_pick	Luck.cs	5-16	b5c6475a946f	e0f0cc73bb2c
@@ -2280,109 +2289,112 @@ crates/terrustia/src/game/spawn.rs	fn tower_pool :: const STARDUST	NPC.cs	1349	d
 crates/terrustia/src/game/spawn.rs	fn tower_pool :: const VORTEX	NPC.cs	1328	9c1d3be83a7b	8611eac7bdb6
 crates/terrustia/src/game/spawn.rs	fn town_suppression_applies	NPC.cs	404-409	e331cc2e8d73	b19a67dd1c2b
 crates/terrustia/src/game/spawn.rs	fn town_suppression_applies	NPC.cs	800	232e19bc35a6	b19a67dd1c2b
-crates/terrustia/src/game/spawn.rs	fn try_spawn	Main.cs	9880-10745	28c2343ce91d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1003	f3acd4591230	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1058	7c308fab221f	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1144	3516f82c9d1d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1202	5f741b9d242a	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1297-1372	d3d1c4460999	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1383	4848e7756ede	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1387-1391	c98131137d4d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1571-1574	d0db59677916	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1586-1628	6a649cd3bc8a	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1588-1656	bcf07cc344d6	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1662	3fdb4b6368b0	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1682-1765	0b3564a1cdff	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1766-2085	8b60dd53af5b	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2099	41205183dfa4	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2101-2115	bf9b63951cc5	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2116-2407	c8937230e569	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2363	1375ba83f8c2	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2409-2413	61bb39eec634	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2416-2420	87e5e329b7ee	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2442-2448	143e46db8144	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2487-2534	baa74986fcb8	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2562-2578	ab90c19a24d0	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2580	8760303ce4dd	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2584-2599	68f719b10530	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2588	dc1ccbd80be8	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2629	1506fab20afb	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2631-2645	ee25c6f7b3f8	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2646-2654	6d8b5955a8df	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	266	ab8587ddfeed	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2661-2722	cba3e8b58cc0	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2723-2747	dfe000d1cee9	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2748	55b10ef7ceea	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2748-2771	0c226669cc54	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2796-2799	dcd0d4484557	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	291-306	f8bd87f17068	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	312-313	5f6a47062647	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	312-317	51c260b5e63b	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3614	0ba026ffd5b4	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3616-3624	5d31d111d603	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3625	8cff4541ac09	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3629	7f7afcd7fda9	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3629-3632	efa06340508e	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3637	f9a8e790445d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3637-3702	e57584247b6f	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3674	11079c6abc92	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3704	0f6f7a3e9782	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	372	ac6c0b642a2c	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3737	08892a173c3e	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3776-3805	40906eacc62d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3802	8d3faef201f0	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	381	7b4bfe968c36	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	382-397	e20285c31501	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3831	1375ba83f8c2	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3914	e372afeb6850	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3914-3924	ef95eae2f4d7	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3929-3948	497ca4c786c9	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3952	9bf3a236de24	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3952-4022	4ac181bb6905	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4039-4061	ffc881bb11b8	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	404-409	e331cc2e8d73	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4066	f2572e7a832d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	411	95816e39ff3a	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4125	84f0fb1a4643	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	414	796dcaca80e7	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4168	6ac0dcf5eee6	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4202	79270df541b7	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4204	6a5021f15c35	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4482-4485	1b75168ac76d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4486-4493	a2bb7d86fd8b	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4494-4501	d0620079e79b	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4770-4816	2b276dffb912	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4871	c4b482beed98	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4877	5cfef7ac17cd	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4881-4884	c7cf57676192	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4921-4924	8b6b9e22fb36	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4925	cac5a6c6ca1e	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4925-4935	516cb7fee041	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5004	0812d29fe1d2	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5004-5010	191c3892aa35	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5005-5199	fdc70a1a6f1f	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5021	0ba026ffd5b4	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5088	319b2c90e291	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5100	58c38cd05b12	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5110	967f81b0e210	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5209	e86aa8f7c550	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	543	718519f48a0c	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	56866-56931	fc07713d9aaa	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5882	8f1ecd2e7ff3	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	591-660	79c2fe6ae2f2	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	686	4ffaefcc81db	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	772	5f9c0bbe533e	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	795-924	9a4f0dd9d696	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	977	3a37a185472d	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	979-986	ee4254df6aa0	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	981	616240c38252	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	983	d5e06db34b7a	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	990-993	fddb74e3e2e5	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	670-693	9efe3e53e8ba	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	693	6d54c2f4d31e	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	706	3f51501d00b7	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	TileID.cs	355	c6c87371c95b	19780debf2ac
-crates/terrustia/src/game/spawn.rs	fn try_spawn	WorldGen.cs	11003-11014	d16e939a4e30	19780debf2ac
+crates/terrustia/src/game/spawn.rs	fn try_spawn	Main.cs	2785	7658a71b701a	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	Main.cs	9880-10745	28c2343ce91d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1003	f3acd4591230	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1058	7c308fab221f	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1144	3516f82c9d1d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1202	5f741b9d242a	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1286	a4643db5f1ec	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1297-1372	d3d1c4460999	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1383	4848e7756ede	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1387-1391	c98131137d4d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1571-1574	d0db59677916	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1586-1628	6a649cd3bc8a	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1588-1656	bcf07cc344d6	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1662	3fdb4b6368b0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1682-1765	0b3564a1cdff	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	1766-2085	8b60dd53af5b	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2099	41205183dfa4	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2101-2115	bf9b63951cc5	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2116-2407	c8937230e569	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2363	1375ba83f8c2	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2409-2413	61bb39eec634	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2416-2420	87e5e329b7ee	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2442-2448	143e46db8144	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2487-2534	baa74986fcb8	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2562-2578	ab90c19a24d0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2580	8760303ce4dd	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2584-2599	68f719b10530	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2588	dc1ccbd80be8	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2629	1506fab20afb	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2631-2645	ee25c6f7b3f8	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2646-2654	6d8b5955a8df	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	266	ab8587ddfeed	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2661-2722	cba3e8b58cc0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2723-2747	dfe000d1cee9	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2748	55b10ef7ceea	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2748-2771	0c226669cc54	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	2796-2799	dcd0d4484557	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	291-306	f8bd87f17068	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	312-313	5f6a47062647	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	312-317	51c260b5e63b	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3614	0ba026ffd5b4	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3616-3624	5d31d111d603	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3625	8cff4541ac09	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3629	7f7afcd7fda9	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3629-3632	efa06340508e	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3637	f9a8e790445d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3637-3702	e57584247b6f	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3674	11079c6abc92	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3704	0f6f7a3e9782	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	372	ac6c0b642a2c	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3737	08892a173c3e	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3772	d020c8d4a9c0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3776-3805	40906eacc62d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3802	8d3faef201f0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	381	7b4bfe968c36	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	382-397	e20285c31501	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3831	1375ba83f8c2	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3914	e372afeb6850	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3914-3924	ef95eae2f4d7	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3929-3948	497ca4c786c9	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3952	9bf3a236de24	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	3952-4022	4ac181bb6905	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4039-4061	ffc881bb11b8	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	404-409	e331cc2e8d73	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4066	f2572e7a832d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	411	95816e39ff3a	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4125	84f0fb1a4643	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	414	796dcaca80e7	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4168	6ac0dcf5eee6	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4202	79270df541b7	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4204	6a5021f15c35	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4482-4485	1b75168ac76d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4486-4493	a2bb7d86fd8b	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4494-4501	d0620079e79b	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4770-4816	2b276dffb912	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4871	c4b482beed98	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4877	5cfef7ac17cd	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4881-4884	c7cf57676192	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4921-4924	8b6b9e22fb36	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4925	cac5a6c6ca1e	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	4925-4935	516cb7fee041	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5004	0812d29fe1d2	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5004-5010	191c3892aa35	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5005-5199	fdc70a1a6f1f	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5021	0ba026ffd5b4	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5088	319b2c90e291	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5100	58c38cd05b12	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5110	967f81b0e210	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5209	e86aa8f7c550	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	543	718519f48a0c	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	56866-56931	fc07713d9aaa	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	5882	8f1ecd2e7ff3	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	591-660	79c2fe6ae2f2	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	686	4ffaefcc81db	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	772	5f9c0bbe533e	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	795-924	9a4f0dd9d696	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	977	3a37a185472d	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	979-986	ee4254df6aa0	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	981	616240c38252	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	983	d5e06db34b7a	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	NPC.cs	990-993	fddb74e3e2e5	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	670-693	9efe3e53e8ba	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	693	6d54c2f4d31e	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	SceneMetrics.cs	706	3f51501d00b7	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	TileID.cs	355	c6c87371c95b	cecec0337597
+crates/terrustia/src/game/spawn.rs	fn try_spawn	WorldGen.cs	11003-11014	d16e939a4e30	cecec0337597
 crates/terrustia/src/game/spawn.rs	fn try_spawn :: const MOON_LORD	NPC.cs	358-362	7f974637a5f6	977e4868cca2
 crates/terrustia/src/game/spawn.rs	fn try_spawn :: const MOON_LORD	NPC.cs	6036	8e053a031264	977e4868cca2
 crates/terrustia/src/game/spawn.rs	fn underground_desert_pick	NPC.cs	1684-1692	69b7b3bfa279	c59207bd82ed
@@ -2430,6 +2442,12 @@ crates/terrustia/src/game/spawn.rs	fn water_surface	NPC.cs	2014-2025	7ed8ea42eb2
 crates/terrustia/src/game/spawn.rs	fn water_surface	NPC.cs	2120-2143	b1603757688d	c3892a5f97ab
 crates/terrustia/src/game/spawn.rs	fn water_surface	NPC.cs	2224-2236	81e905b18c39	c3892a5f97ab
 crates/terrustia/src/game/spawn.rs	fn water_tile	NPC.cs	1058	7c308fab221f	02c988dac684
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	MessageBuffer.cs	1106	81c7ee727ea9	156b01c6fa3f
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	NPC.cs	266	ab8587ddfeed	156b01c6fa3f
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	NPC.cs	416	1b973667c221	156b01c6fa3f
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	NPC.cs	5599-5600	a9b4286380e6	156b01c6fa3f
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	NPC.cs	5601	07a9a931fb27	156b01c6fa3f
+crates/terrustia/src/game/spawn.rs	fn zombie_settings	NPC.cs	5606-5614	f4774622fc2c	156b01c6fa3f
 crates/terrustia/src/game/spawn.rs	fn zones_at	SceneMetrics.cs	367-372	bd1829084d59	c29dfa66441e
 crates/terrustia/src/game/spawn.rs	fn zones_at	SceneMetrics.cs	601	ea439a3d8a8b	c29dfa66441e
 crates/terrustia/src/game/spawn.rs	fn zones_at	SceneMetrics.cs	648-664	c20c84e50f16	c29dfa66441e
@@ -2479,10 +2497,16 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn a_dungeon_hangs_its_traps_on_
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_dungeon_hangs_its_traps_on_the_brick_they_belong_to :: const ANCHOR_OUT	NPC.cs	91002-91017	df5e97503236	f02648645396
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_dungeon_hangs_its_traps_on_the_brick_they_belong_to :: const SLAB_WALL	NPC.cs	2634	5e64e47cc654	a62b2805df9b
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_dungeon_hangs_its_traps_on_the_brick_they_belong_to :: const SLAB_WALL	NPC.cs	2638	d341a033aa59	a62b2805df9b
-crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	3616-3624	5d31d111d603	7599b878be38
-crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5820-5848	7d617d43f92c	7599b878be38
-crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5829	2db6c8ad13b8	7599b878be38
-crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5843	265ff7dc066a	7599b878be38
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	3616-3624	5d31d111d603	cb0c3b5bb3fd
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5820-5848	7d617d43f92c	cb0c3b5bb3fd
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5829	2db6c8ad13b8	cb0c3b5bb3fd
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fallen_log_is_what_puts_fairies_underground	NPC.cs	5843	265ff7dc066a	cb0c3b5bb3fd
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	416	1b973667c221	3e8fb6528666
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	5595-5619	8553b169523e	3e8fb6528666
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	5598	16cf9fc45772	3e8fb6528666
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	5599	d69906fda807	3e8fb6528666
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	5601	07a9a931fb27	3e8fb6528666
+crates/terrustia/src/game/spawn.rs	mod tests :: fn a_fresh_character_doubles_the_torch_zombies_odds	NPC.cs	5606-5613	d0b52d421ef6	3e8fb6528666
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_frog_draw_can_be_a_bound_yellow_slime_until_it_is_freed	NPC.cs	5621-5634	6a95045edd38	dd7991267aee
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_full_moon_in_hardmode_brings_out_the_werewolves	NPC.cs	4633	643ad8ee236f	700296180250
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_graveyard_brings_out_the_ghosts_and_the_wedding	NPC.cs	4544	4bd03aff4c52	ea76f985a1c5
@@ -2531,16 +2555,20 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn a_windy_day_turns_the_butterf
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_windy_surface_day_blows_a_balloon_and_a_dandelion_downwind	NPC.cs	1016-1019	f2e64b8fa483	f1604c9bec70
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_windy_surface_day_blows_a_balloon_and_a_dandelion_downwind	NPC.cs	4494-4501	d0620079e79b	f1604c9bec70
 crates/terrustia/src/game/spawn.rs	mod tests :: fn a_wyvern_can_be_drawn_in_the_sky_in_hardmode	NPC.cs	1412	0812d29fe1d2	d2906595695b
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2122	7ec540ad125a	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2409	de50bc340fb6	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2416-2420	87e5e329b7ee	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2748-2766	0f94fc2f7c50	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2796-2799	dcd0d4484557	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	3776-3805	40906eacc62d	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	3914-3924	ef95eae2f4d7	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	4486-4501	bffc1f38d316	1a33f8a112a2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	4925-4935	516cb7fee041	1a33f8a112a2
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2122	7ec540ad125a	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2409	de50bc340fb6	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2416-2420	87e5e329b7ee	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2748-2766	0f94fc2f7c50	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	2796-2799	dcd0d4484557	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	3772-3775	2c97e6587d74	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	3776-3805	40906eacc62d	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	3914-3924	ef95eae2f4d7	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	4486-4501	bffc1f38d316	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	4925-4935	516cb7fee041	13abe14fb292
+crates/terrustia/src/game/spawn.rs	mod tests :: fn ambient_roster	NPC.cs	5051	96fa05c2c58e	13abe14fb292
 crates/terrustia/src/game/spawn.rs	mod tests :: fn an_attempt_every_water_arm_declines_falls_through_to_the_land_chain	NPC.cs	1988	3b818de056ef	13ab6afaaf4b
+crates/terrustia/src/game/spawn.rs	mod tests :: fn an_ordinary_night_hands_out_torches_and_all_seven_zombies	NPC.cs	4722	2e70eebc0e81	4360b253563f
+crates/terrustia/src/game/spawn.rs	mod tests :: fn an_ordinary_night_hands_out_torches_and_all_seven_zombies	NPC.cs	4771-4816	3f805efb1e2c	4360b253563f
 crates/terrustia/src/game/spawn.rs	mod tests :: fn bound_townsfolk_are_gated_on_real_progression	NPC.cs	2087-2091,2656	054ef892dd1f	07df3aab9e74
 crates/terrustia/src/game/spawn.rs	mod tests :: fn cattails_in_the_rain_bring_dragonflies	NPC.cs	2200-2218	27fae920e109	44609ba4dc33
 crates/terrustia/src/game/spawn.rs	mod tests :: fn cavern_floor	NPC.cs	2557	585bc20b8571	767b66947ca8
@@ -2549,8 +2577,14 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn check_to_spawn_rock_golem_wan
 crates/terrustia/src/game/spawn.rs	mod tests :: fn christmas_puts_the_zombies_in_sweaters	NPC.cs	4739	eaec7de21ff9	8ce9d85a98d9
 crates/terrustia/src/game/spawn.rs	mod tests :: fn christmas_puts_the_zombies_in_sweaters	NPC.cs	5660-5662	f69faeb92375	8ce9d85a98d9
 crates/terrustia/src/game/spawn.rs	mod tests :: fn christmas_puts_the_zombies_in_sweaters	NPC.cs	5678-5685	a29b06e6dbe7	8ce9d85a98d9
+crates/terrustia/src/game/spawn.rs	mod tests :: fn doctor_bones_walks_the_jungle_grass_after_dark	NPC.cs	3772-3775	2c97e6587d74	7564725135ec
 crates/terrustia/src/game/spawn.rs	mod tests :: fn each_evil_keeps_its_own_goldfish_in_the_water	NPC.cs	1999	30c02ca01516	22a597a1b4d8
 crates/terrustia/src/game/spawn.rs	mod tests :: fn each_evil_keeps_its_own_goldfish_in_the_water	NPC.cs	1999-2008	0ee3006c0df5	22a597a1b4d8
+crates/terrustia/src/game/spawn.rs	mod tests :: fn expert_ice_underfoot_is_the_armed_eskimos_only_home	NPC.cs	4665	cca7c2aebca1	d20dac5e471b
+crates/terrustia/src/game/spawn.rs	mod tests :: fn expert_mode_arms_the_zombies	Main.cs	2785	7658a71b701a	a06a4a0a4b7c
+crates/terrustia/src/game/spawn.rs	mod tests :: fn expert_mode_arms_the_zombies	NPC.cs	4724	d65ec872f512	a06a4a0a4b7c
+crates/terrustia/src/game/spawn.rs	mod tests :: fn expert_mode_arms_the_zombies	NPC.cs	4744	ca4fc099a1f3	a06a4a0a4b7c
+crates/terrustia/src/game/spawn.rs	mod tests :: fn expert_mode_arms_the_zombies	NPC.cs	4744-4769	e365557f93f5	a06a4a0a4b7c
 crates/terrustia/src/game/spawn.rs	mod tests :: fn far_off_monsters_do_not_cap_a_lone_player	NPC.cs	313	1ab7b889844e	72e7f21e7fd1
 crates/terrustia/src/game/spawn.rs	mod tests :: fn forest_surface	NPC.cs	1206	aa98f627787f	b5f0567a5e96
 crates/terrustia/src/game/spawn.rs	mod tests :: fn forest_surface	NPC.cs	4125	84f0fb1a4643	b5f0567a5e96
@@ -2574,13 +2608,16 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn marble_and_granite_are_where_
 crates/terrustia/src/game/spawn.rs	mod tests :: fn marble_and_granite_are_where_those_four_live	NPC.cs	5039	fc185e8ac55a	8d58a620e66a
 crates/terrustia/src/game/spawn.rs	mod tests :: fn marble_and_granite_are_where_those_four_live	NPC.cs	5041	f55363072843	8d58a620e66a
 crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_friendly_chain	NPC.cs	81004-81043	deff8e39afb1	1f333bd5c5f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4655	127b2d6d28a2	d05d46b9f2f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4675	34ef1e4adc81	d05d46b9f2f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	16	196aac41dc90	d05d46b9f2f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	356	ba667dd353e3	d05d46b9f2f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	622	fc72dbb83522	d05d46b9f2f2
-crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	734-751	6d4df8ac7d1c	d05d46b9f2f2
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4655	127b2d6d28a2	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4675	34ef1e4adc81	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4722	2e70eebc0e81	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	NPC.cs	4744-4816	5ef0188c2a8a	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	16	196aac41dc90	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	356	ba667dd353e3	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	622	fc72dbb83522	b11319fa8b58
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_graveyard_and_the_seasonal_chain	SceneMetrics.cs	734-751	6d4df8ac7d1c	b11319fa8b58
 crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_hallowed_ground_arm	NPC.cs	4039	4b63294aaa9b	be66df0661cb
+crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_ordinary_critter_arms	NPC.cs	3772	d020c8d4a9c0	a1b4e9337714
 crates/terrustia/src/game/spawn.rs	mod tests :: fn measure_the_weather_and_dungeon_arms	NPC.cs	2631-2645	ee25c6f7b3f8	a2f1b60448b4
 crates/terrustia/src/game/spawn.rs	mod tests :: fn one_critter_in_four_hundred_is_the_gold_one	NPC.cs	2584	896f3c766efa	7e6eac7440cd
 crates/terrustia/src/game/spawn.rs	mod tests :: fn one_critter_in_four_hundred_is_the_gold_one	NPC.cs	6054	1f38232169cf	7e6eac7440cd
@@ -2595,13 +2632,16 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn the_biome_scan_uses_the_games
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_are_gem_critters_and_nothing_else	NPC.cs	2600-2624	ee785d8de162	993b90726998
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_hand_out_a_lost_girl	NPC.cs	30360-30389	66a5fa33fda0	dd7831431862
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_hand_out_a_lost_girl	NPC.cs	5012-5015	414405781dc4	dd7831431862
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one	NPC.cs	4925-4935	516cb7fee041	7e44b7edd490
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	4544	4bd03aff4c52	7d38397a6572
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5012	62382f94bd21	7d38397a6572
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5021	0ba026ffd5b4	7d38397a6572
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5051	96fa05c2c58e	7d38397a6572
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5078	8c631b05a4d9	7d38397a6572
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5115	d289c1f457aa	7d38397a6572
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_hand_out_the_skeleton_look_alikes_and_expert_adds_the_throwers	NPC.cs	5120	498fb0636d0f	7de3bbc71b0d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_hand_out_the_skeleton_look_alikes_and_expert_adds_the_throwers	NPC.cs	5141-5199	e1f7328b7ebe	7de3bbc71b0d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one	NPC.cs	4925-4935	516cb7fee041	183ab90c8eac
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	4544	4bd03aff4c52	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5012	62382f94bd21	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5021	0ba026ffd5b4	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5051	96fa05c2c58e	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5078	8c631b05a4d9	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5115	d289c1f457aa	e14ddebd753d
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_have_a_season_of_their_own	NPC.cs	5141-5199	e1f7328b7ebe	e14ddebd753d
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_offer_a_bound_old_slime_once_skeletron_is_down	NPC.cs	2095	dfd83a501593	722f272c4083
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_caverns_offer_a_skeleton_merchant_at_any_progression	NPC.cs	5004-5010	191c3892aa35	26173f028dfd
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_desert_wall_is_read_on_the_ground_tile_and_the_one_above_it	NPC.cs	5535-5556	5088dcafd84c	8bbd01a23b1e
@@ -2642,7 +2682,7 @@ crates/terrustia/src/game/spawn.rs	mod tests :: fn the_mushroom_roster_hangs_off
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_mushroom_roster_hangs_off_the_ground_tile	NPC.cs	5110	967f81b0e210	0e17681f828c
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_mushroom_roster_hangs_off_the_ground_tile	NPC.cs	5209	e86aa8f7c550	0e17681f828c
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_nearest_book_is_nearest_the_corner_of_the_box	NPC.cs	62954-63010	4eb4ea2a33e0	7fe31597b232
-crates/terrustia/src/game/spawn.rs	mod tests :: fn the_new_moon_is_the_night_of_the_eyes	NPC.cs	4554	6c8f1ac69d25	0661db4f35d4
+crates/terrustia/src/game/spawn.rs	mod tests :: fn the_new_moon_is_the_night_of_the_eyes	NPC.cs	4554	6c8f1ac69d25	f8189a812e6a
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand	NPC.cs	1798	b032cda7a541	97adb548b780
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand	NPC.cs	1800	6ba237ff11f9	97adb548b780
 crates/terrustia/src/game/spawn.rs	mod tests :: fn the_ocean_roster_comes_out_of_water_and_not_off_the_sand	NPC.cs	1859-1926	9f3e717383d7	97adb548b780
@@ -2712,15 +2752,26 @@ crates/terrustia/src/game/spawn.rs	struct EventSpawns	SceneMetrics.cs	276-282	6f
 crates/terrustia/src/game/spawn.rs	struct EventSpawns	SceneMetrics.cs	706	3f51501d00b7	12e9624ec1b9
 crates/terrustia/src/game/spawn.rs	struct EventSpawns	SceneMetrics.cs	734-751	6d4df8ac7d1c	12e9624ec1b9
 crates/terrustia/src/game/spawn.rs	struct EventSpawns	Star.cs	41-60	e00943632df3	12e9624ec1b9
-crates/terrustia/src/game/spawn.rs	struct Seasonal	Main.cs	13290-13309	17b724fc7290	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	Main.cs	13329-13347	9deddd58d41e	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	1287	5c7f66ddd248	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	1637-1656	83d5d209fd90	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	2588-2624	5385c185601e	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	389	6aab9685e5f6	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4202	79270df541b7	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4284-4303	fcec017431a5	69c06f35c228
-crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4675	34ef1e4adc81	69c06f35c228
+crates/terrustia/src/game/spawn.rs	struct Seasonal	Main.cs	13290-13309	17b724fc7290	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	Main.cs	13329-13347	9deddd58d41e	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	Main.cs	2785	7658a71b701a	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	1287	5c7f66ddd248	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	1637-1656	83d5d209fd90	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	2588-2624	5385c185601e	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	389	6aab9685e5f6	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4202	79270df541b7	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4284-4303	fcec017431a5	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct Seasonal	NPC.cs	4675	34ef1e4adc81	44ef7ce89201
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	1286	a4643db5f1ec	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	4691	dbe70dc8c105	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	4722	2e70eebc0e81	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5595-5619	8553b169523e	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5598	16cf9fc45772	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5599	d69906fda807	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5600	a9be520165ad	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5601	07a9a931fb27	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5606-5614	f4774622fc2c	9dc5966d9283
+crates/terrustia/src/game/spawn.rs	struct ZombieSettings	NPC.cs	5615-5618	2a3acd9aec96	9dc5966d9283
 crates/terrustia/src/game/spawn.rs	struct Zones	SceneMetrics.cs	260	6155f42cd4c5	2d110bfba2d1
 crates/terrustia/src/game/spawn.rs	struct Zones	SceneMetrics.cs	268	e58b27bdba3c	2d110bfba2d1
 crates/terrustia/src/game/spawn.rs	struct Zones	SceneMetrics.cs	52	2e2297cfe238	2d110bfba2d1
