@@ -12116,8 +12116,8 @@ mod fallen_log_scan {
     /// still finds a log at some offsets and misses it at others, and a single placement would
     /// pass against the wrong constant more often than not.
     ///
-    /// Neutralised by widening the strides to `step_by(4)` and `step_by(3)`: "a log at (302, 201)
-    /// went unseen", and 30 of the 36 offsets fail.
+    /// Neutralised by widening the strides to `step_by(4)` and `step_by(3)`: "a log at (300, 201)
+    /// went unseen on load".
     #[test]
     fn a_log_anywhere_in_the_overworld_is_found() {
         for dx in 0..6 {
@@ -12172,15 +12172,15 @@ mod fallen_log_scan {
     #[test]
     fn the_margins_and_the_underground_are_outside_the_window() {
         for (x, y, what) in [
-            (20, 200, "the left margin"),
-            (750, 200, "the right margin"),
+            (20, 200, "in the left margin"),
+            (750, 200, "in the right margin"),
             (300, 295, "below the surface line"),
             (300, 40, "above the scan's ceiling"),
         ] {
             let mut world = logging_country();
             place_log(&mut world, x, y);
             let server = GameServer::new(Config::default(), world);
-            assert!(!server.fairy_log, "a log in {what} counted");
+            assert!(!server.fairy_log, "a log {what} counted");
         }
     }
 }
