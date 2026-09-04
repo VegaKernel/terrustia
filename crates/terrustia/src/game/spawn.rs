@@ -7370,7 +7370,7 @@ mod tests {
     /// Neutralised by deleting the `BUNNY if at.party` arm from `holiday_costume`: no Party Bunny
     /// in twenty thousand ticks and the first assertion fails. Neutralised again by moving that arm
     /// to the head of the chain, above both calendars: the last assertion fails with
-    /// "the chain is out of order: 303 x2013, 337 x656, 540 x18000".
+    /// "the chain is out of order: 303 x6030, 337 x1964, 540 x18020".
     ///
     /// The ordering is checked by counting rather than by membership, because at two draws in three
     /// each every arm still comes up whichever order they are in: a set of what appeared cannot
