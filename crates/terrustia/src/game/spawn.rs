@@ -6101,6 +6101,28 @@ mod tests {
             }
         }
         assert!(saw_some, "the friendly table is empty everywhere");
+
+        // ...and the same of the chain the two layers below the surface hand their draw to, whose
+        // answers never pass through the table above and so would not otherwise be checked at all.
+        for depth in [
+            Depth::Surface,
+            Depth::Underground,
+            Depth::Cavern,
+            Depth::Underworld,
+        ] {
+            for seed in 0..2_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                let Some(t) = deep_friendly_pick(depth, &mut rng) else {
+                    continue;
+                };
+                let stats = npc_stats(t).expect("a real critter type");
+                assert_eq!(
+                    stats.damage, 0,
+                    "{depth:?}'s friendly chain names the monster {}",
+                    stats.name
+                );
+            }
+        }
     }
 
     /// The underworld draws its heavies at the game's rates, not a flat uniform share. The Voodoo
