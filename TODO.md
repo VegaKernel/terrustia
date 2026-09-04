@@ -790,12 +790,23 @@ and the Crawdad/Shelly/Salamander family already documented checker false-positi
 via its own real spawner) and then reading the unreachable list for anything gating real content
 rather than cosmetic variety.
 
-- **NIGHTZOMBIE**: the whole Halloween/Graveyard/full-moon night roster is unwired
-  (`NPC.cs:4530-4650`) - Halloween zombie variants (317-337, 190-194), Ghost, HoppinJack, TheGroom,
-  TheBride, and the full-moon Werewolf (104). Neither real-date Halloween detection nor graveyard-zone
-  detection exist anywhere in the codebase; `spawn.rs` says so itself ("this project has no notion of
-  a graveyard zone"). `progress.rs`'s `downed_halloween_king`/`_tree` are Frost Moon boss flags, not
-  calendar tracking, and must not be confused with this.
+- **NIGHTZOMBIE**: ~~the whole Halloween/Graveyard/full-moon night roster is unwired~~ **done.** Two
+  lanes, and the note above was wrong about the second half of it in two ways worth recording. The
+  detection it said did not exist was the easy part: `world/calendar.rs` answers `Main.halloween` and
+  `Main.xMas` off the real date, and `ZoneGraveyard` never needed a tile scan at all, because the
+  client counts its own tombstones and sends the answer up in packet 36 like every other zone
+  (`Player::in_graveyard`). The line range was wrong too: the chain is `NPC.cs:4539-4816`, and its
+  last eighty lines are not a season's at all. They are `GetZombieSettings` (`NPC.cs:5595-5619`) and
+  the ordinary night's own fallthrough, which is where the Torch Zombie (one attempt in five for a
+  player still on their starting hundred health), the seven plain zombies, the expert armed family
+  and the Armed Zombie Eskimo live. The caverns' sibling chain ends the same way, in the plain
+  Skeleton and its three look-alikes with the Bone Throwing Skeletons above them. Doctor Bones (52)
+  turned out to be neither: his arm is jungle grass underfoot and a dark sky, at any depth
+  (`NPC.cs:3772`). `progress.rs`'s `downed_halloween_king`/`_tree` are Frost Moon boss flags, not
+  calendar tracking, and must not be confused with this. Three types stay in `docs/spawn-gaps.tsv`
+  on purpose: 450 and 451 are dead in the game's own source (`num56` is drawn once and tested
+  against zero three times, `NPC.cs:5120-5138`), and 691 is behind `RollOnlyBadLuckExtreme`, which
+  never fires for a player whose luck this server does not model.
 - **DESERT**: the entire hardmode Underground Desert roster is missing - DesertGhoul x4 (including the
   corruption/crimson/hallow-tainted variants), DesertLamia x2, SandShark x4, SandElemental,
   DesertDjinn, the giant antlions, TombCrawlerHead. Our desert pool only has Vulture/SandSlime/Antlion.
