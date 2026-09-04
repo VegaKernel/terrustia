@@ -1262,6 +1262,12 @@ pub struct Seasonal {
     /// [`crate::game::player::Player::in_graveyard`]).
     pub graveyard: bool,
     pub hard_mode: bool,
+    /// `Main.expertMode` (`Main.cs:2785`, `Difficulty >= GameDifficultyLevel.Expert`), which is the
+    /// only gate the whole armed-zombie family has: 430 and 432-436, the Armed Zombie Eskimo (431)
+    /// and the Armed Torch Zombie (591) are all behind it and behind nothing else about the world.
+    /// It sits here rather than on [`Conditions`] for the same reason the calendar does: it changes
+    /// what turns up, not how fast.
+    pub expert: bool,
     pub blood_moon: bool,
     /// `Main.dayTime`. The chain below is the *night* chain, and a graveyard is the one thing that
     /// reaches it in daylight (`NPC.cs:4202`, `if (!ZoneGraveyard && Main.dayTime)`: standing among
@@ -1279,6 +1285,66 @@ pub struct Seasonal {
     /// Christmas, then a party, then the plain bunny (`NPC.cs:1637-1656`, `:2588-2624`,
     /// `:4284-4303`).
     pub party: bool,
+}
+
+/// Which zombie this attempt would field, and how likely it is to be carrying a torch.
+///
+/// `NPC.GetZombieSettings` (`NPC.cs:5595-5619`), whose four out-parameters decide every one of the
+/// surface night's closing arms. Vanilla calls it once at the top of `SpawnAnNPC` (`NPC.cs:1286`),
+/// before any other roll in the chain, and every arm below reads the same answer: the armed zombie
+/// and the plain zombie are the *same* style with a different sprite, which is why the two cannot
+/// each roll their own.
+///
+/// The fourth out-parameter, `maggotZombieChance`, is not a field here: it is set to 20
+/// (`NPC.cs:5600`) and nothing in the function ever moves it, so [`seasonal_night_pick`] carries it
+/// inline with the same citation.
+#[derive(Clone, Copy, Debug)]
+pub struct ZombieSettings {
+    /// `zombieStyle`, `Main.rand.Next(7)` (`NPC.cs:5601`): 0 to 6, indexing both the armed family
+    /// and the plain one.
+    pub style: u8,
+    /// `spawnArmedZombies` (`NPC.cs:5598`), which starts true and is cleared in one place only:
+    /// `WorldGen.Skyblock.lowTiles && !DownedAnyPreHardmodeBoss` (`NPC.cs:5615-5618`). This server
+    /// generates no Skyblock world, so the field is here for the shape rather than because anything
+    /// can currently clear it, and the narrowing is the same one the Skyblock arm at `NPC.cs:4691`
+    /// already carries.
+    pub armed: bool,
+    /// `torchZombieChance` (`NPC.cs:5599`, `:5606-5614`), the one-in-N behind `NPC.cs:4722`.
+    pub torch_chance: u32,
+}
+
+/// [`ZombieSettings`] for one spawn attempt.
+///
+/// `starting_health` is vanilla's `playerHasStartingHealth` (`NPC.cs:416`,
+/// `player.statLifeMax <= 100`), read off the player the attempt is for. It is not a curiosity: a
+/// fresh character has exactly 100, so on an ordinary server the torch zombie's odds start at one
+/// in five rather than one in twelve, and a crowd sharpens them further.
+///
+/// The caller reads it off `Player::life_max`, which is the same number: packet 16's second field
+/// is assigned straight to `statLifeMax` (`MessageBuffer.cs:1106`), the base maximum rather than
+/// `statLifeMax2`, which is what carries a player's equipment bonuses and is what `NPC.cs:416`
+/// deliberately does not read.
+///
+/// `active_players` is `numberOfActivePlayers` (`NPC.cs:266`), the same count [`Conditions`]
+/// already carries.
+pub fn zombie_settings(
+    starting_health: bool,
+    active_players: u32,
+    rng: &mut SmallRng,
+) -> ZombieSettings {
+    // NPC.cs:5599-5600, the two defaults, and `:5601` the style.
+    let mut torch_chance: i32 = 12;
+    let style = rng.random_range(0..7u8);
+    // NPC.cs:5606-5614. Integer division, then a floor of 2, exactly as the game writes it: five
+    // players still leave the chance at 3, and six or more sit on the floor.
+    if starting_health {
+        torch_chance = (5 - (active_players / 2) as i32).max(2);
+    }
+    ZombieSettings {
+        style,
+        armed: true,
+        torch_chance: torch_chance as u32,
+    }
 }
 
 /// The surface night chain's own arms, ahead of the ordinary pool: `NPC.cs:4539-4740`.
@@ -1303,29 +1369,37 @@ pub struct Seasonal {
 ///   rolls and hand the draw back, which is what the promise above is worth: without them a snowy
 ///   hardmode night would answer with a Wolf where the game had already answered with an armour.
 ///   (The line numbers here were `:4636` and `:4640` and named the wrong arm; both are corrected.)
-/// * `NPC.cs:4665` the Armed Zombie Eskimo, whose gate is `Main.expertMode` and nothing this
-///   signature can see. It is the third branch of the snow arm below, so skipping it hands its
-///   share to the arm's own fallthrough, which is 161 and already in [`pool`]'s snow night. 431
-///   stays disclosed.
 /// * `NPC.cs:4691-4711` the Skyblock arm, for a world shape this server does not generate.
 /// * `NPC.cs:4712` the Moss Zombie, which is gated on `RollOnlyBadLuckExtreme(30) == 0`. That
 ///   returns `-1` for any player whose luck is not negative (`Luck.cs:53-60`), and this server
 ///   models no luck at all, so the arm cannot fire here any more than it fires for a vanilla player
 ///   with no luck effects. Same reasoning, and the same citation, as the `rate * 0.85` bonus
 ///   [`rates`] declines to transcribe. NPC 691 therefore stays in `docs/spawn-gaps.tsv` on purpose.
-/// * `NPC.cs:4722` the Torch Zombie and `:4743` the armed and styled zombies, which are the
-///   ordinary zombie's own variants rather than a season's.
 ///
-/// The negative ids vanilla spawns alongside four of these arms (`-38` to `-43`, `NPC.cs:4569`,
-/// `:4581-4610`, and `-54`/`-55` in the rain arm) are not types: `NPCID.FromNetId`
-/// (`NPCID.cs:12478`) maps them back onto the very same NPC with a size multiplier
-/// (`NPC.cs:8080-8137`), so `SmallRainZombie` and `BigRainZombie` are both 223.
-/// `tools/check_spawn_reach.py` drops them from vanilla's roster for that reason, and nothing here
-/// models NPC scale, so they are dropped here too.
+/// The chain's own last arm answers rather than handing back, which is the one place this differs
+/// in shape from [`cavern_seasonal_pick`]: vanilla's surface night ends in a zombie
+/// (`NPC.cs:4771-4816`) and not in a pool, so the fallthrough is transcribed and [`pool`]'s surface
+/// night is reached only through the arms above that hand the draw back on purpose.
+///
+/// The negative ids vanilla spawns alongside six of these arms (`-38` to `-43`, `NPC.cs:4569`,
+/// `:4581-4610`; `-54`/`-55` in the rain arm; and `-26` to `-37` and `-44`/`-45` in the closing
+/// switch, `:4772-4815`) are not types: `NPCID.FromNetId` (`NPCID.cs:12478`) maps them back onto
+/// the very same NPC with a size multiplier (`NPC.cs:8080-8137`) through `NetIdMap`
+/// (`NPCID.cs:10451-10460`), so `SmallRainZombie` and `BigRainZombie` are both 223 and
+/// `Small`/`Big Female Zombie` are both 200. `tools/check_spawn_reach.py` drops them from vanilla's
+/// roster for that reason, and nothing here models NPC scale, so they are dropped here too. The
+/// closing switch's own `Main.rand.Next(3) == 0` size swap (`:4812-4815`) is therefore the last
+/// statement of the chain and changes nothing downstream, so unlike the rolls above it, it is not
+/// reproduced.
 ///
 /// `ground_block` is the tile the spawn stands on, the game's own `spawnTileY` (`NPC.cs:329`), which
 /// is this server's `y + 1`. Only the snow arm reads it.
-pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) -> Option<u16> {
+pub fn seasonal_night_pick(
+    at: Seasonal,
+    zombie: ZombieSettings,
+    ground_block: u16,
+    rng: &mut SmallRng,
+) -> Option<u16> {
     let one_in = |rng: &mut SmallRng, n: u32| rng.random_ratio(1, n);
 
     // NPC.cs:4539. The Raven is the season's own bird, and a graveyard has one whether or not it is
@@ -1419,8 +1493,13 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
         if !at.graveyard && at.hard_mode && one_in(rng, 3) {
             return Some(155); // Wolf
         }
-        // NPC.cs:4665's expert Armed Zombie Eskimo and `:4671`'s plain Zombie Eskimo, which is the
-        // arm's fallthrough and already in [`pool`]'s snow night. Handed back rather than answered.
+        // NPC.cs:4665, the expert Armed Zombie Eskimo, which is the arm's third branch and the only
+        // place in the whole spawner 431 comes from.
+        if zombie.armed && at.expert && one_in(rng, 2) {
+            return Some(431); // ArmedZombieEskimo
+        }
+        // NPC.cs:4671's plain Zombie Eskimo is the arm's fallthrough and is already in [`pool`]'s
+        // snow night, so it is handed back rather than answered.
         return None;
     }
     // NPC.cs:4675, the rain arm. All three of its outcomes are NPC 223 (`-54` and `-55` are the
@@ -1434,6 +1513,16 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
     if at.graveyard && one_in(rng, 20) {
         return Some(632); // MaggotZombie
     }
+    // NPC.cs:4722, the Torch Zombie, and the only place either it or its armed twin comes from. Its
+    // gate is neither a season nor a place: any ordinary night hands one out, and on a server whose
+    // players still have their starting hundred health it is one attempt in five rather than the
+    // one in twelve the bare default would give (see [`zombie_settings`]).
+    if one_in(rng, zombie.torch_chance) {
+        if zombie.armed && at.expert && one_in(rng, 2) {
+            return Some(591); // ArmedTorchZombie
+        }
+        return Some(590); // TorchZombie
+    }
     // NPC.cs:4734: `Main.rand.Next(319, 322)`, so 319, 320 or 321.
     if at.halloween && one_in(rng, 2) {
         return Some(319 + rng.random_range(0..3)); // ZombieDoctor, ZombieSuperman, ZombiePixie
@@ -1442,7 +1531,34 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
     if at.xmas && one_in(rng, 2) {
         return Some(331 + rng.random_range(0..2)); // ZombieXmas, ZombieSweater
     }
-    None
+    // NPC.cs:4744-4769, the armed zombies. Note which style is missing from the game's own switch:
+    // case 1 is excluded by the gate itself (`zombieStyle != 1`), because the Bald Zombie has no
+    // armed twin, and cases 0 and 2 to 6 map onto 430 and 432 to 436 in order.
+    if zombie.armed && zombie.style != 1 && at.expert && one_in(rng, 3) {
+        return Some(match zombie.style {
+            2 => 432, // ArmedZombiePincussion
+            3 => 433, // ArmedZombieSlimed
+            4 => 434, // ArmedZombieSwamp
+            5 => 435, // ArmedZombieTwiggy
+            6 => 436, // ArmedZombieCenx
+            // `short type7 = 430` is the game's own initialiser as well as its case 0, so a style
+            // the switch does not name would answer with it there too.
+            _ => 430, // ArmedZombie
+        });
+    }
+    // NPC.cs:4771-4816, the chain's fallthrough: the seven plain zombies, one per style. This is
+    // what an ordinary surface night in the game actually ends in, so it answers rather than
+    // handing the draw back to [`pool`].
+    Some(match zombie.style {
+        1 => 132, // BaldZombie
+        2 => 186, // PincushionZombie
+        3 => 187, // SlimedZombie
+        4 => 188, // SwampZombie
+        5 => 189, // TwiggyZombie
+        6 => 200, // FemaleZombie
+        // `short type8 = 3` is the initialiser and case 0 both, as above.
+        _ => 3, // Zombie
+    })
 }
 
 /// The cavern chain's own seasonal arms, ahead of the ordinary pool: `NPC.cs:5005-5199`.
@@ -1474,15 +1590,20 @@ pub fn seasonal_night_pick(at: Seasonal, ground_block: u16, rng: &mut SmallRng) 
 /// * `NPC.cs:5088`, `:5100` the ice and snow arms, which belong to the snow pool, and which is also
 ///   why the caller keeps [`Biome::Snow`] out of this chain: both of them `return` above `:5115`,
 ///   so a snow cavern never sees a Halloween skeleton.
-/// * `NPC.cs:5120` the four Bone Throwing Skeletons. The arm is `int num56 = Main.rand.Next(4)`
-///   followed by three `num56 == 0` tests in a row, so 450 and 451 are dead in the game itself and
-///   449 is one draw in four with 452 taking the rest. Transcribing the bug faithfully would still
-///   leave two of the four in the gap list, and transcribing it *unfaithfully* to clear them is the
-///   opposite of the point, so all four stay disclosed.
-/// * `NPC.cs:5145-5198` the closing `switch`, whose four cases are the plain Skeleton and its three
-///   look-alikes (201-203). [`pool`] already carries 21 for the caverns; the three variants are the
-///   same enemy with a different sprite, so they are left rather than given the pool three more
-///   entries that would quadruple the skeleton share of every cavern draw.
+/// * `NPC.cs:5127-5134`, the second and third branches of the Bone Throwing Skeleton arm. The arm
+///   is `int num56 = Main.rand.Next(4)` followed by three `num56 == 0` tests in a row, so only the
+///   first of them can ever hold: 450 and 451 are dead in the game itself, and the arm is one draw
+///   in four for 449 with 452 taking the other three. That bug is transcribed as the bug it is, so
+///   450 and 451 stay in `docs/spawn-gaps.tsv` while 449 and 452 leave it.
+///
+/// The closing `switch` (`NPC.cs:5141-5199`) answers rather than handing back, the same way
+/// [`seasonal_night_pick`]'s does and for the same reason: it is vanilla's own fallthrough for the
+/// walking half of the caverns, so [`pool`]'s cavern list is reached through the arms above that
+/// decline on purpose (the flying half at `:5005`, hardmode's nine draws in ten at `:5051`, and the
+/// Undead Miner and cavern-monster rolls at `:5083` and `:5105`) rather than by falling off the end.
+/// Its four cases are the plain Skeleton and its three look-alikes, each with a one-in-three size
+/// swap onto a negative net id (`-46` to `-53`) that `NPCID.NetIdMap` (`NPCID.cs:10451-10460`) maps
+/// straight back onto the same four types, so the swap changes nothing and is not reproduced.
 ///
 /// `glowshroom_ground` is vanilla's `ZoneGlowshroom && (tileType == 70 || tileType == 190)`, the
 /// gate both halves of the chain put in front of their Spore pair (`NPC.cs:5110` and `:5209`). The
@@ -1615,7 +1736,26 @@ pub fn cavern_seasonal_pick(
         // SkeletonTopHat, SkeletonAstonaut, SkeletonAlien
         return Some(322 + rng.random_range(0..3));
     }
-    None
+    // NPC.cs:5120-5139, the Bone Throwing Skeletons. `num56` is drawn once and then tested against
+    // zero three times, so the second and third branches are unreachable in the game: this is one
+    // draw in four for 449 and three in four for 452, and 450 and 451 stay disclosed rather than
+    // being handed odds vanilla never gives them.
+    if at.expert && one_in(rng, 3) {
+        return Some(if rng.random_range(0..4) == 0 {
+            449 // BoneThrowingSkeleton
+        } else {
+            452 // BoneThrowingSkeleton4
+        });
+    }
+    // NPC.cs:5141-5199, the chain's fallthrough: `Main.rand.Next(4)` over the plain Skeleton and its
+    // three look-alikes.
+    const SKELETONS: [u16; 4] = [
+        21,  // Skeleton
+        201, // HeadacheSkeleton
+        202, // MisassembledSkeleton
+        203, // PantlessSkeleton
+    ];
+    Some(SKELETONS[rng.random_range(0..SKELETONS.len())])
 }
 
 /// What hallowed ground offers ahead of the hallow pool (`NPC.cs:4039-4061`).
@@ -2489,6 +2629,19 @@ const SPIKE_BALL_AI_STYLE: i32 = 20;
 /// down (`NPC.cs:4925-4935`, [`CAVERN_BEETLE_ODDS`]).
 const LAC_BEETLE: u16 = 219;
 const LAC_BEETLE_ODDS: u32 = 60;
+
+/// Doctor Bones (`NPCID.DoctorBones`), the one arm directly above the Lac Beetle's in the same
+/// chain: `tileType == 60 && RollLuck(500) == 0 && !Main.dayTime` (`NPC.cs:3772-3775`).
+///
+/// Jungle grass at night and nothing else. It carries no depth gate, no biome gate and no
+/// progression gate, so a jungle *surface* at night offers him as readily as an underground one,
+/// which is why he goes in the outer chain here rather than into any pool: neither the surface's
+/// seasonal chain nor the jungle's pool is reached from where vanilla answers with him.
+///
+/// `RollLuck(500)` is a plain `Main.rand.Next(500)` at luck zero (`Luck.cs:5-16`), the same
+/// narrowing every other `Roll*Luck` call site in this file makes.
+const DOCTOR_BONES: u16 = 52;
+const DOCTOR_BONES_ODDS: u32 = 500;
 const WORM: u16 = 357;
 const WORM_ODDS: u32 = 8;
 const MOUSE: u16 = 300;
@@ -5356,6 +5509,15 @@ pub fn try_spawn(
             xmas: world.xmas,
             graveyard: conditions.graveyard,
             hard_mode: events.hard_mode,
+            // `Main.expertMode` is `Main.Difficulty >= 2` (`Main.cs:2785`), and `Main.Difficulty`
+            // in a Journey world is the slider rather than the world's own mode. The same two-line
+            // shape `Server::effective_difficulty` uses, written here because `try_spawn` already
+            // holds both halves of it and needs no accessor to reach them.
+            expert: if journey_world {
+                journey.difficulty_multiplier()
+            } else {
+                terrustia_proto::difficulty::of_game_mode(world.game_mode)
+            } >= 2.0,
             blood_moon: world.blood_moon,
             day_time: world.day_time,
             moon_phase: world.moon_phase,
@@ -5378,6 +5540,14 @@ pub fn try_spawn(
         if rng.random_range(0..rate.max(1)) != 0 {
             continue;
         }
+        // `GetZombieSettings` (`NPC.cs:1286`), which vanilla draws at the top of `SpawnAnNPC` and so
+        // reaches only once the cap and the rate roll have both let an attempt through. Here for the
+        // same reason: it costs one `rng` draw, and put above the rate roll it would cost that draw
+        // on every player on every tick instead of on the one attempt in six hundred that gets this
+        // far. It is drawn once per attempt rather than once per candidate tile, which is one draw
+        // fewer than the game makes and changes nothing: the style is independent of where in the
+        // box the candidate lands.
+        let zombie = zombie_settings(player.life_max <= 100, active_players, rng);
         // `spawnFriendly` (`NPC.cs:795-924`, see `rates`'s own doc): when a populated base has
         // quieted the wild, this attempt draws a harmless critter instead of a monster rather than
         // being thrown away. It is carried down into the candidate loop below, where the same
@@ -5935,6 +6105,15 @@ pub fn try_spawn(
                 // (`:2629`) returns long before this arm, so a dungeon never reaches it in the game
                 // either. The Lac Beetle carries none of them: its gate is jungle grass underfoot
                 // and nothing else, and the Snail's arm is the one that leaves the jungle in.
+                // Doctor Bones, the arm immediately above the Lac Beetle's in vanilla's own chain
+                // (`NPC.cs:3772`, see [`DOCTOR_BONES`]). Jungle grass and a dark sky, at any depth
+                // and in any biome, which is the whole of his gate.
+                None if ground_block == Some(JUNGLE_GRASS)
+                    && !world.day_time
+                    && rng.random_range(0..DOCTOR_BONES_ODDS) == 0 =>
+                {
+                    DOCTOR_BONES
+                }
                 None if depth != Depth::Surface
                     && ground_block == Some(JUNGLE_GRASS)
                     && rng.random_range(0..LAC_BEETLE_ODDS) == 0 =>
@@ -6314,7 +6493,7 @@ pub fn try_spawn(
                         );
                     if seasonal_ground
                         && let Some(npc_type) =
-                            seasonal_night_pick(seasonal, world.tile(x, y + 1).block, rng)
+                            seasonal_night_pick(seasonal, zombie, world.tile(x, y + 1).block, rng)
                     {
                         out.push((npc_type, (x as f32 * 16.0, y as f32 * 16.0)));
                         break;
@@ -6785,32 +6964,45 @@ mod tests {
         // deleting an arm shows up here as a type that stopped being reachable. Every combination
         // of the flags it reads, since each one opens arms the others do not, both moon phases it
         // names, and two floors, because the snow arm keys on the tile underfoot.
+        //
+        // `expert` is one of those flags now: the whole armed-zombie family hangs off it and off
+        // nothing else. The zombie settings are drawn from the same seeded stream, so the seven
+        // styles and both torch chances all turn up across a run of seeds without another loop.
         for halloween in [false, true] {
             for xmas in [false, true] {
                 for graveyard in [false, true] {
                     for hard_mode in [false, true] {
-                        for blood_moon in [false, true] {
-                            for raining in [false, true] {
-                                for moon_phase in [0u8, 4] {
-                                    let at = Seasonal {
-                                        halloween,
-                                        xmas,
-                                        graveyard,
-                                        hard_mode,
-                                        blood_moon,
-                                        day_time: false,
-                                        moon_phase,
-                                        raining,
-                                        party: false,
-                                    };
-                                    for ground_block in [2u16, 147] {
-                                        for seed in 0..4_000u64 {
-                                            let mut rng = SmallRng::seed_from_u64(seed);
-                                            set.extend(seasonal_night_pick(
-                                                at,
-                                                ground_block,
-                                                &mut rng,
-                                            ));
+                        for expert in [false, true] {
+                            for blood_moon in [false, true] {
+                                for raining in [false, true] {
+                                    for moon_phase in [0u8, 4] {
+                                        let at = Seasonal {
+                                            halloween,
+                                            xmas,
+                                            graveyard,
+                                            hard_mode,
+                                            expert,
+                                            blood_moon,
+                                            day_time: false,
+                                            moon_phase,
+                                            raining,
+                                            party: false,
+                                        };
+                                        for ground_block in [2u16, 147] {
+                                            for seed in 0..4_000u64 {
+                                                let mut rng = SmallRng::seed_from_u64(seed);
+                                                let zombie = zombie_settings(
+                                                    seed % 2 == 0,
+                                                    (seed % 8) as u32,
+                                                    &mut rng,
+                                                );
+                                                set.extend(seasonal_night_pick(
+                                                    at,
+                                                    zombie,
+                                                    ground_block,
+                                                    &mut rng,
+                                                ));
+                                            }
                                         }
                                     }
                                 }
@@ -6824,13 +7016,18 @@ mod tests {
         // Ghost's arm is gated on one of them, and both halves of the stone, because Tim's is.
         // Three floors, because two of the arms key on the stone underfoot: plain rock, marble
         // (367) and granite (368).
+        //
+        // `hard_mode` and `expert` are paired rather than crossed: hardmode turns nine draws in ten
+        // away before the Bone Throwing Skeletons are ever asked (`NPC.cs:5051`), so the expert arm
+        // needs a classic world to be sampled properly and the fourth combination adds nothing.
         for halloween in [false, true] {
             for graveyard in [false, true] {
-                for hard_mode in [false, true] {
+                for (hard_mode, expert) in [(false, false), (false, true), (true, false)] {
                     let at = Seasonal {
                         halloween,
                         graveyard,
                         hard_mode,
+                        expert,
                         ..Seasonal::default()
                     };
                     for no_worms in [false, true] {
@@ -7061,6 +7258,10 @@ mod tests {
         // tests, which is what keeps listing them here from drifting into a claim their branches
         // still make good.
         set.insert(LAC_BEETLE);
+        // ...and Doctor Bones, whose arm sits directly above the Lac Beetle's and is the same shape:
+        // a roll, a tile underfoot, and no roster behind it (`NPC.cs:3772-3775`). `try_spawn`
+        // reaching him is asserted by this module's own tests.
+        set.insert(DOCTOR_BONES);
         set.insert(WORM);
         set.insert(MOUSE);
         set.insert(SNAIL);
@@ -8218,14 +8419,21 @@ mod tests {
 
     /// The caverns' beetle pair, one draw in sixty and nothing else gating it (`NPC.cs:4925-4935`).
     ///
+    /// Two hundred thousand ticks and not the twenty thousand this used to run: a cavern at rest
+    /// answers about eight times per thousand ticks and roughly one answer in ninety is a beetle, so
+    /// the old count expected 1.7 of them and had close to a one-in-five chance of finding none. It
+    /// found one on the stream it happened to be reading until an arm above it drew a number and
+    /// reshuffled everything downstream, which is the shape of a test that was measuring luck rather
+    /// than the arm. At this count the expected haul is eighteen.
+    ///
     /// Neutralised with `&& false` on the arm: "no Cochineal Beetle (217) in the caverns: {10, 16,
-    /// 21, 44, 49, 93, 195, 300, 354, 359, 453, 496, 497, 498, 504, 506}". Neutralised again by
-    /// making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan Beetle (218) in a snowy
-    /// cavern: {147, 150, 167, 185, 217, 354, 453}".
+    /// 21, 44, 49, 93, 195, 201, 202, 203, 300, 354, 357, 359, 453, 496, 497, 498, 504, 506}".
+    /// Neutralised again by making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan
+    /// Beetle (218) in a snowy cavern: {147, 150, 167, 185, 217, 354, 453}".
     #[test]
     fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one() {
         let stone = cavern_of(1);
-        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 20_000)
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 200_000)
             .into_iter()
             .collect();
         assert!(
@@ -8240,7 +8448,7 @@ mod tests {
         // 147 is `TileID.SnowBlock`, and 1500 of them is `SnowTileNormalThreshold`.
         let snow = cavern_of(147);
         assert_eq!(biome_at(&snow, 400, 255), Biome::Snow);
-        let snowy: std::collections::BTreeSet<u16> = spawns_at(&snow, false, 400, 255, 20_000)
+        let snowy: std::collections::BTreeSet<u16> = spawns_at(&snow, false, 400, 255, 200_000)
             .into_iter()
             .collect();
         assert!(
@@ -8816,19 +9024,31 @@ mod tests {
 
     /// ...and the same swap really is reached from a spawn, rather than only from its own function.
     ///
-    /// The Gold Bunny is the cheapest of the nine to reach end to end: the surface day's friendly
-    /// pool is eight entries, so a bunny is one draw in eight and a gold one is one in three
-    /// thousand two hundred.
+    /// The assertion is "one of the twins turned up", not "the Gold Bunny turned up", and the tick
+    /// count is what makes that a claim rather than a coin toss. Half a million ticks of a forest
+    /// surface yield about thirteen hundred friendly draws, roughly a thousand of them types with a
+    /// twin, so at one in four hundred the expected haul is two or three gold critters overall but
+    /// well under one of any single *named* twin, and pinning the test to the Gold Bunny alone was
+    /// closer to a two-in-three chance of failing on any given rng stream (measured: 5 of 12 fresh
+    /// seeds passed at this tick count).
+    /// It passed on this seed until an unrelated arm above it drew one more number and reshuffled
+    /// everything downstream, which is exactly the shape of a test that was measuring luck.
+    /// [`gold_variant`]'s own test above already pins each of the nine individually and exactly;
+    /// what this one is for is the wiring, and any twin proves that.
     ///
-    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: "no Gold Bunny (443) in half
-    /// a million ticks", the set holding the eight plain critters and nothing else.
+    /// Six million ticks put the expected haul near thirty, so a run that finds none is not a run
+    /// that got unlucky.
+    ///
+    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: "no gold critter in six
+    /// million ticks", the set holding the plain critters and nothing else.
     #[test]
     fn the_gold_critters_reach_a_real_spawn() {
+        const TWINS: [u16; 8] = [442, 443, 444, 445, 447, 448, 592, 539];
         let (world, (px, py)) = forest_surface();
-        let seen = friendly_draws_with(&world, &quiet(), px, py, 500_000);
+        let seen = friendly_draws_with(&world, &quiet(), px, py, 6_000_000);
         assert!(
-            seen.contains(&443),
-            "no Gold Bunny (443) in half a million ticks: {seen:?}"
+            TWINS.iter().any(|twin| seen.contains(twin)),
+            "no gold critter in six million ticks: {seen:?}"
         );
     }
 
@@ -8967,7 +9187,9 @@ mod tests {
     /// in a logged world".
     #[test]
     fn a_fallen_log_is_what_puts_fairies_underground() {
-        const TICKS: u32 = 200_000;
+        // 200,000 was a 1-in-3 coin toss for seeing all three colours (mean 2.5 draws at a 1/1000
+        // gate); a merge-verifier's multi-seed probe found 1,000,000 gives 12/12 fresh streams.
+        const TICKS: u32 = 1_000_000;
         // `flat_world_of` puts the surface at 100 and the rock layer at 200 in a world 600 rows
         // deep, so the gate's window is row 150 (their halfway line) up to row 299, exclusive.
         let floor = 255;
@@ -9148,18 +9370,19 @@ mod tests {
             );
         }
 
-        // An ordinary cavern in the upper stone answers one thing and one only, the Lost Girl
-        // (`NPC.cs:5012`), who carries no season and no progression gate. Everything else above is
-        // therefore the season's doing rather than the chain's.
+        // An ordinary cavern in the upper stone answers the Lost Girl (`NPC.cs:5012`) and the four
+        // skeletons of the chain's own fallthrough (`:5141-5199`), and nothing else: neither
+        // carries a season or a progression gate, so everything above is the season's doing rather
+        // than the chain's.
         assert_eq!(
             set(sample(plain, false, false)),
-            std::collections::BTreeSet::from([195u16]),
-            "an ordinary cavern answered more than the Lost Girl"
+            std::collections::BTreeSet::from([21u16, 195, 201, 202, 203]),
+            "an ordinary cavern answered more than the Lost Girl and the skeletons"
         );
         // ...and the bottom half of the stone adds exactly one more: Tim (`NPC.cs:5021`).
         assert_eq!(
             set(sample(plain, false, true)),
-            std::collections::BTreeSet::from([45u16, 195]),
+            std::collections::BTreeSet::from([21u16, 45, 195, 201, 202, 203]),
             "the lower caverns should add Tim and nothing else"
         );
 
@@ -9224,6 +9447,272 @@ mod tests {
                 "{npc_type} turned up in an ordinary cavern: {ordinary:?}"
             );
         }
+    }
+
+    /// `GetZombieSettings` (`NPC.cs:5595-5619`) on its own: the torch zombie's odds are not the
+    /// constant they look like, and the style is drawn once for the whole attempt.
+    ///
+    /// The `playerHasStartingHealth` half (`NPC.cs:416`, `statLifeMax <= 100`) is the one that
+    /// matters in practice: a character who has not eaten a life crystal yet is what almost every
+    /// player on a fresh server is, and it more than doubles how often the night hands out a torch.
+    ///
+    /// Neutralised by deleting the `if starting_health` block: every row of the second table comes
+    /// back as 12 and the first assertion in it fails. Neutralised the other way, by dropping the
+    /// `.max(2)`, the six- and twenty-player rows fail instead.
+    #[test]
+    fn a_fresh_character_doubles_the_torch_zombies_odds() {
+        let mut rng = SmallRng::seed_from_u64(4);
+        // NPC.cs:5599, the bare default: a player past their first life crystals, at any headcount.
+        for players in [1u32, 4, 20] {
+            let settings = zombie_settings(false, players, &mut rng);
+            assert_eq!(settings.torch_chance, 12, "{players} players");
+            // NPC.cs:5598. Nothing outside a Skyblock world ever clears it.
+            assert!(settings.armed);
+        }
+        // NPC.cs:5606-5613: five, less half the headcount as an integer, floored at two.
+        for (players, expected) in [
+            (1u32, 5u32),
+            (2, 4),
+            (3, 4),
+            (4, 3),
+            (5, 3),
+            (6, 2),
+            (20, 2),
+        ] {
+            assert_eq!(
+                zombie_settings(true, players, &mut rng).torch_chance,
+                expected,
+                "{players} players on a fresh character"
+            );
+        }
+        // NPC.cs:5601, `Main.rand.Next(7)`: all seven, and nothing outside them.
+        let styles: std::collections::BTreeSet<u8> = (0..500u64)
+            .map(|seed| zombie_settings(false, 1, &mut SmallRng::seed_from_u64(seed)).style)
+            .collect();
+        assert_eq!(styles, (0..7u8).collect());
+    }
+
+    /// The surface night's own fallthrough, through `try_spawn`: the seven plain zombies
+    /// (`NPC.cs:4771-4816`) and the Torch Zombie above them (`:4722`).
+    ///
+    /// Six of the seven had no producer anywhere in this server, because the chain used to hand the
+    /// draw back to [`pool`] here and the pool's surface night is the plain Zombie and the Demon Eye.
+    /// The Torch Zombie is the bigger miss of the two: its arm carries no season, no biome and no
+    /// progression gate at all, so on a server of fresh characters it is one attempt in five, and it
+    /// was simply absent.
+    ///
+    /// Neutralised by returning `None` instead of the closing `Some(match zombie.style ...)`: the
+    /// six style assertions fail (the observed set is "{2, 3, 190, 191, 192, 193, 194, 590}", the
+    /// pool's own night, the coloured eyes' own arm above the tail, and the torch arm above that).
+    /// Neutralised the other way, by deleting the `NPC.cs:4722` arm, the torch assertion fails on
+    /// its own and the styles keep coming.
+    #[test]
+    fn an_ordinary_night_hands_out_torches_and_all_seven_zombies() {
+        let (world, (px, py)) = night_world();
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(seen.contains(&590), "no Torch Zombie (590): {seen:?}");
+        for (npc_type, name) in [
+            (3u16, "Zombie"),
+            (132, "BaldZombie"),
+            (186, "PincushionZombie"),
+            (187, "SlimedZombie"),
+            (188, "SwampZombie"),
+            (189, "TwiggyZombie"),
+            (200, "FemaleZombie"),
+        ] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) on an ordinary night: {seen:?}"
+            );
+        }
+        // Every armed one is behind `Main.expertMode` and this world is classic.
+        for npc_type in [430u16, 431, 432, 433, 434, 435, 436, 591] {
+            assert!(
+                !seen.contains(&npc_type),
+                "{npc_type} turned up in a classic world: {seen:?}"
+            );
+        }
+    }
+
+    /// ...and what expert mode adds to that night: the armed zombies (`NPC.cs:4744-4769`) and the
+    /// Armed Torch Zombie (`:4724`).
+    ///
+    /// `Main.expertMode` is `Main.Difficulty >= 2` (`Main.cs:2785`), which is `game_mode == 1` here.
+    /// Note which style has no armed twin: case 1, the Bald Zombie, is excluded by the arm's own
+    /// gate, so 132 keeps turning up in an expert world where the other six thin out.
+    ///
+    /// Neutralised by dropping `at.expert` from the `NPC.cs:4744` gate: 430 and 432-436 then turn up
+    /// in the classic run of the test above and its exclusion assertions fail. Neutralised by
+    /// deleting the arm outright, the six assertions here fail and the classic test still passes.
+    #[test]
+    fn expert_mode_arms_the_zombies() {
+        let (mut world, (px, py)) = night_world();
+        world.game_mode = 1;
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [
+            (430u16, "ArmedZombie"),
+            (432, "ArmedZombiePincussion"),
+            (433, "ArmedZombieSlimed"),
+            (434, "ArmedZombieSwamp"),
+            (435, "ArmedZombieTwiggy"),
+            (436, "ArmedZombieCenx"),
+            (591, "ArmedTorchZombie"),
+        ] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) in an expert world: {seen:?}"
+            );
+        }
+        // The Bald Zombie has no armed twin, so style 1 still answers with the plain one.
+        assert!(seen.contains(&132), "no BaldZombie (132): {seen:?}");
+    }
+
+    /// The snow arm's own third branch (`NPC.cs:4665`), which is the only place in the whole spawner
+    /// the Armed Zombie Eskimo comes from.
+    ///
+    /// The arm keys on the tile underfoot rather than on the player's zone, and it `return`s, so the
+    /// rest of the night's tail never runs with ice under the spawn: an expert snowfield hands out
+    /// 431 and no armed zombie of any other kind.
+    ///
+    /// The floor is a single row of ice, which is nowhere near the three hundred tiles the zone scan
+    /// wants, so this is a *forest* with ice underfoot: exactly the case that proves the arm keys on
+    /// the tile. What answers when the arm hands back is the ordinary surface-night pool.
+    ///
+    /// Neutralised by deleting the `NPC.cs:4665` branch so the arm falls straight through to its
+    /// `return None`: "no ArmedZombieEskimo (431) on expert ice: {2, 3, 190, 191, 192, 193, 194}",
+    /// the surface night's pool and its coloured eyes and nothing else.
+    #[test]
+    fn expert_ice_underfoot_is_the_armed_eskimos_only_home() {
+        let mut world = flat_world_sized(1600, 90, 161);
+        world.day_time = false;
+        world.game_mode = 1;
+        let (px, py) = (800, 88);
+        assert_eq!(depth_at(&world, py), Depth::Surface);
+
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            seen.contains(&431),
+            "no ArmedZombieEskimo (431) on expert ice: {seen:?}"
+        );
+        for npc_type in [430u16, 432, 433, 434, 435, 436, 590, 591] {
+            assert!(
+                !seen.contains(&npc_type),
+                "{npc_type} got past the snow arm's own return: {seen:?}"
+            );
+        }
+    }
+
+    /// The caverns' own fallthrough (`NPC.cs:5141-5199`) and the expert arm above it (`:5120`),
+    /// through `try_spawn`.
+    ///
+    /// Two of the four Bone Throwing Skeletons are dead in the game itself: `num56` is drawn once
+    /// and then tested against zero three times over, so 450 and 451 cannot be reached by any
+    /// vanilla player either and stay in `docs/spawn-gaps.tsv`. That is asserted here rather than
+    /// left as a comment, because the tempting thing to do with that arm is to "fix" it.
+    ///
+    /// Neutralised by returning `None` instead of the closing `Some(SKELETONS[...])`: "no
+    /// HeadacheSkeleton (201) in the caverns: {10, 16, 21, 44, 49, 93, 195, 217, 300, 354, 357, 359,
+    /// 447, 453, 496, 497, 498, 504, 506}", the plain cavern pool and the arms above. Neutralised by
+    /// deleting the `:5120` arm instead, "no BoneThrowingSkeleton (449) in an expert cavern" fails
+    /// with 201, 202 and 203 present in that same set, so the two halves are independent.
+    #[test]
+    fn the_caverns_hand_out_the_skeleton_look_alikes_and_expert_adds_the_throwers() {
+        let world = flat_world(250);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+
+        let classic: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [
+            (21u16, "Skeleton"),
+            (201, "HeadacheSkeleton"),
+            (202, "MisassembledSkeleton"),
+            (203, "PantlessSkeleton"),
+        ] {
+            assert!(
+                classic.contains(&npc_type),
+                "no {name} ({npc_type}) in the caverns: {classic:?}"
+            );
+        }
+        for npc_type in [449u16, 450, 451, 452] {
+            assert!(
+                !classic.contains(&npc_type),
+                "{npc_type} turned up in a classic world: {classic:?}"
+            );
+        }
+
+        let mut world = world;
+        world.game_mode = 1;
+        let expert: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            expert.contains(&449),
+            "no BoneThrowingSkeleton (449) in an expert cavern: {expert:?}"
+        );
+        assert!(
+            expert.contains(&452),
+            "no BoneThrowingSkeleton4 (452) in an expert cavern: {expert:?}"
+        );
+        for npc_type in [450u16, 451] {
+            assert!(
+                !expert.contains(&npc_type),
+                "{npc_type} is unreachable in the game itself and must stay unreachable here: \
+                 {expert:?}"
+            );
+        }
+    }
+
+    /// Doctor Bones (`NPC.cs:3772-3775`), whose whole gate is jungle grass underfoot and a dark sky.
+    ///
+    /// No depth, no biome and no progression: he is as much a surface find as an underground one,
+    /// which is why he sits in `try_spawn`'s own outer chain rather than in any pool. Nothing in
+    /// this server drew him at all before.
+    ///
+    /// Neutralised by deleting the arm: "no Doctor Bones (52) on a jungle surface at night:
+    /// {42, 51}", the jungle's own surface pair and nothing else. With the arm kept but
+    /// `!world.day_time` dropped, "Doctor Bones in broad daylight: {42, 51, 52}" fails instead.
+    #[test]
+    fn doctor_bones_walks_the_jungle_grass_after_dark() {
+        let mut world = flat_world_sized(1600, 90, JUNGLE_GRASS);
+        world.day_time = false;
+        let (px, py) = (800, 88);
+        assert_eq!(depth_at(&world, py), Depth::Surface);
+
+        let night: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            night.contains(&DOCTOR_BONES),
+            "no Doctor Bones ({DOCTOR_BONES}) on a jungle surface at night: {night:?}"
+        );
+
+        world.day_time = true;
+        let day: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            !day.contains(&DOCTOR_BONES),
+            "Doctor Bones in broad daylight: {day:?}"
+        );
+
+        // ...and the same arm underground, since it carries no depth gate either.
+        let mut deep = cavern_of(JUNGLE_GRASS);
+        deep.day_time = false;
+        let under: std::collections::BTreeSet<u16> = spawns_at(&deep, false, 400, 250, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            under.contains(&DOCTOR_BONES),
+            "no Doctor Bones underground: {under:?}"
+        );
     }
 
     /// The caverns hand out a Lost Girl one attempt in eighty (`NPC.cs:5012-5015`), and she is the
@@ -9811,7 +10300,8 @@ mod tests {
             let mut rng = SmallRng::seed_from_u64(99);
             (0..200_000)
                 .filter(|_| {
-                    matches!(seasonal_night_pick(at, 2, &mut rng), Some(ty) if (190..=194).contains(&ty))
+                    let zombie = zombie_settings(true, 1, &mut rng);
+                    matches!(seasonal_night_pick(at, zombie, 2, &mut rng), Some(ty) if (190..=194).contains(&ty))
                 })
                 .count()
         };
@@ -11817,6 +12307,14 @@ mod tests {
     /// graveyard, so the two arms and the two rolls above them cost about 0.6 ns of a run that
     /// happens at most once per *tick*. Written as an array of the six ice and snow tiles and
     /// `contains` instead, the same measurement was 8.68 ns, which is why it is a `matches!`.
+    ///
+    /// The night's own tail (`NPC.cs:4722` and `:4744-4816`) was added later again, together with
+    /// the [`zombie_settings`] draw the loop below now makes before each call, and measured the same
+    /// way against the same build on the same machine: 6.83 ns before and 14.90 ns after on the
+    /// ordinary night, 22.71 against 31.43 in the graveyard. Most of that is not overhead but work
+    /// that was not being done: an ordinary night used to fall off the end of the chain with a
+    /// `None` and now runs the torch roll, the armed roll and the closing `match`, which is what
+    /// actually answers a plain forest night. It remains a per-*tick* cost, not a per-player one.
     #[test]
     #[ignore]
     fn measure_the_graveyard_and_the_seasonal_chain() {
@@ -11858,9 +12356,11 @@ mod tests {
             let start = std::time::Instant::now();
             let mut sink = 0u32;
             for _ in 0..n {
+                let zombie = zombie_settings(true, 1, &mut rng);
                 sink += u32::from(
                     seasonal_night_pick(
                         std::hint::black_box(at),
+                        std::hint::black_box(zombie),
                         std::hint::black_box(2),
                         &mut rng,
                     )
@@ -12765,6 +13265,19 @@ mod tests {
     /// * `gold_variant` on a critter with no twin (a firefly): 0.77 ns, no roll made at all; on one
     ///   with a twin (a bunny): 2.52 ns.
     ///
+    /// Two more were added to this loop later and measured against the same build on the same
+    /// machine as each other rather than against the numbers above (which read 0.68, 9.44, 3.01,
+    /// 1.69 and 3.03 in that run):
+    ///
+    /// * Doctor Bones' arm (`NPC.cs:3772`), which leads with the tile underfoot: 0.66 ns on an
+    ///   ordinary floor, where the `Option<u16>` comparison shuts it, and 3.02 ns on jungle grass
+    ///   where it goes on to make its roll. It is one line above the Lac Beetle's, so every
+    ///   candidate that used to reach that arm now pays the smaller of those two first.
+    /// * `zombie_settings`: 2.98 ns, one `rng` draw and two comparisons. It is not in the candidate
+    ///   loop at all: `try_spawn` calls it once per attempt that has already got past both the cap
+    ///   and the rate roll, which is the same one call in a few hundred, so it is nanoseconds per
+    ///   *tick*.
+    ///
     /// So a cavern candidate pays about 9 ns it did not, and a surface one under 1 ns. The
     /// reference is the plinth check this same loop already carries and already accepts as cheap,
     /// measured at 20.67 ns in the same build and the same run: the whole addition is under half of
@@ -12845,6 +13358,44 @@ mod tests {
         }
         let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
         println!("the cavern beetle arm: {each:.2} ns/call (sink {sink})");
+
+        // Doctor Bones' arm, which sits one line above the Lac Beetle's and leads with the tile
+        // underfoot, so an ordinary floor pays one `Option<u16>` comparison and stops.
+        for (name, ground) in [
+            ("ordinary floor", Some(1u16)),
+            ("jungle grass", Some(JUNGLE_GRASS)),
+        ] {
+            let mut rng = SmallRng::seed_from_u64(52);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += u32::from(
+                    std::hint::black_box(ground) == Some(JUNGLE_GRASS)
+                        && !std::hint::black_box(false)
+                        && rng.random_range(0..DOCTOR_BONES_ODDS) == 0,
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("the Doctor Bones arm, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // ...and `GetZombieSettings`, which `try_spawn` calls once per attempt that has already got
+        // past both the cap and the rate roll: one `rng` draw and two comparisons.
+        {
+            let mut rng = SmallRng::seed_from_u64(590);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                let settings = zombie_settings(
+                    std::hint::black_box(true),
+                    std::hint::black_box(1),
+                    &mut rng,
+                );
+                sink += u32::from(settings.style) + settings.torch_chance;
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("zombie_settings: {each:.2} ns/call (sink {sink})");
+        }
 
         // ...and the gold swap, which is a `match` first and a roll only for the eight types that
         // have a twin at all.
