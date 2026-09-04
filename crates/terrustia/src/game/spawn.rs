@@ -9430,6 +9430,271 @@ mod tests {
         }
     }
 
+    /// `GetZombieSettings` (`NPC.cs:5595-5619`) on its own: the torch zombie's odds are not the
+    /// constant they look like, and the style is drawn once for the whole attempt.
+    ///
+    /// The `playerHasStartingHealth` half (`NPC.cs:416`, `statLifeMax <= 100`) is the one that
+    /// matters in practice: a character who has not eaten a life crystal yet is what almost every
+    /// player on a fresh server is, and it more than doubles how often the night hands out a torch.
+    ///
+    /// Neutralised by deleting the `if starting_health` block: every row of the second table comes
+    /// back as 12 and the first assertion in it fails. Neutralised the other way, by dropping the
+    /// `.max(2)`, the six- and twenty-player rows fail instead.
+    #[test]
+    fn a_fresh_character_doubles_the_torch_zombies_odds() {
+        let mut rng = SmallRng::seed_from_u64(4);
+        // NPC.cs:5599, the bare default: a player past their first life crystals, at any headcount.
+        for players in [1u32, 4, 20] {
+            let settings = zombie_settings(false, players, &mut rng);
+            assert_eq!(settings.torch_chance, 12, "{players} players");
+            // NPC.cs:5598. Nothing outside a Skyblock world ever clears it.
+            assert!(settings.armed);
+        }
+        // NPC.cs:5606-5613: five, less half the headcount as an integer, floored at two.
+        for (players, expected) in [
+            (1u32, 5u32),
+            (2, 4),
+            (3, 4),
+            (4, 3),
+            (5, 3),
+            (6, 2),
+            (20, 2),
+        ] {
+            assert_eq!(
+                zombie_settings(true, players, &mut rng).torch_chance,
+                expected,
+                "{players} players on a fresh character"
+            );
+        }
+        // NPC.cs:5601, `Main.rand.Next(7)`: all seven, and nothing outside them.
+        let styles: std::collections::BTreeSet<u8> = (0..500u64)
+            .map(|seed| zombie_settings(false, 1, &mut SmallRng::seed_from_u64(seed)).style)
+            .collect();
+        assert_eq!(styles, (0..7u8).collect());
+    }
+
+    /// The surface night's own fallthrough, through `try_spawn`: the seven plain zombies
+    /// (`NPC.cs:4771-4816`) and the Torch Zombie above them (`:4722`).
+    ///
+    /// Six of the seven had no producer anywhere in this server, because the chain used to hand the
+    /// draw back to [`pool`] here and the pool's surface night is the plain Zombie and the Demon Eye.
+    /// The Torch Zombie is the bigger miss of the two: its arm carries no season, no biome and no
+    /// progression gate at all, so on a server of fresh characters it is one attempt in five, and it
+    /// was simply absent.
+    ///
+    /// Neutralised by returning `None` instead of the closing `Some(match zombie.style ...)`: the
+    /// six style assertions fail with "{2, 3, 590}", the pool's own night plus the torch arm above
+    /// it. Neutralised the other way, by deleting the `NPC.cs:4722` arm, the torch assertion fails
+    /// on its own and the styles keep coming.
+    #[test]
+    fn an_ordinary_night_hands_out_torches_and_all_seven_zombies() {
+        let (world, (px, py)) = night_world();
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(seen.contains(&590), "no Torch Zombie (590): {seen:?}");
+        for (npc_type, name) in [
+            (3u16, "Zombie"),
+            (132, "BaldZombie"),
+            (186, "PincushionZombie"),
+            (187, "SlimedZombie"),
+            (188, "SwampZombie"),
+            (189, "TwiggyZombie"),
+            (200, "FemaleZombie"),
+        ] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) on an ordinary night: {seen:?}"
+            );
+        }
+        // Every armed one is behind `Main.expertMode` and this world is classic.
+        for npc_type in [430u16, 431, 432, 433, 434, 435, 436, 591] {
+            assert!(
+                !seen.contains(&npc_type),
+                "{npc_type} turned up in a classic world: {seen:?}"
+            );
+        }
+    }
+
+    /// ...and what expert mode adds to that night: the armed zombies (`NPC.cs:4744-4769`) and the
+    /// Armed Torch Zombie (`:4724`).
+    ///
+    /// `Main.expertMode` is `Main.Difficulty >= 2` (`Main.cs:2785`), which is `game_mode == 1` here.
+    /// Note which style has no armed twin: case 1, the Bald Zombie, is excluded by the arm's own
+    /// gate, so 132 keeps turning up in an expert world where the other six thin out.
+    ///
+    /// Neutralised by dropping `at.expert` from the `NPC.cs:4744` gate: 430 and 432-436 then turn up
+    /// in the classic run of the test above and its exclusion assertions fail. Neutralised by
+    /// deleting the arm outright, the six assertions here fail and the classic test still passes.
+    #[test]
+    fn expert_mode_arms_the_zombies() {
+        let (mut world, (px, py)) = night_world();
+        world.game_mode = 1;
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [
+            (430u16, "ArmedZombie"),
+            (432, "ArmedZombiePincussion"),
+            (433, "ArmedZombieSlimed"),
+            (434, "ArmedZombieSwamp"),
+            (435, "ArmedZombieTwiggy"),
+            (436, "ArmedZombieCenx"),
+            (591, "ArmedTorchZombie"),
+        ] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) in an expert world: {seen:?}"
+            );
+        }
+        // The Bald Zombie has no armed twin, so style 1 still answers with the plain one.
+        assert!(seen.contains(&132), "no BaldZombie (132): {seen:?}");
+    }
+
+    /// The snow arm's own third branch (`NPC.cs:4665`), which is the only place in the whole spawner
+    /// the Armed Zombie Eskimo comes from.
+    ///
+    /// The arm keys on the tile underfoot rather than on the player's zone, and it `return`s, so the
+    /// rest of the night's tail never runs with ice under the spawn: an expert snowfield hands out
+    /// 431 and no armed zombie of any other kind.
+    ///
+    /// The floor is a single row of ice, which is nowhere near the three hundred tiles the zone scan
+    /// wants, so this is a *forest* with ice underfoot: exactly the case that proves the arm keys on
+    /// the tile. What answers when the arm hands back is the ordinary surface-night pool.
+    ///
+    /// Neutralised by deleting the `NPC.cs:4665` branch so the arm falls straight through to its
+    /// `return None`: "no ArmedZombieEskimo (431) on expert ice: {2, 3, 190, 191, 192, 193, 194}",
+    /// the surface night's pool and its coloured eyes and nothing else.
+    #[test]
+    fn expert_ice_underfoot_is_the_armed_eskimos_only_home() {
+        let mut world = flat_world_sized(1600, 90, 161);
+        world.day_time = false;
+        world.game_mode = 1;
+        let (px, py) = (800, 88);
+        assert_eq!(depth_at(&world, py), Depth::Surface);
+
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            seen.contains(&431),
+            "no ArmedZombieEskimo (431) on expert ice: {seen:?}"
+        );
+        for npc_type in [430u16, 432, 433, 434, 435, 436, 590, 591] {
+            assert!(
+                !seen.contains(&npc_type),
+                "{npc_type} got past the snow arm's own return: {seen:?}"
+            );
+        }
+    }
+
+    /// The caverns' own fallthrough (`NPC.cs:5141-5199`) and the expert arm above it (`:5120`),
+    /// through `try_spawn`.
+    ///
+    /// Two of the four Bone Throwing Skeletons are dead in the game itself: `num56` is drawn once
+    /// and then tested against zero three times over, so 450 and 451 cannot be reached by any
+    /// vanilla player either and stay in `docs/spawn-gaps.tsv`. That is asserted here rather than
+    /// left as a comment, because the tempting thing to do with that arm is to "fix" it.
+    ///
+    /// Neutralised by returning `None` instead of the closing `Some(SKELETONS[...])`: "no
+    /// HeadacheSkeleton (201) in the caverns: {10, 16, 21, 44, 49, 93, 195, 217, 300, 354, 357, 359,
+    /// 447, 453, 496, 497, 498, 504, 506}", the plain cavern pool and the arms above. Neutralised by
+    /// deleting the `:5120` arm instead, "no BoneThrowingSkeleton (449) in an expert cavern" fails
+    /// with 201, 202 and 203 present in that same set, so the two halves are independent.
+    #[test]
+    fn the_caverns_hand_out_the_skeleton_look_alikes_and_expert_adds_the_throwers() {
+        let world = flat_world(250);
+        let (px, py) = (400, 248);
+        assert_eq!(depth_at(&world, py), Depth::Cavern);
+
+        let classic: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [
+            (21u16, "Skeleton"),
+            (201, "HeadacheSkeleton"),
+            (202, "MisassembledSkeleton"),
+            (203, "PantlessSkeleton"),
+        ] {
+            assert!(
+                classic.contains(&npc_type),
+                "no {name} ({npc_type}) in the caverns: {classic:?}"
+            );
+        }
+        for npc_type in [449u16, 450, 451, 452] {
+            assert!(
+                !classic.contains(&npc_type),
+                "{npc_type} turned up in a classic world: {classic:?}"
+            );
+        }
+
+        let mut world = world;
+        world.game_mode = 1;
+        let expert: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 200_000)
+            .into_iter()
+            .collect();
+        assert!(
+            expert.contains(&449),
+            "no BoneThrowingSkeleton (449) in an expert cavern: {expert:?}"
+        );
+        assert!(
+            expert.contains(&452),
+            "no BoneThrowingSkeleton4 (452) in an expert cavern: {expert:?}"
+        );
+        for npc_type in [450u16, 451] {
+            assert!(
+                !expert.contains(&npc_type),
+                "{npc_type} is unreachable in the game itself and must stay unreachable here: \
+                 {expert:?}"
+            );
+        }
+    }
+
+    /// Doctor Bones (`NPC.cs:3772-3775`), whose whole gate is jungle grass underfoot and a dark sky.
+    ///
+    /// No depth, no biome and no progression: he is as much a surface find as an underground one,
+    /// which is why he sits in `try_spawn`'s own outer chain rather than in any pool. Nothing in
+    /// this server drew him at all before.
+    ///
+    /// Neutralised by deleting the arm: "no Doctor Bones (52) on a jungle surface at night:
+    /// {42, 51}", the jungle's own surface pair and nothing else. With the arm kept but
+    /// `!world.day_time` dropped, "Doctor Bones in broad daylight: {42, 51, 52}" fails instead.
+    #[test]
+    fn doctor_bones_walks_the_jungle_grass_after_dark() {
+        let mut world = flat_world_sized(1600, 90, JUNGLE_GRASS);
+        world.day_time = false;
+        let (px, py) = (800, 88);
+        assert_eq!(depth_at(&world, py), Depth::Surface);
+
+        let night: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            night.contains(&DOCTOR_BONES),
+            "no Doctor Bones ({DOCTOR_BONES}) on a jungle surface at night: {night:?}"
+        );
+
+        world.day_time = true;
+        let day: std::collections::BTreeSet<u16> = spawns_at(&world, false, px, py, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            !day.contains(&DOCTOR_BONES),
+            "Doctor Bones in broad daylight: {day:?}"
+        );
+
+        // ...and the same arm underground, since it carries no depth gate either.
+        let mut deep = cavern_of(JUNGLE_GRASS);
+        deep.day_time = false;
+        let under: std::collections::BTreeSet<u16> = spawns_at(&deep, false, 400, 250, 400_000)
+            .into_iter()
+            .collect();
+        assert!(
+            under.contains(&DOCTOR_BONES),
+            "no Doctor Bones underground: {under:?}"
+        );
+    }
+
     /// The caverns hand out a Lost Girl one attempt in eighty (`NPC.cs:5012-5015`), and she is the
     /// only path into the Nymph there has ever been.
     ///
