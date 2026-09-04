@@ -29,11 +29,20 @@
       await setMotd(session, motdDraft);
       if (config) config.motd = motdDraft;
       saved = true;
+      // A save that follows a failed one must not leave the old error sitting next to the new
+      // "saved."  -  without this, a failure followed by a success showed both at once.
+      error = "";
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       saving = false;
     }
+  }
+
+  // "saved." otherwise never clears: it stayed shown under a draft the operator had since edited
+  // further, which reads as "your new changes are saved" when they are not.
+  function onMotdInput() {
+    saved = false;
   }
 </script>
 
@@ -50,7 +59,7 @@
       read-only: it reflects the config file and command-line flags the process was started with.
     </p>
     <form class="motd-form" onsubmit={(e) => { e.preventDefault(); saveMotd(); }}>
-      <input bind:value={motdDraft} />
+      <input bind:value={motdDraft} oninput={onMotdInput} aria-label="message of the day" />
       <button disabled={saving}>{saving ? "saving…" : "save"}</button>
     </form>
     {#if saved}<p class="accent-text">saved.</p>{/if}
@@ -112,7 +121,6 @@
   h3 {
     margin: 0 0 0.4rem;
     font-size: 0.8rem;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     font-weight: 500;
   }
@@ -149,7 +157,7 @@
   .card {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.9rem 1rem;
     display: flex;
     flex-direction: column;
@@ -158,7 +166,6 @@
 
   .label {
     font-size: 0.72rem;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-dim);
   }

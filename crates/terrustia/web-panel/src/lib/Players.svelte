@@ -13,6 +13,7 @@
   let { session }: { session: string } = $props();
 
   let players = $state<Player[]>([]);
+  let loading = $state(true);
   let error = $state("");
   let acting = $state<string | null>(null);
   let banTarget = $state<Player | null>(null);
@@ -32,6 +33,8 @@
       error = "";
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
     }
   }
 
@@ -126,9 +129,12 @@
 
 {#if error}<p class="danger">{error}</p>{/if}
 
-{#if players.length === 0}
+{#if loading}
+  <p class="dim">loading…</p>
+{:else if players.length === 0}
   <p class="dim">nobody is connected.</p>
 {:else}
+  <div class="table-scroll">
   <table>
     <thead>
       <tr>
@@ -169,6 +175,7 @@
       {/each}
     </tbody>
   </table>
+  </div>
 {/if}
 
 {#if banTarget}
@@ -255,7 +262,6 @@
   th {
     color: var(--text-dim);
     font-weight: 500;
-    text-transform: uppercase;
     font-size: 0.72rem;
     letter-spacing: 0.06em;
   }
@@ -271,11 +277,10 @@
   .badge {
     margin-left: 0.5rem;
     font-size: 0.62rem;
-    text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--bg);
     background: var(--danger);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.05rem 0.35rem;
   }
 
@@ -309,9 +314,9 @@
   .dialog {
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 1.25rem;
-    width: 320px;
+    width: min(320px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -333,7 +338,7 @@
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     padding: 0.4rem;
     font-family: inherit;
   }

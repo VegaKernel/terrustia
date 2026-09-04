@@ -15,16 +15,35 @@
   let memHist = $state<(number | null)[]>([]);
 
   let cpuCanvas = $state<HTMLCanvasElement | undefined>(undefined);
+  let wallCanvas = $state<HTMLCanvasElement | undefined>(undefined);
   let playerCanvas = $state<HTMLCanvasElement | undefined>(undefined);
   let memCanvas = $state<HTMLCanvasElement | undefined>(undefined);
 
+  // A canvas 2D context needs a real colour string, not a `var(--x)` reference, so these read the
+  // same tokens `app.css` defines rather than duplicating their hex values here  -  a colour picked
+  // once in one place, not two copies that can drift.
+  function cssVar(name: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
   const COL = {
-    accent: "#59d499",
-    warn: "#e0b34d",
-    danger: "#e0645a",
-    dim: "#7c8791",
-    grid: "#1f2a30",
-    bg: "#0a0d10",
+    get accent() {
+      return cssVar("--accent");
+    },
+    get accentDim() {
+      return cssVar("--accent-dim");
+    },
+    get warn() {
+      return cssVar("--warn");
+    },
+    get danger() {
+      return cssVar("--danger");
+    },
+    get dim() {
+      return cssVar("--text-dim");
+    },
+    get grid() {
+      return cssVar("--border");
+    },
   };
 
   function push<T>(arr: T[], v: T): T[] {
@@ -154,6 +173,11 @@
     spark(cpuCanvas, cpuHist, COL.accent, { threshold: m?.budget_us });
   });
   $effect(() => {
+    void wallHist;
+    void wallCanvas;
+    spark(wallCanvas, wallHist, COL.accentDim);
+  });
+  $effect(() => {
     void playerHist;
     void playerCanvas;
     spark(playerCanvas, playerHist, COL.warn, { max: 1 });
@@ -229,6 +253,13 @@
       <canvas bind:this={cpuCanvas}></canvas>
     </div>
     <div class="chart">
+      <div class="chart-head">
+        <span>tick wall time</span>
+        <span class="dim">µs  -  wall clock, not just cpu</span>
+      </div>
+      <canvas bind:this={wallCanvas}></canvas>
+    </div>
+    <div class="chart">
       <div class="chart-head"><span>players online</span></div>
       <canvas bind:this={playerCanvas}></canvas>
     </div>
@@ -280,7 +311,7 @@
   .stat {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.7rem 0.85rem;
     display: flex;
     flex-direction: column;
@@ -289,7 +320,6 @@
 
   .label {
     font-size: 0.68rem;
-    text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-dim);
   }
@@ -323,7 +353,7 @@
   .chart {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.6rem 0.75rem 0.4rem;
   }
 
@@ -331,9 +361,20 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    gap: var(--sp-2);
     font-size: 0.75rem;
     margin-bottom: 0.4rem;
     color: var(--text);
+  }
+
+  /* The title must never be the one that shrinks to make room for a longer caption next to it  - 
+     that is what let "tick wall time" collapse into three stacked lines. */
+  .chart-head > span:first-child {
+    flex-shrink: 0;
+  }
+
+  .chart-head .dim {
+    text-align: right;
   }
 
   .budget-key {
@@ -349,7 +390,7 @@
   .phases {
     border: 1px solid var(--border);
     background: var(--bg-raised);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 0.6rem 0.85rem 0.85rem;
     max-width: 720px;
   }
@@ -374,7 +415,7 @@
 
   .phase-bar-track {
     background: var(--bg);
-    border-radius: 2px;
+    border-radius: var(--radius-sm);
     height: 12px;
     overflow: hidden;
   }

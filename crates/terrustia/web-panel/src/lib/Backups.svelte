@@ -38,7 +38,7 @@
     saveNote = "";
     try {
       await forceSave(session);
-      saveNote = "save requested — watch the console for the result, then refresh.";
+      saveNote = "save requested  -  the list below refreshes automatically.";
       // Give the background save a beat to rotate the backups, then refresh.
       setTimeout(refresh, 1500);
     } catch (e) {
@@ -102,28 +102,30 @@
     {#if view.backups.length === 0}
       <p class="dim">no backups yet — press “save now”, and one will appear.</p>
     {:else}
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>size</th>
-            <th>age</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each view.backups as b (b.index)}
+      <div class="table-scroll">
+        <table>
+          <thead>
             <tr>
-              <td class="mono">bak{b.index}{#if b.index === 1}<span class="dim"> · newest</span>{/if}</td>
-              <td class="dim">{b.size_mb.toFixed(2)} MB</td>
-              <td class="dim">{age(b.age_secs)}</td>
-              <td class="actions">
-                <button class="danger-btn" onclick={() => (confirmTarget = b)}>roll back to this</button>
-              </td>
+              <th>#</th>
+              <th>size</th>
+              <th>age</th>
+              <th></th>
             </tr>
-          {/each}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {#each view.backups as b (b.index)}
+              <tr>
+                <td class="mono">bak{b.index}{#if b.index === 1}<span class="dim"> · newest</span>{/if}</td>
+                <td class="dim">{b.size_mb.toFixed(2)} MB</td>
+                <td class="dim">{age(b.age_secs)}</td>
+                <td class="actions">
+                  <button class="danger-btn" onclick={() => (confirmTarget = b)}>roll back to this</button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
     {/if}
   {/if}
 {:else}
@@ -199,7 +201,6 @@
   th {
     color: var(--text-dim);
     font-weight: 500;
-    text-transform: uppercase;
     font-size: 0.72rem;
     letter-spacing: 0.06em;
   }
@@ -234,9 +235,9 @@
   .dialog {
     background: var(--bg-raised);
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-lg);
     padding: 1.25rem;
-    width: 420px;
+    width: min(420px, 92vw);
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
