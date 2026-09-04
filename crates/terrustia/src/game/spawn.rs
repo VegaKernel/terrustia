@@ -8687,20 +8687,40 @@ mod tests {
     /// ...and a dirt-walled cave in the narrow band around the surface line is the other place, at
     /// one attempt in ten (`NPC.cs:3629` -> `CheckToSpawnUndergroundGnomes`).
     ///
+    /// It has two separate wall gates, one above the other, and each needs its own dark corner to be
+    /// tested in: `if (Main.dayTime && tile.wall <= 0) return false;` wants *some* wall by day, and
+    /// the line under it wants one of six particular ones at any hour. An unwalled cave in daylight
+    /// is turned down by the first, so it says nothing at all about the second.
+    ///
     /// Neutralised by returning `false` from `underground_gnome`'s first line: the walled assertion
-    /// fails. Neutralised again by dropping the `GNOME_WALLS.contains(&wall)` line, which makes the
-    /// unwalled assertion fail instead, gnomes coming out of bare stone.
+    /// fails. Neutralised again by dropping the `GNOME_WALLS.contains(&wall)` line: the night
+    /// assertion fails, gnomes coming out of bare stone in the dark. Neutralised a third way, by
+    /// dropping the `Main.dayTime && wall == 0` line: the daylight assertion fails instead.
     #[test]
     fn a_dirt_walled_cave_near_the_surface_is_the_other_gnome() {
-        let mut world = flat_world_sized(1600, 90, 1);
-        let at = (800, 88);
         // `worldSurface` is 100 here, so the band is rows 80 to 110 and the floor at 90 is in it.
-        let bare = spawns_at(&world, false, at.0, at.1, 100_000);
+        let at = (800, 88);
+
+        // Unwalled and after dark, so the daylight gate is open and the wall set is the only thing
+        // left to turn it down.
+        let mut night = flat_world_sized(1600, 90, 1);
+        night.day_time = false;
+        let dark = spawns_at(&night, false, at.0, at.1, 100_000);
         assert!(
-            !bare.contains(&GNOME),
-            "a gnome out of an unwalled cave: {bare:?}"
+            !dark.contains(&GNOME),
+            "a gnome out of a bare stone cave: {dark:?}"
         );
 
+        // Unwalled in daylight, which is the other gate.
+        let day = flat_world_sized(1600, 90, 1);
+        let lit = spawns_at(&day, false, at.0, at.1, 100_000);
+        assert!(
+            !lit.contains(&GNOME),
+            "a gnome out of an unwalled cave in daylight: {lit:?}"
+        );
+
+        // ...and the same cave with dirt walls in it.
+        let mut world = flat_world_sized(1600, 90, 1);
         for x in 0..world.width() {
             for y in 90..94 {
                 let mut tile = world.tile(x, y);
