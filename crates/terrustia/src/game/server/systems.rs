@@ -4974,6 +4974,7 @@ impl GameServer {
             self.announce("Party time's over!");
             self.broadcast_world_data();
         }
+        self.roll_starfall_night();
         self.roll_natural_lantern_night();
         if self.world.blood_moon || self.moon.running() || self.world.moon_phase == 4 {
             return;
@@ -4989,6 +4990,34 @@ impl GameServer {
             info!("blood moon");
             self.broadcast_world_data();
         }
+    }
+
+    /// `Star.NightSetup`, called once at dusk from `Main.UpdateTime_StartNight`
+    /// (`Main.cs:66208` -> `Star.cs:41-60`):
+    ///
+    /// ```csharp
+    /// starfallBoost = 1f;
+    /// int maxValue = 10;
+    /// int maxValue2 = 3;
+    /// if (Main.tenthAnniversaryWorld) { maxValue = 5; maxValue2 = 2; }
+    /// if (Main.rand.Next(maxValue) == 0) { starfallBoost = (float)Main.rand.Next(300, 501) * 0.01f; }
+    /// else if (Main.rand.Next(maxValue2) == 0) { starfallBoost = (float)Main.rand.Next(100, 151) * 0.01f; }
+    /// ```
+    ///
+    /// Only the first branch can clear the `> 3f` the spawner asks for, and only where it rolled
+    /// 301 or above (`300 * 0.01f` is exactly 3 and does not), so a meteor-shower night is a shade
+    /// under one in ten. The second branch tops out at 1.5 and so can never clear it; its draw is
+    /// not reproduced here, because what it lands on feeds only the star fall that drops Fallen
+    /// Stars (`WorldGen.cs:72406`), which this server does not model, and this `rng` is not
+    /// vanilla's stream in any case. `Main.tenthAnniversaryWorld` is not modelled anywhere in this
+    /// server, so the ordinary 10 is the whole of the outer roll.
+    ///
+    /// The Enchanted Nightcrawler is the one thing that reads this (`NPC.cs:2409`), and without it
+    /// NPC 484 was in no pool and no branch at all.
+    fn roll_starfall_night(&mut self) {
+        use rand::Rng;
+        self.starfall_night =
+            self.rng.random_range(0..10) == 0 && self.rng.random_range(300..501) > 300;
     }
 
     /// `LanternNight::CheckNight`, called once at dusk — see `game/lantern_night.rs`'s own module
@@ -6395,6 +6424,15 @@ impl GameServer {
             // ...and so are both halves of the windy day: the latch and the target it latched on.
             happy_windy_day: self.weather.happy_windy_day,
             wind_target: self.weather.target,
+            // `BirthdayParty.PartyIsUp`, for the bunny that wears a party hat.
+            party: self.party.is_up(),
+            // The Enchanted Nightcrawler's whole sky gate (`NPC.cs:2409`), resolved once a tick
+            // because none of its three clauses varies per candidate tile: tonight's meteor
+            // shower, a sky with 55 clouds or fewer in it, and no overcast layer either up or
+            // still counting back down toward one.
+            starfall_night: self.starfall_night
+                && self.world.num_clouds <= 55
+                && self.weather.cloud_bg_active == 0.0,
             downed_plantera: progress.downed_plantera,
             hard_mode: progress.hard_mode,
             downed_mech_any: progress.downed_mech_any,

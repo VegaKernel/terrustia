@@ -1255,6 +1255,14 @@ pub struct GameServer {
     slime_rain: crate::game::slime_rain::SlimeRainState,
     /// Lantern Night — see [`crate::game::lantern_night`]'s own module doc.
     lantern_night: crate::game::lantern_night::LanternNightState,
+    /// Whether tonight's `Star.starfallBoost` cleared 3, rolled at dusk by
+    /// [`Self::roll_starfall_night`].
+    ///
+    /// The boost itself is a `float` in the game (`Star.cs:35`) and its other reader is the star
+    /// fall that actually drops Fallen Stars (`WorldGen.cs:72406`), which this server does not
+    /// model. The one thing the spawner asks of it is `> 3f` (`NPC.cs:2409`), so that is what is
+    /// kept: a bool per night rather than a number nothing else here would read.
+    starfall_night: bool,
 }
 
 impl GameServer {
@@ -1399,6 +1407,7 @@ impl GameServer {
             party: crate::game::party::PartyState::default(),
             slime_rain: crate::game::slime_rain::SlimeRainState::default(),
             lantern_night: crate::game::lantern_night::LanternNightState::default(),
+            starfall_night: false,
             palette: crate::term::Palette::PLAIN,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
