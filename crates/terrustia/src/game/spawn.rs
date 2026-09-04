@@ -7142,13 +7142,16 @@ mod tests {
     /// fire):
     /// * `&& false` on the Worm arm: "no Worm (357) underground: {10, 16, 21, 44, 49, 93, 195,
     ///   217, 300, 354, 359, 453, 496, 497, 498, 504, 506}".
-    /// * the same on the Mouse arm: "no Mouse (300) underground".
-    /// * the same on the Snail arm: "no Snail (359) underground".
-    /// * the same on the Lac Beetle arm: "no Lac Beetle (219) on jungle grass".
+    /// * the same on the Mouse arm: "no Mouse (300) underground: {10, 16, 21, 44, 49, 93, 195, 217,
+    ///   354, 357, 359, 448, 453, 496, 497, 498, 504, 506}".
+    /// * the same on the Snail arm: "no Snail (359) underground: {10, 16, 21, 44, 49, 93, 195, 217,
+    ///   300, 354, 357, 448, 453, 496, 497, 498, 504, 506}".
+    /// * the same on the Lac Beetle arm: "no Lac Beetle (219) on jungle grass: {42, 43, 51, 56,
+    ///   204, 217, 354, 359}".
     /// * dropping `Biome::Jungle` from the Worm and Mouse arms' exclusion list: "the jungle keeps
-    ///   the worm and the mouse out".
+    ///   the worm and the mouse out: {42, 43, 51, 56, 204, 217, 219, 300, 357, 359}".
     /// * relaxing `depth != Depth::Surface` to `true` on all four: "the surface has no worms of its
-    ///   own, and got 357".
+    ///   own, and got 357: {1, 300, 357, 359}".
     #[test]
     fn the_ground_under_the_surface_has_worms_mice_and_snails() {
         let stone = cavern_of(1);
@@ -7206,9 +7209,10 @@ mod tests {
 
     /// The caverns' beetle pair, one draw in sixty and nothing else gating it (`NPC.cs:4925-4935`).
     ///
-    /// Neutralised with `&& false` on the arm: neither beetle is drawn in twenty thousand ticks in
-    /// either world and the first assertion fails. Neutralised again by making the fork answer
-    /// `COCHINEAL_BEETLE` in both branches: "no Cyan Beetle (218) in a snowy cavern".
+    /// Neutralised with `&& false` on the arm: "no Cochineal Beetle (217) in the caverns: {10, 16,
+    /// 21, 44, 49, 93, 195, 300, 354, 359, 453, 496, 497, 498, 504, 506}". Neutralised again by
+    /// making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan Beetle (218) in a snowy
+    /// cavern: {147, 150, 167, 185, 217, 354, 453}".
     #[test]
     fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one() {
         let stone = cavern_of(1);
@@ -7244,10 +7248,11 @@ mod tests {
     /// `SpawnLavaBaitCritters`, `:5850-5877`). The day fork is the whole difference between a Hell
     /// Butterfly and a Lavafly; the Magma Snail comes at either hour.
     ///
-    /// Neutralised with `&& false` on the `LAVA_BAIT_ODDS` arm: none of the three is drawn in
-    /// twenty thousand ticks by day or by night, and the first assertion fails. Neutralised again
-    /// by dropping `lava_bait_pick`'s `day_time` fork so it always answers 654: "no Hell Butterfly
-    /// (653) in the underworld by day".
+    /// Neutralised with `&& false` on the `LAVA_BAIT_ODDS` arm: "no Hell Butterfly (653) in the
+    /// underworld by day: {24, 39, 59, 60, 62}", none of the three drawn in twenty thousand ticks.
+    /// Neutralised again by dropping `lava_bait_pick`'s `day_time` fork so it always answers 654:
+    /// "no Hell Butterfly (653) in the underworld by day: {24, 39, 59, 60, 62, 654, 655}", the
+    /// other two now present.
     #[test]
     fn the_underworld_has_lava_bait_critters() {
         use terrustia_proto::tile::Tile;
@@ -7299,9 +7304,10 @@ mod tests {
     /// (`NPC.cs:2409-2413`). It is the head of the friendly grass chain, so it takes half of every
     /// friendly attempt while the sky is right, ahead of the firefly and the owl.
     ///
-    /// Neutralised by dropping `events.starfall_night` from the arm's guard: the second assertion
-    /// fails, an ordinary night drawing nightcrawlers too. Neutralised again with `&& false` on the
-    /// whole arm: the first fails.
+    /// Neutralised with `&& false` on the whole arm: "no Enchanted Nightcrawler (484) under a
+    /// meteor shower: {355, 611, 689}". Neutralised again by dropping `events.starfall_night` from
+    /// the arm's guard: the second assertion fails instead, "an ordinary night should have none",
+    /// with 484 in the set.
     #[test]
     fn a_meteor_shower_night_brings_the_enchanted_nightcrawler() {
         let (world, (px, py)) = night_world();
@@ -7337,10 +7343,11 @@ mod tests {
     /// The firefly arm is a two-way fork on the tile underfoot, not one type: hallowed grass makes
     /// it a Lightning Bug (`NPC.cs:2416-2420`, `type2 = 358` when `tileType == 109`).
     ///
-    /// Neutralised by deleting the `critter == FIREFLY && ground_block == Some(HALLOWED_GRASS)`
-    /// branch: no Lightning Bug is drawn over hallowed grass and the first assertion fails.
-    /// Neutralised again by dropping the `ground_block` half of the guard so every firefly becomes
-    /// one: "an ordinary forest has fireflies, not lightning bugs".
+    /// Neutralised by turning off the `critter == FIREFLY && ground_block == Some(HALLOWED_GRASS)`
+    /// branch: "no Lightning Bug (358) over hallowed grass: {355, 611, 689}". Neutralised again by
+    /// dropping the `ground_block` half of the guard so every firefly becomes one: the last
+    /// assertion fails instead, "an ordinary forest has fireflies, not lightning bugs", with 358 in
+    /// the set.
     #[test]
     fn hallowed_grass_turns_the_firefly_into_a_lightning_bug() {
         let mut world = flat_world_of(90, HALLOWED_GRASS);
@@ -7421,8 +7428,9 @@ mod tests {
     /// that this server's pool simply did not list (`NPC.cs:2611`'s `SelectRandom(299, 538)` and
     /// `:2474`'s own arm).
     ///
-    /// Neutralised by removing each id from `friendly_pool`'s surface day arm in turn: each removal
-    /// fails its own assertion and leaves the other passing.
+    /// Neutralised by removing each id from `friendly_pool`'s surface day arm in turn: "no
+    /// SquirrelRed (538) on a friendly surface day: {46, 74, 297, 298, 299, 356, 669}" and "no
+    /// Stinkbug (669) on a friendly surface day: {46, 74, 297, 298, 299, 356, 538}".
     #[test]
     fn the_surface_day_draws_a_red_squirrel_and_a_stink_bug() {
         let (world, (px, py)) = forest_surface();
@@ -7442,9 +7450,10 @@ mod tests {
     /// on top of a pool draw the gold types need more attempts than a spawn-tick harness can
     /// afford; `the_gold_critters_reach_a_real_spawn` below is the end-to-end half of the claim.
     ///
-    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: every twin is missing and the
-    /// first assertion fires. Neutralised again by dropping the `depth == Depth::Surface` guard from
-    /// the squirrel arm: "a gold squirrel underground" fails.
+    /// Neutralised by replacing `gold_variant`'s body with `npc_type` (keeping the `rng` draw, so
+    /// the only change is which type comes back): "Bird -> 442 came up 0 times in 400,000, not
+    /// about a thousand". Neutralised again by relaxing the squirrel arm's `depth ==
+    /// Depth::Surface` guard to `|| true`: "a gold squirrel underground, left: 994".
     #[test]
     fn one_critter_in_four_hundred_is_the_gold_one() {
         let twins: [(u16, u16, &str); 9] = [
@@ -7508,8 +7517,8 @@ mod tests {
     /// pool is eight entries, so a bunny is one draw in eight and a gold one is one in three
     /// thousand two hundred.
     ///
-    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: no Gold Bunny in half a
-    /// million ticks.
+    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: "no Gold Bunny (443) in half
+    /// a million ticks", the set holding the eight plain critters and nothing else.
     #[test]
     fn the_gold_critters_reach_a_real_spawn() {
         let (world, (px, py)) = forest_surface();
