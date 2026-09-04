@@ -8620,36 +8620,67 @@ mod tests {
         );
     }
 
-    /// A Living Tree is where the gnomes are, and above ground they are not rare: `RollLuck(1 +
-    /// gnomeChance / 10)` with `gnomeChance` 10 is one attempt in two (`NPC.cs:1625-1628`).
+    /// A Living Tree is where the gnomes are, and vanilla asks about it twice over: once at the
+    /// spawn candidate's own wall, where above ground a gnome is one attempt in two
+    /// (`NPC.cs:1586`, `:1625-1628`), and once at the *player's*, wherever in the column the
+    /// candidate landed (`:3625-3628`, `livingTree` being `Main.tile[pX, pY].wall == 244` at
+    /// `:414`).
     ///
     /// Fails before the fix: 624 was in no pool and no branch, and its own routine
     /// (`AI_003_Gnomes_ShouldTurnToStone`, and the petrified pose that goes with it) could never
     /// run in a world.
     ///
-    /// Neutralised by deleting the arm from `try_spawn`'s chain: the first assertion fails and the
-    /// second still passes, so a wall of ordinary stone was never the reason.
+    /// The two arms are separated here rather than tested together, because a world with living
+    /// wood everywhere opens both at once and neutralising either one on its own then proves
+    /// nothing: the wall goes only on the columns the candidates can reach for the first, and only
+    /// on the player's own tile for the second.
+    ///
+    /// Neutralised by making the `spawn_wall_type(world, x, y) == LIVING_WOOD_WALL` arm unreachable:
+    /// the candidate assertion fails and the other two pass. Neutralised again by making the
+    /// `player_wall == LIVING_WOOD_WALL` arm unreachable: the player assertion fails instead.
     #[test]
     fn a_living_tree_is_where_the_gnomes_are() {
-        let mut world = flat_world_sized(1600, 90, 1);
         let at = (800, 88);
-        let bare = spawns_at(&world, false, at.0, at.1, 100_000);
+        // No candidate ever lands within `SAFE_RANGE_X` of the player, so columns 739 to 861 are
+        // the player's own and nobody else's, and everything outside them is a candidate's.
+        let wall_between = |world: &mut World, from: i32, to: i32| {
+            for x in from..to {
+                for y in 85..95 {
+                    let mut tile = world.tile(x, y);
+                    tile.wall = LIVING_WOOD_WALL;
+                    world.set_tile(x, y, tile);
+                }
+            }
+        };
+
+        let plain = flat_world_sized(1600, 90, 1);
+        let bare = spawns_at(&plain, false, at.0, at.1, 100_000);
         assert!(
             !bare.contains(&GNOME),
             "a gnome out of a plain stone wall: {bare:?}"
         );
 
-        for x in 0..world.width() {
-            for y in 85..95 {
-                let mut tile = world.tile(x, y);
-                tile.wall = LIVING_WOOD_WALL;
-                world.set_tile(x, y, tile);
-            }
-        }
-        let inside = spawns_at(&world, false, at.0, at.1, 100_000);
+        // The candidate's own wall, with the player standing outside the tree.
+        let mut candidate_side = flat_world_sized(1600, 90, 1);
+        wall_between(&mut candidate_side, 700, 739);
+        wall_between(&mut candidate_side, 862, 900);
+        assert_eq!(candidate_side.tile(at.0, at.1).wall, 0);
+        let outside = spawns_at(&candidate_side, false, at.0, at.1, 100_000);
+        assert!(
+            outside.contains(&GNOME),
+            "no gnome from a living tree the candidate stood in: {outside:?}"
+        );
+
+        // ...and the player's own, with every candidate outside it. At night, because that arm
+        // takes `!Main.dayTime || Main.tile[spawnTileX, spawnTileY].wall > 0` and the candidates
+        // here have no wall at all.
+        let mut player_side = flat_world_sized(1600, 90, 1);
+        player_side.day_time = false;
+        wall_between(&mut player_side, at.0, at.0 + 1);
+        let inside = spawns_at(&player_side, false, at.0, at.1, 100_000);
         assert!(
             inside.contains(&GNOME),
-            "no gnome inside a living tree: {inside:?}"
+            "no gnome for a player standing in a living tree: {inside:?}"
         );
     }
 
