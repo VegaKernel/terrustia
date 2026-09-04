@@ -807,6 +807,23 @@ rather than cosmetic variety.
   likely to reveal it needs real new infrastructure (a general item-vs-live-NPC interaction, which
   nothing in this server currently has) rather than a narrow wire-up; the lane was told to disclose
   that honestly rather than force a bad implementation.
+- **PALWORLDPAL**: the two distressed Palworld pets (695, 696) stay in `docs/spawn-gaps.tsv`
+  deliberately, and the reason is the encounter rather than the spawn. The ambient arm itself is
+  small and well understood (`NPC.cs:4374-4389`, inside the daytime block at `:4202` this server
+  already models for the Goblin Scout: away from world spawn by more than `maxTilesX / 8`, on tile
+  2/147/60/161, one attempt in 160, neither type already alive, and the colour decided by whether
+  the player is carrying item 5663 or 5664 with a 40% default). What is missing is everything the
+  pet is *for*. `AI_127_Pal` (`NPC.cs:43379-43478`) opens by running `CultistRitual.CheckFloor2`
+  (`CultistRitual.cs:133-159`), killing itself outright if there is no floor, and otherwise raising
+  two Goblin Archers that guard it, each back-linked with `ai[3] = -(whoAmI + 1)`; only once both
+  are dead does it let the player collect it, and `AI_127_Pal_GiveRewerd` (`:43481-43489`) then
+  drops item 5663/5664. `ai::hardmode::fixtures::pal` has the three waiting states and neither end
+  of that: no escort spawn, no self-destruct, no reward, and its `escorts_alive` is a world-wide
+  count of NPC 111 rather than its own two. Closing it needs `CheckFloor2`, a way for a spawning
+  routine to learn the slot it just filled (only `Spawn::parent` reports one back today) and a way
+  for an AI tick to drop an item (`Effects` has no such field; loot goes through the kill path).
+  Wiring the spawn alone would take the pair off the gap list while leaving a pet that appears
+  unguarded and pops for nothing, which is worse than the honest gap. It belongs to an AI lane.
 
 ## Phase 3: after v0.0.1, in order
 
