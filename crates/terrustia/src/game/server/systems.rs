@@ -92,6 +92,14 @@ impl GameServer {
             let around = crate::game::buffs::Around {
                 npc_type: npc.npc_type,
                 ai1: npc.ai[1],
+                // Pre-existing narrowing, found while pricing `Spawn::parent` for the Palworld pal
+                // encounter but not this site's to fix: vanilla's own gate is `realLife == -1`
+                // (`NPC.cs:92802`), set only for worm segments and the Wall of Flesh mouth, both of
+                // which share one life pool across every part. `follows_boss` is broader than that:
+                // anything raised through it (a boss's own escort, not only a body segment) reads as
+                // a segment here too, and would wrongly skip Soul Drain (`buffs.rs`'s own
+                // `!around.is_segment` check) if it were ever hurt. The Palworld guards are
+                // unaffected: they carry no `follows_boss`, only `Spawn::handle`'s one-way link.
                 is_segment: npc.follows.is_some() || npc.follows_boss.is_some(),
                 get_good: false,
                 lava_wet: false,
@@ -11885,7 +11893,9 @@ mod tile_squares_only_reach_who_can_see_them {
 mod a_distressed_pal_and_its_guard {
     use super::*;
     use crate::config::Config;
-    use terrustia_proto::npc_params::{PAL_CATTIVA, PAL_ESCORT, PAL_REWARD_CATTIVA};
+    use terrustia_proto::npc_params::{
+        PAL_CATTIVA, PAL_ESCORT, PAL_PAYOUT_TICKS, PAL_REWARD_CATTIVA,
+    };
 
     /// Where the pet stands, on a floor with room either side.
     const FLOOR_ROW: i32 = 100;
@@ -11997,24 +12007,42 @@ mod a_distressed_pal_and_its_guard {
         }
         assert_eq!(guards(&server).len(), 1, "the stranger is still out there");
 
-        let before = server.items.iter().count();
-        let mut collected = false;
-        for _ in 0..400 {
+        // With both its own guards dead and a player already inside `PAL_APPROACH`, the pal moves
+        // straight to its payout countdown next tick and pays out `PAL_PAYOUT_TICKS` (120) ticks
+        // later. A window well past that but nowhere near the old 400-tick bound catches the payout
+        // happening on schedule rather than eventually, by luck, once some unrelated condition frees
+        // the slot.
+        let mut collected_at = None;
+        for tick in 0..150 {
             server.tick_npcs();
             if server.npcs.get(pal).is_none() {
-                collected = true;
+                collected_at = Some(tick);
                 break;
             }
         }
-        assert!(
-            collected,
-            "with its guard dead and you on top of it, it should have been collected"
+        assert_eq!(
+            collected_at,
+            // One tick to notice both guards are gone and move from state 0 to state 1 (already
+            // inside PAL_APPROACH, so this same tick also moves it straight to state 2), then
+            // PAL_PAYOUT_TICKS of counting before the payout tick itself.
+            Some(PAL_PAYOUT_TICKS as usize + 1),
+            "with its guard dead and you on top of it, the payout should land on the tick vanilla's \
+             own PAL_PAYOUT_TICKS names, not merely sometime before this loop gives up"
         );
+        // Exactly one reward, not "at least one": the payout used to route through the same
+        // same-tick expiry `tick_life`'s despawn-radius refresh immediately overwrote, so the pal
+        // was never actually removed, kept re-entering its payout arm, and re-queued the reward
+        // item every tick until the collecting player happened to fall out of range. A loose
+        // `count() > before` assertion passed on that broken behaviour as readily as on the fix.
         let dropped: Vec<i32> = server.items.iter().map(|(_, item)| item.item.id).collect();
-        assert!(
-            server.items.iter().count() > before
-                && dropped.contains(&i32::from(PAL_REWARD_CATTIVA)),
-            "a collected Cattiva should have left item {PAL_REWARD_CATTIVA} behind: {dropped:?}"
+        assert_eq!(
+            dropped
+                .iter()
+                .filter(|&&id| id == i32::from(PAL_REWARD_CATTIVA))
+                .count(),
+            1,
+            "a collected Cattiva should leave exactly one item {PAL_REWARD_CATTIVA} behind, not \
+             one per tick it stayed alive after paying out: {dropped:?}"
         );
     }
 }

@@ -213,7 +213,7 @@ pub struct AiOutput {
     /// A buff the NPC just updated wants put straight onto a player, as (player slot, buff id,
     /// ticks) — see [`super::ai::Effects::player_buff`].
     pub player_buff: Option<(u8, u16, i32)>,
-    /// An item to put into the world where this NPC stands, outside the kill path — see
+    /// An item to put into the world where this NPC stands, outside the kill path: see
     /// [`super::ai::Effects::reward`].
     pub reward: Option<i16>,
 }
@@ -324,9 +324,6 @@ pub fn update_with(
         if effects.died {
             npc.life = 0;
         }
-        if effects.expired {
-            npc.time_left = 0;
-        }
         out.transform = effects.transform;
         out.rest_for = effects.rest_for;
         out.detonated = effects.detonated;
@@ -352,6 +349,17 @@ pub fn update_with(
 
         step_physics(npc, tiles);
         tick_life(npc, targets);
+        // Applied after `tick_life`'s own despawn-radius refresh, not before: a routine that
+        // decided this is its last tick has to win over "but a player is standing right here",
+        // or the refresh clobbers the same-tick zero before anything downstream ever sees it. A
+        // one-shot payout whose own exit condition guarantees a player is in range (the Palworld
+        // pet, `NPC.cs:43461-43467`) never got removed at all under the old order: `time_left`
+        // was set to 0 and immediately refreshed back to `DEFAULT_TIME_LEFT` a few lines later in
+        // the same tick, so the routine kept re-entering its payout arm and re-queuing the reward
+        // item every tick until the collecting player fell out of packet-buffer range by chance.
+        if effects.expired {
+            npc.time_left = 0;
+        }
         if worth_telling_clients(npc, before) {
             npc.dirty = true;
         }

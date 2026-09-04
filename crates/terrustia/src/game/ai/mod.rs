@@ -737,6 +737,10 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             // up"; neither survives into this server's fighter, which is not a line-for-line port,
             // so neither is transcribed. The stop, the facing and the idle band are.
             if npc.npc_type == terrustia_proto::npc_params::PAL_ESCORT && npc.ai[3] < 0.0 {
+                // Narrowing: vanilla reads `Main.player[target].Center` unconditionally, since
+                // `target` is already a live index by the time `AI_003_Fighters` runs. This adds
+                // `.filter(|t| t.alive)` on top, which only matters if `world.target` can ever
+                // name a player this tick has already removed; strictly safer either way.
                 let woken = world.was_hurt
                     || world.target.filter(|t| t.alive).is_some_and(|t| {
                         let (cx, cy) = npc.center();
@@ -756,6 +760,11 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
                     // The pal it is standing over, which the caller resolves from the same
                     // back-link. `Math.Sign` answers zero when the two centres line up exactly and
                     // `signum` would answer one, so it is spelled out rather than borrowed.
+                    //
+                    // Narrowing: vanilla reads `Main.npc[num56].Center` unconditionally, a stale
+                    // slot and all, and always re-faces from it. This skips the whole facing step
+                    // when `world.parent` is `None` rather than facing toward whatever the last
+                    // occupant of a freed slot happens to be.
                     if let Some(pal) = world.parent {
                         let gap = pal.center().0 - npc.center().0;
                         let facing = match gap.partial_cmp(&0.0) {

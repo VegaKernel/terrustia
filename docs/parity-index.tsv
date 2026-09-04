@@ -1360,6 +1360,7 @@ crates/terrustia/src/game/npc_ai.rs	fn avoidance	NPC.cs	31191-31206	dd6bbcdc0210
 crates/terrustia/src/game/npc_ai.rs	fn tick_life	NPC.cs	14427-14441	c7967ea0277a	abfe0ff00019
 crates/terrustia/src/game/npc_ai.rs	fn tick_life	NPC.cs	6880-6890	83652ff12385	abfe0ff00019
 crates/terrustia/src/game/npc_ai.rs	fn tick_life	NPC.cs	78697	e3b0c44298fc	abfe0ff00019
+crates/terrustia/src/game/npc_ai.rs	fn update_with	NPC.cs	43461-43467	a8c07e39b2b4	77ab1a306b11
 crates/terrustia/src/game/npc_ai.rs	mod tests :: fn a_skeleton_merchant_is_not_a_town_npc_and_does_expire	NPC.cs	14427-14441	c7967ea0277a	2764b6c021ca
 crates/terrustia/src/game/npc_ai.rs	mod tests :: fn a_skeleton_merchant_is_not_a_town_npc_and_does_expire	NPC.cs	78697	e3b0c44298fc	2764b6c021ca
 crates/terrustia/src/game/npc_ai.rs	struct Spawn	NPC.cs	26197	9c1d3be83a7b	e61a9c7e1944
@@ -1671,8 +1672,8 @@ crates/terrustia/src/game/server/mod.rs	struct GameServer	WorldGen.cs	3272	43583
 crates/terrustia/src/game/server/mod.rs	struct GameServer	WorldGen.cs	50299-50302	6583807eb5db	3a5302dbb6ec
 crates/terrustia/src/game/server/mod.rs	struct GameServer	WorldGen.cs	72072-72079	2a6f4d26e0bc	3a5302dbb6ec
 crates/terrustia/src/game/server/mod.rs	struct GameServer	WorldGen.cs	72406	6c77495a5649	3a5302dbb6ec
-crates/terrustia/src/game/server/systems.rs	(file)	Main.cs	65601	8f010278c79f	e93f1285ba7a
-crates/terrustia/src/game/server/systems.rs	(file)	RemoteClient.cs	152-190	4e99a0e9d426	e93f1285ba7a
+crates/terrustia/src/game/server/systems.rs	(file)	Main.cs	65601	8f010278c79f	2a0eb33dabeb
+crates/terrustia/src/game/server/systems.rs	(file)	RemoteClient.cs	152-190	4e99a0e9d426	2a0eb33dabeb
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn apply_army	DD2Event.cs	1041-1091	3c3d8d6ca2b3	d73480a22bee
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn apply_circuit	Wiring.cs	362	f5551005b910	629f18d74290
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn apply_touch_debuffs	Player.cs	5259	eab208d08f70	052d7d1fe8df
@@ -1751,6 +1752,7 @@ crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_items	Pla
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_liquids	Liquid.cs	993-1012	d5d07d9497ce	5fa1001c2f8d
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_liquids	WorldGen.cs	72072-72079	2a6f4d26e0bc	5fa1001c2f8d
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_mech_cooldowns	Wiring.cs	147-158	0a9f32c875d3	2f2d836b9328
+crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_npc_buffs	NPC.cs	92802	e2d0076d5fcd	324a12f5eb20
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_npcs	NPC.cs	1411	daa5710da404	643d3b777c1d
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_npcs	NPC.cs	34446	8b635047a0d4	643d3b777c1d
 crates/terrustia/src/game/server/systems.rs	impl GameServer :: fn tick_npcs	NPC.cs	34451	480837b3dea4	643d3b777c1d
@@ -1833,7 +1835,7 @@ crates/terrustia/src/game/server/systems.rs	mod nebula_headcrab_buff	NPC.cs	3750
 crates/terrustia/src/game/server/systems.rs	mod nebula_headcrab_buff :: fn a_player_in_creative_godmode_is_not_buffed	NPC.cs	37522	43daaf496668	313e1587cdc6
 crates/terrustia/src/game/server/systems.rs	mod npc_buff_broadcast_scope	NPC.cs	81959	d03b8fc5d51d	0810b311afd8
 crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: fn a_teleport_streams_where_the_player_lands	TeleportPylonsSystem.cs	199	061550f629e4	6d1ad664b249
-crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: mod a_distressed_pal_and_its_guard	NPC.cs	43379-43489	477de6f4a3b4	fd736bf14c4b
+crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: mod a_distressed_pal_and_its_guard	NPC.cs	43379-43489	477de6f4a3b4	d2b0d5607225
 crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: mod blood_moon_turns_critters_evil	NPC.cs	93033-93048	32c2b1c8eafc	287292c3daa6
 crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: mod fallen_log_scan :: fn a_log_anywhere_in_the_overworld_is_found	Main.cs	66212	c88d915fcfd0	a0b533d5f37a
 crates/terrustia/src/game/server/systems.rs	mod section_streaming_as_players_move :: fn walking_into_a_new_section_streams_the_block_around_it :: mod fallen_log_scan :: fn a_log_anywhere_in_the_overworld_is_found	MysticLogFairiesEvent.cs	147-161	d0ed073314c5	a0b533d5f37a
