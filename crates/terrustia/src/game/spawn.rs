@@ -1712,7 +1712,6 @@ pub fn hallow_ground_pick(
 /// has no holiday case at all, and the two tile types with their own answer (jungle grass, and snow
 /// or ice) are answered before the default case this replaces.
 fn holiday_costume(npc_type: u16, depth: Depth, at: Seasonal, rng: &mut SmallRng) -> u16 {
-    const BUNNY: u16 = 46;
     const BLUE_SLIME: u16 = 1;
     let two_in_three = |rng: &mut SmallRng| !rng.random_ratio(1, 3);
     match npc_type {
@@ -2428,7 +2427,10 @@ fn choose_weighted(
 /// disclosed narrowing: the game chooses a bird over a bunny by the grass under the spawn and by
 /// weather, season and time this server does not all model, so this returns the ordinary set for
 /// the place and lets the caller pick evenly among it. The underworld's lava-bait critters and the
-/// gold and gem variants are left out on purpose; they are cosmetic rolls on top of these.
+/// gold variants are left out on purpose; the gold ones are cosmetic rolls on top of these.
+///
+/// Everything below the surface line is empty here on purpose and is [`deep_friendly_pick`]'s: the
+/// game's own tail there is a gated fork rather than a set, so a pool cannot say it.
 /// The whole of a graveyard's friendly draw (`NPC.cs:2101-2115`).
 ///
 /// Not part of [`friendly_pool`], because vanilla's arm is not a variation on the ordinary one: it
@@ -2441,6 +2443,9 @@ pub const GRAVEYARD_VERMIN: [u16; 2] = [
 
 /// The Frog (`NPCID.Frog`), which is not simply drawn: it is the last arm of a chain of its own.
 const FROG: u16 = 361;
+
+/// The plain Bunny (`NPCID.Bunny`), vanilla's own last resort in the friendly critter chain.
+const BUNNY: u16 = 46;
 
 /// The night Owl (`NPCID.Owl`), which like the frog is a chain rather than a draw.
 const OWL: u16 = 611;
@@ -2492,9 +2497,10 @@ fn spawn_owl(rng: &mut SmallRng) -> u16 {
 /// bound town slime with no progression gate and no depth gate whatsoever.
 ///
 /// The middle arm, `RollLuck(goldCritterChance) == 0` -> Gold Frog (445), is left out: the gold
-/// and gem critter variants are a class this server does not model at all, as [`friendly_pool`]
-/// already declares, and taking only the frog would leave the Gold Bunny and Gold Goldfish out
-/// while their sibling was in.
+/// critter variants are a class this server does not model at all, as [`friendly_pool`] already
+/// declares, and taking only the frog would leave the Gold Bunny and Gold Goldfish out while their
+/// sibling was in. The gem critters are a separate class and they *are* modelled, in
+/// [`deep_friendly_pick`]; the frog's arm is not one of their three sites.
 fn spawn_frog(world: &World, alive: &dyn Fn(u16) -> bool, rng: &mut SmallRng) -> u16 {
     // `RollLuck(30)` is `Main.rand.Next(30)` at luck zero (`Luck.cs:5-16`). The `alive` scan is
     // last on purpose: `&&` short-circuits, so an ordinary frog draw never walks the NPC table.
@@ -2505,6 +2511,117 @@ fn spawn_frog(world: &World, alive: &dyn Fn(u16) -> bool, rng: &mut SmallRng) ->
         return BOUND_TOWN_SLIME_YELLOW;
     }
     FROG
+}
+
+/// The first id of the seven Gem Squirrels, `NPCID.GemSquirrelAmethyst`.
+const GEM_SQUIRREL: u16 = 639;
+
+/// ...and of the seven Gem Bunnies, `NPCID.GemBunnyAmethyst`.
+const GEM_BUNNY: u16 = 646;
+
+/// Which gem a gem critter carries (`GetGemSquirrelToSpawn`, `NPC.cs:5717-5745`, and
+/// `GetGemBunnyToSpawn`, `NPC.cs:5687-5715`).
+///
+/// Vanilla writes the two as separate methods, but they are the same `Main.rand.Next(100)` ladder
+/// with the same six cutoffs and the same gem order, because the two id runs are laid out
+/// identically: `639..=645` is the squirrel run and `646..=652` the bunny run, each Amethyst, Topaz,
+/// Sapphire, Emerald, Ruby, Diamond, Amber in id order. So this is one ladder keyed by the first id
+/// of a run, and the cutoffs below are the game's own, written rarest first exactly as it writes
+/// them:
+///
+/// ```csharp
+/// int num = Main.rand.Next(100);
+/// if (num < 5)  { return 644; }  // Diamond
+/// if (num < 13) { return 645; }  // Amber
+/// if (num < 23) { return 643; }  // Ruby
+/// if (num < 35) { return 642; }  // Emerald
+/// if (num < 51) { return 641; }  // Sapphire
+/// if (num < 72) { return 640; }  // Topaz
+/// return 639;                    // Amethyst
+/// ```
+///
+/// So Amethyst is 28 draws in a hundred and Diamond is 5, which is the point of the ladder: the
+/// critter tells you what the rock around it is worth before you have swung at it.
+fn gem_critter(first: u16, rng: &mut SmallRng) -> u16 {
+    let roll = rng.random_range(0..100);
+    if roll < 5 {
+        return first + 5; // Diamond
+    }
+    if roll < 13 {
+        return first + 6; // Amber
+    }
+    if roll < 23 {
+        return first + 4; // Ruby
+    }
+    if roll < 35 {
+        return first + 3; // Emerald
+    }
+    if roll < 51 {
+        return first + 2; // Sapphire
+    }
+    if roll < 72 {
+        return first + 1; // Topaz
+    }
+    first // Amethyst
+}
+
+/// What a friendly attempt draws below the surface, which is a chain and not a pool
+/// (`NPC.cs:2600-2624`):
+///
+/// ```csharp
+/// else if (Main.rand.Next(3) == 0)
+/// {
+///     if (flag11)      { if (Main.rand.Next(5) == 0) SpawnNPC(..., GetGemSquirrelToSpawn()); }
+///     else if (flag10) { SpawnNPC(..., Utils.SelectRandom(Main.rand, new short[2] { 299, 538 })); }
+/// }
+/// else if (flag11) { if (Main.rand.Next(5) == 0) SpawnNPC(..., GetGemBunnyToSpawn()); }
+/// else             { SpawnNPC(..., 46); }
+/// ```
+///
+/// `flag11` (`NPC.cs:2557`) is `spawnTileY >= Main.rockLayer && spawnTileY <= Main.UnderworldLayer`,
+/// which is [`Depth::Cavern`] exactly, and `flag10` (`NPC.cs:2380`) is `surfaceSpawn`, which is
+/// [`friendly_pool`]'s business. So the tail says three things this server did not:
+///
+/// * The caverns are the gem critters' one ordinary home. All fourteen were unreachable here, and
+///   this arm is why: nothing in this server drew from either ladder at all.
+/// * The caverns hold *nothing else*. `friendly_pool` used to answer the Bunny and the Squirrel at
+///   every depth from one fallback arm, but neither is drawn under the rock layer in the game: a
+///   cavern attempt is a gem critter one time in five on either side of the fork and nothing at all
+///   the other four.
+/// * The plain Bunny belongs to the dirt layer between the surface line and the rock, and the
+///   Squirrel is the surface's alone.
+///
+/// `None` is a real answer, not a failure: vanilla's arm simply spawns nothing, and the caller drops
+/// the attempt rather than falling through to a monster.
+///
+/// Two of the three sites that reach the ladders are left out, and neither of them is the only way
+/// to meet a gem critter:
+///
+/// * `NPC.cs:2382-2389`, the rain arm, which is the same fourteen at better odds under the same
+///   `deeperThanRockLayer` gate. Its other four arms are the rain critter roster (the Worm, the Gold
+///   Worm and both Goldfish Walkers), none of which this server models, so taking the gem half alone
+///   would put gem critters in the rain with none of their neighbours.
+/// * `NPC.cs:2564-2574`, which wants `inRemixStartingArea`: the drunk-world seed's surface-in-hell
+///   start, a world layout this server does not generate.
+fn deep_friendly_pick(depth: Depth, rng: &mut SmallRng) -> Option<u16> {
+    // `NPC.cs:2600`, the fork: heads is the squirrel side, tails the bunny side.
+    if rng.random_range(0..3) == 0 {
+        // `NPC.cs:2602-2607`. The `else if (flag10)` below it is the surface Squirrel pair, which
+        // `friendly_pool` carries, so off the surface a miss here is simply nothing.
+        if depth == Depth::Cavern && rng.random_range(0..5) == 0 {
+            return Some(gem_critter(GEM_SQUIRREL, rng));
+        }
+        return None;
+    }
+    // `NPC.cs:2614-2620`.
+    if depth == Depth::Cavern {
+        if rng.random_range(0..5) == 0 {
+            return Some(gem_critter(GEM_BUNNY, rng));
+        }
+        return None;
+    }
+    // `NPC.cs:2621-2624`, the plain Bunny, which is the dirt layer's and not the cavern's.
+    (depth == Depth::Underground).then_some(BUNNY)
 }
 
 pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
@@ -2553,11 +2670,15 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         (Surface, Forest | Corruption | Crimson | Hallow) => {
             if day {
                 &[
-                    74,  // Bird
-                    297, // BirdBlue
-                    298, // BirdRed
-                    46,  // Bunny
+                    74,    // Bird
+                    297,   // BirdBlue
+                    298,   // BirdRed
+                    BUNNY, // Bunny
+                    // The squirrel arm is `Utils.SelectRandom(Main.rand, new short[2] { 299, 538 })`
+                    // (`NPC.cs:2611`), so the Red Squirrel is drawn exactly as often as the grey
+                    // one. Only the grey one was here, which is why 538 had no producer at all.
                     299, // Squirrel
+                    538, // SquirrelRed
                     356, // Butterfly
                 ]
             } else {
@@ -2569,11 +2690,19 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         }
         // The underworld's friendly spawns are lava-bait critters this server does not model.
         (Underworld, _) => &[],
-        // Underground and cavern: the game's own fallback is a bunny, with squirrels near the mouth
-        // of a cave (`NPC.cs:2600-2623`).
+        // Underground and cavern are not a pool at all: vanilla's tail (`NPC.cs:2600-2624`) is a
+        // fork with a one-in-five gate on each side, so it answers a gem critter, a plain Bunny, or
+        // nothing, depending on the layer. [`deep_friendly_pick`] owns it, and this returning empty
+        // is what hands the draw over to it. It used to answer a Bunny and a Squirrel at both
+        // depths, which put the Squirrel three hundred tiles below the last tree and left every one
+        // of the fourteen gem critters with no producer anywhere in this server.
+        (Underground | Cavern, _) => &[],
+        // Anything else is the surface, where the Bunny and the Squirrel really are the fallback
+        // (`NPC.cs:2609-2611`, `:2621-2624`).
         (_, _) => &[
-            46,  // Bunny
-            299, // Squirrel
+            BUNNY, // Bunny
+            299,   // Squirrel
+            538,   // SquirrelRed
         ],
     }
 }
@@ -4635,24 +4764,40 @@ pub fn try_spawn(
                         friendly_pool(depth, player_biome, world.day_time)
                     };
                     if critters.is_empty() {
-                        continue;
-                    }
-                    let critter = critters[rng.random_range(0..critters.len())];
-                    // A frog is a chain rather than a draw, and vanilla runs that chain exactly
-                    // where this pool answers 361 (`NPC.cs:2363`, `:3831` -> `SpawnFrog`). No
-                    // holiday costume applies: `holiday_costume` only ever dresses a bunny or a
-                    // plain slime, and the jungle-grass arm is answered ahead of the case it reads.
-                    if critter == FROG {
-                        let alive =
-                            |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
-                        spawn_frog(world, &alive, rng)
-                    } else if critter == OWL {
-                        // The owl is the other chain in this pool, for the same reason
-                        // (`NPC.cs:2442-2448` -> `spawn_owl`): one draw in a hundred is the Owl
-                        // Mimic instead. No holiday costume applies here either.
-                        spawn_owl(rng)
+                        // Empty is not the same as nothing: below the surface line vanilla's own
+                        // tail is a gated fork rather than a set, so the two layers down there hand
+                        // the draw to [`deep_friendly_pick`] instead. It is where all fourteen gem
+                        // critters come from, and where the plain Bunny of the dirt layer does. The
+                        // underworld really is empty and falls through to the `continue`.
+                        //
+                        // No costume ever reaches a gem critter: vanilla's Halloween, Christmas and
+                        // party bunnies (`NPC.cs:2584-2599`) all carry `!flag11`, so nothing under
+                        // the rock layer is dressed up. `holiday_costume` only matches the plain
+                        // Bunny, so passing this through it dresses the dirt layer's bunny exactly
+                        // where vanilla dresses it and leaves the caverns untouched.
+                        let Some(deep) = deep_friendly_pick(depth, rng) else {
+                            continue;
+                        };
+                        holiday_costume(deep, depth, seasonal, rng)
                     } else {
-                        holiday_costume(critter, depth, seasonal, rng)
+                        let critter = critters[rng.random_range(0..critters.len())];
+                        // A frog is a chain rather than a draw, and vanilla runs that chain exactly
+                        // where this pool answers 361 (`NPC.cs:2363`, `:3831` -> `SpawnFrog`). No
+                        // holiday costume applies: `holiday_costume` only ever dresses a bunny or a
+                        // plain slime, and the jungle-grass arm is answered ahead of the case it
+                        // reads.
+                        if critter == FROG {
+                            let alive =
+                                |ty: u16| npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive());
+                            spawn_frog(world, &alive, rng)
+                        } else if critter == OWL {
+                            // The owl is the other chain in this pool, for the same reason
+                            // (`NPC.cs:2442-2448` -> `spawn_owl`): one draw in a hundred is the Owl
+                            // Mimic instead. No holiday costume applies here either.
+                            spawn_owl(rng)
+                        } else {
+                            holiday_costume(critter, depth, seasonal, rng)
+                        }
                     }
                 }
                 // Below the dungeon before Skeletron falls, the dungeon answers with the Dungeon
@@ -5535,6 +5680,18 @@ mod tests {
             set.insert(spawn_owl(&mut rng));
         }
 
+        // The friendly chain below the surface line, which `friendly_pool` deliberately leaves
+        // empty: the dirt layer's plain Bunny, and the caverns' fourteen gem critters. The rarest
+        // of the fourteen is a one-in-fifteen fork, then a one-in-five gate, then five draws in a
+        // hundred on the gem ladder, so a Gem Bunny Diamond wants roughly one seed in a hundred and
+        // fifty and this needs a long run before all fourteen have come up once.
+        for depth in DEPTHS {
+            for seed in 0..20_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.extend(deep_friendly_pick(depth, &mut rng));
+            }
+        }
+
         // The dungeon's doorman, and the residents found tied up underground.
         set.insert(DUNGEON_GUARDIAN);
         set.extend(rescues::RESCUES.iter().map(|r| r.bound));
@@ -6397,6 +6554,111 @@ mod tests {
         );
         assert!(!seen.contains(&OWL), "an owl in broad daylight: {seen:?}");
         assert!(!seen.contains(&OWL_MIMIC), "and a mimic too: {seen:?}");
+    }
+
+    /// The surface draws both squirrels. Vanilla's arm is
+    /// `Utils.SelectRandom(Main.rand, new short[2] { 299, 538 })` (`NPC.cs:2611`), so the Red
+    /// Squirrel comes up exactly as often as the grey one; only the grey one was in the pool, so
+    /// 538 had no producer anywhere in this server.
+    ///
+    /// Neutralised by dropping 538 from `friendly_pool`'s surface arm: the second assertion fails
+    /// and the first still passes, so this is not reading "nothing friendly spawned".
+    #[test]
+    fn the_surface_draws_both_squirrels() {
+        let (world, (px, py)) = forest_surface();
+        let seen = friendly_draws_at(&world, px, py, 20_000);
+        assert!(seen.contains(&299), "no grey squirrel: {seen:?}");
+        assert!(seen.contains(&538), "no red squirrel: {seen:?}");
+    }
+
+    /// A flat floor deep enough to be caverns, and a place to stand on it.
+    ///
+    /// `flat_world` puts the surface line at 100 and the rock layer at 200, so a floor at 300 is
+    /// below the rock and above the underworld at `600 - 200`: vanilla's `flag11` exactly
+    /// (`NPC.cs:2557`).
+    fn cavern_floor() -> (World, (i32, i32)) {
+        let world = flat_world(300);
+        let at = (400, 298);
+        assert_eq!(depth_at(&world, at.1), Depth::Cavern);
+        (world, at)
+    }
+
+    /// The caverns hand out gem critters, and they hand out nothing else (`NPC.cs:2600-2624`).
+    ///
+    /// All fourteen were unreachable: `friendly_pool`'s one fallback arm answered a Bunny and a
+    /// Squirrel at every depth below the surface, so neither gem ladder was called anywhere in this
+    /// server and no player could meet a single one of them. The same arm was wrong in the other
+    /// direction too, because vanilla's tail draws neither of those two under the rock layer: the
+    /// `flag11` side of its fork is a gem critter one attempt in five and nothing the other four.
+    ///
+    /// Neutralised by making `deep_friendly_pick` return `Some(BUNNY)` for every depth, which is
+    /// what the old fallback amounted to: the first assertion fails on all fourteen types at once
+    /// and the second fails on the Bunny. Returning `None` for `Depth::Cavern` alone fails the first
+    /// and passes the second, which is the half that says the caverns really are otherwise empty.
+    #[test]
+    fn the_caverns_are_gem_critters_and_nothing_else() {
+        let (world, (px, py)) = cavern_floor();
+        let seen = friendly_draws_at(&world, px, py, 200_000);
+        for ty in GEM_SQUIRREL..=GEM_BUNNY + 6 {
+            assert!(
+                seen.contains(&ty),
+                "no gem critter {ty} in the caverns: {seen:?}"
+            );
+        }
+        for ty in [BUNNY, 299, 538] {
+            assert!(
+                !seen.contains(&ty),
+                "the surface critter {ty} reached the caverns: {seen:?}"
+            );
+        }
+    }
+
+    /// ...and the dirt layer between the surface line and the rock keeps the plain Bunny it always
+    /// had, with no gem critter anywhere in it (`NPC.cs:2614-2624`: the gem arms are `flag11`'s and
+    /// the bunny is the `else`).
+    ///
+    /// Neutralised by widening both gem gates in `deep_friendly_pick` from `depth == Depth::Cavern`
+    /// to `depth != Depth::Surface`: the dirt layer comes back holding twelve gem critters and no
+    /// Bunny at all, which is both halves of this at once. The cavern test is unaffected by that
+    /// widening and still passes, so the failure is this layer's and not a general one.
+    #[test]
+    fn the_dirt_layer_keeps_its_plain_bunny_and_no_gems() {
+        let world = flat_world(150);
+        let at = (400, 148);
+        assert_eq!(depth_at(&world, at.1), Depth::Underground);
+        let seen = friendly_draws_at(&world, at.0, at.1, 20_000);
+        assert!(seen.contains(&BUNNY), "no bunny in the dirt layer: {seen:?}");
+        for ty in GEM_SQUIRREL..=GEM_BUNNY + 6 {
+            assert!(
+                !seen.contains(&ty),
+                "the gem critter {ty} reached the dirt layer: {seen:?}"
+            );
+        }
+    }
+
+    /// The gem ladder is weighted, not uniform (`NPC.cs:5689-5714`, `:5719-5744`): Amethyst is 28
+    /// draws in a hundred and Diamond is 5, so a Gem Bunny Diamond is a find and a Gem Bunny
+    /// Amethyst is not.
+    ///
+    /// Neutralised by replacing `gem_critter`'s body with `first + rng.random_range(0..7)`: the
+    /// uniform share is 14.3%, which fails the Amethyst bound at once.
+    #[test]
+    fn the_gem_ladder_is_weighted_rarest_last() {
+        let mut rng = SmallRng::seed_from_u64(645);
+        let mut counts = [0u32; 7];
+        const RUNS: u32 = 200_000;
+        for _ in 0..RUNS {
+            counts[usize::from(gem_critter(GEM_BUNNY, &mut rng) - GEM_BUNNY)] += 1;
+        }
+        // Amethyst, Topaz, Sapphire, Emerald, Ruby, Diamond, Amber, in id order: the ladder's own
+        // cutoffs read as widths are 28, 21, 16, 12, 10, 5, 8 per hundred.
+        for (offset, want) in [28u32, 21, 16, 12, 10, 5, 8].into_iter().enumerate() {
+            let got = counts[offset] * 100 / RUNS;
+            assert!(
+                got.abs_diff(want) <= 1,
+                "gem offset {offset}: {got}% drawn, vanilla's ladder says {want}%"
+            );
+        }
     }
 
     /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
