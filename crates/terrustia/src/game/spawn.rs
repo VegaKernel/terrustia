@@ -3377,6 +3377,12 @@ fn spawn_butterfly(too_windy: bool, rng: &mut SmallRng) -> u16 {
 /// `isAValidZoneAndTile` is the caller's, and is exactly `!ZoneCorrupt && !ZoneCrimson && !waterTile`
 /// (`NPC.cs:3629`). `Main.eclipse` and `Main.bloodMoon` are read off the world here rather than
 /// passed, because that is where this server keeps them.
+///
+/// The `Main.dayTime && tile.wall <= 0` line is dead where the game writes it, and is transcribed
+/// anyway rather than dropped: every wall the line below accepts is nonzero, so the only tile it
+/// can turn down is one the wall set turns down a line later regardless of the hour. It is the same
+/// belt-and-braces as the `!raining` on the owl's arm ([`spawn_owl`]), and it is called out here
+/// because it looks from the outside like a daylight gate on gnomes and is not one.
 fn underground_gnome(
     world: &World,
     x: i32,
@@ -8687,15 +8693,16 @@ mod tests {
     /// ...and a dirt-walled cave in the narrow band around the surface line is the other place, at
     /// one attempt in ten (`NPC.cs:3629` -> `CheckToSpawnUndergroundGnomes`).
     ///
-    /// It has two separate wall gates, one above the other, and each needs its own dark corner to be
-    /// tested in: `if (Main.dayTime && tile.wall <= 0) return false;` wants *some* wall by day, and
-    /// the line under it wants one of six particular ones at any hour. An unwalled cave in daylight
-    /// is turned down by the first, so it says nothing at all about the second.
+    /// The unwalled control runs after dark on purpose. The game has two wall gates one above the
+    /// other, `if (Main.dayTime && tile.wall <= 0) return false;` and then the wall set, and the
+    /// first is dead: everything the set accepts is nonzero, so the only tile the daylight line can
+    /// turn down is one the set turns down anyway. Testing the set in daylight would therefore prove
+    /// nothing about it. (Dropping that daylight line changes no outcome at all, which is why there
+    /// is no neutralisation listed for it; see [`underground_gnome`].)
     ///
     /// Neutralised by returning `false` from `underground_gnome`'s first line: the walled assertion
-    /// fails. Neutralised again by dropping the `GNOME_WALLS.contains(&wall)` line: the night
-    /// assertion fails, gnomes coming out of bare stone in the dark. Neutralised a third way, by
-    /// dropping the `Main.dayTime && wall == 0` line: the daylight assertion fails instead.
+    /// fails. Neutralised again by dropping the `GNOME_WALLS.contains(&wall)` line: the after-dark
+    /// assertion fails, gnomes coming out of bare stone.
     #[test]
     fn a_dirt_walled_cave_near_the_surface_is_the_other_gnome() {
         // `worldSurface` is 100 here, so the band is rows 80 to 110 and the floor at 90 is in it.
