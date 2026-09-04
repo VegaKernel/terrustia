@@ -5088,6 +5088,13 @@ impl GameServer {
     /// model: an early return changes nothing about the flag and turns a worst-case million tile
     /// reads into a handful on most worlds.
     ///
+    /// The loop order is vanilla's, columns outside and rows in, even though tiles are stored
+    /// row-major here (`world/packed.rs`'s own `y * width + x`) and so the sweep misses the cache on
+    /// every read. Swapping the two visits exactly the same grid and cannot change a bool over all
+    /// of it, so it was tried and measured: it bought 16% and no more, because `World::tile`
+    /// reassembling a tile costs more than the miss does. Not enough to write the loop differently
+    /// from the game.
+    ///
     /// Run at world load and at every dusk, which is where vanilla runs it
     /// (`WorldGen.cs:3272`, `Main.cs:66212`). Not per tick, and never on the spawn path.
     ///
@@ -12182,5 +12189,36 @@ mod fallen_log_scan {
             let server = GameServer::new(Config::default(), world);
             assert!(!server.fairy_log, "a log {what} counted");
         }
+    }
+
+    /// What the sweep costs, on the largest world the game makes and in its worst case.
+    ///
+    /// The worst case is a world with no log at all: the early return that makes a logged world
+    /// cheap never fires, so every column and every second row is read. A large world is 8400 by
+    /// 2400 with its surface around row 800, which is 2767 columns by 346 rows, so roughly 957,000
+    /// tile reads.
+    ///
+    /// It is not on a per-tick path. It runs once at world load and once at each dusk, which at the
+    /// game's own day length is one sweep per 24 minutes of play.
+    ///
+    /// Measured on this machine, release build, with several build lanes running beside it: 3.2 to
+    /// 4.9 ms a sweep across runs. Against a 16.67 ms frame that is a fifth to a third of the one
+    /// tick a night that pays it, and a world that has a log in it, which is nearly all of them,
+    /// returns at the first one and pays a fraction of that.
+    #[test]
+    #[ignore]
+    fn measure_the_fallen_log_sweep() {
+        let mut world = crate::world::World::empty(8400, 2400, "sweep bench");
+        world.surface = 800;
+        let mut server = GameServer::new(Config::default(), world);
+
+        const SWEEPS: u32 = 10;
+        let start = std::time::Instant::now();
+        for _ in 0..SWEEPS {
+            server.scan_for_fallen_logs();
+            assert!(!std::hint::black_box(server.fairy_log));
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(SWEEPS) * 1e3;
+        println!("scan_for_fallen_logs, no log in a large world: {each:.3} ms/sweep");
     }
 }

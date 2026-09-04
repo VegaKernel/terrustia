@@ -12484,6 +12484,74 @@ mod tests {
         }
     }
 
+    /// What the fairy gate and the hornet swap cost the per-candidate loop.
+    ///
+    /// Both sit on a path that already runs and neither adds a scan of any kind.
+    ///
+    /// * [`underground_fairy`] is one arm in [`try_spawn`]'s chain, reached by every candidate that
+    ///   gets past the water and the meteor, the same place [`underground_gnome`] already sits. On
+    ///   a world with no fallen log left in it the first line is a bool and it returns; on a world
+    ///   with one it is a single roll five hundred times in five hundred and one, and the `alive`
+    ///   scan behind it is asked last so a declined roll never walks the NPC table.
+    /// * [`hornet_variant`] is an after-the-draw swap on the final pool draw, which happens at most
+    ///   once per tick server-wide, and its own first line is a `u16` compare.
+    ///
+    /// Measured on this machine, release build, arguments behind a `black_box`. The numbers this
+    /// prints:
+    ///
+    /// * `underground_fairy`, no log: 1.08 ns, which is the bool and the return.
+    /// * `underground_fairy`, logged and declining: 2.04 ns, the roll and nothing else.
+    /// * `hornet_variant` on something that is not a hornet: 2.03 ns. On a hornet: 1.97 ns. The two
+    ///   are the same because at this size the `black_box` on the argument costs as much as the
+    ///   body: the swap is a compare and, at most, one roll.
+    ///
+    /// `try_spawn` as a whole measures 242-527 ns a call
+    /// ([`tests::measure_the_statue_mimic_plinth_check`]), so the fairy arm is under one percent of
+    /// one attempt and the hornet swap is not measurable against a tick at all.
+    ///
+    /// The whole-world log sweep behind `fairy_log` is not here because it is not on this path at
+    /// all: it runs at world load and at dusk, and is measured next to itself in
+    /// `game/server/systems.rs`'s own `measure_the_fallen_log_sweep`.
+    #[test]
+    #[ignore]
+    fn measure_the_fairy_gate_and_the_hornet_swap() {
+        let n = 10_000_000;
+        let mut world = World::empty(1200, 600, "bench");
+        world.surface = 100;
+        world.rock_layer = 200;
+
+        let mut rng = SmallRng::seed_from_u64(7);
+        for (name, fairy_log) in [("no log", false), ("logged and declining", true)] {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for i in 0..n {
+                sink += u32::from(underground_fairy(
+                    std::hint::black_box(&world),
+                    std::hint::black_box(fairy_log),
+                    std::hint::black_box(false),
+                    std::hint::black_box(200 + i % 4),
+                    &|| false,
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("underground_fairy, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        for (name, base) in [("not a hornet", 43u16), ("a hornet", HORNET)] {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..n {
+                sink = sink.wrapping_add(u32::from(hornet_variant(
+                    std::hint::black_box(base),
+                    &mut rng,
+                )));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
+            println!("hornet_variant, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     /// What the water chain costs, both halves of it.
     ///
     /// Two things moved. [`water_tile`] is now hoisted out of its own match guard and read once per
