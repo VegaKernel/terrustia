@@ -1795,6 +1795,57 @@ fn gold_variant(npc_type: u16, depth: Depth, rng: &mut SmallRng) -> u16 {
     }
 }
 
+/// The plain jungle Hornet, `NPCID.Hornet`, which is what [`pool`]'s jungle arms carry.
+const HORNET: u16 = 42;
+
+/// The first of the five hornet families, `NPCID.HornetFatty`. The other four follow it in id
+/// order: Honey, Leafy, Spikey, Stingy.
+const HORNET_FATTY: u16 = 231;
+
+/// Which hornet a jungle draw is actually answered by (`NPC.SpawnHornet`, `NPC.cs:5289-5354`).
+///
+/// Vanilla never spawns a plain Hornet directly. All three of its hornet arms call `SpawnHornet`:
+/// a Hive tile at `NPC.cs:3834-3861` (`tileType == 225`, half the time and only outside hardmode's
+/// own Moss Hornet fork), a Hive wall at `:3925-3928` (`wallType == 86`, seven attempts in eight),
+/// and the deep jungle-grass fallthrough at `:3929-3942`. Every one of them lands in the same
+/// eight-way switch:
+///
+/// ```csharp
+/// switch (Main.rand.Next(8))
+/// {
+/// case 0: ... return SpawnNPC(..., 231);
+/// case 1: ... return SpawnNPC(..., 232);
+/// case 2: ... return SpawnNPC(..., 233);
+/// case 3: ... return SpawnNPC(..., 234);
+/// case 4: ... return SpawnNPC(..., 235);
+/// default: ... return SpawnNPC(..., 42);
+/// }
+/// ```
+///
+/// So five draws in eight are a *family* hornet and only three are the plain one. Every jungle
+/// hornet this server has ever spawned was the plain 42, which is three eighths of what the game
+/// puts in a hive.
+///
+/// This is [`holiday_costume`]'s and [`gold_variant`]'s shape of after-the-draw swap, and for the
+/// same reason: 42 is what [`pool`]'s jungle arms stand for, so conditioning on "a hornet was
+/// drawn" and then re-rolling which one is the same distribution written the other way round.
+///
+/// Each case also has two `Main.rand.Next(4) == 0` rolls above its answer, for the little and big
+/// members of that family (`-56`/`-57` under 231, up to `-64`/`-65` under 235, and `-16`/`-17`
+/// under 42). Those are not transcribed and nothing is lost by it: a negative id is a *net id*, not
+/// a type, and `NPCID.FromNetId` resolves all ten of them straight back onto the same five types
+/// this does answer with (`npc_data::NET_ID_MAP`, `NPCID.cs:12478-12484`). This server spawns by
+/// type, so the only thing the size rolls decide is how big the sprite draws.
+fn hornet_variant(npc_type: u16, rng: &mut SmallRng) -> u16 {
+    if npc_type != HORNET {
+        return npc_type;
+    }
+    match rng.random_range(0..8u16) {
+        family @ 0..=4 => HORNET_FATTY + family,
+        _ => HORNET,
+    }
+}
+
 /// What the underworld's lava-bait critters answer with (`NPC.SpawnLavaBaitCritters`,
 /// `NPC.cs:5850-5877`):
 ///
@@ -3362,6 +3413,73 @@ fn spawn_butterfly(too_windy: bool, rng: &mut SmallRng) -> u16 {
     }
 }
 
+/// The three fairy critters, `NPCID.FairyCritterPink` and the Green and Blue that follow it.
+const FAIRY_CRITTER_PINK: u16 = 583;
+
+/// One in five hundred, `CheckToSpawnUndergroundFairy`'s own base odds (`NPC.cs:5824`).
+const FAIRY_CHANCE: u32 = 500;
+
+/// `NPC.Spawner.CheckToSpawnUndergroundFairy` (`NPC.cs:5820-5848`):
+///
+/// ```csharp
+/// if (!fairyLog) return false;
+/// int num = 500;
+/// if (Main.tenthAnniversaryWorld && !Main.getGoodWorld) num = 250;
+/// if (Main.hardMode) num = (int)((float)num * 1.66f);
+/// if (RollLuck(num) != 0) return false;
+/// if ((double)spawnTileY < (Main.worldSurface + Main.rockLayer) / 2.0
+///     || spawnTileY >= Main.maxTilesY - 300) return false;
+/// if (AnyHelpfulFairies()) return false;
+/// return true;
+/// ```
+///
+/// This is the *underground* fairy, and the whole of what it asks is: the world has a fallen log
+/// somewhere in it, the spot is below the halfway line between the surface and the rock layer but
+/// clear of the bottom three hundred rows, one draw in five hundred came up, and there is not
+/// already a fairy out doing this. It has no biome gate, no hour gate and no progression gate: a
+/// player digging deep on their first day can meet one.
+///
+/// `fairy_log` is `NPC.Spawner.fairyLog` (`NPC.cs:150`), which the spawner only ever reads.
+/// `MysticLogFairiesEvent.ScanWholeOverworldForLogs` owns every write to it, and the caller keeps
+/// it: see `game/server/systems.rs`'s own `scan_for_fallen_logs`.
+///
+/// Hardmode makes a fairy *rarer*, not commoner: `(int)(500f * 1.66f)` is exactly 830 at `f32`
+/// (the product rounds to 830.0 rather than to 829.99998, so the truncation costs nothing).
+///
+/// `Main.tenthAnniversaryWorld` is not modelled anywhere in this server, so the 250 arm drops and
+/// the base is always 500. `RollLuck(num)` is `Main.rand.Next(num)` at luck zero (`Luck.cs:5-16`),
+/// the narrowing every other `Roll*Luck` site in this file already makes.
+///
+/// `any_helpful_fairies` is `NPC.AnyHelpfulFairies()` (`NPC.cs:90954-90964`): a live 583, 584 or
+/// 585 whose `ai[2] > 1f`, which is every state past the two drifting ones (`game::ai::fairy`'s own
+/// `state` module). It is passed as a closure and asked last, so a declined roll never walks the
+/// NPC table.
+fn underground_fairy(
+    world: &World,
+    fairy_log: bool,
+    hard_mode: bool,
+    ground_y: i32,
+    any_helpful_fairies: &dyn Fn() -> bool,
+    rng: &mut SmallRng,
+) -> bool {
+    if !fairy_log {
+        return false;
+    }
+    let chance = if hard_mode {
+        (FAIRY_CHANCE as f32 * 1.66) as u32
+    } else {
+        FAIRY_CHANCE
+    };
+    if rng.random_range(0..chance) != 0 {
+        return false;
+    }
+    let halfway = (f64::from(world.surface) + f64::from(world.rock_layer)) / 2.0;
+    if f64::from(ground_y) < halfway || ground_y >= world.height() - 300 {
+        return false;
+    }
+    !any_helpful_fairies()
+}
+
 /// `NPC.Spawner.CheckToSpawnUndergroundGnomes` (`NPC.cs:5747-5787`):
 ///
 /// ```csharp
@@ -4692,6 +4810,15 @@ pub struct EventSpawns<'a> {
     /// * `Main.cloudBGActive == 0f`, the overcast-background counter
     ///   (`Main.updateCloudLayer`, `Main.cs:13346-13400`), which `game/weather.rs` already ticks.
     pub starfall_night: bool,
+    /// `NPC.Spawner.fairyLog` (`NPC.cs:150`): whether this world still has a fallen log standing in
+    /// it. The one gate on the underground fairy (see [`underground_fairy`]), and the only thing
+    /// the spawner ever reads of the whole mystic-log business.
+    ///
+    /// Resolved by the caller for the same reason [`Self::starfall_night`] is: vanilla re-decides
+    /// it at world load, at every dusk and whenever a log is broken (`MysticLogFairiesEvent`), not
+    /// per candidate tile, so a per-tile scan of the whole overworld would be paying a million tile
+    /// reads for an answer that changes at most once a night.
+    pub fairy_log: bool,
     /// Whether the wall has fallen, which is what opens the hardmode half of every pool.
     pub hard_mode: bool,
     /// ...and whether a mechanical boss is down, which is what opens the underworld's.
@@ -5684,6 +5811,50 @@ pub fn try_spawn(
                 // type. Standing in a crater there are Meteor Heads and there is nothing else, and
                 // that is the entire point of the place.
                 None if zones.meteor => METEOR_HEAD,
+                // The underground fairy, sitting exactly where vanilla puts it: below the eclipse
+                // chain that ends at `NPC.cs:3614` and directly above the two Gnome arms below
+                // (`:3616-3624`, gate in [`underground_fairy`]).
+                //
+                // ```csharp
+                // else if (CheckToSpawnUndergroundFairy(spawnTileX, spawnTileY))
+                // {
+                //     int type3 = Main.rand.Next(583, 586);
+                //     if (Main.tenthAnniversaryWorld && !Main.getGoodWorld && Main.rand.Next(4) != 0) type3 = 583;
+                //     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, type3, 0, 0f, 0f, 2f).TargetClosest();
+                // }
+                // ```
+                //
+                // The three colours are drawn flat and mean nothing: `Main.rand.Next(583, 586)` is
+                // the whole of it, and a fairy's behaviour does not read its own type anywhere. The
+                // tenth-anniversary arm drops with every other `tenthAnniversaryWorld` branch in
+                // this file.
+                //
+                // `ai2 = 2f` is the fairy's `state::APPROACH` (`game::ai::fairy`), so one arrives
+                // already coming for the player rather than drifting where it appeared, which is
+                // the difference between meeting one in a cave and never knowing it was there. It
+                // is also what `AnyHelpfulFairies` reads, so without it the gate below could never
+                // suppress a second. `NpcStore::spawn` seeds it, beside the dungeon library mimic's
+                // own dormancy, because this function answers with types and not with `ai` slots.
+                None if !sky && {
+                    let busy = || {
+                        npcs.iter().any(|(_, n)| {
+                            matches!(n.npc_type, FAIRY_CRITTER_PINK..=585)
+                                && n.is_alive()
+                                && n.ai[2] > 1.0
+                        })
+                    };
+                    underground_fairy(
+                        world,
+                        events.fairy_log,
+                        events.hard_mode,
+                        y + 1,
+                        &busy,
+                        rng,
+                    )
+                } =>
+                {
+                    FAIRY_CRITTER_PINK + rng.random_range(0..3u16)
+                }
                 // The other two Gnomes, both sitting immediately above the Glowing Mushroom arm in
                 // vanilla's own chain (`NPC.cs:3625` and `:3629`) and therefore immediately above it
                 // here. Neither is reachable on a friendly attempt in the game: `spawnFriendly` is
@@ -6327,7 +6498,11 @@ pub fn try_spawn(
                     if ty == CAVERN_SENTINEL {
                         events.cavern_monsters.pick(rng)
                     } else {
-                        holiday_costume(ty, depth, seasonal, rng)
+                        // Two after-the-draw swaps, both of which decline for everything they are
+                        // not about: a costume for the bunny and the surface slime, and a family
+                        // for the hornet ([`hornet_variant`], which is what makes a hive throw
+                        // Fatties and Stingies rather than five plain Hornets in eight).
+                        hornet_variant(holiday_costume(ty, depth, seasonal, rng), rng)
                     }
                 }
             };
@@ -6599,6 +6774,17 @@ mod tests {
                 set.insert(GNOME);
             }
         }
+        // ...and the fairy directly above it, the same way: its gate is a producer, its answer is
+        // three colours drawn flat in [`try_spawn`]'s own arm. `burrow` is 600 rows deep with its
+        // surface at 200 and its rock layer at 300, so the gate's window is row 250 (their halfway
+        // line) up to row 299 (`height - 300`, exclusive), and 275 sits inside it.
+        for _ in 0..20_000 {
+            if underground_fairy(&burrow, true, false, 275, &|| false, &mut rng) {
+                for colour in 0..3u16 {
+                    set.insert(FAIRY_CRITTER_PINK + colour);
+                }
+            }
+        }
         // The surface night's own chain, asked through itself for the same reason the sky is:
         // deleting an arm shows up here as a type that stopped being reachable. Every combination
         // of the flags it reads, since each one opens arms the others do not, both moon phases it
@@ -6771,6 +6957,13 @@ mod tests {
                     set.insert(gold_variant(base, depth, &mut rng));
                 }
             }
+        }
+
+        // ...and the third swap of that shape, the hornet's family. One base and no depth fork, so
+        // a handful of seeds covers all six of its eighths.
+        for seed in 0..200u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            set.insert(hornet_variant(HORNET, &mut rng));
         }
 
         // The underworld's lava-bait chain, asked through its own producer for the same reason the
@@ -6980,6 +7173,7 @@ mod tests {
             wind_target: 0.0,
             party: false,
             starfall_night: false,
+            fairy_log: false,
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
@@ -8755,6 +8949,102 @@ mod tests {
         assert!(
             walled.contains(&GNOME),
             "no gnome in a dirt-walled cave: {walled:?}"
+        );
+    }
+
+    /// The underground fairy, whose whole gate is whether the world still has a fallen log in it
+    /// (`NPC.cs:3616-3624` -> [`underground_fairy`], `NPC.cs:5820-5848`).
+    ///
+    /// All three colours were in no pool and no branch, which made `game::ai::fairy` dead code: the
+    /// one routine in the game whose entire purpose is to lead a player to ore, fully built here,
+    /// and nothing could ever put one in a world. It has no biome gate, no hour gate and no
+    /// progression gate, so a fresh character digging deep can meet one on their first day.
+    ///
+    /// The three depth and log assertions are separate claims and are asked separately: the log is
+    /// asked end to end through `try_spawn` because that is the wiring worth proving, and the two
+    /// depth edges through the gate itself, because at one draw in five hundred a spawn-tick
+    /// harness would need millions of ticks to say anything about a row that is one off the line.
+    ///
+    /// Neutralised by dropping `events.fairy_log` from `underground_fairy`'s first line: the second
+    /// assertion fails, "a world with no fallen log in it drew a fairy". Neutralised again by
+    /// deleting the whole arm from `try_spawn`'s chain: the first fails, "no FairyCritterPink (583)
+    /// in a logged world".
+    #[test]
+    fn a_fallen_log_is_what_puts_fairies_underground() {
+        const TICKS: u32 = 200_000;
+        // `flat_world_of` puts the surface at 100 and the rock layer at 200 in a world 600 rows
+        // deep, so the gate's window is row 150 (their halfway line) up to row 299, exclusive.
+        let floor = 255;
+        let cave = flat_world_of(floor, 1);
+        let at = (400, floor - 1);
+        assert_eq!(depth_at(&cave, at.1), Depth::Cavern);
+
+        let logged = EventSpawns {
+            fairy_log: true,
+            ..quiet()
+        };
+        let seen: std::collections::BTreeSet<u16> = spawns_with(&cave, &logged, at.0, at.1, TICKS)
+            .into_iter()
+            .map(|(npc_type, _)| npc_type)
+            .collect();
+        for colour in 0..3u16 {
+            let npc_type = FAIRY_CRITTER_PINK + colour;
+            assert!(
+                seen.contains(&npc_type),
+                "no fairy ({npc_type}) in a logged world: {seen:?}"
+            );
+        }
+
+        // ...and a world whose logs have all been mined has none of the three.
+        let bare: std::collections::BTreeSet<u16> = spawns_with(&cave, &quiet(), at.0, at.1, TICKS)
+            .into_iter()
+            .map(|(npc_type, _)| npc_type)
+            .collect();
+        assert!(
+            !(FAIRY_CRITTER_PINK..=585).any(|npc_type| bare.contains(&npc_type)),
+            "a world with no fallen log in it drew a fairy: {bare:?}"
+        );
+
+        // The two depth edges, asked of the gate directly. Both are exact: `< halfway` turns 149
+        // down and keeps 150, and `>= height - 300` turns 300 down and keeps 299.
+        let window = |ground_y: i32| {
+            (0..40_000u64).any(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                underground_fairy(&cave, true, false, ground_y, &|| false, &mut rng)
+            })
+        };
+        assert!(!window(149), "a fairy above the surface-to-rock halfway line");
+        assert!(window(150), "no fairy on the halfway line itself");
+        assert!(window(299), "no fairy one row above the bottom three hundred");
+        assert!(!window(300), "a fairy in the bottom three hundred rows");
+
+        // ...and one already out keeps the next away (`NPC.AnyHelpfulFairies`, `NPC.cs:5843`).
+        assert!(
+            !(0..40_000u64).any(|seed| {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                underground_fairy(&cave, true, false, 200, &|| true, &mut rng)
+            }),
+            "a second fairy while one was already leading somebody"
+        );
+
+        // Hardmode makes them rarer rather than commoner: `(int)(500f * 1.66f)` is 830
+        // (`NPC.cs:5829`), so the same seed count finds fewer.
+        let hits = |hard_mode: bool| {
+            (0..500_000u64)
+                .filter(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(*seed);
+                    underground_fairy(&cave, true, hard_mode, 200, &|| false, &mut rng)
+                })
+                .count()
+        };
+        let (early, late) = (hits(false), hits(true));
+        assert!(
+            (800..1200).contains(&early),
+            "one in five hundred came up {early} times in 500,000"
+        );
+        assert!(
+            (450..750).contains(&late),
+            "one in eight hundred and thirty came up {late} times in 500,000"
         );
     }
 
@@ -13784,6 +14074,87 @@ mod tests {
             !sun.contains(&204),
             "the jungle surface offered a Spiked Jungle Slime"
         );
+    }
+
+    /// Five hornets in eight belong to a family, and this server only ever spawned the other three.
+    ///
+    /// Every hornet arm in the game routes through `NPC.SpawnHornet` (`NPC.cs:5289-5354`), whose
+    /// `Main.rand.Next(8)` gives cases 0 to 4 to the five families (231 to 235) and only the
+    /// default to the plain 42. All five were in no pool and no branch, so a jungle hive here threw
+    /// nothing but plain Hornets while a real one throws them three times in eight.
+    ///
+    /// Checked through `try_spawn` rather than through [`hornet_variant`] alone, because the claim
+    /// worth holding is that the swap is on the path a jungle draw actually takes, and the odds are
+    /// cheap enough to reach end to end: the jungle pool is five entries, so a hornet is one draw in
+    /// five and each family one in forty.
+    ///
+    /// The two halves are asked separately because they are separate claims: that every family is
+    /// reachable, and that the plain hornet is still the commonest single answer rather than being
+    /// replaced by them.
+    ///
+    /// Neutralised by replacing `hornet_variant`'s body with `npc_type` (keeping the `rng` draw, so
+    /// only the answer changes): "the jungle offered no HornetFatty (231)". Neutralised again by
+    /// deleting the `_ => HORNET` arm's reachability, folding the default eighth into case 0
+    /// (`family @ 0..=7 => HORNET_FATTY + family.min(4)`): the second assertion fails with "the
+    /// plain Hornet (42) is gone from the jungle".
+    #[test]
+    fn a_jungle_hornet_belongs_to_one_of_five_families() {
+        const TICKS: u32 = 200_000;
+        let floor = 300;
+        let deep = flat_world_of(floor, JUNGLE_GRASS);
+        let at = (400, floor - 1);
+        assert_eq!(biome_at(&deep, at.0, at.1), Biome::Jungle);
+
+        let seen = roster_at(&deep, false, at, TICKS);
+        for (npc_type, name) in [
+            (231u16, "HornetFatty"),
+            (232, "HornetHoney"),
+            (233, "HornetLeafy"),
+            (234, "HornetSpikey"),
+            (235, "HornetStingy"),
+        ] {
+            assert!(
+                seen.contains(&npc_type),
+                "the jungle offered no {name} ({npc_type}): {seen:?}"
+            );
+        }
+        assert!(
+            seen.contains(&HORNET),
+            "the plain Hornet ({HORNET}) is gone from the jungle: {seen:?}"
+        );
+
+        // ...and the split really is three eighths plain to one eighth each, not a uniform sixth or
+        // a plain hornet that only slipped through on a stray seed. Asked of the swap directly, so
+        // the pool's own draw does not smear the counts.
+        const DRAWS: u64 = 80_000;
+        let mut counts = [0u32; 6];
+        for seed in 0..DRAWS {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            match hornet_variant(HORNET, &mut rng) {
+                HORNET => counts[5] += 1,
+                family => counts[(family - HORNET_FATTY) as usize] += 1,
+            }
+        }
+        for (family, hits) in counts[..5].iter().enumerate() {
+            let id = HORNET_FATTY + family as u16;
+            assert!(
+                (9_000..11_000).contains(hits),
+                "{id} came up {hits} times in {DRAWS}, not about an eighth"
+            );
+        }
+        assert!(
+            (28_000..32_000).contains(&counts[5]),
+            "the plain Hornet came up {} times in {DRAWS}, not about three eighths",
+            counts[5]
+        );
+
+        // Anything that is not a hornet is handed straight back, whatever the seed.
+        for base in [43u16, 51, 56, 176, 204] {
+            for seed in 0..1_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                assert_eq!(hornet_variant(base, &mut rng), base);
+            }
+        }
     }
 
     /// A corrupt cavern grows a Clinger once the wall is down (`NPC.cs:4136-4139`), and never

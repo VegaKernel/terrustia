@@ -4976,6 +4976,10 @@ impl GameServer {
         }
         self.roll_starfall_night();
         self.roll_natural_lantern_night();
+        // `WorldGen.mysticLogsEvent.StartNight()`, immediately after `LanternNight.CheckNight()`
+        // in `Main.UpdateTime_StartNight` (`Main.cs:66211-66212`) and in that order here for the
+        // same reason the three above are: it is the order the game writes.
+        self.scan_for_fallen_logs();
         if self.world.blood_moon || self.moon.running() || self.world.moon_phase == 4 {
             return;
         }
@@ -5052,6 +5056,53 @@ impl GameServer {
         if self.lantern_night.is_up() != was_up {
             self.broadcast_world_data();
         }
+    }
+
+    /// `MysticLogFairiesEvent.ScanWholeOverworldForLogs` (`MysticLogFairiesEvent.cs:135-166`),
+    /// narrowed to the one bit of it the spawner reads:
+    ///
+    /// ```csharp
+    /// _stumpCoords.Clear();
+    /// NPC.Spawner.fairyLog = false;
+    /// int num = (int)Main.worldSurface - 10;
+    /// int num2 = 100;
+    /// int num3 = Main.maxTilesX - 100;
+    /// int num4 = 3;
+    /// int num5 = 2;
+    /// for (int i = 100; i < num3; i += num4)
+    ///     for (int num6 = num; num6 >= num2; num6 -= num5)
+    ///     {
+    ///         Tile tile = Main.tile[i, num6];
+    ///         if (tile.active() && tile.type == 488 && tile.liquid == 0)
+    ///         {
+    ///             list.Add(new Point(i, num6));
+    ///             NPC.Spawner.fairyLog = true;
+    ///         }
+    ///     }
+    /// ```
+    ///
+    /// The strides are the log's own size: a fallen log is three tiles wide and two tall
+    /// (`world/worldgen/fallen_logs.rs`), so stepping x by 3 and y by 2 cannot step over one. This
+    /// stops at the first hit rather than collecting every stump, because the stump list exists
+    /// only for `TrySpawningFairies`, the *surface* half of the event, which this server does not
+    /// model: an early return changes nothing about the flag and turns a worst-case million tile
+    /// reads into a handful on most worlds.
+    ///
+    /// Run at world load and at every dusk, which is where vanilla runs it
+    /// (`WorldGen.cs:3272`, `Main.cs:66212`). Not per tick, and never on the spawn path.
+    ///
+    /// The remix world's own scan window (`MysticLogFairiesEvent.cs:142-146`, which looks below the
+    /// rock layer instead) drops with every other `Main.remixWorld` branch in this server.
+    pub(super) fn scan_for_fallen_logs(&mut self) {
+        const FALLEN_LOG: u16 = 488;
+        let bottom = i32::from(self.world.surface) - 10;
+        let right = self.world.width() - 100;
+        self.fairy_log = (100..right).step_by(3).any(|x| {
+            (100..=bottom).rev().step_by(2).any(|y| {
+                let tile = self.world.tile(x, y);
+                tile.is_active() && tile.block == FALLEN_LOG && tile.liquid == 0
+            })
+        });
     }
 
     /// Raise a moon, if it is night.
@@ -6433,6 +6484,8 @@ impl GameServer {
             starfall_night: self.starfall_night
                 && self.world.num_clouds <= 55
                 && self.weather.cloud_bg_active == 0.0,
+            // `NPC.Spawner.fairyLog`, kept by `scan_for_fallen_logs` at load and at every dusk.
+            fairy_log: self.fairy_log,
             downed_plantera: progress.downed_plantera,
             hard_mode: progress.hard_mode,
             downed_mech_any: progress.downed_mech_any,
@@ -12022,5 +12075,112 @@ mod purification_powder_turns_the_tortured_soul {
             .on_client_projectile(0, &frame[3..])
             .expect("the server takes the shot");
         assert!(server.powders.is_empty());
+    }
+}
+
+/// `NPC.Spawner.fairyLog`, the one thing the spawner reads of the whole mystic-log business
+/// (`MysticLogFairiesEvent.ScanWholeOverworldForLogs`).
+#[cfg(test)]
+mod fallen_log_scan {
+    use super::*;
+
+    const FALLEN_LOG: u16 = 488;
+
+    /// A world big enough for the scan's own window to be non-empty. `World::empty` puts the
+    /// surface at a third of the height, so this one's is row 300, and the scan runs from row 290
+    /// (`worldSurface - 10`) up to row 100, across columns 100 to 699.
+    fn logging_country() -> crate::world::World {
+        crate::world::World::empty(800, 900, "fallen log probe")
+    }
+
+    /// Lay a real log down: three tiles wide and two tall, framed the way `place_object` frames
+    /// one, eighteen pixels to a tile.
+    fn place_log(world: &mut crate::world::World, x: i32, y: i32) {
+        for dx in 0..3i32 {
+            for dy in 0..2i32 {
+                let tile = terrustia_proto::Tile::framed(
+                    FALLEN_LOG,
+                    (dx * 18) as i16,
+                    (dy * 18) as i16,
+                );
+                world.set_tile(x + dx, y + dy, tile);
+            }
+        }
+    }
+
+    /// The scan's strides are the log's own footprint, so a log lands on the grid wherever it is
+    /// put: `i += 3` across a three-wide log and `num6 -= 2` down a two-tall one
+    /// (`MysticLogFairiesEvent.cs:147-161`).
+    ///
+    /// Every offset is tried rather than one, because a stride that was one out (4 and 3, say)
+    /// still finds a log at some offsets and misses it at others, and a single placement would
+    /// pass against the wrong constant more often than not.
+    ///
+    /// Neutralised by widening the strides to `step_by(4)` and `step_by(3)`: "a log at (302, 201)
+    /// went unseen", and 30 of the 36 offsets fail.
+    #[test]
+    fn a_log_anywhere_in_the_overworld_is_found() {
+        for dx in 0..6 {
+            for dy in 0..6 {
+                let mut world = logging_country();
+                let (x, y) = (300 + dx, 200 + dy);
+                place_log(&mut world, x, y);
+                let mut server = GameServer::new(Config::default(), world);
+                assert!(server.fairy_log, "a log at ({x}, {y}) went unseen on load");
+
+                // ...and again at dusk, which is the other moment vanilla rescans
+                // (`Main.cs:66212`).
+                server.fairy_log = false;
+                server.roll_dusk_events();
+                assert!(server.fairy_log, "a log at ({x}, {y}) went unseen at dusk");
+            }
+        }
+    }
+
+    /// A world with no log in it, and a world whose log is under water, both leave the flag down.
+    ///
+    /// The flooded case is `tile.liquid == 0` (`MysticLogFairiesEvent.cs:155`), which is the one
+    /// clause of the three that is easy to drop as decoration.
+    ///
+    /// Neutralised by dropping `tile.liquid == 0` from the scan: the flooded assertion fails, "a
+    /// drowned log still counted".
+    #[test]
+    fn no_log_and_a_drowned_log_both_leave_the_flag_down() {
+        let bare = GameServer::new(Config::default(), logging_country());
+        assert!(!bare.fairy_log, "a world with no logs in it claimed one");
+
+        let mut flooded = logging_country();
+        place_log(&mut flooded, 300, 200);
+        for dx in 0..3 {
+            for dy in 0..2 {
+                let tile = flooded
+                    .tile(300 + dx, 200 + dy)
+                    .with_liquid(terrustia_proto::tile::Liquid::Water, 255);
+                flooded.set_tile(300 + dx, 200 + dy, tile);
+            }
+        }
+        let drowned = GameServer::new(Config::default(), flooded);
+        assert!(!drowned.fairy_log, "a drowned log still counted");
+    }
+
+    /// The window is the overworld and only the overworld: the hundred columns at each edge and
+    /// everything below `worldSurface - 10` are outside it (`MysticLogFairiesEvent.cs:139-152`).
+    ///
+    /// Neutralised by starting the column loop at 0 instead of 100: the left-margin assertion
+    /// fails. Neutralised again by dropping the `- 10` from the row start: the below-surface
+    /// assertion fails, a log at row 295 counting when it should not.
+    #[test]
+    fn the_margins_and_the_underground_are_outside_the_window() {
+        for (x, y, what) in [
+            (20, 200, "the left margin"),
+            (750, 200, "the right margin"),
+            (300, 295, "below the surface line"),
+            (300, 40, "above the scan's ceiling"),
+        ] {
+            let mut world = logging_country();
+            place_log(&mut world, x, y);
+            let server = GameServer::new(Config::default(), world);
+            assert!(!server.fairy_log, "a log in {what} counted");
+        }
     }
 }

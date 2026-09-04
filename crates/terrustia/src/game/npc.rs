@@ -1118,6 +1118,24 @@ impl Default for NpcStore {
 const WATER_BOLT_MIMIC: u16 = 694;
 const MIMIC_DORMANT: f32 = 3.0;
 
+/// The three fairy critters, `NPCID.FairyCritterPink` through `FairyCritterBlue`, which enter the
+/// world already coming for whoever dug them up.
+///
+/// The underground fairy's one spawn passes `ai2: 2f` (`NPC.cs:3623`, the `CheckToSpawnUndergroundFairy`
+/// arm), which is the fairy routine's `state::APPROACH` (`game::ai::fairy`). Left at zero it would
+/// be `state::IDLE`, drifting about the cave it appeared in until somebody wandered within two
+/// hundred and fifty pixels of it, and `NPC.AnyHelpfulFairies` (`NPC.cs:90954-90964`, `ai[2] > 1f`)
+/// would never see it either, so the spawner's own "not while one is already out" gate could not
+/// hold.
+///
+/// Seeded here for the same reason the mimic above is. The one caveat, recorded rather than
+/// guarded: vanilla's *other* producer, `MysticLogFairiesEvent.TrySpawningFairies`
+/// (`MysticLogFairiesEvent.cs:118`), spawns its surface fairies with a plain `NewNPC` and so leaves
+/// them idle. This server has no analog of that event, so nothing here wants the idle form; a lane
+/// that adds it should clear `ai[2]` on its own spawns rather than widen this.
+const FAIRY_CRITTERS: std::ops::RangeInclusive<u16> = 583..=585;
+const FAIRY_APPROACHING: f32 = 2.0;
+
 impl NpcStore {
     pub fn new() -> Self {
         Self {
@@ -1199,6 +1217,9 @@ impl NpcStore {
         npc.scale_stats(self.scaling);
         if npc_type == WATER_BOLT_MIMIC {
             npc.ai[3] = MIMIC_DORMANT;
+        }
+        if FAIRY_CRITTERS.contains(&npc_type) {
+            npc.ai[2] = FAIRY_APPROACHING;
         }
         self.slots[index] = Some(npc);
         u8::try_from(index).ok()
@@ -1532,6 +1553,36 @@ mod tests {
         // routine (ai_style 10) and hunts from the moment it appears.
         let skull = store.spawn(34, (0.0, 0.0)).expect("a slot");
         assert_eq!(store.get(skull).expect("the skull").ai[3], 0.0);
+    }
+
+    /// ...and an underground fairy enters it already coming for whoever dug it up.
+    ///
+    /// `NPC.cs:3623` is the only spawn of 583 to 585 this server has, and it passes `ai2: 2f`,
+    /// which is `game::ai::fairy`'s `state::APPROACH`. Left at zero the fairy would drift about the
+    /// cave it appeared in (`state::IDLE`) until somebody happened within two hundred and fifty
+    /// pixels of it, and `NPC.AnyHelpfulFairies` (`NPC.cs:90954-90964`) reads the same slot, so the
+    /// spawner's "not while one is already out" gate would never fire either.
+    ///
+    /// Neutralised by deleting the `FAIRY_CRITTERS.contains` guard from `NpcStore::spawn`: all
+    /// three assertions fail with `0.0` against `2.0`.
+    #[test]
+    fn an_underground_fairy_is_born_already_coming_for_you() {
+        let mut store = NpcStore::new();
+        for npc_type in FAIRY_CRITTERS {
+            let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+            assert_eq!(
+                store.get(index).expect("the fairy").ai[2],
+                FAIRY_APPROACHING,
+                "fairy {npc_type}"
+            );
+        }
+
+        // The range is exactly the three, not the ids either side of them: 582 is the Antlion Larva
+        // and 586 the Zombie Merman, and neither reads `ai[2]` as a fairy state.
+        for npc_type in [582u16, 586] {
+            let index = store.spawn(npc_type, (0.0, 0.0)).expect("a slot");
+            assert_eq!(store.get(index).expect("a neighbour").ai[2], 0.0);
+        }
     }
 
     /// One flag decides whether a hit lands, because vanilla has one flag.
