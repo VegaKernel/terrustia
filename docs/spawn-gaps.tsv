@@ -12,11 +12,6 @@
 201	HeadacheSkeleton
 202	MisassembledSkeleton
 203	PantlessSkeleton
-231	HornetFatty
-232	HornetHoney
-233	HornetLeafy
-234	HornetSpikey
-235	HornetStingy
 430	ArmedZombie
 431	ArmedZombieEskimo
 432	ArmedZombiePincussion
@@ -28,9 +23,6 @@
 450	BoneThrowingSkeleton2
 451	BoneThrowingSkeleton3
 452	BoneThrowingSkeleton4
-583	FairyCritterPink
-584	FairyCritterGreen
-585	FairyCritterBlue
 590	TorchZombie
 591	ArmedTorchZombie
 691	MossZombie

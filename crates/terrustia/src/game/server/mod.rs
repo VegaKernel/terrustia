@@ -1263,6 +1263,16 @@ pub struct GameServer {
     /// model. The one thing the spawner asks of it is `> 3f` (`NPC.cs:2409`), so that is what is
     /// kept: a bool per night rather than a number nothing else here would read.
     starfall_night: bool,
+    /// `NPC.Spawner.fairyLog` (`NPC.cs:150`): whether this world still has a fallen log in it,
+    /// which is the one gate on the underground fairy (`spawn::underground_fairy`).
+    ///
+    /// `MysticLogFairiesEvent` owns the flag in the game and re-decides it by scanning the whole
+    /// overworld at three moments: world load (`WorldGen.cs:3272`), every dusk
+    /// (`Main.cs:66212`) and whenever a fallen log is broken (`WorldGen.cs:50299-50302`). This
+    /// server keeps the first two, in [`Self::scan_for_fallen_logs`]; the third is the same scan
+    /// with a narrower trigger, and skipping it only means a world whose last log was mined at dusk
+    /// keeps its fairies until the next one.
+    fairy_log: bool,
 }
 
 impl GameServer {
@@ -1408,6 +1418,7 @@ impl GameServer {
             slime_rain: crate::game::slime_rain::SlimeRainState::default(),
             lantern_night: crate::game::lantern_night::LanternNightState::default(),
             starfall_night: false,
+            fairy_log: false,
             palette: crate::term::Palette::PLAIN,
         };
         // The Angler wants something from the moment the world opens, not from the first dawn.
@@ -1417,6 +1428,10 @@ impl GameServer {
         // play to produce its first figures, and the Dryad would tell everyone who joined in that
         // minute that their world was nought per cent of everything.
         server.census.sweep(&server.world);
+        // ...and look for a fallen log once up front, which is `OnWorldLoad +=
+        // mysticLogsEvent.StartWorld` (`WorldGen.cs:3272` -> `MysticLogFairiesEvent.cs:26-32`). A
+        // world opened at night would otherwise have no underground fairies until its first dusk.
+        server.scan_for_fallen_logs();
         // Remember every pylon's network up front, rather than waiting for the first join to fill
         // the map in. Otherwise a pylon mined before anybody had connected would be announced with
         // the wrong network and stay on every travel map afterwards.
