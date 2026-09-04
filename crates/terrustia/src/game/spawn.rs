@@ -7369,8 +7369,13 @@ mod tests {
     ///
     /// Neutralised by deleting the `BUNNY if at.party` arm from `holiday_costume`: no Party Bunny
     /// in twenty thousand ticks and the first assertion fails. Neutralised again by moving that arm
-    /// *above* the Halloween one and running with both flags on: the Halloween bunny stops
-    /// appearing, which is the ordering the game fixes and the last assertion here checks.
+    /// to the head of the chain, above both calendars: the last assertion fails with
+    /// "the chain is out of order: 303 x2013, 337 x656, 540 x18000".
+    ///
+    /// The ordering is checked by counting rather than by membership, because at two draws in three
+    /// each every arm still comes up whichever order they are in: a set of what appeared cannot
+    /// tell the orders apart, and asserting on one would have looked like a test and proved
+    /// nothing.
     #[test]
     fn a_party_puts_a_bunny_in_a_hat() {
         let (world, (px, py)) = forest_surface();
@@ -7389,13 +7394,26 @@ mod tests {
             "a party bunny with no party: {quiet_day:?}"
         );
 
-        // Halloween wins over a party, because vanilla tests the calendars first.
-        let mut spooky = world.clone();
-        spooky.halloween = true;
-        let both = friendly_draws_with(&spooky, &party, px, py, 20_000);
+        // The chain is Halloween, then Christmas, then the party (`NPC.cs:2588-2599`), and each arm
+        // takes two draws in three of what reaches it. So with all three on, a bunny is Halloween's
+        // two times in three, Christmas's two in nine, and the party's two in twenty-seven.
+        let at = Seasonal {
+            halloween: true,
+            xmas: true,
+            party: true,
+            ..Seasonal::default()
+        };
+        let mut counts = std::collections::BTreeMap::new();
+        for seed in 0..27_000u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            *counts
+                .entry(holiday_costume(46, Depth::Surface, at, &mut rng))
+                .or_insert(0usize) += 1;
+        }
+        let (spooky, festive, partying) = (counts[&303], counts[&337], counts[&540]);
         assert!(
-            both.contains(&303),
-            "Halloween is tested ahead of the party: {both:?}"
+            spooky > festive && festive > partying && partying > 0,
+            "the chain is out of order: 303 x{spooky}, 337 x{festive}, 540 x{partying}"
         );
     }
 
