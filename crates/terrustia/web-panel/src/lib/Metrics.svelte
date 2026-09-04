@@ -20,7 +20,7 @@
   let memCanvas = $state<HTMLCanvasElement | undefined>(undefined);
 
   // A canvas 2D context needs a real colour string, not a `var(--x)` reference, so these read the
-  // same tokens `app.css` defines rather than duplicating their hex values here — a colour picked
+  // same tokens `app.css` defines rather than duplicating their hex values here  -  a colour picked
   // once in one place, not two copies that can drift.
   function cssVar(name: string): string {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -255,7 +255,7 @@
     <div class="chart">
       <div class="chart-head">
         <span>tick wall time</span>
-        <span class="dim">µs — wall clock, not just cpu</span>
+        <span class="dim">µs  -  wall clock, not just cpu</span>
       </div>
       <canvas bind:this={wallCanvas}></canvas>
     </div>
@@ -367,7 +367,7 @@
     color: var(--text);
   }
 
-  /* The title must never be the one that shrinks to make room for a longer caption next to it —
+  /* The title must never be the one that shrinks to make room for a longer caption next to it  - 
      that is what let "tick wall time" collapse into three stacked lines. */
   .chart-head > span:first-child {
     flex-shrink: 0;

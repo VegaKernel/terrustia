@@ -104,7 +104,7 @@ async fn set_motd(
 // ---- console / chat --------------------------------------------------------------------------
 
 /// Only the first line of whatever was sent, trimmed. A panel session is already as trusted as the
-/// console (see this module's parent doc comment), so this is not a permission boundary — it
+/// console (see this module's parent doc comment), so this is not a permission boundary  -  it
 /// exists so a chat message or command containing an embedded newline cannot smuggle a second
 /// command in past whatever the operator thought they were sending.
 fn first_line(text: &str) -> &str {
@@ -158,7 +158,7 @@ async fn send_chat(
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "empty message");
     }
-    // Exactly what the console's own `say` command does — see `run_console`'s `"say"` arm.
+    // Exactly what the console's own `say` command does  -  see `run_console`'s `"say"` arm.
     if state
         .events
         .send(ServerEvent::Console {
@@ -175,7 +175,7 @@ async fn send_chat(
 // ---- metrics --------------------------------------------------------------------------------
 
 /// The process's current resident set size in bytes, best-effort and platform-specific. `None`
-/// where the platform will not report it — the panel's memory graph shows a gap rather than a
+/// where the platform will not report it  -  the panel's memory graph shows a gap rather than a
 /// wrong number. No new dependency: `libc` is already a workspace crate, and this is the one small
 /// piece of live state the game task does not (and should not) track for the panel.
 ///
@@ -198,7 +198,7 @@ fn process_rss_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
         // `proc_pid_rusage`'s v0 record carries `ri_resident_size`, the current resident size in
-        // bytes — the honest "how much memory is this process using right now" number, unlike
+        // bytes  -  the honest "how much memory is this process using right now" number, unlike
         // `getrusage`'s `ru_maxrss`, which is a high-water mark that never falls.
         let mut info = std::mem::MaybeUninit::<libc::rusage_info_v0>::zeroed();
         let ret = unsafe {
@@ -231,7 +231,7 @@ struct PhaseCost {
 #[derive(Serialize)]
 struct MetricsResponse {
     /// The per-tick budget, in microseconds, so the panel can draw the line a tick is measured
-    /// against (16,667 µs — sixty ticks a second).
+    /// against (16,667 µs  -  sixty ticks a second).
     budget_us: u64,
     /// The most recent tick's processor cost, and how long it took in wall time.
     cpu_us: u64,

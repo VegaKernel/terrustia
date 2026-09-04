@@ -30,7 +30,7 @@
       if (config) config.motd = motdDraft;
       saved = true;
       // A save that follows a failed one must not leave the old error sitting next to the new
-      // "saved." — without this, a failure followed by a success showed both at once.
+      // "saved."  -  without this, a failure followed by a success showed both at once.
       error = "";
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

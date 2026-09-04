@@ -15,16 +15,16 @@ bun run check    # svelte-check + tsc, no build
 Design language: TUI-inspired, echoing the sticky console's own aesthetic rather than a generic
 component-kit look — see `crates/terrustia/src/game/console.rs`/`term.rs` for the terminal this is
 meant to feel like an extension of. Monospace-only: no web fonts, no icon fonts, nothing the panel
-ever fetches over the network to render correctly — `src/app.css`'s top comment says so directly.
+ever fetches over the network to render correctly  -  `src/app.css`'s top comment says so directly.
 Labels read in the app's own lowercase, TUI-style case ("world", "saves to", "listening"), never
 shouted in caps.
 
 ## Design tokens
 
 Every colour, spacing and radius value in the panel is one of the tokens below, defined once in
-`src/app.css`'s `:root` and read everywhere else through `var(--x)` — including the two places that
+`src/app.css`'s `:root` and read everywhere else through `var(--x)`  -  including the two places that
 draw with a real `<canvas>` 2D context rather than CSS (`Metrics.svelte`'s sparklines,
-`WorldView.svelte`'s avatar/UI colours, not its tile palette — see below), which read the same
+`WorldView.svelte`'s avatar/UI colours, not its tile palette  -  see below), which read the same
 custom properties at draw time via `getComputedStyle` instead of keeping a second hardcoded copy.
 Adding a new literal colour, radius or spacing value outside this table anywhere in the panel is
 very likely the wrong move; extend the table first.
@@ -34,7 +34,7 @@ very likely the wrong move; extend the table first.
 | token | value | used for |
 |---|---|---|
 | `--bg` | `#0a0d10` | page background, the darkest surface |
-| `--bg-raised` | `#10151a` | cards, panels, dialogs, table headers — one step up from `--bg` |
+| `--bg-raised` | `#10151a` | cards, panels, dialogs, table headers  -  one step up from `--bg` |
 | `--border` | `#1f2a30` | every 1px border and table rule |
 | `--text` | `#d7dde1` | primary text |
 | `--text-dim` | `#7c8791` | secondary text, labels, captions |
@@ -44,8 +44,8 @@ very likely the wrong move; extend the table first.
 | `--danger` | `#e0645a` | errors, destructive actions, PvP indicators, the tick-budget threshold line |
 
 `WorldView.svelte`'s `TILE_COLORS` map (the world render's terrain palette) is deliberately outside
-this table: it is its own small, documented design system — a stylized, procedural render, never a
-transcription of Terraria's own art — not applications of the app-chrome tokens above.
+this table: it is its own small, documented design system  -  a stylized, procedural render, never a
+transcription of Terraria's own art  -  not applications of the app-chrome tokens above.
 
 ### Spacing
 
@@ -62,7 +62,7 @@ A 4px grid, six steps. Prefer the token over a bare `rem`/`px` value in any new 
 
 ### Radius
 
-Three steps, mapped to component kind — never a fourth value:
+Three steps, mapped to component kind  -  never a fourth value:
 
 | token | value | used for |
 |---|---|---|
@@ -71,4 +71,4 @@ Three steps, mapped to component kind — never a fourth value:
 | `--radius-lg` | 4px | cards, dialogs, chart/stat panels |
 
 A circular element (the live/dead status dot, a player's avatar swatch) uses `border-radius: 50%`
-directly — that is a shape, not a step on this scale.
+directly  -  that is a shape, not a step on this scale.

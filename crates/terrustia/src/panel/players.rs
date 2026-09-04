@@ -56,7 +56,7 @@ impl From<terrustia_proto::player_info::PlayerAppearance> for AppearanceResponse
     }
 }
 
-/// A connected player, over the wire — real position and appearance data for the world view to
+/// A connected player, over the wire  -  real position and appearance data for the world view to
 /// draw a stylized avatar from, and enough else (health, mana, address) for the player list.
 #[derive(Serialize)]
 pub(super) struct PlayerResponse {
@@ -143,7 +143,7 @@ async fn kick_player(
 
 #[derive(Deserialize)]
 struct BanRequest {
-    /// `"name"`, `"ip"` (or `"address"`) or `"uuid"` — the same three words `/ban` accepts.
+    /// `"name"`, `"ip"` (or `"address"`) or `"uuid"`  -  the same three words `/ban` accepts.
     kind: String,
     value: String,
     #[serde(default)]

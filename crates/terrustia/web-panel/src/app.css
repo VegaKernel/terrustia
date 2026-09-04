@@ -120,7 +120,7 @@ button:disabled {
 }
 
 /* Every wide table in the panel (players, accounts, backups, audit, worlds) wraps in this rather
-   than letting an overflowing table widen the whole page — see `web-panel/README.md`'s token
+   than letting an overflowing table widen the whole page  -  see `web-panel/README.md`'s token
    table for the narrow-viewport rules this belongs to. */
 .table-scroll {
   overflow-x: auto;

@@ -11,16 +11,16 @@
 //! honest answer rather than a hot-swap), a read-only settings view with the few fields that are
 //! genuinely safe to change live, and a stylized, procedural live world view (see
 //! `crates/terrustia/web-panel/src/lib/WorldView.svelte` for the rendering side, and
-//! [`worlds::world_ws_upgrade`] for the data it draws from — real positions and appearance data,
+//! [`worlds::world_ws_upgrade`] for the data it draws from  -  real positions and appearance data,
 //! real tile types, never a composited Terraria sprite).
 //!
 //! **Layout**: this coordinator module owns startup/shutdown ([`run`], [`supervise`],
 //! [`PanelHandle`]), shared plumbing every route needs ([`PanelState`], [`ask`], [`err`],
 //! [`auth_lookup`], [`send_ws`]), and static asset serving. Each resource has its own sibling
-//! module — [`auth`] (sessions, login, logout), [`status`] (the status/console socket),
+//! module  -  [`auth`] (sessions, login, logout), [`status`] (the status/console socket),
 //! [`players`] (players, kick/ban/mute, the whitelist), [`worlds`] (list/switch/generate, the
 //! world-view socket), [`settings`] (config, motd, console/chat send, metrics, backups/rollback)
-//! and [`accounts`] (accounts, groups, the permission editor, the audit log) — each exposing a
+//! and [`accounts`] (accounts, groups, the permission editor, the audit log)  -  each exposing a
 //! `router()` this module merges into one. This mirrors `game::server`'s own split into
 //! `mod.rs`/`console.rs`/`dispatch.rs`/`panel.rs`/`systems.rs`/`tick.rs`: one coordinator, sibling
 //! files by resource.
@@ -44,14 +44,14 @@
 //! **Every endpoint below `/api/` other than `/api/unclaimed`, `/api/login` and `/api/logout`
 //! requires a valid session and its own permission**, checked by [`auth::authorized`] (or
 //! [`auth::authorized_token`] for the two WebSocket routes, which carry the session as a `session`
-//! query parameter instead of a bearer header — a browser cannot attach a custom header to a
+//! query parameter instead of a bearer header  -  a browser cannot attach a custom header to a
 //! WebSocket upgrade): a token looked up in [`PanelState::sessions`] to find the signed-in
-//! account, then a fresh, per-request check — against the game task's live `Admin` store, not
-//! anything cached at login — that the account's group grants the specific permission that route
+//! account, then a fresh, per-request check  -  against the game task's live `Admin` store, not
+//! anything cached at login  -  that the account's group grants the specific permission that route
 //! needs. `login` itself only requires `panel.view` to issue a session at all; a `default` account
 //! (which does not hold it) cannot get a session, and a `moderator` one can sign in but still gets
 //! `403` from, say, `/api/console`. A session also idles out on its own
-//! ([`auth::SESSION_IDLE_TIMEOUT`]), and `/api/logout` ([`auth::router`]) revokes one outright —
+//! ([`auth::SESSION_IDLE_TIMEOUT`]), and `/api/logout` ([`auth::router`]) revokes one outright  -
 //! see `auth`'s own module doc for both.
 //!
 //! The two long-lived WebSockets (`status::stream_status`, `worlds::stream_world`) re-run this

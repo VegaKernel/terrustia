@@ -31,7 +31,7 @@ pub(super) fn router() -> Router<PanelState> {
 }
 
 /// Where a background world generation has got to. Coarse on purpose: `worldgen::generate` is a
-/// single blocking call with no progress callback, so there is no honest percentage to report —
+/// single blocking call with no progress callback, so there is no honest percentage to report  -
 /// only which of these states it is in, and how long it has been running.
 #[derive(Clone, Default)]
 pub(super) struct WorldGenJob {
@@ -123,7 +123,7 @@ async fn switch_world(
     if let Err(resp) = super::auth::authorized(&state, &headers, perm::WORLD_SWITCH).await {
         return resp;
     }
-    // The panel never accepts a raw path from the client — only a name matched against what
+    // The panel never accepts a raw path from the client  -  only a name matched against what
     // `worlds::list()` itself found on disk, so there is no path here a request body could smuggle
     // in that the world directory does not already contain.
     let Some(path) = crate::worlds::list().into_iter().find(|p| {
@@ -198,7 +198,7 @@ fn tile_color_name(color: TileColor) -> &'static str {
     }
 }
 
-/// Players refresh often enough to look live (twice a second); tiles are sampled far less often —
+/// Players refresh often enough to look live (twice a second); tiles are sampled far less often  -
 /// the world's shape barely changes tick to tick, and even the bounded sample in
 /// `GameServer::world_tile_sample` is not worth recomputing ten times as often as anyone could see
 /// a difference. `tokio::time::interval` fires its first tick immediately, so both kinds of frame
@@ -251,7 +251,7 @@ struct NewWorldRequest {
     name: String,
     width: i32,
     height: i32,
-    /// Optional seed text — a plain number reproduces that numeric seed, free text is hashed into
+    /// Optional seed text  -  a plain number reproduces that numeric seed, free text is hashed into
     /// one, and either is checked against vanilla's secret-seed strings (see
     /// `worldgen::generate_from_text`). Empty or absent means a fresh random seed.
     #[serde(default)]
@@ -268,7 +268,7 @@ struct NewWorldStatusResponse {
     elapsed_secs: u64,
 }
 
-/// A world must be a whole number of sections and within the client's addressable range — the same
+/// A world must be a whole number of sections and within the client's addressable range  -  the same
 /// rules `Config::validate` applies, checked here so a bad size is refused before a slow generation
 /// is started rather than after. Returns the reason as a plain string; the caller turns it into a
 /// `400` (a `Result<(), Response>` here would carry axum's large `Response` in its `Err`, which
@@ -378,7 +378,7 @@ async fn new_world(
     let seed = req.seed.clone();
     // A real background thread off the request: `worldgen::generate` is a single blocking call, so
     // it runs on the blocking pool and reports back through the shared job cell. It deliberately
-    // outlives the request that started it (and even a panel toggled off mid-gen — the `Arc` keeps
+    // outlives the request that started it (and even a panel toggled off mid-gen  -  the `Arc` keeps
     // the cell alive until the thread finishes), so the operator can watch it via `new_world_status`.
     tokio::task::spawn_blocking(move || {
         let began = Instant::now();
@@ -409,7 +409,7 @@ async fn new_world(
                     .and_then(|s| s.to_str())
                     .map(str::to_string);
                 job.message = format!(
-                    "generated {name} ({width} x {height}) in {}s — switch to it from the worlds tab",
+                    "generated {name} ({width} x {height}) in {}s  -  switch to it from the worlds tab",
                     began.elapsed().as_secs()
                 );
                 info!(world = %name, "new world generated from the web panel");
@@ -425,6 +425,6 @@ async fn new_world(
     (StatusCode::ACCEPTED, Json(snapshot_worldgen(&state))).into_response()
 }
 
-/// The job cell type `PanelState::worldgen` carries, and its accessor's lock-recovery behaviour —
+/// The job cell type `PanelState::worldgen` carries, and its accessor's lock-recovery behaviour  -
 /// see [`super::PanelState::worldgen`].
 pub(super) type WorldGenCell = Arc<Mutex<WorldGenJob>>;

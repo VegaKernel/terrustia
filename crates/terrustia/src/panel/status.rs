@@ -1,7 +1,7 @@
 //! `/api/status` and the status/console WebSocket (`/api/ws`).
 //!
 //! The socket carries two kinds of frame down one connection: a status refresh every two seconds,
-//! and (for a session holding `panel.console`) every line the sticky console's own feed sees —
+//! and (for a session holding `panel.console`) every line the sticky console's own feed sees  -
 //! log lines, command replies, and in-game chat. Both permissions are re-checked on every tick
 //! (see [`stream_status`]'s doc comment), not just once at connect: a session's own group can
 //! change mid-connection, through this very panel, and a socket opened before that change must
@@ -38,17 +38,17 @@ pub(super) struct StatusResponse {
     world_file: Option<String>,
     version: &'static str,
     unclaimed: bool,
-    /// The calling account's own permission strings — a UX convenience so the frontend can choose
+    /// The calling account's own permission strings  -  a UX convenience so the frontend can choose
     /// which tabs and buttons to show; every route still re-checks its own permission server-side
     /// regardless of what this says. See [`super::PanelAuthLookup::permissions`].
     permissions: Vec<String>,
     /// How many world saves have failed in a row. `0` is healthy; see
     /// [`PanelStatus::save_failures`]'s own doc comment for what this means and where it comes
-    /// from — this is a straight passthrough, not a second copy of the logic.
+    /// from  -  this is a straight passthrough, not a second copy of the logic.
     save_failures: u32,
 }
 
-/// `account` is the signed-in account making the request — its own permissions are what the
+/// `account` is the signed-in account making the request  -  its own permissions are what the
 /// response's `permissions` field carries, so this must be the real caller, not an empty
 /// placeholder (an earlier draft used `String::new()` here, before this field existed, when only
 /// the server-wide `unclaimed` flag was needed from `auth_lookup`).
@@ -93,7 +93,7 @@ async fn ws_upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     // A WebSocket upgrade can't carry a custom Authorization header from a browser, so the session
-    // travels as a query parameter here instead — same token, same validation, just a different
+    // travels as a query parameter here instead  -  same token, same validation, just a different
     // transport for the one request type that needs it.
     let account = match authorized_token(&state, &q.session, perm::PANEL_VIEW).await {
         Ok(account) => account,
@@ -103,7 +103,7 @@ async fn ws_upgrade(
 }
 
 /// Every frame this socket sends, tagged by `type` so the frontend's one `onmessage` handler can
-/// tell a status refresh apart from a console/chat line — see the module doc's note that this is
+/// tell a status refresh apart from a console/chat line  -  see the module doc's note that this is
 /// the same WebSocket the panel has always had, not a second one grown for this.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -117,12 +117,12 @@ enum WsMessage {
 }
 
 /// `token` (not a bare account name) is what this socket carries across ticks, so each one can
-/// re-run the *whole* session check — not just re-ask whether the account still holds
+/// re-run the *whole* session check  -  not just re-ask whether the account still holds
 /// `panel.console`, which is all this used to do. A session that expires (idle timeout, see
 /// `auth::SESSION_IDLE_TIMEOUT`), is signed out through `/api/logout`, or belongs to an account
 /// that gets deleted mid-connection now has its socket closed on the next tick rather than
-/// continuing to serve a live status feed — and, for a `panel.console` holder, the entire server
-/// log — to a credential that is no longer good for anything else in the panel.
+/// continuing to serve a live status feed  -  and, for a `panel.console` holder, the entire server
+/// log  -  to a credential that is no longer good for anything else in the panel.
 async fn stream_status(mut socket: WebSocket, state: PanelState, token: String, account: String) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     // Subscribing here, not earlier, is deliberate: a `broadcast` receiver only ever sees frames
@@ -135,7 +135,7 @@ async fn stream_status(mut socket: WebSocket, state: PanelState, token: String, 
             _ = interval.tick() => {
                 let account = match authorized_token(&state, &token, perm::PANEL_VIEW).await {
                     Ok(account) => account,
-                    // The session is gone, expired, or no longer holds `panel.view` — close the
+                    // The session is gone, expired, or no longer holds `panel.view`  -  close the
                     // socket rather than keep serving a feed a fresh request would now refuse.
                     Err(_) => break,
                 };

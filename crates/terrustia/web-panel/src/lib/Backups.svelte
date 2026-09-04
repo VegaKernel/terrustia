@@ -38,7 +38,7 @@
     saveNote = "";
     try {
       await forceSave(session);
-      saveNote = "save requested — the list below refreshes automatically.";
+      saveNote = "save requested  -  the list below refreshes automatically.";
       // Give the background save a beat to rotate the backups, then refresh.
       setTimeout(refresh, 1500);
     } catch (e) {

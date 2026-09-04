@@ -95,7 +95,7 @@ export async function login(req: LoginRequest): Promise<LoginResponse> {
 }
 
 /** Signs out: revokes the session on the server (`/api/logout`) and clears the stored token.
- *  Previously this only cleared `localStorage` — the token itself stayed valid on the server
+ *  Previously this only cleared `localStorage` - the token itself stayed valid on the server
  *  until the panel process restarted, so a copy of it (from a shell history, a shared browser
  *  profile) kept working after "sign out". Best-effort: the token is cleared locally either way,
  *  since a network failure here should never leave the operator unable to sign out of their own

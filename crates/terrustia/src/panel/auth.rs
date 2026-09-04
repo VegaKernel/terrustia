@@ -36,7 +36,7 @@ pub(super) struct Session {
 /// watching the panel is never signed out mid-session, only a token nobody has used in this long.
 ///
 /// ponytail: expiry is checked lazily, on the next lookup of that exact token, not swept
-/// proactively — a session nobody ever looks up again just sits inert in the map until the
+/// proactively  -  a session nobody ever looks up again just sits inert in the map until the
 /// process restarts. That is a bounded memory cost (one entry per login, on a loopback-only
 /// surface with a handful of operators), not a security gap: the token itself already stopped
 /// authorizing anything the moment it went idle. Add a periodic sweep if the map's size ever
@@ -70,13 +70,23 @@ async fn unclaimed(State(state): State<PanelState>) -> Response {
 /// An expired session is removed from the map right here rather than left for something else to
 /// clean up later.
 pub(super) fn session_name(state: &PanelState, token: &str) -> Option<String> {
-    let mut sessions = state.sessions();
+    session_name_at(&mut state.sessions(), token, Instant::now())
+}
+
+/// The real check, split from [`session_name`] so a test can supply `now` directly instead of
+/// waiting out a real [`SESSION_IDLE_TIMEOUT`]. `state.sessions()`'s `MutexGuard` derefs to this
+/// same `HashMap`, so production and tests run the identical logic.
+fn session_name_at(
+    sessions: &mut std::collections::HashMap<String, Session>,
+    token: &str,
+    now: Instant,
+) -> Option<String> {
     let session = sessions.get_mut(token)?;
-    if session.last_seen.elapsed() > SESSION_IDLE_TIMEOUT {
+    if now.saturating_duration_since(session.last_seen) > SESSION_IDLE_TIMEOUT {
         sessions.remove(token);
         return None;
     }
-    session.last_seen = Instant::now();
+    session.last_seen = now;
     Some(session.name.clone())
 }
 
@@ -84,7 +94,7 @@ pub(super) fn issue_session(state: &PanelState, name: String) -> Response {
     // This token is not the same threat model as `GameServer::announce_claim_token`: that one
     // never leaves the local console and is spent once. This one *is* sent over the network (the
     // panel's own loopback socket, but still a socket) and, once issued, is the standing
-    // credential for full panel control — start/stop, bans, world switching — for as long as the
+    // credential for full panel control  -  start/stop, bans, world switching  -  for as long as the
     // session lives. A fast xorshift seeded from a nanosecond timestamp, the constant process id
     // and a small guessable session count is not unguessable enough for that. Uses the same real
     // CSPRNG `Account::new` already pulls in for password salts (`argon2::password_hash`'s own
@@ -117,12 +127,12 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// The session-and-permission check every endpoint other than `/api/unclaimed`, `/api/login` and
 /// `/api/logout` needs: a valid session (a bearer token that resolves to a signed-in account), and
 /// that account's group currently granting `permission`. Checked fresh against the game task's
-/// live `Admin` store on *every* call rather than cached at login — a group's permissions, or an
+/// live `Admin` store on *every* call rather than cached at login  -  a group's permissions, or an
 /// account's own group, can change mid-session (through this very panel), and a session issued
 /// before that change must not go on behaving as if it never happened.
 ///
 /// Returns the account name on success: a handful of handlers (anything that can hand power to
-/// someone else — creating an account, moving one between groups, editing a group's own permission
+/// someone else  -  creating an account, moving one between groups, editing a group's own permission
 /// set) need to know who is asking, for `Admin::group_within_reach`'s anti-escalation check.
 ///
 /// See this module's own doc comment for the full route-to-permission map.
@@ -249,11 +259,11 @@ async fn login(
         }
         let name = req.name.clone();
         let password = req.password.clone();
-        // The first account owns the server, so it goes into the `owner` group — the one
+        // The first account owns the server, so it goes into the `owner` group  -  the one
         // `group::defaults` gives the `*` permission. This mirrors the console `claim`/`register`
         // path exactly (`GameServer::run_console`'s `"claim"` arm and `announce_claim_token`'s own
         // owner branch both use `"owner"`). An earlier draft passed `"everything"`, which is not a
-        // group any server actually has — it resolves to `default`, silently leaving the very first
+        // group any server actually has  -  it resolves to `default`, silently leaving the very first
         // account unable to administer anything.
         let account = match tokio::task::spawn_blocking(move || {
             Account::new(&name, &password, "owner")
@@ -335,7 +345,7 @@ async fn login(
     }
     // Authenticating an account is not enough to hold a panel session: the account's group must
     // grant `panel.view`. Every route reached with that session then checks its own permission (see
-    // this module's doc comment for the full mapping) — a `default` account, which does not hold
+    // this module's doc comment for the full mapping)  -  a `default` account, which does not hold
     // `panel.view`, cannot get a session at all; a `moderator` one can sign in but gets `403` from
     // `/api/console` all the same.
     if !lookup.panel_view {
@@ -363,7 +373,7 @@ async fn record_throttled(state: &PanelState, target: String, count: u32) {
         .await;
 }
 
-/// Removes the caller's own session token from the map, if any — the "sign out" button's real
+/// Removes the caller's own session token from the map, if any  -  the "sign out" button's real
 /// counterpart. Previously this route did not exist at all: signing out only cleared the token
 /// from the browser's own `localStorage` (`api.ts`'s `logout()`), which left the token itself
 /// valid until the panel process restarted. Idempotent (a missing or already-removed token is not
@@ -374,4 +384,58 @@ async fn logout(State(state): State<PanelState>, headers: axum::http::HeaderMap)
         state.sessions().remove(token);
     }
     StatusCode::OK.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{Duration, Instant, SESSION_IDLE_TIMEOUT, Session, session_name_at};
+
+    /// The idle timeout has no test elsewhere in this codebase: `tests/panel.rs` covers logout
+    /// (a token removed outright) and WebSocket reauth (a revoked permission), neither of which
+    /// exercises this branch. Supplying `now` directly tests the real 12-hour constant without
+    /// waiting on it: deleting the `>` check entirely, or halving the constant, both fail this.
+    #[test]
+    fn a_session_idle_past_the_timeout_is_removed_and_refused() {
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            "tok".to_string(),
+            Session {
+                name: "bri".to_string(),
+                last_seen: Instant::now(),
+            },
+        );
+        let past_timeout = Instant::now() + SESSION_IDLE_TIMEOUT + Duration::from_secs(1);
+        assert_eq!(session_name_at(&mut sessions, "tok", past_timeout), None);
+        assert!(
+            !sessions.contains_key("tok"),
+            "an idle session is removed from the map on the lookup that finds it idle, not just refused"
+        );
+    }
+
+    /// A session used inside the window stays live and its clock resets, so an operator actively
+    /// watching the panel is never signed out mid-session.
+    #[test]
+    fn a_session_used_within_the_timeout_stays_and_refreshes() {
+        let mut sessions = HashMap::new();
+        let started = Instant::now();
+        sessions.insert(
+            "tok".to_string(),
+            Session {
+                name: "bri".to_string(),
+                last_seen: started,
+            },
+        );
+        let still_within = started + SESSION_IDLE_TIMEOUT / 2;
+        assert_eq!(
+            session_name_at(&mut sessions, "tok", still_within),
+            Some("bri".to_string())
+        );
+        assert_eq!(
+            sessions.get("tok").map(|s| s.last_seen),
+            Some(still_within),
+            "a live lookup refreshes last_seen to now, not just returns the name"
+        );
+    }
 }

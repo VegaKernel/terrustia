@@ -27,7 +27,7 @@
     other: "#4a4a54",
   };
 
-  // A canvas 2D context needs a real colour string, not a `var(--x)` reference — see the same
+  // A canvas 2D context needs a real colour string, not a `var(--x)` reference  -  see the same
   // helper in `Metrics.svelte`. The PvP-red and default-text colours below read `app.css`'s own
   // `--danger`/`--text` rather than a second hardcoded copy of them.
   function cssVar(name: string): string {

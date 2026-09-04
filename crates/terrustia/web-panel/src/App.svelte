@@ -15,7 +15,7 @@
   // A boot-time failure used to always drop to the login form, even for a session that was still
   // perfectly good: `unwrap` (`api.ts`) only clears the stored session on a real 401, so a 503
   // ("the game is not running") left a valid token in `localStorage` while the screen asked the
-  // operator to sign in again — the actual problem (the game task is gone) was never named. The
+  // operator to sign in again  -  the actual problem (the game task is gone) was never named. The
   // stored session's presence after the call is now the signal: gone means 401, treat as signed
   // out; still there means something else failed, and that something is worth showing.
   async function checkSession() {

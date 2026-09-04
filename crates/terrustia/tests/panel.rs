@@ -1064,7 +1064,7 @@ async fn logout_revokes_the_session_and_closes_its_open_sockets() {
     assert_eq!(status, 200, "{body}");
     let session = extract_session(&body);
 
-    // A session's owner may always sign themselves out, whatever else is true of the request —
+    // A session's owner may always sign themselves out, whatever else is true of the request  -
     // `/api/logout` needs no permission and never fails on a missing/unknown token.
     let (status, _) = client.post_json(&format!("{base}/api/logout"), "").await;
     assert_eq!(
@@ -1106,8 +1106,8 @@ async fn logout_revokes_the_session_and_closes_its_open_sockets() {
         "a revoked session must be refused like any other invalid one: {body}"
     );
 
-    // Both sockets were already open, so they only find out on their own next tick — up to 2s for
-    // the status socket, 0.5s for the world socket — but they must find out, and close, rather
+    // Both sockets were already open, so they only find out on their own next tick  -  up to 2s for
+    // the status socket, 0.5s for the world socket  -  but they must find out, and close, rather
     // than going on serving a live feed to a token `/api/logout` just revoked.
     let budget = std::time::Duration::from_secs(10);
     let status_closed = recv_until_closed(&mut status_feed, budget).await;
@@ -1126,7 +1126,7 @@ async fn logout_revokes_the_session_and_closes_its_open_sockets() {
 /// time rather than a fixed number of reads: `console_feed()` (`crate::term`) is one broadcast
 /// channel shared by the whole test binary, so under `cargo test`'s default parallelism this
 /// socket's console branch can be kept busy by *other* tests' unrelated log lines faster than the
-/// 2-second status tick that actually re-checks the session arrives — a fixed attempt count could
+/// 2-second status tick that actually re-checks the session arrives  -  a fixed attempt count could
 /// exhaust itself on nothing but that cross-test log traffic and never reach the tick that closes
 /// the socket. A wall-clock deadline waits through as much of that traffic as it takes.
 async fn recv_until_closed(feed: &mut ws_lite::WsClient, overall: std::time::Duration) -> bool {
@@ -1809,7 +1809,7 @@ mod ws_lite {
 
         /// The next text frame's payload, or `None` if nothing arrived within `timeout` *or* the
         /// server closed the connection (a real close frame, or the TCP connection dropping
-        /// outright — `stream_status`/`stream_world` do the latter, since axum's `WebSocket` closes
+        /// outright  -  `stream_status`/`stream_world` do the latter, since axum's `WebSocket` closes
         /// its transport on drop rather than sending a close frame first). Both read as "nothing
         /// more is coming", which is exactly what a test asserting a socket closed wants to check.
         pub async fn recv_text(&mut self, timeout: Duration) -> Option<String> {

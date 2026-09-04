@@ -73,7 +73,7 @@
   <!-- Shown regardless of line count: once the log holds lines, a dropped socket used to look
        identical to a quiet server, since the disconnected message above only rendered while the
        log was still empty. -->
-  {#if !live && lines.length > 0}<p class="warn">not connected — showing the last lines received.</p>{/if}
+  {#if !live && lines.length > 0}<p class="warn">not connected  -  showing the last lines received.</p>{/if}
 
   {#if error}<p class="danger">{error}</p>{/if}
 

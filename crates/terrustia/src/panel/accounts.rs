@@ -1,4 +1,4 @@
-//! Accounts, groups, the group-permission editor, and the audit log — everything gated on
+//! Accounts, groups, the group-permission editor, and the audit log  -  everything gated on
 //! `admin.accounts`, `admin.groups` or `admin.audit`.
 
 use axum::extract::{Query, State};
@@ -137,7 +137,7 @@ async fn create_account(
             "that password is too short; use at least six characters",
         );
     }
-    // Hash off the game task, exactly as the login/claim path does — argon2 must never run inline.
+    // Hash off the game task, exactly as the login/claim path does  -  argon2 must never run inline.
     let name = req.name.clone();
     let password = req.password.clone();
     let group = req.group.clone();
@@ -213,8 +213,8 @@ struct SetGroupPermissionRequest {
 }
 
 /// Add or remove one permission on a group. `actor` (the signed-in account) must already hold the
-/// permission being granted — enforced on the game task, in
-/// `GameServer::panel_set_group_permission` — so the editor cannot be used to hand out power nobody
+/// permission being granted  -  enforced on the game task, in
+/// `GameServer::panel_set_group_permission`  -  so the editor cannot be used to hand out power nobody
 /// making the change actually has.
 async fn set_group_permission(
     State(state): State<PanelState>,
