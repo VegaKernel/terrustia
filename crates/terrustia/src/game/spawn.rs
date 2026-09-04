@@ -3446,9 +3446,11 @@ const FAIRY_CHANCE: u32 = 500;
 /// Hardmode makes a fairy *rarer*, not commoner: `(int)(500f * 1.66f)` is exactly 830 at `f32`
 /// (the product rounds to 830.0 rather than to 829.99998, so the truncation costs nothing).
 ///
-/// `Main.tenthAnniversaryWorld` is not modelled anywhere in this server, so the 250 arm drops and
-/// the base is always 500. `RollLuck(num)` is `Main.rand.Next(num)` at luck zero (`Luck.cs:5-16`),
-/// the narrowing every other `Roll*Luck` site in this file already makes.
+/// `Main.tenthAnniversaryWorld` is real state in this server (`world.secret_seeds.tenth_anniversary`,
+/// already read by the Big Mimic AI) but the spawner has no such flag on `EventSpawns` to read it
+/// through, so the 250 arm drops and the base is always 500 until one is plumbed here. `RollLuck(num)`
+/// is `Main.rand.Next(num)` at luck zero (`Luck.cs:5-16`), the narrowing every other `Roll*Luck` site
+/// in this file already makes.
 ///
 /// `any_helpful_fairies` is `NPC.AnyHelpfulFairies()` (`NPC.cs:90954-90964`): a live 583, 584 or
 /// 585 whose `ai[2] > 1f`, which is every state past the two drifting ones (`game::ai::fairy`'s own
@@ -5826,8 +5828,9 @@ pub fn try_spawn(
                 //
                 // The three colours are drawn flat and mean nothing: `Main.rand.Next(583, 586)` is
                 // the whole of it, and a fairy's behaviour does not read its own type anywhere. The
-                // tenth-anniversary arm drops with every other `tenthAnniversaryWorld` branch in
-                // this file.
+                // tenth-anniversary arm drops for the same reason [`underground_fairy`]'s own doc
+                // gives: real state (`world.secret_seeds.tenth_anniversary`), no flag plumbed
+                // through `EventSpawns` to read it.
                 //
                 // `ai2 = 2f` is the fairy's `state::APPROACH` (`game::ai::fairy`), so one arrives
                 // already coming for the player rather than drifting where it appeared, which is
