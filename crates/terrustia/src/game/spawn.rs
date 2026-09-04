@@ -11032,6 +11032,129 @@ mod tests {
         }
     }
 
+    /// What the six new critter arms cost the per-candidate loop.
+    ///
+    /// None of them reads a tile of its own. Every input they want was already resolved by the time
+    /// the match is reached: `depth`, `player_biome` and `ground_block` are all computed once per
+    /// candidate for the arms above them, and the rest is `i32` arithmetic on the world's own
+    /// dimensions. So the whole of the addition is a handful of comparisons and, where those pass,
+    /// a roll.
+    ///
+    /// The shape of the cost is worth naming, because it is not flat. A *surface* candidate pays
+    /// one enum comparison for all four of the below-the-surface arms and then nothing, since
+    /// `depth != Depth::Surface` shuts the first of them; a cavern candidate pays all four gates
+    /// and their rolls, plus the beetle arm's two comparisons and roll. The underworld's lava-bait
+    /// arm is one comparison anywhere else.
+    ///
+    /// Measured on this machine, release build, ten million iterations each, the numbers this test
+    /// prints:
+    ///
+    /// * the four below-the-surface gates on a surface candidate: 0.91 ns, which is the single
+    ///   `depth` comparison and nothing else.
+    /// * the same four in a forest cavern, rolls included: 6.60 ns.
+    /// * the beetle arm on top of that: 2.47 ns.
+    /// * `gold_variant` on a critter with no twin (a firefly): 0.77 ns, no roll made at all; on one
+    ///   with a twin (a bunny): 2.52 ns.
+    ///
+    /// So a cavern candidate pays about 9 ns it did not, and a surface one under 1 ns. The
+    /// reference is the plinth check this same loop already carries and already accepts as cheap,
+    /// measured at 20.67 ns in the same build and the same run: the whole addition is under half of
+    /// it in the caverns and a twentieth of it on the surface. Both sit inside the candidate loop,
+    /// which `try_spawn` enters only once the rate roll lets an attempt through, roughly one call
+    /// in 383 on an ordinary forest day
+    /// ([`tests::measure_the_statue_mimic_plinth_check`], which also records why wall-clock timing
+    /// of `try_spawn` as a whole cannot resolve a change this size on this machine).
+    #[test]
+    #[ignore]
+    fn measure_the_ordinary_critter_arms() {
+        const N: u32 = 10_000_000;
+        let world = flat_world(300);
+        let height = world.height();
+        let rock_layer = i32::from(world.rock_layer);
+
+        // The four below-the-surface gates, written exactly as `try_spawn` writes them, so what is
+        // timed is the gate and not a stand-in for it.
+        let four_gates = |depth: Depth, biome: Biome, y: i32, rng: &mut SmallRng| -> u32 {
+            let land = !matches!(
+                biome,
+                Biome::Snow
+                    | Biome::Crimson
+                    | Biome::Corruption
+                    | Biome::Jungle
+                    | Biome::Hallow
+                    | Biome::Dungeon
+            );
+            let snail_land = !matches!(
+                biome,
+                Biome::Snow | Biome::Crimson | Biome::Corruption | Biome::Hallow | Biome::Dungeon
+            );
+            u32::from(
+                (depth != Depth::Surface
+                    && y + 1 < height - CRITTER_FLOOR
+                    && land
+                    && rng.random_range(0..WORM_ODDS) == 0)
+                    || (depth != Depth::Surface
+                        && y + 1 < height - CRITTER_FLOOR
+                        && land
+                        && rng.random_range(0..MOUSE_ODDS) == 0)
+                    || (depth != Depth::Surface
+                        && y + 1 < (rock_layer + height) / 2
+                        && snail_land
+                        && rng.random_range(0..SNAIL_ODDS) == 0),
+            )
+        };
+
+        for (name, depth, y) in [
+            ("surface candidate", Depth::Surface, 80),
+            ("forest cavern candidate", Depth::Cavern, 300),
+        ] {
+            let mut rng = SmallRng::seed_from_u64(357);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += four_gates(
+                    std::hint::black_box(depth),
+                    std::hint::black_box(Biome::Forest),
+                    std::hint::black_box(y),
+                    &mut rng,
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("the four below-the-surface gates, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // The caverns' beetle arm, which is two comparisons and a roll and nothing else.
+        let mut rng = SmallRng::seed_from_u64(217);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..N {
+            sink += u32::from(
+                std::hint::black_box(Depth::Cavern) == Depth::Cavern
+                    && std::hint::black_box(Biome::Forest) != Biome::Dungeon
+                    && rng.random_range(0..CAVERN_BEETLE_ODDS) == 0,
+            );
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+        println!("the cavern beetle arm: {each:.2} ns/call (sink {sink})");
+
+        // ...and the gold swap, which is a `match` first and a roll only for the eight types that
+        // have a twin at all.
+        for (name, base) in [("firefly, no twin", FIREFLY), ("bunny, has a twin", 46u16)] {
+            let mut rng = SmallRng::seed_from_u64(442);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += u32::from(gold_variant(
+                    std::hint::black_box(base),
+                    std::hint::black_box(Depth::Surface),
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("gold_variant, {name}: {each:.2} ns/call (sink {sink})");
+        }
+    }
+
     #[test]
     fn spawning_is_frequent_enough_to_matter() {
         // Picking a blind point and demanding it be the surface almost never works; scanning down
