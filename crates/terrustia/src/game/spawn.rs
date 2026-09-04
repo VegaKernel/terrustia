@@ -1274,6 +1274,11 @@ pub struct Seasonal {
     /// arm (`NPC.cs:4675`). It is here rather than on [`Conditions`] for the same reason the rest
     /// of this struct is: rain changes what turns up, not how fast.
     pub raining: bool,
+    /// `BirthdayParty.PartyIsUp`, which `game/party.rs` already keeps. It sits beside the two
+    /// calendar flags above because vanilla's bunny chain treats it as a third one: Halloween, then
+    /// Christmas, then a party, then the plain bunny (`NPC.cs:1637-1656`, `:2588-2624`,
+    /// `:4284-4303`).
+    pub party: bool,
 }
 
 /// The surface night chain's own arms, ahead of the ordinary pool: `NPC.cs:4539-4740`.
@@ -1708,6 +1713,17 @@ pub fn hallow_ground_pick(
 /// `GetBasicSlimeToSpawn_ChanceToBeHolidaySlime` (`NPC.cs:5678-5685`) is `Main.rand.Next(3) != 0`
 /// outside Skyblock, the same two-in-three the bunny uses.
 ///
+/// The Party Bunny is the third arm of the same chain (`NPC.cs:1645-1648`, `:2596-2599`,
+/// `:4292-4295`) and sits below the two calendars in all three of vanilla's copies of it, so it
+/// sits below them here. Without it 540 was in no pool and no branch, and a party could not put a
+/// single bunny in a party hat.
+///
+/// One narrowing that predates the party arm and now covers all three: vanilla's copy at
+/// `NPC.cs:2588-2599` carries `!flag11` (`spawnTileY >= Main.rockLayer && <= Main.UnderworldLayer`,
+/// `:2557`), so a cavern's friendly draw dresses nothing up. The other two copies carry no such
+/// gate, and neither does this, so a costumed bunny is very slightly commoner underground here than
+/// in the game and never rarer.
+///
 /// The slime swap is surface-only because vanilla's is: `GetBasicSlimeToSpawn(surface: false, ...)`
 /// has no holiday case at all, and the two tile types with their own answer (jungle grass, and snow
 /// or ice) are answered before the default case this replaces.
@@ -1717,12 +1733,100 @@ fn holiday_costume(npc_type: u16, depth: Depth, at: Seasonal, rng: &mut SmallRng
     match npc_type {
         BUNNY if at.halloween && two_in_three(rng) => 303, // BunnySlimed
         BUNNY if at.xmas && two_in_three(rng) => 337,      // BunnyXmas
+        BUNNY if at.party && two_in_three(rng) => 540,     // PartyBunny
         BLUE_SLIME if depth == Depth::Surface && at.halloween && two_in_three(rng) => 302, // SlimeMasked
         // `Main.rand.Next(333, 337)`, so 333 to 336: the four ribbon colours.
         BLUE_SLIME if depth == Depth::Surface && at.xmas && two_in_three(rng) => {
             333 + rng.random_range(0..4)
         }
         _ => npc_type,
+    }
+}
+
+/// `NPC.goldCritterChance` (`NPC.cs:6054`), the one-in-N behind every `RollLuck(goldCritterChance)`
+/// in the spawner. A plain `Main.rand.Next(400)` at luck zero (`Luck.cs:5-16`), the same narrowing
+/// every other `Roll*Luck` call site in this file makes.
+const GOLD_CRITTER_CHANCE: u32 = 400;
+
+/// The gold twin a critter is drawn as instead of itself, one time in four hundred.
+///
+/// The sibling of [`holiday_costume`], and here for the same reason: vanilla writes these as an
+/// `else if` *above* the ordinary answer rather than as a swap after it, and applying them to the
+/// type already drawn is the same distribution written the other way round. Each pair below is one
+/// such arm, and each is `RollLuck(goldCritterChance) == 0 ? gold : plain` with nothing else in it:
+///
+/// * the bird, `NPC.cs:2455-2459` and `:2538-2542` (and `:4331`, `:4352` on the monster path),
+/// * the bunny, `NPC.cs:1629-1632`, `:2580-2583` and `:4276-4279`,
+/// * the squirrel, `NPC.cs:1633-1636`, `:2584-2587` and `:4280-4283`,
+/// * the butterfly, `NPC.cs:2489-2496` and `:4232-4239`,
+/// * the frog, `NPC.SpawnFrog` (`NPC.cs:5627-5634`),
+/// * the goldfish, `NPC.cs:1590-1597`, `:2303-2310` and `:2316-2323`,
+/// * the worm, `NPC.cs:1616-1623`, `:2391-2398` and `:3782-3789`,
+/// * the mouse, `NPC.cs:1603-1610` and `:3793-3800`.
+///
+/// `depth` is here for the squirrel and nothing else: its arm alone carries `& flag10`
+/// (`surfaceSpawn`, `NPC.cs:1203`), so a squirrel met underground is never the gold one. The other
+/// seven arms carry no depth gate at all.
+///
+/// Deliberately not in the table, each because its plain half is not something this server draws:
+/// the Gold Dragonfly (601), the Gold Water Strider (613), the Gold Seahorse (627) and the Gold
+/// Goldfish Walker (593), whose four base critters are all in the water and beach arms
+/// [`water_pick`] already declines to model. The Gold Lady Bug (605) is left to the lane that
+/// brings the plain Lady Bug (604) with it.
+///
+/// The roll is made only once a type with a twin has actually been drawn, so an ordinary attempt
+/// pays one `match` and no `rng` draw at all.
+fn gold_variant(npc_type: u16, depth: Depth, rng: &mut SmallRng) -> u16 {
+    let gold = match npc_type {
+        74 | 297 | 298 => 442,                 // Bird, BirdBlue, BirdRed -> GoldBird
+        46 => 443,                             // Bunny -> GoldBunny
+        356 => 444,                            // Butterfly -> GoldButterfly
+        361 => 445,                            // Frog -> GoldFrog
+        300 => 447,                            // Mouse -> GoldMouse
+        357 => 448,                            // Worm -> GoldWorm
+        55 => 592,                             // Goldfish -> GoldGoldfish
+        299 if depth == Depth::Surface => 539, // Squirrel -> SquirrelGold
+        _ => return npc_type,
+    };
+    if rng.random_range(0..GOLD_CRITTER_CHANCE) == 0 {
+        gold
+    } else {
+        npc_type
+    }
+}
+
+/// What the underworld's lava-bait critters answer with (`NPC.SpawnLavaBaitCritters`,
+/// `NPC.cs:5850-5877`):
+///
+/// ```csharp
+/// if (Main.rand.Next(3) != 0)
+/// {
+///     if (Main.dayTime) return SpawnNPC(..., 653);
+///     ...four `Main.rand.Next(fireFlyMultiple) == 0` companions at 654...
+///     return SpawnNPC(..., 654);
+/// }
+/// return SpawnNPC(..., 655);
+/// ```
+///
+/// Two thirds of the draws are the day's Hell Butterfly or the night's Lavafly, and the remaining
+/// third is a Magma Snail whatever the hour. Vanilla reaches it from two places, and so does this
+/// server: the underworld's ordinary chain one draw in eight (`NPC.cs:4881-4884`) and the friendly
+/// chain's own underworld case (`:2562-2578`).
+///
+/// The four extra Lavaflies are not transcribed: `fireFlyMultiple` is one of the three per-world
+/// nightly critter-density rolls (`NPC.setFireFlyChance`, `NPC.cs:94495-94542`) that this server
+/// does not model at all, and the same omission already stands for the firefly's own companions in
+/// [`friendly_pool`]. Nothing is made unreachable by it; a Lavafly arrives alone rather than in a
+/// cloud.
+fn lava_bait_pick(day_time: bool, rng: &mut SmallRng) -> u16 {
+    if rng.random_range(0..3) != 0 {
+        if day_time {
+            653 // HellButterfly
+        } else {
+            654 // Lavafly
+        }
+    } else {
+        655 // MagmaSnail
     }
 }
 
@@ -2319,6 +2423,98 @@ const DARK_CASTER_ODDS: u32 = 7;
 /// routine and not of the type, so it would catch anything else driven by the same one.
 const SPIKE_BALL_AI_STYLE: i32 = 20;
 
+/// The four ordinary critters the ground below the surface line has of its own, and the rolls that
+/// offer them (`NPC.cs:3776-3805`, four consecutive arms of the outer chain).
+///
+/// None of them is a friendly-attempt draw: they sit on the monster path, above the Lihzahrd
+/// temple at `:3914` and everything after it, which is where [`try_spawn`] puts them. So an
+/// ordinary cave has worms and mice in it whether or not a nearby town has quieted the wild, which
+/// is what makes these four the commonest critters in the game and is why all four sat unreachable
+/// here: nothing in this server drew a critter outside a `spawnFriendly` attempt at all.
+///
+/// The Lac Beetle keys on jungle grass and nothing else, so an underground jungle is where it
+/// lives; the Cochineal and Cyan Beetles are the caverns' own pair and have their own arm further
+/// down (`NPC.cs:4925-4935`, [`CAVERN_BEETLE_ODDS`]).
+const LAC_BEETLE: u16 = 219;
+const LAC_BEETLE_ODDS: u32 = 60;
+const WORM: u16 = 357;
+const WORM_ODDS: u32 = 8;
+const MOUSE: u16 = 300;
+const MOUSE_ODDS: u32 = 13;
+const SNAIL: u16 = 359;
+const SNAIL_ODDS: u32 = 13;
+
+/// How far above the bottom of the world the worm and the mouse stop (`NPC.cs:3780`, `:3791`,
+/// `spawnTileY < Main.maxTilesY - 210`), which is ten rows shallower than the underworld itself.
+const CRITTER_FLOOR: i32 = 210;
+
+/// The caverns' beetle pair (`NPC.cs:4925-4935`):
+///
+/// ```csharp
+/// else if (Main.rand.Next(60) == 0)
+/// {
+///     if (ZoneSnow) { SpawnNPC(..., 218); }
+///     else { SpawnNPC(..., 217); }
+/// }
+/// ```
+///
+/// One arm below the Rock Golem's and with no gate of its own beyond the roll, so one cavern draw
+/// in sixty is a beetle wherever the stone is.
+const COCHINEAL_BEETLE: u16 = 217;
+const CYAN_BEETLE: u16 = 218;
+const CAVERN_BEETLE_ODDS: u32 = 60;
+
+/// The underworld's own draw of the lava-bait critters (`NPC.cs:4881-4884`), one attempt in eight,
+/// immediately below the Tortured Soul's arm and above the Bone Serpent's. See [`lava_bait_pick`]
+/// for what it answers with.
+const LAVA_BAIT_ODDS: u32 = 8;
+
+/// The Enchanted Nightcrawler's own arm, at the head of the friendly grass chain
+/// (`NPC.cs:2409-2413`):
+///
+/// ```csharp
+/// if (((!Main.dayTime && Main.numClouds <= 55 && Main.cloudBGActive == 0f
+///     && Star.starfallBoost > 3f) & flag10) && RollLuck(2) == 0)
+/// {
+///     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, 484);
+///     break;
+/// }
+/// ```
+///
+/// A clear, starry night with a meteor shower on it, and nothing about rain: the arm above it
+/// (`:2381`) takes every rainy draw and `break`s, so `!raining` is already true wherever this is
+/// reached. `flag10` is `surfaceSpawn`.
+///
+/// Nothing is narrowed here. The three sky clauses are all state this server already keeps: the
+/// cloud count is the world's own (straight out of the `.wld` and walked every tick by
+/// `Weather::tick_clouds`), `Main.cloudBGActive` is `Weather::cloud_bg_active`, and the shower is
+/// the dusk roll behind [`EventSpawns::starfall_night`]. The caller resolves all three into that
+/// one bool, so this arm costs one bool test on an ordinary night.
+///
+/// `RollLuck(2)` is a plain `Main.rand.Next(2)` at luck zero (`Luck.cs:5-16`).
+///
+/// It carries [`friendly_pool`]'s own standing narrowing and no new one: the arm lives inside
+/// vanilla's `case 2`/`109`/`477`/`492`, the four grasses, and this server keys the friendly draw
+/// on the player's biome rather than on the tile underfoot. So a stone-floored forest surface
+/// answers here where the game would have fallen through the tile switch and drawn nothing.
+const ENCHANTED_NIGHTCRAWLER: u16 = 484;
+const ENCHANTED_NIGHTCRAWLER_ODDS: u32 = 2;
+
+/// The Firefly (`NPCID.Firefly`) and what the same arm answers with when the grass underfoot is
+/// hallowed instead (`NPC.cs:2414-2421`):
+///
+/// ```csharp
+/// int type2 = 355;
+/// if (tileType == 109) { type2 = 358; }
+/// ```
+///
+/// Keyed on the tile and not on `ZoneHallow`, exactly as vanilla writes it, so a single hallowed
+/// grass tile in an ordinary forest answers with a Lightning Bug and a pearlstone hallow floored in
+/// plain grass does not. `109` is `TileID.HallowedGrass`.
+const FIREFLY: u16 = 355;
+const LIGHTNING_BUG: u16 = 358;
+const HALLOWED_GRASS: u16 = 109;
+
 /// The Prismatic Lacewing, which is not a critter you catch for a collection: killing one is the
 /// *only* way the Empress of Light is ever summoned (`NPC.cs:80309-80319`). With no arm spawning
 /// it, an entire boss, her fight and her whole drop table were unreachable. The id itself lives in
@@ -2426,8 +2622,12 @@ fn choose_weighted(
 /// the biome the player stands in rather than by the exact tile the game reads, which is the
 /// disclosed narrowing: the game chooses a bird over a bunny by the grass under the spawn and by
 /// weather, season and time this server does not all model, so this returns the ordinary set for
-/// the place and lets the caller pick evenly among it. The underworld's lava-bait critters and the
-/// gold variants are left out on purpose; the gold ones are cosmetic rolls on top of these.
+/// the place and lets the caller pick evenly among it. The gem variants are left out on purpose;
+/// they are a cosmetic roll on top of these, and the two arms that carry them
+/// (`NPC.cs:2600-2620`) are the caverns' own, not this pool's. The gold variants are *not* left
+/// out any more: see [`gold_variant`], which the caller applies to whatever this answers. The
+/// underworld's lava-bait critters are a separate monster-path arm (see [`lava_bait_pick`]), not
+/// part of `spawnFriendly` at all, so they were never this pool's to carry.
 ///
 /// Everything below the surface line is empty here on purpose and is [`deep_friendly_pick`]'s: the
 /// game's own tail there is a gated fork rather than a set, so a pool cannot say it.
@@ -2667,6 +2867,21 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
         // The ordinary surface: birds, a bunny, a squirrel and butterflies by day; fireflies and
         // owls by night (`NPC.cs:2414`,`2439-2449`,`2452-2552`). The evils and the hallow borrow
         // it, as their own critter rolls fall back to the same set in the game.
+        //
+        // The Red Squirrel is not a variant of the Squirrel: `NPC.cs:2611` draws the pair with
+        // `Utils.SelectRandom(Main.rand, new short[2] { 299, 538 })`, an even coin flip
+        // (`Utils.cs:2628-2631`), so both are ordinary entries here. That arm carries `& flag10`
+        // (`surfaceSpawn`), which is why 538 is on this list and not on the underground one below,
+        // where 299 already sits.
+        //
+        // The Stink Bug is an arm of its own rather than a coin flip (`NPC.cs:2474-2486`, and
+        // `:4218-4229` on the monster path), gated on `Main.rand.Next(stinkBugChance) == 0`.
+        // `stinkBugChance` is one of the three per-world nightly critter-density rolls
+        // (`NPC.setFireFlyChance`, `NPC.cs:94495-94542`): on two days in three it is 999999 and the
+        // bug never comes, and on the rest it is 1 to 13. This server models none of the three, and
+        // the Butterfly beside it is already in this list ungated by its own `butterflyChance` for
+        // exactly the same reason, so the bug joins as one more even entry. That is the pool's
+        // standing narrowing, not a new one.
         (Surface, Forest | Corruption | Crimson | Hallow) => {
             if day {
                 &[
@@ -2680,6 +2895,7 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
                     299, // Squirrel
                     538, // SquirrelRed
                     356, // Butterfly
+                    669, // Stinkbug
                 ]
             } else {
                 &[
@@ -2688,7 +2904,9 @@ pub fn friendly_pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
                 ]
             }
         }
-        // The underworld's friendly spawns are lava-bait critters this server does not model.
+        // The underworld's friendly draw is a chain, not a pool: `NPC.cs:2562-2578` hands it
+        // straight to `SpawnLavaBaitCritters`, which [`lava_bait_pick`] transcribes and the caller
+        // runs instead of drawing from here.
         (Underworld, _) => &[],
         // Underground and cavern are not a pool at all: vanilla's tail (`NPC.cs:2600-2624`) is a
         // fork with a one-in-five gate on each side, so it answers a gem critter, a plain Bunny, or
@@ -3952,6 +4170,23 @@ pub struct EventSpawns<'a> {
     /// `DangerThatPreventsOtherDangers` set (the lunar pillars) is folded into the caller's boss
     /// test rather than named separately.
     pub any_danger: bool,
+    /// `BirthdayParty.PartyIsUp` (`game/party.rs`), for the party bunny the bunny chain wears
+    /// alongside its Halloween and Christmas costumes (see [`holiday_costume`]).
+    pub party: bool,
+    /// The whole sky half of the Enchanted Nightcrawler's gate (`NPC.cs:2409`): a meteor shower
+    /// over a clear, un-overcast sky. Three clauses resolved by the caller into the one bit the
+    /// spawner reads, because all three are state it already keeps and none of them varies per
+    /// candidate tile.
+    ///
+    /// * `Star.starfallBoost > 3f`. `Star.NightSetup` (`Star.cs:41-60`) re-rolls the boost at every
+    ///   dusk, from `Main.UpdateTime_StartNight` (`Main.cs:66208`): one night in ten it is
+    ///   `Main.rand.Next(300, 501) * 0.01f`, otherwise one in three of the rest it is
+    ///   `Main.rand.Next(100, 151) * 0.01f`, and otherwise it is 1. Only the first branch can clear
+    ///   3, and only where it rolled 301 or above, so a shower night is a shade under one in ten.
+    /// * `Main.numClouds <= 55`, the world's own published cloud count.
+    /// * `Main.cloudBGActive == 0f`, the overcast-background counter
+    ///   (`Main.updateCloudLayer`, `Main.cs:13346-13400`), which `game/weather.rs` already ticks.
+    pub starfall_night: bool,
     /// Whether the wall has fallen, which is what opens the hardmode half of every pool.
     pub hard_mode: bool,
     /// ...and whether a mechanical boss is down, which is what opens the underworld's.
@@ -4492,6 +4727,8 @@ pub fn try_spawn(
             moon_phase: world.moon_phase,
             // `NPC.cs:372`, `raining = Main.raining`.
             raining: world.raining,
+            // `BirthdayParty.PartyIsUp`, resolved by the caller off `game/party.rs`.
+            party: events.party,
         };
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
@@ -4748,18 +4985,44 @@ pub fn try_spawn(
                     )
                 }
                 // A friendly attempt draws a harmless critter for this place; if there is no
-                // critter for it (the underworld), the attempt is dropped rather than turned into a
-                // monster the game would not have spawned here.
+                // critter for it, the attempt is dropped rather than turned into a monster the game
+                // would not have spawned here.
                 None if spawn_friendly => {
                     // A graveyard's friendly draw is its own and it is exactly two things
                     // (`NPC.cs:2101-2115`): a Maggot or a Rat, on dry land, and nothing at all
-                    // standing in water. The arm sits ahead of every other friendly one, so no
-                    // bird, bunny or firefly is drawn among the tombstones.
+                    // standing in water. The arm sits ahead of every other friendly one and
+                    // `return`s, so no bird, bunny, firefly, nightcrawler or lava-bait critter is
+                    // drawn among the tombstones. That is why the two branches below it are below
+                    // it: tombstones in the underworld really do answer with a Rat in the game.
                     let critters = if seasonal.graveyard {
                         if water_tile(world, x, y) {
                             continue;
                         }
                         &GRAVEYARD_VERMIN[..]
+                    } else if depth == Depth::Underworld {
+                        // The underworld's friendly draw is not a pool at all: vanilla's grass case
+                        // hands every spawn below `Main.UnderworldLayer` straight to
+                        // `SpawnLavaBaitCritters` (`NPC.cs:2562-2578`), which is the same chain the
+                        // underworld's ordinary arm calls further down. So this is answered here
+                        // rather than through [`friendly_pool`], whose underworld entry is empty
+                        // for exactly that reason.
+                        out.push((
+                            lava_bait_pick(world.day_time, rng),
+                            (x as f32 * 16.0, y as f32 * 16.0),
+                        ));
+                        break;
+                    } else if events.starfall_night
+                        && !world.day_time
+                        && depth == Depth::Surface
+                        && rng.random_range(0..ENCHANTED_NIGHTCRAWLER_ODDS) == 0
+                    {
+                        // The Enchanted Nightcrawler, at the head of the grass chain
+                        // (`NPC.cs:2409-2413`, see [`ENCHANTED_NIGHTCRAWLER`]): half of every
+                        // friendly surface attempt on a clear meteor-shower night, ahead of the
+                        // firefly, the owl and every bird. Without it 484 was in no pool and no
+                        // branch.
+                        out.push((ENCHANTED_NIGHTCRAWLER, (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
                     } else {
                         friendly_pool(depth, player_biome, world.day_time)
                     };
@@ -4786,7 +5049,7 @@ pub fn try_spawn(
                         // holiday costume applies: `holiday_costume` only ever dresses a bunny or a
                         // plain slime, and the jungle-grass arm is answered ahead of the case it
                         // reads.
-                        if critter == FROG {
+                        let drawn = if critter == FROG {
                             let alive = |ty: u16| {
                                 npcs.iter().any(|(_, n)| n.npc_type == ty && n.is_alive())
                             };
@@ -4796,9 +5059,18 @@ pub fn try_spawn(
                             // (`NPC.cs:2442-2448` -> `spawn_owl`): one draw in a hundred is the Owl
                             // Mimic instead. No holiday costume applies here either.
                             spawn_owl(rng)
+                        } else if critter == FIREFLY && ground_block == Some(HALLOWED_GRASS) {
+                            // ...and the firefly is a two-way fork on the tile underfoot rather than
+                            // a single type (`NPC.cs:2416-2420`, see [`LIGHTNING_BUG`]).
+                            // `ground_block` is the read this attempt already made, not a second one.
+                            LIGHTNING_BUG
                         } else {
-                            holiday_costume(critter, depth, seasonal, rng)
-                        }
+                            critter
+                        };
+                        // Gold first and the costume second, which is vanilla's own order: the gold
+                        // bunny's arm (`NPC.cs:2580`) sits above the Halloween one (`:2588`), and a
+                        // gold critter is never dressed up because it is no longer a bunny by then.
+                        holiday_costume(gold_variant(drawn, depth, rng), depth, seasonal, rng)
                     }
                 }
                 // Below the dungeon before Skeletron falls, the dungeon answers with the Dungeon
@@ -4842,6 +5114,79 @@ pub fn try_spawn(
                         mushroom_pick(depth == Depth::Surface, events.hard_mode, wet, rng) =>
                 {
                     npc_type
+                }
+                // The four critters the ground below the surface line has of its own, in vanilla's
+                // own order and at vanilla's own odds (`NPC.cs:3776-3805`, see [`LAC_BEETLE`]).
+                // Their place in the chain is where vanilla puts them: below the Glowing Mushroom
+                // arm at `:3637` and above the Lihzahrd temple at `:3914`.
+                //
+                // These are not friendly-attempt draws. Vanilla spawns them on the monster path,
+                // which is why a cave has worms and mice in it whether or not a town nearby has
+                // quieted the wild, and why all four were unreachable here: until now nothing in
+                // this server drew a critter outside a `spawnFriendly` attempt.
+                //
+                // `spawnTileY > Main.worldSurface` is exactly `depth != Surface`: the game's
+                // `spawnTileY` is the solid row, this server's `y + 1`, and `depth_at` puts `y` in
+                // `Surface` for `y < surface`, so the two comparisons agree row for row.
+                //
+                // The biome exclusions are vanilla's own `!ZoneSnow && !ZoneCrimson && !ZoneCorrupt
+                // && !ZoneJungle && !ZoneHallow`, read here as the single winning [`Biome`] this
+                // file picks everywhere. The dungeon is added because `else if (ZoneDungeon)`
+                // (`:2629`) returns long before this arm, so a dungeon never reaches it in the game
+                // either. The Lac Beetle carries none of them: its gate is jungle grass underfoot
+                // and nothing else, and the Snail's arm is the one that leaves the jungle in.
+                None if depth != Depth::Surface
+                    && ground_block == Some(JUNGLE_GRASS)
+                    && rng.random_range(0..LAC_BEETLE_ODDS) == 0 =>
+                {
+                    LAC_BEETLE
+                }
+                None if depth != Depth::Surface
+                    && y + 1 < world.height() - CRITTER_FLOOR
+                    && !matches!(
+                        player_biome,
+                        Biome::Snow
+                            | Biome::Crimson
+                            | Biome::Corruption
+                            | Biome::Jungle
+                            | Biome::Hallow
+                            | Biome::Dungeon
+                    )
+                    && rng.random_range(0..WORM_ODDS) == 0 =>
+                {
+                    gold_variant(WORM, depth, rng)
+                }
+                None if depth != Depth::Surface
+                    && y + 1 < world.height() - CRITTER_FLOOR
+                    && !matches!(
+                        player_biome,
+                        Biome::Snow
+                            | Biome::Crimson
+                            | Biome::Corruption
+                            | Biome::Jungle
+                            | Biome::Hallow
+                            | Biome::Dungeon
+                    )
+                    && rng.random_range(0..MOUSE_ODDS) == 0 =>
+                {
+                    gold_variant(MOUSE, depth, rng)
+                }
+                // The Snail's own gate is not the other two's: it keeps the jungle (`NPC.cs:3802`
+                // omits `!ZoneJungle`) and it stops at the middle of the stone rather than ten rows
+                // above the underworld.
+                None if depth != Depth::Surface
+                    && y + 1 < (i32::from(world.rock_layer) + world.height()) / 2
+                    && !matches!(
+                        player_biome,
+                        Biome::Snow
+                            | Biome::Crimson
+                            | Biome::Corruption
+                            | Biome::Hallow
+                            | Biome::Dungeon
+                    )
+                    && rng.random_range(0..SNAIL_ODDS) == 0 =>
+                {
+                    SNAIL
                 }
                 // The Lihzahrd Temple, which answers with its own two and nothing else
                 // (`NPC.cs:3914-3924`, see [`LIHZAHRD`]). The arm sits exactly where vanilla puts
@@ -4946,6 +5291,18 @@ pub fn try_spawn(
                 {
                     TORTURED_SOUL
                 }
+                // ...and the arm immediately below his (`NPC.cs:4881-4884`), one underworld draw in
+                // eight: the lava-bait critters, which are the only three creatures down there that
+                // are not trying to kill anybody. See [`lava_bait_pick`] for the fork itself.
+                //
+                // It shares the Tortured Soul's `Depth::Underworld` gate, and with it the one
+                // disclosed narrowing that gate already carried: vanilla's own arm opens at
+                // `spawnTileY > Main.maxTilesY - 190` (`:4871`) and [`UNDERWORLD_DEPTH`] is 200, so
+                // the ten rows between them draw from the cavern chain here where the game would
+                // already be in the underworld.
+                None if depth == Depth::Underworld && rng.random_range(0..LAVA_BAIT_ODDS) == 0 => {
+                    lava_bait_pick(world.day_time, rng)
+                }
                 // The caverns' Rock Golem (`NPC.cs:4921-4924`):
                 //
                 // ```csharp
@@ -4992,6 +5349,20 @@ pub fn try_spawn(
                     ) =>
                 {
                     ROCK_GOLEM
+                }
+                // ...and the arm immediately below the golem's (`NPC.cs:4925-4935`, see
+                // [`CAVERN_BEETLE_ODDS`]): one cavern draw in sixty is a beetle, cyan in the snow
+                // and cochineal everywhere else. It carries the golem's own two gates and nothing
+                // more, because vanilla's carries none of its own at all.
+                None if depth == Depth::Cavern
+                    && player_biome != Biome::Dungeon
+                    && rng.random_range(0..CAVERN_BEETLE_ODDS) == 0 =>
+                {
+                    if player_biome == Biome::Snow {
+                        CYAN_BEETLE
+                    } else {
+                        COCHINEAL_BEETLE
+                    }
                 }
                 // The cavern chain's rare wanderer (`NPC.cs:5004-5010`):
                 //
@@ -5525,6 +5896,7 @@ mod tests {
                                         day_time: false,
                                         moon_phase,
                                         raining,
+                                        party: false,
                                     };
                                     for ground_block in [2u16, 147] {
                                         for seed in 0..4_000u64 {
@@ -5642,7 +6014,8 @@ mod tests {
         }
 
         // The holiday costumes, which swap a critter or a plain slime for a dressed-up one after it
-        // is drawn rather than sitting in a pool of their own.
+        // is drawn rather than sitting in a pool of their own. The party is the third of them and
+        // is sampled like the two calendars: it is where the Party Bunny lives, and nowhere else.
         for at in [
             Seasonal {
                 halloween: true,
@@ -5652,12 +6025,37 @@ mod tests {
                 xmas: true,
                 ..Seasonal::default()
             },
+            Seasonal {
+                party: true,
+                ..Seasonal::default()
+            },
         ] {
             for base in [46, 1] {
                 for seed in 0..200u64 {
                     let mut rng = SmallRng::seed_from_u64(seed);
                     set.insert(holiday_costume(base, Depth::Surface, at, &mut rng));
                 }
+            }
+        }
+
+        // ...and the gold variants, which are the same shape of after-the-draw swap and are asked
+        // the same way: every base that has a twin, at both depths, since the squirrel's is
+        // surface-only. One draw in four hundred, so the seed count is what the odds ask for.
+        for base in [74, 297, 298, 46, 356, 361, 300, 357, 55, 299] {
+            for depth in [Depth::Surface, Depth::Cavern] {
+                for seed in 0..20_000u64 {
+                    let mut rng = SmallRng::seed_from_u64(seed);
+                    set.insert(gold_variant(base, depth, &mut rng));
+                }
+            }
+        }
+
+        // The underworld's lava-bait chain, asked through its own producer for the same reason the
+        // sky is: both halves of its day fork, and enough seeds for the Magma Snail's third.
+        for day_time in [false, true] {
+            for seed in 0..200u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                set.insert(lava_bait_pick(day_time, &mut rng));
             }
         }
 
@@ -5744,6 +6142,24 @@ mod tests {
         // asserted by this module's own tests, so listing it here cannot drift into a claim the
         // branch still makes good.
         set.insert(METEOR_HEAD);
+        // ...and the six the ground itself offers on the monster path rather than through any
+        // pool: the four below the surface line (`NPC.cs:3776-3805`) and the caverns' beetle pair
+        // (`:4925-4935`). Each is a branch with a roll and a place gate and no roster behind it, so
+        // there is nothing to sample; `try_spawn` reaching all six is asserted by this module's own
+        // tests, which is what keeps listing them here from drifting into a claim their branches
+        // still make good.
+        set.insert(LAC_BEETLE);
+        set.insert(WORM);
+        set.insert(MOUSE);
+        set.insert(SNAIL);
+        set.insert(COCHINEAL_BEETLE);
+        set.insert(CYAN_BEETLE);
+        // ...and the two the friendly chain answers with ahead of its own pool: the Enchanted
+        // Nightcrawler on a meteor-shower night (`NPC.cs:2409`) and the Lightning Bug the firefly
+        // arm becomes over hallowed grass (`:2416-2420`). Both are asserted reachable through
+        // `try_spawn` itself by this module's own tests.
+        set.insert(ENCHANTED_NIGHTCRAWLER);
+        set.insert(LIGHTNING_BUG);
         // The six a world happens to have are drawn from thirteen, so every world's own set counts.
         for world_id in 0..200 {
             set.extend(cavern_monsters::CavernMonsters::for_world(world_id).flat());
@@ -5839,6 +6255,8 @@ mod tests {
             sandstorm: false,
             happy_windy_day: false,
             wind_target: 0.0,
+            party: false,
+            starfall_night: false,
             downed_plantera: false,
             downed_all_mechs: false,
             boss_cap: false,
@@ -6507,6 +6925,31 @@ mod tests {
         py: i32,
         ticks: u32,
     ) -> std::collections::BTreeSet<u16> {
+        friendly_draws_with(world, &quiet(), px, py, ticks)
+    }
+
+    /// The same, with the events under the test's control: the party and the meteor-shower night
+    /// are both server state the friendly chain reads.
+    fn friendly_draws_with(
+        world: &World,
+        events: &EventSpawns<'_>,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> std::collections::BTreeSet<u16> {
+        friendly_draws_in(world, events, false, px, py, ticks)
+    }
+
+    /// ...and the same again for a player standing among tombstones, whose friendly arm is its own
+    /// and answers ahead of every other one.
+    fn friendly_draws_in(
+        world: &World,
+        events: &EventSpawns<'_>,
+        graveyard: bool,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> std::collections::BTreeSet<u16> {
         const GUIDE: u16 = 22;
         let mut npcs = NpcStore::new();
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
@@ -6514,8 +6957,12 @@ mod tests {
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
         player.state = crate::game::ConnState::Playing;
         player.position = (px as f32 * 16.0, py as f32 * 16.0);
-        // No zone bytes, deliberately: `1 << 6` on byte 4 is the graveyard flag, whose friendly arm
-        // answers ahead of every other one and would leave this reading vermin instead.
+        // `1 << 6` on byte 4 is the graveyard flag, whose friendly arm answers ahead of every other
+        // one; unset by default, so a caller that does not ask for tombstones reads the ordinary
+        // pool rather than vermin.
+        if graveyard {
+            player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        }
         for _ in 0..3 {
             npcs.spawn(GUIDE, player.position);
         }
@@ -6529,7 +6976,7 @@ mod tests {
                 world,
                 &npcs,
                 &players,
-                &quiet(),
+                events,
                 &JourneyPowers::default(),
                 &mut biomes,
                 &mut rng,
@@ -6685,6 +7132,439 @@ mod tests {
                 "gem offset {offset}: {got}% drawn, vanilla's ladder says {want}%"
             );
         }
+    }
+
+    /// A cavern floored in one material every eight rows, thick enough over the whole 169x124 scan
+    /// box for [`biome_at`] to read whatever that material says.
+    ///
+    /// One solid row in eight rather than a slab, so every ledge has seven clear rows over it and
+    /// [`has_room`] never turns a candidate away for want of headroom. `flat_world_of`'s single
+    /// four-row floor is not enough tile for the snow threshold (1500) that one of these tests
+    /// needs.
+    fn cavern_of(block: u16) -> World {
+        use terrustia_proto::tile::Tile;
+        let mut world = World::empty(800, 600, "cavern");
+        world.surface = 100;
+        world.rock_layer = 200;
+        for y in (200i32..340).step_by(8) {
+            for x in 200..600 {
+                world.set_tile(x, y, Tile::block(block));
+            }
+        }
+        world
+    }
+
+    /// The four critters the ground below the surface line has of its own (`NPC.cs:3776-3805`).
+    ///
+    /// All four sat unreachable for one root reason: this server drew critters only inside a
+    /// `spawnFriendly` attempt, and vanilla spawns these on the *monster* path, in the same
+    /// `else if` ladder as the Lihzahrd temple and the sandstorm. A cave with no town anywhere near
+    /// it has worms and mice in it in the game, and had none at all here.
+    ///
+    /// Neutralised arm by arm, each rerun (the assertions are ordered, so each names the first to
+    /// fire):
+    /// * `&& false` on the Worm arm: "no Worm (357) underground: {10, 16, 21, 44, 49, 93, 195,
+    ///   217, 300, 354, 359, 453, 496, 497, 498, 504, 506}".
+    /// * the same on the Mouse arm: "no Mouse (300) underground: {10, 16, 21, 44, 49, 93, 195, 217,
+    ///   354, 357, 359, 448, 453, 496, 497, 498, 504, 506}".
+    /// * the same on the Snail arm: "no Snail (359) underground: {10, 16, 21, 44, 49, 93, 195, 217,
+    ///   300, 354, 357, 448, 453, 496, 497, 498, 504, 506}".
+    /// * the same on the Lac Beetle arm: "no Lac Beetle (219) on jungle grass: {42, 43, 51, 56,
+    ///   204, 217, 354, 359}".
+    /// * dropping `Biome::Jungle` from the Worm and Mouse arms' exclusion list: "the jungle keeps
+    ///   the worm and the mouse out: {42, 43, 51, 56, 204, 217, 219, 300, 357, 359}".
+    /// * relaxing `depth != Depth::Surface` to `true` on all four: "the surface has no worms of its
+    ///   own, and got 357: {1, 300, 357, 359}".
+    #[test]
+    fn the_ground_under_the_surface_has_worms_mice_and_snails() {
+        let stone = cavern_of(1);
+        assert_eq!(depth_at(&stone, 255), Depth::Cavern);
+        assert_eq!(biome_at(&stone, 400, 255), Biome::Forest);
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 20_000)
+            .into_iter()
+            .collect();
+        for (npc_type, name) in [(WORM, "Worm"), (MOUSE, "Mouse"), (SNAIL, "Snail")] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) underground: {seen:?}"
+            );
+        }
+
+        // Jungle grass is the Lac Beetle's whole gate, and the same floor shuts the worm and the
+        // mouse out while leaving the snail in: `NPC.cs:3802` is the one of the four with no
+        // `!ZoneJungle` on it.
+        let jungle = cavern_of(JUNGLE_GRASS);
+        assert_eq!(biome_at(&jungle, 400, 255), Biome::Jungle);
+        let under_jungle: std::collections::BTreeSet<u16> =
+            spawns_at(&jungle, false, 400, 255, 20_000)
+                .into_iter()
+                .collect();
+        assert!(
+            under_jungle.contains(&LAC_BEETLE),
+            "no Lac Beetle ({LAC_BEETLE}) on jungle grass: {under_jungle:?}"
+        );
+        assert!(
+            !under_jungle.contains(&WORM) && !under_jungle.contains(&MOUSE),
+            "the jungle keeps the worm and the mouse out: {under_jungle:?}"
+        );
+        assert!(
+            under_jungle.contains(&SNAIL),
+            "the snail's arm has no jungle exclusion: {under_jungle:?}"
+        );
+
+        // ...and none of the four is a surface spawn: `spawnTileY > Main.worldSurface` on all of
+        // them.
+        let (surface, (px, py)) = forest_surface();
+        let above: std::collections::BTreeSet<u16> = spawns_at(&surface, false, px, py, 20_000)
+            .into_iter()
+            .collect();
+        for npc_type in [WORM, MOUSE, SNAIL, LAC_BEETLE] {
+            assert!(
+                !above.contains(&npc_type),
+                "the surface has no worms of its own, and got {npc_type}: {above:?}"
+            );
+        }
+        assert!(
+            !above.is_empty(),
+            "the surface answered with nothing at all"
+        );
+    }
+
+    /// The caverns' beetle pair, one draw in sixty and nothing else gating it (`NPC.cs:4925-4935`).
+    ///
+    /// Neutralised with `&& false` on the arm: "no Cochineal Beetle (217) in the caverns: {10, 16,
+    /// 21, 44, 49, 93, 195, 300, 354, 359, 453, 496, 497, 498, 504, 506}". Neutralised again by
+    /// making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan Beetle (218) in a snowy
+    /// cavern: {147, 150, 167, 185, 217, 354, 453}".
+    #[test]
+    fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one() {
+        let stone = cavern_of(1);
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 20_000)
+            .into_iter()
+            .collect();
+        assert!(
+            seen.contains(&COCHINEAL_BEETLE),
+            "no Cochineal Beetle ({COCHINEAL_BEETLE}) in the caverns: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&CYAN_BEETLE),
+            "the cyan one is the snow's alone: {seen:?}"
+        );
+
+        // 147 is `TileID.SnowBlock`, and 1500 of them is `SnowTileNormalThreshold`.
+        let snow = cavern_of(147);
+        assert_eq!(biome_at(&snow, 400, 255), Biome::Snow);
+        let snowy: std::collections::BTreeSet<u16> = spawns_at(&snow, false, 400, 255, 20_000)
+            .into_iter()
+            .collect();
+        assert!(
+            snowy.contains(&CYAN_BEETLE),
+            "no Cyan Beetle ({CYAN_BEETLE}) in a snowy cavern: {snowy:?}"
+        );
+        assert!(
+            !snowy.contains(&COCHINEAL_BEETLE),
+            "the cochineal one is everywhere the snow is not: {snowy:?}"
+        );
+    }
+
+    /// The underworld's lava-bait critters, one ordinary draw in eight (`NPC.cs:4881-4884` ->
+    /// `SpawnLavaBaitCritters`, `:5850-5877`). The day fork is the whole difference between a Hell
+    /// Butterfly and a Lavafly; the Magma Snail comes at either hour.
+    ///
+    /// Neutralised with `&& false` on the `LAVA_BAIT_ODDS` arm: "no Hell Butterfly (653) in the
+    /// underworld by day: {24, 39, 59, 60, 62}", none of the three drawn in twenty thousand ticks.
+    /// Neutralised again by dropping `lava_bait_pick`'s `day_time` fork so it always answers 654:
+    /// "no Hell Butterfly (653) in the underworld by day: {24, 39, 59, 60, 62, 654, 655}", the
+    /// other two now present. Neutralised a third time by putting the friendly arm's underworld
+    /// branch back above its graveyard fork: "no graveyard vermin in an underworld graveyard:
+    /// {59, 60, 62, 654, 655}".
+    #[test]
+    fn the_underworld_has_lava_bait_critters() {
+        use terrustia_proto::tile::Tile;
+        let mut world = World::empty(800, 600, "underworld");
+        world.surface = 100;
+        world.rock_layer = 200;
+        for y in (400i32..560).step_by(8) {
+            for x in 200..600 {
+                world.set_tile(x, y, Tile::block(57)); // ash
+            }
+        }
+        assert_eq!(depth_at(&world, 455), Depth::Underworld);
+
+        let by_day: std::collections::BTreeSet<u16> = spawns_at(&world, false, 400, 455, 20_000)
+            .into_iter()
+            .collect();
+        assert!(
+            by_day.contains(&653),
+            "no Hell Butterfly (653) in the underworld by day: {by_day:?}"
+        );
+        assert!(
+            by_day.contains(&655),
+            "no Magma Snail (655) by day: {by_day:?}"
+        );
+        assert!(
+            !by_day.contains(&654),
+            "the Lavafly is the night's: {by_day:?}"
+        );
+
+        world.day_time = false;
+        let by_night: std::collections::BTreeSet<u16> = spawns_at(&world, false, 400, 455, 20_000)
+            .into_iter()
+            .collect();
+        assert!(
+            by_night.contains(&654),
+            "no Lavafly (654) in the underworld at night: {by_night:?}"
+        );
+        assert!(
+            by_night.contains(&655),
+            "no Magma Snail (655) at night: {by_night:?}"
+        );
+        assert!(
+            !by_night.contains(&653),
+            "the Hell Butterfly is the day's: {by_night:?}"
+        );
+
+        // A graveyard's friendly arm sits ahead of the underworld's and `return`s
+        // (`NPC.cs:2101-2115`), so tombstones in hell answer with a Maggot or a Rat rather than a
+        // Lavafly. Only the friendly branch is governed by it: the ordinary chain's own lava-bait
+        // arm at `:4881` has no graveyard test, and neither does this server's, which is why this
+        // asserts what a graveyard *does* draw rather than what it does not.
+        let among_tombstones = friendly_draws_in(&world, &quiet(), true, 400, 455, 20_000);
+        assert!(
+            GRAVEYARD_VERMIN
+                .iter()
+                .any(|v| among_tombstones.contains(v)),
+            "no graveyard vermin in an underworld graveyard: {among_tombstones:?}"
+        );
+    }
+
+    /// A meteor-shower night brings the Enchanted Nightcrawler out, and an ordinary one does not
+    /// (`NPC.cs:2409-2413`). It is the head of the friendly grass chain, so it takes half of every
+    /// friendly attempt while the sky is right, ahead of the firefly and the owl.
+    ///
+    /// Neutralised with `&& false` on the whole arm: "no Enchanted Nightcrawler (484) under a
+    /// meteor shower: {355, 611, 689}". Neutralised again by dropping `events.starfall_night` from
+    /// the arm's guard: the second assertion fails instead, "an ordinary night should have none",
+    /// with 484 in the set.
+    #[test]
+    fn a_meteor_shower_night_brings_the_enchanted_nightcrawler() {
+        let (world, (px, py)) = night_world();
+        let shower = EventSpawns {
+            starfall_night: true,
+            ..quiet()
+        };
+        let seen = friendly_draws_with(&world, &shower, px, py, 20_000);
+        assert!(
+            seen.contains(&ENCHANTED_NIGHTCRAWLER),
+            "no Enchanted Nightcrawler ({ENCHANTED_NIGHTCRAWLER}) under a meteor shower: {seen:?}"
+        );
+
+        let ordinary = friendly_draws_with(&world, &quiet(), px, py, 20_000);
+        assert!(
+            !ordinary.contains(&ENCHANTED_NIGHTCRAWLER),
+            "an ordinary night should have none: {ordinary:?}"
+        );
+        assert!(
+            ordinary.contains(&FIREFLY),
+            "...and the firefly proves the ordinary night still drew something: {ordinary:?}"
+        );
+
+        // Daylight has none either, shower or no shower: `!Main.dayTime` is the arm's first clause.
+        let (day, (dx, dy)) = forest_surface();
+        let daylit = friendly_draws_with(&day, &shower, dx, dy, 20_000);
+        assert!(
+            !daylit.contains(&ENCHANTED_NIGHTCRAWLER),
+            "a nightcrawler in broad daylight: {daylit:?}"
+        );
+    }
+
+    /// The firefly arm is a two-way fork on the tile underfoot, not one type: hallowed grass makes
+    /// it a Lightning Bug (`NPC.cs:2416-2420`, `type2 = 358` when `tileType == 109`).
+    ///
+    /// Neutralised by turning off the `critter == FIREFLY && ground_block == Some(HALLOWED_GRASS)`
+    /// branch: "no Lightning Bug (358) over hallowed grass: {355, 611, 689}". Neutralised again by
+    /// dropping the `ground_block` half of the guard so every firefly becomes one: the last
+    /// assertion fails instead, "an ordinary forest has fireflies, not lightning bugs", with 358 in
+    /// the set.
+    #[test]
+    fn hallowed_grass_turns_the_firefly_into_a_lightning_bug() {
+        let mut world = flat_world_of(90, HALLOWED_GRASS);
+        world.day_time = false;
+        assert_eq!(biome_at(&world, 400, 88), Biome::Hallow);
+        let seen = friendly_draws_with(&world, &quiet(), 400, 88, 20_000);
+        assert!(
+            seen.contains(&LIGHTNING_BUG),
+            "no Lightning Bug ({LIGHTNING_BUG}) over hallowed grass: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&FIREFLY),
+            "the plain firefly should have been replaced: {seen:?}"
+        );
+
+        let (forest, (px, py)) = night_world();
+        let plain = friendly_draws_with(&forest, &quiet(), px, py, 20_000);
+        assert!(
+            plain.contains(&FIREFLY) && !plain.contains(&LIGHTNING_BUG),
+            "an ordinary forest has fireflies, not lightning bugs: {plain:?}"
+        );
+    }
+
+    /// A party puts a bunny in a hat, which is the third arm of the same chain the two calendars
+    /// use (`NPC.cs:1645`, `:2596`, `:4292`), and 540 came from nowhere else in the spawner.
+    ///
+    /// Neutralised by deleting the `BUNNY if at.party` arm from `holiday_costume`: no Party Bunny
+    /// in twenty thousand ticks and the first assertion fails. Neutralised again by moving that arm
+    /// to the head of the chain, above both calendars: the last assertion fails with
+    /// "the chain is out of order: 303 x6030, 337 x1964, 540 x18020".
+    ///
+    /// The ordering is checked by counting rather than by membership, because at two draws in three
+    /// each every arm still comes up whichever order they are in: a set of what appeared cannot
+    /// tell the orders apart, and asserting on one would have looked like a test and proved
+    /// nothing.
+    #[test]
+    fn a_party_puts_a_bunny_in_a_hat() {
+        let (world, (px, py)) = forest_surface();
+        let party = EventSpawns {
+            party: true,
+            ..quiet()
+        };
+        let seen = friendly_draws_with(&world, &party, px, py, 20_000);
+        assert!(
+            seen.contains(&540),
+            "no Party Bunny (540) with a party on: {seen:?}"
+        );
+        let quiet_day = friendly_draws_with(&world, &quiet(), px, py, 20_000);
+        assert!(
+            !quiet_day.contains(&540) && quiet_day.contains(&46),
+            "a party bunny with no party: {quiet_day:?}"
+        );
+
+        // The chain is Halloween, then Christmas, then the party (`NPC.cs:2588-2599`), and each arm
+        // takes two draws in three of what reaches it. So with all three on, a bunny is Halloween's
+        // two times in three, Christmas's two in nine, and the party's two in twenty-seven.
+        let at = Seasonal {
+            halloween: true,
+            xmas: true,
+            party: true,
+            ..Seasonal::default()
+        };
+        let mut counts = std::collections::BTreeMap::new();
+        for seed in 0..27_000u64 {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            *counts
+                .entry(holiday_costume(46, Depth::Surface, at, &mut rng))
+                .or_insert(0usize) += 1;
+        }
+        let (spooky, festive, partying) = (counts[&303], counts[&337], counts[&540]);
+        assert!(
+            spooky > festive && festive > partying && partying > 0,
+            "the chain is out of order: 303 x{spooky}, 337 x{festive}, 540 x{partying}"
+        );
+    }
+
+    /// The Red Squirrel and the Stink Bug, two ordinary members of the surface day's friendly draw
+    /// that this server's pool simply did not list (`NPC.cs:2611`'s `SelectRandom(299, 538)` and
+    /// `:2474`'s own arm).
+    ///
+    /// Neutralised by removing each id from `friendly_pool`'s surface day arm in turn: "no
+    /// SquirrelRed (538) on a friendly surface day: {46, 74, 297, 298, 299, 356, 669}" and "no
+    /// Stinkbug (669) on a friendly surface day: {46, 74, 297, 298, 299, 356, 538}".
+    #[test]
+    fn the_surface_day_draws_a_red_squirrel_and_a_stink_bug() {
+        let (world, (px, py)) = forest_surface();
+        let seen = friendly_draws_with(&world, &quiet(), px, py, 20_000);
+        for (npc_type, name) in [(538u16, "SquirrelRed"), (669, "Stinkbug")] {
+            assert!(
+                seen.contains(&npc_type),
+                "no {name} ({npc_type}) on a friendly surface day: {seen:?}"
+            );
+        }
+    }
+
+    /// One critter draw in four hundred is the gold one (`goldCritterChance`, `NPC.cs:6054`), which
+    /// is the whole of how the eight gold variants below are ever spawned in the game.
+    ///
+    /// Checked against the function rather than through `try_spawn`, because at one in four hundred
+    /// on top of a pool draw the gold types need more attempts than a spawn-tick harness can
+    /// afford; `the_gold_critters_reach_a_real_spawn` below is the end-to-end half of the claim.
+    ///
+    /// Neutralised by replacing `gold_variant`'s body with `npc_type` (keeping the `rng` draw, so
+    /// the only change is which type comes back): "Bird -> 442 came up 0 times in 400,000, not
+    /// about a thousand". Neutralised again by relaxing the squirrel arm's `depth ==
+    /// Depth::Surface` guard to `|| true`: "a gold squirrel underground, left: 994".
+    #[test]
+    fn one_critter_in_four_hundred_is_the_gold_one() {
+        let twins: [(u16, u16, &str); 9] = [
+            (74, 442, "Bird"),
+            (297, 442, "BirdBlue"),
+            (298, 442, "BirdRed"),
+            (46, 443, "Bunny"),
+            (356, 444, "Butterfly"),
+            (361, 445, "Frog"),
+            (300, 447, "Mouse"),
+            (357, 448, "Worm"),
+            (55, 592, "Goldfish"),
+        ];
+        for (base, gold, name) in twins {
+            let hits = (0..400_000u64)
+                .filter(|seed| {
+                    let mut rng = SmallRng::seed_from_u64(*seed);
+                    gold_variant(base, Depth::Cavern, &mut rng) == gold
+                })
+                .count();
+            // 400,000 draws at one in four hundred is a thousand expected; the band is wide enough
+            // that no seed sequence realistically misses it and narrow enough that a wrong constant
+            // (one in forty, or one in four thousand) cannot land inside it.
+            assert!(
+                (700..1400).contains(&hits),
+                "{name} -> {gold} came up {hits} times in 400,000, not about a thousand"
+            );
+        }
+
+        // The squirrel is the one arm with a depth gate on it: `& flag10` (`NPC.cs:2584`).
+        let surface = (0..400_000u64)
+            .filter(|seed| {
+                let mut rng = SmallRng::seed_from_u64(*seed);
+                gold_variant(299, Depth::Surface, &mut rng) == 539
+            })
+            .count();
+        assert!(
+            (700..1400).contains(&surface),
+            "SquirrelGold came up {surface} times in 400,000 on the surface"
+        );
+        let underground = (0..400_000u64)
+            .filter(|seed| {
+                let mut rng = SmallRng::seed_from_u64(*seed);
+                gold_variant(299, Depth::Cavern, &mut rng) == 539
+            })
+            .count();
+        assert_eq!(underground, 0, "a gold squirrel underground");
+
+        // Anything with no twin is handed straight back, whatever the seed.
+        for base in [355u16, OWL, 606, 148] {
+            for seed in 0..1_000u64 {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                assert_eq!(gold_variant(base, Depth::Surface, &mut rng), base);
+            }
+        }
+    }
+
+    /// ...and the same swap really is reached from a spawn, rather than only from its own function.
+    ///
+    /// The Gold Bunny is the cheapest of the nine to reach end to end: the surface day's friendly
+    /// pool is eight entries, so a bunny is one draw in eight and a gold one is one in three
+    /// thousand two hundred.
+    ///
+    /// Neutralised by replacing `gold_variant`'s body with `npc_type`: "no Gold Bunny (443) in half
+    /// a million ticks", the set holding the eight plain critters and nothing else.
+    #[test]
+    fn the_gold_critters_reach_a_real_spawn() {
+        let (world, (px, py)) = forest_surface();
+        let seen = friendly_draws_with(&world, &quiet(), px, py, 500_000);
+        assert!(
+            seen.contains(&443),
+            "no Gold Bunny (443) in half a million ticks: {seen:?}"
+        );
     }
 
     /// Halloween is a real-world date, and it dresses the night up: the Raven, the two costumed
@@ -7800,12 +8680,19 @@ mod tests {
         // A bound resident is the one other thing that can turn up, because that branch sits above
         // every biome arm in the game too (`NPC.cs:1658-1697`, `:2087-2098`, all of them above the
         // fallthrough the temple arm lives in), so it is subtracted rather than asserted away.
-        let bound: std::collections::BTreeSet<u16> = crate::game::rescues::RESCUES
+        //
+        // ...and so is the Snail, for the same reason and with more surprise value: its arm
+        // (`NPC.cs:3802-3805`) sits a hundred lines *above* the temple's in the same `else if`
+        // ladder, and its own gate excludes the snow, both evils, the hallow and the dungeon but
+        // not the jungle a temple reads as. So one temple draw in thirteen really is a snail in the
+        // game, and this is the temple's roster with that arm honoured rather than without it.
+        let from_higher_arms: std::collections::BTreeSet<u16> = crate::game::rescues::RESCUES
             .iter()
             .map(|r| r.bound)
-            .chain([BOUND_TOWN_SLIME_OLD])
+            .chain([BOUND_TOWN_SLIME_OLD, SNAIL])
             .collect();
-        let wild: std::collections::BTreeSet<u16> = seen.difference(&bound).copied().collect();
+        let wild: std::collections::BTreeSet<u16> =
+            seen.difference(&from_higher_arms).copied().collect();
         assert_eq!(
             wild,
             [LIHZAHRD, FLYING_SNAKE].into_iter().collect(),
@@ -10180,6 +11067,129 @@ mod tests {
             }
             let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
             println!("{name}: {each:.2} ns/test (sink {sink})");
+        }
+    }
+
+    /// What the six new critter arms cost the per-candidate loop.
+    ///
+    /// None of them reads a tile of its own. Every input they want was already resolved by the time
+    /// the match is reached: `depth`, `player_biome` and `ground_block` are all computed once per
+    /// candidate for the arms above them, and the rest is `i32` arithmetic on the world's own
+    /// dimensions. So the whole of the addition is a handful of comparisons and, where those pass,
+    /// a roll.
+    ///
+    /// The shape of the cost is worth naming, because it is not flat. A *surface* candidate pays
+    /// one enum comparison for all four of the below-the-surface arms and then nothing, since
+    /// `depth != Depth::Surface` shuts the first of them; a cavern candidate pays all four gates
+    /// and their rolls, plus the beetle arm's two comparisons and roll. The underworld's lava-bait
+    /// arm is one comparison anywhere else.
+    ///
+    /// Measured on this machine, release build, ten million iterations each, the numbers this test
+    /// prints:
+    ///
+    /// * the four below-the-surface gates on a surface candidate: 0.91 ns, which is the single
+    ///   `depth` comparison and nothing else.
+    /// * the same four in a forest cavern, rolls included: 6.60 ns.
+    /// * the beetle arm on top of that: 2.47 ns.
+    /// * `gold_variant` on a critter with no twin (a firefly): 0.77 ns, no roll made at all; on one
+    ///   with a twin (a bunny): 2.52 ns.
+    ///
+    /// So a cavern candidate pays about 9 ns it did not, and a surface one under 1 ns. The
+    /// reference is the plinth check this same loop already carries and already accepts as cheap,
+    /// measured at 20.67 ns in the same build and the same run: the whole addition is under half of
+    /// it in the caverns and a twentieth of it on the surface. Both sit inside the candidate loop,
+    /// which `try_spawn` enters only once the rate roll lets an attempt through, roughly one call
+    /// in 383 on an ordinary forest day
+    /// ([`tests::measure_the_statue_mimic_plinth_check`], which also records why wall-clock timing
+    /// of `try_spawn` as a whole cannot resolve a change this size on this machine).
+    #[test]
+    #[ignore]
+    fn measure_the_ordinary_critter_arms() {
+        const N: u32 = 10_000_000;
+        let world = flat_world(300);
+        let height = world.height();
+        let rock_layer = i32::from(world.rock_layer);
+
+        // The four below-the-surface gates, written exactly as `try_spawn` writes them, so what is
+        // timed is the gate and not a stand-in for it.
+        let four_gates = |depth: Depth, biome: Biome, y: i32, rng: &mut SmallRng| -> u32 {
+            let land = !matches!(
+                biome,
+                Biome::Snow
+                    | Biome::Crimson
+                    | Biome::Corruption
+                    | Biome::Jungle
+                    | Biome::Hallow
+                    | Biome::Dungeon
+            );
+            let snail_land = !matches!(
+                biome,
+                Biome::Snow | Biome::Crimson | Biome::Corruption | Biome::Hallow | Biome::Dungeon
+            );
+            u32::from(
+                (depth != Depth::Surface
+                    && y + 1 < height - CRITTER_FLOOR
+                    && land
+                    && rng.random_range(0..WORM_ODDS) == 0)
+                    || (depth != Depth::Surface
+                        && y + 1 < height - CRITTER_FLOOR
+                        && land
+                        && rng.random_range(0..MOUSE_ODDS) == 0)
+                    || (depth != Depth::Surface
+                        && y + 1 < (rock_layer + height) / 2
+                        && snail_land
+                        && rng.random_range(0..SNAIL_ODDS) == 0),
+            )
+        };
+
+        for (name, depth, y) in [
+            ("surface candidate", Depth::Surface, 80),
+            ("forest cavern candidate", Depth::Cavern, 300),
+        ] {
+            let mut rng = SmallRng::seed_from_u64(357);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += four_gates(
+                    std::hint::black_box(depth),
+                    std::hint::black_box(Biome::Forest),
+                    std::hint::black_box(y),
+                    &mut rng,
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("the four below-the-surface gates, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // The caverns' beetle arm, which is two comparisons and a roll and nothing else.
+        let mut rng = SmallRng::seed_from_u64(217);
+        let start = std::time::Instant::now();
+        let mut sink = 0u32;
+        for _ in 0..N {
+            sink += u32::from(
+                std::hint::black_box(Depth::Cavern) == Depth::Cavern
+                    && std::hint::black_box(Biome::Forest) != Biome::Dungeon
+                    && rng.random_range(0..CAVERN_BEETLE_ODDS) == 0,
+            );
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+        println!("the cavern beetle arm: {each:.2} ns/call (sink {sink})");
+
+        // ...and the gold swap, which is a `match` first and a roll only for the eight types that
+        // have a twin at all.
+        for (name, base) in [("firefly, no twin", FIREFLY), ("bunny, has a twin", 46u16)] {
+            let mut rng = SmallRng::seed_from_u64(442);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += u32::from(gold_variant(
+                    std::hint::black_box(base),
+                    std::hint::black_box(Depth::Surface),
+                    &mut rng,
+                ));
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("gold_variant, {name}: {each:.2} ns/call (sink {sink})");
         }
     }
 
