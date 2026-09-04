@@ -8322,9 +8322,10 @@ mod tests {
     /// Fails before the fix: none of the six had a producer anywhere in this server.
     ///
     /// Neutralised by making the `if wet` block in `friendly_chain` unreachable: every assertion
-    /// below fails. Neutralised again by dropping the `!x_range` clause from the surface sub-chain,
-    /// which puts water striders on top of the player and leaves the Pupfish assertion (its arm is
-    /// only reached when the sub-chain declines) failing instead.
+    /// below fails. Neutralised again by dropping the `!x_range` clause from the surface sub-chain:
+    /// the placement assertions fail, water striders landing in the safe column band on top of the
+    /// player. (The roster assertions do *not* fail for that one, which is why the placement ones
+    /// are here: the arm's own one-in-three decline reaches the Pupfish and the goldfish anyway.)
     #[test]
     fn inland_water_draws_what_it_is_standing_on() {
         // Column 700 in a 1200-wide world: past `beachDistance` at both ends, so `isBeach` is false
@@ -8357,6 +8358,22 @@ mod tests {
         }
         for (_, (_, y)) in jungle.iter().filter(|(ty, _)| *ty == TURTLE_JUNGLE) {
             assert_eq!(*y, SHORE_TOP, "a jungle turtle was not on the water");
+        }
+        // ...and `!xRange` (`NPC.cs:2237`): nothing that stands on the water is placed inside the
+        // safe column band, because it goes several rows away from the candidate and would arrive
+        // on the player's head. The striders scatter up to one column either side of theirs, so the
+        // bound they have to clear is one short of [`SAFE_RANGE_X`].
+        // The goldfish the arm falls through to is exempt: it stands where the candidate did, and
+        // vanilla's `!xRange` sits on the surface sub-chain alone.
+        for (npc_type, (x, _)) in jungle
+            .iter()
+            .filter(|(ty, _)| matches!(*ty, WATER_STRIDER | GOLD_WATER_STRIDER | TURTLE_JUNGLE))
+        {
+            assert!(
+                (x / 16.0 - 700.0).abs() >= (SAFE_RANGE_X - 1) as f32,
+                "{npc_type} was placed on top of the player, at column {}",
+                x / 16.0
+            );
         }
 
         ground_case(
