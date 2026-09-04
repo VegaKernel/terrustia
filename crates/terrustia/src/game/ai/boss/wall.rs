@@ -105,6 +105,7 @@ pub fn wall<T: TileView>(
             (-1.0, (npc.center().1 + bottom) / 2.0),
         ] {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: WALL_EYE,
                 position: (npc.position.0, at),
                 // The side rides in the velocity, as it does for Skeletron's hands: the eyes want
@@ -116,6 +117,7 @@ pub fn wall<T: TileView>(
         }
         for n in 0..WALL_HUNGRY_COUNT {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: WALL_HUNGRY,
                 position: (npc.position.0, (npc.center().1 + bottom) / 2.0),
                 velocity: (0.0, 0.0),
@@ -158,6 +160,7 @@ pub fn wall<T: TileView>(
         }
         if leeches < WALL_LEECH_CAP {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: WALL_LEECH,
                 position: (
                     npc.position.0 + npc.width() / 2.0,

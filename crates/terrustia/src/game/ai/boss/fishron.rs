@@ -289,6 +289,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                 let length = aim.0.hypot(aim.1).max(f32::MIN_POSITIVE);
                 let reach = (npc.width() + 20.0) / 2.0;
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: DETONATING_BUBBLE,
                     position: (
                         cx + aim.0 / length * reach,
@@ -331,6 +332,7 @@ pub fn fishron(npc: &mut Npc, world: &World<'_, impl TileView>) -> FishronOutcom
                 let perp = (-heading.1 * side, heading.0 * side);
                 let reach = (npc.width() + 20.0) / 2.0;
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: DETONATING_BUBBLE,
                     position: (cx + heading.0 * reach, cy + heading.1 * reach + 45.0),
                     velocity: (

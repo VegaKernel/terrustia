@@ -431,6 +431,7 @@ pub fn calm<T: TileView>(tiles: &T, target: Option<crate::game::npc_ai::Target>)
         target_velocity: (0.0, 0.0),
         hostile: None,
         census: &[],
+        own_escorts: 0,
         parent: None,
         parent_state: 0.0,
         parent_health: 1.0,
@@ -502,6 +503,14 @@ pub struct World<'a, T: TileView> {
     /// How many of each NPC type are alive, for the routines that wait on their escort, their
     /// armour or their swarm. Only the types something asks about are counted.
     pub census: &'a [(u16, usize)],
+    /// How many of *this* NPC's own escorts are still in the world, which
+    /// [`census`](Self::census) cannot answer because it counts a type across the whole world.
+    ///
+    /// Only a pal reads it, and only its own two guards are counted: the caller unpacks the
+    /// handles the pal recorded through [`Spawn::handle`](crate::game::npc_ai::Spawn::handle), which
+    /// is `AI_127_Pal_TryUnpackNPC` (`NPC.cs:43496-43508`). Every other style sees zero: the caller
+    /// does not go looking on their behalf.
+    pub own_escorts: usize,
     /// For a boss part, where its parent is and how big it is.
     pub parent: Option<boss::skeletron::Parent>,
     /// ...and which state that parent is in.
@@ -638,6 +647,9 @@ pub struct Effects {
     /// latched nebula headcrab riding a head applies `Obstructed` to its rider every tick it sits
     /// there (`NPC.cs:37508-37526`, `player22.AddBuff(163, 59)`).
     pub player_buff: Option<(u8, u16, i32)>,
+    /// An item to drop where this NPC stands, outside the kill path. A pal's pet is the only
+    /// source: it is handed over rather than looted (`NPC.cs:43481-43489`).
+    pub reward: Option<i16>,
 }
 
 /// Drive an NPC whose style is [`Parity::Ported`].
@@ -690,6 +702,82 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             }
         }
         3 => {
+            // A Goblin Archer with a negative `ai[3]` is one of a distressed pal's two guards, and
+            // for as long as it is one it does not hunt at all (`NPC.cs:57553-57592`, inside
+            // `AI_003_Fighters` and ahead of everything that walks):
+            //
+            // ```csharp
+            // if (type == 111)
+            // {
+            //     if (ai[3] < 0f) TargetClosest(faceTarget: false);
+            //     if (ai[3] < 0f && (justHit || Distance(Main.player[target].Center) < 200f))
+            //     { ai[3] = 0f; ai[0] = 0f; netUpdate = true; }
+            //     if (ai[3] < 0f)
+            //     {
+            //         directionY = -1; flag = false;
+            //         velocity.X *= 0.93f;
+            //         if ((double)velocity.X > -0.1 && (double)velocity.X < 0.1) velocity.X = 0f;
+            //         int num56 = (int)(0f - ai[3] - 1f);
+            //         int num57 = Math.Sign(Main.npc[num56].Center.X - base.Center.X);
+            //         if (num57 != direction) { velocity.X = 0f; direction = num57; netUpdate = true; }
+            //         if (ai[0] < 1000f) ai[0] = 1000f;
+            //         if (++ai[0] >= 1300f) { ai[0] = 1000f; netUpdate = true; }
+            //         return;
+            //     }
+            // }
+            // ```
+            //
+            // Being hit, or anybody coming within two hundred pixels, clears the back-link and the
+            // idle counter in one go and the archer falls straight through into the ordinary
+            // fighter on the same tick, exactly as it does there. Vanilla's trailing
+            // `if (ai[0] >= 1000f) ai[0] = 0f;` (`:57588-57591`) is unreachable: the only path out
+            // of the guard state already zeroes `ai[0]`.
+            //
+            // `flag` is `AI_003_Fighters`' own "may jump" latch and `directionY = -1` its "look
+            // up"; neither survives into this server's fighter, which is not a line-for-line port,
+            // so neither is transcribed. The stop, the facing and the idle band are.
+            if npc.npc_type == terrustia_proto::npc_params::PAL_ESCORT && npc.ai[3] < 0.0 {
+                let woken = world.was_hurt
+                    || world.target.filter(|t| t.alive).is_some_and(|t| {
+                        let (cx, cy) = npc.center();
+                        (t.center.0 - cx).hypot(t.center.1 - cy)
+                            < terrustia_proto::npc_params::PAL_ESCORT_WAKE
+                    });
+                if woken {
+                    npc.ai[3] = 0.0;
+                    npc.ai[0] = 0.0;
+                    npc.dirty = true;
+                } else {
+                    npc.direction_y = -1;
+                    npc.velocity.0 *= terrustia_proto::npc_params::PAL_DRAG;
+                    if npc.velocity.0.abs() < 0.1 {
+                        npc.velocity.0 = 0.0;
+                    }
+                    // The pal it is standing over, which the caller resolves from the same
+                    // back-link. `Math.Sign` answers zero when the two centres line up exactly and
+                    // `signum` would answer one, so it is spelled out rather than borrowed.
+                    if let Some(pal) = world.parent {
+                        let gap = pal.center().0 - npc.center().0;
+                        let facing = match gap.partial_cmp(&0.0) {
+                            Some(std::cmp::Ordering::Greater) => 1i8,
+                            Some(std::cmp::Ordering::Less) => -1i8,
+                            _ => 0i8,
+                        };
+                        if facing != npc.direction {
+                            npc.velocity.0 = 0.0;
+                            npc.direction = facing;
+                            npc.dirty = true;
+                        }
+                    }
+                    npc.ai[0] =
+                        npc.ai[0].max(terrustia_proto::npc_params::PAL_ESCORT_IDLE_FROM) + 1.0;
+                    if npc.ai[0] >= terrustia_proto::npc_params::PAL_ESCORT_IDLE_TO {
+                        npc.ai[0] = terrustia_proto::npc_params::PAL_ESCORT_IDLE_FROM;
+                        npc.dirty = true;
+                    }
+                    return effects;
+                }
+            }
             let action = fighter::update(npc, world.tiles, target, world.conditions);
             if action != fighter::Action::None {
                 effects.doors.push(action);
@@ -739,6 +827,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let cast = caster::update(npc, world, rng);
             if let Some((npc_type, position)) = cast.summon {
                 effects.spawn.push(crate::game::npc_ai::Spawn {
+                    handle: None,
                     npc_type,
                     position,
                     velocity: (0.0, 0.0),
@@ -813,6 +902,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             );
             for (position, velocity) in swarm.creepers {
                 effects.spawn.push(crate::game::npc_ai::Spawn {
+                    handle: None,
                     npc_type: terrustia_proto::npc_params::CREEPER,
                     position,
                     velocity,
@@ -826,6 +916,7 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
             let court = boss::king_slime::update(npc, world, rng);
             for (npc_type, position, velocity, ai) in court.shed {
                 effects.spawn.push(crate::game::npc_ai::Spawn {
+                    handle: None,
                     npc_type,
                     position,
                     velocity,
@@ -1044,8 +1135,14 @@ pub fn run<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng)
         122 => effects.expired = hardmode::fixtures::pirate_ghost(npc, world).spent,
         124 => hardmode::fixtures::slime_chest(npc),
         127 => {
-            let escorts = world.count(terrustia_proto::npc_params::PAL_ESCORT);
-            effects.expired = hardmode::fixtures::pal(npc, world, escorts).spent;
+            // Its *own* two, not every Goblin Archer in the world: this read
+            // `world.count(PAL_ESCORT)`, so any archer anywhere (a goblin army has dozens) held
+            // every pal in its waiting state, and killing an unrelated one released it. The count
+            // is now vanilla's own unpack of the pal's two handles, done by the caller.
+            let out = hardmode::fixtures::pal(npc, world, world.own_escorts);
+            effects.spawn.extend(out.spawn);
+            effects.reward = out.reward;
+            effects.expired = out.spent;
         }
         49 => effects.shots.extend(hardmode::hoverers::nimbus(npc, world)),
         56 => hardmode::drifters::dungeon_spirit(npc, world),
@@ -1401,6 +1498,7 @@ mod tests {
                 target_velocity: (0.0, 0.0),
                 hostile: None,
                 census: &[],
+                own_escorts: 0,
                 parent: None,
                 parent_state: 0.0,
                 parent_health: 1.0,
@@ -1460,6 +1558,7 @@ mod tests {
             target_velocity: (0.0, 0.0),
             hostile: None,
             census: &[],
+            own_escorts: 0,
             parent: None,
             parent_state: 0.0,
             parent_health: 1.0,
@@ -1530,6 +1629,109 @@ mod tests {
 
         // ...and nothing else in the style does, however badly hurt: a Zombie stays a Zombie.
         assert_eq!(split(3, 100, 1), None, "a Zombie turned into something");
+    }
+
+    /// A Goblin Archer raised as a pal's guard stands over it and does not hunt, until it is hit or
+    /// somebody walks up to it (`NPC.cs:57553-57592`).
+    ///
+    /// Fails before the fix: nothing in this server read the pal's `ai[3]` back-link, so both
+    /// guards charged the player from the moment they were raised and the pal was left standing on
+    /// its own, which is not the encounter.
+    ///
+    /// Neutralised by deleting the whole `npc.npc_type == PAL_ESCORT && npc.ai[3] < 0.0` block from
+    /// the `3 =>` arm of [`run`]: the "stands its ground" and "faces its pal" assertions fail, the
+    /// archer walking off toward the player. Neutralised again by dropping only the `world.was_hurt`
+    /// term from `woken`: the "being hit wakes it" assertion fails. And a third time by dropping the
+    /// `PAL_ESCORT_WAKE` distance term: the "walking up to it wakes it" assertion fails.
+    #[test]
+    fn a_pals_goblin_archer_guards_it_until_hit_or_approached() {
+        let mut tiles = Flat::default();
+        for x in 0..400 {
+            for y in 700..710 {
+                tiles.0.insert((x, y), Tile::block(1));
+            }
+        }
+        let escort = terrustia_proto::npc_params::PAL_ESCORT;
+        // The pal it is guarding, three tiles to its left, as `parents` would report it.
+        let pal_at = boss::skeletron::Parent {
+            position: (2900.0, 11_100.0),
+            size: (30.0, 30.0),
+            rotation: 0.0,
+            scale: 1.0,
+            velocity: (0.0, 0.0),
+            direction: 1,
+            sprite_direction: 1,
+            time_left: 750,
+            state: 0.0,
+            phase: 0.0,
+            health: 1.0,
+        };
+        let guard = || {
+            let mut npc = Npc::new(escort, (3000.0, 11_100.0), 1).expect("goblin archer");
+            // `ai[3] = -(whoAmI + 1)` for a pal in slot 4.
+            npc.ai[3] = -5.0;
+            npc.direction = 1;
+            npc.velocity = (2.0, 0.0);
+            npc
+        };
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+
+        // The player is at 3200, two hundred pixels being what wakes it: `fighter_world` stands
+        // them just inside that, so push them well out for the waiting half.
+        let mut asleep = fighter_world(&tiles);
+        asleep.target = Some(Target {
+            slot: 0,
+            center: (9000.0, 11_100.0),
+            velocity: (0.0, 0.0),
+            alive: true,
+        });
+        asleep.parent = Some(pal_at);
+
+        let mut g = guard();
+        run(&mut g, &asleep, &mut rng);
+        assert_eq!(g.ai[3], -5.0, "nothing has woken it, it is still a guard");
+        assert!(
+            g.velocity.0 < 2.0,
+            "it stands its ground rather than walking: {}",
+            g.velocity.0
+        );
+        assert_eq!(
+            g.direction, -1,
+            "and it faces its pal, which is to its left"
+        );
+        assert!(
+            (1000.0..1300.0).contains(&g.ai[0]),
+            "its idle counter runs in its own band: {}",
+            g.ai[0]
+        );
+
+        // Being hit wakes it, and it is an ordinary Goblin Archer from that tick on.
+        let mut hurt = asleep;
+        hurt.was_hurt = true;
+        let mut h = guard();
+        run(&mut h, &hurt, &mut rng);
+        assert_eq!(h.ai[3], 0.0, "being hit wakes it");
+        assert_eq!(h.ai[0], 0.0, "and clears the idle counter with it");
+
+        // ...and so does simply walking up to it.
+        let near = fighter_world(&tiles);
+        let mut n = guard();
+        assert!(
+            (near.target.expect("a target").center.0 - n.center().0).abs()
+                < terrustia_proto::npc_params::PAL_ESCORT_WAKE,
+            "the player has to be inside the wake distance for this to test it"
+        );
+        run(&mut n, &near, &mut rng);
+        assert_eq!(n.ai[3], 0.0, "walking up to it wakes it");
+
+        // An archer that was never a guard is untouched by any of this.
+        let mut plain = Npc::new(escort, (3000.0, 11_100.0), 1).expect("goblin archer");
+        run(&mut plain, &near, &mut rng);
+        assert_eq!(plain.ai[3], 0.0);
+        assert!(
+            plain.velocity.0 != 0.0,
+            "an ordinary Goblin Archer walks at you"
+        );
     }
 
     #[test]

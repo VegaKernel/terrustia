@@ -129,6 +129,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) 
             let (cx, cy) = npc.center();
             for side in 0..2 {
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: MOON_LORD_HAND,
                     position: (
                         cx + side as f32 * MOON_LORD_HAND_OUT * 2.0 - MOON_LORD_HAND_OUT,
@@ -143,6 +144,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, parts_open: usize) 
                 });
             }
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: MOON_LORD_HEAD,
                 position: (cx, cy - MOON_LORD_HEAD_UP),
                 velocity: (0.0, 0.0),
@@ -329,6 +331,7 @@ pub fn eye_socket(
         if npc.local_ai[1] == 0.0 {
             npc.local_ai[1] = 1.0;
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: MOON_LORD_FREE_EYE,
                 position: npc.center(),
                 velocity: (0.0, 0.0),
@@ -503,6 +506,7 @@ fn run_head_attack(
             // there is nothing to filter on, so every mark produces its leech.
             if LEECH_MARKS.contains(&within) {
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: MOON_LORD_LEECH,
                     position: target,
                     velocity: (0.0, 0.0),

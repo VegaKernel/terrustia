@@ -326,6 +326,7 @@ pub fn mothron(
                 npc.ai[3] += 1.0;
                 if npc.ai[3] == wait {
                     out.spawn.push(Spawn {
+                        handle: None,
                         npc_type: MOTHRON_EGG,
                         position: (npc.ai[1], npc.ai[2]),
                         velocity: (0.0, 0.0),

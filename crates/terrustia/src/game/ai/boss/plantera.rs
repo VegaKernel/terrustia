@@ -76,6 +76,7 @@ pub fn plantera(
         let at = npc.center();
         for _ in 0..PLANTERA_HOOKS {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: PLANTERA_HOOK,
                 position: at,
                 velocity: (0.0, 0.0),
@@ -256,6 +257,7 @@ pub fn plantera(
     });
 
     let tentacle_at = |hook: Option<usize>| Spawn {
+        handle: None,
         npc_type: PLANTERA_TENTACLE,
         position: (cx, cy),
         velocity: (0.0, 0.0),
@@ -313,6 +315,7 @@ pub fn plantera(
         let lean = if dy > 0.0 { 0.0 } else { (dx * 0.2).abs() };
         dy -= lean;
         out.spawn.push(Spawn {
+            handle: None,
             npc_type: PLANTERA_SPORE,
             position: (cx, cy),
             velocity: unit((dx, dy), PLANTERA_SPORE_SPEED),

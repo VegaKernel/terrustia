@@ -158,6 +158,7 @@ pub fn dutchman(
         npc.local_ai[0] = 1.0;
         for (i, at) in cannon_stations(npc).into_iter().enumerate() {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: DUTCHMAN_GUN,
                 position: at,
                 velocity: (0.0, 0.0),
@@ -189,6 +190,7 @@ pub fn dutchman(
         let across = (rng.random::<f32>() - 0.5) * (npc.width() - 70.0);
         let above = (rng.random::<f32>() - 0.5) * 20.0 - npc.height() / 2.0 - 20.0;
         out.spawn.push(Spawn {
+            handle: None,
             npc_type: DUTCHMAN_DROPS[rng.random_range(0..DUTCHMAN_DROPS.len())],
             position: (cx + across, cy + above),
             velocity: (

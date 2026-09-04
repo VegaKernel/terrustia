@@ -354,6 +354,7 @@ fn scream(
         let at = (cx + angle.cos() * 2.0 * reach, cy + angle.sin() * reach);
         if (at.0 - player.0).hypot(at.1 - player.1) > 100.0 {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: BETSY_WYVERN,
                 position: at,
                 velocity: (0.0, 0.0),

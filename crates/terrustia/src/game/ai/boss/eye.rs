@@ -125,6 +125,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                 throw.1 / length * EYE_SPLIT_SERVANT_SPEED,
             );
             summoned.push(Spawn {
+                handle: None,
                 npc_type: SERVANT_OF_CTHULHU,
                 position: (
                     centre.0 + throw.0 * EYE_SERVANT_THROW,
@@ -308,6 +309,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
                     let k = speed / reach.max(f32::MIN_POSITIVE);
                     let throw = (dx * k, dy * k);
                     summoned.push(Spawn {
+                        handle: None,
                         npc_type: SERVANT_OF_CTHULHU,
                         // Thrown out ahead of itself rather than dropped.
                         position: (

@@ -316,6 +316,7 @@ pub fn cultist(
                     let (s, c) = angle.sin_cos();
                     let v = (aim.0 * c - aim.1 * s, aim.0 * s + aim.1 * c);
                     out.spawn.push(Spawn {
+                        handle: None,
                         npc_type: CULTIST_ANCIENT_LIGHT,
                         position: (cx, cy),
                         velocity: (
@@ -364,6 +365,7 @@ pub fn cultist(
                     let angle = (clones + slot + 1) as f32 * std::f32::consts::TAU / slots as f32
                         - std::f32::consts::FRAC_PI_2;
                     out.spawn.push(Spawn {
+                        handle: None,
                         npc_type: CULTIST_CLONE,
                         position: (
                             cx + angle.cos() * CULTIST_CLONE_RING,

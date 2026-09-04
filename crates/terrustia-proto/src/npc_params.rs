@@ -2727,11 +2727,35 @@ pub const CASTER_ARRIVAL: f32 = 120.0;
 pub const CASTER_FADE_IN: f32 = 60.0;
 
 /// Style 127: the two "pals" wait for their escort to die, then two seconds more before paying out.
+///
+/// `AI_127_Pal` (`NPC.cs:43379-43478`) is the whole encounter: on its first tick it looks for two
+/// bits of floor either side of itself, dies outright if there are none, and otherwise raises the
+/// two Goblin Archers that stand over it. Only when both are gone will it let anybody near, and
+/// two seconds after that it hands over the pet and goes.
+pub const PAL_CATTIVA: u16 = 695;
+pub const PAL_FOXSPARKS: u16 = 696;
 pub const PAL_ESCORT: u16 = 111;
 pub const PAL_ESCORTS: usize = 2;
 pub const PAL_APPROACH: f32 = 100.0;
 pub const PAL_PAYOUT_TICKS: f32 = 120.0;
 pub const PAL_DRAG: f32 = 0.93;
+/// What it hands over: `AI_127_Pal_GiveRewerd` (`NPC.cs:43481-43489`), one Palworld Minion item
+/// matched to which of the pair it was (`ItemID.cs:12872`, `:12874`).
+pub const PAL_REWARD_CATTIVA: i16 = 5663;
+pub const PAL_REWARD_FOXSPARKS: i16 = 5664;
+/// Where the two escorts stand: `CheckFloor2` walks the columns six tiles either side of the pal
+/// (`CultistRitual.cs:135-140`, `i` of -3 and 3 with `num2 = point.X + i * 2`) and the archer is
+/// dropped three tiles above the floor it found (`NPC.cs:43400`, `spawnPoints[i].Y * 16 - 48`).
+pub const PAL_ESCORT_COLUMN: i32 = 6;
+pub const PAL_ESCORT_LIFT: f32 = 48.0;
+
+/// The other half of the encounter, in `AI_003_Fighters` rather than here: a Goblin Archer with a
+/// negative `ai[3]` is one of a pal's two guards and stands over it instead of hunting
+/// (`NPC.cs:57553-57592`). It wakes on being hit or on anybody coming within this many pixels, and
+/// while it waits `ai[0]` cycles through an idle band.
+pub const PAL_ESCORT_WAKE: f32 = 200.0;
+pub const PAL_ESCORT_IDLE_FROM: f32 = 1000.0;
+pub const PAL_ESCORT_IDLE_TO: f32 = 1300.0;
 
 // --- The Martian invasion and its scout -------------------------------------------------------
 

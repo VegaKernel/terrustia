@@ -129,6 +129,7 @@ pub fn head<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallRng
         if !guardian {
             for side in [-1.0, 1.0] {
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: SKELETRON_HAND,
                     position: (
                         npc.position.0 + npc.width() / 2.0,

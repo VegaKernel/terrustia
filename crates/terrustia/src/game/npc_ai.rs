@@ -38,6 +38,20 @@ pub struct Spawn {
     /// fractional band in `ai[0]` (`NPC.cs:26197`), a Pumpking blade's phase in `ai[3]`
     /// (`NPC.cs:33383`).
     pub ai: [Option<f32>; 4],
+    /// Where the spawner wants a handle to this spawn written back, as (its own slot, `ai` index).
+    ///
+    /// `NewNPC` returns the slot it filled, and a routine that keeps hold of what it raised needs
+    /// that number. A pal writes `ai[1 + i] = num2 + 1` for each of the two guards it raises
+    /// (`NPC.cs:43401`) and unpacks them later to ask whether either is still alive
+    /// (`AI_127_Pal_TryUnpackNPC`, `NPC.cs:43496-43508`) - which is *not* the same question as
+    /// "is either still guarding me", because a guard that has been woken has cleared its own
+    /// back-link and still holds the pal.
+    ///
+    /// [`Spawn::parent`] reports the link the other way round and cannot stand in for this: it also
+    /// makes the spawn a *part* of its parent, which for a Goblin Archer with a life of its own it
+    /// is not. So the caller, which knows the slot, writes it here instead. The value stored is
+    /// vanilla's own `slot + 1`, so an untouched zero still means "nobody".
+    pub handle: Option<(u8, usize)>,
 }
 
 /// Everything about the world a tick of AI reads that is not the NPC or the tiles.
@@ -79,6 +93,9 @@ pub struct Surroundings<'a> {
     /// How many of each NPC type are alive, for the routines that wait on their escort or their
     /// armour.
     pub census: &'a [(u16, usize)],
+    /// How many of this NPC's own escorts are alive. Only a pal asks; see
+    /// [`super::ai::World::own_escorts`].
+    pub own_escorts: usize,
     /// For a boss part, where its parent is and how big it is.
     pub parent: Option<super::ai::boss::skeletron::Parent>,
     /// ...and which state that parent is in.
@@ -196,6 +213,9 @@ pub struct AiOutput {
     /// A buff the NPC just updated wants put straight onto a player, as (player slot, buff id,
     /// ticks) — see [`super::ai::Effects::player_buff`].
     pub player_buff: Option<(u8, u16, i32)>,
+    /// An item to put into the world where this NPC stands, outside the kill path — see
+    /// [`super::ai::Effects::reward`].
+    pub reward: Option<i16>,
 }
 
 /// Move a worm segment to trail the one in front of it.
@@ -289,6 +309,7 @@ pub fn update_with(
             mage: around.mage,
             target_velocity: target.map_or((0.0, 0.0), |t| t.velocity),
             census: around.census,
+            own_escorts: around.own_escorts,
             parent: around.parent,
             parent_state: around.parent_state,
             parent_health: around.parent_health,
@@ -326,6 +347,7 @@ pub fn update_with(
         out.carry = effects.carry;
         out.roared = effects.roared;
         out.player_buff = effects.player_buff;
+        out.reward = effects.reward;
         npc.was_hurt = false;
 
         step_physics(npc, tiles);
@@ -962,6 +984,7 @@ fn brain_of_cthulhu(npc: &mut Npc, target: Option<Target>, rng: &mut SmallRng, o
         if npc.ai[0] % 240.0 == 0.0 {
             for _ in 0..3 {
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type: CREEPER,
                     position: npc.center(),
                     velocity: (0.0, 0.0),

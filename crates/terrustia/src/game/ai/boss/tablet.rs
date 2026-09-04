@@ -45,6 +45,7 @@ pub fn tablet(npc: &mut Npc, world: &World<'_, impl TileView>, attendants: usize
             let devote = i == 1 || i == 2;
             let across = (i as f32 - 1.5) * 90.0;
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: if devote {
                     CULTIST_DEVOTE
                 } else {

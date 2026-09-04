@@ -258,6 +258,7 @@ fn mimic_attack(npc: &mut Npc, reach: f32, rng: &mut SmallRng, out: &mut Bite) {
             }
             if npc.ai[2] == MIMIC_RELEASE {
                 out.spawn = Some(Spawn {
+                    handle: None,
                     npc_type: WATER_SPHERE,
                     position: npc.center(),
                     velocity: (0.0, 0.0),

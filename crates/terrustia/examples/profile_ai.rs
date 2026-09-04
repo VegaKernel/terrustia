@@ -105,6 +105,7 @@ fn main() -> ExitCode {
                     body_tentacles: 0,
                     kin_moving: false,
                     census: &[],
+                    own_escorts: 0,
                     parent: None,
                     parent_state: 0.0,
                     parent_health: 1.0,

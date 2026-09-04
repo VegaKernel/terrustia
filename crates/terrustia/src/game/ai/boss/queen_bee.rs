@@ -384,6 +384,7 @@ pub fn update<T: TileView>(npc: &mut Npc, world: &World<'_, T>, rng: &mut SmallR
             let (dx, dy) = (target.center.0 - cx, target.center.1 - cy);
             let k = QUEEN_BEE_SPEED / (dx * dx + dy * dy).sqrt().max(0.01);
             hive.bees.push(Spawn {
+                handle: None,
                 npc_type: if rng.random_ratio(1, 2) {
                     BEE
                 } else {
