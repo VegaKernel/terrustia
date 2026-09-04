@@ -2461,6 +2461,61 @@ const TORTURED_SOUL_ODDS: u32 = 20;
 const GOBLIN_SCOUT_ODDS: u32 = 15;
 const GOBLIN_SCOUT_ORB_ODDS: u32 = 7;
 
+/// The distressed Palworld pets (`NPCID.PalworldCattivaDistressed`, `NPCID.PalworldFoxsparksDistressed`).
+///
+/// A crossover encounter rather than a spawn: what arrives is a caged pet and the two Goblin
+/// Archers guarding it. See `ai::hardmode::fixtures::pal` for the rest of it.
+pub use terrustia_proto::npc_params::{PAL_CATTIVA, PAL_FOXSPARKS};
+
+/// `Main.rand.Next(160) == 0` on the pal's arm (`NPC.cs:4374`).
+const PAL_ODDS: u32 = 160;
+/// `RollLuck(100) < 40` (`NPC.cs:4378`), which the pair are split on when the player is carrying
+/// both pets already or neither. A plain `Main.rand.Next(100)` at luck zero (`Luck.cs:5-16`), the
+/// same narrowing as every other `RollLuck` in this file.
+const PAL_FOXSPARKS_CHANCE: u32 = 40;
+
+/// Which of the two shows up: whichever one you are not already carrying (`NPC.cs:4375-4386`).
+///
+/// ```csharp
+/// bool flag18 = Main.player[target].HasItem(5663);
+/// bool flag19 = Main.player[target].HasItem(5664);
+/// bool flag20 = RollLuck(100) < 40;
+/// if (!flag19 & flag18) flag20 = true;
+/// if (!flag18 & flag19) flag20 = false;
+/// short type5 = (short)(flag20 ? 696 : 695);
+/// ```
+///
+/// Carrying one of the pair and not the other pins the answer to the other one; carrying both or
+/// neither leaves it to the roll. This is the one arm in this whole file that reads a player's
+/// inventory, which the module's own doc comment says the spawner does not do: it does now, for
+/// this one arm, because `HasItem` is answerable from the equipment sync the server already keeps
+/// and leaving it out would have made the pair a coin toss forever. `Player.HasItem`
+/// (`Player.cs:56554-56564`) scans slots 0 to 57, the main inventory with its coins and ammo, and
+/// nothing worn, banked or in a piggy bank; the slot bound is transcribed rather than flattened to
+/// "anywhere on the player".
+fn pal_type(player: &Player, rng: &mut SmallRng) -> u16 {
+    let carrying = |item: i32| {
+        player
+            .inventory
+            .values()
+            .any(|slot| slot.slot < 58 && slot.item.id == item && slot.item.stack > 0)
+    };
+    let has_cattiva = carrying(i32::from(terrustia_proto::npc_params::PAL_REWARD_CATTIVA));
+    let has_foxsparks = carrying(i32::from(terrustia_proto::npc_params::PAL_REWARD_FOXSPARKS));
+    let mut foxsparks = rng.random_range(0..100) < PAL_FOXSPARKS_CHANCE;
+    if !has_foxsparks && has_cattiva {
+        foxsparks = true;
+    }
+    if !has_cattiva && has_foxsparks {
+        foxsparks = false;
+    }
+    if foxsparks {
+        PAL_FOXSPARKS
+    } else {
+        PAL_CATTIVA
+    }
+}
+
 /// Plain Sand (`TileID.Sand`), the one ground the Goblin Scout is never found on: vanilla's three
 /// `tileType == 53` arms (`NPC.cs:4390`, `:4474`, `:4478`) answer every dry sand tile before the
 /// chain reaches him.
@@ -6411,6 +6466,50 @@ pub fn try_spawn(
                             biome,
                             Biome::Corruption | Biome::Crimson | Biome::Jungle | Biome::Dungeon
                         );
+                    // Above the scout in that same chain, and the one thing in it that is neither
+                    // critter nor enemy: a distressed Palworld pet, cornered by two goblins
+                    // (`NPC.cs:4374-4389`).
+                    //
+                    // ```csharp
+                    // else if (!waterTile && num45 > Main.maxTilesX / 8
+                    //     && (tileType == 2 || tileType == 147 || tileType == 60 || tileType == 161)
+                    //     && Main.rand.Next(160) == 0 && !AnyNPCs(696) && !AnyNPCs(695))
+                    // {
+                    //     bool flag18 = Main.player[target].HasItem(5663);
+                    //     bool flag19 = Main.player[target].HasItem(5664);
+                    //     bool flag20 = RollLuck(100) < 40;
+                    //     if (!flag19 & flag18) flag20 = true;
+                    //     if (!flag18 & flag19) flag20 = false;
+                    //     short type5 = (short)(flag20 ? 696 : 695);
+                    //     SpawnNPC(spawnTileX * 16 + 8, spawnTileY * 16, type5);
+                    // }
+                    // ```
+                    //
+                    // The distance gate is `num45` again, the same read the scout below uses, and a
+                    // looser one: an eighth of the world out from the spawn point rather than a
+                    // third. `tileType == 60` is jungle grass, which the `surface_day` biome
+                    // exclusion does not contradict: it excludes the jungle *zone*, and vanilla
+                    // reaches this chain only outside it too (`NPC.cs:3929-3948` answers a jungle
+                    // first), while a stray jungle-grass block on an ordinary surface reaches both.
+                    //
+                    // `!wet` is the `waterTile` this attempt already read rather than a second one;
+                    // under `surface_day` the two are the same read, since `wet` differs from
+                    // `water_tile` only by a sky test and the sky is not the surface.
+                    if surface_day
+                        && !wet
+                        && (x - i32::from(world.spawn_x)).abs() > world.width() / 8
+                        && matches!(
+                            ground_block,
+                            Some(GRASS | SNOW_BLOCK | JUNGLE_GRASS | ICE_BLOCK)
+                        )
+                        && rng.random_range(0..PAL_ODDS) == 0
+                        && !npcs.iter().any(|(_, n)| {
+                            matches!(n.npc_type, PAL_CATTIVA | PAL_FOXSPARKS) && n.is_alive()
+                        })
+                    {
+                        out.push((pal_type(player, rng), (x as f32 * 16.0, y as f32 * 16.0)));
+                        break;
+                    }
                     if surface_day
                         && ground_block != Some(SAND)
                         && !water_tile(world, x, y)
@@ -7222,6 +7321,12 @@ mod tests {
         // branches still make good.
         set.insert(GOBLIN_SCOUT);
         set.insert(STATUE_MIMIC);
+        // ...and the pair the same surface day offers an eighth of the map out, one attempt in a
+        // hundred and sixty, on grass, snow, jungle grass or ice (`NPC.cs:4374-4389`). Both are
+        // asserted reachable through `try_spawn` itself by this module's own tests, so listing them
+        // here cannot drift into a claim that their arm still makes good.
+        set.insert(PAL_CATTIVA);
+        set.insert(PAL_FOXSPARKS);
         // ...and the four the same surface day offers in weather rather than in a pool: two in the
         // rain and two on a windy day (`NPC.cs:4486-4501`). All four are asserted reachable through
         // `try_spawn` itself by this module's own tests, so listing them here cannot drift into a
@@ -7871,7 +7976,59 @@ mod tests {
         py: i32,
         ticks: u32,
     ) -> Vec<(u16, (f32, f32))> {
-        let npcs = NpcStore::new();
+        spawns_full(
+            world,
+            &NpcStore::new(),
+            events,
+            graveyard,
+            None,
+            px,
+            py,
+            ticks,
+        )
+    }
+
+    /// The same with an NPC table that already has something in it, for the arms gated on a census
+    /// of themselves.
+    fn spawns_with_npcs(
+        world: &World,
+        npcs: &NpcStore,
+        events: &EventSpawns<'_>,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<(u16, (f32, f32))> {
+        spawns_full(world, npcs, events, false, None, px, py, ticks)
+    }
+
+    /// ...and the same with an item in the player's inventory, for the one arm that reads it.
+    fn spawns_carrying(world: &World, item: i16, px: i32, py: i32, ticks: u32) -> Vec<u16> {
+        spawns_full(
+            world,
+            &NpcStore::new(),
+            &quiet(),
+            false,
+            Some(item),
+            px,
+            py,
+            ticks,
+        )
+        .into_iter()
+        .map(|(npc_type, _)| npc_type)
+        .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawns_full(
+        world: &World,
+        npcs: &NpcStore,
+        events: &EventSpawns<'_>,
+        graveyard: bool,
+        carrying: Option<i16>,
+        px: i32,
+        py: i32,
+        ticks: u32,
+    ) -> Vec<(u16, (f32, f32))> {
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
         drop(out_rx);
         let mut player = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx);
@@ -7879,6 +8036,19 @@ mod tests {
         player.position = (px as f32 * 16.0, py as f32 * 16.0);
         if graveyard {
             player.zone = Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 1 << 6, 0, 0]));
+        }
+        if let Some(item) = carrying {
+            // Slot 3, an ordinary inventory slot: `Player.HasItem` scans 0 to 57.
+            player.inventory.insert(
+                3,
+                terrustia_proto::inventory::SyncEquipment {
+                    player: 0,
+                    slot: 3,
+                    item: terrustia_proto::item::ItemStack::new(i32::from(item), 1, 0),
+                    favorited: false,
+                    blocked: false,
+                },
+            );
         }
         let players = vec![Some(player)];
 
@@ -7888,7 +8058,7 @@ mod tests {
         for _ in 0..ticks {
             seen.extend(try_spawn(
                 world,
-                &npcs,
+                npcs,
                 &players,
                 events,
                 &JourneyPowers::default(),
@@ -12645,6 +12815,101 @@ mod tests {
         );
     }
 
+    /// What the Palworld arm costs the per-candidate loop.
+    ///
+    /// The part paid on every surface-day attempt is four scalar tests: a bool already computed
+    /// (`surface_day`), another already computed (`wet`), one subtraction and compare for the
+    /// distance gate, and a four-way `matches!` on a tile id that was read once further up. There
+    /// is nothing to measure there and the two calls below are what the arm actually adds.
+    ///
+    /// Both sit behind `Main.rand.Next(160) == 0`, which is vanilla's own ordering
+    /// (`NPC.cs:4374-4375`: the roll comes before `AnyNPCs` and before `HasItem`), so an attempt
+    /// pays them once in a hundred and sixty and only after every clause above them has passed.
+    ///
+    /// Measured in release, ten million calls each, against the plinth check the loop already
+    /// carries and accepts as cheap:
+    ///
+    /// * `pal_type`, empty inventory: 6.99 ns
+    /// * `pal_type`, a full 58-slot inventory holding neither pet: 89.06 ns
+    /// * the `AnyNPCs` pair over a full 200-slot NPC table: 82.48 ns
+    /// * `good_place_for_a_statue_mimic`, the reference, in the same run: 20.95 ns
+    ///
+    /// So the worst case is about 172 ns, or eight plinth checks, on one attempt in a hundred and
+    /// sixty, on a path that has already walked a ground column to reach it: 1.1 ns amortised over
+    /// every attempt that gets as far as this line. Both worst cases are pessimistic on purpose. A
+    /// real player's inventory is not fifty-eight full slots of things that are not the pet, and
+    /// the `AnyNPCs` pair returns at the first pet it finds, which is the case where the arm
+    /// declines and the whole cost stops being paid.
+    #[test]
+    #[ignore]
+    fn measure_the_palworld_arm() {
+        const N: u32 = 10_000_000;
+        let bench = |name: &str, mut body: Box<dyn FnMut() -> u32 + '_>| {
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink = sink.wrapping_add(body());
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("{name}: {each:.2} ns/call (sink {sink})");
+        };
+
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        drop(out_rx);
+        let bare = Player::new(0, "127.0.0.1:1".parse().unwrap(), out_tx.clone());
+        // The worst case `Player.HasItem` can be given: every one of the fifty-eight slots it scans
+        // full, and neither pet among them, so both scans run to the end.
+        let mut loaded = Player::new(1, "127.0.0.1:2".parse().unwrap(), out_tx);
+        for slot in 0..58u16 {
+            loaded.inventory.insert(
+                slot,
+                terrustia_proto::inventory::SyncEquipment {
+                    player: 1,
+                    slot,
+                    item: terrustia_proto::item::ItemStack::new(i32::from(slot) + 1, 1, 0),
+                    favorited: false,
+                    blocked: false,
+                },
+            );
+        }
+
+        for (name, player) in [("empty", &bare), ("full inventory", &loaded)] {
+            let mut rng = SmallRng::seed_from_u64(1601);
+            bench(
+                &format!("pal_type, {name}"),
+                Box::new(|| u32::from(pal_type(std::hint::black_box(player), &mut rng))),
+            );
+        }
+
+        // `!AnyNPCs(696) && !AnyNPCs(695)`, over a table with no pet in it and every slot taken,
+        // which is the only shape where both scans run to the end.
+        let mut npcs = NpcStore::new();
+        while npcs.spawn(1, (1000.0, 1000.0)).is_some() {}
+        bench(
+            "AnyNPCs pair, full table",
+            Box::new(|| {
+                u32::from(!std::hint::black_box(&npcs).iter().any(|(_, n)| {
+                    matches!(n.npc_type, PAL_CATTIVA | PAL_FOXSPARKS) && n.is_alive()
+                }))
+            }),
+        );
+
+        // The reference, in the same run and the same build.
+        let plinth = flat_world(90);
+        let mut x = 200;
+        bench(
+            "good_place_for_a_statue_mimic",
+            Box::new(|| {
+                x = 200 + (x + 1) % 128;
+                u32::from(good_place_for_a_statue_mimic(
+                    std::hint::black_box(&plinth),
+                    x,
+                    90,
+                ))
+            }),
+        );
+    }
+
     /// What the friendly tail costs the candidate loop, which is the only place it runs.
     ///
     /// It is deliberately not a scan and adds none: [`deep_friendly_pick`] reads no tile, no wall
@@ -14109,6 +14374,149 @@ mod tests {
             after > 0 && after < raised / 2,
             "a downed goblin army left the shadow-orb rate up: {raised} -> {after}"
         );
+    }
+
+    /// The surface day offers a distressed Palworld pet an eighth of the map out from spawn, on
+    /// grass, snow, jungle grass or ice, and only when neither of the pair is already about
+    /// (`NPC.cs:4374-4389`).
+    ///
+    /// Fails before the fix, when 695 and 696 were in no pool and no branch: the whole crossover
+    /// encounter (`ai::hardmode::fixtures::pal`, its two Goblin Archer guards and the two Palworld
+    /// Minion items) was written and unreachable, and both types sat in `docs/spawn-gaps.tsv`.
+    ///
+    /// Neutralised by deleting the `out.push((pal_type(player, rng), ...))` block from `try_spawn`:
+    /// the "offered no pal" assertion fails. Neutralised again by dropping the
+    /// `(x - world.spawn_x).abs() > world.width() / 8` clause: the near-spawn assertion fails
+    /// instead. And a third time by dropping the `matches!(ground_block, ...)` clause: the
+    /// stone-floor assertion fails, a pet turning up on bare rock.
+    #[test]
+    fn the_surface_day_offers_a_palworld_pet_on_the_right_ground_and_away_from_spawn() {
+        // One attempt in 160 on top of everything else the chain declines first, so this wants a
+        // long run: it measures 236 pets over 400k ticks.
+        const TICKS: u32 = 400_000;
+        let pets = |world: &World, (px, py): (i32, i32)| {
+            spawns_at(world, false, px, py, TICKS)
+                .into_iter()
+                .filter(|ty| matches!(*ty, PAL_CATTIVA | PAL_FOXSPARKS))
+                .count()
+        };
+
+        // Grass underfoot, since the arm keys on the ground tile and the shared flat world is
+        // stone. `World::empty` puts the spawn point at the middle, which is where the player
+        // stands, so the distance gate is shut here.
+        let near_spawn = flat_world_sized(1600, 90, GRASS);
+        let at = (800, 88);
+        assert_eq!(depth_at(&near_spawn, at.1), Depth::Surface);
+        assert_eq!(
+            pets(&near_spawn, at),
+            0,
+            "a pal turned up within an eighth of the map of the world spawn"
+        );
+
+        let mut world = near_spawn.clone();
+        world.spawn_x = 0;
+        assert!(
+            (at.0 - i32::from(world.spawn_x)).abs() - SPAWN_RANGE_X > world.width() / 8,
+            "the whole spawn box has to be outside the gate for this to test the gate"
+        );
+        let baseline = pets(&world, at);
+        assert!(baseline > 0, "a surface day far from spawn offered no pal");
+
+        // Both of the pair are reachable, which is what keeps `ambient_roster` listing them honest.
+        let drawn: std::collections::BTreeSet<u16> = spawns_at(&world, false, at.0, at.1, TICKS)
+            .into_iter()
+            .filter(|ty| matches!(*ty, PAL_CATTIVA | PAL_FOXSPARKS))
+            .collect();
+        assert!(
+            drawn.contains(&PAL_CATTIVA) && drawn.contains(&PAL_FOXSPARKS),
+            "only one of the pair is reachable: {drawn:?}"
+        );
+
+        // `tileType == 2 || 147 || 60 || 161`: stone is none of them, and the same world with a
+        // stone floor offers nothing.
+        let mut stone = flat_world_sized(1600, 90, 1);
+        stone.spawn_x = 0;
+        assert_eq!(pets(&stone, at), 0, "a pal turned up on a stone floor");
+
+        // ...and the same for ice, which *is* one of them, so this is the other half of the claim.
+        let mut ice = flat_world_sized(1600, 90, ICE_BLOCK);
+        ice.spawn_x = 0;
+        assert!(pets(&ice, at) > 0, "ice underfoot offered no pal");
+
+        // `!ZoneGraveyard && Main.dayTime` (`NPC.cs:4202`), the block it lives in.
+        let mut night = world.clone();
+        night.day_time = false;
+        assert_eq!(pets(&night, at), 0, "the surface night offered a pal");
+        assert_eq!(
+            spawns_at_in(&world, false, true, at.0, at.1, TICKS)
+                .into_iter()
+                .filter(|ty| matches!(*ty, PAL_CATTIVA | PAL_FOXSPARKS))
+                .count(),
+            0,
+            "a graveyard offered a pal in daylight"
+        );
+    }
+
+    /// `!AnyNPCs(696) && !AnyNPCs(695)` (`NPC.cs:4374`): one pet at a time in the whole world, and
+    /// either of the pair blocks the other.
+    ///
+    /// Neutralised by dropping the `!npcs.iter().any(...)` clause: both assertions fail, a second
+    /// pet appearing beside one that is already out.
+    #[test]
+    fn one_palworld_pet_at_a_time_blocks_the_other() {
+        const TICKS: u32 = 400_000;
+        let mut world = flat_world_sized(1600, 90, GRASS);
+        world.spawn_x = 0;
+        let at = (800, 88);
+
+        for already in [PAL_CATTIVA, PAL_FOXSPARKS] {
+            let mut npcs = NpcStore::new();
+            npcs.spawn(already, (200.0 * 16.0, 88.0 * 16.0))
+                .expect("a free slot");
+            let seen = spawns_with_npcs(&world, &npcs, &quiet(), at.0, at.1, TICKS)
+                .into_iter()
+                .filter(|(ty, _)| matches!(*ty, PAL_CATTIVA | PAL_FOXSPARKS))
+                .count();
+            assert_eq!(seen, 0, "a pal was offered while {already} was already out");
+        }
+    }
+
+    /// Which of the pair arrives is decided by what the player is already carrying
+    /// (`NPC.cs:4375-4386`): with one of the two Palworld Minion items in the inventory and not the
+    /// other, the one you are missing is the one you meet.
+    ///
+    /// Neutralised by dropping both `if !has_* && has_*` overrides from `pal_type`: both assertions
+    /// fail, each run coming back with a mix instead of one type.
+    #[test]
+    fn a_pal_is_whichever_of_the_pair_you_are_not_carrying() {
+        const TICKS: u32 = 200_000;
+        let mut world = flat_world_sized(1600, 90, GRASS);
+        world.spawn_x = 0;
+        let at = (800, 88);
+
+        for (carried, wanted, name) in [
+            (
+                terrustia_proto::npc_params::PAL_REWARD_CATTIVA,
+                PAL_FOXSPARKS,
+                "Foxsparks",
+            ),
+            (
+                terrustia_proto::npc_params::PAL_REWARD_FOXSPARKS,
+                PAL_CATTIVA,
+                "Cattiva",
+            ),
+        ] {
+            let drawn: std::collections::BTreeSet<u16> =
+                spawns_carrying(&world, carried, at.0, at.1, TICKS)
+                    .into_iter()
+                    .filter(|ty| matches!(*ty, PAL_CATTIVA | PAL_FOXSPARKS))
+                    .collect();
+            assert_eq!(
+                drawn,
+                std::collections::BTreeSet::from([wanted]),
+                "carrying {carried} should only ever offer the {name}"
+            );
+        }
     }
 
     /// The dungeon's own chain offers its two traps, and the brick decides which one

@@ -45,6 +45,12 @@ pub struct Outcome {
     /// Set when it should count as killed rather than merely removed — a pillar that finishes
     /// collapsing has been beaten, and the world needs to know.
     pub died: bool,
+    /// An item this routine wants put into the world where its NPC stands, outside the kill path.
+    ///
+    /// A pal hands its pet over and *leaves* rather than dying (`AI_127_Pal_GiveRewerd`,
+    /// `NPC.cs:43481-43489`, an `Item.NewItem` followed by `life = 0; active = false;` with no
+    /// strike), so its reward cannot come from a drop table keyed on being killed.
+    pub reward: Option<i16>,
 }
 
 /// Ease toward a wanted velocity on both axes, doubling the push while still going the wrong way.

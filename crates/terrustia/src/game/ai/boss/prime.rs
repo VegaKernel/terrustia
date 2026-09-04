@@ -90,6 +90,7 @@ pub fn prime_head(npc: &mut Npc, world: &World<'_, impl TileView>) -> PrimeOutco
             (PRIME_LASER, 1.0, Some(PRIME_ARM_HEAD_START)),
         ] {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: limb,
                 position: at,
                 velocity: (side, 0.0),

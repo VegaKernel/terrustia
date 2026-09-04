@@ -705,6 +705,7 @@ mod tests {
             target_velocity: (0.0, 0.0),
             hostile: None,
             census: &[],
+            own_escorts: 0,
             parent: None,
             parent_state: 0.0,
             parent_health: 1.0,

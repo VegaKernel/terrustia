@@ -374,6 +374,7 @@ fn shed_minions(npc: &mut Npc, rng: &mut SmallRng, out: &mut QueenSlimeOutcome) 
             npc.position.1 + spread(rng, npc.height()) - h,
         );
         out.spawn.push(Spawn {
+            handle: None,
             npc_type,
             position: at,
             velocity: (

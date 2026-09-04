@@ -827,23 +827,28 @@ rather than cosmetic variety.
   likely to reveal it needs real new infrastructure (a general item-vs-live-NPC interaction, which
   nothing in this server currently has) rather than a narrow wire-up; the lane was told to disclose
   that honestly rather than force a bad implementation.
-- **PALWORLDPAL**: the two distressed Palworld pets (695, 696) stay in `docs/spawn-gaps.tsv`
-  deliberately, and the reason is the encounter rather than the spawn. The ambient arm itself is
-  small and well understood (`NPC.cs:4374-4389`, inside the daytime block at `:4202` this server
-  already models for the Goblin Scout: away from world spawn by more than `maxTilesX / 8`, on tile
-  2/147/60/161, one attempt in 160, neither type already alive, and the colour decided by whether
-  the player is carrying item 5663 or 5664 with a 40% default). What is missing is everything the
-  pet is *for*. `AI_127_Pal` (`NPC.cs:43379-43478`) opens by running `CultistRitual.CheckFloor2`
-  (`CultistRitual.cs:133-159`), killing itself outright if there is no floor, and otherwise raising
-  two Goblin Archers that guard it, each back-linked with `ai[3] = -(whoAmI + 1)`; only once both
-  are dead does it let the player collect it, and `AI_127_Pal_GiveRewerd` (`:43481-43489`) then
-  drops item 5663/5664. `ai::hardmode::fixtures::pal` has the three waiting states and neither end
-  of that: no escort spawn, no self-destruct, no reward, and its `escorts_alive` is a world-wide
-  count of NPC 111 rather than its own two. Closing it needs `CheckFloor2`, a way for a spawning
-  routine to learn the slot it just filled (only `Spawn::parent` reports one back today) and a way
-  for an AI tick to drop an item (`Effects` has no such field; loot goes through the kill path).
-  Wiring the spawn alone would take the pair off the gap list while leaving a pet that appears
-  unguarded and pops for nothing, which is worse than the honest gap. It belongs to an AI lane.
+- **PALWORLDPAL**: *done*. The two distressed Palworld pets (695, 696) are off `docs/spawn-gaps.tsv`
+  with the whole encounter behind them rather than the spawn alone. The ambient arm is the surface
+  day's (`NPC.cs:4374-4389`, inside the daytime block at `:4202`): more than `maxTilesX / 8` from
+  world spawn, on tile 2/147/60/161, one attempt in 160, neither of the pair already out, and which
+  one arrives decided by whether the player is carrying item 5663 or 5664 with a 40% default. That
+  last clause makes this the one arm in `spawn.rs` that reads an inventory, and `Player.HasItem`'s
+  own 0..58 slot bound is transcribed rather than flattened to "anywhere on the player".
+  `AI_127_Pal` (`NPC.cs:43379-43478`) now runs `CultistRitual.CheckFloor2` (`CultistRitual.cs:133-159`)
+  on its first tick and deletes itself where there is no floor, raises two Goblin Archers on the
+  spots it finds with `ai[3] = -(whoAmI + 1)` on each, and hands over item 5663/5664 two seconds
+  after a player reaches an unguarded pet (`AI_127_Pal_GiveRewerd`, `:43481-43489`). The guards' own
+  half is `AI_003_Fighters`' type-111 branch (`NPC.cs:57553-57592`), which was also missing: a
+  back-linked archer stands over its pet and faces it until it is hit or somebody comes within two
+  hundred pixels. The three pieces of plumbing this wanted are `Spawn::handle` (the slot write-back
+  `Spawn::parent` could not stand in for, because `parent` also makes the spawn a *part*),
+  `Effects::reward` (an item handed over rather than looted, so nothing goes near the kill path) and
+  `World::own_escorts` (which replaces a world-wide count of NPC 111 that let any Goblin Archer
+  anywhere hold every pal in its waiting state). Two smaller fixes fell out of the read:
+  `timeLeft = activeTime` is an assignment to 750 (`NPC.cs:6188`), not the `max(3600)` that was
+  there, and vanilla's drag runs after the routine's early returns rather than before them. Not
+  transcribed, all client-side: the pain and joy sounds, and the Foxsparks' own `Lighting.AddLight`
+  glow (`:43432-43454`, `:43471-43474`).
 
 ## Phase 3: after v0.0.1, in order
 

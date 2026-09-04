@@ -68,6 +68,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, guns_alive: usize) 
         for npc_type in [MARTIAN_SAUCER_TURRET, MARTIAN_SAUCER_CANNON] {
             for side in 0..2 {
                 out.spawn.push(Spawn {
+                    handle: None,
                     npc_type,
                     position: (
                         cx + side as f32 * SAUCER_PART_OUT * 2.0 - SAUCER_PART_OUT,
@@ -83,6 +84,7 @@ pub fn core(npc: &mut Npc, world: &World<'_, impl TileView>, guns_alive: usize) 
             }
         }
         out.spawn.push(Spawn {
+            handle: None,
             npc_type: MARTIAN_SAUCER_BODY,
             position: (cx, cy),
             velocity: (0.0, 0.0),

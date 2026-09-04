@@ -92,6 +92,14 @@ impl GameServer {
             let around = crate::game::buffs::Around {
                 npc_type: npc.npc_type,
                 ai1: npc.ai[1],
+                // Pre-existing narrowing, found while pricing `Spawn::parent` for the Palworld pal
+                // encounter but not this site's to fix: vanilla's own gate is `realLife == -1`
+                // (`NPC.cs:92802`), set only for worm segments and the Wall of Flesh mouth, both of
+                // which share one life pool across every part. `follows_boss` is broader than that:
+                // anything raised through it (a boss's own escort, not only a body segment) reads as
+                // a segment here too, and would wrongly skip Soul Drain (`buffs.rs`'s own
+                // `!around.is_segment` check) if it were ever hurt. The Palworld guards are
+                // unaffected: they carry no `follows_boss`, only `Spawn::handle`'s one-way link.
                 is_segment: npc.follows.is_some() || npc.follows_boss.is_some(),
                 get_good: false,
                 lava_wet: false,
@@ -317,6 +325,9 @@ impl GameServer {
         // a latched nebula headcrab's Obstructed is currently the only source of these
         // (`Effects::player_buff`'s own doc comment, `NPC.cs:37508-37526`).
         let mut player_buffs: Vec<(u8, u16, i32)> = Vec::new();
+        // Items a routine wants left in the world without anything having been killed for them, as
+        // (item id, where). A pal's pet is the only source (`Effects::reward`).
+        let mut rewards: Vec<(i16, (f32, f32))> = Vec::new();
         // Taken out of the event's own state for the tick so a mage can read it while the table
         // is borrowed, and put back once everything has moved.
         let mut raisable: Vec<(f32, f32)>;
@@ -619,9 +630,18 @@ impl GameServer {
                     npc.ai[0] = 1.0;
                     sand_worms_to_grow.push((index, npc.position, body, tail, least, most));
                 }
-                // A part reads its parent through this; it cannot see the table itself.
+                // A part reads its parent through this; it cannot see the table itself. A pal's
+                // Goblin Archer is not a *part* of it (it is an ordinary enemy that can be killed,
+                // looted and banner-counted on its own), so it carries no `follows_boss`; the pal
+                // it stands over is named by the same negative `ai[3]` back-link the guard branch
+                // reads, and `parents` is keyed by slot already.
                 let parent = npc
                     .follows_boss
+                    .or_else(|| {
+                        (npc.npc_type == terrustia_proto::npc_params::PAL_ESCORT && npc.ai[3] < 0.0)
+                            .then(|| u8::try_from((0.0 - npc.ai[3] - 1.0) as i32).ok())
+                            .flatten()
+                    })
                     .and_then(|slot| parents.get(&slot).copied());
                 let (parent_state, parent_health) =
                     parent.map_or((0.0, 1.0), |p| (p.state, p.health));
@@ -697,6 +717,26 @@ impl GameServer {
                             Default::default()
                         },
                         sockets_open,
+                        // `AI_127_Pal_TryUnpackNPC` (`NPC.cs:43496-43508`) over the pal's own two
+                        // handles: `(int)aiValue - 1`, in range, and the slot still occupied.
+                        // `parents` is keyed by slot and built from the occupied slots only, so
+                        // membership in it is vanilla's `Main.npc[num].active` (read at the top of
+                        // the tick rather than live, which at most keeps a guard killed earlier in
+                        // this same tick counted for one more).
+                        //
+                        // Only a pal asks. Every other style gets a zero for the cost of one
+                        // comparison.
+                        own_escorts: if npc.stats.ai_style == 127 {
+                            [npc.ai[1], npc.ai[2]]
+                                .into_iter()
+                                .filter(|handle| {
+                                    u8::try_from(*handle as i32 - 1)
+                                        .is_ok_and(|slot| parents.contains_key(&slot))
+                                })
+                                .count()
+                        } else {
+                            0
+                        },
                         parent,
                         parent_state,
                         parent_health,
@@ -752,6 +792,13 @@ impl GameServer {
                 // A latched nebula headcrab wants Obstructed put on the player it is riding.
                 if let Some(buff) = ai_out.player_buff.take() {
                     player_buffs.push(buff);
+                }
+                // A pal handing over its pet. Not a drop and not loot: `AI_127_Pal_GiveRewerd`
+                // (`NPC.cs:43481-43489`) is a bare `Item.NewItem` at the pal's own centre, and the
+                // `life = 0; active = false;` that follows it is a removal rather than a kill, so
+                // nothing here goes near `npc_died`.
+                if let Some(item) = ai_out.reward.take() {
+                    rewards.push((item, npc.center()));
                 }
                 // A wither beast standing in its aura weakens whoever is standing in it too.
                 if let Some(reach) = ai_out.aura.take() {
@@ -946,6 +993,12 @@ impl GameServer {
             }
         }
 
+        // A pal's pet, left where the pal was standing. `Item.NewItem(GetItemSource_Loot(),
+        // base.Center, num, 1, -1)` (`NPC.cs:43488`): one, no prefix, and no owner.
+        for (item, at) in rewards {
+            self.spawn_item(ItemStack::new(i32::from(item), 1, 0), at);
+        }
+
         for at in rituals {
             if self
                 .npcs
@@ -1065,6 +1118,16 @@ impl GameServer {
                             npc.ai[slot] = *v;
                         }
                     }
+                }
+                // ...and the link back the other way, for a spawner that keeps hold of what it
+                // raised: `ai[1 + i] = num2 + 1` on a pal (`NPC.cs:43401`). `NewNPC` hands the slot
+                // back in the game; here only this loop knows it, so this is where it is written.
+                if let Some((spawner, ai_slot)) = summon.handle
+                    && let Some(owner) = self.npcs.get_mut(spawner)
+                    && let Some(cell) = owner.ai.get_mut(ai_slot)
+                {
+                    *cell = f32::from(index) + 1.0;
+                    owner.dirty = true;
                 }
                 self.broadcast_npc(index);
             }
@@ -11822,6 +11885,168 @@ mod tile_squares_only_reach_who_can_see_them {
     }
 }
 
+/// The Terraria x Palworld encounter end to end, through the server's own tick rather than through
+/// the routine on its own: a distressed pet raises two Goblin Archers to guard it, will not be
+/// collected while either is alive, and hands over its Palworld Minion item when it is
+/// (`NPC.cs:43379-43489`).
+#[cfg(test)]
+mod a_distressed_pal_and_its_guard {
+    use super::*;
+    use crate::config::Config;
+    use terrustia_proto::npc_params::{
+        PAL_CATTIVA, PAL_ESCORT, PAL_PAYOUT_TICKS, PAL_REWARD_CATTIVA,
+    };
+
+    /// Where the pet stands, on a floor with room either side.
+    const FLOOR_ROW: i32 = 100;
+    const PAL_COLUMN: i32 = 250;
+
+    /// A world that is solid from `FLOOR_ROW` down and open above it, with one pet on the floor.
+    fn encounter() -> (GameServer, u8) {
+        let mut world = crate::world::World::empty(500, 300, "pal encounter probe");
+        for x in 0..world.width() {
+            for y in FLOOR_ROW..world.height() {
+                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+        let mut server = GameServer::new(Config::default(), world);
+        let index = server
+            .npcs
+            .spawn(PAL_CATTIVA, (PAL_COLUMN as f32 * 16.0, 97.0 * 16.0))
+            .expect("a free NPC slot");
+        (server, index)
+    }
+
+    fn guards(server: &GameServer) -> Vec<u8> {
+        server
+            .npcs
+            .iter()
+            .filter(|(_, n)| n.npc_type == PAL_ESCORT && n.is_alive())
+            .map(|(slot, _)| slot)
+            .collect()
+    }
+
+    /// Its first tick raises two archers, each back-linked to the pet's own slot.
+    ///
+    /// Neutralised by dropping the `for spot in spots` loop from `fixtures::pal`: the count
+    /// assertion fails and the pet stands alone. Neutralised again by deleting the
+    /// `effects.spawn.extend(out.spawn)` line from the `127 =>` arm of `ai::run`: the same
+    /// assertion fails, with the routine asking for guards that nothing raises.
+    #[test]
+    fn a_pal_raises_its_own_guard_on_its_first_tick() {
+        let (mut server, pal) = encounter();
+        server.tick_npcs();
+        let raised = guards(&server);
+        assert_eq!(raised.len(), 2, "a pal is guarded by two Goblin Archers");
+        for slot in raised {
+            let archer = server.npcs.get(slot).expect("just raised");
+            assert_eq!(
+                archer.ai[3],
+                -(f32::from(pal) + 1.0),
+                "each guard is back-linked to the pal it stands over"
+            );
+        }
+    }
+
+    /// The whole encounter, in order: guarded, then collectible, then paid out.
+    ///
+    /// Neutralised by putting `world.count(PAL_ESCORT)` back in place of `world.own_escorts` in the
+    /// `127 =>` arm of `ai::run` and standing an unrelated Goblin Archer somewhere else in the
+    /// world (which this test does): the "still guarded" half passes but the "released" half fails,
+    /// the pal held forever by an archer that is nothing to do with it. Neutralised again by
+    /// deleting the `for (item, at) in rewards` loop from `tick_npcs`: the reward assertion fails
+    /// and a collected pet leaves nothing behind.
+    #[test]
+    fn the_pet_is_collected_only_once_both_guards_are_dead_and_leaves_its_item() {
+        let (mut server, pal) = encounter();
+        // A Goblin Archer of nobody's, on the other side of the world. It must not hold the pal.
+        server
+            .npcs
+            .spawn(PAL_ESCORT, (50.0 * 16.0, 97.0 * 16.0))
+            .expect("a free NPC slot");
+        // ...and a player standing right on the pet, so the only thing left to wait for is the
+        // guard. Well inside `PAL_APPROACH`, and inside `PAL_ESCORT_WAKE` of the guards too.
+        let pal_at = server.npcs.get(pal).expect("just spawned").center();
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(256);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().expect("loopback"), out_tx);
+        player.state = ConnState::Playing;
+        player.position = (pal_at.0, pal_at.1 - 20.0);
+        server.players[0] = Some(player);
+
+        server.tick_npcs();
+        let raised = guards(&server);
+        assert_eq!(raised.len(), 3, "its own two, plus the stranger");
+
+        for _ in 0..40 {
+            server.tick_npcs();
+        }
+        assert_eq!(
+            server.npcs.get(pal).expect("still guarded").ai[0],
+            0.0,
+            "a guarded pal stays in its waiting state however close you stand"
+        );
+
+        // Kill its own two, which by now have woken and cleared their own back-links: the pal names
+        // them in `ai[1]`/`ai[2]` and that is what still holds it. The stranger stays.
+        let held = server.npcs.get(pal).expect("still there");
+        let mine = [held.ai[1], held.ai[2]];
+        assert!(
+            mine.iter().all(|h| *h > 0.0),
+            "the pal should be holding a handle to each of its own guards: {mine:?}"
+        );
+        for handle in mine {
+            let slot = u8::try_from(handle as i32 - 1).expect("a real slot");
+            assert!(
+                server
+                    .npcs
+                    .get(slot)
+                    .is_some_and(|n| n.npc_type == PAL_ESCORT),
+                "handle {handle} should name one of its own Goblin Archers"
+            );
+            server.npcs.remove(slot);
+        }
+        assert_eq!(guards(&server).len(), 1, "the stranger is still out there");
+
+        // With both its own guards dead and a player already inside `PAL_APPROACH`, the pal moves
+        // straight to its payout countdown next tick and pays out `PAL_PAYOUT_TICKS` (120) ticks
+        // later. A window well past that but nowhere near the old 400-tick bound catches the payout
+        // happening on schedule rather than eventually, by luck, once some unrelated condition frees
+        // the slot.
+        let mut collected_at = None;
+        for tick in 0..150 {
+            server.tick_npcs();
+            if server.npcs.get(pal).is_none() {
+                collected_at = Some(tick);
+                break;
+            }
+        }
+        assert_eq!(
+            collected_at,
+            // One tick to notice both guards are gone and move from state 0 to state 1 (already
+            // inside PAL_APPROACH, so this same tick also moves it straight to state 2), then
+            // PAL_PAYOUT_TICKS of counting before the payout tick itself.
+            Some(PAL_PAYOUT_TICKS as usize + 1),
+            "with its guard dead and you on top of it, the payout should land on the tick vanilla's \
+             own PAL_PAYOUT_TICKS names, not merely sometime before this loop gives up"
+        );
+        // Exactly one reward, not "at least one": the payout used to route through the same
+        // same-tick expiry `tick_life`'s despawn-radius refresh immediately overwrote, so the pal
+        // was never actually removed, kept re-entering its payout arm, and re-queued the reward
+        // item every tick until the collecting player happened to fall out of range. A loose
+        // `count() > before` assertion passed on that broken behaviour as readily as on the fix.
+        let dropped: Vec<i32> = server.items.iter().map(|(_, item)| item.item.id).collect();
+        assert_eq!(
+            dropped
+                .iter()
+                .filter(|&&id| id == i32::from(PAL_REWARD_CATTIVA))
+                .count(),
+            1,
+            "a collected Cattiva should leave exactly one item {PAL_REWARD_CATTIVA} behind, not \
+             one per tick it stayed alive after paying out: {dropped:?}"
+        );
+    }
+}
+
 /// A blood moon turns the world's critters evil, which is the only way a Corrupt Bunny exists.
 ///
 /// `NPC.UpdateNPC_BloodMoonTransformations` (`NPC.cs:93033-93048`). Our surface-corruption spawn
@@ -12217,5 +12442,64 @@ mod fallen_log_scan {
         }
         let each = start.elapsed().as_secs_f64() / f64::from(SWEEPS) * 1e3;
         println!("scan_for_fallen_logs, no log in a large world: {each:.3} ms/sweep");
+    }
+
+    /// What the pal wiring costs a tick of the whole NPC table.
+    ///
+    /// Four things were added to the per-NPC path and none of them is a scan:
+    ///
+    /// * `own_escorts` is `npc.stats.ai_style == 127`, and the two-handle unpack behind it runs
+    ///   only for a pal, of which a world holds at most one.
+    /// * the `parent` resolution gained an `or_else` that runs only when `follows_boss` is `None`
+    ///   and is then `npc.npc_type == 111 && npc.ai[3] < 0.0`.
+    /// * the style-3 arm gained `npc.npc_type == 111`, paid only by fighters.
+    /// * `ai_out.reward.take()`, one `Option` read, beside the twenty that were already there.
+    ///
+    /// The claim being measured is that this is not visible against the tick it sits in, which
+    /// already runs a zone scan, a physics step and a routine per NPC. Two hundred slots filled with
+    /// ordinary fighters, release build, a thousand ticks, three runs of each arm:
+    ///
+    /// * with the wiring in place: 58.8, 59.2, 62.3 us/tick
+    /// * with all four removed by hand and rerun in the same build: 57.5, 58.0, 61.4 us/tick
+    ///
+    /// The gap between the two medians is 1.2 us and the spread *within* each arm is 3.5, so the
+    /// honest reading is "no measurable cost" rather than any number. Against a 16.67 ms frame the
+    /// whole two-hundred-NPC tick is a third of one per cent.
+    #[test]
+    #[ignore]
+    fn measure_what_the_pal_wiring_costs_a_tick() {
+        let mut world = crate::world::World::empty(2000, 800, "npc tick bench");
+        world.surface = 200;
+        for x in 0..world.width() {
+            for y in 300..world.height() {
+                world.set_tile(x, y, terrustia_proto::Tile::block(1));
+            }
+        }
+        let mut server = GameServer::new(Config::default(), world);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4096);
+        let mut player = Player::new(0, "127.0.0.1:1".parse().expect("loopback"), out_tx);
+        player.state = ConnState::Playing;
+        player.position = (1000.0 * 16.0, 299.0 * 16.0);
+        server.players[0] = Some(player);
+
+        // Zombies: `ai_style` 3, which is the arm the guard branch was added to.
+        let mut filled = 0;
+        while server
+            .npcs
+            .spawn(3, ((900 + filled % 200) as f32 * 16.0, 299.0 * 16.0))
+            .is_some()
+        {
+            filled += 1;
+        }
+
+        const TICKS: u32 = 1_000;
+        // One pass to warm whatever the first tick builds, then the measured run.
+        server.tick_npcs();
+        let start = std::time::Instant::now();
+        for _ in 0..TICKS {
+            server.tick_npcs();
+        }
+        let each = start.elapsed().as_secs_f64() / f64::from(TICKS) * 1e6;
+        println!("tick_npcs, {filled} fighters: {each:.1} us/tick");
     }
 }

@@ -252,6 +252,7 @@ fn attack<T: TileView>(
         });
     } else {
         out.spawn = Some(Spawn {
+            handle: None,
             npc_type: FUNGI_SPORE,
             position: from,
             velocity: (dx, dy),

@@ -97,6 +97,7 @@ pub fn body(npc: &mut Npc, world: &World<'_, impl TileView>, state: GolemState) 
             (terrustia_proto::npc_params::GOLEM_HEAD, GOLEM_HEAD_OFFSET),
         ] {
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type,
                 position: (cx + offset.0, cy + offset.1),
                 velocity: (0.0, 0.0),

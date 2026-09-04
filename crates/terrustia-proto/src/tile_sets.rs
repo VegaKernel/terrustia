@@ -127,3 +127,37 @@ pub fn is_moss(block: u16) -> bool {
         179 | 180 | 181 | 182 | 183 | 381 | 534 | 536 | 539 | 625 | 627
     )
 }
+
+/// Whether a block is a platform: `TileID.Sets.Platforms` (`TileID.cs:243`).
+///
+/// ```csharp
+/// public static bool[] Platforms = Factory.CreateBoolSet(19, 427, 435, 436, 437, 438, 439);
+/// ```
+///
+/// Not the same set as [`crate::tile_solid::solid_top`], which is `Main.tileSolidTop` and holds a
+/// good deal more than platforms. The distinction matters wherever the game asks "is there a floor
+/// here" as `WorldGen.SolidTile(x, y) || TileID.Sets.Platforms[type]`: `SolidTile` throws every
+/// solid-top tile out, and this set puts back the seven that are really floors rather than every
+/// table and workbench that happens to be standable.
+pub fn is_platform(block: u16) -> bool {
+    matches!(block, 19 | 427 | 435 | 436 | 437 | 438 | 439)
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::is_platform;
+
+    /// The seven, and not the rest of `Main.tileSolidTop`.
+    #[test]
+    fn the_platform_set_is_narrower_than_the_solid_top_set() {
+        for block in [19, 427, 435, 436, 437, 438, 439] {
+            assert!(is_platform(block), "{block} is a platform");
+        }
+        // Tile 18 is a workbench: solid-top, standable, and not a platform.
+        assert!(crate::tile_solid::solid_top(18), "a workbench is solid-top");
+        assert!(!is_platform(18), "but a workbench is not a platform");
+        for block in [0, 1, 2, 53] {
+            assert!(!is_platform(block), "{block} is not a platform");
+        }
+    }
+}

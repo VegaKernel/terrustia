@@ -98,6 +98,7 @@ pub fn pumpking(
                 (1.0, Some(150.0))
             };
             out.spawn.push(Spawn {
+                handle: None,
                 npc_type: PUMPKING_BLADE,
                 position: npc.center(),
                 velocity: (0.0, 0.0),
