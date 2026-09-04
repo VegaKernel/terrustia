@@ -2055,10 +2055,11 @@ pub fn pool(depth: Depth, biome: Biome, day: bool) -> &'static [u16] {
             295, // AngryBonesBigMuscle
             296, // AngryBonesBigHelmet
         ],
-        // The ocean's own roster is *aquatic*, and lives in [`water_pool`]: vanilla reaches it only
+        // The ocean's own roster is *aquatic*, and lives in [`water_pick`]: vanilla reaches it only
         // through `waterTile && isOcean` (`NPC.cs:1798`), so a shark cannot appear on dry sand.
         // A dry beach tile falls through to the ordinary surface pool the same way vanilla's does,
-        // which is why standing on the shore at night still brings zombies.
+        // which is why standing on the shore at night still brings zombies. The beach's *harmless*
+        // roster is neither of those two: it is [`friendly_chain`], which answers ahead of this.
         (depth, Ocean) => pool(depth, Forest, day),
         // No Corrupt Bunny (47) here, deliberately: vanilla's `NPC.Spawner` never spawns one at
         // any depth. The only way a Corrupt Bunny exists is `AttemptToConvertNPCToEvil`
@@ -2625,12 +2626,18 @@ fn choose_weighted(
 /// the place and lets the caller pick evenly among it. The gem variants are left out on purpose;
 /// they are a cosmetic roll on top of these, and the two arms that carry them
 /// (`NPC.cs:2600-2620`) are the caverns' own, not this pool's. The gold variants are *not* left
-/// out any more: see [`gold_variant`], which the caller applies to whatever this answers. The
+/// out any more: see [`gold_variant`], which the caller applies to whatever this answers, and
+/// [`friendly_chain`], which makes its own six rolls at the arms that carry them. The
 /// underworld's lava-bait critters are a separate monster-path arm (see [`lava_bait_pick`]), not
 /// part of `spawnFriendly` at all, so they were never this pool's to carry.
 ///
 /// Everything below the surface line is empty here on purpose and is [`deep_friendly_pick`]'s: the
 /// game's own tail there is a gated fork rather than a set, so a pool cannot say it.
+///
+/// It is not the whole of that branch, and never was. Four of vanilla's chains inside it answer and
+/// `return` before this table is ever read: the graveyard's [`GRAVEYARD_VERMIN`], and the beach,
+/// the water and the rain, which are [`friendly_chain`]. This is the fallthrough under all of them.
+///
 /// The whole of a graveyard's friendly draw (`NPC.cs:2101-2115`).
 ///
 /// Not part of [`friendly_pool`], because vanilla's arm is not a variation on the ordinary one: it
@@ -2696,11 +2703,13 @@ fn spawn_owl(rng: &mut SmallRng) -> u16 {
 /// Yellow Slime is only ever met by somebody wandering a jungle looking at frogs. It is the one
 /// bound town slime with no progression gate and no depth gate whatsoever.
 ///
-/// The middle arm, `RollLuck(goldCritterChance) == 0` -> Gold Frog (445), is left out: the gold
-/// critter variants are a class this server does not model at all, as [`friendly_pool`] already
-/// declares, and taking only the frog would leave the Gold Bunny and Gold Goldfish out while their
-/// sibling was in. The gem critters are a separate class and they *are* modelled, in
-/// [`deep_friendly_pick`]; the frog's arm is not one of their three sites.
+/// The middle arm, `RollLuck(goldCritterChance) == 0` -> Gold Frog (445), is left out. It is not
+/// that the class is unmodelled: [`friendly_chain`] rolls [`GOLD_CRITTER_CHANCE`] on six of its own
+/// arms, and the gem critters are a separate class again and are modelled in [`deep_friendly_pick`]
+/// (the frog's arm is not one of their three sites). It is that the Gold Frog belongs with the Gold
+/// Bunny, the Gold Butterfly and the rest of the ordinary-critter roster, which is still gapped in
+/// `docs/spawn-gaps.tsv`, and taking one of them out of order would leave that list saying less
+/// than it does now.
 fn spawn_frog(world: &World, alive: &dyn Fn(u16) -> bool, rng: &mut SmallRng) -> u16 {
     // `RollLuck(30)` is `Main.rand.Next(30)` at luck zero (`Luck.cs:5-16`). The `alive` scan is
     // last on purpose: `&&` short-circuits, so an ordinary frog draw never walks the NPC table.
@@ -3658,9 +3667,16 @@ const JUNGLE_GRASS: u16 = 60;
 ///   `:1935-1974`, and the turtle, grebe, pupfish and ducks at `:2009-2073`. Their rolls are not
 ///   made here, so the combat types they sit above are slightly commoner than in the game and never
 ///   rarer.
+///
+///   Every one of those critters is reachable now, through [`friendly_chain`] rather than through
+///   here: vanilla writes the same roster twice, once in these combat arms and once in its own
+///   `spawnFriendly` branch (`NPC.cs:2116-2325`), and the friendly copy is the one that returns a
+///   position as well as a type. What stays out is this copy of it and only this copy.
 /// * **The Angler (376)** at `:1778`, `:1801` and `:1928`, a rescue rather than a roster.
-/// * **The gold critter variants** (592 Gold Goldfish), a class this server does not model at all;
-///   [`spawn_frog`] carries the same disclosure for the Gold Frog.
+/// * **The gold critter variants** (592 Gold Goldfish) *in this function*, whose ordinary siblings
+///   here are answered without their `RollLuck(goldCritterChance)`; [`spawn_frog`] carries the same
+///   disclosure for the Gold Frog. [`friendly_chain`] does make those rolls, so the class is
+///   modelled, just not on these arms.
 /// * **`SharkSpawnChance`** (`NPC.cs:5558-5576`) returns 10 unless a Chum Bucket projectile (type
 ///   820) is floating in reach, and this server has no such projectile, so the constant is the
 ///   whole of it.
