@@ -5521,11 +5521,6 @@ pub fn try_spawn(
             // `BirthdayParty.PartyIsUp`, resolved by the caller off `game/party.rs`.
             party: events.party,
         };
-        // `GetZombieSettings` (`NPC.cs:1286`), drawn once per attempt rather than once per candidate
-        // tile. Vanilla draws it at the top of `SpawnAnNPC`, which it reaches only with a candidate
-        // already chosen, so this is one roll earlier in the order and one roll cheaper; the style
-        // it picks is independent of where the candidate lands, so the distribution is the same.
-        let zombie = zombie_settings(player.life_max <= 100, active_players, rng);
         let (mut rate, band, spawn_friendly) = rates(conditions, rng);
         let no_worms = no_worms(conditions);
         // This player's own near-player cap, checked before the rate roll, exactly as the game does
@@ -5540,6 +5535,14 @@ pub fn try_spawn(
         if rng.random_range(0..rate.max(1)) != 0 {
             continue;
         }
+        // `GetZombieSettings` (`NPC.cs:1286`), which vanilla draws at the top of `SpawnAnNPC` and so
+        // reaches only once the cap and the rate roll have both let an attempt through. Here for the
+        // same reason: it costs one `rng` draw, and put above the rate roll it would cost that draw
+        // on every player on every tick instead of on the one attempt in six hundred that gets this
+        // far. It is drawn once per attempt rather than once per candidate tile, which is one draw
+        // fewer than the game makes and changes nothing: the style is independent of where in the
+        // box the candidate lands.
+        let zombie = zombie_settings(player.life_max <= 100, active_players, rng);
         // `spawnFriendly` (`NPC.cs:795-924`, see `rates`'s own doc): when a populated base has
         // quieted the wild, this attempt draws a harmless critter instead of a monster rather than
         // being thrown away. It is carried down into the candidate loop below, where the same
@@ -8411,14 +8414,21 @@ mod tests {
 
     /// The caverns' beetle pair, one draw in sixty and nothing else gating it (`NPC.cs:4925-4935`).
     ///
+    /// Two hundred thousand ticks and not the twenty thousand this used to run: a cavern at rest
+    /// answers about eight times per thousand ticks and roughly one answer in ninety is a beetle, so
+    /// the old count expected 1.7 of them and had close to a one-in-five chance of finding none. It
+    /// found one on the stream it happened to be reading until an arm above it drew a number and
+    /// reshuffled everything downstream, which is the shape of a test that was measuring luck rather
+    /// than the arm. At this count the expected haul is eighteen.
+    ///
     /// Neutralised with `&& false` on the arm: "no Cochineal Beetle (217) in the caverns: {10, 16,
-    /// 21, 44, 49, 93, 195, 300, 354, 359, 453, 496, 497, 498, 504, 506}". Neutralised again by
-    /// making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan Beetle (218) in a snowy
-    /// cavern: {147, 150, 167, 185, 217, 354, 453}".
+    /// 21, 44, 49, 93, 195, 201, 202, 203, 300, 354, 357, 359, 453, 496, 497, 498, 504, 506}".
+    /// Neutralised again by making the fork answer `COCHINEAL_BEETLE` in both branches: "no Cyan
+    /// Beetle (218) in a snowy cavern: {147, 150, 167, 185, 217, 354, 453}".
     #[test]
     fn the_caverns_have_a_beetle_and_the_snow_has_the_other_one() {
         let stone = cavern_of(1);
-        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 20_000)
+        let seen: std::collections::BTreeSet<u16> = spawns_at(&stone, false, 400, 255, 200_000)
             .into_iter()
             .collect();
         assert!(
@@ -8433,7 +8443,7 @@ mod tests {
         // 147 is `TileID.SnowBlock`, and 1500 of them is `SnowTileNormalThreshold`.
         let snow = cavern_of(147);
         assert_eq!(biome_at(&snow, 400, 255), Biome::Snow);
-        let snowy: std::collections::BTreeSet<u16> = spawns_at(&snow, false, 400, 255, 20_000)
+        let snowy: std::collections::BTreeSet<u16> = spawns_at(&snow, false, 400, 255, 200_000)
             .into_iter()
             .collect();
         assert!(
@@ -12287,6 +12297,14 @@ mod tests {
     /// graveyard, so the two arms and the two rolls above them cost about 0.6 ns of a run that
     /// happens at most once per *tick*. Written as an array of the six ice and snow tiles and
     /// `contains` instead, the same measurement was 8.68 ns, which is why it is a `matches!`.
+    ///
+    /// The night's own tail (`NPC.cs:4722` and `:4744-4816`) was added later again, together with
+    /// the [`zombie_settings`] draw the loop below now makes before each call, and measured the same
+    /// way against the same build on the same machine: 6.83 ns before and 14.90 ns after on the
+    /// ordinary night, 22.71 against 31.43 in the graveyard. Most of that is not overhead but work
+    /// that was not being done: an ordinary night used to fall off the end of the chain with a
+    /// `None` and now runs the torch roll, the armed roll and the closing `match`, which is what
+    /// actually answers a plain forest night. It remains a per-*tick* cost, not a per-player one.
     #[test]
     #[ignore]
     fn measure_the_graveyard_and_the_seasonal_chain() {
@@ -13237,6 +13255,19 @@ mod tests {
     /// * `gold_variant` on a critter with no twin (a firefly): 0.77 ns, no roll made at all; on one
     ///   with a twin (a bunny): 2.52 ns.
     ///
+    /// Two more were added to this loop later and measured against the same build on the same
+    /// machine as each other rather than against the numbers above (which read 0.68, 9.44, 3.01,
+    /// 1.69 and 3.03 in that run):
+    ///
+    /// * Doctor Bones' arm (`NPC.cs:3772`), which leads with the tile underfoot: 0.66 ns on an
+    ///   ordinary floor, where the `Option<u16>` comparison shuts it, and 3.02 ns on jungle grass
+    ///   where it goes on to make its roll. It is one line above the Lac Beetle's, so every
+    ///   candidate that used to reach that arm now pays the smaller of those two first.
+    /// * `zombie_settings`: 2.98 ns, one `rng` draw and two comparisons. It is not in the candidate
+    ///   loop at all: `try_spawn` calls it once per attempt that has already got past both the cap
+    ///   and the rate roll, which is the same one call in a few hundred, so it is nanoseconds per
+    ///   *tick*.
+    ///
     /// So a cavern candidate pays about 9 ns it did not, and a surface one under 1 ns. The
     /// reference is the plinth check this same loop already carries and already accepts as cheap,
     /// measured at 20.67 ns in the same build and the same run: the whole addition is under half of
@@ -13317,6 +13348,44 @@ mod tests {
         }
         let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
         println!("the cavern beetle arm: {each:.2} ns/call (sink {sink})");
+
+        // Doctor Bones' arm, which sits one line above the Lac Beetle's and leads with the tile
+        // underfoot, so an ordinary floor pays one `Option<u16>` comparison and stops.
+        for (name, ground) in [
+            ("ordinary floor", Some(1u16)),
+            ("jungle grass", Some(JUNGLE_GRASS)),
+        ] {
+            let mut rng = SmallRng::seed_from_u64(52);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                sink += u32::from(
+                    std::hint::black_box(ground) == Some(JUNGLE_GRASS)
+                        && !std::hint::black_box(false)
+                        && rng.random_range(0..DOCTOR_BONES_ODDS) == 0,
+                );
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("the Doctor Bones arm, {name}: {each:.2} ns/call (sink {sink})");
+        }
+
+        // ...and `GetZombieSettings`, which `try_spawn` calls once per attempt that has already got
+        // past both the cap and the rate roll: one `rng` draw and two comparisons.
+        {
+            let mut rng = SmallRng::seed_from_u64(590);
+            let start = std::time::Instant::now();
+            let mut sink = 0u32;
+            for _ in 0..N {
+                let settings = zombie_settings(
+                    std::hint::black_box(true),
+                    std::hint::black_box(1),
+                    &mut rng,
+                );
+                sink += u32::from(settings.style) + settings.torch_chance;
+            }
+            let each = start.elapsed().as_secs_f64() / f64::from(N) * 1e9;
+            println!("zombie_settings: {each:.2} ns/call (sink {sink})");
+        }
 
         // ...and the gold swap, which is a `match` first and a roll only for the eight types that
         // have a twin at all.
