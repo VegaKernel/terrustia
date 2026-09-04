@@ -12095,15 +12095,15 @@ mod tests {
     /// Measured on this machine, release build, arguments behind a `black_box`. The numbers this
     /// prints:
     ///
-    /// * `spawn_wall_type` on plain grass: 10.05 ns, the three tile reads. `try_spawn` as a whole
-    ///   measures 242-527 ns a call ([`tests::measure_the_statue_mimic_plinth_check`]), and the
-    ///   match this sits in runs once or twice an attempt, so it is two to four percent of one.
-    /// * `underground_gnome` declining on unwalled ground: 2.54 ns, which is the roll and nothing
+    /// * `spawn_wall_type` on unwalled grass: 10 to 11 ns, the three tile reads. `try_spawn` as a
+    ///   whole measures 242-527 ns a call ([`tests::measure_the_statue_mimic_plinth_check`]), and
+    ///   the match this sits in runs once or twice an attempt, so it is two to four percent of one.
+    /// * `underground_gnome` declining on unwalled ground: 2 to 3 ns, which is the roll and nothing
     ///   else nine times in ten.
-    /// * `friendly_chain` on a dry beach: 11.06 ns, the arm answering at once with a Seagull. In
-    ///   inland water: 136.80 ns, which is almost all the water-surface scan (up to 49 rows, four
-    ///   tile reads each). In the rain over grass, still air, no cattail within reach: 4582.61 ns,
-    ///   and that one is the cattail sweep.
+    /// * `friendly_chain` on a dry beach: 11 to 12 ns, the arm answering at once with a Seagull. In
+    ///   inland water: 120 to 140 ns, which is almost all the water-surface scan (up to 49 rows,
+    ///   four tile reads each). In the rain over grass, still air, no cattail within reach: 3.7 to
+    ///   4.6 us, and that one is the cattail sweep.
     ///
     /// Only the last is worth a second look, and it is 2501 tile reads by construction
     /// (`FindCattailTop`, `NPC.cs:81004-81043`). It is reached on a rainy daytime friendly attempt
@@ -12145,7 +12145,7 @@ mod tests {
             );
         }
         let each = start.elapsed().as_secs_f64() / f64::from(n) * 1e9;
-        println!("spawn_wall_type, plain stone: {each:.2} ns/call (sink {sink})");
+        println!("spawn_wall_type, unwalled grass: {each:.2} ns/call (sink {sink})");
 
         // ...and the underground gnome, declining.
         let mut rng = SmallRng::seed_from_u64(7);
